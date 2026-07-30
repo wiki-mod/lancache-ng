@@ -25,99 +25,50 @@ on:
     # product-code change.
     - cron: "23 3 * * 0"
   push:
-    branches: [master, v0.2.0]
+    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # both stay listed so this trigger keeps covering whichever integration
+    # branch is actually receiving pushes (#709).
+    branches: [master, current_dev, v0.2.0]
+    # Narrowed to real image-content paths only (#1253, Q1 of #1255): this
+    # workflow builds, scans, and publishes the actual build-tools image, so
+    # its trigger must fire only when something that changes that image's
+    # bytes changed -- tools/build-tools/** (the Dockerfile and everything it
+    # COPYs/builds in its own build context) or this workflow file itself
+    # (which defines the build/scan/publish steps).
+    #
+    # This list used to be much broader (tests/bats/**, tests/shellspec/**,
+    # scripts/lib/**, individual services/*/entrypoint.sh files, several
+    # other workflow files, deploy/*/docker-compose.yml, ...), but none of
+    # that is image content -- it was here only so this job's "Run Bats setup
+    # fixtures"/"Run ShellSpec setup fixtures" steps re-ran the project's
+    # regression suites whenever one of their real dependencies changed. That
+    # forced a byte-identical multi-arch image rebuild on scarce
+    # lancache-heavy capacity for every such change, confirmed wasteful in
+    # #1253 since most of the current CI-hardening work touches exactly
+    # those broad paths and never tools/build-tools/** itself. That
+    # regression coverage now lives in the separate, cheap
+    # build-tools-smoke.yml workflow, which runs the identical suites
+    # against the already-published image (pulled, never rebuilt) on its
+    # own broad trigger -- see that file for the per-path provenance this
+    # comment used to carry, and AG-CI-010 (CLAUDE.md) for the "routine PRs
+    # must not rebuild the build-tools image" contract this narrowing
+    # restores. scripts/check-bats-path-filter-coverage.sh (#879) now
+    # targets build-tools-smoke.yml's on.push.paths/on.pull_request.paths
+    # instead of this workflow's, since that is where the suites actually
+    # run today.
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
-      - "certs/**"
-      - "tests/bats/**"
-      - "tests/shellspec/**"
-      - "tests/fixtures/**"
-      - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
-      - "scripts/check-validation-subnet-wrapper-coverage.sh"
-      - "scripts/check-bats-path-filter-coverage.sh"
-      - "scripts/check-build-tools-smoke-coverage.sh"
-      - "scripts/select-build-tools-image.sh"
-      - "scripts/lib/**"
-      - "scripts/classify-image-impact.sh"
-      - "scripts/compute-next-release-tag.sh"
-      - "scripts/detect-full-setup-changes.sh"
-      - "scripts/ensure-pr-staging-images.sh"
-      - "scripts/plan-deep-validation.sh"
-      - "scripts/docker-socket-proxy.sh"
-      - "scripts/check-action-node-versions.sh"
-      - "scripts/check-executable-bits.sh"
-      - "scripts/check-workflow-service-lists.sh"
-      - "scripts/check-orphaned-branches.sh"
-      - "scripts/check-changelog-direct-edit.sh"
-      - "scripts/check-pr-title-convention.sh"
-      - "scripts/setup-cli-simulation.sh"
-      - "scripts/syslog-forwarding-simulation.sh"
-      - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
-      - ".github/workflows/build-push.yml"
-      - ".github/workflows/full-setup-validate.yml"
-      - ".github/workflows/full-setup-deep-validate.yml"
-      - ".github/actions/derive-validation-network/action.yml"
-      - "services/dns/**"
-      - "services/dhcp/**"
-      - "services/dhcp-proxy/**"
-      - "services/proxy/**"
-      - "services/watchdog/**"
-      - "services/ui/dhcp-probe.sh"
-      - "services/ui/docker-entrypoint.sh"
-      - "deploy/dev/docker-compose.yml"
-      - "deploy/prod/docker-compose.yml"
-      - "deploy/quickstart/docker-compose.yml"
-      - "deploy/secondary/docker-compose.yml"
   pull_request:
-    branches: [master, v0.2.0]
+    # current_dev is the active development branch today (v0.2.0 is frozen);
+    # both stay listed so this trigger keeps covering whichever integration
+    # branch is actually receiving pushes (#709).
+    branches: [master, current_dev, v0.2.0]
+    # See the on.push.paths comment above -- identical narrowing, identical
+    # reasoning (#1253).
     paths:
       - "tools/build-tools/**"
       - ".github/workflows/build-tools.yml"
-      - "certs/**"
-      - "tests/bats/**"
-      - "tests/shellspec/**"
-      - "tests/fixtures/**"
-      - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
-      - "scripts/check-validation-subnet-wrapper-coverage.sh"
-      - "scripts/check-bats-path-filter-coverage.sh"
-      - "scripts/check-build-tools-smoke-coverage.sh"
-      - "scripts/select-build-tools-image.sh"
-      - "scripts/lib/**"
-      - "scripts/classify-image-impact.sh"
-      - "scripts/compute-next-release-tag.sh"
-      - "scripts/detect-full-setup-changes.sh"
-      - "scripts/ensure-pr-staging-images.sh"
-      - "scripts/plan-deep-validation.sh"
-      - "scripts/docker-socket-proxy.sh"
-      - "scripts/check-action-node-versions.sh"
-      - "scripts/check-executable-bits.sh"
-      - "scripts/check-workflow-service-lists.sh"
-      - "scripts/check-orphaned-branches.sh"
-      - "scripts/check-changelog-direct-edit.sh"
-      - "scripts/check-pr-title-convention.sh"
-      - "scripts/setup-cli-simulation.sh"
-      - "scripts/syslog-forwarding-simulation.sh"
-      - ".github/workflows/gc-pr-staging-images.yml"
-      - ".github/workflows/backfill-stack-latest.yml"
-      - ".github/workflows/build-push.yml"
-      - ".github/workflows/full-setup-validate.yml"
-      - ".github/workflows/full-setup-deep-validate.yml"
-      - ".github/actions/derive-validation-network/action.yml"
-      - "services/dns/**"
-      - "services/dhcp/**"
-      - "services/dhcp-proxy/**"
-      - "services/proxy/**"
-      - "services/watchdog/**"
-      - "services/ui/dhcp-probe.sh"
-      - "services/ui/docker-entrypoint.sh"
-      - "deploy/dev/docker-compose.yml"
-      - "deploy/prod/docker-compose.yml"
-      - "deploy/quickstart/docker-compose.yml"
-      - "deploy/secondary/docker-compose.yml"
 
 permissions:
   contents: read
@@ -173,80 +124,49 @@ jobs:
     # capacity on it.
     name: determine build-tools publish scope
     runs-on: ubuntu-latest
+    timeout-minutes: 10
+    # Narrows the workflow-level grant (packages/id-token/attestations/
+    # artifact-metadata: write, needed by the build/publish jobs below) down
+    # to what this job actually uses: a checkout plus a git diff to compute an
+    # output. It never logs in to GHCR, pushes an image, or attests anything,
+    # so it has no legitimate use for any of those write scopes (OSPS-AC-04.02
+    # least-privilege audit, refs #1130).
+    permissions:
+      contents: read
     outputs:
       should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
-      # every other test-only path below (scripts/check-idempotence-test-
-      # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries,
-      # services/dns/**, services/dhcp/**, services/dhcp-proxy/**,
-      # services/proxy/**, services/watchdog/**, services/ui/dhcp-probe.sh,
-      # services/ui/docker-entrypoint.sh, and the deploy/*/docker-compose.yml
-      # files) are in this workflow's path filter so the local smoke-test/
-      # Bats/ShellSpec steps below actually run when one of those changes --
-      # each one is a real dependency of at least one tests/bats/*.bats suite
-      # (#873: the filter previously covered only setup.sh and the
-      # idempotence-coverage guard, so a PR touching any of these other
-      # tested files never ran the bats suite written for it). Such a change
-      # must not also rebuild and publish the build-tools image itself --
-      # that stays tied to build-tools inputs (tools/build-tools/** or this
-      # workflow file), per the "routine PRs must not rebuild the build-tools
-      # image unless build-tools inputs changed" contract. This entire list
-      # is kept in sync automatically by scripts/check-bats-path-filter-
-      # coverage.sh (#879), which fails the light-tier static-check step in
-      # build-push.yml if any tests/bats/*.bats or tests/bats/helpers/*.sh
-      # dependency is not covered by an entry in this list (or its
-      # pull_request twin below) -- this comment documents WHY specific
-      # entries exist, the guard is what stops the list from silently
-      # drifting out of sync again.
+      # This diff is a second, narrower gate underneath the trigger's own
+      # path filter above (#1253, Q1 of #1255): that filter already restricts
+      # push events reaching this job to tools/build-tools/** or this
+      # workflow file, and a push event's before..after range is exactly the
+      # same compare range GitHub's own path-filter evaluation used to decide
+      # to fire this job in the first place -- so for an ordinary push this
+      # almost always resolves true. It stays as a real, independent check
+      # rather than being deleted as redundant because (a) workflow_dispatch
+      # and schedule bypass it entirely via the early return just below, and
+      # (b) it is the only thing that would still catch a future edit that
+      # widens the trigger's path list again without updating this diff to
+      # match -- trusting "the trigger filter already proved it" would make
+      # that drift silent instead of merely unlikely today.
       #
-      # scripts/check-idempotence-test-coverage.sh specifically (#732 review):
-      # its own tests/bats/check_idempotence_test_coverage.bats fixture suite
-      # is what actually proves the guard *catches* a regression (unlike
-      # build-push.yml's step, which only runs the guard once against
-      # today's real repo -- a happy-path check that can't detect the guard
-      # itself silently breaking). Without this entry, a PR touching only
-      # the guard script would not already match tests/bats/** and so would
-      # never run that suite. scripts/check-validation-subnet-wrapper-
-      # coverage.sh (#896) and scripts/check-bats-path-filter-coverage.sh
-      # itself (#879) are listed for the identical reason -- each one's own
-      # fixture suite (tests/bats/check_validation_subnet_wrapper_coverage.
-      # bats, tests/bats/check_bats_path_filter_coverage.bats) is what proves
-      # THAT guard catches a real regression, not just that it currently
-      # passes against today's tree.
-      #
-      # .github/workflows/build-push.yml, .github/workflows/
-      # full-setup-validate.yml, .github/workflows/full-setup-deep-
-      # validate.yml, and .github/actions/derive-validation-network/
-      # action.yml (#879): an earlier version of this comment argued full-
-      # setup-validate.yml/full-setup-deep-validate.yml did not need to be
-      # listed here, since an unwrapped job added to either file is already
-      # blocked by build-push.yml's unconditional (no-path-filter)
-      # shellcheck jobs. That reasoning covered only the validation-subnet-
-      # wrapper class of regression -- it did not account for
-      # tests/bats/healthcheck_service_lists.bats (byte-for-byte parity of
-      # services_with_healthcheck across build-push.yml, full-setup-
-      # validate.yml, and full-setup-deep-validate.yml, and its subset check
-      # against scripts/setup-cli-simulation.sh and scripts/syslog-
-      # forwarding-simulation.sh), tests/bats/validation_image_tag.bats
-      # (build-push.yml must keep calling scripts/lib/validation-image-
-      # tag.sh's functions instead of reimplementing them), or
-      # tests/bats/reserve_validation_subnet.bats (derive-validation-
-      # network/action.yml must keep sourcing scripts/lib/reserve-validation-
-      # subnet.sh instead of reimplementing its formula) -- none of which
-      # shellcheck can catch, since they assert cross-file content agreement,
-      # not shell syntax. scripts/check-bats-path-filter-coverage.sh's own
-      # existence-filtered dependency scan found this gap directly against
-      # the real repo tree; these four files are added here to close it.
-      # scripts/setup-cli-simulation.sh and scripts/syslog-forwarding-
-      # simulation.sh (also real healthcheck_service_lists.bats dependencies)
-      # and deploy/secondary/docker-compose.yml (tests/bats/
-      # setup_secondary_docker_compose.bats's checked-in reference file for
-      # its cmd_secondary heredoc sync-guard, #946) are added alongside them
-      # for the same reason.
+      # This workflow's trigger used to carry a much broader path list here
+      # (tests/bats/**, scripts/lib/**, individual services/*/entrypoint.sh
+      # files, other workflow files, ...), and this same job's "Determine
+      # whether build-tools inputs actually changed" step is what kept those
+      # broad-path pushes from actually publishing a rebuilt image (only
+      # skipping the publish, not the heavy local build/scan/smoke-test
+      # steps that ran regardless). #1253 removed that broad list from this
+      # workflow's own trigger entirely -- see build-tools-smoke.yml for
+      # where that regression coverage (and scripts/check-bats-path-filter-
+      # coverage.sh's #879 target) now lives -- so this step's practical
+      # effect today is narrower than its history above suggests, but its
+      # logic is deliberately left unchanged (see #1253's own scope: narrow
+      # the trigger and extract the smoke tests, do not touch the
+      # build/scan/merge/promote logic itself).
       - name: Determine whether build-tools inputs actually changed
         id: should-publish
         run: |
@@ -285,7 +205,7 @@ jobs:
           if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::notice::Only test-only paths (tests/bats/**, tests/shellspec/**, setup.sh) changed; skipping build-tools image rebuild/publish."
+            echo "::notice::No tools/build-tools/** or workflow-file change found in this push's commit range; skipping build-tools image rebuild/publish."
             echo "should-publish=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -294,6 +214,27 @@ jobs:
     needs: determine-publish-scope
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 90
+    # AG-CI-017: several runner instances on one host share a single Docker/
+    # BuildKit daemon and content store, so two build-tools image builds that
+    # land on the same host race on the same base-image layers -- the recurring
+    # `ref layer-sha256:...locked ... unavailable` signature (#1246-#1249) that
+    # #1222/#1240's retry only waited out rather than removed. The workflow-level
+    # `concurrency:` above serializes push-event runs but keeps per-PR runs
+    # parallel (`{workflow}-{ref}`), which is exactly what lets different PRs'
+    # builds race on a shared host. This constant-keyed job-level group
+    # serializes THIS heavy amd64 image build across every run repo-wide, so no
+    # two ever execute at once and the shared-content-store race cannot occur.
+    # cancel-in-progress: false QUEUES rather than cancels -- deliberately NOT
+    # the cancel-in-progress cascade that once left 90+ minutes with no completed
+    # build. arm64 (isolated GitHub-hosted runners) and the light merge job are
+    # unaffected and stay parallel. Serializing is acceptable because build-tools
+    # image builds are rare (only real tools/build-tools content changes trigger
+    # them once #1253/Q1 narrows the rebuild path). The deeper root-cause fix --
+    # giving each per-host runner instance its own isolated BuildKit content
+    # store -- is host infra tracked under #1065.
+    concurrency:
+      group: build-tools-amd64-image-build
+      cancel-in-progress: false
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -345,7 +286,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -399,22 +340,56 @@ jobs:
 
       # Pull requests cannot push to GHCR, so they build a local scan image
       # and run the smoke/Trivy checks before the workflow can pass.
+      #
+      # Issue #1222 / AG-CI-013: this step failed at least four times on
+      # 2026-07-24 (#1117, #1179, #1206, #1209) with an identical transient
+      # BuildKit/containerd content-store layer-lock race
+      # ("(*service).Write failed: rpc error: code = Unavailable ... locked
+      # for <N>ms"), caused by host-level contention on a shared base-image
+      # layer when multiple jobs build concurrently on this self-hosted
+      # runner pool. Was a plain `uses: docker/build-push-action` step with
+      # zero retry; now a raw `docker buildx build` invocation wrapped by
+      # scripts/lib/build-retry.sh's build_retry(), which retries ONLY when
+      # the captured build output matches that exact signature -- a real
+      # Dockerfile/compile failure (which never produces it) still fails on
+      # the first attempt, not masked or delayed by a blind retry. A
+      # composite-action wrapper (the shape .github/actions/
+      # ghcr-build-push-retry/buildx-setup-retry use for other `uses:` steps)
+      # was rejected here: those two can retry blindly because every failure
+      # they wrap already IS the transient case by construction, but this
+      # wrapper needs to inspect the real build log text, and a `uses:`
+      # step's own stdout/stderr is written straight to the job log, not
+      # exposed to a later step as a readable value -- a plain shell
+      # invocation is what a signature-conditional retry actually requires.
+      # Flags mirror the previous action's `with:` inputs one-for-one
+      # (builder/context/load/pull/tags/platforms/provenance/build-args/
+      # cache-from/cache-to); this step never pushes (no push/GHCR
+      # credentials involved), so nothing else about its behavior changes.
       - name: Build local amd64 scan image
         id: local-build-amd64
         timeout-minutes: 60
-        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
-        with:
-          builder: ${{ steps.buildx.outputs.name }}
-          context: tools/build-tools
-          load: true
-          pull: true
-          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
-          platforms: linux/amd64
-          provenance: false
-          build-args: |
-            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
-          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
-          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
+        env:
+          APT_CACHE_BUST: ${{ steps.apt-cache-bust.outputs.value }}
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+          BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
+          BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/build-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/build-retry.sh"
+
+          build_retry -- docker buildx build \
+            --builder "$BUILDX_BUILDER" \
+            --load \
+            --pull \
+            --tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" \
+            --platform linux/amd64 \
+            --provenance=false \
+            --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
+            --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
+            tools/build-tools
 
       # This tool list mirrors AG-VAL-017's (.github/AGENTS.md) required
       # build-tools contents exactly -- this step is the executable check
@@ -424,6 +399,7 @@ jobs:
       # broken/mis-linked (e.g. a dynamic library the image forgot to
       # install), which `command -v` alone would not.
       - name: Smoke-test acceleration-infrastructure tools
+        timeout-minutes: 15
         run: |
           set -euo pipefail
 
@@ -481,6 +457,7 @@ jobs:
       # that `bats`/`shellspec` are present on PATH (which "Smoke-test
       # acceleration-infrastructure tools" above already checked).
       - name: Run Bats setup fixtures
+        timeout-minutes: 20
         run: |
           set -euo pipefail
 
@@ -492,6 +469,7 @@ jobs:
             bash -lc 'set -euo pipefail; bats tests/bats'
 
       - name: Run ShellSpec setup fixtures
+        timeout-minutes: 20
         run: |
           set -euo pipefail
 
@@ -785,6 +763,18 @@ jobs:
         run: |
           docker rmi "${BUILD_TOOLS_SCAN_IMAGE_AMD64}" || true
 
+      # The docker-container builder "Set up Docker Buildx" created above is
+      # never torn down by setup-buildx-action itself, and this runner pool
+      # is persistent (self-hosted), not a one-shot GitHub-hosted VM -- every
+      # run without this step leaves an orphaned builder container plus its
+      # buildkit state volume behind forever. `|| true` because a missing
+      # builder (e.g. an earlier step failed before "Set up Docker Buildx"
+      # ever ran) must not fail an otherwise-successful job.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   build-tools-arm64:
     # Native linux/arm64 leg, same rationale as build-push.yml's build-arm64
     # (added by #592): a GitHub-hosted arm64 runner instead of QEMU on the
@@ -817,7 +807,7 @@ jobs:
 
       - name: Log in to GHCR
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -999,6 +989,18 @@ jobs:
         run: |
           docker rmi "${BUILD_TOOLS_SCAN_IMAGE_ARM64}" || true
 
+      # Same leak as the amd64 leg's own "Remove buildx builder" step above:
+      # setup-buildx-action never tears its builder down on its own. This
+      # job runs on a GitHub-hosted ubuntu-24.04-arm runner (destroyed after
+      # the job, unlike the amd64 leg's persistent self-hosted pool), so the
+      # leak this closes is latent rather than actively observed here -- kept
+      # for consistency and in case this job is ever moved to a persistent
+      # runner.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   merge-build-tools-manifests:
     # Combines build-tools's linux/amd64 tag with build-tools-arm64's
     # linux/arm64 tag into the real sha-<commit> multi-platform tag that
@@ -1017,6 +1019,7 @@ jobs:
         needs['determine-publish-scope'].outputs.should-publish == 'true'
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 20
     # A job-level permissions block replaces the workflow-level default
     # above entirely rather than merging with it, so artifact-metadata:
     # write has to be repeated here too -- omitting it left this job with
@@ -1033,10 +1036,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -1207,3 +1211,14 @@ jobs:
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
           fi
+
+      # Same leak as the other two jobs' own "Remove buildx builder" steps:
+      # this job never builds a local image (only `imagetools create`/
+      # `inspect` against already-pushed digests), so it had no local-image
+      # cleanup step to piggyback on before now, but "Set up Docker Buildx"
+      # above still creates a real docker-container builder + state volume
+      # that was never removed on this persistent self-hosted runner pool.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true

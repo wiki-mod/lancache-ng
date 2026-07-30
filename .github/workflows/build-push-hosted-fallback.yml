@@ -103,6 +103,7 @@ jobs:
     # channel tag inside a gate), and turns the `services` input into a JSON
     # matrix the downstream jobs can consume via fromJSON().
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     outputs:
       build_tools_image: ${{ steps.select-image.outputs.build_tools_image }}
       matrix: ${{ steps.services.outputs.matrix }}
@@ -127,6 +128,7 @@ jobs:
         # validate-compose job, which sets this up before calling the same
         # script for the same reason, rather than relying on the hosted
         # runner's default Docker install already having a usable builder.
+        id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Resolve build-tools image
@@ -144,6 +146,17 @@ jobs:
               ;;
           esac
           printf 'build_tools_image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # This job runs on a GitHub-hosted ubuntu-latest runner (ephemeral --
+      # destroyed after the job), so the builder leak this closes doesn't
+      # actually accumulate here the way it does on this workflow's own
+      # persistent self-hosted counterpart (build-push.yml); kept for
+      # consistency with every other builder-creation site in this repo and
+      # in case this job is ever moved to a persistent runner.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Compute service matrix
         id: services
@@ -231,6 +244,14 @@ jobs:
     # -- there is nothing here for that machinery to protect).
     needs: preflight
     runs-on: ubuntu-latest
+    # 75, not the file's default 30: "Build local scan image" below is an
+    # UNCACHED amd64 build (--pull, no cache-from/cache-to) and dns/ui are
+    # real Rust services -- a cold cargo build of either on ubuntu-latest can
+    # plausibly exceed 30 minutes on its own, before the Trivy scan step even
+    # starts. A flat 30 here would turn a working uncached Rust build into a
+    # guaranteed-timeout job, the same failure class avoided below for
+    # build-hosted-fallback's own 90-minute build step.
+    timeout-minutes: 75
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
@@ -272,6 +293,7 @@ jobs:
         # Retried, not the plain action: this is a fresh GitHub-hosted VM
         # every run with no local image cache, the same rate-limit exposure
         # build-arm64 hit and worked around in issue #930.
+        id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Build local scan image
@@ -314,6 +336,13 @@ jobs:
         if: always()
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} || true
 
+      # Same leak as build-tools.yml/build-push.yml's own builder-teardown
+      # steps: "Set up Docker Buildx" above never removes its own builder.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   build-hosted-fallback:
     # Mirrors build-push.yml's build-arm64 job's own steps almost exactly
     # (same composite actions, same credential pattern, same lack of
@@ -323,6 +352,15 @@ jobs:
     # job would have published for this commit.
     needs: [preflight, container-scan-hosted-fallback]
     runs-on: ubuntu-latest
+    # 120, not the file's default 30: this job's own "Build and push" step
+    # below already declares timeout-minutes: 90, plus a conditional 20-minute
+    # Trivy scan step for the build-tools row -- a flat 30-minute job timeout
+    # would contradict that existing step budget and guarantee this job is
+    # killed before its own build step could ever finish, regardless of a
+    # real build's actual health. 120 keeps a real, meaningfully bounding cap
+    # (vs. the 360-minute GitHub default) while clearing the documented
+    # worst case (90 + 20 + smaller step overhead).
+    timeout-minutes: 120
     permissions:
       contents: read
       packages: write
@@ -365,7 +403,7 @@ jobs:
         # credential build-arm64 already uses on this same class of
         # GitHub-hosted runner in production (issue #592). See this
         # workflow's header comment for the full credential-decision writeup.
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -484,6 +522,13 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+      # Same leak as every other builder-creation site in this repo: "Set up
+      # Docker Buildx" above never removes its own builder.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   merge-manifest-hosted-fallback:
     # Combines the sha-<short>-amd64 tag just published above with
     # build-arm64's existing sha-<short>-arm64 tag (already published by
@@ -504,6 +549,7 @@ jobs:
     needs: [preflight, build-hosted-fallback]
     if: ${{ inputs.merge_manifest }}
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -514,10 +560,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -565,6 +612,13 @@ jobs:
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
           done
+
+      # Same leak as every other builder-creation site in this repo: "Set up
+      # Docker Buildx" above never removes its own builder.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Summary
         run: |

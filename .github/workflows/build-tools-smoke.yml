@@ -1,0 +1,351 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
+# tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
+# image, pulled via scripts/select-build-tools-image.sh -- it never builds or
+# publishes anything itself.
+#
+# Split out of build-tools.yml on purpose: that workflow's own trigger used
+# to also cover this broad test-input path list, so a PR touching only
+# tests/bats/**, scripts/lib/**, or one of the service entrypoint files these
+# suites read forced a full byte-identical multi-arch build-tools image
+# rebuild on scarce lancache-heavy capacity, just to re-run bats/shellspec
+# against the freshly (but pointlessly) rebuilt image. Narrowing
+# build-tools.yml's own trigger to real image-content paths
+# (tools/build-tools/**, that workflow file itself) and moving the suites
+# here instead means a test/script-only change still gets the exact same
+# regression coverage, at a fraction of the cost: no Docker build, no Trivy
+# scan, no actionlint-builder Go compilation -- just a `docker pull` of a
+# digest-pinned image already proven (via build-tools.yml's own smoke-test
+# step) to contain everything these suites need, then two `docker run`
+# invocations that mirror build-tools.yml's "Run Bats setup fixtures"/
+# "Run ShellSpec setup fixtures" steps exactly.
+#
+# scripts/check-bats-path-filter-coverage.sh (#879) targets THIS file's
+# on.push.paths/on.pull_request.paths now (previously build-tools.yml's) --
+# it is the workflow that actually executes `bats tests/bats` and
+# `shellspec tests/shellspec` against a real bats dependency change today.
+# build-tools.yml keeps running the same two suites too, but only against
+# the local image it just built on its own (now narrow) trigger -- that is a
+# smoke test of the freshly built image itself, not a regression gate for
+# test/script changes; see that workflow's own step comments.
+name: Build Tools Smoke Tests
+
+on:
+  push:
+    # Mirrors build-tools.yml's own branches list (#709: current_dev is the
+    # active development branch today; v0.2.0 stays listed as the frozen
+    # long-lived hotfix branch).
+    branches: [master, current_dev, v0.2.0]
+    paths:
+      - ".github/workflows/build-tools-smoke.yml"
+      - "certs/generate-ca.sh"
+      - "tests/bats/**"
+      - "tests/shellspec/**"
+      - "tests/fixtures/**"
+      - "setup.sh"
+      - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/check-validation-subnet-wrapper-coverage.sh"
+      - "scripts/check-bats-path-filter-coverage.sh"
+      - "scripts/check-build-tools-smoke-coverage.sh"
+      - "scripts/select-build-tools-image.sh"
+      - "scripts/lib/**"
+      - "scripts/classify-image-impact.sh"
+      - "scripts/compute-next-release-tag.sh"
+      - "scripts/detect-full-setup-changes.sh"
+      - "scripts/ensure-pr-staging-images.sh"
+      - "scripts/plan-deep-validation.sh"
+      - "scripts/docker-socket-proxy.sh"
+      - "scripts/check-action-node-versions.sh"
+      - "scripts/check-executable-bits.sh"
+      - "scripts/check-workflow-service-lists.sh"
+      - "scripts/check-orphaned-branches.sh"
+      - "scripts/check-changelog-direct-edit.sh"
+      - "scripts/check-pr-title-convention.sh"
+      - "scripts/check-pr-tracking-metadata.sh"
+      - "scripts/check-setup-prompt-drift.sh"
+      - "scripts/check-compose-healthchecks.sh"
+      - "scripts/generate-vex.sh"
+      - "scripts/setup-cli-simulation.sh"
+      - "scripts/syslog-forwarding-simulation.sh"
+      - ".github/workflows/gc-pr-staging-images.yml"
+      - ".github/workflows/backfill-stack-latest.yml"
+      - ".github/workflows/build-push.yml"
+      - ".github/workflows/full-setup-validate.yml"
+      - ".github/workflows/full-setup-deep-validate.yml"
+      - ".github/workflows/full-setup-sims.yml"
+      - ".github/actions/derive-validation-network/action.yml"
+      - ".github/actions/wait-validation-stack-health/action.yml"
+      # Individual files, not "services/<name>/**" wildcards (#1198): each
+      # service directory also holds its own Dockerfile, nginx/lua/config
+      # assets, and in services/dns's case an entire nats-subscriber Rust
+      # crate -- none of which any tests/bats/*.bats or tests/shellspec/**
+      # suite actually reads. scripts/check-bats-path-filter-coverage.sh
+      # (#879) is the source of truth for exactly which files below are real
+      # bats dependencies; re-run it after touching this list.
+      #
+      # Full per-entry provenance (moved here verbatim from build-tools.yml
+      # by #1253, which only relocated this reasoning -- it did not
+      # re-derive it):
+      #
+      # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
+      # every other test-only path below (scripts/check-idempotence-test-
+      # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries, the
+      # individual services/**/*.{sh,conf,template,txt} entries) are in this
+      # workflow's path filter so the suites below actually run when one of
+      # those changes -- each one is a real dependency of at least one
+      # tests/bats/*.bats suite (#873: the filter previously covered only
+      # setup.sh and the idempotence-coverage guard, so a PR touching any of
+      # these other tested files never ran the bats suite written for it).
+      # This entire list is kept in sync automatically by
+      # scripts/check-bats-path-filter-coverage.sh (#879), which fails the
+      # light-tier static-check step in build-push.yml if any
+      # tests/bats/*.bats or tests/bats/helpers/*.sh dependency is not
+      # covered by an entry in this list (or its pull_request twin below) --
+      # this comment documents WHY specific entries exist, the guard is what
+      # stops the list from silently drifting out of sync again.
+      #
+      # scripts/check-idempotence-test-coverage.sh specifically (#732
+      # review): its own tests/bats/check_idempotence_test_coverage.bats
+      # fixture suite is what actually proves the guard *catches* a
+      # regression (unlike build-push.yml's step, which only runs the guard
+      # once against today's real repo -- a happy-path check that can't
+      # detect the guard itself silently breaking). Without this entry, a PR
+      # touching only the guard script would not already match
+      # tests/bats/** and so would never run that suite.
+      # scripts/check-validation-subnet-wrapper-coverage.sh (#896) and
+      # scripts/check-bats-path-filter-coverage.sh itself (#879) are listed
+      # for the identical reason -- each one's own fixture suite
+      # (tests/bats/check_validation_subnet_wrapper_coverage.bats,
+      # tests/bats/check_bats_path_filter_coverage.bats) is what proves THAT
+      # guard catches a real regression, not just that it currently passes
+      # against today's tree.
+      #
+      # .github/workflows/build-push.yml, .github/workflows/
+      # full-setup-validate.yml, .github/workflows/full-setup-deep-
+      # validate.yml, and .github/actions/derive-validation-network/
+      # action.yml (#879): an earlier version of this comment argued
+      # full-setup-validate.yml/full-setup-deep-validate.yml did not need to
+      # be listed here, since an unwrapped job added to either file is
+      # already blocked by build-push.yml's unconditional (no-path-filter)
+      # shellcheck jobs. That reasoning covered only the validation-subnet-
+      # wrapper class of regression -- it did not account for
+      # tests/bats/healthcheck_service_lists.bats (byte-for-byte parity of
+      # services_with_healthcheck across build-push.yml, full-setup-
+      # validate.yml, and full-setup-deep-validate.yml, and its subset check
+      # against scripts/setup-cli-simulation.sh and scripts/syslog-
+      # forwarding-simulation.sh), tests/bats/validation_image_tag.bats
+      # (build-push.yml must keep calling scripts/lib/validation-image-
+      # tag.sh's functions instead of reimplementing them), or
+      # tests/bats/reserve_validation_subnet.bats (derive-validation-
+      # network/action.yml must keep sourcing scripts/lib/reserve-validation-
+      # subnet.sh instead of reimplementing its formula) -- none of which
+      # shellcheck can catch, since they assert cross-file content agreement,
+      # not shell syntax. scripts/check-bats-path-filter-coverage.sh's own
+      # existence-filtered dependency scan found this gap directly against
+      # the real repo tree; these four files are added here to close it.
+      # scripts/setup-cli-simulation.sh and scripts/syslog-forwarding-
+      # simulation.sh (also real healthcheck_service_lists.bats dependencies)
+      # and deploy/secondary/docker-compose.yml (tests/bats/
+      # setup_secondary_docker_compose.bats's checked-in reference file for
+      # its cmd_secondary heredoc sync-guard, #946) are added alongside them
+      # for the same reason.
+      #
+      # .github/workflows/full-setup-sims.yml and .github/actions/
+      # wait-validation-stack-health/action.yml (#1171): #1112 extracted the
+      # shared full-setup jobs into this reusable workflow and composite
+      # action, which moved tests/bats/healthcheck_service_lists.bats's and
+      # tests/bats/quickstart_compose_lock.bats's real dependencies out of
+      # build-push.yml/full-setup-validate.yml/full-setup-deep-validate.yml
+      # and into these two new files -- #1112 itself did not add them here,
+      # which is exactly why both bats suites went on failing
+      # deterministically against current_dev's own tip until #1171 fixed
+      # both the tests and this list together. scripts/check-bats-path-
+      # filter-coverage.sh's own existence-filtered dependency scan against
+      # the real repo tree is what caught this gap (tests/bats/
+      # check_bats_path_filter_coverage.bats's "the guard also passes when
+      # pointed at the real repository tree" case), not a fixture -- the
+      # same "the guard proves itself against today's real tree" property
+      # called out for the other four-file group above.
+      - "services/dns/cdn-domains.txt"
+      - "services/dns/entrypoint.sh"
+      - "services/dhcp/entrypoint.sh"
+      - "services/dhcp/kea-ctrl-agent.conf"
+      - "services/dhcp/kea-dhcp4.conf"
+      - "services/dhcp/kea-dhcp-ddns.conf"
+      - "services/dhcp-proxy/dnsmasq.conf.template"
+      - "services/dhcp-proxy/dnsmasq-relay.conf.template"
+      - "services/dhcp-proxy/entrypoint.sh"
+      - "services/ntp/entrypoint.sh"
+      - "services/proxy/entrypoint.sh"
+      - "services/watchdog/watchdog.sh"
+      - "services/ui/dhcp-probe.sh"
+      - "services/ui/docker-entrypoint.sh"
+      - "deploy/prod/docker-compose.yml"
+      - "deploy/quickstart/docker-compose.yml"
+      - "deploy/secondary/docker-compose.yml"
+  pull_request:
+    # Mirrors build-tools.yml's own branches list (#709).
+    branches: [master, current_dev, v0.2.0]
+    paths:
+      - ".github/workflows/build-tools-smoke.yml"
+      - "certs/generate-ca.sh"
+      - "tests/bats/**"
+      - "tests/shellspec/**"
+      - "tests/fixtures/**"
+      - "setup.sh"
+      - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/check-validation-subnet-wrapper-coverage.sh"
+      - "scripts/check-bats-path-filter-coverage.sh"
+      - "scripts/check-build-tools-smoke-coverage.sh"
+      - "scripts/select-build-tools-image.sh"
+      - "scripts/lib/**"
+      - "scripts/classify-image-impact.sh"
+      - "scripts/compute-next-release-tag.sh"
+      - "scripts/detect-full-setup-changes.sh"
+      - "scripts/ensure-pr-staging-images.sh"
+      - "scripts/plan-deep-validation.sh"
+      - "scripts/docker-socket-proxy.sh"
+      - "scripts/check-action-node-versions.sh"
+      - "scripts/check-executable-bits.sh"
+      - "scripts/check-workflow-service-lists.sh"
+      - "scripts/check-orphaned-branches.sh"
+      - "scripts/check-changelog-direct-edit.sh"
+      - "scripts/check-pr-title-convention.sh"
+      - "scripts/check-pr-tracking-metadata.sh"
+      - "scripts/check-setup-prompt-drift.sh"
+      - "scripts/check-compose-healthchecks.sh"
+      - "scripts/generate-vex.sh"
+      - "scripts/setup-cli-simulation.sh"
+      - "scripts/syslog-forwarding-simulation.sh"
+      - ".github/workflows/gc-pr-staging-images.yml"
+      - ".github/workflows/backfill-stack-latest.yml"
+      - ".github/workflows/build-push.yml"
+      - ".github/workflows/full-setup-validate.yml"
+      - ".github/workflows/full-setup-deep-validate.yml"
+      - ".github/workflows/full-setup-sims.yml"
+      - ".github/actions/derive-validation-network/action.yml"
+      - ".github/actions/wait-validation-stack-health/action.yml"
+      - "services/dns/cdn-domains.txt"
+      - "services/dns/entrypoint.sh"
+      - "services/dhcp/entrypoint.sh"
+      - "services/dhcp/kea-ctrl-agent.conf"
+      - "services/dhcp/kea-dhcp4.conf"
+      - "services/dhcp/kea-dhcp-ddns.conf"
+      - "services/dhcp-proxy/dnsmasq.conf.template"
+      - "services/dhcp-proxy/dnsmasq-relay.conf.template"
+      - "services/dhcp-proxy/entrypoint.sh"
+      - "services/ntp/entrypoint.sh"
+      - "services/proxy/entrypoint.sh"
+      - "services/watchdog/watchdog.sh"
+      - "services/ui/dhcp-probe.sh"
+      - "services/ui/docker-entrypoint.sh"
+      - "deploy/prod/docker-compose.yml"
+      - "deploy/quickstart/docker-compose.yml"
+      - "deploy/secondary/docker-compose.yml"
+
+permissions:
+  contents: read
+
+# Cheap, read-only job: unlike build-tools.yml (which must survive to
+# completion once it starts publishing mutable/immutable tags), a superseded
+# run here has written nothing shareable yet, so reclaiming its runner slot
+# for a newer push/PR update is pure benefit. Scoped per-workflow-per-ref, the
+# same shape as build-tools.yml's own pull_request group.
+concurrency:
+  group: ${{ format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  bats-shellspec-smoke:
+    # Light tier, not heavy (#1253 design decision): this job never builds an
+    # image -- it pulls an already-published, already-smoke-tested digest
+    # (scripts/select-build-tools-image.sh with BUILD_TOOLS_REQUIRE_PUBLISHED=
+    # true, the same strict pull-only mode build-push.yml's validate-compose
+    # job already uses on lancache-light for the identical reason: "this job
+    # runs on the light tier, so it must not trigger the selector's
+    # trusted-ref fallback Docker build"). Running `bats tests/bats` and
+    # `shellspec tests/shellspec` inside a `docker run` of that pulled image
+    # is pure shell-script execution, no compilation and no BuildKit/Trivy
+    # work, so it fits the light tier's "lightweight static checks" contract
+    # (AG-CI-002) rather than the heavy tier's Docker-build/CodeQL/
+    # container-scan one.
+    name: run bats/shellspec suites against the published build-tools image
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs are expected to be dominated by the image pull (a few tens of
+    # seconds on a warm runner) plus the two suites themselves (bounded by
+    # build-tools.yml's own identical steps, each given 20 minutes there);
+    # generous headroom for a cold pull under concurrent load.
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx for manifest inspection
+        # select-build-tools-image.sh's published_image_reference() resolves
+        # the channel tag to its immutable digest via `docker buildx
+        # imagetools inspect` -- same requirement, same step shape, as
+        # build-push.yml's validate-compose job.
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Select published build-tools image
+        id: select-image
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          # Authenticated pulls avoid GHCR's much lower anonymous rate limit
+          # under concurrent CI load -- same fix, same reasoning, as
+          # validate-compose's identical env block in build-push.yml (that
+          # job hit a real "denied: denied" failure during a burst of
+          # concurrent runs before this was added).
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # BUILD_TOOLS_REQUIRE_PUBLISHED=true forces the strict pull-only
+          # path (no local Docker build fallback, ever) -- required on this
+          # light-tier job for the same reason validate-compose's own
+          # comment states: a local fallback build would be the very
+          # heavy-tier work this split exists to avoid.
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          case "$image" in
+            *@sha256:*)
+              ;;
+            *)
+              echo "::error::Expected a digest-qualified build-tools image from the published build-tools selector, got '$image'."
+              exit 1
+              ;;
+          esac
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+
+      # Mirrors build-tools.yml's identically-named step exactly, against
+      # the pulled published image instead of a freshly built local one --
+      # same command, same suite, same regression coverage.
+      - name: Run Bats setup fixtures
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bats tests/bats'
+
+      # Mirrors build-tools.yml's identically-named step exactly.
+      - name: Run ShellSpec setup fixtures
+        timeout-minutes: 20
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'

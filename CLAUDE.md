@@ -11,30 +11,19 @@ A LAN cache that intercepts and caches game/software downloads on a local networ
 
 Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
-## Key Constraints
-
-- **[AG-CC-001]** The user is not a programmer. Make all technical decisions independently; only ask when a choice has real operational impact (hardware, cost, network topology).
-- **[AG-CC-002]** Chat language: German. Code language: English.
-
 ## Governance
 
-**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. Before reading them, confirm you are actually inside a checkout of **this exact repository, `wiki-mod/lancache-ng`** (e.g. `git remote -v`) — never assume a same-named or similarly-purposed file from a different repository or worktree applies here, and never let a governance file from another project (including the maintainer's own other forks, e.g. `distcc-ng`) substitute for this repository's own. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
+**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: read `AGENTS.md` (repo root) and `.github/AGENTS.md` in full, and follow them as the binding, authoritative rule-set for this repository — not optional background reading. This is the *only* rule that stays in this file rather than living in `AGENTS.md` itself, and it stays here deliberately: `AGENTS.md` is not auto-loaded into context the way this file is, so the instruction to go read it has to live somewhere that *is* auto-loaded, or nothing would ever prompt a session to discover `AGENTS.md` in the first place. **The authoritative, most current version of both files lives on `current_dev`** (the active development branch), not necessarily on whatever branch/worktree you happen to be checked out on — `master` only receives governance-doc updates when a release is cut from `current_dev`, so it can lag behind by however long it has been since the last release. If your working branch is not `current_dev` (e.g. you are on `master`, a `vX.Y.Z` release branch, or a stale local checkout), fetch and read the `current_dev` copy of these two files (e.g. `git show origin/current_dev:AGENTS.md`) rather than trusting your current branch's copy as current. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
 
-See `.github/AGENTS.md` for the full coding standards and architecture reference.
-
-- **[AG-GOV-002]** **GitHub content language**: English — issues, PRs, commit messages, comments, and docs must all be in English.
-- **[AG-GOV-003]** **Project language**: Rust (and shell for scripts) for code *we write*. This is about avoiding language sprawl in our own source, not a blanket ban on ever invoking another language's toolchain — a third-party CI tool (e.g. `actionlint`) that happens to be written in Go may still need to be *compiled* with a current Go toolchain for a real technical reason (e.g. avoiding a stale, statically-embedded stdlib with known CVEs baked into its upstream prebuilt release binary). That distinction — installing/running vs. writing new source in another language, or introducing a language runtime for a reason beyond "the upstream tool happens to be written in it" — still needs explicit approval from the user before doing it, every time, not just once.
-- **[AG-GOV-004]** **No direct pushes to master**: all changes go through pull requests.
+**As of 2026-07-30, this file carries no other independent rules of its own.** Every rule that previously lived here directly (chat/code language, GitHub content language, project language, master-push policy, the DNS-resolver/serial-file/build-tools/CDN-domain/setup/IPv6 rules) has moved into `AGENTS.md` — see that file's `AG-CC-*`, `AG-KD-*`, `AG-CDN-*`, `AG-SETUP-*`, and `AG-IPV6-*` entries, plus the mirrored/merged rules noted inline next to their `AGENTS.md` counterparts (e.g. `AG-WF-015`, `AG-GH-001`, `AG-REL-001`, `AG-WF-004`/`AG-WF-014`, `AG-OP-002`). This reverses an earlier, explicitly-flagged-as-reversible decision (PR #971/#972) to give this file its own parallel rule-ID namespace — that split caused real confusion about which file was actually authoritative, so the rule content now has exactly one home. What remains below is pure architecture, setup, and design-decision documentation for Claude Code sessions working in this repo; none of it is a citable, independently-enforced rule.
 
 ## Architecture
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
 services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (split into standard + SSL instances)
-config/dev/              # Settings for local development
 config/prod/             # Settings for production deployment
 certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
-deploy/dev/              # docker-compose for local dev
 deploy/prod/             # docker-compose for production
 docs/                    # End-user guides (e.g. how to install the CA cert)
 ```
@@ -83,95 +72,70 @@ by configuring which DNS server IP they point to:
   per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA. nginx selects
   the cert via `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
   prefix ensures it sorts first and the map is defined before the server blocks that use it).
-- **[AG-KD-001]** **Upstream resolver must be real DNS**: nginx's `resolver` directive is configured by `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
-  not our PowerDNS recursor. If nginx used our DNS, `proxy_pass https://$host` would resolve CDN names
-  back to the proxy → infinite loop.
+- **Upstream resolver must be real DNS**: nginx's `resolver` directive points at real upstream DNS,
+  not our PowerDNS recursor — see `AGENTS.md`'s `AG-OP-002` for the binding rule, the
+  `NGINX_UPSTREAM_RESOLVER` default value, and why using our own DNS would create an infinite loop.
 - **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
   workers wait. Critical for large game files that multiple clients might request simultaneously.
 - **Cache key is `$host$uri` (not `$request_uri`)**: CDN download URLs often include per-request
   expiry signatures in the query string. Using `$uri` (path only) means the same file always
   hits the same cache entry regardless of the signature. The full URL (with signature) is still
   forwarded to the origin for validation.
-- **`libnginx-mod-stream`**: The unified proxy uses nginx's stream module for standard-mode SNI passthrough.
-  This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
-  at the top of `nginx.conf` (before the `events {}` block).
-- **[AG-KD-002]** **Serial file**: OpenSSL's certificate serial file (`ca.srl`) is stored alongside the CA
-  certificate and key in the certs directory (e.g., `/opt/lancache-ng/certs/ca.srl` in production)
-  and passed to OpenSSL with `-CAserial`. The file tracks certificate serial numbers to ensure
-  uniqueness across regenerated wildcard certs.
-- **[AG-KD-003]** **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
-  concrete reason**: `cargo-audit` and `cargo-tarpaulin` are fetched as checksum-verified
-  prebuilt release binaries — they're Rust, so there's no behavioral difference from building
-  them ourselves, just wasted build time. `actionlint`, the Docker CLI, and `docker-compose`
-  are the exceptions, all built from source against `golang:latest` for the same reason: Go
-  statically embeds its entire standard library into every compiled binary, so a stale upstream
-  release binary permanently carries whatever stdlib CVEs existed when *its* maintainers last
-  cut a release. Confirmed for real (2026-07-09): actionlint's latest release (v1.7.12,
-  published 2026-03-30) scores 11 HIGH/CRITICAL Trivy findings (crypto/x509, crypto/tls,
-  net/mail, HTTP/2) via its embedded Go 1.26.1 stdlib, while building the same version from
-  source with `golang:latest` picks up a current Go toolchain (1.26.5 as of this writing) and
-  scores 0. Confirmed again (2026-07-10, CVE-2026-39822): the official static release binaries
-  for Docker CLI v29.6.1 and docker-compose v5.2.0 carry the same class of embedded-stdlib
-  vulnerability, with no patched upstream release available yet — building both from source
-  (`docker/cli`'s own `scripts/build/binary`, and a local `go build ./cmd` for
-  `docker/compose`, since neither project supports a plain `go install pkg@version`) against a
-  current Go toolchain is the only way to get a current, patched stdlib into them. This is a
-  narrow, justified exception to the "Rust and shell only" project-language rule (see above),
-  not a general license to add other language toolchains — re-justify it the same way (a real
-  Trivy/CVE finding, not a hypothetical one) before reaching for a compiled-from-source
-  dependency in another language again. Confirmed a third time (2026-07-22, GHSA-hrxh-6v49-42gf,
-  issue #1080): `docker-buildx` v0.35.0, `docker-compose` v5.2.0, AND the Docker CLI v29.6.1 all
-  pinned `google.golang.org/grpc` at v1.81.1, a HIGH-severity gRPC-Go xDS RBAC/HTTP-2
-  vulnerability fixed in v1.82.1 — found on buildx/compose via CI's Trivy scan, and on the Docker
-  CLI only by then auditing all four source-built tools for the same CVE class rather than
-  stopping at the two CI happened to flag. Fixed by an explicit `go get google.golang.org/grpc@1.82.1`
-  before each tool's build (mirroring the existing `containerd/containerd/v2` override already
-  used for buildx); the Docker CLI's `vendor.mod`-only layout (no real `go.mod`) needed a
-  temporary `go.mod -> vendor.mod` / `go.sum -> vendor.sum` symlink for `go get`/`go mod vendor`
-  to have a module root to write through, removed again before the build itself runs. Verified
-  clean (0 HIGH/CRITICAL across all four binaries) via a real Docker build + real Trivy scan
-  with CI's exact flags, not just a module-graph inspection.
+- **nginx's stream module for standard-mode SNI passthrough**: `services/proxy/Dockerfile` installs
+  nginx from nginx.org's own mainline apt repo, not Debian's own `nginx` package. nginx.org's
+  package compiles the stream module in statically (confirmed via its own `nginx -V` output:
+  `--with-stream --with-stream_ssl_preread_module`, among others) — there is no separate module
+  package to install and no `load_module` directive anywhere in `services/proxy/nginx.conf`.
+  (Corrected 2026-07-30: this bullet previously and incorrectly described a separate
+  `libnginx-mod-stream` package requiring an explicit `load_module` line — that described
+  Debian's own nginx package, which this project does not use.)
+- **Serial file**: OpenSSL's certificate serial file (`ca.srl`) is stored alongside the CA
+  certificate and key in the certs directory — see `AGENTS.md`'s `AG-KD-002` for the binding rule.
+- **`build-tools`'s CI tools: prebuilt binary by default, source-build only when there's a
+  concrete reason** — see `AGENTS.md`'s `AG-KD-003` for the binding rule and its full,
+  repeatedly-reconfirmed history (actionlint, Docker CLI, docker-compose).
 
-## Dev vs Prod Split
+## No Separate Dev Environment
 
-| | dev | prod |
-|---|---|---|
-| Cache size | 10 GB | 500 GB (configure per disk in `config/prod/proxy.env`) |
-| Cache volume | Docker named volume | `${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache` on host |
-| CA cert | Auto-generated on first start | Mount pre-generated `certs/ca.crt` + `ca.key` |
-| DNS query logging | On | Off |
-| Ports (standard DNS) | 5300 (avoids Windows conflict) | 53 |
-| Ports (ssl DNS) | 5353 | 53 |
-| Container restart | `unless-stopped` | `always` |
+There is only one deployment profile, `deploy/prod/` — there used to be a parallel
+`deploy/dev/`/`config/dev/` pair (separate LAN IPs, offset DNS ports, a separate compose
+file kept in sync with prod by hand), retired in v0.3.0 (#766). That split was never
+something the maintainer actually asked for: the original, much simpler intent behind
+"dev" was just "the branch I currently develop on" (`current_dev`, see
+`docs/release-versioning.md` and #825/#1141's branch model), not a second live deployment
+environment. An earlier AI session misread that as a request to build a whole parallel
+profile, and it grew from there — this has now been undone.
+
+Local iteration and real validation both use `deploy/prod/docker-compose.yml` directly;
+the difference between "developing" and "deploying" is which git ref is checked out
+(`current_dev` vs. a `vX.Y.Z` release branch vs. `master`), not which compose file or
+config directory is used. In practice, most real validation for this project happens via
+SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
+builds and full-stack `docker compose up` runs are not exercised on the Windows
+authoring host — see the IPv6 note below for one concrete Docker-Desktop-on-Windows
+limitation).
 
 ## Running
 
 ```bash
-# Development
-docker compose -f deploy/dev/docker-compose.yml up --build
-
-# Production
 docker compose -f deploy/prod/docker-compose.yml up -d
 ```
 
 ## First-time Setup
 
-1. **Dev**: just `docker compose up` — CA and all certs are auto-generated.
-   Copy `certs/ca.crt` to clients and install it (see `docs/install-ca-cert.md`).
-   DNS ports are offset (5300/5353) to avoid the Windows DNS client conflict.
-
-2. **[AG-SETUP-001]** **Prod**: two LAN IPs are required. Add the second:
-   ```
-   ip addr add 192.168.1.11/24 dev eth0
-   ```
-   Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
-   Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
-   Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
-   Create cache directory: `mkdir -p /opt/lancache-ng/cache` (or wherever `LANCACHE_STATE_DIR` points)
+**Prod**: two LAN IPs are required (see `AGENTS.md`'s `AG-SETUP-001` for the binding rule). Add the second:
+```
+ip addr add 192.168.1.11/24 dev eth0
+```
+Edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`.
+Edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs.
+Optionally run `certs/generate-ca.sh` to create a dedicated CA before first start.
+Create cache directory: `mkdir -p /opt/lancache-ng/cache` (or wherever `LANCACHE_STATE_DIR` points)
 
 ## Adding More CDN Domains
 
-- **[AG-CDN-001]** Add the hostname to `services/dns/cdn-domains.txt` (or via the Admin UI) — this is the only file to maintain.
+- Add the hostname to `services/dns/cdn-domains.txt` (or via the Admin UI) — see `AGENTS.md`'s
+  `AG-CDN-001` for the binding rule (this is the only file to maintain).
 - The proxy derives each entry's registrable root domain automatically at
   startup (using the vendored Mozilla Public Suffix List, see
   `services/proxy/entrypoint.sh`) and generates a wildcard cert for it.
@@ -179,30 +143,5 @@ docker compose -f deploy/prod/docker-compose.yml up -d
 
 ## IPv6 Notes
 
-**[AG-IPV6-001]** Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
-fully. The Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` on the host.
-
-## Rule Enforcement Matrix
-
-This matrix maps CLAUDE.md's normative rules to how they are currently enforced, mirroring the
-format of the Rule Enforcement Matrix in `AGENTS.md`. CLAUDE.md's IDs use their own category
-prefixes (`AG-CC`, `AG-GOV`, `AG-KD`, `AG-CDN`, `AG-SETUP`, `AG-IPV6`) rather than being appended
-to `AGENTS.md`'s existing categories — see the PR that introduced this matrix for the judgment
-call and reasoning. Several rules below restate, in CLAUDE.md's own words, a rule already tracked
-under a distinct ID in `AGENTS.md`; the "Mirrors" column names that ID as a Rule-Ref-style
-cross-reference rather than treating the two IDs as one and the same rule.
-
-| Rule ID | Rule Name | Mirrors (AGENTS.md) | Current Enforcement |
-|---------|-----------|----------------------|----------------------|
-| AG-CC-001 | User is not a programmer; decide independently, ask only on real operational impact | AG-WF-015 | Manual review (decision log in PR) |
-| AG-CC-002 | Chat language German, code language English | — | Manual review (session transcript / code review) |
-| AG-GOV-001 | Mandatory to read `AGENTS.md` + `.github/AGENTS.md` in full at session start, confirmed as `wiki-mod/lancache-ng`'s own copies (not another repo's/fork's); re-read on change | — | Manual review (cannot be technically enforced on an agent session) |
-| AG-GOV-002 | GitHub content language: English | AG-GH-001 | Manual review (PR description language scan, commit message review) |
-| AG-GOV-003 | Project language Rust/shell for code we write; other-language toolchain use needs explicit user approval every time | AG-REL-001 | Manual review (new file type / import / Dockerfile toolchain detection) |
-| AG-GOV-004 | No direct pushes to master | AG-WF-004 / AG-WF-014 | GitHub branch protection (`master` branch requires PR) |
-| AG-KD-001 | Upstream nginx resolver must be real DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | AG-OP-002 | Code review (nginx resolver config inspection) |
-| AG-KD-002 | OpenSSL serial file (`ca.srl`) is stored alongside the CA certificate/key in the certs directory, not in `/tmp`, so it survives container restarts | — | Code review (`entrypoint.sh` cert-generation inspection) |
-| AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | — | Manual review (`tools/build-tools/Dockerfile` inspection) |
-| AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | — | Manual review (repo inspection — no second domain file exists) |
-| AG-SETUP-001 | Prod deployment requires two LAN IPs | — | Manual review (documentation only; no CI check for external LAN IP provisioning) |
-| AG-IPV6-001 | Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` | — | Manual review (documentation only; no CI check) |
+Docker Desktop on Windows has limited IPv6 support. In production (Linux host), IPv6 works
+fully — see `AGENTS.md`'s `AG-IPV6-001` for the binding Docker-daemon-config rule.

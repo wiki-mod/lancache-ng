@@ -17,26 +17,33 @@ on:
         default: none
   schedule:
     # Daily stable-channel refresh (issues #1035, #1056; re-scoped for the
-    # #825/#1141 branch-model decision: master = `latest`, current_dev =
-    # `nightly`, archived vY.X.Z branches publish no live channel). The
-    # `promote` job only moves the `latest` stack channel on a push to
-    # master, so between master pushes the channel's images can silently go
-    # stale (exactly #1035's failure mode for the old `edge` name, back when
-    # this same schedule kept the then-master-fed `nightly` channel fresh
-    # instead). A `schedule` event always runs from the repository's default
-    # branch (currently master), and because `detect-changes` only gates
-    # pull_request events -- every non-PR event builds all services
-    # unconditionally -- this rebuilds the full stack and re-runs `promote`,
-    # whose `refs/heads/master -> latest` case then re-points the channel. So
-    # `latest` can never drift more than ~24h behind master even with no push.
+    # #825/#1141 branch-model decision: master = `latest`, archived vY.X.Z
+    # branches publish no live channel). The `promote` job only moves the
+    # `latest` stack channel on a push to master, so between master pushes
+    # the channel's images can silently go stale (exactly #1035's failure
+    # mode for the old `edge` name, back when this same schedule kept the
+    # then-master-fed `nightly` channel fresh instead). A `schedule` event
+    # always runs from the repository's default branch (currently master),
+    # and because `detect-changes` only gates pull_request events -- every
+    # non-PR event builds all services unconditionally -- this rebuilds the
+    # full stack and re-runs `promote`, whose `refs/heads/master -> latest`
+    # case then re-points the channel. So `latest` can never drift more than
+    # ~24h behind master even with no push.
     #
-    # KNOWN GAP: this schedule cannot give `nightly` (current_dev's channel)
-    # the same guarantee. GitHub Actions `schedule:` triggers only ever run
-    # from the repository's default branch, never from current_dev, so there
-    # is no equivalent daily safety net if current_dev goes a while without a
-    # push. #825 explicitly left the GitHub default-branch question open, so
-    # this is not solved here; revisit if nightly staleness between pushes
-    # becomes a real operational problem.
+    # `nightly` (current_dev's channel) is DELIBERATELY NOT covered by this
+    # same cron since #1254/#1255 (2026-07-25): current_dev no longer
+    # auto-publishes nightly on every push at all (see the `promote` job's
+    # own "Branch-to-channel mapping" comment), so "keep nightly from drifting
+    # between pushes" is no longer this schedule's job to do. `nightly` has
+    # its OWN dedicated schedule instead -- see nightly-refresh.yml, which
+    # dispatches this same workflow against current_dev's tip once a day
+    # (same 01:00 UTC cron time as this one, for the identical DST-drift
+    # reason documented below) plus on-demand. That file's own header
+    # documents the one gap this split still carries: GitHub's `schedule:`
+    # trigger only fires from a workflow file as it exists on the default
+    # branch, so nightly-refresh.yml's cron is inert until it has itself been
+    # merged to master, even though it lives in a repo whose active
+    # development happens on current_dev.
     #
     # 01:00 UTC == 02:00 CET (the intended local refresh time). GitHub Actions
     # cron has no timezone concept and always fires in UTC, so during CEST
@@ -50,6 +57,49 @@ on:
     tags: ["v*"]
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
+    # Issue #1203: skip the ENTIRE workflow run (no job is ever scheduled, so
+    # none of them queue for a lancache-light runner slot at all) when every
+    # changed file is documentation. This is a TRIGGER-level filter, distinct
+    # from and additional to detect-changes'/ci_scope_policy's existing
+    # job-level `if:` scoping below -- that scoping can only skip work AFTER
+    # a job already started competing for a runner slot; it cannot stop the
+    # job from being scheduled and queued in the first place. Confirmed for
+    # real (#1203): detect-changes/validate-compose/file-headers themselves
+    # sat queued for 17+ minutes with no runner ever assigned
+    # (`runner_name: ""`) behind unrelated PRs' work, for a PR whose entire
+    # diff was one .md file -- the job-level skip inside detect-changes can
+    # never fire before detect-changes itself gets a runner.
+    #
+    # Pattern mirrors scripts/classify-image-impact.sh's own touches_docs()/
+    # docs_only definition (`*.md | docs/*`) for consistency with the
+    # job-level scoping this trigger-level filter sits alongside.
+    # `!CHANGELOG.md` keeps that one file un-ignored: scripts/
+    # check-changelog-direct-edit.sh (run inside this same workflow's
+    # `shellcheck` job) is a warn-only guard that specifically fires when a
+    # PR edits CHANGELOG.md directly outside the automated release flow --
+    # a blanket `**/*.md` exclude would silently skip the whole workflow (and
+    # so that warning) for a CHANGELOG-only PR.
+    #
+    # RISK, deliberately not resolved by this comment alone -- see the PR
+    # that introduced this block for the full writeup: `master` and `v0.2.0`
+    # both require several of this workflow's jobs via branch protection
+    # (`shellcheck`, `validate-compose`, `CI scope policy`,
+    # `file purpose headers`, `PR template validation`,
+    # `PR tracking metadata (labels/milestone/project)`, `coverage (Rust)`,
+    # `validate full-setup image`). `paths-ignore` cannot be scoped per
+    # target branch within one trigger block -- if this workflow run never
+    # starts at all for a doc-only PR opened DIRECTLY against master or
+    # v0.2.0, none of those required checks can ever report, and GitHub
+    # blocks that PR from merging forever ("Expected -- Waiting for status
+    # to be reported"), not just slowly. `current_dev` -- where #1186/#1189/
+    # #1196 and effectively all day-to-day PRs land -- has NO branch
+    # protection at all (confirmed via the GitHub API), so this is safe
+    # where the problem actually occurs; it is a real, accepted risk only
+    # for the rare direct-to-master/v0.2.0 release/hotfix path.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "!CHANGELOG.md"
     # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
     # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
     # the github.event.pull_request webhook snapshot for this run (see that job's
@@ -61,11 +111,25 @@ on:
     # metadata actually changes. `edited` is deliberately excluded -- it fires on
     # title/body/base-ref edits, which are unrelated to labels/milestone and would
     # add much higher-frequency reruns of the full heavy pipeline for no metadata
-    # benefit. Yes, this reruns build/test/scan jobs too on a bare label/milestone
-    # change (they have no metadata-only fast path -- see AG-GH-008 Enforcement
-    # Notes for why that tradeoff was accepted rather than building one): labels
-    # and milestones are set rarely per PR (usually once, by a human or the
-    # labeler), unlike commits, so the added self-hosted-runner cost is bounded.
+    # benefit.
+    #
+    # `labeled`/`unlabeled`/`milestoned`/`demilestoned` carry no new commit -- the
+    # content under test is byte-identical to whatever the PR's last `synchronize`
+    # (or `opened`/`reopened`) already validated, so re-running the Rust
+    # build/test/lint/audit jobs and the multi-arch image builds for them buys
+    # nothing: a prior run already produced the authoritative result for this exact
+    # commit. Each of build/build-arm64/dns_rust_quality/ui_rust_quality/dns_test/
+    # ui_test/dns_cargo_audit/ui_cargo_audit/rust_coverage's own `if:` therefore
+    # additionally requires the pull_request event's `action` to be one of
+    # opened/synchronize/reopened/ready_for_review before it will run at all (see
+    # each job's own comment) -- this list and that inline per-job condition must be
+    # kept in sync if either ever changes. AG-GH-008's metadata check itself
+    # (pr-tracking-metadata-check/-hosted) is deliberately NOT scoped this way: it
+    # only reads the webhook snapshot and depends solely on validate-compose (which
+    # has no such gate), so it still re-evaluates on every type below, keeping its
+    # own freshness guarantee intact. ci_scope_policy's per-path required-success
+    # logic is taught the same event-action distinction so a metadata-only event
+    # skipping these jobs is never mistaken for a real, unexplained failure.
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
@@ -149,18 +213,42 @@ defaults:
     shell: bash
 
 jobs:
-  # PR-only change classification: skips per-crate/per-service heavy work only
-  # when a PR clearly cannot affect it. Service-image decisions are based on
-  # each Dockerfile's COPY graph, while docs/governance/setup/deploy/release
-  # classes stay visible for policy checks. Build-affecting workflow or
-  # composite-action changes are treated as touching runtime services, since the
-  # CI logic itself changed. Dedicated release helper workflows remain release
-  # contract changes, and build-tools rebuilds stay tied to build-tools inputs.
-  # Master/tag pushes are never scoped: they always run the full pipeline.
+  # Change classification for PR path-scoping and (as of #1095) push-event
+  # scoping of the four redundant Rust jobs. On a pull_request it diffs the PR's
+  # merge-base..head; on a push it diffs github.event.before..github.sha (the
+  # commits that push actually introduced), degrading to --all-changed when that
+  # base is absent/unreachable (all-zeros first push, force-push, GC'd base) so
+  # an undeterminable diff fails safe to the full pipeline. Service-image
+  # decisions are based on each Dockerfile's COPY graph, while docs/governance/
+  # setup/deploy/release classes stay visible for policy checks. Build-affecting
+  # workflow or composite-action changes are treated as touching runtime
+  # services, since the CI logic itself changed. Dedicated release helper
+  # workflows remain release contract changes, and build-tools rebuilds stay
+  # tied to build-tools inputs.
+  #
+  # SCOPE (#1095): the push-event outputs currently gate ONLY dns_test/ui_test/
+  # dns_cargo_audit/ui_cargo_audit -- work that already ran and passed on the PR
+  # that produced the push (AG-WF-004 forbids direct master pushes), so skipping
+  # it on a push that did not touch the relevant crate reuses that known-good
+  # result. build/build-arm64/container-scan still run the FULL per-service set
+  # on push: their should-build/should-scan gates keep their push branch
+  # unchanged here, because per-service build/scan reuse on push additionally
+  # needs a safe way to re-tag a prior commit's already-built sha-* image, which
+  # depends on cross-run ordering this job cannot provide by itself. That is
+  # deferred to Part 1 of #1095. workflow_dispatch is left unscoped (detect-
+  # changes does not run for it); the four jobs' own if: fail safe to running
+  # whenever this job did not produce a successful classification.
   detect-changes:
     name: detect changed paths
-    if: github.event_name == 'pull_request'
+    if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real recent runs (30+ samples across pull_request/push events, 2026-07):
+    # this job's own git-diff/classify-image-impact.sh work completes in
+    # 6-17s. 15 minutes is a generous, round floor (not derived by scaling
+    # that tiny number -- see the shared job-timeout rollout PR for why every
+    # cheap self-hosted script job in this file uses the same 15-minute
+    # floor) that still turns any future hang into a fast, bounded failure.
+    timeout-minutes: 15
     outputs:
       dns_rust: ${{ steps.filter.outputs.dns_rust }}
       dns_image: ${{ steps.filter.outputs.dns_image }}
@@ -168,6 +256,7 @@ jobs:
       watchdog: ${{ steps.filter.outputs.watchdog }}
       dhcp: ${{ steps.filter.outputs.dhcp }}
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
+      ntp: ${{ steps.filter.outputs.ntp }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       workflow: ${{ steps.filter.outputs.workflow }}
@@ -187,10 +276,10 @@ jobs:
         id: filter
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
 
-          : "${BASE_SHA:?pull request base SHA is required}"
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
           # The per-path classification -- and the merge-base #536 fix that
@@ -201,13 +290,36 @@ jobs:
           # "Changed files:" listing to stderr and the key=value booleans (plus
           # the additive IMAGE_IMPACT verdict, unused by this job) to stdout.
           # checkout above runs with fetch-depth: 0, which merge-base needs.
-          bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
+            : "${BASE_SHA:?pull request base SHA is required}"
+            bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+          else
+            # push (branch or tag): diff exactly the commits this push
+            # introduced (github.event.before..github.sha). Fail safe to
+            # --all-changed when that base is unusable -- an all-zeros first
+            # push, or a base commit not present even under fetch-depth: 0 (a
+            # force-push that discarded the old tip, or a GC'd/unreachable ref)
+            # -- so an undeterminable diff runs the full set instead of silently
+            # skipping a real change. Mirrors build-tools.yml's own before-diff
+            # fallback (determine-publish-scope).
+            if [ -z "$BEFORE_SHA" ] \
+              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+              echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); classifying all paths as changed."
+              bash scripts/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+            else
+              bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            fi
+          fi
 
   file-headers:
     # Cheap repository hygiene gate. It runs before expensive Rust/image work so
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its
+    # comment) -- generous relative to real observed duration, not tight.
+    timeout-minutes: 15
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): a superseded commit's file-headers run gets
     # reclaimed instead of running to completion. Safe to cancel mid-flight:
@@ -230,10 +342,42 @@ jobs:
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
+  compose-healthchecks:
+    # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
+    # shape exactly: a plain bash/grep script with no build-tools/Docker
+    # dependency of its own, so it runs directly on a light runner rather
+    # than waiting on validate-compose's image selection.
+    name: compose healthchecks
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs expected in the same 8-15s range as file-headers (a single
+    # bash script scanning ~4 compose files). Same generous 15-minute floor
+    # as detect-changes above.
+    timeout-minutes: 15
+    # Job-level concurrency, mirroring file-headers' own group exactly: safe
+    # to cancel mid-flight since nothing but build/build-arm64's own PR-only
+    # `if:` gate (`needs['compose-healthchecks'].result == 'success'`)
+    # consumes this job's result, and that gate cleanly skips rather than
+    # errors on a cancelled result.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-compose-healthchecks-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-compose-healthchecks-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
+        run: bash scripts/check-compose-healthchecks.sh
+
   pr-template-check:
     name: PR template validation
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-12s (one live `gh pr view` call + a bash script). Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -280,6 +424,9 @@ jobs:
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: 5-7s on ubuntu-latest. Same 15-minute floor as
+    # detect-changes' self-hosted equivalent above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -324,6 +471,9 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 8-12s (gh pr view calls + one docker run of the build-tools
+    # image). Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -331,6 +481,83 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Auto-assign Dependabot PR milestone
+        # AG-GH-008 requires every PR to carry a milestone. Dependabot cannot
+        # set its own milestone or add itself to a project board -- this used
+        # to be handled by exempting dependabot[bot] from this whole check
+        # (see #1061-#1064), but the maintainer decided (issue #1278) that
+        # auto-tagging real metadata is the right fix instead of skipping the
+        # requirement. Labels and project-board placement are already handled
+        # for Dependabot PRs without this step (GitHub's own dependency
+        # labels plus labeler.yml's path-based labels; add-to-project.yml's
+        # unconditional pull_request_target trigger) -- milestone was the one
+        # real gap, confirmed by checking real Dependabot PRs via the GitHub
+        # API (#1270, #1163: labeled and on the project board, milestone
+        # null).
+        #
+        # Runs before "Fetch current labels/milestone live" below so that
+        # step's live `gh pr view` re-fetch already sees the milestone this
+        # step just set, in the same job run -- no separate job/race needed.
+        #
+        # Uses PROJECT_AUTOMATION_PAT, not the default GITHUB_TOKEN: this
+        # project already standardized on that PAT for every other
+        # Dependabot-adjacent write (add-to-project.yml, the project-board
+        # sub-check two steps down) since GITHUB_TOKEN cannot write Projects
+        # v2 data; reusing the same secret for this REST write keeps the
+        # permission model in one place. Confirmed live (PR #1270's
+        # pr-tracking-metadata-check-hosted run, 2026-07-29) that this PAT
+        # does reach build-push.yml on a Dependabot-authored pull_request run
+        # -- Dependabot PRs are same-repo branches, not forks, so the
+        # fork-secret-withholding restriction documented below does not
+        # apply here.
+        #
+        # Idempotent per AG-OP-006/AG-OP-009: only PATCHes when the PR's live
+        # milestone is genuinely empty, so a re-run (e.g. the `synchronize`
+        # retrigger on a new Dependabot commit) never overwrites a milestone
+        # a maintainer set by hand in between.
+        #
+        # Known, accepted cost: successfully setting a milestone here fires a
+        # real `milestoned` PR event, which re-triggers this entire workflow
+        # once more (this file's `on.pull_request.types` already includes
+        # `milestoned`, and its own comment already accepts bare
+        # label/milestone changes as a bounded, infrequent cost). This is a
+        # ONE-TIME cost per newly-opened Dependabot PR, not recurring, since
+        # the idempotence check above means later runs never PATCH again.
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # Milestone #11, "LanCache-NG Roadmap" -- the repo's existing
+          # general-purpose catch-all milestone for PRs/issues that don't tie
+          # to a specific version release (see `gh api
+          # repos/{owner}/{repo}/milestones` for its own description). If
+          # this milestone is ever renumbered or renamed, update both this
+          # value and the comment together.
+          DEPENDABOT_MILESTONE_NUMBER: 11
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check will fail below (No milestone set) until a maintainer sets one by hand, same as it would for any other PR missing this secret-dependent automation."
+            exit 0
+          fi
+          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
+          if [ -n "$current_milestone" ]; then
+            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
+            exit 0
+          fi
+          # `if !` (rather than a bare command) keeps this under `set -e`
+          # per AG-VAL-004: a command forming an `if` test is exempt from
+          # errexit, so a real API failure here degrades to a warning
+          # instead of aborting the job -- the authoritative gate is the
+          # milestone check inside check-pr-tracking-metadata.sh a couple of
+          # steps below, which will still fail with a clear, actionable
+          # message if this best-effort auto-tag didn't actually land.
+          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
+            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
+            exit 0
+          fi
+          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
       - name: Fetch current labels/milestone live
         # Same class of bug found and fixed in pr-template-check (2026-07-16):
         # github.event.pull_request.labels/.milestone is a snapshot taken when
@@ -367,9 +594,6 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          # Dependabot's own PR author identity -- see
-          # check-pr-tracking-metadata.sh's dependabot[bot] exemption.
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           # PR_LABELS_JSON now names a live-fetched file (mounted below),
@@ -388,7 +612,6 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
-            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
@@ -396,6 +619,11 @@ jobs:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: up to ~1 min (build-tools image resolution + gh pr view
+    # calls on ubuntu-latest, slower than the self-hosted twin since it
+    # cannot reuse validate-compose's already-selected image). Same
+    # 15-minute floor as detect-changes above -- still ~15x the observed max.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -416,6 +644,35 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Auto-assign Dependabot PR milestone
+        # See the primary pr-tracking-metadata-check job's identical step
+        # (issue #1278) for the full rationale: Dependabot cannot set its
+        # own milestone, so this auto-assigns the "LanCache-NG Roadmap"
+        # catch-all (#11) via PROJECT_AUTOMATION_PAT before the live
+        # label/milestone re-fetch below, instead of exempting Dependabot
+        # from the check entirely (the previous approach, #1061-#1064).
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DEPENDABOT_MILESTONE_NUMBER: 11
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check-hosted will fail below (No milestone set) until a maintainer sets one by hand."
+            exit 0
+          fi
+          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
+          if [ -n "$current_milestone" ]; then
+            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
+            exit 0
+          fi
+          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
+            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
+            exit 0
+          fi
+          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
       - name: Fetch current labels/milestone live
         # See the primary pr-tracking-metadata-check job's identical step for
         # why this fetches live via `gh pr view` instead of trusting
@@ -487,6 +744,8 @@ jobs:
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-10s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -542,6 +801,9 @@ jobs:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
+    # Real runs: up to ~50s (build-tools image resolution on ubuntu-latest +
+    # gh pr view). Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     permissions:
       contents: read
       pull-requests: read
@@ -596,6 +858,8 @@ jobs:
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
@@ -603,6 +867,20 @@ jobs:
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
+
+  compose-healthchecks-hosted:
+    name: compose healthchecks (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    # Real runs: same order of magnitude as file-headers-hosted. Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
+        run: bash scripts/check-compose-healthchecks.sh
 
   line-endings:
     # Cheap repository hygiene gate (issue #601). .gitattributes already
@@ -616,6 +894,8 @@ jobs:
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-11s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs['line-endings'].result == 'success'`
@@ -650,6 +930,8 @@ jobs:
   line-endings-hosted:
     name: line endings (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
@@ -658,9 +940,62 @@ jobs:
       - name: Check tracked files use Unix (LF) line endings
         run: bash scripts/check-line-endings.sh
 
+  language-policy:
+    # Enforces AG-REL-001 (project language: Rust and shell for code we
+    # write) by asserting the ABSENCE of banned-language source files, rather
+    # than scanning code IN a banned language for vulnerabilities the way
+    # CodeQL's per-language analysis does. That distinction matters here:
+    # after issue #1158's Rust rewrite of the last Python file
+    # (tools/pxe-client-probe), this repository has zero Python files, which
+    # makes CodeQL's separate, GitHub-managed "default setup" Python analysis
+    # fail every real run with "could not process any code" -- a scan that
+    # can never pass again is not a useful gate. This job instead fails the
+    # moment a banned-language file reappears, which is the actual property
+    # AG-REL-001 wants enforced.
+    name: language policy
+    needs: validate-compose
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: a few seconds (pure git ls-files + case-statement scan).
+    # Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-language-policy-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-language-policy-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Check for banned-language source files (AG-REL-001)
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
+
+  language-policy-hosted:
+    name: language policy (GitHub-hosted fallback)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Check for banned-language source files (AG-REL-001)
+        run: bash scripts/check-language-policy.sh
+
   # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs
   # with no LAN dependency of their own: file-headers-hosted,
-  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted, and
+  # compose-healthchecks-hosted (#1169), line-endings-hosted,
+  # shellcheck-hosted, pr-template-check-hosted, language-policy-hosted, and
   # watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
   # self-hosted runners because they still depend on the shared build-tools
   # image, sccache/distcc acceleration, or registry credentials that do not
@@ -686,6 +1021,13 @@ jobs:
     # to be installed on the runner host.
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real full-job runs: 30-85s. Must exceed the "Run ShellCheck and
+    # ActionLint" step's own 15-minute timeout below (a job-level bound
+    # tighter than a step it contains would fail the job before that step's
+    # own deliberate 15-minute allowance ever gets to run out) -- 25 minutes
+    # covers that step's 15-minute budget plus this job's other steps
+    # (governance guardrails, changelog-edit guard) with real headroom.
+    timeout-minutes: 25
     # Job-level concurrency (#891): cancel-in-progress is pull_request-only --
     # see `build`'s group comment for the full #979 rationale. build/
     # build-arm64 require `needs.shellcheck.result == 'success'`
@@ -717,7 +1059,28 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # Real incident (2026-07-24/25): actionlint's default invocation embeds
+      # its own shellcheck integration, which intermittently hangs INDEFINITELY
+      # in a Go-runtime deadlock (observed on-host: STAT Ssl, WCHAN
+      # futex_do_wait, no child processes, signal-deaf) -- a normal run finishes
+      # in ~1-2s. `timeout-minutes: 15` alone is NOT sufficient against this:
+      # GitHub cancels a timed-out step by sending SIGTERM to the `docker run`
+      # client, the client forwards SIGTERM into the container, and a deadlocked
+      # actionlint ignores it -- so BOTH the client and the container keep
+      # running, the runner slot stays occupied, and `--rm` never fires
+      # (verified on-host 2026-07-25: SIGTERM to a `docker run` whose container
+      # traps TERM leaves both alive). That is exactly how accumulated hung lint
+      # containers exhausted the entire lancache-light runner tier for hours on
+      # 2026-07-25 (containers seen alive 5-14h despite this 15-minute bound).
+      # The real guard is the INNER `timeout --kill-after=30 300` around
+      # actionlint below: SIGTERM at 300s, then an UNIGNORABLE SIGKILL 30s later,
+      # so even a deadlocked actionlint is force-killed from inside the
+      # container, the container exits, `--rm` cleans up, and the slot is freed
+      # fast (verified on-host: `timeout -s KILL` reaps a TERM-trapping process,
+      # exit 137, container removed). `timeout-minutes: 15` is kept as a
+      # coarse job-level backstop for any unrelated stall.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
@@ -725,7 +1088,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
+            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
 
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
@@ -927,6 +1290,10 @@ jobs:
   shellcheck-hosted:
     name: shellcheck (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real full-job runs: 58-84s. 25 minutes, same as the self-hosted
+    # shellcheck job above, for the same reason: must exceed this job's own
+    # "Run ShellCheck and ActionLint" step timeout added below.
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
@@ -946,7 +1313,19 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      # Parity fix: this step runs the exact same actionlint invocation as
+      # the self-hosted shellcheck job's own "Run ShellCheck and ActionLint"
+      # step (see that job's comment for the real 2026-07-24 incident -- a
+      # 5+ hour indefinite hang, reproduced 3/3 times, from actionlint's
+      # embedded shellcheck integration). That fix only covered the
+      # self-hosted job; this hosted fallback carried the identical
+      # unbounded-hang risk and had no timeout at all until now. Same coarse
+      # 15-minute job-level bound AND the same inner `timeout --kill-after=30
+      # 300` SIGKILL guard around actionlint (see the self-hosted job's comment
+      # for why the step timeout-minutes alone cannot reap a signal-deaf,
+      # deadlocked container), for the same reason.
       - name: Run ShellCheck and ActionLint
+        timeout-minutes: 15
         run: |
           set -euo pipefail
           docker run --rm \
@@ -954,7 +1333,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; actionlint .github/workflows/*.yml'
+            bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
 
       - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
         env:
@@ -1016,6 +1395,14 @@ jobs:
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 20-72s (the docker-run/grep checks in this job are cheap).
+    # 30 minutes rather than the 15-minute floor used by the other light
+    # script jobs in this file: select-build-tools-image.sh's resolution
+    # step can fall back to a local Docker build of the (large) build-tools
+    # image if the published one is unavailable or fails its smoke test --
+    # real work this job's own comment below explicitly calls out -- and
+    # that fallback build is not represented in the fast-path samples above.
+    timeout-minutes: 30
     # Job-level concurrency (#891 follow-up): cancel-in-progress is
     # pull_request-only -- see `build`'s group comment for the full #979
     # rationale. validate-compose is the shared `needs:` root that exports the
@@ -1053,12 +1440,27 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx for manifest inspection
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Resolve compose validation image
         id: select-compose-validation-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          # Without these, select-build-tools-image.sh's ghcr_retry call pulls
+          # ghcr.io/.../build-tools:nightly anonymously. An unauthenticated pull
+          # has a much lower GHCR rate limit than an authenticated one, and
+          # under real load (many concurrent workflow runs each pulling this
+          # same tag) it fails closed with "denied: denied" -- confirmed for
+          # real: this exact job failed this way on a real push to current_dev
+          # during a burst of concurrent CI activity, blocking build/build-arm64
+          # (which unconditionally need this job to succeed) and starving the
+          # channel/nightly-tag refresh entirely. Every other GHCR-pulling job
+          # in this workflow already authenticates the same way (see
+          # docker/login-action usages elsewhere in this file); this job was
+          # the one gap.
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -1083,6 +1485,18 @@ jobs:
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
+
+      # This is the only step in this job that uses the builder set up above
+      # (select-build-tools-image.sh's own `docker buildx imagetools
+      # inspect` call) -- its own trusted-ref fallback path, if ever taken,
+      # uses plain `docker build`, not buildx, so nothing later in this job
+      # needs the builder kept alive. Torn down here rather than left
+      # running to the job's own much-later "Remove fallback compose
+      # validation image" cleanup near the end of this file.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Validate stack image contract
         run: |
@@ -1231,6 +1645,8 @@ jobs:
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
           NATS_CALLOUT_PASSWORD: ci-nats-callout-password
           NATS_CALLOUT_USER: ci-nats-callout
+          NATS_SYS_PASSWORD: ci-nats-sys-password
+          NATS_SYS_USER: ci-nats-sys
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -1271,6 +1687,8 @@ jobs:
             --env NATS_DNS_WRITER_USER \
             --env NATS_CALLOUT_PASSWORD \
             --env NATS_CALLOUT_USER \
+            --env NATS_SYS_PASSWORD \
+            --env NATS_SYS_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \
@@ -1306,7 +1724,6 @@ jobs:
           }
 
           validate_compose -f deploy/quickstart/docker-compose.yml --profile ssl
-          validate_compose -f deploy/dev/docker-compose.yml
           validate_compose -f deploy/prod/docker-compose.yml
           validate_compose -f deploy/secondary/docker-compose.yml
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
@@ -1317,7 +1734,6 @@ jobs:
           # explicit profile activation so their service definitions are
           # actually parsed and validated, not silently excluded.
           for compose_file in \
-            deploy/dev/docker-compose.yml \
             deploy/prod/docker-compose.yml \
             deploy/quickstart/docker-compose.yml; do
             validate_compose -f "$compose_file" --profile dhcp-kea
@@ -1332,7 +1748,6 @@ jobs:
             local path
 
             for path in \
-              deploy/dev/docker-compose.yml \
               deploy/prod/docker-compose.yml \
               deploy/quickstart/docker-compose.yml
             do
@@ -1378,11 +1793,11 @@ jobs:
           grep -Fq 'write_env_file "${secondary_dir}/.env"' setup.sh \
             || { echo "::error::Secondary setup must use the safe env writer for generated .env files."; exit 1; }
 
-          if grep -F 'EXEC: "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+          if grep -F 'EXEC: "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Docker exec is banned from the Admin UI/watchdog proxy for security reasons; use predeclared container actions instead."
             exit 1
           fi
-          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
+          if grep -E '^[[:space:]]*(CONTAINERS|POST): "1"' deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml >/dev/null; then
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
@@ -1414,7 +1829,7 @@ jobs:
               exit 1
             }
 
-          for compose_file in deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
+          for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
             grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
@@ -1513,19 +1928,18 @@ jobs:
                   exit 1
                 }
                 if (saw_environment || saw_interpolated_dhcp_key) {
-                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for dev/prod.\n", compose_file
+                  printf "::error file=%s::dhcp-proxy must not reintroduce Compose environment interpolation for dnsmasq-proxy values; env_file is the contract for prod.\n", compose_file
                   exit 1
                 }
               }
             ' "$compose_file"
           }
 
-          # Dev/prod dhcp-proxy values are written by setup into env files.
+          # Prod dhcp-proxy values are written by setup into env files.
           # Compose interpolation does not read env_file values, so explicit
           # environment entries here would silently erase the configured proxy
           # DHCP settings. Quickstart is intentionally separate because setup
           # writes its single .env file directly.
-          validate_dhcp_proxy_env_file_contract deploy/dev/docker-compose.yml ../../config/dev/dhcp-proxy.env
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
           # Issue #450: dnsmasq relay/proxy optional-option surface. Guards
@@ -1540,7 +1954,7 @@ jobs:
             DHCP_PROXY_BOOT_SERVER
             DHCP_PROXY_CUSTOM_OPTIONS
           )
-          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
             for key in "${dhcp_proxy_optional_keys[@]}"; do
               grep -Eq "^${key}=" "$env_file" \
                 || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the dnsmasq relay/proxy optional-option surface added by issue #450."; exit 1; }
@@ -1563,7 +1977,7 @@ jobs:
             DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
             DHCP_PROXY_PXE_BOOT_FILENAME_UEFI
           )
-          for env_file in config/dev/dhcp-proxy.env config/prod/dhcp-proxy.env deploy/quickstart/.env; do
+          for env_file in config/prod/dhcp-proxy.env deploy/quickstart/.env; do
             for key in "${dhcp_proxy_pxe_keys[@]}"; do
               grep -Eq "^${key}=" "$env_file" \
                 || { echo "::error file=${env_file}::${env_file} must define ${key} (empty by default) for the PXE boot-pointer opt-in surface added by issue #705."; exit 1; }
@@ -1598,6 +2012,8 @@ jobs:
             NATS_DNS_WRITER_USER
             NATS_CALLOUT_PASSWORD
             NATS_CALLOUT_USER
+            NATS_SYS_PASSWORD
+            NATS_SYS_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             PDNS_API_KEY
@@ -1643,6 +2059,8 @@ jobs:
             NATS_DNS_WRITER_USER
             NATS_CALLOUT_PASSWORD
             NATS_CALLOUT_USER
+            NATS_SYS_PASSWORD
+            NATS_SYS_USER
             NATS_UI_PASSWORD
             NATS_UI_USER
             NGINX_UPSTREAM_RESOLVER
@@ -1745,7 +2163,7 @@ jobs:
             /^cmd_update\(\) \{/ { in_update=1; pause_seen=0; next }
             /^# .*debug subcommand/ { in_update=0 }
             in_update && /pause_lancache_convergence_for_update/ { pause_seen=1 }
-            in_update && !pause_seen && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ { print FILENAME ":" FNR ":" $0; found=1 }
+            in_update && !pause_seen && !/^[[:space:]]*#/ && /(cmd_backup|git -C|cp "\$install_dir\/deploy\/quickstart\/docker-compose\.yml"|migrate_env_for_update|validate_compose_config|docker[[:space:]]+compose([[:space:]]+--env-file[[:space:]]+[^[:space:]]+)?[[:space:]]+(pull|up))/ { print FILENAME ":" FNR ":" $0; found=1 }
             END { exit found ? 0 : 1 }
           ' setup.sh; then
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
@@ -2262,8 +2680,8 @@ jobs:
             || { echo "::error::setup.sh must keep latest as the normal stable default; nightly must be explicit."; exit 1; }
           grep -F 'LANCACHE_IMAGE_CHANNEL=latest' README.md >/dev/null \
             || { echo "::error::README must document latest as the normal install default."; exit 1; }
-          grep -F 'nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`' docs/release-versioning.md >/dev/null \
-            || { echo "::error::Release docs must keep nightly opt-in, not default."; exit 1; }
+          grep -F 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' docs/release-versioning.md >/dev/null \
+            || { echo "::error::Release docs must document nightly as the pre-1.0 default (see #1068 item 1 / #1120)."; exit 1; }
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
@@ -2285,12 +2703,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # #825/#1141 branch-model decision: master -> latest, current_dev
-          # -> nightly, archived vY.X.Z branches -> no live channel. These
-          # awk guards are scoped to each branch's own if/elif arm (not a
-          # flat grep -F for the channel_tags line alone) so a regression
-          # that keeps both literal strings in the file but ties them to the
-          # wrong branch would still be caught.
+          # #825/#1141 branch-model decision: master -> latest, archived
+          # vY.X.Z branches -> no live channel. current_dev's own mapping was
+          # SUPERSEDED by #1254/#1255 below -- see that guard for the current
+          # invariant. These awk guards are scoped to each branch's own
+          # if/elif arm (not a flat grep -F for the channel_tags line alone)
+          # so a regression that keeps both literal strings in the file but
+          # ties them to the wrong branch would still be caught.
           if ! awk '
             /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
             in_branch && /^ *elif/ { in_branch=0 }
@@ -2300,13 +2719,43 @@ jobs:
             echo "::error::Master promotion must publish the latest channel."
             exit 1
           fi
-          if ! awk '
+          # #1254/#1255 (2026-07-25) supersedes the current_dev half of the
+          # #825/#1141 mapping above: a current_dev PUSH must NOT auto-publish
+          # the nightly channel anymore (nightly is now a real once-daily
+          # scheduled/dispatch-only, green-gated channel -- see the `promote`
+          # job's own "Branch-to-channel mapping" comment for the full
+          # reasoning). This guard is the mirror image of the old one: it
+          # fails if the auto-publish regresses back in, rather than failing
+          # if it's missing.
+          if awk '
             /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
             in_branch && /^ *elif/ { in_branch=0 }
             in_branch && /channel_tags\+=\(nightly\)/ { found=1 }
             END { exit found ? 0 : 1 }
           ' .github/workflows/build-push.yml; then
-            echo "::error::current_dev promotion must publish the nightly channel."
+            echo "::error::current_dev push must no longer auto-publish the nightly channel (#1254/#1255 -- nightly is promoted only via the scheduled/manual channel-input dispatch path, see nightly-refresh.yml)."
+            exit 1
+          fi
+          # The scheduled/manual refresh path itself must actually exist and
+          # target current_dev with channel=nightly -- otherwise removing the
+          # auto-publish above would leave nightly never refreshed at all
+          # (a silent full outage of the pre-1.0 default channel, not merely
+          # slower staleness).
+          if [[ ! -f .github/workflows/nightly-refresh.yml ]]; then
+            echo "::error::nightly-refresh.yml is missing; nightly would never be promoted once current_dev pushes stop auto-publishing it (#1254/#1255)."
+            exit 1
+          fi
+          # Explicit if/! instead of a chained `A && B && C || D` (shellcheck
+          # SC2015: that shape is not real if-then-else, since D can also run
+          # when an earlier `&&` term itself fails to execute for an
+          # unrelated reason -- not just when the check's condition is
+          # false). Not a false positive here: this is a real, if narrow,
+          # correctness footgun this project's own AG-VAL-001 ("warnings are
+          # errors") does not carve out an exception for.
+          if ! { grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
+              && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
+              && grep -F 'channel=nightly' .github/workflows/nightly-refresh.yml >/dev/null; }; then
+            echo "::error::nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)."
             exit 1
           fi
           # Scoped to the promote job's own channel_tags=() ... 0-tags-check
@@ -2357,6 +2806,24 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-workflow-service-lists.sh
 
+      - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
+        # OSPS-VM-04.02: the committed OpenVEX document (vex.openvex.json) must
+        # be regenerated from .trivyignore.yaml whenever the accepted-
+        # vulnerability list changes. This guard fails closed if it drifts, so
+        # a PR editing .trivyignore.yaml without regenerating the VEX document
+        # cannot ship a stale supply-chain artifact. Runs in the build-tools
+        # container because scripts/check-vex-drift.sh needs jq, same as the
+        # naming/service-list guards above.
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-vex-drift.sh
+
       - name: Check config-writer idempotence test coverage (#640)
         run: |
           set -euo pipefail
@@ -2390,6 +2857,34 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-bats-path-filter-coverage.sh
 
+      - name: Check setup.sh/simulation-script prompt drift (issue #1176)
+        # Guards the failure class #1112/#1171 and #1082/#1175 both share:
+        # a PR changes something several other files depend on by hand-
+        # duplicated convention, and nothing catches the ones left stale
+        # until CI happens to exercise them days later on an unrelated PR.
+        # This instance: setup.sh's interactive install wizard and the two
+        # expect-driven simulation scripts (scripts/setup-cli-simulation.sh,
+        # scripts/syslog-forwarding-simulation.sh) that hand-encode its
+        # prompt sequence. PR #1082 added a new unconditional prompt without
+        # updating either simulation script, hanging both until timeout
+        # (#1175) -- discovered only because those specific jobs happened to
+        # run against an unrelated PR. scripts/check-setup-prompt-drift.sh
+        # fails closed whenever an unconditional wizard prompt is missing a
+        # matching expect_prompt answer in either simulation script, or a
+        # simulation script's pattern no longer matches any real prompt.
+        # Runs in the build-tools container for the same reason as the
+        # other check-*.sh guards above: real bash/grep/awk/sed semantics,
+        # not whatever happens to be on the runner host.
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash scripts/check-setup-prompt-drift.sh
+
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
         # check-logging-matrix.sh itself shells out to `docker compose ...
         # config --services` per Compose file, which -- same as the "Validate
@@ -2418,6 +2913,8 @@ jobs:
           NATS_DNS_WRITER_USER: ci-nats-dns-writer
           NATS_CALLOUT_PASSWORD: ci-nats-callout-password
           NATS_CALLOUT_USER: ci-nats-callout
+          NATS_SYS_PASSWORD: ci-nats-sys-password
+          NATS_SYS_USER: ci-nats-sys
           NATS_PASSWORD: ci-nats-password
           NATS_UI_PASSWORD: ci-nats-ui-password
           NATS_UI_USER: ci-nats-ui
@@ -2458,6 +2955,8 @@ jobs:
             --env NATS_DNS_WRITER_USER \
             --env NATS_CALLOUT_PASSWORD \
             --env NATS_CALLOUT_USER \
+            --env NATS_SYS_PASSWORD \
+            --env NATS_SYS_USER \
             --env NATS_PASSWORD \
             --env NATS_UI_PASSWORD \
             --env NATS_UI_USER \
@@ -2504,6 +3003,8 @@ jobs:
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-9s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     outputs:
       subnet: ${{ steps.derive.outputs.subnet }}
       gateway: ${{ steps.derive.outputs.gateway }}
@@ -2558,6 +3059,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 30-71s (pulls the just-published multi-platform image set,
+    # brings the full stack up via docker compose, smoke-tests it, tears it
+    # down). 30 minutes, not the 15-minute lint-job floor, because this job
+    # depends on a real docker-compose stack startup (image pulls, container
+    # health checks) whose cold-cache worst case is not represented by these
+    # warm-cache samples.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -2667,7 +3175,13 @@ jobs:
           tag="$(vit_resolve_tag "$EVENT_NAME" "$BASE_REF" "$PR_NUMBER" "$BUILD_SHA" "$ACTOR" "$HEAD_REPO" "$REPOSITORY" "")"
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; base-channel fallback for untouched services: '$base_channel_tag')."
+            # #1254/#1255: any untouched service is backfilled from this PR's
+            # own base commit's per-commit sha-* image in the next step
+            # ("Ensure PR staging tags exist for full-setup services"), not
+            # from base_channel_tag -- that variable is computed above only
+            # for the pr_staging_available == false branch's whole-suite
+            # fallback below, and is otherwise unused by this step.
+            echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
           else
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
               echo "::notice::$ACTOR's pull_request runs get a read-only GITHUB_TOKEN (Dependabot, or a fork PR), so build/build-arm64 could not push a PR staging tag. Validating against the '$tag' base channel instead -- the same behavior this job always had before #626."
@@ -2698,11 +3212,12 @@ jobs:
       # skipping cleanly.
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -2715,24 +3230,27 @@ jobs:
       # validate now waits for merge-manifests (see this job's own `needs:`
       # comment above) specifically so that's true. If it's missing anyway --
       # build/build-arm64 actually failed to push it, or imagetools inspect
-      # hit a transient registry error -- silently copying base-channel
-      # content into that service's pr-<N>-sha-<short> tag would make this
-      # job green while testing exactly the stale image #626 exists to stop
-      # testing, just now hidden behind a tag name that LOOKS PR-specific.
-      # Fail loudly instead; only a genuinely untouched service gets the
-      # base-channel back-fill.
+      # hit a transient registry error -- silently copying the PR base
+      # commit's own per-commit image into that service's pr-<N>-sha-<short>
+      # tag would make this job green while testing exactly the stale image
+      # #626 exists to stop testing, just now hidden behind a tag name that
+      # LOOKS PR-specific. Fail loudly instead; only a genuinely untouched
+      # service gets the base-commit back-fill (#1254/#1255: sourced from the
+      # PR base commit's own durable sha-<short> tag, not a mutable channel).
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          BASE_CHANNEL_TAG: ${{ steps.channel.outputs.base-channel-tag }}
-          # #808: this PR's own base commit, needed to prove a base-channel
-          # image was actually built from a commit at or after it before
-          # backfilling an untouched service from that channel. Always
-          # present here: this step only runs when pr-staging-available is
-          # true, which requires a pull_request event (see "Determine
-          # validation image channel" above).
+          # #808/#1254/#1255: this PR's own base commit. Needed both to prove
+          # the back-fill source image was actually built from it (or later)
+          # before backfilling an untouched service, AND (since #1254/#1255)
+          # to derive that source image's own tag directly (sha-<short of
+          # this>) -- no separate BASE_CHANNEL_TAG input is used anymore, see
+          # this step's own base_sha_short computation below. Always present
+          # here: this step only runs when pr-staging-available is true,
+          # which requires a pull_request event (see "Determine validation
+          # image channel" above).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
@@ -2753,6 +3271,27 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
+
+          # #1254/#1255 (2026-07-25): the #808 back-fill source below is now
+          # this PR's own base commit's durable per-commit sha-<short> image,
+          # not the mutable nightly/latest base-channel tag. Slice matches
+          # docker/metadata-action's `type=sha,prefix=sha-,format=short`
+          # convention (7 hex chars) used for every service's real sha-*
+          # tag -- the exact same 7-char slice the `promote` job's own
+          # short_sha="${COMMIT_SHA::7}" already relies on for the identical
+          # tag shape. This is a deliberate correctness improvement, not just
+          # a rename: nightly is no longer republished on every current_dev
+          # push (it is now a once-daily scheduled/dispatch-only green-gated
+          # channel -- see nightly-refresh.yml), so it could otherwise lag an
+          # untouched service's back-fill behind this PR's real base by up to
+          # a day. The base commit's own sha-* tag is always exactly the
+          # right commit by construction; #1254's feasibility investigation
+          # confirmed every non-PR push still publishes a fresh per-commit
+          # tag for every service (issue #1095's "build all services per
+          # push" behavior, not yet changed), so this image reliably exists
+          # (or appears shortly after -- the bounded poll below still handles
+          # that race exactly as it did for the base channel before).
+          base_sha_short="${BASE_SHA:0:7}"
 
           # Calls vit_service_should_have_staging_tag directly instead of
           # reimplementing the same "workflow/CI-contract change forces
@@ -2782,17 +3321,15 @@ jobs:
           # already exists. A prior run of this exact PR head (a manual
           # re-run, or this job simply running twice for the same commit) may
           # already have back-filled an untouched service's pr-<N>-sha-<short>
-          # tag from whatever the base channel pointed at THEN. If the base
-          # channel (nightly/dev) has since moved -- another PR merged in the
-          # meantime -- an existence check alone would see the stale alias,
-          # assume it's still correct, and `continue` without refreshing it:
-          # this job would then validate a deploy/workflow-only PR that
-          # doesn't touch that service against an old, no-longer-current
-          # base image, silently. So an untouched service is unconditionally
-          # (re)pointed at whatever the base channel resolves to RIGHT NOW --
-          # `imagetools create` is a cheap registry-side manifest write, not
-          # a rebuild, so refreshing it even when nothing actually changed
-          # costs nothing worth optimizing away.
+          # tag from this PR's base commit image. That source is now pinned
+          # to one fixed commit (base_sha_short, computed above) rather than
+          # a moving channel, so re-pointing it every run is no longer about
+          # chasing a channel that "moved since" -- it is still done
+          # unconditionally anyway, both for defense-in-depth (a prior partial
+          # run, or a manually-retried job) and because `imagetools create`
+          # is a cheap registry-side manifest write, not a rebuild, so
+          # refreshing it even when nothing actually changed costs nothing
+          # worth optimizing away.
           full_setup_services=(proxy dns watchdog ui build-tools)
           for service in "${full_setup_services[@]}"; do
             pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
@@ -2808,17 +3345,23 @@ jobs:
                 echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
                 continue
               fi
-              echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to base-channel content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
+              echo "::error::$service's PR staging tag ($pr_image) is missing even though detect-changes says this PR touched it (or a workflow/CI-contract file changed). Refusing to fall back to the PR base commit's content for a touched service -- that would silently reintroduce #626's bug behind a tag name that looks PR-specific. Check whether build/build-arm64 actually pushed $service successfully for this commit."
               exit 1
             fi
 
-            base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
-            echo "::notice::$service is untouched by this PR; verifying $BASE_CHANNEL_TAG ($base_image) was built from a commit at or after this PR's base commit ($BASE_SHA) before backfilling..."
-            # #808: never back-fill from a base-channel image without first
-            # proving it was actually built from base.sha or later -- see
+            base_image="ghcr.io/${REPOSITORY}/${service}:sha-${base_sha_short}"
+            echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $BASE_SHA before backfilling (#1254/#1255: no longer sourced from the mutable nightly/latest channel)..."
+            # #808: never back-fill without first proving the source image
+            # was actually built from base.sha or later -- see
             # scripts/lib/staging-image-freshness.sh for the mechanism and
             # the "validate full-setup image" job's own checkout step
             # (fetch-depth: 0) for why full git history is available here.
+            # sif_wait_for_fresh_base_image's revision-ancestry check is still
+            # meaningful even though base_image is now pinned to base_sha_short
+            # by construction: it also doubles as the existence poll for the
+            # #808 race (the base commit's own push-triggered build may not
+            # have pushed this tag yet), and it still guards against a
+            # corrupted/mislabeled image reporting the wrong revision.
             # 900/5400/15 (normal budget / hard ceiling / poll interval, in
             # seconds) intentionally match scripts/ensure-pr-staging-images.sh's
             # own BASE_FRESHNESS_POLL_* defaults exactly -- keep in sync by
@@ -2828,10 +3371,19 @@ jobs:
               echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
               exit 1
             fi
-            echo "::notice::(re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
+            echo "::notice::(re)pointing $PR_TAG at the PR base commit's own per-commit image ($base_image)."
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
           done
+
+      # This is the last step in the job that uses the builder set up above --
+      # "Build full-setup validation image" below is a plain `docker build`,
+      # not buildx. Same `pr-staging-available` gate as the setup step itself,
+      # since there is nothing to remove when that step never ran.
+      - name: Remove buildx builder
+        if: ${{ always() && steps.channel.outputs.pr-staging-available == 'true' }}
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Build full-setup validation image
         env:
@@ -2888,222 +3440,14 @@ jobs:
       # stabilize" step below: #450/#485, dnsmasq trying to bind an
       # already-used port).
       - name: Reserve a validation subnet and start the stack (locked, retries on collision)
-        id: reserve-and-start
-        working-directory: deploy/full-setup
-        env:
-          LANCACHE_IMAGE_REGISTRY: ghcr.io
-          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
-          LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-
-          : "${GITHUB_RUN_ID:?GITHUB_RUN_ID is required}"
-          : "${GITHUB_RUN_ATTEMPT:?GITHUB_RUN_ATTEMPT is required}"
-
-          if ! command -v flock >/dev/null 2>&1; then
-            echo "::error::flock is required for safe validation-subnet locking."
-            exit 1
-          fi
-
-          # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-
-          lock_root="/tmp/lancache-validation-locks"
-          max_attempts=10
-
-          # #832 inventory finding: this step used to carry its OWN separate,
-          # inline copy of the conflict-check python block (a bare
-          # `name.startswith(own_prefix)` match) instead of calling
-          # validation_subnet_conflicts (sourced above from
-          # reserve-validation-subnet.sh) like every other caller already
-          # does -- despite that shared function's own docstring claiming
-          # issue #820 had consolidated every copy. A bare startswith is
-          # exactly the footgun validation_subnet_conflicts's own_prefix
-          # argument guards against (e.g. project "lancache-ng-validation-22"
-          # would wrongly swallow "lancache-ng-validation-220..." as "ours").
-          # Removed in favor of calling the shared, already-fixed function
-          # directly below, closing this divergence for good instead of
-          # patching the duplicate in place.
-
-          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose pull --quiet
-
-          reserved_slot=""
-          holder_pid=""
-          next_attempt=1
-
-          while [[ -z "$reserved_slot" && "$next_attempt" -le "$max_attempts" ]]; do
-            reservation="$(validation_subnet_reserve_slot "$lock_root" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$next_attempt" "$max_attempts")" || {
-              echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts."
-              exit 1
-            }
-            attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-            slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
-            candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
-
-            # Rederive the COMPLETE VALIDATION_* set from THIS attempt's own
-            # candidate slot via the single shared validation_subnet_export_env
-            # (reserve-validation-subnet.sh) -- the SAME function every other
-            # reservation site in this project now calls (see
-            # full-setup-validate.yml/full-setup-deep-validate.yml's own
-            # "Reserve a validation subnet and start the stack" steps), instead
-            # of this step's own former hand-written copy. Matters both for
-            # validation_subnet_conflicts's own_prefix check right below and
-            # for avoiding a compose-project/UI-port collision between two
-            # concurrent runs that started from the same initial slot but
-            # diverged on a retry.
-            validation_subnet_export_env "$slot"
-
-            # Persist THIS ATTEMPT's identifiers to $GITHUB_ENV right away,
-            # every time through the loop -- not only once after the whole
-            # retry loop succeeds below. Issue #932 (CI run 29569378100, job
-            # 87852874801) confirmed a real production case where `docker
-            # compose up -d` a few lines down failed for a reason classified
-            # as non-retryable (Docker's own "has active endpoints" race
-            # while recreating a leftover network from a stale prior run that
-            # reused this same slot number -- see validation_network_teardown
-            # in reserve-validation-subnet.sh) and the step exited via `exit
-            # 1` below. The write that used to sit only after this whole loop
-            # never ran on that path, so COMPOSE_PROJECT_NAME was still unset
-            # in $GITHUB_ENV when the "Tear down full-setup validation stack"
-            # step ran (it DOES have `if: always()` and DID run) -- its own
-            # fail-closed `[[ -n "${COMPOSE_PROJECT_NAME:-}" ]]` guard, meant
-            # only for the case where no slot was ever derived at all, saw it
-            # empty and silently skipped `validation_project_networks_teardown`,
-            # leaving that attempt's network behind to poison a later run
-            # that reuses the same slot. $GITHUB_ENV takes the last value
-            # written for a repeated key, so writing here on every attempt
-            # keeps this a no-op correctness fix for the common, successful
-            # case (the final attempt's write is simply the last one and
-            # still lands before the "up" call) while covering every failure
-            # exit out of this step (a non-retryable `docker compose up`
-            # failure, or exhausting every retry) with the last attempted
-            # slot's real project name, subnet, and lock-holder PID instead
-            # of nothing at all.
-            {
-              echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"
-              echo "VALIDATION_UI_PORT=$VALIDATION_UI_PORT"
-              echo "VALIDATION_LOCK_HOLDER_PID=$candidate_pid"
-              echo "VALIDATION_SUBNET=$VALIDATION_SUBNET"
-              echo "VALIDATION_GATEWAY=$VALIDATION_GATEWAY"
-              echo "VALIDATION_PROXY_IP=$VALIDATION_PROXY_IP"
-              echo "VALIDATION_DNS_STANDARD_IP=$VALIDATION_DNS_STANDARD_IP"
-              echo "VALIDATION_PROXY_SSL_IP=$VALIDATION_PROXY_SSL_IP"
-              echo "VALIDATION_DNS_SSL_IP=$VALIDATION_DNS_SSL_IP"
-              echo "VALIDATION_WATCHDOG_IP=$VALIDATION_WATCHDOG_IP"
-              echo "VALIDATION_NETDATA_IP=$VALIDATION_NETDATA_IP"
-              echo "VALIDATION_NATS_IP=$VALIDATION_NATS_IP"
-              echo "VALIDATION_UI_IP=$VALIDATION_UI_IP"
-              echo "VALIDATION_STANDARD_SHIM_IP=$VALIDATION_STANDARD_SHIM_IP"
-            } >> "$GITHUB_ENV"
-
-            conflict="$(validation_subnet_conflicts "$VALIDATION_SUBNET" "$COMPOSE_PROJECT_NAME")"
-            if [[ -n "$conflict" ]]; then
-              echo "Slot $slot's subnet $VALIDATION_SUBNET overlaps existing host/Docker state ($conflict); releasing and trying the next candidate."
-              validation_subnet_release "$candidate_pid"
-              next_attempt=$((attempt + 1))
-              continue
-            fi
-
-            echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
-            if up_output="$(docker compose up -d 2>&1)"; then
-              echo "$up_output"
-              reserved_slot="$slot"
-              holder_pid="$candidate_pid"
-              break
-            fi
-
-            echo "$up_output"
-            validation_subnet_release "$candidate_pid"
-
-            if ! validation_subnet_output_is_collision "$up_output"; then
-              echo "::error::docker compose up failed for a reason unrelated to a subnet collision; not retrying."
-              exit 1
-            fi
-
-            echo "docker compose up failed with a network-overlap error on attempt $attempt, retrying with a different subnet."
-            next_attempt=$((attempt + 1))
-          done
-
-          if [[ -z "$reserved_slot" ]]; then
-            echo "::error::Could not reserve a free validation subnet and start the stack after $max_attempts attempts."
-            exit 1
-          fi
-
-          echo "Validation stack is up on subnet $VALIDATION_SUBNET (lock held by PID $holder_pid)."
+        uses: ./.github/actions/reserve-validation-subnet-stack
+        with:
+          image-tag: ${{ steps.channel.outputs.tag }}
+          ghcr-retry-username: ${{ github.actor }}
+          ghcr-retry-password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Wait for the stack to stabilize and check container health
-        working-directory: deploy/full-setup
-        run: |
-          set -euo pipefail
-
-          # Services with an explicit healthcheck report a real "healthy"
-          # status; docker-socket-proxy has none, so it's only checked for
-          # "running" plus a restart-count ceiling (catches a crash loop
-          # without needing a healthcheck definition for every service).
-          services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata"
-          all_services="docker-socket-proxy $services_with_healthcheck"
-
-          deadline=$((SECONDS + 90))
-          while (( SECONDS < deadline )); do
-            all_ready=1
-            for service in $services_with_healthcheck; do
-              cid="$(docker compose ps -q "$service")"
-              status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-              if [[ "$status" != "healthy" ]]; then
-                all_ready=0
-              fi
-            done
-            if [[ "$all_ready" -eq 1 ]]; then
-              break
-            fi
-            sleep 5
-          done
-
-          echo "::group::Final container status"
-          docker compose ps
-          echo "::endgroup::"
-
-          failed=0
-          for service in $all_services; do
-            cid="$(docker compose ps -q "$service")"
-            if [[ -z "$cid" ]]; then
-              echo "::error::$service has no running container"
-              failed=1
-              continue
-            fi
-
-            restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid")"
-            container_status="$(docker inspect --format '{{.State.Status}}' "$cid")"
-
-            if [[ "$container_status" != "running" ]]; then
-              echo "::error::$service is not running (state: $container_status)"
-              failed=1
-            elif (( restart_count > 1 )); then
-              echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
-              failed=1
-            fi
-
-            if [[ " $services_with_healthcheck " == *" $service "* ]]; then
-              health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-              if [[ "$health" != "healthy" ]]; then
-                echo "::error::$service did not become healthy (status: $health)"
-                failed=1
-              fi
-            fi
-          done
-
-          if [[ "$failed" -eq 1 ]]; then
-            echo "::group::Logs from all services (failure diagnostics)"
-            docker compose logs --no-color
-            echo "::endgroup::"
-            exit 1
-          fi
-
-          echo "Full-setup stack is stable: all services running and healthy."
+        uses: ./.github/actions/wait-validation-stack-health
 
       # Unlike the failure-only log dump above, this always runs -- #626's
       # whole point is that a *green* run here must be verifiable as having
@@ -3174,6 +3518,16 @@ jobs:
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow
     # changes still force it because the CI contract itself may have changed.
+    #
+    # Also skipped on a metadata-only pull_request event (labeled/unlabeled/
+    # milestoned/demilestoned -- see the trigger's own `types:` comment above):
+    # those events carry no new commit, so re-running clippy/fmt/check against
+    # the exact same tree a prior opened/synchronize/reopened/ready_for_review
+    # run already validated would just burn a scarce lancache-heavy slot for a
+    # known-identical result. `github.event.action` is read directly off the
+    # event context, not a job output, so this check is safe even when
+    # detect-changes did not run for this event (workflow_dispatch/schedule are
+    # never `pull_request`, so the added clause is a no-op there).
     name: rust-quality (dns/nats-subscriber)
     needs: detect-changes
     if: >-
@@ -3181,11 +3535,22 @@ jobs:
         always() &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 31s-3.3min. But this job's own "cargo clippy"
+    # step already carries a 35-minute timeout (a deliberately generous
+    # bound for sccache/sccache-dist fallback to a full local compile) -- a
+    # job-level timeout must exceed every step timeout it contains, or the
+    # job would fail before that step's own allowance runs out. 45 minutes
+    # covers the clippy step's 35-minute budget plus this job's other steps.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
@@ -3195,7 +3560,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3232,6 +3597,9 @@ jobs:
   ui_rust_quality:
     # UI Rust quality mirrors the DNS job but stays independent so both crates
     # can run in parallel on suitable runners.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's identical comment above for the full reasoning.
     name: rust-quality (ui)
     needs: detect-changes
     if: >-
@@ -3239,11 +3607,19 @@ jobs:
         always() &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning as dns_rust_quality above: this job's own "cargo
+    # clippy" step below already carries a 35-minute timeout, so the
+    # job-level bound must exceed it. Real warm-cache runs: 50s-3.3min.
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
@@ -3253,7 +3629,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3290,8 +3666,23 @@ jobs:
   dns_test:
     # DNS unit tests are separate from quality checks so failures identify
     # whether the regression is lint/format level or behavioral.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning (no new commit,
+    # so no new behavior to test).
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095). detect-changes now runs
+    # on push too (diffing github.event.before..github.sha), so this consults its
+    # outputs uniformly instead of the old `github.event_name != 'pull_request'`
+    # always-run-on-push short-circuit: on a push that did not touch the crate
+    # (nor the workflow), the PR that produced that push already ran and passed
+    # this exact test (AG-WF-004), so skipping reuses that known-good result.
+    # `detect-changes.result != 'success'` fails safe to running whenever the
+    # classification is unavailable (workflow_dispatch, or an infra failure of
+    # detect-changes) rather than silently skipping. ci_scope_policy tolerates
+    # the resulting `skipped` on push (require_success_or_intentional_cancellation)
+    # and re-derives strict per-path required-ness on pull_request.
     if: >-
       ${{
         always() &&
@@ -3299,11 +3690,22 @@ jobs:
         (needs.dns_rust_quality.result == 'success' || needs.dns_rust_quality.result == 'skipped') &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 26-56s. Same class of risk as dns_rust_quality's
+    # clippy step above (this job's own "test" step compiles the crate via
+    # the same cargo-with-sccache-fallback path, so an sccache/sccache-dist
+    # miss forces the same full local recompile) -- 45 minutes matches
+    # dns_rust_quality/ui_rust_quality's bound for that reason, not derived
+    # from the fast warm-cache samples alone.
+    timeout-minutes: 45
     # Job-level concurrency (#891 follow-up, extending #888/#892/#915's
     # proven pattern): dns_test is on the scarce self-hosted lancache-heavy
     # pool, so reclaiming a superseded commit's run matters for real
@@ -3333,7 +3735,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3360,8 +3762,15 @@ jobs:
   ui_test:
     # UI tests run only when the UI or workflow contract changes. This keeps
     # docs/setup-only PRs from paying for unrelated Rust test work.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning (reuse of the PR-time known-good
+    # result on an unchanged push, fail-safe run when classification is
+    # unavailable, ci_scope_policy tolerance of the resulting push `skipped`).
     if: >-
       ${{
         always() &&
@@ -3369,11 +3778,19 @@ jobs:
         (needs.ui_rust_quality.result == 'success' || needs.ui_rust_quality.result == 'skipped') &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_test above (compiles via the same
+    # cargo-with-sccache-fallback path, so shares its cold-compile risk).
+    # Real warm-cache runs: 40-51s.
+    timeout-minutes: 45
     # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
     # above for the same reason): scarce lancache-heavy capacity, safe to
     # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
@@ -3397,7 +3814,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3422,6 +3839,12 @@ jobs:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   rust_coverage:
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning. This is a
+    # required branch-protection check on master/v0.2.0 ("coverage (Rust)"),
+    # but it already tolerates a clean `skipped` result today for any PR whose
+    # path scoping below finds no relevant Rust change (e.g. a docs-only PR);
+    # this adds one more, equally clean skip source, not a new failure mode.
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
     if: >-
@@ -3432,12 +3855,24 @@ jobs:
         (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real warm-cache runs: 1.3-6.6min. 60 minutes rather than a tighter
+    # multiple of that: cargo-tarpaulin instruments and recompiles both
+    # crates for coverage (its own build path, separate from the
+    # sccache-fallback compiles elsewhere in this file), and this job can
+    # also fall back to a branch-local build-tools image rebuild (see the
+    # step comment below) when a PR's own Dockerfile change hasn't been
+    # published yet -- neither cold path is represented by the samples above.
+    timeout-minutes: 60
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): rust_coverage is on the scarce self-hosted
     # lancache-heavy pool, same as build/container-scan, so reclaiming a
@@ -3652,6 +4087,8 @@ jobs:
     needs: rust_coverage
     if: "!cancelled() && needs.rust_coverage.result == 'success' && github.event_name == 'push' && startsWith(github.ref, 'refs/heads/')"
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 10-12s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # Job-level concurrency, keyed per source ref: the top-level group (see
     # top of file) is run_id-suffixed for push events and therefore never
     # collides, so it no longer serializes same-branch badge publishes the
@@ -3806,6 +4243,9 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 6-13s (bash -n + a file-permission check, no compilation).
+    # Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: test (watchdog)
@@ -3825,6 +4265,8 @@ jobs:
     # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
+    # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
@@ -3838,19 +4280,34 @@ jobs:
   dns_cargo_audit:
     # Dependency audits remain crate-specific. They are skipped only when path
     # filtering proves the crate and workflow contract did not change.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning (Cargo.lock is
+    # unchanged, so a prior run's audit result already stands).
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 10-14s. cargo-audit checks Cargo.lock against the advisory
+    # database using a prebuilt binary (AG-KD-003) -- it does not compile
+    # the crate, so it does not share dns_test's cold-compile risk. 20
+    # minutes covers a slow advisory-database fetch with real headroom.
+    timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_test above): scarce lancache-heavy capacity, no other consumer
     # besides ci_scope_policy, whose push-branch check on this job's result
@@ -3894,19 +4351,31 @@ jobs:
   ui_cargo_audit:
     # UI dependency audit mirrors the DNS audit and stays parallel to avoid
     # serializing independent Rust checks.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
+    # binary, no crate compilation). Real runs: 10-18s.
+    timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_cargo_audit above): scarce lancache-heavy capacity, no other
     # consumer besides ci_scope_policy, whose push-branch check on this
@@ -4012,6 +4481,20 @@ jobs:
     # for the pull_request path, where the validate-compose skip-cascade still
     # applies.
     #
+    # (#1095 update) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit now have a
+    # SECOND legitimate `skipped` source on push, independent of the
+    # concurrency-cancellation one above: detect-changes runs on push events too
+    # (not just pull_request), and these four jobs' own `if:` gates skip on a
+    # push that did not touch the relevant crate (nor the workflow) -- the PR
+    # that produced that push already ran and passed them (AG-WF-004), so the
+    # skip reuses that known-good result. require_success_or_intentional_cancellation()
+    # already tolerates `skipped`, so it covers this new source with no change;
+    # this note just records that on push a `skipped` here can now mean
+    # "path-scoped out by detect-changes" as well as "superseded mid-flight".
+    # watchdog_test and rust_coverage are NOT path-scoped on push (rust_coverage
+    # stays unconditional for the badge, and still runs the crates' tests under
+    # tarpaulin regardless), so this change does not touch their tolerance.
+    #
     # dns_rust_quality/ui_rust_quality are deliberately left on strict
     # require_success(): they are not in #891's enumerated candidate list
     # (PR #915 explicitly flagged them, and watchdog_test, as out of scope so
@@ -4044,6 +4527,10 @@ jobs:
       - ui_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real runs: 7-14s (this job only reads its upstream needs' results and
+    # runs a policy script; no compilation or Docker work of its own). Same
+    # 15-minute floor as detect-changes above.
+    timeout-minutes: 15
     # cancel-in-progress is pull_request-only -- see `build`'s group comment
     # for the full #979 rationale. build/build-arm64 require
     # `needs.ci_scope_policy.result == 'success'` unconditionally, so on push
@@ -4076,6 +4563,7 @@ jobs:
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           DETECT_RESULT: ${{ needs['detect-changes'].result }}
           DNS_RUST_CHANGED: ${{ needs['detect-changes'].outputs.dns_rust }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
@@ -4201,21 +4689,45 @@ jobs:
             require_boolean "$output" "${!output}"
           done
 
+          # dns_rust_quality/dns_test/dns_cargo_audit (and the UI equivalents)
+          # are now additionally gated in their own job `if:` on the PR event's
+          # `action`: labeled/unlabeled/milestoned/demilestoned carry no new
+          # commit, so those jobs deliberately skip on such an event even when
+          # the diff itself would otherwise mark the crate as changed (that
+          # diff was already validated by the opened/synchronize/reopened/
+          # ready_for_review run for this exact commit). Fail-safe default of
+          # true (content event) mirrors the rest of this file's posture of
+          # running the full pipeline whenever a classification is uncertain,
+          # rather than silently skipping for an event type not in this known
+          # metadata-only list.
+          content_event=true
+          case "$EVENT_ACTION" in
+            labeled|unlabeled|milestoned|demilestoned)
+              content_event=false
+              ;;
+          esac
+
           dns_rust_required=false
           ui_required=false
           watchdog_required=false
-          if [ "$WORKFLOW_CHANGED" = "true" ]; then
-            dns_rust_required=true
-            ui_required=true
-            watchdog_required=true
+          if [ "$content_event" = "true" ]; then
+            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+              dns_rust_required=true
+              ui_required=true
+            fi
+            if [ "$DNS_RUST_CHANGED" = "true" ]; then
+              dns_rust_required=true
+            fi
+            if [ "$UI_CHANGED" = "true" ]; then
+              ui_required=true
+            fi
           fi
-          if [ "$DNS_RUST_CHANGED" = "true" ]; then
-            dns_rust_required=true
-          fi
-          if [ "$UI_CHANGED" = "true" ]; then
-            ui_required=true
-          fi
-          if [ "$WATCHDOG_CHANGED" = "true" ]; then
+          # watchdog_test is intentionally NOT gated on content_event (its own
+          # job `if:` was left unchanged -- see its job-level comment): it
+          # runs on the lancache-light tier at a few seconds' cost, not the
+          # scarce lancache-heavy pool this change targets, so its
+          # requiredness still follows path scoping alone, on every PR event.
+          if [ "$WORKFLOW_CHANGED" = "true" ] || [ "$WATCHDOG_CHANGED" = "true" ]; then
             watchdog_required=true
           fi
 
@@ -4307,6 +4819,14 @@ jobs:
     # self-hosted pool would reintroduce the emulated-Rust-compile risk this
     # scan is meant to catch before build/build-arm64 push anything real.
     runs-on: ${{ fromJSON(matrix.runner) }}
+    # Real per-service runs: 24s-7min (this job's own comment above notes it
+    # "routinely dominates PR runtime" -- it builds a full service image,
+    # amd64 on self-hosted or native arm64 on a hosted runner, then Trivy
+    # scans it). 60 minutes gives real headroom for a cold Docker layer
+    # cache or a Trivy vulnerability-database refresh, neither of which
+    # shows up in the warm-cache samples above; still far under build's own
+    # 150-minute bound for the same class of work at full multi-arch scale.
+    timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     strategy:
@@ -4349,6 +4869,13 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/amd64
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
             platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
@@ -4400,6 +4927,13 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
             platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4623,6 +5157,7 @@ jobs:
         if: >-
           matrix.platform_tag == 'amd64' &&
           (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+        id: buildx-amd64
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Set up Docker Buildx for scan build (arm64, retried)
@@ -4637,6 +5172,7 @@ jobs:
         if: >-
           matrix.platform_tag == 'arm64' &&
           (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+        id: buildx-arm64
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Build local scan image
@@ -4649,6 +5185,7 @@ jobs:
           MATRIX_BUILD_CONTEXTS: ${{ matrix.build_contexts }}
         run: |
           set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-buildx-retry.sh"
 
           secret_args=()
           if [ -n "$SCCACHE_REDIS_FILE" ]; then
@@ -4687,7 +5224,7 @@ jobs:
           # (hence the cache key) for build-tools's own Dockerfile.
           apt_cache_bust="$(date -u +%G-W%V)"
 
-          docker buildx build \
+          docker_buildx_retry -- docker buildx build \
             --load \
             --pull \
             --platform ${{ matrix.platform }} \
@@ -4700,6 +5237,18 @@ jobs:
             "${build_context_args[@]}" \
             -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
             ${{ matrix.context }}
+
+      # Exactly one of the two "Set up Docker Buildx for scan build" rows
+      # above actually ran per matrix row (gated on matrix.platform_tag), so
+      # exactly one of steps.buildx-amd64/steps.buildx-arm64 has a real
+      # builder name -- the other is empty and the `||` falls through to it.
+      # Same should-scan gate as "Build local scan image" above: nothing to
+      # remove when that step (and therefore the builder setup) was skipped.
+      - name: Remove buildx builder
+        if: ${{ always() && (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') }}
+        run: |
+          docker buildx rm "${{ steps.buildx-amd64.outputs.name || steps.buildx-arm64.outputs.name }}" || true
+
       - name: Prepare local Trivy cache
         # Trivy's cache backend (BoltDB) only allows one process to hold a
         # given cache directory open at a time. This directory used to be
@@ -4909,6 +5458,16 @@ jobs:
     # and trusted-ref vulnerability scans before publishing. For build-tools,
     # it also scans the exact pushed digest before attestation/promotion can
     # proceed.
+    #
+    # Also skipped on a metadata-only pull_request event (labeled/unlabeled/
+    # milestoned/demilestoned -- see the trigger's own `types:` comment at the
+    # top of this file): those events never carry a new commit, so there is no
+    # new image content for this job to build or push -- a prior opened/
+    # synchronize/reopened/ready_for_review run already published the sha-*
+    # (and, on a same-repo PR, pr-<N>-sha-<short>) tags for this exact commit.
+    # merge-manifests/full-setup-validate downstream already tolerate a
+    # skipped build/build-arm64 cleanly via their own `needs.build.result ==
+    # 'success'` gates, so this skip cascades without any further change.
     needs:
       - shellcheck
       - validate-compose
@@ -4916,6 +5475,7 @@ jobs:
       - detect-changes
       - ci_scope_policy
       - file-headers
+      - compose-healthchecks
       - pr-template-check
       - pr-tracking-metadata-check
       - pr-title-convention-check
@@ -4927,8 +5487,13 @@ jobs:
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
         needs['line-endings'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
@@ -5016,6 +5581,10 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5050,6 +5619,7 @@ jobs:
               watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5110,7 +5680,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -5474,6 +6044,19 @@ jobs:
           cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
+      # This job never `--load`s a local image (push-only), so unlike
+      # container-scan it had no existing "Remove scan image"-style final
+      # cleanup step to piggyback on -- but "Set up Docker Buildx" above
+      # still creates a real docker-container builder + state volume on this
+      # persistent self-hosted runner pool that setup-buildx-action never
+      # removes on its own. "Build and push" above is the only step in this
+      # job that uses it; "Rotate local Buildx cache" below only manipulates
+      # the local cache directory on disk, not the builder itself.
+      - name: Remove buildx builder
+        if: ${{ always() && steps.should-build.outputs.should-build == 'true' }}
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       - name: Rotate local Buildx cache
         if: >-
           ${{
@@ -5652,6 +6235,9 @@ jobs:
     # merge-manifests below combines this job's per-service linux/arm64 tag
     # with build's linux/amd64 tag into the real sha-<commit> multi-platform
     # tag; this job never writes that tag directly.
+    #
+    # Also skipped on a metadata-only pull_request event -- see `build`'s
+    # identical comment above for the full reasoning.
     needs:
       - shellcheck
       - validate-compose
@@ -5659,6 +6245,7 @@ jobs:
       - detect-changes
       - ci_scope_policy
       - file-headers
+      - compose-healthchecks
       - pr-template-check
       - pr-tracking-metadata-check
       - pr-title-convention-check
@@ -5670,8 +6257,13 @@ jobs:
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
         needs['line-endings'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
+        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
@@ -5728,6 +6320,10 @@ jobs:
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5762,6 +6358,7 @@ jobs:
               watchdog) should_build="${{ needs['detect-changes'].outputs.watchdog }}" ;;
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
+              ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5820,7 +6417,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -5971,6 +6568,19 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}-arm64
           cache-to: type=gha,scope=${{ matrix.service }}-arm64,mode=max
 
+      # Same leak as build's own equivalent step: this job never `--load`s a
+      # local image (push-only), so it had no existing local-image cleanup
+      # step -- but "Set up Docker Buildx" above still creates a real
+      # docker-container builder that setup-buildx-action/buildx-setup-retry
+      # never remove on their own. This runner is GitHub-hosted (ephemeral),
+      # so unlike build's self-hosted equivalent this is a defensive no-op
+      # today rather than an active leak, but kept for consistency and in
+      # case this job is ever moved to a persistent runner.
+      - name: Remove buildx builder
+        if: ${{ always() && steps.should-build.outputs.should-build == 'true' }}
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       - name: Scan pushed build-tools digest with Trivy
         # Same exact-pushed-digest scan build performs for its linux/amd64
         # build-tools image, mirrored here for the linux/arm64 digest.
@@ -6034,6 +6644,11 @@ jobs:
     needs: [build, build-arm64]
     if: "!cancelled() && needs.build.result == 'success' && needs['build-arm64'].result == 'success'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 17s-4.1min (per this job's own comment, it only assembles a
+    # manifest list from two already-pushed digests -- no image rebuild).
+    # 30 minutes covers the ghcr_retry backoff windows on its GHCR calls
+    # (max ~2 minutes total) plus real headroom for registry slowness.
+    timeout-minutes: 30
     permissions:
       contents: read
       packages: write
@@ -6052,10 +6667,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6076,7 +6692,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
 
@@ -6097,6 +6713,7 @@ jobs:
             [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
             [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
@@ -6192,7 +6809,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -6242,6 +6859,15 @@ jobs:
             merged_digest="$(digest_for_image "$target_image")"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
+
+      # "Set up Docker Buildx" above runs unconditionally (unlike the two
+      # mutually-exclusive "Create ..." steps that consume it), so this
+      # teardown is unconditional too -- exactly one of those two steps ever
+      # uses the builder per run, but it was created either way.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       # actions/attest is a standalone action step, so it cannot run inside
       # the bash loops above -- one explicit step per service is required,
@@ -6298,6 +6924,15 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest }}
+
+      - name: Attest ntp merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.ntp_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/ntp
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.ntp_digest }}
 
       - name: Attest ui merged manifest provenance
         if: steps.create-trusted-manifests.outputs.ui_digest != ''
@@ -6366,6 +7001,15 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/dhcp-proxy
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
 
+      - name: Attest ntp PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.ntp_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/ntp
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.ntp_digest }}
+
       - name: Attest ui PR staging manifest provenance
         if: steps.create-pr-staging-manifests.outputs.ui_digest != ''
         uses: ./.github/actions/ghcr-attest-retry
@@ -6414,6 +7058,15 @@ jobs:
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Real runs: 17s-3.6min for this job's own promotion work, but
+    # scripts/lib/promote-lock.sh's promote_lock_acquire_with_retry is
+    # called with (max_attempts=40, backoff_seconds=15), a legitimate
+    # non-hang wait of up to ~10 minutes for the shared cross-run lock under
+    # real contention (concurrent promotions from a merge cascade), before
+    # this job's own work even starts. 45 minutes covers that real lock-wait
+    # ceiling plus this job's own work with headroom, so normal lock
+    # contention can never be mistaken for a hang.
+    timeout-minutes: 45
     # Promote only repoints already-built, already-pushed sha-* images at
     # mutable channel tags -- it is idempotent and fast, unlike the rest of
     # this workflow (build/test/scan/build-images), which is slow and where
@@ -6527,10 +7180,11 @@ jobs:
           promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6552,7 +7206,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
@@ -6636,13 +7290,40 @@ jobs:
             fi
           fi
 
-          # Branch-to-channel mapping (#825/#1141, decided 2026-07-23:
-          # "master = stable, current_dev = nightly, vY.X.Z = archived
-          # release, ganz simpel"). master publishes the stable `latest`
-          # channel; current_dev (the permanent active-development branch)
-          # publishes `nightly` continuously from its own tip -- taking over
-          # the role master used to have here before this decision. A
-          # version-numbered integration branch (v0.2.0, v0.3.0, ...) is an
+          # Branch-to-channel mapping. Original #825/#1141 decision
+          # (2026-07-23): "master = stable, current_dev = nightly, vY.X.Z =
+          # archived release, ganz simpel" -- master publishes the stable
+          # `latest` channel; current_dev (the permanent active-development
+          # branch) published `nightly` continuously from its own tip.
+          #
+          # SUPERSEDED for current_dev by the #1254/#1255 "real once-daily
+          # nightly" decision (2026-07-25): a plain current_dev PUSH no
+          # longer moves the mutable `nightly` pointer at all. Every push
+          # still builds, scans, and publishes that commit's durable
+          # per-service `sha-<commit>` tags completely unchanged (that
+          # publishing happens in the build/build-arm64/merge-manifests jobs
+          # above, not here in promote, and does not depend on channel_tags
+          # in any way) -- the ONLY thing that changes is that this job no
+          # longer also repoints `nightly` at every one of those commits
+          # unconditionally. `nightly` is instead refreshed exactly once a
+          # day (01:00 UTC) plus on-demand, by nightly-refresh.yml
+          # dispatching this same workflow against current_dev's current tip
+          # with `channel: nightly` -- landing in the workflow_dispatch
+          # REQUESTED_CHANNEL path a few lines below, the same path a human
+          # operator already had available for an ad-hoc spot-check
+          # promotion. Because promote only runs after build/test/scan
+          # succeed (see this job's own `needs: merge-manifests` /
+          # `if:` above), this keeps nightly green-gated and fail-closed: a
+          # broken current_dev tip simply never reaches this job, so nightly
+          # holds its last good state instead of being force-moved onto a
+          # red commit on every push regardless of downstream stability. See
+          # #1254's feasibility comment for why #808's untouched-service
+          # backfill (this workflow's "Ensure PR staging tags exist for
+          # full-setup services" step) does not depend on nightly staying
+          # continuously fresh either -- it now backfills from the PR base
+          # commit's own durable sha-<commit> tag instead.
+          #
+          # A version-numbered integration branch (v0.2.0, v0.3.0, ...) is an
           # archived release freeze: it still takes deliberate backports, but
           # deliberately gets NO channel_tags entry at all -- there is no
           # live channel fed from it anymore (see setup.sh's matching hard
@@ -6651,7 +7332,8 @@ jobs:
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(latest)
           elif [[ "$GITHUB_REF" = "refs/heads/current_dev" ]]; then
-            channel_tags+=(nightly)
+            : # #1254/#1255: deliberately no automatic channel tag on a plain
+              # push anymore -- see the comment above this if/elif chain.
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
@@ -6788,6 +7470,16 @@ jobs:
               docker buildx imagetools inspect "ghcr.io/${REPOSITORY}/stack:${channel_tag}" >/dev/null
           done
 
+      # "Promote coherent stack tags" above is the only step in this job
+      # that uses the builder set up above -- neither "Cut an automated
+      # patch release tag" nor anything after it touches buildx. Torn down
+      # here rather than left running until this job's own much-later
+      # "Release the cross-workflow promote lock" cleanup.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
       # Automated SemVer patch (Z) tagging (#819). Gated to the release-
       # bearing branch (master) only -- on any other ref (including this
       # workflow's current v0.2.0 host branch) this step is a deliberate
@@ -6830,13 +7522,7 @@ jobs:
             echo "::notice::No vX.Y.Z release tag exists yet on this history; skipping automated patch tagging until the first release tag is bootstrapped (see #819 Point 4)."
             exit 0
           fi
-          # Qualified as refs/tags/ explicitly (#1054): this repo has both a
-          # branch and a tag named identically for a version like v0.2.0 (the
-          # long-lived integration branch vs. the release cut from it), so a
-          # bare ref lookup here is genuinely ambiguous, not just
-          # theoretically so -- confirmed live via a "refname ... is
-          # ambiguous" warning on this exact line.
-          base_commit="$(git rev-list -n1 "refs/tags/$base_tag")"
+          base_commit="$(git rev-list -n1 "$base_tag")"
 
           # Reuse the SAME classifier detect-changes and the earlier channel
           # promotion above both rely on (#819 Point 1: do not invent a
@@ -6880,13 +7566,6 @@ jobs:
             exit 0
           fi
 
-          # An annotated tag (-a) requires a committer identity, which this
-          # self-hosted runner has no default for (#1054: confirmed live,
-          # "Committer identity unknown" / "empty ident name"). Same bot
-          # identity this file already uses for its other automated commit
-          # (the publish_coverage_badge job).
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$next_tag" "$COMMIT_SHA" -m "Automated patch release ${next_tag}"
           # PROJECT_AUTOMATION_PAT (not secrets.GITHUB_TOKEN) authors this
           # push so the tag push actually re-triggers build-push.yml on
@@ -6917,6 +7596,25 @@ jobs:
           # and -- like the `-c` form it replaces -- this is set only for
           # this one command's environment, never written to `.git/config`.
           push_url="https://github.com/${REPOSITORY}.git"
+          # actions/checkout (persist-credentials: true, the default used
+          # throughout this workflow) already wrote its own GITHUB_TOKEN
+          # `Authorization` extraheader into this job's local .git/config,
+          # scoped to the bare https://github.com/ host. That entry and the
+          # PROJECT_AUTOMATION_PAT-scoped one set below both match this
+          # push's URL, and git's http backend sends every matching
+          # extraheader as its own `Authorization` header on the same
+          # request -- GitHub's HTTP endpoint rejects a request carrying two
+          # `Authorization` headers with a 400. This is a real, confirmed
+          # regression (every real run 2026-07-19 through 2026-07-24 hit
+          # this exact failure, distinct from the two bugs #1054 already
+          # fixed; see #819's verification comment for the affected run
+          # IDs). Clearing checkout's host-scoped entry immediately before
+          # this push ensures only the PAT-scoped header is sent. Nothing
+          # later in this job needs the original GITHUB_TOKEN git
+          # credential -- the next step authenticates its own registry call
+          # explicitly via secrets.GITHUB_TOKEN, not via this ambient git
+          # config.
+          git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           GIT_CONFIG_COUNT=1 \
           GIT_CONFIG_KEY_0="http.${push_url}.extraheader" \
           GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
@@ -6977,6 +7675,17 @@ jobs:
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # NO REAL RUN DATA: this job only runs on an actual `refs/tags/v*` push,
+    # and no such run of this workflow has completed in the recorded history
+    # checked for this rollout (2026-07, ~3800 total workflow runs) -- tags
+    # v0.1.0/v0.2.0/v0.3.0/v0.3.1 exist as GitHub releases, but none was
+    # created by a tag push that triggered this exact job. This value is
+    # therefore an estimate, not a measurement: 30 minutes, anchored to
+    # promote's/merge-manifests' class of work (source archive creation +
+    # GitHub Releases API calls, no compilation), not scaled from any
+    # observed duration. Flagged explicitly rather than guessed silently --
+    # revisit once a real tag-push run of this job exists to measure.
+    timeout-minutes: 30
     # Job-level concurrency, keyed per tag ref: this job's GET-then-create-or-
     # PATCH logic against the GitHub Releases API is only safe if at most one
     # instance runs per tag at a time (two concurrent instances for the same
@@ -7002,10 +7711,11 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
+        id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@06fb636fac595d6fb4b28a5dfcb21a6f5091859c # v4.5.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7016,7 +7726,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ui build-tools stack
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -7056,7 +7766,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
@@ -7129,7 +7839,8 @@ jobs:
             printf -- '- golang:latest -> %s\n' "$golang_base_digest"
             printf '\nProvenance and SBOM status:\n\n'
             printf -- '- Provenance attestations are pushed to GHCR for every first-party service image digest and the stack channel-pointer digest.\n'
-            printf -- '- SBOM artifacts are not generated by this workflow yet; release notes must not claim SBOM coverage until an SBOM-producing job is added.\n'
+            printf -- '- CycloneDX SBOMs are generated per released first-party image digest (via Trivy) and attached to this GitHub release as <service>.cdx.json assets by the release-sbom job.\n'
+            printf -- '- An OpenVEX document generated from .trivyignore.yaml is attached to this release as vex.openvex.json.\n'
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
@@ -7217,3 +7928,228 @@ jobs:
             exit 1
           fi
           UPDATE_RELEASE
+
+      # "Create or update GitHub release for built images" above is the last
+      # step in this job that uses the builder set up above -- "Attach
+      # OpenVEX document to the release" below only touches a release asset
+      # via curl, no buildx.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+      - name: Attach OpenVEX document to the release
+        # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json,
+        # kept in sync with .trivyignore.yaml by the validate-compose drift
+        # guard) as a release asset, so downstream consumers get this project's
+        # accepted-vulnerability dispositions in a standard, tool-parseable
+        # format alongside the release. Idempotent: an existing same-named asset
+        # (e.g. on a workflow rerun for the same tag) is deleted before
+        # re-upload. curl/jq run in the tag-scoped build-tools image (guaranteed
+        # built for a release tag per AG-CI-010), same as the release-notes step
+        # above, rather than assuming host tooling (AG-CI-001).
+        shell: bash
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+
+          if [ ! -s vex.openvex.json ]; then
+            echo "::error::vex.openvex.json is missing from the checkout." >&2
+            exit 1
+          fi
+
+          build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+          docker run --rm \
+            -e GITHUB_TOKEN \
+            -e REPOSITORY \
+            -e TAG_NAME \
+            -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
+            "$build_tools_image" \
+            bash -s <<'UPLOAD_VEX'
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPOSITORY}"
+          uploads="https://uploads.github.com/repos/${REPOSITORY}"
+          auth="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept="Accept: application/vnd.github+json"
+          version="X-GitHub-Api-Version: 2022-11-28"
+          asset_name="vex.openvex.json"
+
+          release_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/tags/$TAG_NAME" | jq -r '.id')"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "Could not resolve release id for $TAG_NAME." >&2
+            exit 1
+          fi
+
+          existing_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/$release_id/assets" | jq -r --arg n "$asset_name" '.[] | select(.name == $n) | .id')"
+          if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
+            curl -fsS -X DELETE -H "$auth" -H "$accept" -H "$version" "$api/releases/assets/$existing_id" >/dev/null
+          fi
+
+          curl -fsS -X POST \
+            -H "$auth" -H "$accept" -H "$version" \
+            -H "Content-Type: application/json" \
+            --data-binary @/tmp/vex.openvex.json \
+            "$uploads/releases/$release_id/assets?name=$asset_name" >/dev/null
+          echo "Uploaded $asset_name to release $TAG_NAME."
+          UPLOAD_VEX
+
+  release-sbom:
+    # OSPS-QA-02.02: every released first-party image must ship with an SBOM.
+    # Scoped to release tags (the same gate as `release`) because the
+    # requirement is about *released* assets; generating SBOMs on every push
+    # would only redo the per-digest work container-scan already does, with no
+    # release-evidence gain. Reuses Trivy -- already this project's pinned,
+    # vetted image scanner (AG-KD-003) -- to emit a CycloneDX SBOM per released
+    # image digest, then attaches each as a <service>.cdx.json GitHub release
+    # asset. That delivery path mirrors how provenance evidence rides alongside
+    # the release and needs only contents:write, with no attestation-permission
+    # expansion. A GHCR OCI-referrer SBOM attestation (actions/attest-sbom) is a
+    # possible future complement, deliberately not added here to keep a single,
+    # fully release-asset-based publication path.
+    name: publish SBOM for ${{ matrix.service }}
+    needs: release
+    if: "!cancelled() && needs.release.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
+    # Container image scanning is memory-heavy, so it takes the heavy tier the
+    # same way container-scan does (AG-CI-002).
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # NO REAL RUN DATA: same gap as `release` above -- this job only runs on
+    # a tag push, and none has completed in recorded history. Anchored
+    # instead to container-scan's per-service class of real data (24s-7min
+    # per service for a full image build + Trivy scan; this job only pulls
+    # an already-built digest and re-runs Trivy for the CycloneDX SBOM
+    # output, so it is never slower than that per-service work). 45 minutes
+    # gives real headroom over container-scan's own per-service worst case.
+    # Flagged explicitly as an estimate, not a measurement.
+    timeout-minutes: 45
+    permissions:
+      contents: write
+      packages: read
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Trivy-scanned first-party image set (container-scan's matrix).
+        # `stack` is intentionally excluded: it is a busybox channel-pointer
+        # image, not a compiled software asset, and is not vuln-scanned either.
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Resolve released image digest
+        id: digest
+        env:
+          REPOSITORY: ${{ github.repository }}
+          SERVICE: ${{ matrix.service }}
+          TAG_NAME: ${{ github.ref_name }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          image="ghcr.io/${REPOSITORY}/${SERVICE}:${TAG_NAME}"
+          # Scan by the immutable digest, never the mutable vX.Y.Z tag
+          # (AG-VAL-026): resolve tag -> digest right before the scan consumes
+          # it so the SBOM is bound to the exact released image content.
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"
+          digest="${digest#\"}"
+          if [[ -z "$digest" || "$digest" == "null" ]]; then
+            echo "::error::Could not resolve digest for $image." >&2
+            exit 1
+          fi
+          echo "image-ref=ghcr.io/${REPOSITORY}/${SERVICE}@${digest}" >> "$GITHUB_OUTPUT"
+
+      # "Resolve released image digest" above is the only step in this job
+      # that uses the builder set up above -- the Trivy scan and release
+      # upload steps below don't touch buildx.
+      - name: Remove buildx builder
+        if: always()
+        run: |
+          docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+      - name: Generate CycloneDX SBOM with Trivy
+        # Same pinned trivy-action the scan jobs use, in SBOM mode. Scans the
+        # digest-qualified reference resolved above (mirrors build-arm64's
+        # "Scan pushed build-tools digest with Trivy" step, which likewise
+        # scans a ghcr.io/...@sha256:... reference after the GHCR login).
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: image
+          image-ref: ${{ steps.digest.outputs.image-ref }}
+          format: cyclonedx
+          output: ${{ matrix.service }}.cdx.json
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+
+      - name: Attach SBOM to the release
+        # Idempotent same-named-asset replace, curl/jq in the tag-scoped
+        # build-tools image -- same delivery mechanism as the release job's
+        # OpenVEX upload above.
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPOSITORY: ${{ github.repository }}
+          TAG_NAME: ${{ github.ref_name }}
+          SERVICE: ${{ matrix.service }}
+        run: |
+          set -euo pipefail
+
+          asset="${SERVICE}.cdx.json"
+          if [ ! -s "$asset" ]; then
+            echo "::error::Trivy did not produce $asset." >&2
+            exit 1
+          fi
+
+          build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+          docker run --rm \
+            -e GITHUB_TOKEN \
+            -e REPOSITORY \
+            -e TAG_NAME \
+            -e ASSET_NAME="$asset" \
+            -v "$PWD/$asset:/tmp/$asset:ro" \
+            "$build_tools_image" \
+            bash -s <<'UPLOAD_SBOM'
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPOSITORY}"
+          uploads="https://uploads.github.com/repos/${REPOSITORY}"
+          auth="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept="Accept: application/vnd.github+json"
+          version="X-GitHub-Api-Version: 2022-11-28"
+
+          release_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/tags/$TAG_NAME" | jq -r '.id')"
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "Could not resolve release id for $TAG_NAME." >&2
+            exit 1
+          fi
+
+          existing_id="$(curl -fsS -H "$auth" -H "$accept" -H "$version" "$api/releases/$release_id/assets" | jq -r --arg n "$ASSET_NAME" '.[] | select(.name == $n) | .id')"
+          if [ -n "$existing_id" ] && [ "$existing_id" != "null" ]; then
+            curl -fsS -X DELETE -H "$auth" -H "$accept" -H "$version" "$api/releases/assets/$existing_id" >/dev/null
+          fi
+
+          curl -fsS -X POST \
+            -H "$auth" -H "$accept" -H "$version" \
+            -H "Content-Type: application/json" \
+            --data-binary "@/tmp/$ASSET_NAME" \
+            "$uploads/releases/$release_id/assets?name=$ASSET_NAME" >/dev/null
+          echo "Uploaded $ASSET_NAME to release $TAG_NAME."
+          UPLOAD_SBOM
