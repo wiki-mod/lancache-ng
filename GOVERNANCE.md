@@ -47,7 +47,7 @@ needs one.
 3. **The maintainer reviews and merges** every pull request; nothing lands
    on `current_dev` or `master` without that review, and `master` additionally
    requires a pull request by branch protection (see `AGENTS.md`'s
-   `AG-WF-004`/`AG-GOV-004`).
+   `AG-WF-004`/`AG-WF-014`).
 4. **Governance and rule changes themselves** (this file, `AGENTS.md`,
    `CLAUDE.md`, `CODE_OF_CONDUCT.md`, `MAINTAINERS.md`) require the
    maintainer's explicit review before being changed — `AGENTS.md`'s

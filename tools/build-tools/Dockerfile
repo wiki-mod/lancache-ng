@@ -26,7 +26,7 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 # HIGH-severity CVE (GHSA-hrxh-6v49-42gf, gRPC-Go xDS RBAC and HTTP/2
 # vulnerabilities) fixed in 1.82.1 -- confirmed via Trivy scanning this image
 # (CI run 29926535995 on PR #1070; tracked as issue #1080, the third
-# confirmed instance of this CVE class per CLAUDE.md's AG-KD-003). Same
+# confirmed instance of this CVE class per AGENTS.md's AG-KD-003). Same
 # reasoning as the containerd override above: neither project has cut a
 # release that resolves this on its own yet, so `go get` the fixed version
 # directly before building.
@@ -37,7 +37,7 @@ ARG GRPC_GO_VERSION=1.82.1
 # not just the one CI happened to flag) pin golang.org/x/text at versions
 # carrying CVE-2026-56852 (a norm.Iter infinite loop on malformed input),
 # HIGH severity, fixed in v0.39.0 -- confirmed via Trivy scanning this image
-# (the fourth confirmed instance of this CVE class per CLAUDE.md's
+# (the fourth confirmed instance of this CVE class per AGENTS.md's
 # AG-KD-003). actionlint has no golang.org/x/text dependency at
 # all (checked directly), so it needs no override. Same reasoning as the
 # containerd/grpc overrides above: neither upstream project has cut a
@@ -166,6 +166,77 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
 
+# trixie-backports is the standard package source for every Debian-based image in
+# this project (maintainer decision, 2026-07-30; see services/proxy/Dockerfile,
+# the template this block is copied from) -- not a curl-only or package-scoped
+# exception: `Package: *` at Pin-Priority 500 (tied with the regular trixie
+# archive) applies project-wide, so ordinary version-comparison rules pick
+# whichever archive/pocket has the newer version for ANY package this stage ever
+# installs, not a hand-picked subset. `apt-get dist-upgrade` then `apt-get
+# full-upgrade` are both run deliberately (a maintainer decision to keep both
+# explicit, even though modern apt treats `full-upgrade` as the same operation
+# `dist-upgrade` performs) so any package a newer archive/pocket has already
+# patched gets picked up on every rebuild, not only whatever this Dockerfile's own
+# `apt-get install` lists happen to name.
+#
+# Real bug this addresses (partially -- see the honest caveat below, do not
+# overclaim): a real Trivy scan of this image (arm64 build, PR #1306's CI run,
+# 2026-07-30T14:41Z) found libexpat1/libexpat1-dev HIGH findings --
+# CVE-2025-59375, CVE-2026-25210, CVE-2026-45186, CVE-2026-56131,
+# CVE-2026-56408 -- on the plain `rust:latest` base image's own pre-installed
+# libexpat 2.7.1-2 (confirmed via `docker run --rm rust:latest dpkg -l | grep
+# expat` on lancache-240: libexpat was never named in this Dockerfile's own
+# install lists at all -- it arrived as a transitive dependency already baked
+# into the upstream base image, which is exactly why a plain `apt-get install`
+# with no upgrade step, as this stage previously had, never touched it).
+#
+# This RUN step does upgrade libexpat1/libexpat1-dev to 2.8.2-1~deb13u1
+# (confirmed on lancache-240, 2026-07-30: both a fresh unmodified-Dockerfile
+# build and this modified one resolve to 2.8.2-1~deb13u1 after `apt-get
+# dist-upgrade`/`full-upgrade`, from Debian-Security/`trixie-security`, already
+# a default source in the base image -- trixie-backports itself has no newer
+# candidate for this specific package, so the project-wide backports pin isn't
+# what supplies this particular fix, though it is still added unconditionally
+# per the maintainer decision above, and is what will pick up a genuinely
+# backports-only fix the next time one is needed).
+#
+# HONEST CAVEAT, do not re-simplify this to "fixed": PR #1306's CI run showed
+# these 5 CVE IDs as `Status: fixed` / `FixedVersion: 2.8.2-1~deb13u1` at
+# 2026-07-30T14:41Z. A real, twice-repeated Trivy scan against this exact
+# rebuilt image on lancache-240, using a freshly downloaded vulnerability DB at
+# 2026-07-30T15:19Z (roughly 40 minutes later), instead shows all 5 IDs as
+# `Status: affected` / `FixedVersion: None` against the very same installed
+# version, 2.8.2-1~deb13u1 -- i.e. the Debian Security Tracker data Trivy
+# consumes was revised, in the time between those two scans, from "fixed in
+# this version" to "still open, no fix in any pocket." This means: the version
+# bump this RUN step performs is real and still worth having (it is a strictly
+# newer, more current package either way), but it does NOT make these 5 CVE
+# IDs disappear from a Trivy scan as of the more recent tracker data -- do not
+# claim otherwise without re-running the same before/after scan this comment
+# is based on. This is the exact same class of mistake already made and
+# corrected once in services/proxy/Dockerfile's curl-CVE comment (a claimed
+# fix that was never re-verified against a fresh scan) -- residual risk and
+# the resulting maintainer decision are tracked in issue #1314 (mirroring
+# #1304's structure for curl), not asserted as resolved here.
+#
+# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
+# APT's `a=`/release-Archive selector matches the Release file's `Suite:` field,
+# and trixie-backports' own Release file declares `Suite: stable-backports` /
+# `Codename: trixie-backports` -- the two are not interchangeable. This exact
+# mistake was made and caught once already in services/proxy/Dockerfile: a first
+# version of that pin used `a=trixie-backports` and silently matched nothing
+# (apt-cache policy still showed backports at its Debian-default priority 100),
+# so every "backports-sourced" package silently stayed on its vulnerable
+# plain-trixie version despite the pin file being present -- caught only by
+# building the image for real and checking an installed package version rather
+# than trusting the Dockerfile comment. Do not repeat that here.
+RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
+    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
+    && apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get full-upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
+
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -293,14 +364,15 @@ RUN docker --version; \
 # wall-clock expiry of its own, only cache-key (instruction text) expiry --
 # once this RUN's resolved command text has been built once, every later
 # build with the identical text reuses that same cached layer forever,
-# including its `apt-get upgrade -y` below, regardless of how much time has
-# passed or how many new Debian security fixes (e.g. #1147's bind9-libs/
-# bind9-dnsutils/bind9-host CVEs) have shipped to trixie-security since.
+# including its `apt-get dist-upgrade -y`/`apt-get full-upgrade -y` below,
+# regardless of how much time has passed or how many new Debian security
+# fixes (e.g. #1147's bind9-libs/bind9-dnsutils/bind9-host CVEs) have shipped
+# to trixie-security (or, since 2026-07-30, trixie-backports) since.
 # Referencing the ARG here (CI passes a value that changes once per ISO
 # week; see the workflows that build this image) makes this RUN's own cache
 # key change on that same weekly cadence, forcing `apt-get update`/`apt-get
-# upgrade -y` to actually re-run against the then-current archive instead of
-# silently replaying a stale layer.
+# dist-upgrade -y`/`apt-get full-upgrade -y` to actually re-run against the
+# then-current archive instead of silently replaying a stale layer.
 #
 # Declared here, immediately before the one RUN step that uses it -- NOT up
 # with the image's other ARGs near the top of this stage -- because of a
@@ -347,7 +419,14 @@ RUN set -euo pipefail; \
     # Base and tool packages can receive security fixes after the upstream
     # rust:latest image was published. Apply Debian upgrades before patching
     # distcc-pump so package updates cannot overwrite the warning fix below.
-    apt-get upgrade -y; \
+    # dist-upgrade + full-upgrade (not plain `upgrade`), matching the
+    # project-wide backports-pin RUN step above -- a maintainer decision to
+    # keep both explicit even though modern apt treats `full-upgrade` as the
+    # same operation `dist-upgrade` performs, so this weekly APT_CACHE_BUST
+    # re-run keeps picking up newly available fixes from either the regular
+    # archive or trixie-backports, not just packages this RUN happens to name.
+    apt-get dist-upgrade -y; \
+    apt-get full-upgrade -y; \
     # linux-libc-dev is pulled in by the toolchain layer and can lag behind the
     # base image even after a generic upgrade; force the current security-fixed
     # package so Trivy does not fail the build-tools image on stale headers.

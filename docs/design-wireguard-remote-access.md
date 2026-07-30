@@ -113,8 +113,8 @@ tunnel changes what a client can reach at L3:
   that can reach the proxy's IP at all, which a routed WireGuard tunnel
   satisfies.
 - **One real interaction worth flagging**: this project's existing
-  `NGINX_UPSTREAM_RESOLVER` / DNS-spoofing design (Key Design Decision
-  AG-KD-001) depends on the *proxy's own* upstream DNS resolution never
+  `NGINX_UPSTREAM_RESOLVER` / DNS-spoofing design (Rule-Ref: AG-OP-002)
+  depends on the *proxy's own* upstream DNS resolution never
   looping back through the LAN's PowerDNS. A remote WireGuard client's own
   DNS queries still need to go to `dns-standard`/`dns-ssl` over the tunnel
   (or the client needs to be configured to use them) for the DNS-spoofing
@@ -185,7 +185,7 @@ operator's SSH target for their own VM and:
    project never stores or transmits VM SSH credentials beyond the single
    interactive session).
 2. Installs WireGuard on the VM if not already present (distribution
-   package, not a source build — Rule-Ref: AG-REL-001/AG-GOV-003 project
+   package, not a source build — Rule-Ref: AG-REL-001 project
    language rules don't apply to a VM the project doesn't own or ship code
    to; this is orchestration, not new project source).
 3. Writes/updates the VM's `wg0.conf` peer list: the site-to-site peer
@@ -220,9 +220,9 @@ SSH-driven remote provisioning). Flagging this as an explicit gap rather
 than silently skipping the question or guessing at their contents.
 
 Both are shell-based, which fits this project's Rust-and-shell language
-convention (Rule-Ref: AG-REL-004/AG-GOV-003) if either is close enough to
+convention (Rule-Ref: AG-REL-004) if either is close enough to
 adapt. A third-party tool like `wg-easy` (Node.js-based) would trigger the
-new-language-approval rule (Rule-Ref: AG-REL-001/AG-GOV-003) if its code
+new-language-approval rule (Rule-Ref: AG-REL-001) if its code
 were vendored into this repo, though running its prebuilt container image
 as an optional dependency (rather than compiling its source into this
 project) would be a materially different, lower-friction question — worth
