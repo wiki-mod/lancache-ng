@@ -75,6 +75,11 @@ COPY kea-ctrl-agent.conf /etc/kea/kea-ctrl-agent.conf.template
 COPY kea-dhcp-ddns.conf /etc/kea/kea-dhcp-ddns.conf.template
 COPY entrypoint.sh /entrypoint.sh
 
+# /run/kea holds Kea's unix-domain control-channel sockets (kea4.sock,
+# kea-ddns.sock, per the *.conf "socket-name" entries above) -- mode 750
+# (owner rwx, group rx, no world access) keeps that directory readable only
+# to root and its own group, since these sockets are container-internal
+# control channels, not something any other local user needs to reach.
 RUN chmod +x /entrypoint.sh && mkdir -p /var/lib/kea && install -d -m 750 /run/kea
 
 EXPOSE 67/udp 8000
