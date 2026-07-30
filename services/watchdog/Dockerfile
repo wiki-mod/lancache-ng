@@ -25,9 +25,9 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog helper for runt
 # two are not interchangeable. Using the wrong one means the pin silently
 # never matches anything and every "backports-sourced" package stays on
 # the plain-trixie version despite the pin file being present -- this was
-# caught in services/proxy/Dockerfile only by building the image for real
-# and checking installed package versions, not by reading the Dockerfile
-# (see issue #1304 / #1298).
+# caught in services/proxy/Dockerfile (PR #1294) only by building the
+# image for real and checking installed package versions, not by reading
+# the Dockerfile.
 #
 # Verified via a real rebuild on lancache-240 (2026-07-30): `apt-cache
 # madison` for every package this Dockerfile installs (curl, jq,
@@ -40,22 +40,37 @@ LABEL org.opencontainers.image.description="lancache-ng watchdog helper for runt
 # working as intended (whichever archive has the newer version wins for
 # a given package, not "backports always wins" for every package).
 #
-# A real before/after Trivy HIGH/CRITICAL scan of this image (same
-# command as this project's CI: `docker run --rm -v
-# /var/run/docker.sock:/var/run/docker.sock -v
-# trivy-cache:/root/.cache/ aquasec/trivy:latest image ...`) found the
-# EXACT SAME 37 findings (33 HIGH, 4 CRITICAL) before and after this
-# change -- a byte-for-byte identical (package, CVE-ID, severity) set,
-# zero fixed, zero newly introduced. The 7 curl/libcurl4t64 CVEs
-# (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545) are the same
-# unfixed-upstream findings services/proxy/Dockerfile's issue #1304
-# already tracks for curl specifically; the remaining 30 findings
-# (util-linux family CVE-2026-53615, gzip, libacl1, the ncurses/perl-base
-# baseline findings) are pre-existing `debian:13-slim` base-image issues
-# with no fix in either archive, matching the pattern issue #1298 already
-# tracks. Do not assume a version bump always reduces a Trivy finding
-# count without re-checking -- it did not here, for any of this image's
-# seven installed packages.
+# A real before/after Trivy scan of this image (`--severity HIGH,CRITICAL`,
+# no `--ignore-unfixed`, to see the full unfixed-CVE landscape honestly --
+# see below for the separate, CI-flag-faithful number) found the EXACT
+# SAME 37 findings (33 HIGH, 4 CRITICAL) before and after this change -- a
+# byte-for-byte identical (package, CVE-ID, severity) set, zero fixed,
+# zero newly introduced, DESPITE `dist-upgrade`/`full-upgrade` moving the
+# detected base OS forward a full Debian point release (13.5 -> 13.6) and
+# dropping 3 packages (114 -> 111) in the process -- the finding set is
+# unaffected even by that. The 7 curl/libcurl4t64 CVEs (CVE-2026-12064,
+# -8286, -8927, -8932, -9079, -9080, -9545) are the same unfixed-upstream
+# findings services/proxy/Dockerfile's issue #1304 already tracks for
+# curl specifically; the remaining 30 findings (util-linux family
+# CVE-2026-53615, gzip, libacl1, the ncurses/perl-base baseline findings)
+# are pre-existing `debian:13-slim` base-image issues with no fix in
+# either archive, matching the pattern issue #1298 already tracks. Do not
+# assume a version bump always reduces a Trivy finding count without
+# re-checking -- it did not here, for any of this image's seven installed
+# packages.
+#
+# IMPORTANT for reading the above honestly: this project's actual CI
+# `container-scan` job (build-push.yml) runs Trivy with `ignore-unfixed:
+# true`, which this verification deliberately did NOT use (to see the
+# real unfixed-CVE landscape, not what CI's gate currently filters out).
+# Re-running the identical scan WITH `--ignore-unfixed` (CI's real flags)
+# against both images gives 0 findings before and after, since all 37
+# findings above have no fixed version anywhere. `container-scan` also
+# does not run on pull requests at all by design (`if: github.event_name
+# != 'pull_request'`, PRs rely on the `build` job's plain image build
+# instead) -- so this Dockerfile change carries no CI-side Trivy gate
+# result of its own; the numbers above are this PR's own, real,
+# independently-run evidence, not a CI check result.
 RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
     && apt-get update \
