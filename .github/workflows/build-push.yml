@@ -927,7 +927,7 @@ jobs:
         run: bash scripts/check-line-endings.sh
 
   language-policy:
-    # Enforces AG-GOV-003 (project language: Rust and shell for code we
+    # Enforces AG-REL-001 (project language: Rust and shell for code we
     # write) by asserting the ABSENCE of banned-language source files, rather
     # than scanning code IN a banned language for vulnerabilities the way
     # CodeQL's per-language analysis does. That distinction matters here:
@@ -937,7 +937,7 @@ jobs:
     # fail every real run with "could not process any code" -- a scan that
     # can never pass again is not a useful gate. This job instead fails the
     # moment a banned-language file reappears, which is the actual property
-    # AG-GOV-003 wants enforced.
+    # AG-REL-001 wants enforced.
     name: language policy
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -956,7 +956,7 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Check for banned-language source files (AG-GOV-003)
+      - name: Check for banned-language source files (AG-REL-001)
         run: |
           set -euo pipefail
           docker run --rm \
@@ -975,7 +975,7 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check for banned-language source files (AG-GOV-003)
+      - name: Check for banned-language source files (AG-REL-001)
         run: bash scripts/check-language-policy.sh
 
   # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs
