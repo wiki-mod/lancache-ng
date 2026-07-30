@@ -120,9 +120,49 @@ validate_ntp_config() {
     return 0
 }
 
+# Removes chronyd's own pidfile if a stale one survives from a previously
+# crashed instance in THIS SAME container (issue #1318). Docker's
+# `restart: always` re-execs this entrypoint against the same writable
+# container filesystem -- /run is not reset between restarts within one
+# container's lifetime -- so if chronyd previously started, wrote its
+# pidfile, then crashed before exiting cleanly (e.g. the fatal
+# CAP_SYS_TIME/adjtimex error confirmed on this project's self-hosted LXC
+# runner fleet, #1296), that pidfile survives and makes every subsequent
+# restart attempt fail with a second, unrelated, misleading error
+# ("Another chronyd may already be running") instead of the real original
+# cause -- a restart loop that never actually retries cleanly, matching
+# this project's convergence/idempotence expectations (issue #456: a
+# transient failure must not permanently wedge a service that could
+# otherwise recover on its own).
+#
+# Safe to remove unconditionally, every start, with no race: this
+# entrypoint always execs chronyd directly as this container's own PID 1
+# (see the final `exec` below), so there is never a legitimate SECOND
+# chronyd process running concurrently in this container that this pidfile
+# could be protecting against -- a fresh start always replaces whatever was
+# PID 1 before, stale or not.
+#
+# Path confirmed directly against this image's own real chronyd build
+# (AG-VAL-023: checked the tool's actual behavior, not assumed it) --
+# chrony.conf.template sets no explicit `pidfile` directive, so chronyd
+# uses its Debian package's compiled-in default, and a real crash's own
+# fatal-error message named this exact path: "Another chronyd may already
+# be running (pid=1), check /run/chrony/chronyd.pid".
+# shellcheck disable=SC2120 # the real call site below intentionally passes
+# no argument (always wants chrony's real default path); the optional
+# override exists purely so tests/bats/ntp_entrypoint_rendering.bats can
+# point this at a throwaway fixture path instead of the real
+# /run/chrony/chronyd.pid, the same optional-parameter pattern
+# render_ntp_config's own template argument already uses above.
+cleanup_stale_ntp_pidfile() {
+    local pidfile="${1:-/run/chrony/chronyd.pid}"
+    rm -f "$pidfile"
+}
+
 NTP_RUNTIME_CONF=/etc/chrony/chrony.conf
 render_ntp_config "$NTP_RUNTIME_CONF"
 validate_ntp_config "$NTP_RUNTIME_CONF" || exit 1
+cleanup_stale_ntp_pidfile
 
 echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
 exec chronyd -n -f "$NTP_RUNTIME_CONF"

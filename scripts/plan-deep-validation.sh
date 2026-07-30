@@ -51,6 +51,7 @@ else
         printf 'build_tools=false\n'
         printf 'dhcp=false\n'
         printf 'dhcp_proxy=false\n'
+        printf 'ntp=false\n'
     } >> "$GITHUB_OUTPUT"
 fi
 
