@@ -476,9 +476,49 @@ FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
+# trixie-backports is the standard package source for this image (maintainer
+# decision, 2026-07-30) -- not scoped to any specific package: `Package: *` at
+# Pin-Priority 500 (tied with the regular trixie archive) applies project-wide
+# to every Debian-based image, so ordinary version-comparison rules pick
+# whichever archive has the newer version for ANY package installed below.
+# `apt-get dist-upgrade` then `apt-get full-upgrade` are both run deliberately
+# (a maintainer decision to keep both explicit, even though modern apt treats
+# `full-upgrade` as the same operation `dist-upgrade` performs) so any package
+# backports has already patched gets picked up on every rebuild.
+#
+# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
+# APT's `a=`/release-Archive selector matches the Release file's `Suite:`
+# field, and trixie-backports' own Release file declares `Suite: stable-backports`
+# / `Codename: trixie-backports` -- the two are not interchangeable. See
+# services/proxy/Dockerfile's identical pin comment for the incident that
+# established this (a first version used `a=trixie-backports` and silently
+# never matched anything).
+#
+# This final stage's own base image (`debian:trixie-slim`) resolves to the
+# exact same digest as services/proxy/Dockerfile's `debian:13-slim` (both
+# aliases of the same underlying image). Issue #1304's own acceptance
+# criteria explicitly call out confirming services/ui's curl sourcing
+# (affected or not) before assuming the proxy's finding generalizes here --
+# CONFIRMED (2026-07-30) via a real, controlled before/after Trivy scan
+# (`--severity HIGH,CRITICAL --scanners vuln`) of this exact image built on
+# both plain trixie (pre-this-PR) and trixie-backports (this PR): 37
+# HIGH/CRITICAL findings on both, byte-for-byte identical CVE ID sets. curl
+# specifically carries the same unfixed 7 HIGH CVE IDs either way
+# (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545 -- `libcurl4t64`
+# moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1, `nmap`/`nmap-common` moved
+# 7.95+dfsg-3 -> 7.98+dfsg-1~bpo13+1, both confirmed via `dpkg -l` on the
+# built image; every other installed package here had no newer backports
+# version, so stayed on plain trixie). Do not re-assert either way without
+# re-running that scan, since curl's CVE set is a moving target (see issue
+# #1304 for the full history and the proxy image's matching result).
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive; \
-    apt-get update && apt-get install -y --no-install-recommends \
+    echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
+    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
+    && apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get full-upgrade -y \
+    && apt-get install -y --no-install-recommends \
     ca-certificates \
     coreutils \
     curl \
