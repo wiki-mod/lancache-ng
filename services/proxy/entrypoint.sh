@@ -628,6 +628,31 @@ case "$PROXY_SECURITY_MODE" in
 esac
 
 export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS
+
+# Deterministic, length-bounded cert/key filename for a domain that may
+# be up to 253 bytes long (_is_valid_domain's own limit) -- well past
+# Linux's 255-byte NAME_MAX once combined with any ".crt"/".key"
+# suffix, and past it even sooner for the exact-host case's extra
+# ".exact-host" text. $2 (a short namespace tag, e.g. "wildcard"/
+# "exact") keeps a bare and a leading-dot cdn-domains.txt entry for the
+# same base resolving to two DIFFERENT names, matching this file's own
+# existing requirement that those need two distinct certs. The real
+# hostname is never lost -- it lives in each cert's SAN (see _sign_cert
+# below) and in the nginx maps that select a cert by hostname, neither
+# of which has an equivalent filesystem constraint.
+#
+# Defined here, unconditionally, rather than inside the SSL_ENABLED
+# block below: the map-generation block further down (see "2. Generate
+# request-time access policy maps") calls this for every
+# _EXTRA_WILDCARD_BASES/_EXTRA_EXACT_HOSTS entry regardless of
+# SSL_ENABLED, since those maps exist even when SSL mode is off. Defining
+# it only inside the SSL_ENABLED=1 branch left it undefined ("command not
+# found") whenever SSL_ENABLED=0 and cdn-domains.txt had any deep entry,
+# breaking the generated map file and failing nginx -t on startup.
+_bounded_cert_name() {
+    printf '%s' "${2}:${1}" | sha256sum | cut -c1-32
+}
+
 # ────────────────────────────────────────────────────────────────────────────
 # 1. SSL mode: Generate CA and certs if needed
 # ────────────────────────────────────────────────────────────────────────────
@@ -728,21 +753,6 @@ if [ "${SSL_ENABLED}" = "1" ]; then
             fi
         fi
         rm -f /tmp/lancache-cert.csr
-    }
-
-    # Deterministic, length-bounded cert/key filename for a domain that may
-    # be up to 253 bytes long (_is_valid_domain's own limit) -- well past
-    # Linux's 255-byte NAME_MAX once combined with any ".crt"/".key"
-    # suffix, and past it even sooner for the exact-host case's extra
-    # ".exact-host" text. $2 (a short namespace tag, e.g. "wildcard"/
-    # "exact") keeps a bare and a leading-dot cdn-domains.txt entry for the
-    # same base resolving to two DIFFERENT names, matching this file's own
-    # existing requirement that those need two distinct certs. The real
-    # hostname is never lost -- it lives in each cert's SAN (see
-    # _sign_cert above) and in the nginx maps that select a cert by
-    # hostname, neither of which has an equivalent filesystem constraint.
-    _bounded_cert_name() {
-        printf '%s' "${2}:${1}" | sha256sum | cut -c1-32
     }
 
     # Returns 0 (true = needs regen) if the default cert:

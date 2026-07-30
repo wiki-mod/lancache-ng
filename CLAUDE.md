@@ -79,12 +79,19 @@ by configuring which DNS server IP they point to:
   exactly what a DNS-spoofed client provides.
 - **Pre-generated wildcard certs**: At startup, `entrypoint.sh` generates one 2048-bit cert
   per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA, plus an
-  additional cert per deeper leading-dot wildcard base or bare exact host that
-  `cdn-domains.txt` lists more than one label past its registrable root (issue #1272,
-  e.g. `.a.b.cdn.example.com` gets its own `*.a.b.cdn.example.com`-only cert). Every
-  generated cert's subject CN is a fixed placeholder (`lancache-ng`), never the real
-  hostname — OpenSSL's default CN policy caps it at 64 bytes, well under the 253-byte
-  domains `cdn-domains.txt` can otherwise contain; the real hostname lives only in each
+  additional cert for some `cdn-domains.txt` entries that a root-level wildcard SAN
+  cannot cover (issue #1272) — the exact threshold differs by entry shape: a
+  **leading-dot wildcard-only entry** (e.g. `.cdn.example.com`) needs its own deeper
+  cert whenever the entry itself differs from the root at all, even by exactly one
+  label (its actual matched hosts are always one label *deeper* than the entry text,
+  so `.cdn.example.com` under root `example.com` already needs its own
+  `*.cdn.example.com`-only cert); a **bare exact-host entry** (e.g.
+  `tlu.dl.delivery.mp.microsoft.com`) needs its own cert only once the host itself is
+  *more than one* label past the root, since a bare entry exactly one label past root
+  is already covered by the root's own `*.<root>` wildcard. Every generated cert's
+  subject CN is a fixed placeholder (`lancache-ng`), never the real hostname —
+  OpenSSL's default CN policy caps it at 64 bytes, well under the 253-byte domains
+  `cdn-domains.txt` can otherwise contain; the real hostname lives only in each
   cert's SAN, which TLS clients validate against per RFC 6125. Cert/key filenames for
   these deeper entries are a namespaced SHA-256 hash of the hostname, not the hostname
   itself, to stay under Linux's 255-byte filename limit. nginx selects the cert via

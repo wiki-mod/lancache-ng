@@ -3,7 +3,7 @@
 #
 # Bats helper exposing hand-extracted copies of services/proxy/entrypoint.sh's
 # _sign_cert() and _bounded_cert_name(), the two functions the deep leading-dot
-# wildcard/exact-host cert path (issue #1272) depends on. Not part of
+# wildcard/exact-host cert path depends on. Not part of
 # tests/bats/helpers/proxy-cert-helpers.sh's awk extraction range (same reason
 # as proxy-collect-domain-rows-helpers.sh: both stop before the executable
 # startup-script body). Kept in sync by hand with the real functions.

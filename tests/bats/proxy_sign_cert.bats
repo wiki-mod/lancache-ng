@@ -4,15 +4,14 @@
 # Regression tests for services/proxy/entrypoint.sh's _sign_cert() and
 # _bounded_cert_name(), exercised against a real openssl CA (not a stub) so
 # these tests actually catch what _collect_domain_rows-only coverage cannot:
-# whether the deep leading-dot wildcard/exact-host cert path (issue #1272)
-# can complete real certificate issuance for a domain long enough to hit
-# OpenSSL's 64-byte commonName limit or Linux's 255-byte NAME_MAX filename
-# limit, both of which _is_valid_domain's own 253-byte ceiling allows.
+# whether the deep leading-dot wildcard/exact-host cert path can complete
+# real certificate issuance for a domain long enough to hit OpenSSL's
+# 64-byte commonName limit or Linux's 255-byte NAME_MAX filename limit, both
+# of which _is_valid_domain's own 253-byte ceiling allows.
 
 bats_require_minimum_version 1.5.0
 
 setup() {
-    repo_root="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
     # shellcheck source=tests/bats/helpers/proxy-sign-cert-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/proxy-sign-cert-helpers.sh"
 
@@ -48,8 +47,13 @@ setup() {
     run openssl x509 -in "$CERT_DIR/test.crt" -noout -text
     [ "$status" -eq 0 ]
     [[ "$output" == *"DNS:*.${long_domain}"* ]]
-    [[ "$output" != *"CN = ${long_domain}"* ]]
-    [[ "$output" == *"CN = lancache-ng"* ]]
+    # This project's pinned build-tools OpenSSL (3.5.6) prints a single-RDN
+    # Subject as "CN=value" with no surrounding spaces (verified directly
+    # against the real ghcr.io/wiki-mod/lancache-ng/build-tools image) --
+    # match that real format, not the "CN = value" spaced form some other
+    # OpenSSL versions/nameopt settings use.
+    [[ "$output" != *"CN=${long_domain}"* ]]
+    [[ "$output" == *"CN=lancache-ng"* ]]
 }
 
 @test "_bounded_cert_name produces a filename that stays within NAME_MAX once suffixed" {
