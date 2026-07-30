@@ -56,7 +56,14 @@ on:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
   pull_request:
-    branches: [master, current_dev, "v[0-9]*"]
+    # TEMPORARY (#1245 proof, reverted before this PR leaves Draft):
+    # "scratch/1245-proof" added so a disposable, genuinely doc-only scratch
+    # PR against THIS branch's own workflow copy can exercise the fix for
+    # real per AG-CI-012 -- pull_request evaluates the workflow from the PR's
+    # merge ref, so a scratch PR opened against this branch sees this fix.
+    # Deliberately NOT added to push.branches above, so pushing the scratch
+    # branches themselves triggers nothing.
+    branches: [master, current_dev, "v[0-9]*", "scratch/1245-proof*"]
     # Issue #1203 added a trigger-level `paths-ignore` (`**/*.md`, `docs/**`,
     # with CHANGELOG.md un-ignored) here to keep doc-only PRs from queueing
     # this workflow's light jobs behind heavy work on the same saturated
