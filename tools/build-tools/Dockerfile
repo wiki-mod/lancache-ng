@@ -26,7 +26,7 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 # HIGH-severity CVE (GHSA-hrxh-6v49-42gf, gRPC-Go xDS RBAC and HTTP/2
 # vulnerabilities) fixed in 1.82.1 -- confirmed via Trivy scanning this image
 # (CI run 29926535995 on PR #1070; tracked as issue #1080, the third
-# confirmed instance of this CVE class per CLAUDE.md's AG-KD-003). Same
+# confirmed instance of this CVE class per AGENTS.md's AG-KD-003). Same
 # reasoning as the containerd override above: neither project has cut a
 # release that resolves this on its own yet, so `go get` the fixed version
 # directly before building.
@@ -37,7 +37,7 @@ ARG GRPC_GO_VERSION=1.82.1
 # not just the one CI happened to flag) pin golang.org/x/text at versions
 # carrying CVE-2026-56852 (a norm.Iter infinite loop on malformed input),
 # HIGH severity, fixed in v0.39.0 -- confirmed via Trivy scanning this image
-# (the fourth confirmed instance of this CVE class per CLAUDE.md's
+# (the fourth confirmed instance of this CVE class per AGENTS.md's
 # AG-KD-003). actionlint has no golang.org/x/text dependency at
 # all (checked directly), so it needs no override. Same reasoning as the
 # containerd/grpc overrides above: neither upstream project has cut a

@@ -2,7 +2,7 @@
 # Rust package manifest for the pxe-client-probe binary: the synthetic
 # PXE-client DHCPDISCOVER probe driven by scripts/dhcp-proxy-pxe-simulation.sh.
 # Replaces the former scripts/lib/pxe-client-probe.py (scapy) to keep the
-# project to its Rust+shell-only language rule (AG-GOV-003 / AG-REL-001).
+# project to its Rust+shell-only language rule (AG-REL-001).
 
 [package]
 name = "pxe-client-probe"
