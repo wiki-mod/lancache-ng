@@ -701,9 +701,49 @@ unknown SNI to the `127.0.0.1:9` discard sink). Info-level.
 
 ### Re-confirmed adjacent facts (not new)
 
-- The proxy image retains build-only `gnupg`/`curl`/`ca-certificates` from the
-  nginx-repo bootstrap (`Dockerfile:14-27`); `curl` is legitimately reused by
-  the compose healthcheck, so this is not dead — noted only to rule it out.
+- **Updated 2026-07-30 (PR #1294)** — this note previously said the proxy image
+  retains build-only `gnupg`/`curl`/`ca-certificates` from the nginx-repo bootstrap
+  as a single group; that is no longer accurate for `gnupg` and needs the `curl`
+  sourcing detail spelled out. Current reality, verified via a real
+  `docker build` + `docker run` + Trivy scan on `lancache-240`:
+  - `gnupg` (and its whole dependency family — `dirmngr`, `gpg`, `gpg-agent`,
+    `gpgconf`, `gpgsm`, `gnupg-l10n`, plus 8 shared libraries used only by that
+    family) is now fully purged in the same Dockerfile layer it is installed in
+    (`Dockerfile`'s `apt-get purge -y --auto-remove gnupg`, right after it
+    fetches and dearmors nginx.org's signing key). Confirmed zero gnupg-family
+    packages remain in the final image, and confirmed nothing in
+    `entrypoint.sh` or any config ever calls `gpg` again. This removed the
+    gnupg-family's Trivy HIGH finding entirely rather than merely retaining it
+    as build-only clutter.
+  - `curl` is **kept** — `curl` is legitimately reused by the compose
+    healthcheck (`deploy/prod`, `deploy/quickstart`, and `deploy/full-setup`
+    all shell out to it for `/healthz`), so purging it (as this PR's first pass
+    briefly did) breaks every proxy healthcheck. `curl` is sourced from Debian
+    trixie-backports (8.21.0 instead of plain trixie's 8.14.1-2+deb13u4) via an
+    APT pin scoped to just `curl` and the specific shared libraries its
+    backports build needs, not a blanket `Package: *` pin. That pin's selector
+    matters: it must read `Pin: release a=stable-backports`, not
+    `a=trixie-backports` — APT's `a=` selector matches the Release file's
+    `Suite:` field, which for trixie-backports is `stable-backports`
+    (`trixie-backports` is only the `Codename:`), so the two are not
+    interchangeable and the wrong one silently pins nothing. See `Dockerfile`'s
+    own comment block above the `RUN` that sets this up for the full rationale.
+    **Important, corrected 2026-07-30**: sourcing curl from backports does
+    **not** reduce curl's Trivy HIGH finding count — a real before/after scan
+    shows the exact same 7 HIGH CVE IDs (`CVE-2026-12064`, `-8286`, `-8927`,
+    `-8932`, `-9079`, `-9080`, `-9545`; all `Status: affected`,
+    `FixedVersion: None`) present on both plain-trixie curl 8.14.1 and
+    backports curl 8.21.0. These were disclosed 2026-07-03 (after 8.21.0
+    shipped) and have no fix anywhere yet. An earlier draft of this note (and
+    of PR #1294's own body) asserted backports "fixes all 7 of curl's CVEs" —
+    that claim was written against an earlier, different set of 7 CVE IDs and
+    was never re-verified with a fresh scan before being recorded; it does not
+    hold for the CVE set actually present today. See issue #1304 for the
+    resulting maintainer decision this leaves open (accept the residual curl
+    risk as-is, purge curl and migrate the healthcheck off it, or something
+    else).
+  - `ca-certificates` and `openssl` remain kept for the same reason as
+    before — both genuinely needed at runtime for TLS.
 - `proxy_ssl_verify_depth 2` was checked as a possible over-strict/over-lax
   setting; depth 2 (≤2 intermediates) covers all common public CDN chains —
   not a finding.
