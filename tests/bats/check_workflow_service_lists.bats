@@ -187,7 +187,12 @@ EOF
 write_good_extra_fixtures() {
     echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)' > "$gc_fixture"
     echo '          services=(proxy dns watchdog dhcp dhcp-proxy ui)' > "$backfill_fixture"
-    echo 'full_setup_services=(proxy dns watchdog ui build-tools)' > "$ensure_fixture"
+    # #1296 (2026-07-30): dhcp/dhcp-proxy moved from excluded to required here
+    # (ensure-pr-staging-images.sh now ensures both -- see that script's own
+    # full_setup_services=(...) comment). This fixture's canonical matrix
+    # (write_canonical_matrix above) has no `ntp` member, so "canonical minus
+    # the real script's {ntp} exclusion" is just the full 7-service set below.
+    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)' > "$ensure_fixture"
 }
 
 # The matrix-source file itself always requires at least one of its own
@@ -281,7 +286,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when ensure-pr-staging-images.sh's column-0 full_setup_services=() contains a typo" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo 'full_setup_services=(proxy dns watchdog ui build-tools typo)' > "$ensure_fixture"
+    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools typo)' > "$ensure_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -291,14 +296,15 @@ write_matrix_source_with_services() {
 
 # Same silent-drop failure mode as backfill-stack-latest.yml above, but for
 # ensure-pr-staging-images.sh's full_setup_services=(...): dropping a real
-# service (here, ui -- beyond the documented dhcp/dhcp-proxy exclusion) must
-# fail. This is the specific gap that scoping this file into
-# FULL_SETUP_EXACT_EXCLUSIONS (exact-equality) rather than leaving it on the
-# original membership-only check exists to close.
+# service (here, ui and dhcp-proxy) must fail. This is the specific gap that
+# scoping this file into FULL_SETUP_EXACT_EXCLUSIONS (exact-equality) rather
+# than leaving it on the original membership-only check exists to close --
+# exactly the #1296 real-world shape (dhcp-proxy silently missing) this test
+# now models directly instead of only via the documented {ntp} exclusion.
 @test "multi-file: fails when ensure-pr-staging-images.sh's full_setup_services=() silently drops a real service" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo 'full_setup_services=(proxy dns watchdog build-tools)' > "$ensure_fixture"
+    echo 'full_setup_services=(proxy dns watchdog dhcp build-tools)' > "$ensure_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
