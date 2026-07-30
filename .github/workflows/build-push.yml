@@ -892,6 +892,17 @@ jobs:
     # root job per the documented invariant in `container-scan`'s comment),
     # so it is a stable place for content-agnostic per-PR checks that must
     # never be silently skipped.
+    #
+    # DO NOT RENAME `name: line endings` below -- it IS the required-status-
+    # check context string in `current_dev`'s classic branch protection
+    # (confirmed via the GitHub API). Despite this job now also running
+    # governance-guardrails/CHANGELOG checks, renaming it to reflect that
+    # broader scope would silently create a new, never-satisfied required
+    # check while the old name stays expected forever -- issue #1245's exact
+    # bug class from a different cause. The same caution applies if issue
+    # #1014 Step 4 ever decomposes `full-setup-validate`: preserve its
+    # existing `if:` (`deploy == 'true' || workflow == 'true'`, unchanged by
+    # this PR) and its exact required-check name.
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -1146,6 +1157,14 @@ jobs:
     # ShellCheck and ActionLint run inside the same build-tools image selected
     # by validate-compose. That keeps linting independent from whatever happens
     # to be installed on the runner host.
+    #
+    # DO NOT RENAME this job's `name:`/key (it has no explicit `name:`, so the
+    # job key `shellcheck` IS the required-status-check context string) --
+    # `current_dev`'s classic branch protection names it literally
+    # (confirmed via `gh api .../branches/current_dev/protection`). Renaming
+    # it would silently create a brand-new, never-satisfied required check
+    # with the old name still expected, reproducing issue #1245's exact bug
+    # class from a different cause.
     needs: [validate-compose, detect-changes]
     # Issue #1245: this is the load-bearing self-skip in this workflow. On a
     # pull_request event whose ENTIRE diff is docs-only (detect-changes'
