@@ -20,12 +20,34 @@
 # services/dhcp-proxy/Dockerfile: entrypoint.sh uses real Bash-only syntax
 # Alpine's default ash shell does not support. `envsubst` ships in the
 # separate `gettext-envsubst` package here too, same as dhcp-proxy.
+#
+# Alpine analogue of the project-wide Debian trixie-backports + dist-upgrade
+# policy (2026-07-30, maintainer decision): plain `apk add --no-cache` does
+# implicitly fetch a fresh package index each time (no persistent index
+# cache is left in the image layer, unlike a bare `apt-get install` without
+# a preceding `apt-get update`), so newly-added packages here already land
+# on a reasonably current version. But it does NOT touch packages already
+# baked into the alpine:3.24 base image layer itself (musl, busybox,
+# apk-tools, ...) -- those stay frozen at whatever version the pinned base
+# digest shipped with unless an explicit `apk upgrade` runs. Alpine has no
+# backports equivalent to Debian's (security fixes land in-place within the
+# current release branch's own repo, closer to Ubuntu's model), so the fix
+# is narrower than the Debian side: `apk update && apk upgrade` before the
+# package install, in the same layer so it costs no extra image size.
+# Verified for real on a pinned alpine:3.24 pull (2026-07-30): `apk-tools`/
+# `libapk` were baked in at 3.0.6-r0 but 3.0.7-r0 was already available in
+# the branch's own repo -- `apk upgrade --no-cache` picked it up
+# immediately, while a plain `apk add --no-cache <pkg>` with no preceding
+# upgrade step would have left the stale 3.0.6-r0 in place indefinitely.
+# `--no-cache` on `update`/`upgrade` mirrors the same flag already used on
+# `add` below: it keeps the fetched index out of `/var/cache/apk` instead
+# of leaving a persistent cache in the image layer.
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
 
-RUN apk add --no-cache \
+RUN apk update --no-cache && apk upgrade --no-cache && apk add --no-cache \
     kea-dhcp4 \
     kea-ctrl-agent \
     kea-dhcp-ddns \
@@ -53,6 +75,11 @@ COPY kea-ctrl-agent.conf /etc/kea/kea-ctrl-agent.conf.template
 COPY kea-dhcp-ddns.conf /etc/kea/kea-dhcp-ddns.conf.template
 COPY entrypoint.sh /entrypoint.sh
 
+# /run/kea holds Kea's unix-domain control-channel sockets (kea4.sock,
+# kea-ddns.sock, per the *.conf "socket-name" entries above) -- mode 750
+# (owner rwx, group rx, no world access) keeps that directory readable only
+# to root and its own group, since these sockets are container-internal
+# control channels, not something any other local user needs to reach.
 RUN chmod +x /entrypoint.sh && mkdir -p /var/lib/kea && install -d -m 750 /run/kea
 
 EXPOSE 67/udp 8000
