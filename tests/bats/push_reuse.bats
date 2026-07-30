@@ -93,13 +93,18 @@ STUB
 }
 
 @test "push_reuse_decide: reuse=false when the channel image has no readable revision label" {
+    # Diagnostic lines go to stderr (push-reuse.sh's own documented
+    # discipline, matching sif_wait_for_fresh_base_image's convention) --
+    # captured directly via `$(... 2>/dev/null)` instead of bats' `run`,
+    # which merges stdout+stderr into `$output` and would corrupt this exact
+    # comparison (see staging_image_freshness.bats's own "stdout carries
+    # ONLY the confirmed revision" test for the same reasoning).
     revision_stub "MISSING"
     classify_stub $'ntp=false'
 
-    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2"
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "push_reuse_decide: reuse=false when the revision is NOT an ancestor of github.sha (wrong-direction/divergent)" {
@@ -111,10 +116,9 @@ STUB
     revision_stub "$c2"
     classify_stub $'ntp=false'
 
-    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c1"
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c1" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "push_reuse_decide: reuse=false when classify-image-impact.sh reports this service DID change between revision and sha" {
@@ -125,20 +129,18 @@ STUB
     revision_stub "$c1"
     classify_stub $'ntp=true\nworkflow=false'
 
-    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2"
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "push_reuse_decide: reuse=false (fail closed) when classify-image-impact.sh itself fails" {
     revision_stub "$c1"
     classify_stub "FAIL"
 
-    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2"
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "push_reuse_decide: reuse=false (fail closed) when the classify output is missing this service's key entirely" {
@@ -149,10 +151,9 @@ STUB
     revision_stub "$c1"
     classify_stub $'workflow=false\ndns_image=false'
 
-    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2"
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
 
-    [ "$status" -eq 0 ]
-    [ "$output" = "false" ]
+    [ "$result" = "false" ]
 }
 
 @test "push_reuse_decide: requires all three positional arguments" {
