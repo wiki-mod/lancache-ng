@@ -11,17 +11,31 @@ FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
-# trixie-backports is the standard package source for this image, not an
-# opt-in exception: pin it to the same priority (500) as the regular trixie
-# archive so ordinary version-comparison rules pick whichever is newer,
-# instead of the Debian-default backports pin (100, install-only-if-
-# explicitly-requested-via-`-t`). Concrete reason this exists: curl's 7 real
-# Trivy HIGH findings in plain trixie (8.14.1-2+deb13u4) are already fixed
-# upstream in curl 8.21.0 (confirmed against curl.se's own per-CVE data,
-# 2026-07-30) -- and trixie-backports already carries exactly that version
-# (8.21.0-2~bpo13+1). Debian's own security tracker (which Trivy's DB reads
-# for Debian packages) had simply not caught up to reflect the backports
-# package as fixed; the backports package itself already contains the fix.
+# trixie-backports is used to get a newer curl (8.21.0 instead of plain
+# trixie's 8.14.1-2+deb13u4) -- pin is scoped to exactly curl and the
+# specific shared libraries its backports build pulls in, never
+# `Package: *`. IMPORTANT, corrected 2026-07-30 after a real before/after
+# Trivy scan: this does NOT reduce curl's Trivy HIGH finding count. Both
+# curl versions carry the exact same 7 HIGH CVE IDs (CVE-2026-12064,
+# -8286, -8927, -8932, -9079, -9080, -9545; each `Status: affected`,
+# `FixedVersion: None` in Trivy's DB) -- these were disclosed 2026-07-03,
+# after 8.21.0 shipped, and have no fix anywhere yet (not trixie, not
+# backports, not sid). An earlier version of this comment claimed
+# backports "fixes all 7 of curl's CVEs," which was true only for a
+# different, earlier set of 7 CVE IDs that 8.21.0 itself did fix relative
+# to older curl releases -- it was never re-verified against a fresh scan
+# before being written down here, and a fresh scan against the actual
+# built image shows the image's current curl finding set is unchanged
+# before vs. after this backports move. The residual risk and the
+# maintainer decision this leaves open (accept as-is, purge curl and
+# migrate the healthcheck off it, or something else) are tracked in this
+# PR's body under "Known open risks" -- do not re-assert "fixes curl's
+# CVEs" here without first re-running the same before/after scan this
+# comment is based on, since curl's actual CVE set is a moving target.
+# What backports still buys, independent of the HIGH-finding count: a
+# newer curl in general (HTTP/3/QUIC support), and this scoped pin itself
+# only widens the package's own maintenance path, not this image's
+# general package provenance (see the pin-scoping rationale below).
 # The pin selector below MUST use `a=stable-backports`, not
 # `a=trixie-backports`: APT's `a=`/release-Archive selector matches the
 # Release file's `Suite:` field, and trixie-backports' own Release file
@@ -33,11 +47,30 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 # plain-trixie version despite the pin file being present -- caught only by
 # building the image for real and checking the installed curl version
 # rather than trusting the Dockerfile comment.
+#
+# The `Package:` line names exactly five packages, not `*`: a first version
+# of this fix pinned ALL of `stable-backports` to priority 500 (tied with
+# the regular trixie archive) and additionally ran `apt-get dist-upgrade`/
+# `full-upgrade` under that blanket pin. That happened to only pull in
+# curl's own dependency closure in THIS build (confirmed by a real build:
+# `dpkg -l | grep bpo` showed exactly `curl`, `libcurl4t64`,
+# `libnghttp3-9`, `libngtcp2-16`, and `libngtcp2-crypto-ossl0` -- the last
+# three are curl 8.21's HTTP/3/QUIC support libraries, not present at a
+# new-enough version in plain trixie), but that was incidental to today's
+# package-version state, not something the blanket pin structurally
+# guaranteed: the moment trixie-backports ships a newer build of ANY other
+# installed package (e.g. one of the base-image packages tracked in #1298),
+# a future rebuild would silently move it onto backports too, widening this
+# image's package provenance far beyond "just get a fixed curl." Naming the
+# five packages explicitly, and dropping the blanket `dist-upgrade`/
+# `full-upgrade` calls entirely (they were only ever needed to let the
+# blanket pin's version-comparison reach curl's dependency chain; a scoped
+# pin plus a normal `apt-get install curl` reaches the same five packages
+# without them, verified by a real rebuild after this change), keeps every
+# other installed package on plain trixie exactly as before this PR.
 RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
-    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
+    && printf 'Package: curl libcurl4t64 libnghttp3-9 libngtcp2-16 libngtcp2-crypto-ossl0\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
     && apt-get update \
-    && apt-get dist-upgrade -y \
-    && apt-get full-upgrade -y \
     && apt-get install -y --no-install-recommends \
     gnupg \
     curl \
@@ -63,9 +96,12 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     # docs/bug-hunt/proxy.md's own prior audit and
     # docs/capability-inventory/SoT-proxy.md's Compose-wiring section) --
     # purging it, as this PR's first two passes did, breaks every proxy
-    # healthcheck. curl's own CVEs are handled by pulling curl from
-    # trixie-backports (see this block's own pin-priority setup above),
-    # not by removing curl or swapping it for a different tool.
+    # healthcheck. curl is pulled from trixie-backports for a newer
+    # version (see this block's own pin-priority setup above) -- but per
+    # that comment's 2026-07-30 correction, this does NOT eliminate
+    # curl's Trivy HIGH findings, which persist unfixed regardless of
+    # curl version; see the PR body's "Known open risks" for the
+    # still-open maintainer decision on how to handle that residual risk.
     # ca-certificates and openssl are also kept: both are genuinely needed
     # at runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's
     # CA/cert generation via openssl, and the system trust store for
