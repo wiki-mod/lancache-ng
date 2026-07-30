@@ -3,9 +3,11 @@
 # nginx-based caching proxy image: unified standard (SNI passthrough) and
 # SSL/MITM (TLS-interception) mode, selected at runtime by entrypoint.sh.
 # Installs nginx from the nginx.org mainline repo (not Debian's own nginx
-# package) and includes libnginx-mod-stream for standard mode's SNI
-# passthrough; see CLAUDE.md's "Key Design Decisions" for the stream-module
-# load order requirement.
+# package). nginx.org's own package compiles the stream module (used by
+# standard mode's SNI passthrough, see nginx.conf's `stream {}` block) in
+# statically -- no separate module package and no `load_module` directive
+# are needed; see CLAUDE.md's "Key Design Decisions" for the full
+# explanation of why that differs from Debian's own nginx package.
 
 FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
