@@ -28,10 +28,10 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 # built image shows the image's current curl finding set is unchanged
 # before vs. after this backports move. The residual risk and the
 # maintainer decision this leaves open (accept as-is, purge curl and
-# migrate the healthcheck off it, or something else) are tracked in this
-# PR's body under "Known open risks" -- do not re-assert "fixes curl's
-# CVEs" here without first re-running the same before/after scan this
-# comment is based on, since curl's actual CVE set is a moving target.
+# migrate the healthcheck off it, or something else) are tracked in issue
+# #1304 -- do not re-assert "fixes curl's CVEs" here without first
+# re-running the same before/after scan this comment is based on, since
+# curl's actual CVE set is a moving target.
 # What backports still buys, independent of the HIGH-finding count: a
 # newer curl in general (HTTP/3/QUIC support), and this scoped pin itself
 # only widens the package's own maintenance path, not this image's
@@ -100,8 +100,8 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     # version (see this block's own pin-priority setup above) -- but per
     # that comment's 2026-07-30 correction, this does NOT eliminate
     # curl's Trivy HIGH findings, which persist unfixed regardless of
-    # curl version; see the PR body's "Known open risks" for the
-    # still-open maintainer decision on how to handle that residual risk.
+    # curl version; see issue #1304 for the still-open maintainer
+    # decision on how to handle that residual risk.
     # ca-certificates and openssl are also kept: both are genuinely needed
     # at runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's
     # CA/cert generation via openssl, and the system trust store for

@@ -738,10 +738,10 @@ unknown SNI to the `127.0.0.1:9` discard sink). Info-level.
     of PR #1294's own body) asserted backports "fixes all 7 of curl's CVEs" —
     that claim was written against an earlier, different set of 7 CVE IDs and
     was never re-verified with a fresh scan before being recorded; it does not
-    hold for the CVE set actually present today. See PR #1294's "Known open
-    risks" for the resulting maintainer decision this leaves open (accept the
-    residual curl risk as-is, purge curl and migrate the healthcheck off it,
-    or something else).
+    hold for the CVE set actually present today. See issue #1304 for the
+    resulting maintainer decision this leaves open (accept the residual curl
+    risk as-is, purge curl and migrate the healthcheck off it, or something
+    else).
   - `ca-certificates` and `openssl` remain kept for the same reason as
     before — both genuinely needed at runtime for TLS.
 - `proxy_ssl_verify_depth 2` was checked as a possible over-strict/over-lax
