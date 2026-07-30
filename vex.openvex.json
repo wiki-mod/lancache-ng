@@ -70,6 +70,104 @@
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
       "impact_statement": "Not exploitable in these artifacts (vulnerable code not present). Same github.com/docker/docker v28.5.2+incompatible finding as CVE-2026-34040 and CVE-2026-41567 above -- see those entries for the shared \"client-library-only, cannot be bumped\" background. CVE-2026-42306 (GHSA-rg2x-37c3-w2rh) is a race condition in the Docker daemon's own `docker cp` implementation that can redirect a copy through a bind mount to write outside the intended container filesystem onto the host. Like CVE-2026-41567, this is daemon-side request-handling code, confirmed absent from these binaries by the same direct vendor/ modules.txt check (only github.com/docker/docker/pkg/namesgenerator is actually vendored from this module in docker/buildx v0.35.0; neither binary implements or executes the daemon's cp handler). (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-11-15 in case the underlying module pin or upstream situation has changed.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-12064"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- not a non-exploitability disposition; curl's vulnerable code genuinely is present here. CVE-2026-12064 is an SSH host-verification bypass triggered by schemeless URLs used with SFTP/SCP. Affects `curl`/`libcurl4t64` identically at both 8.14.1-2+deb13u4 (plain Debian trixie) and 8.21.0-2~bpo13+1 (trixie-backports) across every first-party image that installs curl for its Compose healthcheck: `services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, and `services/ntp` -- confirmed by a real, controlled before/after Trivy scan run separately against each of those 5 images (see issue #1304 for the full investigation and the maintainer's recorded acceptance decision). No fix exists anywhere as of 2026-07-30 (`FixedVersion: None` in Trivy's DB for trixie, backports, and sid alike) -- disclosed 2026-07-03, after curl 8.21.0 itself shipped, so the backports move that fixed an earlier, different CVE set for this same package does not touch this one. Accepted for now because every one of these 5 images invokes curl only for a narrow, localhost-only Compose healthcheck (`curl -sf http://127.0.0.1/...` / `curl -ksf https://127.0.0.1/...`, see each Dockerfile's own comment block and the matching `healthcheck:` block in `deploy/prod`, `deploy/quickstart`, and `deploy/full-setup`) -- a plain loopback GET with no SFTP/SCP schemeless URL ever constructed, no proxy configuration, no mTLS client certificates, no custom libcurl callback API usage, and no long-lived process reusing a cached TLS session (each healthcheck run is a fresh, short-lived curl process). No `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected here, being installed via `apt`/`dpkg` rather than a language-specific analyzer -- carries no `PkgPath` at all, unlike this file's existing Go-binary entries above (`docker-compose`/`docker-buildx`, scanned by Trivy's `gobinary` analyzer, which genuinely does report a file path). Confirmed empirically on a real build of the proxy image: an ignore entry for this same CVE ID with a populated but bogus `paths:` value (`usr/bin/curl`) did NOT suppress the finding, while an otherwise identical entry with no `paths:` field at all DID suppress it cleanly -- for exactly this CVE ID, on both `curl` and `libcurl4t64`, and nothing else (diffed the full before/after finding list, not just exit code). A `paths:` list on this entry would therefore silently never match and the finding would remain unsuppressed; scoping is instead inherent to the CVE ID itself, since every ID in this group of 7 is curl/libcurl-specific in Trivy's own vulnerability database and cannot match any other package. This is a time-boxed acceptance, not an indefinite one: re-review on or before 2026-08-15 -- if trixie, backports, or sid has shipped a fix for any of these 7 CVE IDs by then, drop the corresponding entries and rebuild; if not, this decision needs to be revisited (extend the acceptance, or migrate the affected healthchecks off curl entirely). See issue #1304 for the complete before/after Trivy evidence per image and the maintainer's recorded decision. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-8286"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the healthcheck-usage exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-8286 is an insecure-connection- establishment issue caused by a TLS configuration mismatch. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-8927"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the healthcheck-usage exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-8927 is an information-disclosure issue caused by proxy authentication state not being cleared between connections. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-8932"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the healthcheck-usage exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-8932 is a security-feature-bypass issue caused by improper mTLS connection reuse. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-9079"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the healthcheck-usage exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-9079 is an information-disclosure issue caused by failure to clear proxy authentication credentials. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-9080"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the healthcheck-usage exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-9080 is a use-after-free reachable via `curl_easy_pause()` inside a `CURLMOPT_SOCKETFUNCTION` callback -- a libcurl multi-interface callback API this project's healthcheck usage never invokes. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-9545"
+      },
+      "timestamp": "2026-07-30T04:32:14Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the healthcheck-usage exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-9545 is an information-disclosure issue via a cached SSL session and early data -- reachable only across a long-lived process reusing a session, which does not describe this project's short-lived, one-shot-per-invocation healthcheck curl processes. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
     }
   ]
 }
