@@ -300,11 +300,18 @@ jobs:
     # reusing ssl-mitm-cache-simulation's published-image approach). Does not
     # need the compute-validation-network subnet/IP outputs at all -- it
     # builds its own throwaway images and creates its own auto-addressed
-    # Docker network, no docker-compose stack involved -- but still gates on
-    # that job's own result so a runner degraded enough to fail even that
-    # lightweight derivation doesn't also burn time on this Docker-heavy job.
+    # Docker network, no docker-compose stack involved. Still chained after
+    # ssl-mitm-cache-simulation (not just gated on compute-validation-network
+    # in parallel with every other sim) for the same reason every other job
+    # in this file is chained rather than run concurrently: two independent
+    # `docker build`s racing against full-setup-validate's own build on the
+    # same shared BuildKit content store is exactly the source-level
+    # contention AG-CI-017 requires bounding (the recurring
+    # `ref layer-sha256:...locked` signature across #1246-#1249 under this
+    # runner pool's known saturation, #1065) -- a retry wrapper alone would
+    # not fix a structural concurrency problem this job would otherwise add.
     name: Proxy deep-wildcard TLS simulation
-    needs: [compute-validation-network]
+    needs: [compute-validation-network, ssl-mitm-cache-simulation]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
@@ -345,7 +352,7 @@ jobs:
     # calls out: the manual full-setup-validate.yml never passed its image_tag
     # through to this job, so it always tested "nightly" regardless of intent.
     name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, ssl-mitm-cache-simulation]
+    needs: [compute-validation-network, proxy-deep-wildcard-tls-simulation]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
