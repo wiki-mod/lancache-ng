@@ -42,10 +42,14 @@
 #     below -- and since master itself lags current_dev by however long it
 #     takes for changes to get promoted there, the operator-facing `nightly`
 #     channel can sit frozen at whatever it last resolved to for that whole
-#     window. This is accepted as a real, bounded gap (identical in shape to
-#     the "KNOWN GAP" build-push.yml's own daily `latest` schedule already
-#     documents for the same underlying GitHub limitation) rather than
-#     solved here: #808's untouched-service PR backfill no longer depends on
+#     window. This is a real, bounded gap (identical in shape to the
+#     "KNOWN GAP" build-push.yml's own daily `latest` schedule already
+#     documents for the same underlying GitHub limitation), and per
+#     AG-CI-019 (AGENTS.md) it is not treated as a long-term accepted
+#     tradeoff: this file must reach master via its own dedicated sync PR
+#     in reasonably short order, not sit unsynced indefinitely.
+#     Separately from that sync obligation: #808's untouched-service PR
+#     backfill no longer depends on
 #     nightly staying continuously fresh (it now reads the PR base commit's
 #     own durable sha-<commit> tag instead, see build-push.yml's "Ensure PR
 #     staging tags exist for full-setup services" step), so a temporarily
