@@ -7518,33 +7518,54 @@ jobs:
           # The real fix: git's `http.extraHeader` (and its per-URL
           # `http.<url>.extraHeader` form) documents that setting an entry to
           # the empty string resets the accumulated list for that exact key
-          # (git-config(1)). GIT_CONFIG_COUNT/KEY_n/VALUE_n environment-based
-          # config resolves with higher precedence than any file-based
-          # config -- `includeIf`-included files included -- so adding an
-          # empty-value reset for checkout's OWN key
-          # (`http.https://github.com/.extraheader`, the bare host: checkout
-          # scopes it there, not to this repo's specific path) to this same
-          # GIT_CONFIG_COUNT list clears it for this one `git push`
-          # invocation only, without touching any on-disk file. This does
-          # NOT collapse into a single reset+set pair on one key: checkout's
-          # bare-host key and the PROJECT_AUTOMATION_PAT's repo-path-scoped
-          # key below are two DIFFERENT config keys (different URL-match
-          # specificity) that both matched this same push URL simultaneously
-          # -- which is exactly why both headers were being sent in the first
-          # place -- so both must be listed here; resetting one has no effect
-          # on the other. Verified for real (2026-07-30, self-hosted runner):
-          # reproduced the identical "Duplicate header: Authorization" / 400
-          # failure via a real (read-only, harmless) `git ls-remote` against
-          # this same repo, using checkout's actual persisted-credential
-          # shape (a separate config file plus `includeIf.gitdir`); confirmed
-          # `--local --unset-all` alone left it reproducing every time; then
-          # confirmed adding this empty-value reset entry eliminates it --
-          # exactly one `Authorization` header sent, and GitHub's ordinary
-          # auth-rejection response returned instead of the duplicate-header
-          # 400. Nothing later in this job needs the original GITHUB_TOKEN
-          # git credential -- the next step authenticates its own registry
-          # call explicitly via secrets.GITHUB_TOKEN, not via this ambient
-          # git config.
+          # (Documentation/config/http.adoc: "an empty value will reset the
+          # extra headers to the empty list"). git-config(1)'s own ENVIRONMENT
+          # section documents the precedence that makes this usable here:
+          # "these environment variables [GIT_CONFIG_COUNT/KEY_n/VALUE_n]
+          # will override values in configuration files, but will be
+          # overridden by any explicit options passed via `git -c`" -- i.e.
+          # file-based config (`includeIf`-included files included) < env-based
+          # GIT_CONFIG_COUNT < `-c`. So an empty-value reset for checkout's OWN
+          # key (`http.https://github.com/.extraheader`, the bare host:
+          # checkout scopes it there, not to this repo's specific path),
+          # supplied via GIT_CONFIG_COUNT, clears the file-based value for
+          # this one `git push` invocation only, without touching any on-disk
+          # file. This does NOT collapse into a single reset+set pair on one
+          # key: checkout's bare-host key and the PROJECT_AUTOMATION_PAT's
+          # repo-path-scoped key below are two DIFFERENT config keys
+          # (different URL-match specificity) that both matched this same
+          # push URL simultaneously -- which is exactly why both headers were
+          # being sent in the first place -- so both must be listed here;
+          # resetting one has no effect on the other.
+          #
+          # Deliberately NOT done via `-c http.https://github.com/.extraheader=`
+          # instead of a GIT_CONFIG_COUNT entry, even though it is the same
+          # empty-reset trick: `-c` is documented as HIGHER precedence than
+          # GIT_CONFIG_COUNT (see the quote above), so a `-c`-based reset is
+          # applied after, and therefore also wipes out, the real PAT header
+          # set via GIT_CONFIG_COUNT below -- verified for real: doing the
+          # reset via `-c` while keeping the real header on GIT_CONFIG_COUNT
+          # silently dropped the Authorization header entirely (the push
+          # request went out unauthenticated). Keeping both the reset and the
+          # real header on the same GIT_CONFIG_COUNT list (index 0 then index
+          # 1) avoids this, since entries within one source apply in index
+          # order.
+          #
+          # Verified for real (2026-07-30, self-hosted runner): reproduced the
+          # identical "Duplicate header: Authorization" / 400 failure via a
+          # real (read-only, harmless) `git ls-remote` against this same repo,
+          # using checkout's actual persisted-credential shape (a separate
+          # config file plus `includeIf.gitdir`) and this step's own exact
+          # shell lines (`push_url` construction, the `--unset-all` line, and
+          # the GIT_CONFIG_* assignments below, with only `git push` swapped
+          # for `git ls-remote`); confirmed `--local --unset-all` alone left
+          # it reproducing every time; then confirmed adding this empty-value
+          # reset entry eliminates it -- exactly one `Authorization` header
+          # sent, and GitHub's ordinary auth-rejection response returned
+          # instead of the duplicate-header 400. Nothing later in this job
+          # needs the original GITHUB_TOKEN git credential -- the next step
+          # authenticates its own registry call explicitly via
+          # secrets.GITHUB_TOKEN, not via this ambient git config.
           git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           GIT_CONFIG_COUNT=2 \
           GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
