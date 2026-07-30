@@ -7461,7 +7461,7 @@ jobs:
           # "repository not found" error), which would leak the PAT straight
           # into this step's own log.
           #
-          # The header value is set via GIT_CONFIG_COUNT/KEY_0/VALUE_0
+          # The header value is set via GIT_CONFIG_COUNT/KEY_n/VALUE_n
           # (supported since Git 2.31), not `-c http.extraheader=...`: a `-c`
           # value is still a plain-argv secret for this invocation's
           # lifetime (visible via `ps`/`/proc/<pid>/cmdline`), it just avoids
@@ -7469,34 +7469,88 @@ jobs:
           # variable is not readable via `ps` at all (only via
           # `/proc/<pid>/environ`, which the standard Linux permission model
           # restricts to the same user or root), so this closes that
-          # remaining exposure. The key is scoped to this exact push URL
-          # (`http.<url>.extraheader`, not a bare `http.extraheader`) so it
-          # cannot leak into unrelated git operations in this same shell,
-          # and -- like the `-c` form it replaces -- this is set only for
-          # this one command's environment, never written to `.git/config`.
+          # remaining exposure. The real PAT header (index 1 below) is
+          # scoped to this exact push URL (`http.<url>.extraheader`, not a
+          # bare `http.extraheader`) so it cannot leak into unrelated git
+          # operations in this same shell -- index 0 is a separate,
+          # unrelated key (see below) that resets checkout's own persisted
+          # header, not a secret at all. Like the `-c` form this replaces,
+          # this whole GIT_CONFIG_COUNT list is set only for this one
+          # command's environment, never written to `.git/config`.
           push_url="https://github.com/${REPOSITORY}.git"
           # actions/checkout (persist-credentials: true, the default used
-          # throughout this workflow) already wrote its own GITHUB_TOKEN
-          # `Authorization` extraheader into this job's local .git/config,
-          # scoped to the bare https://github.com/ host. That entry and the
-          # PROJECT_AUTOMATION_PAT-scoped one set below both match this
-          # push's URL, and git's http backend sends every matching
-          # extraheader as its own `Authorization` header on the same
-          # request -- GitHub's HTTP endpoint rejects a request carrying two
-          # `Authorization` headers with a 400. This is a real, confirmed
-          # regression (every real run 2026-07-19 through 2026-07-24 hit
-          # this exact failure, distinct from the two bugs #1054 already
-          # fixed; see #819's verification comment for the affected run
-          # IDs). Clearing checkout's host-scoped entry immediately before
-          # this push ensures only the PAT-scoped header is sent. Nothing
-          # later in this job needs the original GITHUB_TOKEN git
-          # credential -- the next step authenticates its own registry call
-          # explicitly via secrets.GITHUB_TOKEN, not via this ambient git
-          # config.
+          # throughout this workflow, pinned at v7.0.1/3d3c42e...) does NOT
+          # write its GITHUB_TOKEN `Authorization` extraheader directly into
+          # this job's local .git/config. It writes that header into a
+          # separate temp file instead
+          # (_work/_temp/git-credentials-<uuid>.config) and wires it in via a
+          # conditional `includeIf.gitdir:<workdir>.path <that file>` entry
+          # in .git/config -- confirmed directly from a real failed run's log
+          # (run 30328171211, 2026-07-28: `git config --file
+          # .../git-credentials-<uuid>.config http.https://github.com/
+          # .extraheader AUTHORIZATION: basic ***`, immediately followed by
+          # the `includeIf.gitdir` registration lines). That included file's
+          # entry and the PROJECT_AUTOMATION_PAT-scoped one set below both
+          # match this push's URL, and git's http backend sends every
+          # matching extraheader as its own `Authorization` header on the
+          # same request -- GitHub's HTTP endpoint rejects a request carrying
+          # two `Authorization` headers with a 400. This is a real, confirmed
+          # regression (every real run 2026-07-19 through 2026-07-28 hit this
+          # exact failure, distinct from the two bugs #1054 already fixed;
+          # see #819's verification comments for the affected run IDs).
+          #
+          # PR #1230 (2026-07-24) tried to fix this with the
+          # `git config --local --unset-all ...` line below, on the theory
+          # that checkout's header lived directly in .git/config's own
+          # [http ...] section. It does not: `--local` only ever reads/writes
+          # .git/config itself, never a file merely `includeIf`-referenced
+          # from it, so that command always exits 5 ("no such section") and
+          # the `2>/dev/null || true` silently swallowed that as if it had
+          # succeeded -- the includeIf-sourced header was never actually
+          # removed, and the very next real run (30328171211) hit the
+          # identical "Duplicate header: Authorization" / 400 failure this
+          # was supposed to fix. Kept below anyway as a free, harmless
+          # defense-in-depth line in case some future checkout version (or a
+          # differently-configured job) really does write this key straight
+          # into .git/config -- but it must never be trusted as the actual
+          # fix on its own again.
+          #
+          # The real fix: git's `http.extraHeader` (and its per-URL
+          # `http.<url>.extraHeader` form) documents that setting an entry to
+          # the empty string resets the accumulated list for that exact key
+          # (git-config(1)). GIT_CONFIG_COUNT/KEY_n/VALUE_n environment-based
+          # config resolves with higher precedence than any file-based
+          # config -- `includeIf`-included files included -- so adding an
+          # empty-value reset for checkout's OWN key
+          # (`http.https://github.com/.extraheader`, the bare host: checkout
+          # scopes it there, not to this repo's specific path) to this same
+          # GIT_CONFIG_COUNT list clears it for this one `git push`
+          # invocation only, without touching any on-disk file. This does
+          # NOT collapse into a single reset+set pair on one key: checkout's
+          # bare-host key and the PROJECT_AUTOMATION_PAT's repo-path-scoped
+          # key below are two DIFFERENT config keys (different URL-match
+          # specificity) that both matched this same push URL simultaneously
+          # -- which is exactly why both headers were being sent in the first
+          # place -- so both must be listed here; resetting one has no effect
+          # on the other. Verified for real (2026-07-30, self-hosted runner):
+          # reproduced the identical "Duplicate header: Authorization" / 400
+          # failure via a real (read-only, harmless) `git ls-remote` against
+          # this same repo, using checkout's actual persisted-credential
+          # shape (a separate config file plus `includeIf.gitdir`); confirmed
+          # `--local --unset-all` alone left it reproducing every time; then
+          # confirmed adding this empty-value reset entry eliminates it --
+          # exactly one `Authorization` header sent, and GitHub's ordinary
+          # auth-rejection response returned instead of the duplicate-header
+          # 400. Nothing later in this job needs the original GITHUB_TOKEN
+          # git credential -- the next step authenticates its own registry
+          # call explicitly via secrets.GITHUB_TOKEN, not via this ambient
+          # git config.
           git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
-          GIT_CONFIG_COUNT=1 \
-          GIT_CONFIG_KEY_0="http.${push_url}.extraheader" \
-          GIT_CONFIG_VALUE_0="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
+          GIT_CONFIG_COUNT=2 \
+          GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
+          GIT_CONFIG_VALUE_0="" \
+          GIT_CONFIG_KEY_1="http.${push_url}.extraheader" \
+          GIT_CONFIG_VALUE_1="AUTHORIZATION: basic $(printf '%s' "x-access-token:${PROJECT_AUTOMATION_PAT}" | base64 -w0)" \
             git push "$push_url" "refs/tags/${next_tag}"
           echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
