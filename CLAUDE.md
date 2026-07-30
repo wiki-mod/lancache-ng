@@ -18,7 +18,7 @@ Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
 ## Governance
 
-**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs.
+**[AG-GOV-001]** **Mandatory at the start of every session/task in this repo**: check whether `AGENTS.md` (repo root) and `.github/AGENTS.md` exist, read both in full, and follow them as binding rules for this repository — not optional background reading. `AGENTS.md` is not auto-loaded into context the way this file is; you must actively read it yourself. If either file changes during a session (e.g. after a `git pull` or a merge), re-read it before continuing work that it governs. **The authoritative, most current version of both files lives on `current_dev`** (the active development branch), not necessarily on whatever branch/worktree you happen to be checked out on — `master` only receives governance-doc updates when a release is cut from `current_dev`, so it can lag behind by however long it has been since the last release. If your working branch is not `current_dev` (e.g. you are on `master`, a `vX.Y.Z` release branch, or a stale local checkout), fetch and read the `current_dev` copy of these two files (e.g. `git show origin/current_dev:AGENTS.md`) rather than trusting your current branch's copy as current.
 
 See `.github/AGENTS.md` for the full coding standards and architecture reference.
 
@@ -128,7 +128,14 @@ by configuring which DNS server IP they point to:
   temporary `go.mod -> vendor.mod` / `go.sum -> vendor.sum` symlink for `go get`/`go mod vendor`
   to have a module root to write through, removed again before the build itself runs. Verified
   clean (0 HIGH/CRITICAL across all four binaries) via a real Docker build + real Trivy scan
-  with CI's exact flags, not just a module-graph inspection.
+  with CI's exact flags, not just a module-graph inspection. Confirmed a fourth time
+  (2026-07-29, CVE-2026-56852, issue #1281): `docker-buildx` v0.35.0 (go.mod: v0.37.0) and
+  `docker-compose` v5.2.0 / the Docker CLI v29.6.1 (both: v0.38.0) pinned `golang.org/x/text`
+  at versions carrying a HIGH-severity `norm.Iter` infinite-loop CVE fixed in v0.39.0 —
+  `actionlint` has no `golang.org/x/text` dependency at all, so needed no override. Fixed the
+  same way as the grpc/containerd overrides above: an explicit `go get
+  golang.org/x/text@v0.40.0` before each affected tool's build. Verified clean via a real
+  Docker build + real Trivy scan with CI's exact flags.
 
 ## No Separate Dev Environment
 

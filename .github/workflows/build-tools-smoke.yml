@@ -61,8 +61,10 @@ on:
       - "scripts/check-orphaned-branches.sh"
       - "scripts/check-changelog-direct-edit.sh"
       - "scripts/check-pr-title-convention.sh"
+      - "scripts/check-pr-tracking-metadata.sh"
       - "scripts/check-setup-prompt-drift.sh"
       - "scripts/check-compose-healthchecks.sh"
+      - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
@@ -209,8 +211,10 @@ on:
       - "scripts/check-orphaned-branches.sh"
       - "scripts/check-changelog-direct-edit.sh"
       - "scripts/check-pr-title-convention.sh"
+      - "scripts/check-pr-tracking-metadata.sh"
       - "scripts/check-setup-prompt-drift.sh"
       - "scripts/check-compose-healthchecks.sh"
+      - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
@@ -278,7 +282,7 @@ jobs:
     timeout-minutes: 30
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx for manifest inspection
         # select-build-tools-image.sh's published_image_reference() resolves

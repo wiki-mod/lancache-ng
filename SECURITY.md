@@ -43,6 +43,10 @@ releases are not actively maintained.
 
 ## Reporting a Vulnerability
 
+This is the project's documented process for responding to vulnerability
+reports, satisfying the OpenSSF Best Practices Badge's Silver-tier
+`vulnerability_response_process` criterion (project #13763, issue #1130):
+
 1. **Contact**: Send a detailed report to the security contact above, or use GitHub's private advisory feature.
 2. **Information to include**:
    - Description of the vulnerability
@@ -55,6 +59,12 @@ releases are not actively maintained.
    on this repository. That page is the authoritative, public record of every vulnerability
    confirmed in lancache-ng; an empty list there means no vulnerability has been confirmed yet,
    not that this project does not publish them.
+5. **Credit**: Every vulnerability report resolved within the last 12 months is credited to its
+   reporter(s) in the corresponding GitHub Security Advisory, unless the reporter explicitly
+   requests anonymity. This satisfies the Best Practices Badge's Silver-tier
+   `vulnerability_report_credit` criterion. If a past advisory is missing credit that the
+   reporter did not decline, that is a documentation gap to fix on that advisory, not a policy
+   exception.
 
 ## Known Security Tradeoffs and Design Decisions
 
