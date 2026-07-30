@@ -39,24 +39,40 @@ epicgames-download1.akamaized.net
 fastly.cdn.epicgames.com
 
 # ---- Blizzard / Battle.net ----
+# Deliberately NOT `.akamaihd.net` (a full wildcard on that root): akamaihd.net
+# is Akamai's shared, multi-tenant edge hostname space used by thousands of
+# unrelated companies/websites, not exclusive to game CDNs -- wildcarding the
+# whole zone would redirect that unrelated traffic through this cache too.
+# Each vendor's specific akamaihd.net edge host is listed individually below
+# instead.
 level3.blizzard.com
 cdn.blizzard.com
 dist.blizzard.com
 blzddist1-a.akamaihd.net
 blzddist2-a.akamaihd.net
+blzddist3-a.akamaihd.net
 
 # ---- EA / Origin ----
-download2.cdn.ea.com
+# download2.cdn.ea.com removed: it's a one-label subdomain of cdn.ea.com,
+# already covered by the .cdn.ea.com wildcard below.
+.cdn.ea.com
 download.origin.com
 origin-a.akamaihd.net
 
 # ---- Riot Games ----
-lol.secure.dyn.riotcdn.net
-valorant.secure.dyn.riotcdn.net
+# lol./valorant.secure.dyn.riotcdn.net removed: both are one-label subdomains
+# of secure.dyn.riotcdn.net, already covered by the wildcard below.
+.secure.dyn.riotcdn.net
 riotgamespatchcdn.riotgames.com
 
 # ---- Ubisoft ----
+# Both forms kept deliberately: cdn.ubi.com (the bare host, in case Ubisoft
+# ever serves directly from it) and .cdn.ubi.com (wildcard for its edge
+# subdomains) are two of the three non-overlapping match modes -- a
+# leading-dot entry does NOT also cover the bare root, so dropping the bare
+# line here would have silently lost coverage for it.
 cdn.ubi.com
+.cdn.ubi.com
 static3.cdn.ubi.com
 ubistatic-a.akamaihd.net
 
@@ -85,6 +101,7 @@ assetcdn.101.arenanetworks.com
 download.windowsupdate.com
 fg.download.windowsupdate.com.delivery.microsoft.com
 emdl.ws.microsoft.com
+.mp.microsoft.com
 tlu.dl.delivery.mp.microsoft.com
 dl.delivery.mp.microsoft.com
 download.microsoft.com
@@ -100,10 +117,15 @@ releases.ubuntu.com
 esm.ubuntu.com
 
 # ---- Debian ----
+# ftp.de.debian.org / ftp.us.debian.org removed: both are one-label
+# subdomains of de.debian.org / us.debian.org, already covered by the
+# wildcards below.
 deb.debian.org
 security.debian.org
 cdimage.debian.org
 ftp.debian.org
+.de.debian.org
+.us.debian.org
 
 # ---- Fedora ----
 dl.fedoraproject.org
@@ -152,15 +174,16 @@ updates.nobaraproject.org
 dl.nobaraproject.org
 
 # ---- SteamOS / Steam Deck ----
-repo.steamos.cloud
-steamdeck-packages.steamos.cloud
+# repo.steamos.cloud / steamdeck-packages.steamos.cloud removed: both are
+# one-label subdomains of steamos.cloud, already covered by the wildcard.
+.steamos.cloud
 
 # ---- NVIDIA ----
+# us./international./uk./developer.download.nvidia.com removed: all four are
+# one-label subdomains of download.nvidia.com, already covered by the
+# wildcard below.
 download.nvidia.com
-us.download.nvidia.com
-international.download.nvidia.com
-uk.download.nvidia.com
-developer.download.nvidia.com
+.download.nvidia.com
 
 # ---- AMD ----
 drivers.amd.com

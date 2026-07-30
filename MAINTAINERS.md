@@ -5,6 +5,10 @@ their role and responsibilities are, per the OSPS Baseline governance
 controls (see `docs/` for the project's other governance documentation).
 It is kept up to date whenever repository access or roles change.
 
+See `GOVERNANCE.md` for the project's decision-making model and continuity
+plan (the "how" this list's roles fit into), and `ROADMAP.md` for what the
+project intends to do next.
+
 ## Current maintainers
 
 | GitHub handle | Role | Responsibilities | Access to sensitive resources |

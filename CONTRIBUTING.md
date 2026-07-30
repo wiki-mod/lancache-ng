@@ -2,6 +2,10 @@
 
 Thank you for helping improve lancache-ng.
 
+See `GOVERNANCE.md` for how decisions actually get made and who makes them,
+and `ROADMAP.md` for what the project intends to do (and deliberately does
+not intend to do) over the next year.
+
 lancache-ng is network infrastructure software. Changes can affect DNS, DHCP,
 TLS interception, Docker startup, cache correctness and local network
 availability. Please keep contributions small, reviewable and easy to test.
