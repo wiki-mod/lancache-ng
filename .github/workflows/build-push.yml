@@ -111,11 +111,25 @@ on:
     # metadata actually changes. `edited` is deliberately excluded -- it fires on
     # title/body/base-ref edits, which are unrelated to labels/milestone and would
     # add much higher-frequency reruns of the full heavy pipeline for no metadata
-    # benefit. Yes, this reruns build/test/scan jobs too on a bare label/milestone
-    # change (they have no metadata-only fast path -- see AG-GH-008 Enforcement
-    # Notes for why that tradeoff was accepted rather than building one): labels
-    # and milestones are set rarely per PR (usually once, by a human or the
-    # labeler), unlike commits, so the added self-hosted-runner cost is bounded.
+    # benefit.
+    #
+    # `labeled`/`unlabeled`/`milestoned`/`demilestoned` carry no new commit -- the
+    # content under test is byte-identical to whatever the PR's last `synchronize`
+    # (or `opened`/`reopened`) already validated, so re-running the Rust
+    # build/test/lint/audit jobs and the multi-arch image builds for them buys
+    # nothing: a prior run already produced the authoritative result for this exact
+    # commit. Each of build/build-arm64/dns_rust_quality/ui_rust_quality/dns_test/
+    # ui_test/dns_cargo_audit/ui_cargo_audit/rust_coverage's own `if:` therefore
+    # additionally requires the pull_request event's `action` to be one of
+    # opened/synchronize/reopened/ready_for_review before it will run at all (see
+    # each job's own comment) -- this list and that inline per-job condition must be
+    # kept in sync if either ever changes. AG-GH-008's metadata check itself
+    # (pr-tracking-metadata-check/-hosted) is deliberately NOT scoped this way: it
+    # only reads the webhook snapshot and depends solely on validate-compose (which
+    # has no such gate), so it still re-evaluates on every type below, keeping its
+    # own freshness guarantee intact. ci_scope_policy's per-path required-success
+    # logic is taught the same event-action distinction so a metadata-only event
+    # skipping these jobs is never mistaken for a real, unexplained failure.
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
@@ -3504,11 +3518,25 @@ jobs:
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow
     # changes still force it because the CI contract itself may have changed.
+    #
+    # Also skipped on a metadata-only pull_request event (labeled/unlabeled/
+    # milestoned/demilestoned -- see the trigger's own `types:` comment above):
+    # those events carry no new commit, so re-running clippy/fmt/check against
+    # the exact same tree a prior opened/synchronize/reopened/ready_for_review
+    # run already validated would just burn a scarce lancache-heavy slot for a
+    # known-identical result. `github.event.action` is read directly off the
+    # event context, not a job output, so this check is safe even when
+    # detect-changes did not run for this event (workflow_dispatch/schedule are
+    # never `pull_request`, so the added clause is a no-op there).
     name: rust-quality (dns/nats-subscriber)
     needs: detect-changes
     if: >-
       ${{
         always() &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
@@ -3569,11 +3597,18 @@ jobs:
   ui_rust_quality:
     # UI Rust quality mirrors the DNS job but stays independent so both crates
     # can run in parallel on suitable runners.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's identical comment above for the full reasoning.
     name: rust-quality (ui)
     needs: detect-changes
     if: >-
       ${{
         always() &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.ui == 'true' ||
@@ -3631,6 +3666,10 @@ jobs:
   dns_test:
     # DNS unit tests are separate from quality checks so failures identify
     # whether the regression is lint/format level or behavioral.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning (no new commit,
+    # so no new behavior to test).
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
     # Path-scoped on BOTH pull_request and push (#1095). detect-changes now runs
@@ -3649,6 +3688,10 @@ jobs:
         always() &&
         needs['validate-compose'].result == 'success' &&
         (needs.dns_rust_quality.result == 'success' || needs.dns_rust_quality.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
@@ -3719,6 +3762,9 @@ jobs:
   ui_test:
     # UI tests run only when the UI or workflow contract changes. This keeps
     # docs/setup-only PRs from paying for unrelated Rust test work.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
     # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
@@ -3730,6 +3776,10 @@ jobs:
         always() &&
         needs['validate-compose'].result == 'success' &&
         (needs.ui_rust_quality.result == 'success' || needs.ui_rust_quality.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
@@ -3789,6 +3839,12 @@ jobs:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   rust_coverage:
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning. This is a
+    # required branch-protection check on master/v0.2.0 ("coverage (Rust)"),
+    # but it already tolerates a clean `skipped` result today for any PR whose
+    # path scoping below finds no relevant Rust change (e.g. a docs-only PR);
+    # this adds one more, equally clean skip source, not a new failure mode.
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
     if: >-
@@ -3797,6 +3853,10 @@ jobs:
         needs['validate-compose'].result == 'success' &&
         (needs.dns_test.result == 'success' || needs.dns_test.result == 'skipped') &&
         (needs.ui_test.result == 'success' || needs.ui_test.result == 'skipped') &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           github.event_name != 'pull_request' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
@@ -4220,6 +4280,10 @@ jobs:
   dns_cargo_audit:
     # Dependency audits remain crate-specific. They are skipped only when path
     # filtering proves the crate and workflow contract did not change.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning (Cargo.lock is
+    # unchanged, so a prior run's audit result already stands).
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
     # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
@@ -4228,6 +4292,10 @@ jobs:
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.dns_rust == 'true' ||
@@ -4283,6 +4351,9 @@ jobs:
   ui_cargo_audit:
     # UI dependency audit mirrors the DNS audit and stays parallel to avoid
     # serializing independent Rust checks.
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
     # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
@@ -4291,6 +4362,10 @@ jobs:
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (
           needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.ui == 'true' ||
@@ -4488,6 +4563,7 @@ jobs:
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
           DETECT_RESULT: ${{ needs['detect-changes'].result }}
           DNS_RUST_CHANGED: ${{ needs['detect-changes'].outputs.dns_rust }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
@@ -4613,21 +4689,45 @@ jobs:
             require_boolean "$output" "${!output}"
           done
 
+          # dns_rust_quality/dns_test/dns_cargo_audit (and the UI equivalents)
+          # are now additionally gated in their own job `if:` on the PR event's
+          # `action`: labeled/unlabeled/milestoned/demilestoned carry no new
+          # commit, so those jobs deliberately skip on such an event even when
+          # the diff itself would otherwise mark the crate as changed (that
+          # diff was already validated by the opened/synchronize/reopened/
+          # ready_for_review run for this exact commit). Fail-safe default of
+          # true (content event) mirrors the rest of this file's posture of
+          # running the full pipeline whenever a classification is uncertain,
+          # rather than silently skipping for an event type not in this known
+          # metadata-only list.
+          content_event=true
+          case "$EVENT_ACTION" in
+            labeled|unlabeled|milestoned|demilestoned)
+              content_event=false
+              ;;
+          esac
+
           dns_rust_required=false
           ui_required=false
           watchdog_required=false
-          if [ "$WORKFLOW_CHANGED" = "true" ]; then
-            dns_rust_required=true
-            ui_required=true
-            watchdog_required=true
+          if [ "$content_event" = "true" ]; then
+            if [ "$WORKFLOW_CHANGED" = "true" ]; then
+              dns_rust_required=true
+              ui_required=true
+            fi
+            if [ "$DNS_RUST_CHANGED" = "true" ]; then
+              dns_rust_required=true
+            fi
+            if [ "$UI_CHANGED" = "true" ]; then
+              ui_required=true
+            fi
           fi
-          if [ "$DNS_RUST_CHANGED" = "true" ]; then
-            dns_rust_required=true
-          fi
-          if [ "$UI_CHANGED" = "true" ]; then
-            ui_required=true
-          fi
-          if [ "$WATCHDOG_CHANGED" = "true" ]; then
+          # watchdog_test is intentionally NOT gated on content_event (its own
+          # job `if:` was left unchanged -- see its job-level comment): it
+          # runs on the lancache-light tier at a few seconds' cost, not the
+          # scarce lancache-heavy pool this change targets, so its
+          # requiredness still follows path scoping alone, on every PR event.
+          if [ "$WORKFLOW_CHANGED" = "true" ] || [ "$WATCHDOG_CHANGED" = "true" ]; then
             watchdog_required=true
           fi
 
@@ -5358,6 +5458,16 @@ jobs:
     # and trusted-ref vulnerability scans before publishing. For build-tools,
     # it also scans the exact pushed digest before attestation/promotion can
     # proceed.
+    #
+    # Also skipped on a metadata-only pull_request event (labeled/unlabeled/
+    # milestoned/demilestoned -- see the trigger's own `types:` comment at the
+    # top of this file): those events never carry a new commit, so there is no
+    # new image content for this job to build or push -- a prior opened/
+    # synchronize/reopened/ready_for_review run already published the sha-*
+    # (and, on a same-repo PR, pr-<N>-sha-<short>) tags for this exact commit.
+    # merge-manifests/full-setup-validate downstream already tolerate a
+    # skipped build/build-arm64 cleanly via their own `needs.build.result ==
+    # 'success'` gates, so this skip cascades without any further change.
     needs:
       - shellcheck
       - validate-compose
@@ -5377,6 +5487,10 @@ jobs:
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
         needs['line-endings'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
@@ -6121,6 +6235,9 @@ jobs:
     # merge-manifests below combines this job's per-service linux/arm64 tag
     # with build's linux/amd64 tag into the real sha-<commit> multi-platform
     # tag; this job never writes that tag directly.
+    #
+    # Also skipped on a metadata-only pull_request event -- see `build`'s
+    # identical comment above for the full reasoning.
     needs:
       - shellcheck
       - validate-compose
@@ -6140,6 +6257,10 @@ jobs:
         needs['validate-compose'].result == 'success' &&
         needs.ci_scope_policy.result == 'success' &&
         needs['line-endings'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
         (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
