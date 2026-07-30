@@ -501,8 +501,8 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 # (affected or not) before assuming the proxy's finding generalizes here --
 # CONFIRMED (2026-07-30) via a real, controlled before/after Trivy scan
 # (`--severity HIGH,CRITICAL --scanners vuln`) of this exact image built on
-# both plain trixie (pre-this-PR) and trixie-backports (this PR): 37
-# HIGH/CRITICAL findings on both, byte-for-byte identical CVE ID sets. curl
+# both plain trixie and trixie-backports: 37 HIGH/CRITICAL findings on
+# both, byte-for-byte identical CVE ID sets. curl
 # specifically carries the same unfixed 7 HIGH CVE IDs either way
 # (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545 -- `libcurl4t64`
 # moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1, `nmap`/`nmap-common` moved
