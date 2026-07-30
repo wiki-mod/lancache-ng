@@ -186,6 +186,11 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # own history for the incident.
 #
 # Debian package triggers try to start services during image builds; the entrypoint starts PDNS instead.
+# The stub is restored to the real invoke-rc.d (not just left in place) once this
+# layer's installs finish, via a trap so it runs even if apt-get itself fails --
+# so a future RUN layer, or anything inspecting this image, still finds the real
+# invoke-rc.d rather than a permanent no-op stub that outlives the one install it
+# was needed for.
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive; \
     cleanup_invoke_rc_d() { \
