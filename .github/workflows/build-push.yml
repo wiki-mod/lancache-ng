@@ -254,7 +254,7 @@ jobs:
       release_contract: ${{ steps.filter.outputs.release_contract }}
       scripts: ${{ steps.filter.outputs.scripts }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -324,7 +324,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
 
@@ -353,7 +353,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check every deploy/*/docker-compose.yml service has a healthcheck
         run: bash scripts/check-compose-healthchecks.sh
 
@@ -368,7 +368,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate PR template completeness
         env:
           # Fetched live via `gh pr view` instead of trusting
@@ -417,7 +417,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -466,7 +466,84 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Auto-assign Dependabot PR milestone
+        # AG-GH-008 requires every PR to carry a milestone. Dependabot cannot
+        # set its own milestone or add itself to a project board -- this used
+        # to be handled by exempting dependabot[bot] from this whole check
+        # (see #1061-#1064), but the maintainer decided (issue #1278) that
+        # auto-tagging real metadata is the right fix instead of skipping the
+        # requirement. Labels and project-board placement are already handled
+        # for Dependabot PRs without this step (GitHub's own dependency
+        # labels plus labeler.yml's path-based labels; add-to-project.yml's
+        # unconditional pull_request_target trigger) -- milestone was the one
+        # real gap, confirmed by checking real Dependabot PRs via the GitHub
+        # API (#1270, #1163: labeled and on the project board, milestone
+        # null).
+        #
+        # Runs before "Fetch current labels/milestone live" below so that
+        # step's live `gh pr view` re-fetch already sees the milestone this
+        # step just set, in the same job run -- no separate job/race needed.
+        #
+        # Uses PROJECT_AUTOMATION_PAT, not the default GITHUB_TOKEN: this
+        # project already standardized on that PAT for every other
+        # Dependabot-adjacent write (add-to-project.yml, the project-board
+        # sub-check two steps down) since GITHUB_TOKEN cannot write Projects
+        # v2 data; reusing the same secret for this REST write keeps the
+        # permission model in one place. Confirmed live (PR #1270's
+        # pr-tracking-metadata-check-hosted run, 2026-07-29) that this PAT
+        # does reach build-push.yml on a Dependabot-authored pull_request run
+        # -- Dependabot PRs are same-repo branches, not forks, so the
+        # fork-secret-withholding restriction documented below does not
+        # apply here.
+        #
+        # Idempotent per AG-OP-006/AG-OP-009: only PATCHes when the PR's live
+        # milestone is genuinely empty, so a re-run (e.g. the `synchronize`
+        # retrigger on a new Dependabot commit) never overwrites a milestone
+        # a maintainer set by hand in between.
+        #
+        # Known, accepted cost: successfully setting a milestone here fires a
+        # real `milestoned` PR event, which re-triggers this entire workflow
+        # once more (this file's `on.pull_request.types` already includes
+        # `milestoned`, and its own comment already accepts bare
+        # label/milestone changes as a bounded, infrequent cost). This is a
+        # ONE-TIME cost per newly-opened Dependabot PR, not recurring, since
+        # the idempotence check above means later runs never PATCH again.
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          # Milestone #11, "LanCache-NG Roadmap" -- the repo's existing
+          # general-purpose catch-all milestone for PRs/issues that don't tie
+          # to a specific version release (see `gh api
+          # repos/{owner}/{repo}/milestones` for its own description). If
+          # this milestone is ever renumbered or renamed, update both this
+          # value and the comment together.
+          DEPENDABOT_MILESTONE_NUMBER: 11
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check will fail below (No milestone set) until a maintainer sets one by hand, same as it would for any other PR missing this secret-dependent automation."
+            exit 0
+          fi
+          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
+          if [ -n "$current_milestone" ]; then
+            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
+            exit 0
+          fi
+          # `if !` (rather than a bare command) keeps this under `set -e`
+          # per AG-VAL-004: a command forming an `if` test is exempt from
+          # errexit, so a real API failure here degrades to a warning
+          # instead of aborting the job -- the authoritative gate is the
+          # milestone check inside check-pr-tracking-metadata.sh a couple of
+          # steps below, which will still fail with a clear, actionable
+          # message if this best-effort auto-tag didn't actually land.
+          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
+            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
+            exit 0
+          fi
+          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
       - name: Fetch current labels/milestone live
         # Same class of bug found and fixed in pr-template-check (2026-07-16):
         # github.event.pull_request.labels/.milestone is a snapshot taken when
@@ -503,9 +580,6 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          # Dependabot's own PR author identity -- see
-          # check-pr-tracking-metadata.sh's dependabot[bot] exemption.
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           # PR_LABELS_JSON now names a live-fetched file (mounted below),
@@ -524,7 +598,6 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
-            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
@@ -541,7 +614,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
         # This fallback job must resolve its own image rather than depending
         # on validate-compose's output (like the self-hosted job above does)
@@ -557,6 +630,35 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      - name: Auto-assign Dependabot PR milestone
+        # See the primary pr-tracking-metadata-check job's identical step
+        # (issue #1278) for the full rationale: Dependabot cannot set its
+        # own milestone, so this auto-assigns the "LanCache-NG Roadmap"
+        # catch-all (#11) via PROJECT_AUTOMATION_PAT before the live
+        # label/milestone re-fetch below, instead of exempting Dependabot
+        # from the check entirely (the previous approach, #1061-#1064).
+        if: github.event.pull_request.user.login == 'dependabot[bot]'
+        env:
+          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          REPO: ${{ github.repository }}
+          DEPENDABOT_MILESTONE_NUMBER: 11
+        run: |
+          set -euo pipefail
+          if [ -z "$GH_TOKEN" ]; then
+            echo "::warning::PROJECT_AUTOMATION_PAT is not configured -- cannot auto-assign a milestone to this Dependabot PR. pr-tracking-metadata-check-hosted will fail below (No milestone set) until a maintainer sets one by hand."
+            exit 0
+          fi
+          current_milestone="$(gh pr view "$PR_NUMBER" --repo "$REPO" --json milestone -q '.milestone.number // empty')"
+          if [ -n "$current_milestone" ]; then
+            echo "Milestone already set (#$current_milestone) -- leaving it as-is."
+            exit 0
+          fi
+          if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
+            echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
+            exit 0
+          fi
+          echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
       - name: Fetch current labels/milestone live
         # See the primary pr-tracking-metadata-check job's identical step for
         # why this fetches live via `gh pr view` instead of trusting
@@ -589,13 +691,6 @@ jobs:
           # with the right explanation instead of implying the secret is
           # simply unconfigured -- see check-pr-tracking-metadata.sh.
           PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-          # Dependabot's own PR author identity -- see
-          # check-pr-tracking-metadata.sh's dependabot[bot] exemption. Missing
-          # here (unlike the self-hosted twin above) meant this job always
-          # hard-failed every Dependabot PR that reached it with "No milestone
-          # set", since the script's exemption check never had a value to
-          # compare against -- confirmed live on PR #1269/#1270 (2026-07-29).
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
           labels_json="$(cat "$PR_LABELS_JSON")"
@@ -610,7 +705,6 @@ jobs:
             -e REPO \
             -e GH_TOKEN \
             -e PR_IS_FORK \
-            -e PR_AUTHOR \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-pr-tracking-metadata.sh
 
@@ -644,7 +738,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fetch current PR title live
         # Same class of bug found and fixed in pr-template-check and
         # pr-tracking-metadata-check (2026-07-16): github.event.pull_request
@@ -700,7 +794,7 @@ jobs:
       contents: read
       pull-requests: read
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
         # This fallback job must resolve its own image rather than depending
         # on validate-compose's output (like the self-hosted job above does)
@@ -753,7 +847,7 @@ jobs:
     # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -767,7 +861,7 @@ jobs:
     # 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -808,7 +902,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check tracked files use Unix (LF) line endings
         run: |
           set -euo pipefail
@@ -825,7 +919,7 @@ jobs:
     # Real runs: 4-8s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -861,7 +955,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check for banned-language source files (AG-GOV-003)
         run: |
           set -euo pipefail
@@ -877,7 +971,7 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -949,7 +1043,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # Real incident (2026-07-24/25): actionlint's default invocation embeds
       # its own shellcheck integration, which intermittently hangs INDEFINITELY
@@ -1187,7 +1281,7 @@ jobs:
     # "Run ShellCheck and ActionLint" step timeout added below.
     timeout-minutes: 25
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
         # Always resolve through the digest-pinned, smoke-tested selector --
         # never fall back to a bare :latest tag here. This job exists so
@@ -1329,7 +1423,7 @@ jobs:
     outputs:
       build_tools_image: ${{ steps.select-compose-validation-image.outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx for manifest inspection
         id: buildx
@@ -2911,7 +3005,7 @@ jobs:
       project_name: ${{ steps.derive.outputs.project_name }}
       ui_port: ${{ steps.derive.outputs.ui_port }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Derive validation network
         id: derive
         uses: ./.github/actions/derive-validation-network
@@ -2993,7 +3087,7 @@ jobs:
       # PR's base.sha and a base-channel image's build-commit label. Same
       # requirement, and same fix, as the `detect-changes` job's own
       # fetch-depth: 0 checkout (needed for its own merge-base-based diff).
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -3109,7 +3203,7 @@ jobs:
 
       - name: Log in to GHCR
         if: steps.channel.outputs.pr-staging-available == 'true'
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -3430,7 +3524,7 @@ jobs:
     # covers the clippy step's 35-minute budget plus this job's other steps.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3438,7 +3532,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3492,7 +3586,7 @@ jobs:
     # job-level bound must exceed it. Real warm-cache runs: 50s-3.3min.
     timeout-minutes: 45
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3500,7 +3594,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -3590,7 +3684,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3598,7 +3692,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/dns-nats-subscriber'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3662,7 +3756,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Isolate Rust toolchain paths
         run: |
           {
@@ -3670,7 +3764,7 @@ jobs:
             echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/ui'
           } >> "$GITHUB_ENV"
       - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
       - name: Configure Redis-backed sccache
@@ -3740,7 +3834,7 @@ jobs:
         }}
       cancel-in-progress: true
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # This job resolves its own build-tools image rather than reusing
       # validate-compose's exported build_tools_image output. That output is
       # deliberately locked to the published, digest-qualified image (never a
@@ -3966,7 +4060,7 @@ jobs:
       contents: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Download coverage badge data
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1 (v4.3.0 still declared deprecated Node 20 runtime, see #802)
         with:
@@ -4093,7 +4187,7 @@ jobs:
     # Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: test (watchdog)
         run: |
           bash -n services/watchdog/watchdog.sh
@@ -4114,7 +4208,7 @@ jobs:
     # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running watchdog syntax check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -4161,7 +4255,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (dns/nats-subscriber)
         run: |
           set -euo pipefail
@@ -4222,7 +4316,7 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Audit Rust dependencies (ui)
         run: |
           set -euo pipefail
@@ -4390,7 +4484,7 @@ jobs:
       # found" failure and, worse, a silent false pass/fail against the wrong
       # commit's content. Every other job in this workflow already checks out
       # its own commit; this is the one job that didn't.
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Enforce scoped CI gates
         env:
           EVENT_NAME: ${{ github.event_name }}
@@ -4759,7 +4853,7 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
-      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Enable build-tools publish scan
         id: build-tools-scan-changes
@@ -5389,7 +5483,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine whether this service needs building
         id: should-build
@@ -5472,7 +5566,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6121,7 +6215,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine whether this service needs building
         id: should-build
@@ -6202,7 +6296,7 @@ jobs:
               )
             )
           }}
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6449,14 +6543,14 @@ jobs:
       artifact-metadata: write
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -6927,7 +7021,7 @@ jobs:
       # need full tag/commit history, which a default shallow checkout does
       # not have.
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
@@ -6969,7 +7063,7 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7493,14 +7587,14 @@ jobs:
       packages: read
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -7822,14 +7916,14 @@ jobs:
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]
     steps:
       - name: Checkout
-        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        uses: docker/login-action@af1e73f918a031802d376d3c8bbc3fe56130a9b0 # v4.4.0
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}

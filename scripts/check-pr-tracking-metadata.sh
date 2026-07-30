@@ -38,23 +38,22 @@
 #   withheld because this run is from a forked repository" when GH_TOKEN is
 #   empty -- GitHub does not pass repository secrets to pull_request runs
 #   from forks regardless of whether PROJECT_AUTOMATION_PAT is set.
-#   PR_AUTHOR, set from github.event.pull_request.user.login: a literal
-#   "dependabot[bot]" short-circuits this check entirely (see the exemption
-#   below for why).
+#   Dependabot PRs get the same real check as everyone else (issue #1278):
+#   they used to be exempted here entirely (PR_AUTHOR == "dependabot[bot]"
+#   short-circuited straight to exit 0, see #1061-#1064), but Dependabot's
+#   labels and project-board placement are already handled without this
+#   script's help (GitHub's own dependency labels plus labeler.yml's
+#   path-based labels; add-to-project.yml's unconditional
+#   pull_request_target trigger), and build-push.yml's
+#   pr-tracking-metadata-check/-hosted jobs now auto-assign a milestone (the
+#   one real gap) to Dependabot PRs via a dedicated step before this script
+#   runs -- so there is no longer a class of PR this script cannot evaluate
+#   for real.
 #
 # Runs inside the build-tools container in CI (per AG-VAL-016 -- python3
 # and curl below must not be host-local tools), not directly on the runner;
 # see the pr-tracking-metadata-check job in build-push.yml.
 set -euo pipefail
-
-# Dependabot cannot set a milestone or add itself to the project board on
-# its own PRs -- exempting it here (see validate-pr-template.sh's identical
-# exemption) rather than skipping the whole CI job, so the required-status-
-# check gate sees an explicit pass, not an ambiguous skip.
-if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
-    echo "PR tracking metadata check skipped: PR authored by dependabot[bot], which cannot set its own milestone or project-board placement."
-    exit 0
-fi
 
 pr_draft="${PR_DRAFT:-false}"
 pr_number="${PR_NUMBER:?PR_NUMBER is required}"
