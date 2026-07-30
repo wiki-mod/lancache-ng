@@ -90,20 +90,9 @@ by configuring which DNS server IP they point to:
   expiry signatures in the query string. Using `$uri` (path only) means the same file always
   hits the same cache entry regardless of the signature. The full URL (with signature) is still
   forwarded to the origin for validation.
-- **nginx's stream module for standard-mode SNI passthrough**: `services/proxy/Dockerfile` installs
-  nginx from nginx.org's own mainline apt repo (`deb http://nginx.org/packages/mainline/debian/ trixie nginx`),
-  not Debian's own `nginx` package. That distinction matters here: **Debian's own nginx package** splits the
-  stream module out into a separate `libnginx-mod-stream` package, requiring a `load_module modules/ngx_stream_module.so;`
-  directive before `nginx.conf`'s `events {}` block to load it — but **nginx.org's own mainline package
-  compiles the stream module in statically**, confirmed via that package's own `nginx -V` output
-  (`--with-stream --with-stream_realip_module --with-stream_ssl_module --with-stream_ssl_preread_module`).
-  Since this project's proxy image uses nginx.org's package, not Debian's, there is no separate module
-  package to install and no `load_module` directive anywhere in `services/proxy/nginx.conf` — the
-  top-level `stream { ... }` block (`ssl_preread on` → `$stream_backend` on `:8443`) works out of the box.
-  *Corrected 2026-07-30: this section previously claimed the opposite — a separate `libnginx-mod-stream`
-  package and a `load_module` line — which was never true for this image and was caught only via a real
-  `docker build` + `nginx -V` check, not by reading documentation. Do not reintroduce a `load_module`
-  directive based on this stale assumption.*
+- **`libnginx-mod-stream`**: The unified proxy uses nginx's stream module for standard-mode SNI passthrough.
+  This module is in a separate Debian package and loaded via `load_module modules/ngx_stream_module.so;`
+  at the top of `nginx.conf` (before the `events {}` block).
 - **[AG-KD-002]** **Serial file**: OpenSSL's certificate serial file (`ca.srl`) is stored alongside the CA
   certificate and key in the certs directory (e.g., `/opt/lancache-ng/certs/ca.srl` in production)
   and passed to OpenSSL with `-CAserial`. The file tracks certificate serial numbers to ensure
