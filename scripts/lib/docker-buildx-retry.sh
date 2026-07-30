@@ -21,8 +21,8 @@
 # normally absorbed by a client-side retry; build-tools.yml's local scan
 # builds had none.
 #
-# Second confirmed transient signature (2026-07-29, current_dev's own
-# Build & Push run for the #1272 merge commit, `coverage (Rust)` job):
+# Second confirmed transient signature (2026-07-29, a current_dev
+# Build & Push run's `coverage (Rust)` job):
 #
 #   panic: methodref has no signature
 #

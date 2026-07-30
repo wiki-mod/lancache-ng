@@ -73,9 +73,9 @@ always_fail_transient_cmd() {
 }
 
 # The exact error text from the second confirmed transient signature
-# (2026-07-29, current_dev's own Build & Push run for the #1272 merge
-# commit): a golang:latest-toolchain-internal panic inside build-tools'
-# actionlint-builder stage, verbatim.
+# (2026-07-29, a current_dev Build & Push run's `coverage (Rust)` job): a
+# golang:latest-toolchain-internal panic inside build-tools' actionlint-
+# builder stage, verbatim.
 real_go_panic_error() {
     cat <<'EOF'
 #10 108.6 panic: methodref has no signature

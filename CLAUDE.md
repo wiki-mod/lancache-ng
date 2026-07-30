@@ -128,7 +128,14 @@ by configuring which DNS server IP they point to:
   temporary `go.mod -> vendor.mod` / `go.sum -> vendor.sum` symlink for `go get`/`go mod vendor`
   to have a module root to write through, removed again before the build itself runs. Verified
   clean (0 HIGH/CRITICAL across all four binaries) via a real Docker build + real Trivy scan
-  with CI's exact flags, not just a module-graph inspection.
+  with CI's exact flags, not just a module-graph inspection. Confirmed a fourth time
+  (2026-07-29, CVE-2026-56852, issue #1281): `docker-buildx` v0.35.0 (go.mod: v0.37.0) and
+  `docker-compose` v5.2.0 / the Docker CLI v29.6.1 (both: v0.38.0) pinned `golang.org/x/text`
+  at versions carrying a HIGH-severity `norm.Iter` infinite-loop CVE fixed in v0.39.0 —
+  `actionlint` has no `golang.org/x/text` dependency at all, so needed no override. Fixed the
+  same way as the grpc/containerd overrides above: an explicit `go get
+  golang.org/x/text@v0.40.0` before each affected tool's build. Verified clean via a real
+  Docker build + real Trivy scan with CI's exact flags.
 
 ## No Separate Dev Environment
 

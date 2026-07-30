@@ -37,8 +37,8 @@ ARG GRPC_GO_VERSION=1.82.1
 # not just the one CI happened to flag) pin golang.org/x/text at versions
 # carrying CVE-2026-56852 (a norm.Iter infinite loop on malformed input),
 # HIGH severity, fixed in v0.39.0 -- confirmed via Trivy scanning this image
-# (issue #1281, the fourth confirmed instance of this CVE class per
-# CLAUDE.md's AG-KD-003). actionlint has no golang.org/x/text dependency at
+# (the fourth confirmed instance of this CVE class per CLAUDE.md's
+# AG-KD-003). actionlint has no golang.org/x/text dependency at
 # all (checked directly), so it needs no override. Same reasoning as the
 # containerd/grpc overrides above: neither upstream project has cut a
 # release that resolves this on its own yet, so `go get` the fixed version

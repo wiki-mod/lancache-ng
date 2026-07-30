@@ -33,10 +33,12 @@ vulnerabilities:
       at the same module path. Verified against the upstream fix commit's file
       scope AND the current upstream go.mod files. Re-review when upstream
       buildx/compose finish dropping github.com/docker/docker; this is a
-      non-exploitability disposition, not a wait for a fix at the old path, and
-      ideally belongs as an OpenVEX not_affected/vulnerable_code_not_present
-      statement once generate-vex.sh gains that mapping (its header already
-      anticipates this case).
+      non-exploitability disposition, not a wait for a fix at the old path,
+      hence the `status: not_affected` below (generate-vex.sh emits this as
+      an OpenVEX not_affected/vulnerable_code_not_present statement, not the
+      affected/action_statement shape used for entries genuinely awaiting an
+      upstream fix).
+    status: not_affected
     expired_at: 2026-11-15
   - id: CVE-2026-41567
     paths:
@@ -64,6 +66,7 @@ vulnerabilities:
       namesgenerator (a trivial random-container-name generator, unrelated to
       archive/cp handling) -- confirming the actual vulnerable daemon
       code is not present in this binary at all.
+    status: not_affected
     expired_at: 2026-11-15
   - id: CVE-2026-42306
     paths:
@@ -82,4 +85,5 @@ vulnerabilities:
       modules.txt check (only github.com/docker/docker/pkg/namesgenerator is
       actually vendored from this module in docker/buildx v0.35.0; neither
       binary implements or executes the daemon's cp handler).
+    status: not_affected
     expired_at: 2026-11-15
