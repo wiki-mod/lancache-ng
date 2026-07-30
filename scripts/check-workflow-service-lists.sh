@@ -212,9 +212,14 @@ check_services_arrays() {
 # valid case, so tightening it to exact-equality is a separate, pre-existing-
 # design decision outside the scope of this 3-file extension.
 declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
-    ["ensure-pr-staging-images.sh"]="dhcp
-dhcp-proxy
-ntp"
+    # #1296 (2026-07-30): dhcp and dhcp-proxy moved OUT of this exclusion set
+    # -- ensure-pr-staging-images.sh now ensures both, since
+    # scripts/syslog-forwarding-simulation.sh's Triggers 7/8 (added by #864,
+    # after this exclusion set was first written) pull both images directly.
+    # ntp remains excluded: no simulation in this workflow pulls an ntp image
+    # yet (see ensure-pr-staging-images.sh's own comment on this list for the
+    # confirmed trigger-by-trigger check).
+    ["ensure-pr-staging-images.sh"]="ntp"
 )
 
 # Checks every `full_setup_services=(...)` array in $1. For files listed in
