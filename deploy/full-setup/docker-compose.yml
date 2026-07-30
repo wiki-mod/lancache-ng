@@ -47,7 +47,7 @@ services:
         ipv4_address: ${VALIDATION_PROXY_IP:-172.30.99.2}
     restart: unless-stopped
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null"]
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1/healthz"]
       interval: 10s
       timeout: 5s
       retries: 2

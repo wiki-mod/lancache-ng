@@ -25,6 +25,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     nano \
     lsof \
     ripgrep \
+    wget \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     # curl and gnupg (which pulls in dirmngr/gpg/gpg-agent/gpgconf/gpgsm/
@@ -44,7 +45,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     # ca-certificates and openssl are kept: both are genuinely needed at
     # runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's CA/
     # cert generation via openssl, and the system trust store for whatever
-    # nginx itself needs).
+    # nginx itself needs). wget is added here, in the runtime install list,
+    # to replace curl for deploy/{prod,quickstart,full-setup}'s container
+    # healthcheck probes (a real dependency this PR's first pass missed --
+    # purging curl broke every proxy healthcheck, which shells out to it).
     && apt-get purge -y --auto-remove curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 
