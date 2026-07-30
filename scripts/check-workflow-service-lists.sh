@@ -17,9 +17,16 @@
 # or fail this check. A hardcoded canonical set would go stale in exactly the
 # same silent way it is meant to prevent.
 #
-# `full_setup_services=(...)` is deliberately a SUBSET (it intentionally omits
-# dhcp/dhcp-proxy), so it is checked as a subset of the canonical set, not for
-# equality -- a naive "all lists identical" check would be wrong here.
+# `full_setup_services=(...)` is deliberately a SUBSET, so it is checked as a
+# subset of the canonical set, not for equality -- a naive "all lists
+# identical" check would be wrong here. The two `full_setup_services=(...)`
+# copies below no longer share one exclusion set as of #1296 (2026-07-30):
+# build-push.yml's own copy (the compose-only, product-stack membership list)
+# still intentionally omits dhcp/dhcp-proxy, but scripts/ensure-pr-staging-
+# images.sh's copy (the deep-validation staging-image list) now includes both
+# -- see FULL_SETUP_EXACT_EXCLUSIONS below for that file's own, narrower
+# exclusion set (currently just ntp). Do not assume the two arrays mirror
+# each other's exclusions; check each file's own comment.
 #
 # This same #822 recurrence shape was found again, beyond build-push.yml's 4
 # internal copies (issue #935's original scope), in 3 more real files that
@@ -203,14 +210,21 @@ check_services_arrays() {
 # Files where full_setup_services=(...) must equal canonical minus a KNOWN,
 # EXACT exclusion set (not just "no phantom members") -- same reasoning as
 # SUBSET_SERVICES_FILES above: membership-only checking would silently accept
-# a real service being dropped. Scoped to ensure-pr-staging-images.sh, since
-# its full_setup_services=(...) is meant to mirror build-push.yml's own
-# full_setup_services=(...) exactly (both represent the same full-setup
-# validation scope). build-push.yml's own copy intentionally keeps the
-# original, looser membership-only check below -- it has an established bats
-# test (further up this file) exercising an arbitrary smaller subset as a
-# valid case, so tightening it to exact-equality is a separate, pre-existing-
-# design decision outside the scope of this 3-file extension.
+# a real service being dropped. Scoped to ensure-pr-staging-images.sh. Before
+# #1296 (2026-07-30), its full_setup_services=(...) exclusion set mirrored
+# build-push.yml's own full_setup_services=(...) exactly (both represented
+# the same full-setup validation scope); since #1296, the two have
+# deliberately diverged -- ensure-pr-staging-images.sh's own list is now
+# narrower (currently just excludes ntp, see below), because it must ensure a
+# staging image exists for every service a deep-validation simulation
+# actually pulls, which is not the same scope as build-push.yml's
+# compose-membership list. Do not "fix" this file's exclusion set back to
+# matching build-push.yml's -- that would reintroduce #1296. build-push.yml's
+# own copy intentionally keeps the original, looser membership-only check
+# below -- it has an established bats test (further up this file) exercising
+# an arbitrary smaller subset as a valid case, so tightening it to
+# exact-equality is a separate, pre-existing-design decision outside the
+# scope of this 3-file extension.
 declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
     # #1296 (2026-07-30): dhcp and dhcp-proxy moved OUT of this exclusion set
     # -- ensure-pr-staging-images.sh now ensures both, since
