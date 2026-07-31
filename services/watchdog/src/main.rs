@@ -65,9 +65,8 @@ fn load_settings() -> Settings {
         log(&w);
     }
 
-    let (restart_after, warning) =
-        config::parse_u64_with_default(env("RESTART_AFTER").as_deref(), "RESTART_AFTER", 3);
-    if let Some(w) = warning {
+    let (restart_after, warnings) = config::parse_restart_after(env("RESTART_AFTER").as_deref());
+    for w in warnings {
         log(&w);
     }
 
@@ -124,7 +123,7 @@ fn load_settings() -> Settings {
     Settings {
         docker_proxy_url,
         check_interval,
-        restart_after: restart_after as u32,
+        restart_after,
         curl_max_time: Duration::from_secs(curl_max_time),
         curl_max_time_restart: Duration::from_secs(curl_max_time_restart),
         disk_warn_pct: disk_warn_pct as u32,

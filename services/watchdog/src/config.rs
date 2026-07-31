@@ -88,6 +88,30 @@ pub fn parse_u64_with_default(
     }
 }
 
+/// Applies a minimum-value floor to a value [`parse_u64_with_default`]
+/// already validated as a real, all-digit operator input (as opposed to a
+/// value that fell back to `default` for being invalid). Returns `Some`
+/// with the *raw* operator-supplied string when flooring occurred, `None`
+/// otherwise. Deliberately returns the raw string, not the already-parsed
+/// `value`: a leading-zero input like `"00"` parses to the same `0` as a
+/// literal `"0"`, but only the raw string preserves what the operator
+/// actually wrote in the log message the caller builds from this --
+/// watchdog.sh's own `log "...${RAW_VAR}..."` lines always interpolate the
+/// literal env var value, never a value bash itself has already massaged.
+/// An earlier version of this crate's floor logic used the parsed integer
+/// directly, which meant `CHECK_INTERVAL=00` and `CHECK_INTERVAL=0` would
+/// have produced an identical, misleading `CHECK_INTERVAL=0` log line --
+/// losing exactly the information an operator would need to find what they
+/// actually set. Caught in review before merging, not found by the unit
+/// tests (which only exercised the literal `"0"` case).
+fn floor_u64_raw(value: u64, floor: u64, raw: Option<&str>) -> (u64, Option<&str>) {
+    if value < floor {
+        (floor, Some(raw.filter(|s| !s.is_empty()).unwrap_or("0")))
+    } else {
+        (value, None)
+    }
+}
+
 /// `CHECK_INTERVAL` gets an additional floor of 1s beyond the generic
 /// digit-only guard above -- watchdog.sh floors a literal `0` to `1`
 /// because `sleep 0` would turn the main loop into a busy-loop hammering
@@ -97,15 +121,43 @@ pub fn parse_u64_with_default(
 /// first, then the separate below-minimum warning if the digit-guard
 /// result is still `0`).
 pub fn parse_check_interval(raw: Option<&str>) -> (Duration, Vec<String>) {
-    let (mut interval, warning) = parse_u64_with_default(raw, "CHECK_INTERVAL", 30);
+    let (value, warning) = parse_u64_with_default(raw, "CHECK_INTERVAL", 30);
     let mut warnings: Vec<String> = warning.into_iter().collect();
-    if interval < 1 {
+    let (value, floored_raw) = floor_u64_raw(value, 1, raw);
+    if let Some(raw_display) = floored_raw {
         warnings.push(format!(
-            "CHECK_INTERVAL={interval} is below the supported minimum (1s); using 1"
+            "CHECK_INTERVAL={raw_display} is below the supported minimum (1s); using 1"
         ));
-        interval = 1;
     }
-    (Duration::from_secs(interval), warnings)
+    (Duration::from_secs(value), warnings)
+}
+
+/// `RESTART_AFTER` gets the same treatment: watchdog.sh's bash never
+/// validates this knob at all (`[ "$_fcount" -ge "$RESTART_AFTER" ]` under
+/// `set -e` either crashes on non-numeric input or, for a literal `0`,
+/// restarts the monitored container on *every single* unhealthy reading
+/// with no debounce whatsoever -- strictly more destructive than
+/// `CHECK_INTERVAL=0`'s busy-loop, and the same "never a sane operator
+/// intent" reasoning this crate already applies to `CHECK_INTERVAL`/
+/// `SYSLOG_MAX_GB`/`FLUENT_BIT_SELFLOG_MAX_MB`'s floors. Floored to 1
+/// (restart on the very first unhealthy reading -- still a real,
+/// documented, if aggressive, configuration; just never zero rapid-fire
+/// restarts with no debounce at all).
+pub fn parse_restart_after(raw: Option<&str>) -> (u32, Vec<String>) {
+    let (value, warning) = parse_u64_with_default(raw, "RESTART_AFTER", 3);
+    let mut warnings: Vec<String> = warning.into_iter().collect();
+    let (value, floored_raw) = floor_u64_raw(value, 1, raw);
+    if let Some(raw_display) = floored_raw {
+        warnings.push(format!(
+            "RESTART_AFTER={raw_display} is below the supported minimum (1); using 1"
+        ));
+    }
+    // RESTART_AFTER is used as a small threshold compared directly against
+    // a u32 failure counter (see health::FailureCounter) -- truncating a
+    // u64 this small is not a real-world concern (no caller ever sets a
+    // restart threshold anywhere near u32::MAX), unlike the disk/interval
+    // knobs above which stay u64/Duration throughout.
+    (value as u32, warnings)
 }
 
 /// The four Docker container names watchdog's health checks/restarts
@@ -279,6 +331,49 @@ mod tests {
 
         let (interval, _) = parse_check_interval(Some("bogus"));
         assert_eq!(interval, Duration::from_secs(30));
+    }
+
+    #[test]
+    // Regression pin for a bug caught in review (not by the test above,
+    // which only exercised the literal "0" case): the floor warning must
+    // name the RAW operator-supplied value, not the post-parse integer --
+    // "00" and "0" both parse to 0, but only the raw string tells an
+    // operator which one they actually set, matching watchdog.sh's own
+    // log lines (always interpolate the literal env var value).
+    fn parse_check_interval_floor_warning_preserves_raw_leading_zero_value() {
+        let (interval, warnings) = parse_check_interval(Some("00"));
+        assert_eq!(interval, Duration::from_secs(1));
+        assert!(
+            warnings.iter().any(|w| w.contains("CHECK_INTERVAL=00")),
+            "warning must name the raw '00' value, got: {warnings:?}"
+        );
+    }
+
+    #[test]
+    // RESTART_AFTER=0 would otherwise restart the monitored container on
+    // every single unhealthy reading with no debounce at all -- floored to
+    // 1, matching this crate's own established reasoning for CHECK_INTERVAL's
+    // zero-floor (a busy-loop/restart-loop is never a sane operator intent).
+    fn parse_restart_after_floors_zero_to_one() {
+        let (restart_after, warnings) = parse_restart_after(Some("0"));
+        assert_eq!(restart_after, 1);
+        assert!(warnings.iter().any(|w| w.contains("RESTART_AFTER=0")));
+
+        let (restart_after, warnings) = parse_restart_after(Some("00"));
+        assert_eq!(restart_after, 1);
+        assert!(
+            warnings.iter().any(|w| w.contains("RESTART_AFTER=00")),
+            "warning must name the raw '00' value, got: {warnings:?}"
+        );
+
+        let (restart_after, warnings) = parse_restart_after(Some("5"));
+        assert_eq!(restart_after, 5);
+        assert!(warnings.is_empty());
+
+        // Unset keeps the documented default (matches watchdog.sh's
+        // RESTART_AFTER="${RESTART_AFTER:-3}").
+        let (restart_after, _) = parse_restart_after(None);
+        assert_eq!(restart_after, 3);
     }
 
     #[test]
