@@ -162,6 +162,13 @@ validate_ntp_config() {
 # uid:gid always succeeds even unprivileged; chown to an unrelated/invalid
 # owner reliably fails), the same optional-parameter pattern this file's
 # other functions already use.
+# shellcheck disable=SC2120 # the real call site below intentionally passes
+# no arguments (always wants the production chrony:chrony/real-path
+# defaults); the optional overrides exist purely so the bats cases above
+# can exercise this function against fixture paths/owners instead of the
+# real system directories and the chrony user, the same pattern
+# cleanup_stale_ntp_pidfile's own identical disable comment already covers
+# below.
 fix_chrony_dir_ownership() {
     local owner="${1:-chrony:chrony}" log_dir="${2:-/var/log/chrony}" lib_dir="${3:-/var/lib/chrony}"
 
