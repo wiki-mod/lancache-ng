@@ -6,6 +6,11 @@
 # transparency tool to make mixed mutable+immutable states visible; can be
 # used as a CI gate to enforce pinning (exit 1 if violations found) or as an
 # informational report (exit 0, violations reported to stdout/stderr).
+#
+# F-16 (#1095) disposable proof-only marker: this comment-only line exists
+# solely to give a real, isolated diff for the should_run allowlist proof on
+# branch v9-scratch-1095-f16-proof-a; it carries no functional change and this
+# branch is deleted after the proof completes.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
