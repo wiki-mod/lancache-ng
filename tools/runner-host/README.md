@@ -82,7 +82,7 @@ daemon-config.sh` (in this directory) applies these additions safely:
 
 ```json
 {
-  "builder": { "gc": { "enabled": true, "defaultKeepStorage": "20GB" } },
+  "builder": { "gc": { "enabled": true, "defaultReservedSpace": "20GB" } },
   "log-driver": "json-file",
   "log-opts": { "max-size": "10m", "max-file": "3" }
 }
@@ -96,6 +96,26 @@ SIGHUP-reloadable config subset** (only `debug`, `labels`, `live-restore`,
 `dockerd` restart, which drops every container currently running on that
 host, including any in-flight CI job. There is no way to avoid that
 disruption with a reload; the only lever is *when* the restart happens.
+
+**Key-name correction (2026-07-31, AG-VAL-023):** the original draft above
+(PR #1251) used `builder.gc.defaultKeepStorage`. Current moby/moby
+documentation and the `BuilderGCConfig` Go struct
+(`daemon/config/builder.go`) show `defaultReservedSpace` /
+`defaultMaxUsedSpace` / `defaultMinFreeSpace` instead, which raised a real
+risk this whole rollout would silently do nothing: dockerd's JSON parser
+drops any unrecognized key without error (confirmed empirically —
+`dockerd --validate` against a config with a deliberately nonsense key also
+reports "configuration OK", so a clean validate result alone never proved
+the key was real). Verified directly against moby's actual
+`BuilderGCConfig.UnmarshalJSON` source **and** against the literal compiled
+`/usr/bin/dockerd` binary's own embedded struct strings on a real runner
+host (`strings $(which dockerd) | grep -i keepstorage`, no restart needed):
+`defaultKeepStorage` **is** still honored, via a deliberate backward-
+compatibility shim ("Deprecated option is now equivalent to
+DefaultReservedSpace") that maps it onto `DefaultReservedSpace` whenever the
+latter is empty — so the original rollout was never actually broken. This
+repo's tooling now emits the current, non-deprecated `defaultReservedSpace`
+key going forward rather than relying on a documented-deprecated alias.
 
 **Verified real per-host state (direct SSH inspection, 2026-07-31):** three
 of the four runner hosts (`.229`, `.240`, `.241`) already carry a real
@@ -129,10 +149,12 @@ sudo bash /tmp/lancache-ci-docker-daemon-config.sh apply
 
 # 5. THE DISRUPTIVE STEP. Only during the agreed quiet window, one host at a
 #    time: restarts dockerd (stopping every container currently running on
-#    this host) and verifies the new builder/logging settings actually took
-#    effect via `docker info`. Requires an explicit confirmation env var so
-#    it can never fire from a copy-pasted one-liner without a deliberate
-#    extra step:
+#    this host), confirms `docker info` reports the new logging driver (the
+#    one setting `docker info` actually exposes in this Docker version --
+#    the builder GC bound itself is not queryable that way, see the script's
+#    own comment), and reads back the live config file dockerd just loaded.
+#    Requires an explicit confirmation env var so it can never fire from a
+#    copy-pasted one-liner without a deliberate extra step:
 sudo CONFIRM_DOCKERD_RESTART=yes bash /tmp/lancache-ci-docker-daemon-config.sh restart
 
 # 6. Confirm the runner picks up CI jobs normally again before moving on to
@@ -145,13 +167,15 @@ the timestamped backup step 4 created (`/etc/docker/daemon.json.bak.<timestamp>`
 and restart `docker.service` again.
 
 Env overrides (same tunable-via-env style as `lancache-ci-cleanup.sh`):
-`DAEMON_JSON` (default `/etc/docker/daemon.json`), `BUILDER_GC_KEEP_STORAGE`
+`DAEMON_JSON` (default `/etc/docker/daemon.json`), `BUILDER_GC_RESERVED_SPACE`
 (default `20GB`), `LOG_MAX_SIZE` (default `10m`), `LOG_MAX_FILE` (default `3`).
 
 **Status as of 2026-07-31: the script above is prepared and verified (`bash
--n`, `shellcheck`, and a functional `check`/`stage`/`apply` smoke test against
-a copy of each real host's actual `daemon.json`, all run in the pinned
-build-tools container / on-host, never against the live file). The actual
-`restart` step has deliberately NOT been run against any real runner host —
-that remains a maintainer-scheduled action for an agreed quiet window, one
-host at a time**, per issue #1255.
+-n`, `shellcheck`, a 6-test bats suite for the merge logic, and a functional
+`check`/`stage`/`apply` smoke test against a copy of each real host's actual
+`daemon.json`, all run in the pinned build-tools container / on-host, never
+against the live file). `check` and `apply` both also run dockerd's own
+`--validate` preflight against the computed config before anything is
+written or restarted. The actual `restart` step has deliberately NOT been
+run against any real runner host — that remains a maintainer-scheduled
+action for an agreed quiet window, one host at a time**, per issue #1255.

@@ -20,6 +20,15 @@
 #   - an existing daemon.json that is not valid JSON is a hard, fail-closed
 #     error -- this script must never silently discard or clobber content it
 #     cannot parse.
+# Uses `defaultReservedSpace` (not the earlier draft's `defaultKeepStorage`)
+# for `builder.gc`'s size-bound key -- verified against moby/moby's current
+# `BuilderGCConfig` struct and, empirically, against the real compiled
+# `/usr/bin/dockerd` binary on a runner host (`strings $(which dockerd) |
+# grep -i keepstorage`) that `defaultKeepStorage` is only a deprecated,
+# still-functional alias for `defaultReservedSpace`; this rollout emits the
+# current, non-deprecated key name going forward. See the script's own
+# header comment for the full finding.
+#
 # The disruptive `restart` mode and the file-writing `apply`/`stage` modes
 # are intentionally NOT covered here (they require root and a real dockerd);
 # those were instead verified manually against copies of the real per-host
@@ -39,12 +48,12 @@ setup() {
 @test "daemon_config_additions_json: default values match documented README.md rollout" {
     run daemon_config_additions_json
     [ "$status" -eq 0 ]
-    keep_storage="$(jq -r '.builder.gc.defaultKeepStorage' <<<"$output")"
+    reserved_space="$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")"
     enabled="$(jq -r '.builder.gc.enabled' <<<"$output")"
     log_driver="$(jq -r '."log-driver"' <<<"$output")"
     max_size="$(jq -r '."log-opts"."max-size"' <<<"$output")"
     max_file="$(jq -r '."log-opts"."max-file"' <<<"$output")"
-    [ "$keep_storage" = "20GB" ]
+    [ "$reserved_space" = "20GB" ]
     [ "$enabled" = "true" ]
     [ "$log_driver" = "json-file" ]
     [ "$max_size" = "10m" ]
@@ -52,12 +61,12 @@ setup() {
 }
 
 @test "daemon_config_additions_json: env overrides change the emitted values" {
-    BUILDER_GC_KEEP_STORAGE="5GB" LOG_MAX_SIZE="1m" LOG_MAX_FILE="1" run daemon_config_additions_json
+    BUILDER_GC_RESERVED_SPACE="5GB" LOG_MAX_SIZE="1m" LOG_MAX_FILE="1" run daemon_config_additions_json
     [ "$status" -eq 0 ]
-    keep_storage="$(jq -r '.builder.gc.defaultKeepStorage' <<<"$output")"
+    reserved_space="$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")"
     max_size="$(jq -r '."log-opts"."max-size"' <<<"$output")"
     max_file="$(jq -r '."log-opts"."max-file"' <<<"$output")"
-    [ "$keep_storage" = "5GB" ]
+    [ "$reserved_space" = "5GB" ]
     [ "$max_size" = "1m" ]
     [ "$max_file" = "1" ]
 }
@@ -78,7 +87,7 @@ EOF
     [ "$(jq -r '."max-concurrent-uploads"' <<<"$output")" = "20" ]
     [ "$(jq -r '."storage-driver"' <<<"$output")" = "overlay2" ]
     # And the new additions must be present alongside them.
-    [ "$(jq -r '.builder.gc.defaultKeepStorage' <<<"$output")" = "20GB" ]
+    [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")" = "20GB" ]
     [ "$(jq -r '."log-driver"' <<<"$output")" = "json-file" ]
 }
 
@@ -111,5 +120,5 @@ EOF
     # The pre-existing unrelated builder.cache sub-key must survive ...
     [ "$(jq -r '.builder.cache."something-unrelated"' <<<"$output")" = "true" ]
     # ... alongside the new builder.gc this rollout adds.
-    [ "$(jq -r '.builder.gc.defaultKeepStorage' <<<"$output")" = "20GB" ]
+    [ "$(jq -r '.builder.gc.defaultReservedSpace' <<<"$output")" = "20GB" ]
 }

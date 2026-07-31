@@ -34,6 +34,30 @@
 # why the merge below uses jq's recursive `*` operator (deep-merges nested
 # objects such as `builder.gc` instead of replacing the whole `builder` key).
 #
+# Key name (AG-VAL-023 -- checked upstream before writing an assumption into
+# this rollout as fact): earlier drafts of this rollout (PR #1251,
+# tools/runner-host/README.md) used `builder.gc.defaultKeepStorage`, which
+# reads today's moby/moby documentation as a legacy name -- current docs and
+# the `BuilderGCConfig` Go struct (daemon/config/builder.go) show
+# `defaultReservedSpace`/`defaultMaxUsedSpace`/`defaultMinFreeSpace`
+# instead, with no field literally named `defaultKeepStorage` in the current
+# struct fields, which raised a real risk this rollout would be a silent
+# no-op on the pinned Docker 29.6.x runner-host fleet: dockerd's daemon.json
+# parser drops *any* unrecognized key without error (confirmed empirically,
+# 2026-07-31: `dockerd --validate` against a config containing a deliberately
+# nonsense key name also reports "configuration OK" -- validate cannot tell
+# a real key from a typo). Verified directly against moby's actual
+# `BuilderGCConfig.UnmarshalJSON` source AND against the literal compiled
+# `/usr/bin/dockerd` binary's own embedded struct-reflection strings on a
+# real runner host (`strings $(which dockerd) | grep -i keepstorage`, no
+# restart needed): `defaultKeepStorage` IS still read by an explicit,
+# deliberate backward-compatibility shim ("Deprecated option is now
+# equivalent to DefaultReservedSpace") that assigns it into
+# `DefaultReservedSpace` whenever the latter is empty -- so the original
+# key was never actually broken. This script nonetheless emits the current,
+# non-deprecated `defaultReservedSpace` key going forward rather than
+# perpetuating a documented-deprecated spelling in new tooling.
+#
 # Modes (see --help): the default is a safe, read-only `check` that only
 # prints the computed diff. Writing the live file (`apply`) never restarts
 # dockerd by itself; actually restarting dockerd (`restart`) is a separate,
@@ -52,7 +76,7 @@ DAEMON_JSON="${DAEMON_JSON:-/etc/docker/daemon.json}"
 # Tunables, overridable via env the same way lancache-ci-cleanup.sh's reap
 # thresholds are -- lets a specific host deviate from the project default
 # without forking the script.
-BUILDER_GC_KEEP_STORAGE="${BUILDER_GC_KEEP_STORAGE:-20GB}"
+BUILDER_GC_RESERVED_SPACE="${BUILDER_GC_RESERVED_SPACE:-20GB}"
 LOG_MAX_SIZE="${LOG_MAX_SIZE:-10m}"
 LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
 
@@ -62,11 +86,11 @@ LOG_MAX_FILE="${LOG_MAX_FILE:-3}"
 # without re-deriving them.
 daemon_config_additions_json() {
     jq -n \
-        --arg keep_storage "$BUILDER_GC_KEEP_STORAGE" \
+        --arg reserved_space "$BUILDER_GC_RESERVED_SPACE" \
         --arg max_size "$LOG_MAX_SIZE" \
         --arg max_file "$LOG_MAX_FILE" \
         '{
-            "builder": { "gc": { "enabled": true, "defaultKeepStorage": $keep_storage } },
+            "builder": { "gc": { "enabled": true, "defaultReservedSpace": $reserved_space } },
             "log-driver": "json-file",
             "log-opts": { "max-size": $max_size, "max-file": $max_file }
         }'
@@ -119,9 +143,37 @@ Modes:
            pre-agreed quiet window, one host at a time (see README.md).
 
 Env overrides: DAEMON_JSON (default /etc/docker/daemon.json),
-BUILDER_GC_KEEP_STORAGE (default 20GB), LOG_MAX_SIZE (default 10m),
+BUILDER_GC_RESERVED_SPACE (default 20GB), LOG_MAX_SIZE (default 10m),
 LOG_MAX_FILE (default 3).
 EOF
+}
+
+# Runs dockerd's own `--validate` mode against a candidate config -- a
+# read-only, no-restart-required static check dockerd itself provides
+# (confirmed empirically on a real runner host, 2026-07-31, both a good and
+# a deliberately bogus config exit identically fast with no daemon restart
+# or root privilege involved). IMPORTANT caveat, also confirmed empirically:
+# `--validate` only proves the file is syntactically valid JSON that dockerd
+# can parse -- it does NOT catch an unrecognized/misspelled key inside a
+# known object (a config with a deliberately nonsense builder.gc sub-key
+# also reports "configuration OK"), so a clean validate result here is
+# necessary but not sufficient proof the specific settings this script cares
+# about will actually take effect. That is exactly why this script's own
+# header documents having verified `defaultReservedSpace`/`defaultKeepStorage`
+# against moby's real source and the actual compiled dockerd binary, rather
+# than relying on `--validate` for that specific question.
+validate_with_dockerd() {
+    local config_file="$1"
+    if ! command -v dockerd >/dev/null 2>&1; then
+        echo "WARNING: dockerd binary not found on PATH -- skipping the dockerd --validate preflight." >&2
+        return 0
+    fi
+    if ! dockerd --validate --config-file "$config_file" >/dev/null 2>&1; then
+        echo "ERROR: dockerd --validate rejected the computed config -- refusing to proceed." >&2
+        dockerd --validate --config-file "$config_file" >&2 || true
+        return 1
+    fi
+    return 0
 }
 
 cmd_check() {
@@ -136,9 +188,22 @@ cmd_check() {
     merge_daemon_config "$DAEMON_JSON" | tee /dev/stderr | jq '.' >/dev/null
     echo
     echo "--- Diff (current vs. merged) ---"
+    # `diff` exits 1 when it finds differences (the expected, normal case
+    # here -- that's the whole point of this preview) and only exits >1 on a
+    # real usage/read error; `|| true` absorbs the expected exit-1 so
+    # `set -e` doesn't abort this read-only preview over an outcome that
+    # isn't actually a failure.
     diff <(if [[ -f "$DAEMON_JSON" ]]; then jq -S '.' "$DAEMON_JSON"; else echo '{}'; fi) \
          <(merge_daemon_config "$DAEMON_JSON" | jq -S '.') || true
     echo
+    echo "--- dockerd --validate preflight ---"
+    local tmp_check
+    tmp_check="$(mktemp)"
+    merge_daemon_config "$DAEMON_JSON" | jq '.' > "$tmp_check"
+    if validate_with_dockerd "$tmp_check"; then
+        echo "dockerd --validate: configuration OK"
+    fi
+    rm -f "$tmp_check"
     echo "No files were written (check mode). Re-run with 'stage' or 'apply' to write."
 }
 
@@ -158,6 +223,21 @@ cmd_apply() {
         echo "ERROR: computed merged config is not valid JSON -- aborting, nothing written." >&2
         return 1
     fi
+    # Second, stronger preflight: ask dockerd itself whether it accepts this
+    # exact config, before it ever becomes the live file. This still cannot
+    # catch a misspelled key (see validate_with_dockerd's own comment), but
+    # it does catch a config dockerd rejects outright (e.g. a genuinely
+    # malformed value type) -- worth doing here since it costs nothing and
+    # this is the last checkpoint before the file that a later restart will
+    # actually load gets written.
+    local tmp_validate
+    tmp_validate="$(mktemp)"
+    jq '.' <<<"$merged" > "$tmp_validate"
+    if ! validate_with_dockerd "$tmp_validate"; then
+        rm -f "$tmp_validate"
+        return 1
+    fi
+    rm -f "$tmp_validate"
     if [[ -f "$DAEMON_JSON" ]]; then
         local backup
         backup="${DAEMON_JSON}.bak.$(date +%Y%m%dT%H%M%S)"
@@ -202,20 +282,38 @@ cmd_restart() {
         sleep 1
     done
     echo "dockerd is responsive. Verifying the new settings actually took effect ..."
+    # IMPORTANT (confirmed empirically, 2026-07-31): `docker info`'s own JSON
+    # output has NO `BuilderConfig`/builder-GC field at all in this Docker
+    # version -- an earlier draft of this check read a
+    # `.BuilderConfig.GC.DefaultKeepStorage` path that does not exist in the
+    # real `docker info --format '{{json .}}'` schema and would always have
+    # silently reported "<not reported>", giving false confidence that
+    # something had been checked. `LoggingDriver` IS a real top-level field
+    # (confirmed present in real `docker info` JSON output), so that part is
+    # genuinely verifiable this way; the builder GC policy is not exposed by
+    # `docker info` in this Docker version, so this step instead reports what
+    # is actually in the live config file dockerd just (re)loaded from, plus
+    # an explicit note that the GC bound itself can only be confirmed
+    # indirectly, over time, via lancache-ci-cleanup.sh's own disk-usage
+    # measurements no longer showing unbounded build-cache growth.
     local info_json
     info_json="$(docker info --format '{{json .}}')"
-    local keep_storage
-    keep_storage="$(jq -r '.BuilderConfig.GC.DefaultKeepStorage // empty' <<<"$info_json" 2>/dev/null || true)"
     local logging_driver
     logging_driver="$(jq -r '.LoggingDriver // empty' <<<"$info_json" 2>/dev/null || true)"
-    echo "  BuilderConfig.GC.DefaultKeepStorage: ${keep_storage:-<not reported>}"
-    echo "  LoggingDriver: ${logging_driver:-<not reported>}"
+    echo "  LoggingDriver (from docker info): ${logging_driver:-<not reported>}"
     if [[ "$logging_driver" != "json-file" ]]; then
         echo "WARNING: LoggingDriver does not report json-file -- verify manually before" >&2
         echo "declaring this host's rollout complete." >&2
     fi
-    echo "Restart complete. Confirm the host resumes picking up CI jobs normally"
-    echo "before moving on to the next host (one host at a time, per README.md)."
+    echo "  Live $DAEMON_JSON builder.gc section (docker info does not expose this"
+    echo "  in this Docker version, so this is read back from the config file"
+    echo "  dockerd just loaded, not queried from a running-daemon API):"
+    jq '.builder // "(no builder key present)"' "$DAEMON_JSON" 2>/dev/null || echo "  <could not read $DAEMON_JSON>"
+    echo
+    echo "Restart complete. Confirm the host resumes picking up CI jobs normally,"
+    echo "then confirm the build-cache bound is actually holding over the following"
+    echo "days via lancache-ci-cleanup.sh's own before/after disk-usage log, before"
+    echo "moving on to the next host (one host at a time, per README.md)."
 }
 
 main() {
