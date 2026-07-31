@@ -1,0 +1,67 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Manifest for the lancache-watchdog health-monitor/auto-restart daemon
+# (issue #842's Rust rewrite of the former services/watchdog/watchdog.sh).
+#
+# Scope note (2026-07-31/08-01): this crate currently ports only
+# watchdog.sh's health-check/restart state machine (proxy/dns-standard/
+# dns-ssl/nats), the status.json writer, disk-usage probe, and the
+# docker-socket-proxy alert-only probe -- NOT watchdog.sh's three
+# filesystem-retention passes (maybe_purge/maybe_prune_syslog/
+# maybe_rotate_fluent_bit_selflog). See src/lib.rs's module doc comment and
+# issue #842's WIP comment (2026-07-31) for the open scope question this
+# depends on. services/watchdog/Dockerfile's ENTRYPOINT still points at the
+# bash watchdog.sh; this crate is not wired in as a replacement yet.
+
+[package]
+name = "lancache-watchdog"
+version = "0.1.0"
+edition = "2024"
+license = "AGPL-3.0-or-later"
+
+[lib]
+# Exposes every pure, no-I/O module (config parsing/validation, the
+# failure-counter state machine, health-string parsing, status.json
+# shape/serialization, disk-percentage classification) so unit tests can
+# exercise them directly without a live Docker socket proxy or a real
+# filesystem -- mirrors services/dns/nats-subscriber's and services/ui's
+# own lib.rs/fuzz-surface split, though this crate has no fuzz/ harness of
+# its own (no untrusted external wire format to fuzz -- Docker's own health
+# JSON is a trusted local API response, not attacker-controlled input).
+name = "lancache_watchdog"
+path = "src/lib.rs"
+
+[[bin]]
+name = "lancache-watchdog"
+path = "src/main.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# rustls, never openssl-sys (AG-REL-003) -- rust:slim/the eventual runtime
+# base has no OpenSSL headers. Matches services/dns/nats-subscriber's
+# reqwest version/feature shape (a small binary with a narrow HTTP surface,
+# same category as this crate) rather than services/ui's heavier axum-server
+# dependency profile, which this crate has no use for (watchdog has no HTTP
+# server of its own, only an HTTP *client* to docker-socket-proxy).
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+tokio = { version = "1", features = ["full"] }
+# Only pulled in for one purpose: rendering the same UTC RFC3339-ish
+# timestamp shape watchdog.sh's `date -u +%Y-%m-%dT%H:%M:%SZ` produces for
+# status.json's "updated" field (services/ui/src/watchdog_status.rs's
+# STALE_AFTER staleness check reads this file's mtime, not this field, but
+# the field is still operator-visible in the dashboard). No other crate in
+# this repository formats dates yet, so this is a new, deliberate addition,
+# not a reuse -- chosen over `chrono` for a smaller dependency footprint (no
+# proc-macro, no pulled-in timezone database) since only UTC, fixed-format
+# rendering is needed here, never timezone conversion or parsing.
+time = { version = "0.3", features = ["formatting", "macros"] }
+
+# Deliberate release-profile tuning, matching services/ui's and
+# services/dns/nats-subscriber's identical [profile.release] block -- see
+# either crate's own comment for the full reasoning (fat LTO for
+# cross-crate inlining; codegen-units=2 traded against the project's own
+# sccache/distcc build-farm capacity; strip/panic=abort/target-cpu=native
+# each considered and rejected there for the same reasons that apply here).
+[profile.release]
+lto = "fat"
+codegen-units = 2
