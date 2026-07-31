@@ -489,9 +489,11 @@ fn perform_client_dry_run(
     let server_id = offer.server_identifier.expect("checked by build_request");
     let ack = match wait_for_ack(socket, xid, server_id, timeout) {
         Ok(Ok(lease)) => lease,
-        Ok(Err(reason)) => return ClientOutcome::Failed {
-            reason: reason.to_string(),
-        },
+        Ok(Err(reason)) => {
+            return ClientOutcome::Failed {
+                reason: reason.to_string(),
+            };
+        }
         Err(e) => {
             return ClientOutcome::Unavailable {
                 reason: format!("failed while waiting for DHCPACK: {e}"),
@@ -581,9 +583,7 @@ pub fn run_probe(discover_window: Duration, request_timeout: Duration) -> ProbeR
                 discover_window.as_secs_f64()
             ),
         },
-        Some(first_offer) => {
-            perform_client_dry_run(&socket, &chaddr, first_offer, request_timeout)
-        }
+        Some(first_offer) => perform_client_dry_run(&socket, &chaddr, first_offer, request_timeout),
     };
 
     ProbeReport { conflict, client }
@@ -703,7 +703,8 @@ mod tests {
             server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
             ..Default::default()
         };
-        let msg = build_request(42, &chaddr, &offer).expect("a complete offer must build a request");
+        let msg =
+            build_request(42, &chaddr, &offer).expect("a complete offer must build a request");
 
         let mut buf = Vec::new();
         msg.encode(&mut Encoder::new(&mut buf)).unwrap();
@@ -749,9 +750,8 @@ mod tests {
         ]));
         msg.opts_mut()
             .insert(DhcpOption::DomainName("lan.example".to_string()));
-        msg.opts_mut().insert(DhcpOption::BroadcastAddr(Ipv4Addr::new(
-            192, 168, 1, 255,
-        )));
+        msg.opts_mut()
+            .insert(DhcpOption::BroadcastAddr(Ipv4Addr::new(192, 168, 1, 255)));
         msg.opts_mut().insert(DhcpOption::AddressLeaseTime(3600));
         msg.opts_mut().insert(DhcpOption::Renewal(1800));
         msg.opts_mut().insert(DhcpOption::Rebinding(3150));
@@ -762,10 +762,7 @@ mod tests {
 
         let lease = lease_info_from_message(&decoded);
         assert_eq!(lease.offered_ip, Some(Ipv4Addr::new(192, 168, 1, 50)));
-        assert_eq!(
-            lease.server_identifier,
-            Some(Ipv4Addr::new(192, 168, 1, 1))
-        );
+        assert_eq!(lease.server_identifier, Some(Ipv4Addr::new(192, 168, 1, 1)));
         assert_eq!(lease.subnet_mask, Some(Ipv4Addr::new(255, 255, 255, 0)));
         assert_eq!(lease.router, Some(Ipv4Addr::new(192, 168, 1, 1)));
         assert_eq!(

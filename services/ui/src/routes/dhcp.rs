@@ -4627,7 +4627,10 @@ mod tests {
         }
         match report.client {
             DhcpClientCheckStatus::Passed { output, details } => {
-                assert_eq!(output, "DHCP client dry-run succeeded, assigned 192.168.1.211");
+                assert_eq!(
+                    output,
+                    "DHCP client dry-run succeeded, assigned 192.168.1.211"
+                );
                 assert_eq!(
                     details,
                     vec![DhcpProbeDetail {
