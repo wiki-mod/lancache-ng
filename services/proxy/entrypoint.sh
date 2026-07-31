@@ -954,26 +954,49 @@ mkdir -p /etc/nginx/stream.d
     else
         echo "    default 127.0.0.1:9;"
         for domain in "${_UNIQUE_DOMAINS[@]}"; do
-            printf "    %-45s %s:443;\n" "*.${domain}" "$domain"
+            # Forward to the requested SNI itself, NOT to "$domain:443" -- a
+            # registrable root is only a cert-selection/DNS-match boundary,
+            # not necessarily the real origin host for every subdomain
+            # beneath it. A listed drivers.amd.com (root amd.com) must reach
+            # drivers.amd.com:443, not amd.com:443, since the real CDN origin
+            # may not serve that subdomain's content from the root's own
+            # resolved IP -- confirmed live (issue #1297, folded into #1276):
+            # this is the exact bug the _EXTRA_WILDCARD_BASES loop below was
+            # already fixed for; this loop had the same bug for its own,
+            # older case.
+            printf "    %-45s \$ssl_preread_server_name:443;\n" "*.${domain}"
+            # _DOMAIN_IS_ROOT[$domain] is structurally always 1 here: this
+            # loop iterates _UNIQUE_DOMAINS, which by construction only ever
+            # contains derived roots (see _collect_domain_rows), and every
+            # derived root is marked as its own root unconditionally. The
+            # guard is kept anyway so this stays parallel/defensive with the
+            # other three map-generation loops below, none of which can
+            # assume anything about _DOMAIN_IS_ROOT's contents for their own
+            # arrays -- removing it here would save nothing at runtime but
+            # would make this loop's shape inconsistent with its neighbors
+            # for no benefit.
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
-                printf "    %-45s %s:443;\n" "$domain" "$domain"
+                printf "    %-45s \$ssl_preread_server_name:443;\n" "$domain"
             fi
         done
         for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
             # Forward to the requested SNI itself, NOT to "$domain:443" --
-            # unlike a registrable root (_UNIQUE_DOMAINS above), a deeper
-            # wildcard base is a cert-selection boundary, not necessarily a
-            # real, independently resolvable host: passthrough must reach
+            # same reasoning as the registrable-root loop above (issue
+            # #1297, folded into #1276): a deeper wildcard base is a
+            # cert-selection boundary, not necessarily a real,
+            # independently resolvable host: passthrough must reach
             # whatever the client actually asked for (e.g. ftp.de.debian.org),
             # not the wildcard base's own name (de.debian.org), which may
-            # have no DNS record or point at an unrelated endpoint. The
-            # registrable-root loop above has this same class of bug for its
-            # own case (a listed drivers.amd.com forwards to amd.com:443, not
-            # drivers.amd.com:443) -- confirmed separately, tracked as issue
-            # #1297, not fixed here (out of this change's scope).
+            # have no DNS record or point at an unrelated endpoint.
             printf "    %-45s \$ssl_preread_server_name:443;\n" "*.${domain}"
         done
         for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+            # Reviewed for the same #1297 bug class as the two loops above
+            # and found already correct by construction: the map key here
+            # IS the literal exact host, so a match only ever happens when
+            # $ssl_preread_server_name equals $domain exactly -- forwarding
+            # to "$domain:443" is the same target "$ssl_preread_server_name:443"
+            # would resolve to. No change needed for this loop.
             printf "    %-45s %s:443;\n" "$domain" "$domain"
         done
     fi
