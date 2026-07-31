@@ -336,18 +336,23 @@ require_grep 'is missing required platform' \
 require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
   'container scans must use platform- and ref-specific Trivy cache directories (see #904 -- ref-parallel scans must never share a cache dir)'
-require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-\$\{sanitized_ref\}"' \
+require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-pushed-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
-  'the pushed build-tools digest scan must use a ref-specific Trivy cache directory too (see #904)'
+  'the pushed per-service digest scan must use a service- and ref-specific Trivy cache directory too (see #904; widened from build-tools-only to every service by Schritt 3, issue #1095)'
 # #904 follow-through: a cache-dir key only needs to be as fine as its job's
 # own concurrency-group key, but must be at least that fine -- container-scan
-# and build's build-tools-pushed step both suffix run_id onto the cache dir
-# in exactly the workflow_dispatch/rerun condition their own concurrency
-# groups already use that suffix for (see those groups' `group:` expressions
-# a few checks up). An earlier revision of the #904 fix keyed the cache dir
-# on ref alone, which was still coarser than the concurrency-group key for
-# the dispatch/rerun case and left that race open; this guard exists so that
-# specific regression can't come back silently.
+# and build's pushed-service-digest-scan step both suffix run_id onto the
+# cache dir in exactly the workflow_dispatch/rerun condition their own
+# concurrency groups already use that suffix for (see those groups' `group:`
+# expressions a few checks up). An earlier revision of the #904 fix keyed the
+# cache dir on ref alone, which was still coarser than the concurrency-group
+# key for the dispatch/rerun case and left that race open; this guard exists
+# so that specific regression can't come back silently. Schritt 3 (issue
+# #1095) widened the pushed-digest cache dir from build-tools-only to every
+# service, so this guard was updated in lockstep to check for the
+# matrix.service-scoped key rather than the old hardcoded "build-tools-"
+# prefix -- otherwise this guard itself would have silently stopped
+# verifying anything real for 7 of 8 services.
 require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
   .github/workflows/build-push.yml \
   'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'

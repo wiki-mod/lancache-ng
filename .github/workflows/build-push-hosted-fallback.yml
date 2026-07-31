@@ -498,8 +498,14 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}-amd64-hosted-fallback
           cache-to: type=gha,scope=${{ matrix.service }}-amd64-hosted-fallback,mode=max
 
-      - name: Scan pushed build-tools digest with Trivy
-        if: matrix.service == 'build-tools'
+      - name: Scan pushed service digest with Trivy
+        # Same provenance-gap fix as build-push.yml's own "Scan pushed
+        # service digest with Trivy" step (Schritt 3, issue #1095): this was
+        # build-tools-only, mirroring build-push.yml's pre-Schritt-3 state.
+        # This job never skips its own "Build and push" step (no
+        # should-build gating in this fallback workflow, unlike
+        # build-push.yml), so no `steps.build.outcome == 'success'` guard is
+        # needed here the way build-push.yml's equivalent step has one.
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
