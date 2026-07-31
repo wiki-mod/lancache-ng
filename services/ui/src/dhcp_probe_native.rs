@@ -1062,10 +1062,15 @@ mod tests {
             // Passed -- this test's assertion is the xid seen above, but a
             // Failed/Unavailable outcome here would itself be a sign
             // something upstream broke, so it is checked too.
+            // Message::new_with_id's address params are (ciaddr, yiaddr,
+            // siaddr, giaddr) in that order -- the granted lease address
+            // belongs in yiaddr (3rd), matching how a real server's ACK is
+            // shaped and how lease_info_from_message reads it back via
+            // msg.yiaddr(), not ciaddr (which this client never has bound).
             let mut ack = Message::new_with_id(
                 request.xid(),
-                Ipv4Addr::new(192, 168, 50, 77),
                 Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::new(192, 168, 50, 77),
                 Ipv4Addr::UNSPECIFIED,
                 Ipv4Addr::UNSPECIFIED,
                 request.chaddr(),
@@ -1158,10 +1163,12 @@ mod tests {
             let request = Message::decode(&mut Decoder::new(&buf[..n]))
                 .expect("must decode a well-formed DHCPREQUEST");
 
+            // See the xid-chaining test's own comment: the granted lease
+            // address belongs in yiaddr (3rd positional arg), not ciaddr.
             let mut ack = Message::new_with_id(
                 request.xid(),
-                Ipv4Addr::new(192, 168, 77, 5),
                 Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::new(192, 168, 77, 5),
                 Ipv4Addr::UNSPECIFIED,
                 Ipv4Addr::UNSPECIFIED,
                 request.chaddr(),
