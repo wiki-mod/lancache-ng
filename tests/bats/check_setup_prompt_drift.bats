@@ -293,5 +293,39 @@ if [[ "${SOME_FLAG:-}" = "y" ]]; then
     real_repo_root="$BATS_TEST_DIRNAME/../.."
     run bash "$script" "$real_repo_root"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"All 11 unconditional"* ]]
+    # Issue #1176 (Angle 1): both real simulation scripts now derive their
+    # expect_prompt sequence from setup.sh's `list-prompts` introspection
+    # mode (scripts/lib/setup-wizard-introspect.sh) instead of hand-encoding
+    # it, so this guard's static coverage/staleness checks have nothing left
+    # to run against them -- see is_introspection_driven's own comment.
+    [[ "$output" == *"All 2 simulation script(s) are introspection-driven"* ]]
+}
+
+@test "is_introspection_driven: a sim script referencing build_expect_prompt_block is skipped from static coverage/staleness checks" {
+    write_setup 'ask "Server IP (Standard mode)" "192.168.1.10"'
+    # Deliberately gives this fixture NO expect_prompt lines and a pattern
+    # that would otherwise be reported stale if statically checked -- if
+    # is_introspection_driven's skip did not work, this would fail on either
+    # the zero-patterns check or a staleness mismatch.
+    write_sim "$fixture_root/scripts/setup-cli-simulation.sh" '
+build_expect_prompt_block "setup.sh" "/tmp/does-not-matter" "192.168.1.10"
+spawn bash setup.sh
+'
+    write_sim "$fixture_root/scripts/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"derives its expect_prompt sequence from a real"* ]]
+}
+
+@test "is_introspection_driven: fails closed if a sim script references build_expect_prompt_block but no longer spawns setup.sh" {
+    write_setup 'ask "Server IP (Standard mode)" "192.168.1.10"'
+    write_sim "$fixture_root/scripts/setup-cli-simulation.sh" '
+build_expect_prompt_block "setup.sh" "/tmp/does-not-matter" "192.168.1.10"
+'
+    write_sim "$fixture_root/scripts/syslog-forwarding-simulation.sh" 'expect_prompt {Server IP \(Standard mode\)} "192.168.1.10"'
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"no longer contains 'spawn bash setup.sh'"* ]]
 }

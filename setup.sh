@@ -50,12 +50,61 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
 REPLY=""
+# Issue #1176: set by the `list-prompts` subcommand (never by an operator
+# directly) to redirect every ask()/confirm() call in the install wizard into
+# introspection mode instead of its normal interactive behavior -- see
+# wizard_introspect_record_prompt's own comment for what that mode does and
+# why it exists as one shared helper rather than a second, hand-duplicated
+# copy of the wizard's prompt text.
+WIZARD_INTROSPECT_MODE=0
+# fd 9 is reserved for `list-prompts`' optional answers file (opened once via
+# `exec 9<...` where the subcommand is dispatched); unset/empty means no
+# answers file was given, so every prompt just resolves to its own default,
+# same as an operator hitting Enter on every prompt.
+WIZARD_INTROSPECT_ANSWERS_FD=""
+
+# Issue #1176: the ONE place that knows how to turn an ask()/confirm() call
+# into an introspection-mode result, shared by both functions below so
+# `setup.sh list-prompts` walks the exact same call sites, in the exact same
+# order, as a real interactive install -- it cannot re-implement or copy the
+# wizard's branch logic anywhere, only observe it, which is what actually
+# closes the blind spot named in issue #1176 (a new prompt on a conditional
+# branch a simulation script's answers actually reach previously had no
+# single source of truth checking it; now the simulation scripts derive their
+# expected prompt sequence from this function's own output instead of
+# hand-encoding it).
+#
+# Output format: "PROMPT\t<prompt text>\t<default>\n" on stdout -- deliberately
+# plain and grep/cut-friendly (no JSON/YAML dependency, matching this
+# project's shell-first tooling convention) and matches the exact text ask()
+# would otherwise print interactively (prompt, then " [default]: "), so a
+# consumer can reconstruct the real rendered prompt without duplicating
+# ask()'s own formatting logic a second time.
+#
+# Resolving REPLY: pulls the next line from the answers-file fd if one was
+# given, otherwise (or once that file is exhausted) falls back to the
+# prompt's own default -- the same fallback ask() already applies for a blank
+# interactive Enter keypress, so an answers file only needs to name the
+# prompts where the operator would deliberately deviate from the default.
+wizard_introspect_record_prompt() {
+    local prompt="$1" default="$2" line=""
+    printf 'PROMPT\t%s\t%s\n' "$prompt" "$default"
+    if [[ -n "$WIZARD_INTROSPECT_ANSWERS_FD" ]]; then
+        IFS= read -r line <&"$WIZARD_INTROSPECT_ANSWERS_FD" || line=""
+    fi
+    REPLY="${line:-$default}"
+}
+
 # Reads from /dev/tty explicitly, not stdin: this script is commonly run via
 # `curl ... | bash`, which occupies stdin with the script body itself. Without
 # this, every prompt would silently read leftover script text instead of
 # waiting for the user.
 ask() {
     local prompt="$1" default="${2:-}"
+    if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+        wizard_introspect_record_prompt "$prompt" "$default"
+        return
+    fi
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
     read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
@@ -3551,6 +3600,11 @@ Commands:
   install-requirements-secondary
                        Install only the Docker prerequisites for a secondary
                        DNS node, without running ./setup.sh secondary.
+  list-prompts [answers-file]
+                       Introspection mode: reports the exact ordered prompt
+                       sequence the install wizard would ask for a given set
+                       of answers, without touching the filesystem, network,
+                       or Docker. See './setup.sh list-prompts --help'.
   update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
   update-ip [install-dir]
                        Change the configured standard and SSL listener IPs.
@@ -3622,6 +3676,29 @@ stops. ./setup.sh secondary itself only checks for these tools and fails with
 "docker is not installed" if they are missing -- this command lets an
 operator install exactly what a secondary needs, standalone, before running
 ./setup.sh secondary. Must be run as root.
+EOF
+            ;;
+        list-prompts)
+            cat <<EOF
+Usage: ./setup.sh list-prompts [answers-file]
+
+Introspection mode for issue #1176: walks the install wizard's real,
+current branch logic (the exact same code ./setup.sh install runs) and
+prints the ordered prompt sequence it would ask, one per line, as
+"PROMPT<TAB>text<TAB>default". Never touches the filesystem, network, or
+Docker -- no root required.
+
+[answers-file] is optional: a plain text file with one reply per line, in
+the order prompts are expected to be asked. A blank line (or running out of
+lines) falls back to that prompt's own default, the same as an operator
+pressing Enter. Omitting the file entirely walks the all-defaults path.
+
+Intended consumer: scripts/setup-cli-simulation.sh and
+scripts/syslog-forwarding-simulation.sh derive their expect-driven prompt
+sequences from this command's output instead of hand-encoding them, so a new
+prompt on any branch those scripts' answers actually reach cannot silently
+drift out of sync (see scripts/check-setup-prompt-drift.sh for the
+complementary static drift guard, which stays in place as a second net).
 EOF
             ;;
         update)
@@ -5936,6 +6013,29 @@ case "${1:-install}" in
             exit 0
         fi
         ;;
+    list-prompts)
+        # Issue #1176: introspection mode. Deliberately does NOT `exit 0` here
+        # -- it falls through to the exact same top-level wizard code the
+        # `install|""` case above falls through to (see the "Main setup"
+        # header comment below), so `list-prompts` walks the real, current
+        # branch logic instead of a second, hand-duplicated copy of it. The
+        # wizard itself checks WIZARD_INTROSPECT_MODE at every real
+        # filesystem/network/Docker mutation point and skips them; see those
+        # checks' own comments for the specific list.
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help list-prompts
+            exit 0
+        fi
+        WIZARD_INTROSPECT_MODE=1
+        if [[ -n "${2:-}" ]]; then
+            [[ -f "$2" ]] || die "Answers file not found: $2"
+            # Fixed fd 9: this subcommand never nests or re-execs itself, so
+            # there is no risk of a second `list-prompts` invocation in the
+            # same process colliding on this fd.
+            exec 9<"$2"
+            WIZARD_INTROSPECT_ANSWERS_FD=9
+        fi
+        ;;
     install-requirements-primary)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help install-requirements-primary
@@ -6035,42 +6135,49 @@ printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip
 printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
-print_step "Checking prerequisites"
+# Issue #1176: introspection mode needs none of this -- no root, no Docker, no
+# git clone -- it only walks the wizard's prompt/branch logic below. Skipping
+# it here (rather than making list-prompts require root/Docker/a real repo
+# checkout just like a real install) is what lets it run cheaply and
+# repeatedly in CI/bats fixtures.
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    print_step "Checking prerequisites"
 
-[[ "$(id -u)" = "0" ]] \
-    || die "This script must be run as root (sudo ./setup.sh)."
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh)."
 
-assert_prebuilt_image_platform_supported
+    assert_prebuilt_image_platform_supported
 
-ensure_stack_requirements_installed
+    ensure_stack_requirements_installed
 
-if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
-    print_warn "No local repo found — cloning to /opt/lancache-ng..."
-    if ! command -v git >/dev/null 2>&1; then
-        install_git
-    fi
-    setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
-    if [[ -d "/opt/lancache-ng/.git" ]]; then
-        if [[ -n "$setup_bootstrap_ref" ]]; then
-            print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
-            sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
-        else
-            print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
-            sync_repo_to_default_branch /opt/lancache-ng
+    if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
+        print_warn "No local repo found — cloning to /opt/lancache-ng..."
+        if ! command -v git >/dev/null 2>&1; then
+            install_git
         fi
-    elif [[ -n "$setup_bootstrap_ref" ]]; then
-        git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
-            || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
-    else
-        git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
-            || die "Clone failed."
+        setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
+        if [[ -d "/opt/lancache-ng/.git" ]]; then
+            if [[ -n "$setup_bootstrap_ref" ]]; then
+                print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
+                sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
+            else
+                print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+                sync_repo_to_default_branch /opt/lancache-ng
+            fi
+        elif [[ -n "$setup_bootstrap_ref" ]]; then
+            git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+                || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
+        else
+            git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+                || die "Clone failed."
+        fi
+        chmod +x /opt/lancache-ng/setup.sh
+        exec /opt/lancache-ng/setup.sh "$@"
     fi
-    chmod +x /opt/lancache-ng/setup.sh
-    exec /opt/lancache-ng/setup.sh "$@"
-fi
 
-print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
-print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
+    print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
+    print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
+fi
 
 # ── 2. Network IPs ────────────────────────────────────────────────────────────
 print_step "Network configuration"
@@ -6114,9 +6221,15 @@ if [[ "${REPLY,,}" = "y" ]]; then
         print_warn "$IP_SSL not yet assigned to an interface"
         ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
         if [[ "${REPLY,,}" = "y" ]]; then
-            ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
-                && print_ok "$IP_SSL added (not persistent)" \
-                || print_warn "Adding failed — please add manually"
+            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+                # Issue #1176: introspection mode never mutates real host
+                # network state, even if a supplied answers file says "y" here.
+                print_ok "$IP_SSL would be added (skipped: introspection mode)"
+            else
+                ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
+                    && print_ok "$IP_SSL added (not persistent)" \
+                    || print_warn "Adding failed — please add manually"
+            fi
         fi
         printf "\n"
         print_warn "For persistent configuration after reboot:"
@@ -6140,9 +6253,11 @@ if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
-mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
-install_quickstart_compose_assets "$INSTALL_DIR"
-print_ok "quickstart compose assets copied to $INSTALL_DIR"
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
+    install_quickstart_compose_assets "$INSTALL_DIR"
+    print_ok "quickstart compose assets copied to $INSTALL_DIR"
+fi
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
@@ -6549,6 +6664,14 @@ if [[ "${REPLY,,}" = "y" ]]; then
         && env_key_has_usable_secret UI_AUTH_PASSWORD "$INSTALL_DIR/.env"; then
         UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$INSTALL_DIR/.env")
         print_ok "Existing Admin-UI password preserved"
+    elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+        # Issue #1176: introspection mode must not fabricate and print a real
+        # random secret on every run -- it never gets written anywhere, and
+        # doing so would also make list-prompts' own output non-deterministic
+        # across repeat runs with identical answers (AG-OP-006/007), even
+        # though the actual PROMPT sequence itself is unaffected either way.
+        UI_AUTH_PASSWORD=""
+        print_ok "Admin-UI password would be generated (skipped: introspection mode)"
     else
         UI_AUTH_PASSWORD=$(generate_secret_value UI_AUTH_PASSWORD alnum20)
         printf "\n"
@@ -6578,6 +6701,19 @@ if [[ -f "$env_file" ]]; then
     ask "Overwrite .env? [y/N]" "N"
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
+
+# Issue #1176: from here through the end of "Installing systemd watchdog"
+# below is every remaining real mutation the install performs (secret
+# generation, the actual .env write, cache/Kea/NTP directory creation,
+# systemd unit files, `systemctl daemon-reload`) -- none of it can run in
+# introspection mode, which must leave the host completely untouched. No
+# prompt is asked anywhere in this span (confirmed by
+# scripts/check-setup-prompt-drift.sh's own wizard-region scan, which would
+# fail closed on a stray ask()/confirm() call site inside a newly
+# unbalanced block here), so skipping it wholesale changes no prompt
+# ordering -- control falls straight through to the unconditional
+# "Start now?" prompt after "Installing systemd watchdog" either way.
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
 
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
 LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
@@ -6951,6 +7087,8 @@ EOF
     print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
 
+fi # WIZARD_INTROSPECT_MODE guard opened before "Writing .env" above
+
 # ── 12. Summary and confirmation ──────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
@@ -7002,7 +7140,11 @@ fi
 printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
 
 ask "Start now? [Y/n]" "Y"
-[[ "${REPLY,,}" != "n" ]] \
+# Issue #1176: this is the last prompt list-prompts needs -- reusing the
+# existing "start later" exit path here (rather than adding a second exit
+# point) also guarantees introspection never reaches the real pull/systemctl/
+# docker-compose-up mutations below, regardless of what an answers file said.
+[[ "$WIZARD_INTROSPECT_MODE" != "1" && "${REPLY,,}" != "n" ]] \
     || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
 # ── 13. Starting stack ───────────────────────────────────────────────────────

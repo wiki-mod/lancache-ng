@@ -33,22 +33,34 @@
 #      setup.sh without updating the simulation script -- the same drift
 #      class, just discovered from the other direction.
 #
-# --- What this DOES NOT catch (a real, documented blind spot) --------------
+# --- Historical blind spot, now closed for introspection-driven scripts ----
 # A *new* prompt inserted along a *conditional* branch that a simulation
 # script's own answers actually walk (e.g. a new prompt added inside the SSL
 # block, which scripts/syslog-forwarding-simulation.sh's SSL_ENABLED=y path
-# exercises) is invisible to check 1 above, because this script does not
-# execute setup.sh or interpret which conditional branches a given sim's
-# fixed answer sequence actually takes -- it only classifies whether a
-# prompt is reachable unconditionally from the top of the wizard. Closing
-# that gap needs either running setup.sh itself with each sim's exact answer
-# sequence (fragile: today's setup.sh has no non-interactive/dry-run answer-
-# feeding mode, so this would mean stubbing out every host-mutating command
-# the wizard calls) or a `setup.sh --list-prompts`-style introspection mode
-# that reports the real prompt sequence for a given set of answers -- the
-# single-source-of-truth refactor issue #1176 itself proposes as its other,
-# complementary angle. That is intentionally out of scope for this script;
-# see the PR that introduced this guard for the follow-up issue tracking it.
+# exercises) used to be invisible to check 1 above, because this script never
+# executed setup.sh or interpreted which conditional branches a given sim's
+# fixed answer sequence actually takes -- it only classified whether a
+# prompt is reachable unconditionally from the top of the wizard.
+#
+# Issue #1176's Angle 1 (`setup.sh list-prompts`, a real introspection mode
+# that walks the wizard's actual branch logic for a supplied answer
+# sequence -- see setup.sh's own `wizard_introspect_record_prompt` comment)
+# closes this from the OTHER direction: scripts/setup-cli-simulation.sh and
+# scripts/syslog-forwarding-simulation.sh no longer hand-encode their
+# expect_prompt sequences at all -- they call
+# scripts/lib/setup-wizard-introspect.sh's build_expect_prompt_block, which
+# runs `setup.sh list-prompts` with the exact same replies the script is
+# about to send interactively and builds the expect patterns from that real,
+# current output. There is nothing left in either file for THIS script's
+# static text-matching (steps 3-5 below) to compare against, and that is
+# correct, not a gap: a script with no hand-encoded copy cannot drift from
+# one. Per AG-VAL-015, this script is not deleted or weakened just because
+# introspection makes its coverage/staleness checks moot for these two files
+# -- it still runs a real check on any file that still hand-encodes
+# expect_prompt patterns (see is_introspection_driven's own comment for the
+# detection rule and its sanity-check fallback), so it remains a live second
+# net for any simulation script that has not adopted introspection yet, or
+# adopts it incorrectly.
 #
 # --- How prompts are classified: unconditional vs. conditional -------------
 # setup.sh's install wizard is NOT a function -- it is top-level script code
@@ -349,8 +361,43 @@ to_grep_pattern() {
     printf '%s' "$1" | sed 's/\[\^\\n\]/./g'
 }
 
+# is_introspection_driven <file>
+# Issue #1176 (Angle 1): true when <file> derives its expect_prompt sequence
+# from scripts/lib/setup-wizard-introspect.sh's build_expect_prompt_block
+# (a real `setup.sh list-prompts` run) instead of hand-encoding it -- the
+# reference to that function name is the one signal this script trusts,
+# mirroring how parse_wizard_prompts above trusts only setup.sh's own
+# `ask "..."` / `confirm "..."` call sites rather than a broader heuristic.
+# A file that matches still needs SOME sanity check that it has not simply
+# stopped driving the wizard altogether (the exact regression the zero-
+# patterns fail-closed check below exists to catch for hand-encoded files);
+# `spawn bash setup.sh` is that check here -- it is the literal `expect`
+# command that starts the real wizard, unrelated to how the prompt sequence
+# feeding it was built.
+is_introspection_driven() {
+    local file="$1"
+    grep -qF 'build_expect_prompt_block' "$file" || return 1
+    if ! grep -qF 'spawn bash setup.sh' "$file"; then
+        fail "$file references build_expect_prompt_block (introspection-driven) but no longer contains 'spawn bash setup.sh' -- it may have stopped driving the real install wizard entirely; update this script's sanity check if that invocation genuinely changed shape."
+    fi
+    return 0
+}
+
 # --- Step 4/5: coverage + staleness, per simulation script -----------------
+statically_checked_sims=0
 for sim in "${sim_scripts[@]}"; do
+    if is_introspection_driven "$sim"; then
+        # violations may have just been incremented by is_introspection_driven's
+        # own sanity check (missing "spawn bash setup.sh") -- only print the
+        # reassuring green line when that check actually passed, so a real
+        # failure isn't immediately followed by a confusing "all good" line.
+        if [[ $violations -eq 0 ]]; then
+            printf "%b✓ %s derives its expect_prompt sequence from a real 'setup.sh list-prompts' run (scripts/lib/setup-wizard-introspect.sh) -- nothing hand-encoded to check for drift here; see this script's header.%b\n" "$GREEN" "$sim" "$NC"
+        fi
+        continue
+    fi
+    statically_checked_sims=$((statically_checked_sims + 1))
+
     mapfile -t sim_patterns < <(extract_expect_patterns "$sim")
     if [[ ${#sim_patterns[@]} -eq 0 ]]; then
         fail "found zero expect_prompt patterns in $sim -- refusing to run a vacuous check; check extract_expect_patterns in this script or whether $sim still drives setup.sh's wizard at all."
@@ -405,5 +452,9 @@ if [[ $violations -gt 0 ]]; then
     exit 1
 fi
 
-printf "%b✓ All %d unconditional setup.sh wizard prompts are covered by every simulation script, and every simulation script's expect_prompt pattern still matches a real prompt.%b\n" "$GREEN" "${#unconditional_prompts[@]}" "$NC"
+if [[ "$statically_checked_sims" -eq 0 ]]; then
+    printf "%b✓ All %d simulation script(s) are introspection-driven (issue #1176) -- no hand-encoded expect_prompt sequence left to check for drift.%b\n" "$GREEN" "${#sim_scripts[@]}" "$NC"
+else
+    printf "%b✓ All %d unconditional setup.sh wizard prompts are covered by every statically-checked simulation script (%d of %d), and every one of their expect_prompt patterns still matches a real prompt.%b\n" "$GREEN" "${#unconditional_prompts[@]}" "$statically_checked_sims" "${#sim_scripts[@]}" "$NC"
+fi
 exit 0
