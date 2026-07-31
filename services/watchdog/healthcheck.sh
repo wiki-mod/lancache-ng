@@ -29,7 +29,26 @@ esac
 # main loop also re-runs write_status() a second time after maybe_purge()/
 # maybe_prune_syslog() specifically so the once-daily long-running purge
 # scan doesn't age this file out on its own.
-max_age=$(( CHECK_INTERVAL * 3 ))
+#
+# `10#` forces base-10 evaluation (found live, 2026-07-31, PR #1347's CI):
+# the digit-only guard above accepts ANY all-digits string, including one
+# with a leading zero -- CHECK_INTERVAL is routinely set to exactly such a
+# value by scripts/syslog-forwarding-simulation.sh, which deliberately uses
+# the last 8 digits of a nanosecond timestamp as a unique per-run marker
+# (see that script's own comment). Without the `10#` prefix, Bash's `$(( ))`
+# treats a leading-zero numeric literal as octal, and a marker whose
+# remaining digits happen to include an 8 or a 9 (invalid in octal, e.g.
+# "00563179") makes this arithmetic expansion itself fail ("value too great
+# for base") -- under this script's own `set -euo pipefail`, that aborts the
+# healthcheck with a nonzero exit, which Docker reports as "unhealthy" even
+# though watchdog's own main loop is running completely normally. Confirmed
+# live: `bash -c 'set -euo pipefail; CHECK_INTERVAL="00563179"; max_age=$((
+# CHECK_INTERVAL * 3 ))'` fails with exactly that error; the same line with
+# `10#$CHECK_INTERVAL` computes 1689537 correctly. This is a ~1-in-13 chance
+# per run given the marker's random last-8-digits shape, which is why it
+# surfaced as an intermittent "watchdog did not become healthy" CI failure
+# rather than a deterministic one.
+max_age=$(( 10#$CHECK_INTERVAL * 3 ))
 if [ "$max_age" -lt 60 ]; then
     max_age=60
 fi

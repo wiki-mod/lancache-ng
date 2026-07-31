@@ -293,3 +293,43 @@ make_log_file() {
         return 1
     }
 }
+
+# Found live 2026-07-31 (PR #1347's CI, via the sibling bug in
+# services/watchdog/healthcheck.sh's CHECK_INTERVAL -- see that script's own
+# comment for the full incident): the digit-only guard above accepts a
+# leading-zero value like "010" completely unchanged (it is all-digits), but
+# Bash's `$(( max_gb * 1024^3 ))` then evaluates a leading-zero operand as
+# octal, silently computing 010 as 8 instead of 10. A file sized between the
+# two budgets (9 GiB: over the buggy 8 GiB octal misread, under the real 10
+# GiB decimal budget) distinguishes them -- it must survive under a correct
+# decimal read and would be deleted under the octal misread.
+@test "maybe_prune_syslog treats a leading-zero SYSLOG_MAX_GB as decimal, not octal" {
+    # 9 GiB, sparse (see make_log_file's own header comment on why truncate
+    # is cheap and du -sb/stat -c '%s' both report it reliably in this env).
+    make_log_file a.log 9216 1
+
+    SYSLOG_MAX_GB=010 run maybe_prune_syslog
+    [ "$status" -eq 0 ]
+    [ -f "$log_root/hostA/a.log" ] || {
+        echo "expected the 9 GiB file to survive a decimal-10 GiB budget (SYSLOG_MAX_GB=010 misread as octal 8 would delete it instead)" >&2
+        return 1
+    }
+}
+
+# A leading zero followed by an 8 or 9 (e.g. "018") is not just silently
+# misread as octal -- it is not valid octal at all, so Bash's `$(( ))`
+# raises "value too great for base" and aborts the whole function under
+# `set -euo pipefail`. This is exactly the class of failure that made
+# services/watchdog/healthcheck.sh intermittently report the watchdog
+# container unhealthy in CI (CHECK_INTERVAL is a random per-run marker that
+# occasionally takes this shape) -- this asserts maybe_prune_syslog() itself
+# never hits the same fate for an operator-supplied SYSLOG_MAX_GB.
+@test "maybe_prune_syslog does not abort on a leading-zero SYSLOG_MAX_GB containing an 8 or 9" {
+    make_log_file a.log 1 1
+
+    SYSLOG_MAX_GB=018 run maybe_prune_syslog
+    [ "$status" -eq 0 ] || {
+        echo "expected SYSLOG_MAX_GB=018 not to abort maybe_prune_syslog; status=$status output=$output" >&2
+        return 1
+    }
+}

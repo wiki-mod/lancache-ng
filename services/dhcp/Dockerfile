@@ -42,6 +42,29 @@
 # `--no-cache` on `update`/`upgrade` mirrors the same flag already used on
 # `add` below: it keeps the fetched index out of `/var/cache/apk` instead
 # of leaving a persistent cache in the image layer.
+#
+# `findutils` (issue #840, found while validating a later, unrelated Alpine
+# migration for services/watchdog -- PR #1346): this Dockerfile's original
+# Alpine migration (this PR) omitted it, and entrypoint.sh's own
+# `list_kea_snapshot_ids()` (used by the Kea config-validation-rollback path,
+# #763/docs/known-good-config-snapshots.md) uses `find ... -printf '%f\n'`
+# to sort known-good snapshot ids by name. Confirmed live on a real
+# `alpine:3.24` container: BusyBox's bundled `find` does not support the
+# GNU-findutils-only `-printf` action at all ("find: unrecognized:
+# -printf"), fails with exit 1, and writes that error to stderr -- which the
+# function's own `2>/dev/null` silently swallows, leaving `sort` with empty
+# input and the function silently returning an empty snapshot list
+# (indistinguishable from "no snapshots exist yet"). `apk add findutils`
+# installs GNU `find`/`xargs` at `/usr/bin/find`, ahead of BusyBox's own
+# `find` applet earlier in `$PATH` -- the same fix already verified and
+# shipped for `services/watchdog` (PR #1346): `findutils`, not `coreutils`,
+# since `find` is a GNU findutils binary, not a GNU coreutils one. This
+# Dockerfile's other `find` call (`KEA_LEASE_CMDS_HOOK_PATH`'s
+# `find /usr/lib -maxdepth 5 -name libdhcp_lease_cmds.so` fail-closed check,
+# documented above) was never broken by BusyBox -- it only uses portable
+# `-maxdepth`/`-name` actions, no `-printf` -- and is unaffected by this
+# change: confirmed on the real built image that it still resolves the
+# real hook path with GNU `find` now ahead of BusyBox's own in `$PATH`.
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
@@ -60,6 +83,7 @@ RUN apk update --no-cache && apk upgrade --no-cache && apk add --no-cache \
     curl \
     jq \
     iptables \
+    findutils \
     nano \
     lsof \
     ripgrep
