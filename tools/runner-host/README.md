@@ -42,15 +42,28 @@ sudo tail -n 40 /var/log/lancache-ci-cleanup.log
      job never reached its own `docker buildx rm` (confirmed 2026-07-30: 19
      orphaned containers, mostly these last two kinds, had accumulated on one
      host over 6 days undetected, since neither kind was covered before);
-3. prunes stopped containers, build cache, unused images, and unreferenced
+3. reaps stale per-branch Trivy cache directories (`/var/tmp/lancache-ng-
+   trivy-cache/<service>-<arch>-<ref>`, by mtime, default past 1 day) — these
+   belong to `build-push.yml`'s `container-scan` job and persist forever for a
+   branch that stops being scanned (merged, deleted, abandoned scratch
+   branch), since the workflow's own per-push generation-reset only fires on
+   that ref's *next* scan, which never happens. Confirmed live, 2026-07-31:
+   18-38 GB per host. The 1-day default (maintainer decision, 2026-07-31) is
+   deliberately more aggressive than the workflow's own 14-day
+   `TRIVY_CACHE_MAX_AGE_DAYS` generation-reset, trading some redundant
+   cold-cache Trivy DB re-downloads (job routing across hosts is round-robin,
+   not per-branch, so even an active branch can go >24h without a job landing
+   on one specific host) for actually bounding disk growth — a 14-day default
+   reclaimed nothing in practice at this project's actual branch-churn rate;
+4. prunes stopped containers, build cache, unused images, and unreferenced
    anonymous volumes;
-4. re-measures and logs the reclaimed delta, so a run that reclaimed nothing is
+5. re-measures and logs the reclaimed delta, so a run that reclaimed nothing is
    visible instead of assumed successful.
 
 Tunables (env): `REAP_BUILD_TOOLS_AFTER_HOURS`, `BUILD_TOOLS_IMAGE_MATCH`,
 `REAP_VALIDATION_AFTER_HOURS`, `VALIDATION_NAME_MATCH`,
 `REAP_BUILDX_BUILDER_AFTER_HOURS`, `BUILDX_BUILDER_NAME_MATCH`,
-`LANCACHE_CI_CLEANUP_LOG`.
+`TRIVY_CACHE_ROOT`, `REAP_TRIVY_CACHE_AFTER_DAYS`, `LANCACHE_CI_CLEANUP_LOG`.
 
 ## Related, not done here (needs maintainer go — a daemon restart)
 Bound the docker build cache and container logs at the daemon level so they can
