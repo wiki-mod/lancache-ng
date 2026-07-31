@@ -28,6 +28,15 @@
 # classify-image-impact.sh (source the shared booleans, keep should_run on top)
 # is a viable next step but revisits #715's deliberate decoupling, so it is
 # surfaced for maintainer review (#819) rather than done unilaterally here.
+# F-16 (#1095, 2026-07-31) note: should_run's ci_tooling_only_scripts
+# allowlist (added below) is this script's own addition -- classify-
+# image-impact.sh has no should_run concept and therefore no equivalent
+# allowlist to mirror. Narrowing should_run here does not create mirror
+# drift against classify-image-impact.sh's own `scripts`/`setup_runtime`
+# outputs, which stay untouched and blunt (see that script's own comments --
+# they only drive an informational ci_scope_policy notice, with no heavy-job
+# effect, so narrowing them would carry real collision risk against PR #1331
+# for zero CI-cost benefit).
 # Kept as a standalone script (not inline YAML) so
 # tests/bats/detect_full_setup_changes.bats can exercise the rules against
 # canned file lists without a runner.
@@ -210,6 +219,15 @@ emit() {
     output_bool "ntp" touches_prefix "services/ntp/"
     output_bool "build_tools" touches_prefix "tools/build-tools/"
     output_bool "deploy" touches_prefix "deploy/"
+    # `scripts`/`setup_runtime` deliberately stay a blunt, unnarrowed
+    # touches_prefix "scripts/" here (unlike should_run's own scripts/ clause
+    # below, which the F-16 allowlist narrows) -- neither is declared as an
+    # output of full-setup-deep-validate.yml's `plan` job (confirmed: only
+    # should_run/image_tag/pr_staging_available/base_channel_tag/workflow/
+    # proxy/dns_image/watchdog/ui/build_tools/dhcp/dhcp_proxy/ntp are), so
+    # narrowing them would change nothing any consumer reads. They exist here
+    # only as a raw "did anything under scripts/ change at all" signal for
+    # anyone reading this script's own stdout/log output directly.
     output_bool "scripts" touches_prefix "scripts/"
 
     if touches_exact "setup.sh" || touches_prefix "scripts/"; then
