@@ -641,7 +641,18 @@ maybe_prune_syslog() {
         return
     fi
     local size_bytes; size_bytes=$(awk '{print $1}' <<< "$du_output")
-    local budget_bytes=$(( max_gb * 1024 * 1024 * 1024 ))
+    # `10#` forces base-10 evaluation (same class of bug fixed live in
+    # services/watchdog/healthcheck.sh, 2026-07-31, PR #1347's CI -- see
+    # that file's own comment for the full incident): the digit-only guard
+    # above accepts a leading-zero value like "010" unchanged, which Bash's
+    # `$(( ))` would otherwise silently reinterpret as octal (010 = 8, not
+    # 10) -- a silent wrong-budget bug for that shape, or a hard arithmetic
+    # failure ("value too great for base") for a leading zero followed by an
+    # 8 or 9, which would abort this whole function under `set -euo
+    # pipefail`. Not yet observed from real operator input (unlike
+    # CHECK_INTERVAL, this isn't fed a random-digit test marker), but the
+    # exact same failure class, fixed the same way per AG-WF-011.
+    local budget_bytes=$(( 10#$max_gb * 1024 * 1024 * 1024 ))
 
     if [ "$size_bytes" -le "$budget_bytes" ]; then
         log "Syslog size within budget: ${size_bytes} bytes <= ${budget_bytes} bytes (${max_gb}GB); no size-based pruning needed"
@@ -796,7 +807,14 @@ maybe_rotate_fluent_bit_selflog() {
         max_rotations=5
     fi
 
-    local max_bytes=$(( max_mb * 1024 * 1024 ))
+    # `10#` forces base-10 evaluation -- same class of bug as
+    # maybe_prune_syslog()'s SYSLOG_MAX_GB fix above and
+    # services/watchdog/healthcheck.sh's CHECK_INTERVAL fix (both 2026-07-31,
+    # see healthcheck.sh's comment for the full incident): a leading-zero
+    # FLUENT_BIT_SELFLOG_MAX_MB value would otherwise be silently
+    # misinterpreted as octal, or abort this function outright if it
+    # contains an 8 or 9.
+    local max_bytes=$(( 10#$max_mb * 1024 * 1024 ))
     local size_bytes
     size_bytes=$(stat -c '%s' "$selflog_file" 2>/dev/null || echo 0)
 
@@ -881,7 +899,10 @@ maybe_rotate_fluent_bit_selflog() {
     local rotation_count
     rotation_count=$(wc -l < "$rotation_scan")
     if [ "$rotation_count" -gt "$max_rotations" ]; then
-        local excess=$(( rotation_count - max_rotations ))
+        # `10#$max_rotations` -- same class of fix as max_gb/max_mb above;
+        # rotation_count itself is always a plain `wc -l` integer with no
+        # leading zero, so only the env-var-derived operand needs it.
+        local excess=$(( rotation_count - 10#$max_rotations ))
         local rotation_sorted; rotation_sorted="$(mktemp)"
         sort -n "$rotation_scan" > "$rotation_sorted"
         local pruned=0
