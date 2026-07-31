@@ -159,6 +159,27 @@ find_rotated_backups() {
     [[ "$decoded_markers" == *"rotation-5"* ]]
 }
 
+# Same class of bug as the FLUENT_BIT_SELFLOG_MAX_MB test above, but for
+# the rotation-count cleanup path's `excess=$(( rotation_count -
+# max_rotations ))`: that arithmetic only runs once rotation_count actually
+# exceeds max_rotations, so this needs enough real rotations to cross a
+# leading-zero-with-an-8-or-9 cap (FLUENT_BIT_SELFLOG_MAX_ROTATIONS=08) to
+# prove the cleanup pass itself does not abort.
+@test "maybe_rotate_fluent_bit_selflog does not abort on a leading-zero FLUENT_BIT_SELFLOG_MAX_ROTATIONS containing an 8 or 9" {
+    export FLUENT_BIT_SELFLOG_MAX_ROTATIONS=08
+
+    for i in 1 2 3 4 5 6 7 8 9; do
+        head -c 1100000 /dev/zero | tr '\0' 'x' > "$selflog_file"
+        printf 'rotation-%d\n' "$i" >> "$selflog_file"
+        run maybe_rotate_fluent_bit_selflog
+        [ "$status" -eq 0 ] || {
+            echo "expected FLUENT_BIT_SELFLOG_MAX_ROTATIONS=08 not to abort on rotation $i; status=$status output=$output" >&2
+            return 1
+        }
+        sleep 1.1
+    done
+}
+
 @test "maybe_rotate_fluent_bit_selflog clamps invalid FLUENT_BIT_SELFLOG_MAX_MB to the default instead of aborting" {
     printf 'small\n' > "$selflog_file"
 
@@ -188,6 +209,24 @@ find_rotated_backups() {
     FLUENT_BIT_SELFLOG_MAX_MB=99999999999999 run maybe_rotate_fluent_bit_selflog
     [ "$status" -eq 0 ]
     [ -f "$selflog_file" ]
+}
+
+# Found live 2026-07-31 (PR #1347's CI, via the sibling bug in
+# services/watchdog/healthcheck.sh's CHECK_INTERVAL -- see that script's own
+# comment for the full incident): the digit-only guard above accepts a
+# leading-zero value like "018" completely unchanged (it is all-digits), but
+# Bash's `$(( max_mb * 1024 * 1024 ))` then evaluates a leading-zero operand
+# as octal -- "018" is not even valid octal (8 is not an octal digit), so
+# this aborts the whole function with "value too great for base" under
+# `set -euo pipefail` instead of silently misreading it. Must not abort.
+@test "maybe_rotate_fluent_bit_selflog does not abort on a leading-zero FLUENT_BIT_SELFLOG_MAX_MB containing an 8 or 9" {
+    printf 'small\n' > "$selflog_file"
+
+    FLUENT_BIT_SELFLOG_MAX_MB=018 run maybe_rotate_fluent_bit_selflog
+    [ "$status" -eq 0 ] || {
+        echo "expected FLUENT_BIT_SELFLOG_MAX_MB=018 not to abort; status=$status output=$output" >&2
+        return 1
+    }
 }
 
 @test "maybe_rotate_fluent_bit_selflog clamps invalid FLUENT_BIT_SELFLOG_MAX_ROTATIONS to the default" {
