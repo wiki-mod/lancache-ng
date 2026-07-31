@@ -4,58 +4,71 @@
 # a curated set of public NTP servers and serving that time to LAN clients
 # on UDP/123. No Rust builder stage is needed here (unlike services/dns/ or
 # services/ui/) -- this image is a plain package install plus a shell
-# entrypoint, the same shape as services/dhcp/Dockerfile.
+# entrypoint, the same shape as services/dhcp/Dockerfile and (since its own
+# Alpine migration, issue #815) services/dhcp-proxy/Dockerfile.
+#
+# Alpine base (issue #815 Part B, staged Alpine migration for
+# proxy/ntp/watchdog/ui -- ntp picked first as this evaluation's lowest-risk
+# of the four: a plain C daemon with no Rust builder stage and no
+# musl-compiled-binary question at all, unlike services/ui's Rust runtime or
+# services/dns's still-open nats-subscriber retarget). Confirmed live on
+# alpine:3.24 (2026-07-31): installs `chrony-nts` (4.8-r7), NOT the plain
+# `chrony` package -- Alpine deliberately splits chrony into a default build
+# with no NTS/SHA/AES support at all (no libgnutls/libnettle dependency) and
+# this separate `chrony-nts` variant, same upstream version, that pulls in
+# libgnutls/libnettle for NTS. services/ntp/chrony.conf does not configure
+# NTS today, so both packages would work unchanged right now, but installing
+# `chrony-nts` keeps a future NTS-hardening effort from being silently
+# foreclosed by having picked the wrong package name during this migration.
+# `/etc/chrony/`, `conf.d/`, and `sources.d/` match this project's existing
+# expectations exactly (verified live) -- no path translation needed.
+# `bash` is installed explicitly because entrypoint.sh uses real Bash-only
+# syntax (`${var// /}` parameter substitution) that Alpine's default
+# `/bin/sh` (busybox ash) does not support -- see AG-REL-006. `gettext-base`
+# -> `gettext-envsubst`: Alpine splits envsubst out of the base gettext
+# package, matching the same finding already made for the other three
+# already-migrated/being-migrated services in this project.
 
-FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
+FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
 
-ARG DEBIAN_FRONTEND=noninteractive
-
-# trixie-backports is the standard package source for this image (maintainer
-# decision, 2026-07-30) -- project-wide, not scoped to any one package here:
-# `Package: *` at Pin-Priority 500 (tied with the regular trixie archive)
-# means ordinary version-comparison rules pick whichever archive has the
-# newer version for ANY package this image installs, not a hand-picked
-# subset. `apt-get dist-upgrade` then `apt-get full-upgrade` are both run
-# deliberately (kept as two explicit calls even though modern apt treats
-# `full-upgrade` as the same operation `dist-upgrade` performs) so any
-# package backports has already patched gets picked up on every rebuild, not
-# only the packages named in the install list below.
-#
-# The pin selector below MUST use `a=stable-backports`, not
-# `a=trixie-backports`: APT's `a=`/release-Archive selector matches the
-# Release file's `Suite:` field, and trixie-backports' own Release file
-# declares `Suite: stable-backports` / `Codename: trixie-backports` -- the
-# two are not interchangeable (see services/proxy/Dockerfile's matching
-# comment: a first version of this pin used `a=trixie-backports` and
-# silently never matched anything, so every "backports-sourced" package
-# stayed on the vulnerable plain-trixie version despite the pin file being
-# present -- caught only by building the image for real and checking the
-# installed package versions, not by trusting the Dockerfile comment).
-RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
-    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
-    && apt-get update \
-    && apt-get dist-upgrade -y \
-    && apt-get full-upgrade -y \
-    && apt-get install -y --no-install-recommends \
-    chrony \
-    gettext-base \
-    curl \
-    && rm -rf /var/lib/apt/lists/*
+# `apk upgrade --no-cache` (before the package install, same layer) upgrades
+# packages already baked into the alpine:3.24 base layer itself -- `apk add
+# --no-cache` only fetches a fresh index for the packages it is asked to
+# install, it does not touch already-installed packages. See
+# services/dhcp-proxy/Dockerfile's matching comment for the fuller
+# rationale and live verification of this behavior.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
+    bash \
+    chrony-nts \
+    gettext-envsubst \
+    curl
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh
 
-# chronyd runs as root in this container (no `-u`/privilege drop): it needs
-# CAP_SYS_TIME to actually step/slew the container HOST's real system clock
-# (containers share one kernel clock -- there is no per-container clock
-# namespace), and Docker's default capability bounding set excludes
-# CAP_SYS_TIME regardless of any file capability the Debian package may set
-# on the binary. Running as root sidesteps relying on those file
-# capabilities surviving into the container's bounding set; the compose
-# files grant `cap_add: [SYS_TIME]` on top of that (see their comments for
-# the host-wide-clock operational tradeoff this implies).
+# This entrypoint execs chronyd as root (no explicit `-u`/privilege drop of
+# our own): CAP_SYS_TIME is needed to actually step/slew the container
+# HOST's real system clock (containers share one kernel clock -- there is
+# no per-container clock namespace), and Docker's default capability
+# bounding set excludes CAP_SYS_TIME regardless of any file capability the
+# package may set on the binary. The compose files grant `cap_add:
+# [SYS_TIME]` on top of that (see their comments for the host-wide-clock
+# operational tradeoff this implies). Unchanged by the Alpine migration --
+# confirmed live on both bases identically: chronyd's own compiled-in
+# `+PRIVDROP` support makes it drop privileges to the packaged `chrony`
+# system user/group on its own once it no longer needs root (Alpine's
+# chrony-nts pulls this user/group in via its chrony-common dependency; its
+# numeric uid/gid, 100/101, is identical to Debian's own `_chrony` user,
+# confirmed live -- so a pre-existing volume's ownership carries over
+# cleanly across this migration). Because that drop happens after this
+# entrypoint's own `mkdir -p` below (which runs as root), `/var/log/chrony`
+# and `/var/lib/chrony` can end up root-owned and unwritable by the
+# dropped-privilege chronyd -- entrypoint.sh's own chown call fixes this up
+# at container start; see its comment for the real, reproducible bug this
+# validation pass found (present identically pre-migration on Debian too).
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/lib/chrony /var/log/chrony
 
