@@ -49,18 +49,26 @@ RUN apk upgrade --no-cache && \
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh
 
-# chronyd runs as root in this container (no `-u`/privilege drop): it needs
-# CAP_SYS_TIME to actually step/slew the container HOST's real system clock
-# (containers share one kernel clock -- there is no per-container clock
-# namespace), and Docker's default capability bounding set excludes
-# CAP_SYS_TIME regardless of any file capability the package may set on the
-# binary. Running as root sidesteps relying on those file capabilities
-# surviving into the container's bounding set; the compose files grant
-# `cap_add: [SYS_TIME]` on top of that (see their comments for the
-# host-wide-clock operational tradeoff this implies). This is unchanged by
-# the Alpine migration -- Alpine's chrony-nts package also ships a `chrony`
-# system user/group (created by chrony-common's pre-install script,
-# confirmed live) that this image does not use, for the same reason.
+# This entrypoint execs chronyd as root (no explicit `-u`/privilege drop of
+# our own): CAP_SYS_TIME is needed to actually step/slew the container
+# HOST's real system clock (containers share one kernel clock -- there is
+# no per-container clock namespace), and Docker's default capability
+# bounding set excludes CAP_SYS_TIME regardless of any file capability the
+# package may set on the binary. The compose files grant `cap_add:
+# [SYS_TIME]` on top of that (see their comments for the host-wide-clock
+# operational tradeoff this implies). Unchanged by the Alpine migration --
+# confirmed live on both bases identically: chronyd's own compiled-in
+# `+PRIVDROP` support makes it drop privileges to the packaged `chrony`
+# system user/group on its own once it no longer needs root (Alpine's
+# chrony-nts pulls this user/group in via its chrony-common dependency; its
+# numeric uid/gid, 100/101, is identical to Debian's own `_chrony` user,
+# confirmed live -- so a pre-existing volume's ownership carries over
+# cleanly across this migration). Because that drop happens after this
+# entrypoint's own `mkdir -p` below (which runs as root), `/var/log/chrony`
+# and `/var/lib/chrony` can end up root-owned and unwritable by the
+# dropped-privilege chronyd -- entrypoint.sh's own chown call fixes this up
+# at container start; see its comment for the real, reproducible bug this
+# validation pass found (present identically pre-migration on Debian too).
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/lib/chrony /var/log/chrony
 
