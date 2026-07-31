@@ -243,3 +243,89 @@ vulnerabilities:
       (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`,
       `services/ntp`), disclosed 2026-07-03.
     expired_at: 2026-08-15
+  - id: CVE-2025-59375
+    statement: >-
+      Accepted, tracked risk -- not a non-exploitability disposition; the
+      vulnerable code genuinely is present. CVE-2025-59375 is a large
+      dynamic memory allocation triggered by a small crafted XML document.
+      Affects `libexpat1`/`libexpat1-dev` on `tools/build-tools`'s final
+      `rust:latest`-based stage at `2.8.2-1~deb13u1` -- the newest version
+      available anywhere; a real, twice-repeated Trivy scan with a freshly
+      force-downloaded vulnerability DB confirmed this dist-upgrade/
+      full-upgrade does not clear the finding (see issue #1314 for the
+      complete investigation, including the Debian Security Tracker's own
+      fixed/affected assessment for this CVE ID group flipping between two
+      scans 40 minutes apart on 2026-07-30, then flipping back to `fixed`
+      and back to `affected` again on 2026-07-31, confirmed blocking a real
+      maintainer-initiated nightly dispatch and an unrelated #1095 proof
+      push). No fix exists anywhere as of 2026-07-31 (`Status: affected`,
+      `FixedVersion: None` in Trivy's DB for trixie, backports, and sid
+      alike). `libexpat` is not named anywhere in this Dockerfile's own
+      install lists; it arrives purely as a transitive OS dependency of
+      `python3` (installed here only for `distcc-pump`'s parser script --
+      Python's stdlib `pyexpat` module links against the system libexpat).
+      Accepted because this image's actual usage never reaches an
+      XML-parsing trigger condition at all: `distcc-pump` exchanges this
+      project's own internal build-farm protocol data between our own
+      runners, not attacker-controlled XML from any external or untrusted
+      source, and no other tool in this image invokes XML parsing. This is
+      a time-boxed acceptance, not an indefinite one: re-review on or
+      before 2026-08-15 -- if trixie, backports, or sid has shipped a fix
+      for any of these 5 CVE IDs by then, drop the corresponding entries
+      and rebuild; if not, this decision needs to be revisited (extend the
+      acceptance, or investigate dropping `python3`/`distcc-pump`
+      entirely). No `paths:` scoping is given, matching this file's other
+      Debian-os-pkgs-class entries (see the curl group above for why a
+      `paths:` value does not suppress this finding class). See issue
+      #1314 for the complete before/after Trivy evidence and the
+      maintainer's recorded decision.
+    expired_at: 2026-08-15
+  - id: CVE-2026-25210
+    statement: >-
+      Accepted, tracked risk -- same libexpat finding group as
+      CVE-2025-59375 above (see that entry for the full background:
+      transitive-via-python3/distcc-pump provenance, why no `paths:`
+      scoping is given, and the 2026-08-15 re-review checkpoint).
+      CVE-2026-25210 is an integer overflow in buffer reallocation
+      (`doContent`). Same `Status: affected`, `FixedVersion: None` (trixie,
+      backports, sid) as of 2026-07-31, same single affected image
+      (`tools/build-tools`), same non-reachable usage (no untrusted XML
+      input ever reaches libexpat in this image).
+    expired_at: 2026-08-15
+  - id: CVE-2026-45186
+    statement: >-
+      Accepted, tracked risk -- same libexpat finding group as
+      CVE-2025-59375 above (see that entry for the full background:
+      transitive-via-python3/distcc-pump provenance, why no `paths:`
+      scoping is given, and the 2026-08-15 re-review checkpoint).
+      CVE-2026-45186 is a denial-of-service via crafted XML input (an
+      attribute-name collision check complexity issue). Same `Status:
+      affected`, `FixedVersion: None` (trixie, backports, sid) as of
+      2026-07-31, same single affected image (`tools/build-tools`), same
+      non-reachable usage (no untrusted XML input ever reaches libexpat in
+      this image).
+    expired_at: 2026-08-15
+  - id: CVE-2026-56131
+    statement: >-
+      Accepted, tracked risk -- same libexpat finding group as
+      CVE-2025-59375 above (see that entry for the full background:
+      transitive-via-python3/distcc-pump provenance, why no `paths:`
+      scoping is given, and the 2026-08-15 re-review checkpoint).
+      CVE-2026-56131 is a use-after-free via `XML_ResumeParser` handler
+      call depth tracking. Same `Status: affected`, `FixedVersion: None`
+      (trixie, backports, sid) as of 2026-07-31, same single affected image
+      (`tools/build-tools`), same non-reachable usage (no untrusted XML
+      input ever reaches libexpat in this image).
+    expired_at: 2026-08-15
+  - id: CVE-2026-56408
+    statement: >-
+      Accepted, tracked risk -- same libexpat finding group as
+      CVE-2025-59375 above (see that entry for the full background:
+      transitive-via-python3/distcc-pump provenance, why no `paths:`
+      scoping is given, and the 2026-08-15 re-review checkpoint).
+      CVE-2026-56408 is an integer overflow in `copyString`. Same `Status:
+      affected`, `FixedVersion: None` (trixie, backports, sid) as of
+      2026-07-31, same single affected image (`tools/build-tools`), same
+      non-reachable usage (no untrusted XML input ever reaches libexpat in
+      this image).
+    expired_at: 2026-08-15

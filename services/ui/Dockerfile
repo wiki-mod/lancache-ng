@@ -506,11 +506,17 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 # specifically carries the same unfixed 7 HIGH CVE IDs either way
 # (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545 -- `libcurl4t64`
 # moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1, `nmap`/`nmap-common` moved
-# 7.95+dfsg-3 -> 7.98+dfsg-1~bpo13+1, both confirmed via `dpkg -l` on the
-# built image; every other installed package here had no newer backports
-# version, so stayed on plain trixie). Do not re-assert either way without
-# re-running that scan, since curl's CVE set is a moving target (see issue
-# #1304 for the full history and the proxy image's matching result).
+# 7.95+dfsg-3 -> 7.98+dfsg-1~bpo13+1 at the time of that scan, both
+# confirmed via `dpkg -l` on the built image; every other installed package
+# here had no newer backports version, so stayed on plain trixie). Do not
+# re-assert either way without re-running that scan, since curl's CVE set
+# is a moving target (see issue #1304 for the full history and the proxy
+# image's matching result). `nmap` itself (along with `isc-dhcp-client`) was
+# removed from this image entirely by issue #1288 -- both were only ever
+# used by the now-retired dhcp-probe.sh, replaced by a native Rust DHCP
+# probe with no external tool dependency -- so the nmap-specific CVE
+# mention above is retained only as historical record of that earlier scan,
+# not a claim about this image's current package set.
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive; \
     echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
@@ -522,9 +528,7 @@ RUN set -eu; \
     ca-certificates \
     coreutils \
     curl \
-    isc-dhcp-client \
     locales \
-    nmap \
     util-linux \
     nano \
     lsof \
@@ -542,7 +546,10 @@ ENV VISUAL=$EDITOR
 COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
 COPY src/templates /templates
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
-COPY dhcp-probe.sh /usr/local/bin/dhcp-probe.sh
+# The former dhcp-probe.sh (nmap + isc-dhcp-client) is retired by issue
+# #1288 -- the dhcp-probe container now runs this same lancache-ui binary
+# with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe
+# service `entrypoint:`), so no separate script needs to be copied in.
 
 # `--groups adm`: the UI process drops privileges to this unprivileged user
 # (see docker-entrypoint.sh's `setpriv --reuid=lancache ... --init-groups`),
@@ -561,7 +568,7 @@ RUN groupadd --system --gid 10001 lancache \
     && useradd --uid 10001 --gid lancache --groups adm --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats \
-    && chmod +x /usr/local/bin/docker-entrypoint.sh /usr/local/bin/dhcp-probe.sh
+    && chmod +x /usr/local/bin/docker-entrypoint.sh
 
 
 EXPOSE 8080

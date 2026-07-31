@@ -71,9 +71,14 @@ git config --global --add safe.directory "$repo_root"
 # HOST filesystem, not this container's -- a plain /tmp/... path only exists
 # inside this container's own ephemeral layer, so the host daemon can't find
 # it and silently auto-creates it as an empty directory instead, then fails
-# trying to bind-mount that directory onto a file destination (e.g.
-# dhcp-probe.sh). Confirmed directly: that produced exactly this "mount
-# src=... dst=/usr/local/bin/dhcp-probe.sh: not a directory" failure. /work
+# trying to bind-mount that directory onto a file destination (e.g. the
+# quickstart compose's docker-socket-proxy.sh bind mount). Confirmed
+# directly: this class of failure produced exactly a "mount src=... dst=
+# /usr/local/bin/<script>.sh: not a directory" error for one such bind mount
+# (formerly dhcp-probe.sh -- retired by issue #1288, which replaced that
+# bind-mounted script with a native mode of the ui image's own binary, so
+# it is no longer an example of this failure class, though the remaining
+# bind-mounted scripts still are). /work
 # (this checkout, bind-mounted from the same host path the workflow step
 # runs in) is the only path both sides agree on, so the install directory
 # has to live under it instead of under /tmp.

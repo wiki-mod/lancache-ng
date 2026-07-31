@@ -756,7 +756,11 @@ echo "== Trigger 7/8: dhcp (Kea) -- a real DHCPDISCOVER/OFFER/REQUEST/ACK lease 
 # address verbatim. `-sf /bin/true` (a no-op lease-apply script) means the
 # lease is negotiated over the wire but never actually applied to this
 # throwaway client container's own interface, the same safety technique
-# dhcp-kea-lease-flow-simulation.sh and services/ui/dhcp-probe.sh both use.
+# dhcp-kea-lease-flow-simulation.sh's own real-dhclient test uses -- both
+# scripts deliberately still use real `dhclient` for THIS isolated-network
+# CI purpose (testing Kea's own server behavior), distinct from the Admin
+# UI's own dhcp-probe container, which issue #1288 rewrote to a native
+# Rust DHCP client with no dhclient dependency at all.
 dhcp_client_container="lancachee2e-dhcp-client-$$"
 docker run -d --name "$dhcp_client_container" \
     --network "${compose_project}_dhcp-test-net" \
