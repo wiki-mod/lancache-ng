@@ -1,15 +1,15 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-07-30T04:32:14Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-07-31T09:44:24Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
-  "timestamp": "2026-07-30T04:32:14Z",
+  "timestamp": "2026-07-31T09:44:24Z",
   "version": 1,
   "statements": [
     {
       "vulnerability": {
         "name": "CVE-2026-34040"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -31,7 +31,7 @@
       "vulnerability": {
         "name": "CVE-2026-41567"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -53,7 +53,7 @@
       "vulnerability": {
         "name": "CVE-2026-42306"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -75,7 +75,7 @@
       "vulnerability": {
         "name": "CVE-2026-12064"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -89,7 +89,7 @@
       "vulnerability": {
         "name": "CVE-2026-8286"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -103,7 +103,7 @@
       "vulnerability": {
         "name": "CVE-2026-8927"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -117,7 +117,7 @@
       "vulnerability": {
         "name": "CVE-2026-8932"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -131,7 +131,7 @@
       "vulnerability": {
         "name": "CVE-2026-9079"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -145,7 +145,7 @@
       "vulnerability": {
         "name": "CVE-2026-9080"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -159,7 +159,7 @@
       "vulnerability": {
         "name": "CVE-2026-9545"
       },
-      "timestamp": "2026-07-30T04:32:14Z",
+      "timestamp": "2026-07-31T09:44:24Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -168,6 +168,76 @@
       ],
       "status": "affected",
       "action_statement": "Accepted, tracked risk -- same curl/libcurl4t64 finding group as CVE-2026-12064 above (see that entry for the full background: affected images, the per-image usage/exploitability analysis, why no `paths:` scoping is given for this finding class, and the 2026-08-15 re-review checkpoint). CVE-2026-9545 is an information-disclosure issue via a cached SSL session and early data -- reachable only across a long-lived process reusing a session, which does not describe any of these 5 images' curl invocations: each is a short-lived, one-shot-per-invocation `curl` CLI call (or, for `services/ntp`, no invocation at all). Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-30, same 5 confirmed-affected images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`), disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2025-59375"
+      },
+      "timestamp": "2026-07-31T09:44:24Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- not a non-exploitability disposition; the vulnerable code genuinely is present. CVE-2025-59375 is a large dynamic memory allocation triggered by a small crafted XML document. Affects `libexpat1`/`libexpat1-dev` on `tools/build-tools`'s final `rust:latest`-based stage at `2.8.2-1~deb13u1` -- the newest version available anywhere; a real, twice-repeated Trivy scan with a freshly force-downloaded vulnerability DB confirmed this dist-upgrade/ full-upgrade does not clear the finding (see issue #1314 for the complete investigation, including the Debian Security Tracker's own fixed/affected assessment for this CVE ID group flipping between two scans 40 minutes apart on 2026-07-30, then flipping back to `fixed` and back to `affected` again on 2026-07-31, confirmed blocking a real maintainer-initiated nightly dispatch and an unrelated #1095 proof push). No fix exists anywhere as of 2026-07-31 (`Status: affected`, `FixedVersion: None` in Trivy's DB for trixie, backports, and sid alike). `libexpat` is not named anywhere in this Dockerfile's own install lists; it arrives purely as a transitive OS dependency of `python3` (installed here only for `distcc-pump`'s parser script -- Python's stdlib `pyexpat` module links against the system libexpat). Accepted because this image's actual usage never reaches an XML-parsing trigger condition at all: `distcc-pump` exchanges this project's own internal build-farm protocol data between our own runners, not attacker-controlled XML from any external or untrusted source, and no other tool in this image invokes XML parsing. This is a time-boxed acceptance, not an indefinite one: re-review on or before 2026-08-15 -- if trixie, backports, or sid has shipped a fix for any of these 5 CVE IDs by then, drop the corresponding entries and rebuild; if not, this decision needs to be revisited (extend the acceptance, or investigate dropping `python3`/`distcc-pump` entirely). No `paths:` scoping is given, matching this file's other Debian-os-pkgs-class entries (see the curl group above for why a `paths:` value does not suppress this finding class). See issue maintainer's recorded decision. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-25210"
+      },
+      "timestamp": "2026-07-31T09:44:24Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same libexpat finding group as CVE-2025-59375 above (see that entry for the full background: transitive-via-python3/distcc-pump provenance, why no `paths:` scoping is given, and the 2026-08-15 re-review checkpoint). CVE-2026-25210 is an integer overflow in buffer reallocation (`doContent`). Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-31, same single affected image (`tools/build-tools`), same non-reachable usage (no untrusted XML input ever reaches libexpat in this image). (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-45186"
+      },
+      "timestamp": "2026-07-31T09:44:24Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same libexpat finding group as CVE-2025-59375 above (see that entry for the full background: transitive-via-python3/distcc-pump provenance, why no `paths:` scoping is given, and the 2026-08-15 re-review checkpoint). CVE-2026-45186 is a denial-of-service via crafted XML input (an attribute-name collision check complexity issue). Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-31, same single affected image (`tools/build-tools`), same non-reachable usage (no untrusted XML input ever reaches libexpat in this image). (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56131"
+      },
+      "timestamp": "2026-07-31T09:44:24Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same libexpat finding group as CVE-2025-59375 above (see that entry for the full background: transitive-via-python3/distcc-pump provenance, why no `paths:` scoping is given, and the 2026-08-15 re-review checkpoint). CVE-2026-56131 is a use-after-free via `XML_ResumeParser` handler call depth tracking. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-31, same single affected image (`tools/build-tools`), same non-reachable usage (no untrusted XML input ever reaches libexpat in this image). (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+    },
+    {
+      "vulnerability": {
+        "name": "CVE-2026-56408"
+      },
+      "timestamp": "2026-07-31T09:44:24Z",
+      "products": [
+        {
+          "@id": "pkg:github/wiki-mod/lancache-ng",
+          "subcomponents": []
+        }
+      ],
+      "status": "affected",
+      "action_statement": "Accepted, tracked risk -- same libexpat finding group as CVE-2025-59375 above (see that entry for the full background: transitive-via-python3/distcc-pump provenance, why no `paths:` scoping is given, and the 2026-08-15 re-review checkpoint). CVE-2026-56408 is an integer overflow in `copyString`. Same `Status: affected`, `FixedVersion: None` (trixie, backports, sid) as of 2026-07-31, same single affected image (`tools/build-tools`), same non-reachable usage (no untrusted XML input ever reaches libexpat in this image). (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
     }
   ]
 }
