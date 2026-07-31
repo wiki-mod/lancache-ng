@@ -25,9 +25,10 @@
 //! scan, then a separate `dhclient` invocation with its own up-to-60s
 //! no-offer timeout -- up to ~65s worst case (see routes/dhcp.rs's own
 //! `DHCP_PROBE_WAIT_TIMEOUT` comment, since renumbered for this change).
-//! This module instead performs a SINGLE broadcast DHCPDISCOVER and reuses
-//! its results for both checks, a deliberate improvement, not just a
-//! reimplementation:
+//! This module instead performs ONE discovery phase (a handful of broadcast
+//! DHCPDISCOVER retransmits sharing one transaction ID, all within one
+//! bounded window -- see [`DISCOVER_RETRANSMITS`]) and reuses its results
+//! for both checks, a deliberate improvement, not just a reimplementation:
 //! - every DHCPOFFER received within `DISCOVER_WINDOW` answers the
 //!   rogue/conflict-detection requirement (nmap's former role), and
 //! - a REQUEST/ACK exchange against the FIRST offer received (matching
@@ -336,63 +337,136 @@ fn lease_info_from_message(msg: &Message) -> LeaseInfo {
 /// the ONLY interface-adjacent syscall this module makes; there is no
 /// ioctl/netlink call anywhere in this file that could bind an address to a
 /// real interface.
+///
+/// KNOWN OPEN RISK (STATUS: as of 2026-07-31, not yet ruled out on a real
+/// target host): `std::net::UdpSocket` cannot set `SO_REUSEPORT` before
+/// bind, so if the host's own network stack already has a process bound to
+/// UDP port 68 (e.g. a host-level DHCP client actively managing the LAN
+/// interface -- NetworkManager's internal client, `dhcpcd`,
+/// `systemd-networkd`), this bind fails with `EADDRINUSE` and BOTH checks
+/// report Unavailable. The former nmap/dhclient tools did not have this
+/// exact failure mode (nmap's script and dhclient use raw/packet sockets,
+/// not a bound UDP 68 listener). Checked directly on this project's own
+/// runner hosts (192.168.1.229, 192.168.1.240) via `ss -ulpn`: neither had
+/// anything bound to port 68 at the time of checking, so this has not been
+/// observed in practice on this project's current fleet -- but it has not
+/// been verified against every real deployment target either. Adding
+/// `SO_REUSEPORT` support would require a new dependency (`socket2` or raw
+/// `libc` calls), which is a deliberate decision to make later with real
+/// evidence of the problem, not something to add speculatively here.
 fn bind_probe_socket() -> io::Result<UdpSocket> {
     let socket = UdpSocket::bind(SocketAddrV4::new(Ipv4Addr::UNSPECIFIED, DHCP_CLIENT_PORT))?;
     socket.set_broadcast(true)?;
     Ok(socket)
 }
 
-/// Listens for DHCPOFFERs matching `xid` for up to `window`, returning every
-/// one received (not just the first -- see the module doc comment on why
-/// the full window is always waited out). A read timeout is (re-)armed to
-/// exactly the remaining budget on each loop iteration, since
-/// `set_read_timeout` bounds a single call, not the whole loop. Decode
-/// failures and messages that don't match our xid/aren't OFFERs are
-/// silently skipped, not treated as errors -- a shared broadcast domain can
-/// carry unrelated DHCP traffic (other clients' own DISCOVERs/ACKs) that
-/// this probe must ignore rather than choke on.
-fn collect_offers(socket: &UdpSocket, xid: u32, window: Duration) -> Vec<LeaseInfo> {
-    let deadline = Instant::now() + window;
-    let mut offers = Vec::new();
-    let mut buf = [0u8; 1500];
+/// How many times the DISCOVER is (re)transmitted within one
+/// `DISCOVER_WINDOW`, spaced evenly across it. A single UDP broadcast can
+/// legitimately be dropped (no transport-level retry, an overloaded switch,
+/// a momentarily busy server) -- and for this probe's rogue-detection
+/// purpose, a false "not_found" from one dropped packet is the dangerous
+/// direction of error (an operator would wrongly conclude the LAN segment
+/// is clear). `dhclient` mitigated this with its own internal retry loop
+/// across its up-to-60s budget; this constant is this native probe's
+/// equivalent within its much shorter window. Retransmitting does not
+/// lengthen the overall window -- all sends and all listening happen inside
+/// the same `DISCOVER_WINDOW`, so the worst-case timing math in
+/// routes/dhcp.rs's `DHCP_PROBE_WAIT_TIMEOUT` comment is unaffected.
+const DISCOVER_RETRANSMITS: u32 = 3;
 
-    loop {
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        if socket.set_read_timeout(Some(remaining)).is_err() {
-            break;
-        }
-        match socket.recv_from(&mut buf) {
-            Ok((n, _src)) => {
-                let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n])) else {
-                    continue;
-                };
-                if msg.xid() != xid {
-                    continue;
-                }
-                let is_offer = matches!(
-                    msg.opts().get(OptionCode::MessageType),
-                    Some(DhcpOption::MessageType(MessageType::Offer))
-                );
-                if is_offer {
-                    offers.push(lease_info_from_message(&msg));
-                }
-            }
-            Err(e)
-                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
-            {
+/// Broadcasts up to [`DISCOVER_RETRANSMITS`] DHCPDISCOVERs (all sharing the
+/// same `xid`, spaced evenly across `window`) and returns every distinct
+/// DHCPOFFER received in response, deduplicated by server identifier so a
+/// server that answers more than one retransmit isn't double-counted (not
+/// just the first offer -- see the module doc comment on why the full
+/// window is always used). A read timeout is (re-)armed to exactly the
+/// remaining budget before each `recv_from`, since `set_read_timeout` bounds
+/// a single call, not a whole loop. Decode failures and messages that don't
+/// match our xid/aren't OFFERs are silently skipped, not treated as errors
+/// -- a shared broadcast domain can carry unrelated DHCP traffic (other
+/// clients' own DISCOVERs/ACKs) that this probe must ignore rather than
+/// choke on. Returns `Err` only for a real socket-level send/configure
+/// failure; a receive timeout is normal completion, not an error.
+fn collect_offers(
+    socket: &UdpSocket,
+    xid: u32,
+    chaddr: &[u8; 6],
+    window: Duration,
+) -> io::Result<Vec<LeaseInfo>> {
+    let deadline = Instant::now() + window;
+    let retransmit_interval = window / DISCOVER_RETRANSMITS;
+    let broadcast_addr = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
+    let mut offers = Vec::new();
+    let mut seen_servers: std::collections::HashSet<Ipv4Addr> = std::collections::HashSet::new();
+    let mut recv_buf = [0u8; 1500];
+
+    for attempt in 0..DISCOVER_RETRANSMITS {
+        let discover = build_discover(xid, chaddr);
+        let mut send_buf = Vec::new();
+        discover
+            .encode(&mut Encoder::new(&mut send_buf))
+            .map_err(io::Error::other)?;
+        socket.send_to(&send_buf, broadcast_addr)?;
+
+        // The last retransmit listens all the way to `deadline`; earlier
+        // ones only listen until their own slice of the window ends, then
+        // move on to sending the next retransmit -- `.min(deadline)` guards
+        // against `retransmit_interval`'s integer-division rounding ever
+        // pushing an earlier attempt's slice past the real deadline.
+        let listen_until = if attempt + 1 == DISCOVER_RETRANSMITS {
+            deadline
+        } else {
+            (Instant::now() + retransmit_interval).min(deadline)
+        };
+
+        loop {
+            let remaining = listen_until.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
                 break;
             }
-            // Any other recv error (e.g. the socket was closed out from
-            // under us) ends collection early with whatever was already
-            // gathered rather than looping on a persistent error.
-            Err(_) => break,
+            if socket.set_read_timeout(Some(remaining)).is_err() {
+                break;
+            }
+            match socket.recv_from(&mut recv_buf) {
+                Ok((n, _src)) => {
+                    let Ok(msg) = Message::decode(&mut Decoder::new(&recv_buf[..n])) else {
+                        continue;
+                    };
+                    if msg.xid() != xid {
+                        continue;
+                    }
+                    let is_offer = matches!(
+                        msg.opts().get(OptionCode::MessageType),
+                        Some(DhcpOption::MessageType(MessageType::Offer))
+                    );
+                    if !is_offer {
+                        continue;
+                    }
+                    let lease = lease_info_from_message(&msg);
+                    match lease.server_identifier {
+                        // A server answering a retransmit it already
+                        // answered is expected DHCP behavior, not a second
+                        // rogue server -- dedupe by server identifier so it
+                        // is not double-listed.
+                        Some(server) if !seen_servers.insert(server) => {}
+                        _ => offers.push(lease),
+                    }
+                }
+                Err(e)
+                    if e.kind() == io::ErrorKind::WouldBlock
+                        || e.kind() == io::ErrorKind::TimedOut =>
+                {
+                    break;
+                }
+                // Any other recv error (e.g. the socket was closed out from
+                // under us) ends collection early with whatever was already
+                // gathered rather than looping on a persistent error.
+                Err(_) => break,
+            }
         }
     }
 
-    offers
+    Ok(offers)
 }
 
 /// Waits up to `timeout` for a DHCPACK or DHCPNAK matching `xid` from
@@ -409,11 +483,16 @@ fn wait_for_ack(
 ) -> io::Result<Result<LeaseInfo, &'static str>> {
     let deadline = Instant::now() + timeout;
     let mut buf = [0u8; 1500];
+    let mut saw_mismatched_ack = false;
 
     loop {
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            return Ok(Err("no ACK received before the timeout"));
+            return Ok(Err(if saw_mismatched_ack {
+                "received an ACK, but not from the expected server identifier"
+            } else {
+                "no ACK received before the timeout"
+            }));
         }
         socket.set_read_timeout(Some(remaining))?;
         match socket.recv_from(&mut buf) {
@@ -431,10 +510,14 @@ fn wait_for_ack(
                         // the server we requested against -- a mismatched
                         // server identifier here would mean either a
                         // misbehaving server or a race with an unrelated
-                        // exchange sharing the same broadcast domain.
+                        // exchange sharing the same broadcast domain. Noted
+                        // (not just silently ignored) so a timeout that
+                        // follows one still gets a specific reason instead
+                        // of the generic "no ACK at all" text below.
                         if lease.server_identifier == Some(expected_server) {
                             return Ok(Ok(lease));
                         }
+                        saw_mismatched_ack = true;
                     }
                     Some(DhcpOption::MessageType(MessageType::Nak)) => {
                         return Ok(Err("server sent DHCPNAK for the requested address"));
@@ -445,7 +528,11 @@ fn wait_for_ack(
             Err(e)
                 if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut =>
             {
-                return Ok(Err("no ACK received before the timeout"));
+                return Ok(Err(if saw_mismatched_ack {
+                    "received an ACK, but not from the expected server identifier"
+                } else {
+                    "no ACK received before the timeout"
+                }));
             }
             Err(e) => return Err(e),
         }
@@ -456,20 +543,30 @@ fn wait_for_ack(
 /// collected by [`collect_offers`]), then releases the resulting lease --
 /// see the module doc comment for why this differs from `dhclient -1`'s
 /// leak-the-lease behavior.
+///
+/// `xid` MUST be the exact same transaction ID the DISCOVER/OFFER exchange
+/// already used, per RFC 2131 §4.3.2 -- a SELECTING-state REQUEST is how a
+/// client tells a specific server "I'm answering the OFFER you already sent
+/// me for THIS transaction"; a server has no reason to honor a REQUEST
+/// under a transaction ID it never offered anything for, and a conforming
+/// server may silently ignore or NAK it. A fresh random xid here would
+/// make every real-server dry-run fail while still passing every unit test
+/// that only exercises this function's own request-building logic in
+/// isolation.
 fn perform_client_dry_run(
     socket: &UdpSocket,
+    xid: u32,
     chaddr: &[u8; 6],
     offer: &LeaseInfo,
     timeout: Duration,
 ) -> ClientOutcome {
-    let Some(request) = build_request(rand::random(), chaddr, offer) else {
+    let Some(request) = build_request(xid, chaddr, offer) else {
         return ClientOutcome::Failed {
             reason: "the DHCPOFFER was missing a requested IP or server identifier, \
                      so no DHCPREQUEST could be built"
                 .to_string(),
         };
     };
-    let xid = request.xid();
 
     let mut buf = Vec::new();
     if let Err(e) = request.encode(&mut Encoder::new(&mut buf)) {
@@ -506,21 +603,27 @@ fn perform_client_dry_run(
         // to send the RELEASE does not change the dry-run's own PASSED
         // result -- the client path itself was already proven to work by
         // the ACK above, and the server's own lease-expiry timer is a safe
-        // fallback if this datagram is lost.
+        // fallback if this datagram is lost. Sent as a fresh transaction
+        // (a new xid, unlike the REQUEST above): RFC 2131 §4.4.4 specifies
+        // RELEASE as unicast, addressed directly to the leasing server
+        // (not broadcast, unlike DISCOVER/REQUEST -- this client already
+        // knows exactly which server to tell, so there is no need for
+        // every other DHCP server on the segment to see it too).
         let release = build_release(rand::random(), chaddr, client_ip, server_id);
         let mut release_buf = Vec::new();
         if release.encode(&mut Encoder::new(&mut release_buf)).is_ok() {
-            let _ = socket.send_to(&release_buf, broadcast_addr);
+            let release_addr = SocketAddrV4::new(server_id, DHCP_SERVER_PORT);
+            let _ = socket.send_to(&release_buf, release_addr);
         }
     }
 
     ClientOutcome::Passed { lease: ack }
 }
 
-/// Runs the full probe: one broadcast DHCPDISCOVER, a bounded collection
-/// window for DHCPOFFERs (answers the rogue/conflict check), then a
-/// REQUEST/ACK dry-run against the first offer (answers the client-dry-run
-/// check). Every failure path returns a fully-populated [`ProbeReport`]
+/// Runs the full probe: a bounded, retransmitted broadcast DHCPDISCOVER
+/// phase (answers the rogue/conflict check), then a REQUEST/ACK dry-run
+/// against the first offer, reusing the same transaction ID (answers the
+/// client-dry-run check). Every failure path returns a fully-populated [`ProbeReport`]
 /// rather than an `Err` -- this function must never fail to produce a
 /// result, since main.rs's `--dhcp-probe` mode always exits 0 regardless of
 /// outcome (see issues #1155/#1156: the ordered update health gate in
@@ -540,33 +643,25 @@ pub fn run_probe(discover_window: Duration, request_timeout: Duration) -> ProbeR
         }
     };
 
+    // Every DISCOVER retransmit, and the REQUEST that follows the first
+    // offer, share this ONE transaction ID -- see perform_client_dry_run's
+    // own comment on why the REQUEST specifically must not generate a new
+    // one of its own.
     let xid = rand::random();
     let chaddr = random_locally_administered_mac();
-    let discover = build_discover(xid, &chaddr);
 
-    let mut buf = Vec::new();
-    if let Err(e) = discover.encode(&mut Encoder::new(&mut buf)) {
-        let reason = format!("failed to encode DHCPDISCOVER: {e}");
-        return ProbeReport {
-            conflict: ConflictOutcome::Unavailable {
-                reason: reason.clone(),
-            },
-            client: ClientOutcome::Unavailable { reason },
-        };
-    }
-
-    let broadcast_addr = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
-    if let Err(e) = socket.send_to(&buf, broadcast_addr) {
-        let reason = format!("failed to broadcast DHCPDISCOVER: {e}");
-        return ProbeReport {
-            conflict: ConflictOutcome::Unavailable {
-                reason: reason.clone(),
-            },
-            client: ClientOutcome::Unavailable { reason },
-        };
-    }
-
-    let offers = collect_offers(&socket, xid, discover_window);
+    let offers = match collect_offers(&socket, xid, &chaddr, discover_window) {
+        Ok(offers) => offers,
+        Err(e) => {
+            let reason = format!("failed to broadcast DHCPDISCOVER: {e}");
+            return ProbeReport {
+                conflict: ConflictOutcome::Unavailable {
+                    reason: reason.clone(),
+                },
+                client: ClientOutcome::Unavailable { reason },
+            };
+        }
+    };
 
     let conflict = if offers.is_empty() {
         ConflictOutcome::NotFound
@@ -583,7 +678,9 @@ pub fn run_probe(discover_window: Duration, request_timeout: Duration) -> ProbeR
                 discover_window.as_secs_f64()
             ),
         },
-        Some(first_offer) => perform_client_dry_run(&socket, &chaddr, first_offer, request_timeout),
+        Some(first_offer) => {
+            perform_client_dry_run(&socket, xid, &chaddr, first_offer, request_timeout)
+        }
     };
 
     ProbeReport { conflict, client }
