@@ -2,7 +2,7 @@
 
 **Project**: lancache-ng — a local download cache for home networks, LAN parties, labs, schools, offices, or gaming rooms. Stores game/software downloads locally so repeat downloads on the LAN run at LAN speed instead of re-fetching from the internet. Adds SSL interception (MITM via a custom CA) and full IPv6 dual-stack support on top of the original lancachenet concept.
 **Repository**: https://github.com/wiki-mod/lancache-ng
-**See also**: `CLAUDE.md` (Claude Code project instructions, auto-loaded every session) for architecture details and dev/prod setup; `README.md` for end-user-facing documentation.
+**See also**: `CLAUDE.md` (Claude Code project instructions, auto-loaded every session) exists solely to point Claude Code sessions at this file at session start (Rule-Ref: AG-GOV-001) — architecture and setup content lives here, in this file, not there; `README.md` for end-user-facing documentation.
 
 This file contains repository-wide agent rules. It applies to all paths in this repository, including `.github/**`, `setup.sh`, `deploy/**`, `config/**`, `scripts/**`, and `services/**`.
 
@@ -222,19 +222,108 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-A LAN cache that intercepts and caches game/software downloads. Two operating modes:
+Everything runs in Docker containers based on Debian 13 (Trixie) images.
 
-| Mode | Port 443 | CA cert needed? |
-|---|---|---|
-| standard | SNI passthrough | No |
-| ssl | MITM-cached (TLS interception) | Yes |
+```
+services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
+services/dns/            # PowerDNS (authoritative + recursor) for DNS caching & spoofing (split into standard + SSL instances)
+config/prod/             # Settings for production deployment
+certs/                   # CA certificate (auto-generated if missing; ca.key is gitignored)
+deploy/prod/             # docker-compose for production
+docs/                    # End-user guides (e.g. how to install the CA cert)
+```
 
-Stack: Docker / Debian Trixie, nginx, PowerDNS, NATS JetStream, Rust services.
+### Two-Mode / Two-IP Architecture
+
+lancachenet caches only HTTP. This project adds two operating modes — clients pick one
+by configuring which DNS server IP they point to:
+
+| Mode | DNS IP (prod) | Port 80 | Port 443 | CA cert needed? |
+|---|---|---|---|---|
+| **standard** | `192.168.1.10` | cached | passthrough (SNI) | No |
+| **ssl** | `192.168.1.11` | cached | MITM-cached | Yes — install `certs/ca.crt` |
+
+- **Standard mode** (port 8443 on `IP_STANDARD`): nginx `stream` block reads SNI via
+  `ssl_preread` and forwards HTTPS blind to the real CDN. No TLS interception. HTTP
+  is cached normally. Suitable for devices that can't or won't import custom CAs.
+- **SSL mode** (port 443 on `IP_SSL`): full TLS interception via per-domain wildcard certs
+  signed by the LAN CA. Both HTTP and HTTPS downloads are cached.
+- **Single unified proxy service** (`services/proxy`): one nginx container handles both modes
+  via separate ports and Docker port mappings. Both modes share a single cache volume.
+- **Two DNS services** (`dns-standard` and `dns-ssl`), each bound to a distinct LAN IP.
+  This is enforced by the `${IP_STANDARD}` / `${IP_SSL}` variables in `deploy/*/`env`.
+
+### How SSL Interception Works (ssl mode)
+
+1. **DNS spoofing**: PowerDNS authoritative resolves CDN hostnames (e.g. `steamcontent.com`) to the proxy's IP via zone files generated from `cdn-domains.txt`.
+2. **Client connects** to proxy IP:443, sending SNI `steamcontent.com` in the TLS ClientHello.
+3. **nginx** reads the SNI via `$ssl_server_name`, looks up the matching cert in `ssl-map.conf`
+   (generated at startup), and presents a wildcard cert for `steamcontent.com` signed by our CA.
+4. Client accepts because it trusts our CA → TLS handshake succeeds.
+5. nginx decrypts the request, checks `proxy_cache`, fetches from the real CDN if needed
+   (using `NGINX_UPSTREAM_RESOLVER` as the real upstream resolver, never the LAN cache DNS to avoid loops), caches the response.
+6. Consoles (PS5, Xbox) are **not** in the DNS list — if their CDN domains were redirected
+   here, the TLS handshake would fail and the console could not fall back (our DNS would
+   keep returning the proxy IP on every retry). By omitting them from DNS, consoles reach
+   real CDNs directly and work normally (no caching, but no breakage).
+
+### Key Design Decisions
+
+- **[AG-KD-004]** **nginx instead of Squid**: Squid's `intercept` mode requires iptables DNAT and reads
+  `SO_ORIGINAL_DST` for the upstream IP — in a DNS-spoof scenario (no real DNAT) it would
+  get the proxy's own IP and loop. nginx reads `Host`/`$ssl_server_name` directly, which is
+  exactly what a DNS-spoofed client provides.
+- **[AG-KD-005]** **Pre-generated wildcard certs**: At startup, `entrypoint.sh` generates one 2048-bit cert
+  per root CDN domain (e.g. covers `*.steamcontent.com`), signed by our CA, plus an
+  additional cert for some `cdn-domains.txt` entries that a root-level wildcard SAN
+  cannot cover (issue #1272) — the exact threshold differs by entry shape: a
+  **leading-dot wildcard-only entry** (e.g. `.cdn.example.com`) needs its own deeper
+  cert whenever the entry itself differs from the root at all, even by exactly one
+  label (its actual matched hosts are always one label *deeper* than the entry text,
+  so `.cdn.example.com` under root `example.com` already needs its own
+  `*.cdn.example.com`-only cert); a **bare exact-host entry** (e.g.
+  `tlu.dl.delivery.mp.microsoft.com`) needs its own cert only once the host itself is
+  *more than one* label past the root, since a bare entry exactly one label past root
+  is already covered by the root's own `*.<root>` wildcard. Every generated cert's
+  subject CN is a fixed placeholder (`lancache-ng`), never the real hostname —
+  OpenSSL's default CN policy caps it at 64 bytes, well under the 253-byte domains
+  `cdn-domains.txt` can otherwise contain; the real hostname lives only in each
+  cert's SAN, which TLS clients validate against per RFC 6125. Cert/key filenames for
+  these deeper entries are a namespaced SHA-256 hash of the hostname, not the hostname
+  itself, to stay under Linux's 255-byte filename limit. nginx selects the cert via
+  `map $ssl_server_name $ssl_cert_name` in `conf.d/00-ssl-map.conf` (the `00-`
+  prefix ensures it sorts first and the map is defined before the server blocks that use it).
+- **[AG-KD-006]** **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
+  workers wait. Critical for large game files that multiple clients might request simultaneously.
+- **[AG-KD-007]** **nginx's stream module for standard-mode SNI passthrough**: `services/proxy/Dockerfile` installs
+  nginx from nginx.org's own mainline apt repo, not Debian's own `nginx` package. nginx.org's
+  package compiles the stream module in statically (confirmed via its own `nginx -V` output:
+  `--with-stream --with-stream_ssl_preread_module`, among others) — there is no separate module
+  package to install and no `load_module` directive anywhere in `services/proxy/nginx.conf`.
+  (Corrected 2026-07-30: this previously and incorrectly described a separate
+  `libnginx-mod-stream` package requiring an explicit `load_module` line — that described
+  Debian's own nginx package, which this project does not use.)
+- **[AG-KD-008]** **No separate dev deployment profile**: there is only one deployment profile,
+  `deploy/prod/` — there used to be a parallel `deploy/dev/`/`config/dev/` pair (separate
+  LAN IPs, offset DNS ports, a separate compose file kept in sync with prod by hand),
+  retired in v0.3.0 (#766). That split was never something the maintainer actually asked
+  for: the original, much simpler intent behind "dev" was just "the branch I currently
+  develop on" (`current_dev`, see `docs/release-versioning.md` and #825/#1141's branch
+  model), not a second live deployment environment. An earlier AI session misread that as
+  a request to build a whole parallel profile, and it grew from there. Do not reintroduce
+  a separate dev deployment profile — local iteration and real validation both use
+  `deploy/prod/docker-compose.yml` directly (`docker compose -f deploy/prod/docker-compose.yml up -d`);
+  the difference between "developing" and "deploying" is which git ref is checked out
+  (`current_dev` vs. a `vX.Y.Z` release branch vs. `master`), not which compose file or
+  config directory is used. In practice, most real validation for this project happens via
+  SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
+  builds and full-stack `docker compose up` runs are not exercised on the Windows
+  authoring host — see AG-IPV6-001 for one concrete Docker-Desktop-on-Windows limitation).
 
 ## CDN Domains, First-time Setup, IPv6
 
 - **[AG-CDN-001]** Add the hostname to `services/dns/cdn-domains.txt` (or via the Admin UI) — this is the only file to maintain. The proxy derives each entry's registrable root domain automatically at startup (using the vendored Mozilla Public Suffix List, see `services/proxy/entrypoint.sh`) and generates a wildcard cert for it. Restart the containers (or wait for the Admin UI to trigger it) so the proxy picks up the new domain.
-- **[AG-SETUP-001]** **Prod deployment requires two LAN IPs** (`IP_STANDARD`, `IP_SSL`) — see `CLAUDE.md`'s "First-time Setup" section for the concrete setup steps (adding the second IP, editing `.env`/`config/prod/*.env`, generating a CA).
+- **[AG-SETUP-001]** **Prod deployment requires two LAN IPs** (`IP_STANDARD`, `IP_SSL`). First-time setup: add the second IP (e.g. `ip addr add 192.168.1.11/24 dev eth0`); edit `deploy/prod/.env` to set `IP_STANDARD` and `IP_SSL`; edit `config/prod/dns-standard.env` and `config/prod/dns-ssl.env` with the matching IPs; optionally run `certs/generate-ca.sh` to create a dedicated CA before first start; create the cache directory (`mkdir -p /opt/lancache-ng/cache`, or wherever `LANCACHE_STATE_DIR` points).
 - **[AG-IPV6-001]** Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` for full IPv6 dual-stack support. Docker Desktop on Windows has limited IPv6 support; a Linux production host does not have this limitation.
 
 ## Naming Convention
@@ -483,94 +572,8 @@ This matrix maps the hard rules defined above to how they are currently enforced
 
 | Rule ID | Rule Name | Current Enforcement |
 |---------|-----------|-------------------|
-| AG-GH-001 | All GitHub content in English | Manual review (PR description language scan, commit message review) |
 | AG-CC-002 | Chat/session/thinking language German, code language English | Manual review (session transcript / code review) |
-| AG-GH-002 | Issue descriptions include links | Manual review |
-| AG-GH-003 | PRs reference tracking issue | Manual review |
-| AG-GH-004 | Closes vs Refs keywords | Manual review |
-| AG-GH-005 | Non-closing Refs for drafts | Manual review |
-| AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
-| AG-GH-007 | Project-facing text is English | Manual review |
-| AG-GH-008 | PRs carry issue's labels/Milestone/Project | CI-enforced (`pr-tracking-metadata-check` in build-push.yml, blocking on non-draft PRs); Project-board sub-check requires `PROJECT_AUTOMATION_PAT` (see enforcement notes) |
-| AG-GH-009 | Issues carry labels/Type/Milestone/Project-board/parent-sub-issue relationship | Manual review |
-| AG-GH-010 | PR body includes a changelog-style summary (change, impact, validation, risk, follow-up) | Manual review |
-| AG-GH-011 | Scaffold/partial-fix PRs must say so and use `Refs #123`, not `Fixes`/`Closes`, for the unresolved remainder | Manual review |
-| AG-GH-012 | Compare merge commit/current master against the original issue before claiming completion | Manual review |
-| AG-GH-013 | Actively maintain issues/PRs with comments as work happens, not only a one-time body; concrete 15-min-initial + every-15-min cadence, verified via a real time/date command | Manual review |
-| AG-GH-014 | Issues must carry enough detail to be independently actionable | Manual review |
-| AG-GH-015 | A narrowing follow-up issue must state explicitly whether it covers the original's full scope | Manual review |
-| AG-GH-016 | Diff acceptance criteria before closing an issue as resolved/superseded/duplicate | Manual review |
-| AG-GH-017 | Branches must be traceable via PR or linked issue comment at/near creation; check for existing coverage before starting new branch work | Manual review; automated guard tracked in #990 |
-| AG-GH-018 | PR titles follow the Conventional-Commit taxonomy (allowed types incl. `security`/scopes, pre-1.0 `!`/`BREAKING CHANGE:` bumps minor not major) | CI (`pr-title-convention-check`/`pr-title-convention-check-hosted` in build-push.yml); currently `PR_TITLE_LINT_MODE=warn` by default (maintainer decision, #850, 2026-07-23 — a transitional grace period, not a permanent downgrade: a warn finding is still a defect that must be fixed before merge, it just doesn't hard-block CI yet); set the `PR_TITLE_LINT_MODE` repository variable to `block` for full enforcement |
-| AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
-| AG-WF-002 | Separate worktree per PR | Manual review |
-| AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
-| AG-WF-004 | No direct master push | GitHub branch protection (`master` branch requires PR) |
-| AG-WF-005 | Do not merge without explicit ask | Manual review |
-| AG-WF-006 | Keep PRs in draft until ready | Manual review (PR draft status + CI sign-off) |
-| AG-WF-007 | Review findings must be fixed before resolve | Manual review |
-| AG-WF-008 | Fixed findings need factual reply | Manual review |
-| AG-WF-009 | Reply on unresolvable threads | Manual review |
-| AG-WF-010 | Read full context before acting | Manual review (finding quality inspection) |
-| AG-WF-011 | Treat findings as failure classes | Manual review |
-| AG-WF-012 | Verify GitHub API calls upload content | Manual review (GitHub object inspection) |
-| AG-WF-013 | Consider bigger picture | Manual review (scope and impact assessment) |
-| AG-WF-014 | No direct master push (redundant) | GitHub branch protection |
-| AG-WF-015 | User is not a programmer; agents decide independently | Manual review (decision log in PR) |
-| AG-WF-017 | Agent-authored commits/comments/actions carry an identifying marker (`<PREFIX>-<timestamp>`, e.g. `CLD-`/`CDX-` per AI system) | Manual review (commit message / GitHub object inspection) |
-| AG-WF-018 | Search existing issues before filing a new one, even for topics that feel novel | Manual review (`gh issue list --search` before `gh issue create`) |
-| AG-WF-019 | Chain `cd "<path>" && pwd && <command>` in one invocation; never trust a bare `cd` to persist across tool calls | Manual review (command history inspection) |
-| AG-WF-020 | Fetch/rebase/verify before making readiness, mergeability, or integration-order statements | Manual review |
-| AG-WF-021 | Treat subagent results as stale until verified against current remote base and PR head | Manual review |
-| AG-WF-022 | Do not block on subagents when non-overlapping work is available; poll sparingly | Manual review |
-| AG-WF-023 | Agents must make technical decisions independently; ask only when there is real operational impact | Manual review (decision log in PR) |
-| AG-WF-024 | Sub-agents need their own verified-clean working directory; never trust inherited/recycled worktree state; any force-push variant requires immediate pre-action re-verification before proceeding; sub-agents must read+accept governance and report back by name; check back before destructive actions | Manual review |
-| AG-WF-025 | A second occurrence of the same failure class requires proposing a new/strengthened AGENTS.md rule (with maintainer review), not just fixing the instance again | Manual review |
-| AG-WF-026 | Substantive knowledge must be consolidated and durably persisted in the surviving target (issue/PR/branch/etc.) and verified before a lifecycle transition (close/merge/supersede/abandon/handoff); local-only state is never a durable target | Manual review (closing-report/consolidation-comment inspection) |
-| AG-WF-027 | Fix identified problems (new or previously reported) in the same pass instead of leaving them as an unfixed Follow-up/Scope-Boundaries note; scope out and flag explicitly only when a genuine maintainer decision is required | Manual review (PR body/Follow-up-section inspection) |
-| AG-VAL-001 | Warnings are errors | CI (all build jobs fail on warnings) + manual review |
-| AG-VAL-002 | Standard failures are hard failures | CI (non-zero exit codes block merge) + manual review |
-| AG-VAL-003 | Quote search patterns | Manual review (shell command inspection) |
-| AG-VAL-004 | Do not hide failures with `\|\| true` | Manual review (fallback inspection) |
-| AG-VAL-005 | Use deterministic search (rg/grep) | Manual review |
-| AG-VAL-006 | Run narrowest relevant checks | Manual review (PR validation coverage) |
-| AG-VAL-007 | Shell validation (bash -n, shellcheck) | CI (shell workflow files: actionlint; shell scripts: shellcheck in build-tools) |
-| AG-VAL-008 | Rust validation (fmt, check, clippy, test) | CI (`build-tools` container runs cargo checks; PR checklist guidance) |
-| AG-VAL-009 | Docker/Compose validation | CI (`docker compose config` for Compose changes) + manual review |
-| AG-VAL-010 | Compose stack `.env` resolution behavior | Manual review (docs and test guidance) |
-| AG-VAL-011 | Workflow syntax and runner labels | CI (actionlint) + manual review |
-| AG-VAL-012 | Setup/update migration coverage | Manual review (fixture/dry-run documentation) |
-| AG-VAL-013 | DNS real response check | Manual review (`dig` commands required in test/verification guidance) |
-| AG-VAL-014 | Proxy/cache behavior check | Manual review (integration test guidance) |
-| AG-VAL-015 | Do not weaken checks for green | Manual review |
-| AG-VAL-023 | Check a third-party tool's own docs for config options before assuming/building around observed default behavior | Manual review |
-| AG-VAL-016 | Build-tools container (only valid path) | Manual review (CI inspection, PR guidelines) |
-| AG-VAL-017 | Build-tools image tools/PATH | CI (`build-tools` image build and smoke-test) |
-| AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | Manual review (`tools/build-tools/Dockerfile` inspection) |
-| AG-KD-002 | OpenSSL serial file (`ca.srl`) is stored alongside the CA certificate/key in the certs directory, not in `/tmp`, so it survives container restarts | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
-| AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
-| AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
-| AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
-| AG-VAL-024 | New scripts: prefer explicit-interpreter invocation over relying on the committed executable bit (unverifiable on Windows/`core.filemode=false`); `set -e` fail-closed branches need a real failing-input CI run, not manual reasoning | Manual review (PR diff inspection for invocation style; CI run inspection for fail-closed branch coverage) |
-| AG-VAL-021 | CodeQL #394 carve-out for findings in actually macro-*generated* code | Manual review (requires test-coverage evidence per rule text) |
-| AG-VAL-022 | CodeQL #394 carve-out for extraction warnings on ordinary macro *invocations* in human-authored source | Manual review |
-| AG-VAL-025 | Local Docker builds proving build/cache performance must mirror CI acceleration wiring (BUILD_TOOLS_IMAGE, CARGO_BUILD_JOBS, BuildKit secrets) | Manual review |
-| AG-VAL-027 | Adding a new service requires wiring it into full-stack CI validation (or an explicit reasoned Scope-Boundaries exclusion) | Manual review (PR scope inspection). Partial mechanical aid: `scripts/check-workflow-service-lists.sh` keeps the duplicated service-list copies in sync once a service is in the build matrix, but does not enforce that a new service is added to the full-setup validation stack in the first place |
-| AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
-| AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
-| AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
-| AG-REL-004 | Project language is Rust | Manual review |
-| AG-REL-005 | Retired 2026-07-10, merged into AG-REL-001 (was redundant) | N/A |
-| AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
-| AG-REL-007 | Retired 2026-07-10, merged into AG-REL-001 (was triplicative) | N/A |
-| AG-REL-008 | Rust service builders should consume a prebuilt build-tools image; ad-hoc local toolchain compilation needs a documented reason | Manual review (Dockerfile inspection) |
-| AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
-| AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
-| AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
-| AG-SEC-004 | Use GitHub Secrets/Variables | Manual review |
-| AG-SEC-005 | Do not hardcode Redis/distcc/runner IPs | Manual review (grep for hardcoded IPs) |
-| AG-SEC-006 | Remove sensitive data from branch | Manual review + process discipline |
-| AG-SEC-007 | Do not hardcode LAN IPs | Manual review (grep for hardcoded IPs) |
+| AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | Manual review (repo inspection — no second domain file exists) |
 | AG-CI-001 | Runner baseline: assume no tools | Manual review (workflow inspection) |
 | AG-CI-002 | Runner tier routing | Manual review (runner labels inspection) |
 | AG-CI-003 | Runner portability (don't depend only on self-hosted) | Manual review (CI job inspection, documentation) |
@@ -590,11 +593,64 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-CI-017 | Concurrency on shared runner-host resources (esp. a Docker/BuildKit daemon + content store shared by several runner instances per host) must be bounded at the source (concurrency group / per-instance isolation / a cap), not absorbed by retries; a retry (Rule-Ref: AG-CI-013) is only a secondary net, and a recurrence after a retry-based fix proves a source-level concurrency defect. Root-causing this class requires direct runner-host access (SSH process/container inspection), not CI logs alone | Manual review (workflow/script + runner-host inspection) |
 | AG-CI-018 | A `schedule:`/cron trigger only fires from the workflow file's copy on the repository's *default* branch, never from a non-default branch's copy no matter how correct the YAML is; verify the file actually exists on the real default branch (not just the branch it was merged onto), and don't treat a `workflow_dispatch` test run as proof the schedule itself works | Manual review (compare workflow file presence across branches; confirm actual default branch setting) |
 | AG-CI-019 | Which branch supplies a GitHub automation's event depends on its trigger type (schedule = always default-branch; branch-scoped push/pull_request_target = that branch's own copy) — verify per-mechanism, don't assume either way; no CI/governance issue or PR may be closed until its change is confirmed live on master (current_dev state alone is not enough, no "open follow-up" exception); CI/governance PRs use `Refs #N`, never a closing keyword, so current-dev-auto-close.yml cannot prematurely close the issue; CI/governance file changes get a dedicated sync PR to master before their originating issue/PR closes | Manual review (check each automation's trigger type and evaluation semantics; periodic diff of current_dev vs master over CI/governance paths; closing-report check for explicit master-confirmation, not just current_dev; PR-body keyword check) |
+| AG-CODE-001 | Code must be human-readable/documented; comment liberally (WHY, not WHAT — see AG-CODE-002) | Manual review |
+| AG-CODE-002 | Comments document WHY | Manual review |
+| AG-CODE-003 | No task/PR refs in comments | Manual review |
+| AG-CODE-004 | Structured notes for deferred work | Manual review |
+| AG-CODE-005 | Remove TODO markers once implemented | Manual review + grep before finishing PR |
+| AG-CODE-006 | Code must stay human-readable | Manual review |
+| AG-CODE-007 | Structural/orientation step-comments allowed | Manual review |
+| AG-CODE-008 | Touching any part of a file requires checking the entire file for missing WHY-comments | Manual review |
+| AG-CODE-009 | A descriptive name/identifier alone is not a valid comment | Manual review |
+| AG-CODE-010 | Every `#[test]` function needs at least a short comment | Manual review |
+| AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
+| AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
+| AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
+| AG-DOC-004 | Precedence: area-specific AGENTS files (item 3) | Manual review |
+| AG-DOC-005 | Precedence: `SECURITY.md` (item 4) | Manual review |
+| AG-DOC-006 | Precedence: architecture/release documentation (item 5) | Manual review |
+| AG-DOC-007 | Precedence: `README.md`/user-facing docs (item 6) | Manual review |
+| AG-DOC-008 | Do not silently pick a side on a real conflict | Manual review |
+| AG-DOC-009 | Surface conflicts explicitly | Manual review |
+| AG-DOC-010 | Fix one side of a conflict or ask for guidance | Manual review |
+| AG-DOC-011 | Documented exceptions must follow the Scope/Reason/Tracking/Validation/Non-Expansion format | Manual review |
+| AG-GH-001 | All GitHub content in English | Manual review (PR description language scan, commit message review) |
+| AG-GH-002 | Issue descriptions include links | Manual review |
+| AG-GH-003 | PRs reference tracking issue | Manual review |
+| AG-GH-004 | Closes vs Refs keywords | Manual review |
+| AG-GH-005 | Non-closing Refs for drafts | Manual review |
+| AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
+| AG-GH-007 | Project-facing text is English | Manual review |
+| AG-GH-008 | PRs carry issue's labels/Milestone/Project | CI-enforced (`pr-tracking-metadata-check` in build-push.yml, blocking on non-draft PRs); Project-board sub-check requires `PROJECT_AUTOMATION_PAT` (see enforcement notes) |
+| AG-GH-009 | Issues carry labels/Type/Milestone/Project-board/parent-sub-issue relationship | Manual review |
+| AG-GH-010 | PR body includes a changelog-style summary (change, impact, validation, risk, follow-up) | Manual review |
+| AG-GH-011 | Scaffold/partial-fix PRs must say so and use `Refs #123`, not `Fixes`/`Closes`, for the unresolved remainder | Manual review |
+| AG-GH-012 | Compare merge commit/current master against the original issue before claiming completion | Manual review |
+| AG-GH-013 | Actively maintain issues/PRs with comments as work happens, not only a one-time body; concrete 15-min-initial + every-15-min cadence, verified via a real time/date command | Manual review |
+| AG-GH-014 | Issues must carry enough detail to be independently actionable | Manual review |
+| AG-GH-015 | A narrowing follow-up issue must state explicitly whether it covers the original's full scope | Manual review |
+| AG-GH-016 | Diff acceptance criteria before closing an issue as resolved/superseded/duplicate | Manual review |
+| AG-GH-017 | Branches must be traceable via PR or linked issue comment at/near creation; check for existing coverage before starting new branch work | Manual review; automated guard tracked in #990 |
+| AG-GH-018 | PR titles follow the Conventional-Commit taxonomy (allowed types incl. `security`/scopes, pre-1.0 `!`/`BREAKING CHANGE:` bumps minor not major) | CI (`pr-title-convention-check`/`pr-title-convention-check-hosted` in build-push.yml); currently `PR_TITLE_LINT_MODE=warn` by default (maintainer decision, #850, 2026-07-23 — a transitional grace period, not a permanent downgrade: a warn finding is still a defect that must be fixed before merge, it just doesn't hard-block CI yet); set the `PR_TITLE_LINT_MODE` repository variable to `block` for full enforcement |
+| AG-HDR-001 | Every source/config file should open with the standard `lancache-ng (https://github.com/wiki-mod/lancache-ng)` header, in the comment syntax valid for that file's language | CI (`file-headers` job runs `scripts/check-file-headers.sh` in build-push.yml) |
+| AG-HDR-002 | Check what actually parses a `.conf`/`.json`/`.txt` file before adding a header; genuinely JSON content (e.g. the Kea config files) gets no header | CI (`scripts/check-file-headers.sh` exclusion list) |
+| AG-HDR-003 | Do not add a header to a file consumed as a single raw value by a strict parser (e.g. the root `VERSION` file) | CI (`scripts/check-file-headers.sh` exclusion list) |
+| AG-HDR-004 | Do not add a header to a vendored third-party file or a generated/compiled build artifact | CI (`scripts/check-file-headers.sh` exclusion list) |
+| AG-HDR-005 | Scale header detail to the file's actual complexity; do not pad a simple file's header | Manual review |
+| AG-HDR-006 | Every technical claim in a header must be verified against the actual file content and git history | Manual review |
+| AG-HDR-007 | Excluded file types/paths for headers (`.md`, root `.env`/`.env.example`, lockfiles, `.gitkeep`, `VERSION`, vendored/generated artifacts, JSON-as-`.conf`) | CI (`scripts/check-file-headers.sh`'s `is_excluded()` function) |
+| AG-HDR-008 | AGPL-3.0-or-later adopted (root `LICENSE` file); per-file SPDX headers are a separate, not-yet-decided follow-up | Manual review |
+| AG-HDR-009 | Repo-wide header backfill is complete; CI fails a PR missing a header on any non-excluded tracked file; add headers immediately for new files | CI (`file-headers` job in build-push.yml) |
+| AG-IPV6-001 | Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` | Manual review (documentation only; no CI check) |
+| AG-KD-002 | OpenSSL serial file (`ca.srl`) is stored alongside the CA certificate/key in the certs directory, not in `/tmp`, so it survives container restarts | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
+| AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | Manual review (`tools/build-tools/Dockerfile` inspection) |
+| AG-KD-004 | nginx instead of Squid: reads `Host`/`$ssl_server_name` directly rather than needing iptables DNAT + `SO_ORIGINAL_DST`, which a DNS-spoof scenario (no real DNAT) cannot provide | Code review (`services/proxy` architecture inspection) |
+| AG-KD-005 | Pre-generated per-domain wildcard certs, incl. the leading-dot-vs-bare-exact-host deeper-cert threshold, fixed placeholder CN, and SHA-256-hashed filenames for deeper entries | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
+| AG-KD-006 | `proxy_cache_lock on` (only one nginx worker fetches a cache-miss URL at a time) | Code review (nginx config inspection) |
+| AG-KD-007 | nginx installed from nginx.org's mainline apt repo (statically-compiled stream module, no `load_module` directive), not Debian's own `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
+| AG-KD-008 | No separate dev deployment profile — `deploy/prod/` is the only profile; do not reintroduce a parallel `deploy/dev/`/`config/dev/` pair | Manual review (repo inspection — no second deployment profile exists) |
 | AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
 | AG-OP-002 | DNS resolver points to real upstream DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | Code review (nginx resolver config inspection) |
-| AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | Manual review (repo inspection — no second domain file exists) |
-| AG-SETUP-001 | Prod deployment requires two LAN IPs | Manual review (documentation only; no CI check for external LAN IP provisioning) |
-| AG-IPV6-001 | Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` | Manual review (documentation only; no CI check) |
 | AG-OP-003 | Lazy proxy default | Manual review + documentation |
 | AG-OP-004 | Strict behavior is opt-in | Manual review + documentation |
 | AG-OP-005 | Do not silently invert defaults | Manual review |
@@ -608,36 +664,76 @@ This matrix maps the hard rules defined above to how they are currently enforced
 | AG-OP-013 | Convergence/idempotence PRs answer the 5 questions | Manual review (PR body inspection) |
 | AG-OP-014 | DHCP NTP defaults/semantics are a project-wide policy decision, not a per-PR cleanup target | Manual review |
 | AG-OP-015 | Domain scope semantics: a leading-dot entry is an explicit wildcard scope, not equivalent to the root domain | Manual review |
-| AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
-| AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
-| AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
-| AG-DOC-004 | Precedence: area-specific AGENTS files (item 3) | Manual review |
-| AG-DOC-005 | Precedence: `SECURITY.md` (item 4) | Manual review |
-| AG-DOC-006 | Precedence: architecture/release documentation (item 5) | Manual review |
-| AG-DOC-007 | Precedence: `README.md`/user-facing docs (item 6) | Manual review |
-| AG-DOC-008 | Do not silently pick a side on a real conflict | Manual review |
-| AG-DOC-009 | Surface conflicts explicitly | Manual review |
-| AG-DOC-010 | Fix one side of a conflict or ask for guidance | Manual review |
-| AG-DOC-011 | Documented exceptions must follow the Scope/Reason/Tracking/Validation/Non-Expansion format | Manual review |
-| AG-CODE-001 | Code must be human-readable/documented; comment liberally (WHY, not WHAT — see AG-CODE-002) | Manual review |
-| AG-CODE-002 | Comments document WHY | Manual review |
-| AG-CODE-003 | No task/PR refs in comments | Manual review |
-| AG-CODE-004 | Structured notes for deferred work | Manual review |
-| AG-CODE-005 | Remove TODO markers once implemented | Manual review + grep before finishing PR |
-| AG-CODE-006 | Code must stay human-readable | Manual review |
-| AG-CODE-007 | Structural/orientation step-comments allowed | Manual review |
-| AG-CODE-008 | Touching any part of a file requires checking the entire file for missing WHY-comments | Manual review |
-| AG-CODE-009 | A descriptive name/identifier alone is not a valid comment | Manual review |
-| AG-CODE-010 | Every `#[test]` function needs at least a short comment | Manual review |
-| AG-HDR-001 | Every source/config file should open with the standard `lancache-ng (https://github.com/wiki-mod/lancache-ng)` header, in the comment syntax valid for that file's language | CI (`file-headers` job runs `scripts/check-file-headers.sh` in build-push.yml) |
-| AG-HDR-002 | Check what actually parses a `.conf`/`.json`/`.txt` file before adding a header; genuinely JSON content (e.g. the Kea config files) gets no header | CI (`scripts/check-file-headers.sh` exclusion list) |
-| AG-HDR-003 | Do not add a header to a file consumed as a single raw value by a strict parser (e.g. the root `VERSION` file) | CI (`scripts/check-file-headers.sh` exclusion list) |
-| AG-HDR-004 | Do not add a header to a vendored third-party file or a generated/compiled build artifact | CI (`scripts/check-file-headers.sh` exclusion list) |
-| AG-HDR-005 | Scale header detail to the file's actual complexity; do not pad a simple file's header | Manual review |
-| AG-HDR-006 | Every technical claim in a header must be verified against the actual file content and git history | Manual review |
-| AG-HDR-007 | Excluded file types/paths for headers (`.md`, root `.env`/`.env.example`, lockfiles, `.gitkeep`, `VERSION`, vendored/generated artifacts, JSON-as-`.conf`) | CI (`scripts/check-file-headers.sh`'s `is_excluded()` function) |
-| AG-HDR-008 | AGPL-3.0-or-later adopted (root `LICENSE` file); per-file SPDX headers are a separate, not-yet-decided follow-up | Manual review |
-| AG-HDR-009 | Repo-wide header backfill is complete; CI fails a PR missing a header on any non-excluded tracked file; add headers immediately for new files | CI (`file-headers` job in build-push.yml) |
+| AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
+| AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
+| AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
+| AG-REL-004 | Project language is Rust | Manual review |
+| AG-REL-005 | Retired 2026-07-10, merged into AG-REL-001 (was redundant) | N/A |
+| AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
+| AG-REL-007 | Retired 2026-07-10, merged into AG-REL-001 (was triplicative) | N/A |
+| AG-REL-008 | Rust service builders should consume a prebuilt build-tools image; ad-hoc local toolchain compilation needs a documented reason | Manual review (Dockerfile inspection) |
+| AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
+| AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
+| AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
+| AG-SEC-004 | Use GitHub Secrets/Variables | Manual review |
+| AG-SEC-005 | Do not hardcode Redis/distcc/runner IPs | Manual review (grep for hardcoded IPs) |
+| AG-SEC-006 | Remove sensitive data from branch | Manual review + process discipline |
+| AG-SEC-007 | Do not hardcode LAN IPs | Manual review (grep for hardcoded IPs) |
+| AG-SETUP-001 | Prod deployment requires two LAN IPs | Manual review (documentation only; no CI check for external LAN IP provisioning) |
+| AG-VAL-001 | Warnings are errors | CI (all build jobs fail on warnings) + manual review |
+| AG-VAL-002 | Standard failures are hard failures | CI (non-zero exit codes block merge) + manual review |
+| AG-VAL-003 | Quote search patterns | Manual review (shell command inspection) |
+| AG-VAL-004 | Do not hide failures with `\|\| true` | Manual review (fallback inspection) |
+| AG-VAL-005 | Use deterministic search (rg/grep) | Manual review |
+| AG-VAL-006 | Run narrowest relevant checks | Manual review (PR validation coverage) |
+| AG-VAL-007 | Shell validation (bash -n, shellcheck) | CI (shell workflow files: actionlint; shell scripts: shellcheck in build-tools) |
+| AG-VAL-008 | Rust validation (fmt, check, clippy, test) | CI (`build-tools` container runs cargo checks; PR checklist guidance) |
+| AG-VAL-009 | Docker/Compose validation | CI (`docker compose config` for Compose changes) + manual review |
+| AG-VAL-010 | Compose stack `.env` resolution behavior | Manual review (docs and test guidance) |
+| AG-VAL-011 | Workflow syntax and runner labels | CI (actionlint) + manual review |
+| AG-VAL-012 | Setup/update migration coverage | Manual review (fixture/dry-run documentation) |
+| AG-VAL-013 | DNS real response check | Manual review (`dig` commands required in test/verification guidance) |
+| AG-VAL-014 | Proxy/cache behavior check | Manual review (integration test guidance) |
+| AG-VAL-015 | Do not weaken checks for green | Manual review |
+| AG-VAL-016 | Build-tools container (only valid path) | Manual review (CI inspection, PR guidelines) |
+| AG-VAL-017 | Build-tools image tools/PATH | CI (`build-tools` image build and smoke-test) |
+| AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
+| AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-021 | CodeQL #394 carve-out for findings in actually macro-*generated* code | Manual review (requires test-coverage evidence per rule text) |
+| AG-VAL-022 | CodeQL #394 carve-out for extraction warnings on ordinary macro *invocations* in human-authored source | Manual review |
+| AG-VAL-023 | Check a third-party tool's own docs for config options before assuming/building around observed default behavior | Manual review |
+| AG-VAL-024 | New scripts: prefer explicit-interpreter invocation over relying on the committed executable bit (unverifiable on Windows/`core.filemode=false`); `set -e` fail-closed branches need a real failing-input CI run, not manual reasoning | Manual review (PR diff inspection for invocation style; CI run inspection for fail-closed branch coverage) |
+| AG-VAL-025 | Local Docker builds proving build/cache performance must mirror CI acceleration wiring (BUILD_TOOLS_IMAGE, CARGO_BUILD_JOBS, BuildKit secrets) | Manual review |
+| AG-VAL-026 | Inside a blocking CI gate, never trust a mutable channel tag or a runner-local cached image as current — resolve to an immutable per-commit tag/digest and/or pull fresh immediately before the dependent check | Manual review (workflow/script inspection for tag-vs-digest resolution) |
+| AG-VAL-027 | Adding a new service requires wiring it into full-stack CI validation (or an explicit reasoned Scope-Boundaries exclusion) | Manual review (PR scope inspection). Partial mechanical aid: `scripts/check-workflow-service-lists.sh` keeps the duplicated service-list copies in sync once a service is in the build matrix, but does not enforce that a new service is added to the full-setup validation stack in the first place |
+| AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
+| AG-WF-002 | Separate worktree per PR | Manual review |
+| AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
+| AG-WF-004 | No direct master push | GitHub branch protection (`master` branch requires PR) |
+| AG-WF-005 | Do not merge without explicit ask | Manual review |
+| AG-WF-006 | Keep PRs in draft until ready | Manual review (PR draft status + CI sign-off) |
+| AG-WF-007 | Review findings must be fixed before resolve | Manual review |
+| AG-WF-008 | Fixed findings need factual reply | Manual review |
+| AG-WF-009 | Reply on unresolvable threads | Manual review |
+| AG-WF-010 | Read full context before acting | Manual review (finding quality inspection) |
+| AG-WF-011 | Treat findings as failure classes | Manual review |
+| AG-WF-012 | Verify GitHub API calls upload content | Manual review (GitHub object inspection) |
+| AG-WF-013 | Consider bigger picture | Manual review (scope and impact assessment) |
+| AG-WF-014 | No direct master push (redundant) | GitHub branch protection |
+| AG-WF-015 | User is not a programmer; agents decide independently | Manual review (decision log in PR) |
+| AG-WF-016 | Do not silently remove, narrow, or "simplify" any AGENTS.md content without maintainer consent; no rule number may be reused; reference existing rules via `Rule-Ref: <ID>`, never a bare repeated ID | Manual review (diff inspection for content removal/narrowing; grep for bare repeated rule IDs) |
+| AG-WF-017 | Agent-authored commits/comments/actions carry an identifying marker (`<PREFIX>-<timestamp>`, e.g. `CLD-`/`CDX-` per AI system) | Manual review (commit message / GitHub object inspection) |
+| AG-WF-018 | Search existing issues before filing a new one, even for topics that feel novel | Manual review (`gh issue list --search` before `gh issue create`) |
+| AG-WF-019 | Chain `cd "<path>" && pwd && <command>` in one invocation; never trust a bare `cd` to persist across tool calls | Manual review (command history inspection) |
+| AG-WF-020 | Fetch/rebase/verify before making readiness, mergeability, or integration-order statements | Manual review |
+| AG-WF-021 | Treat subagent results as stale until verified against current remote base and PR head | Manual review |
+| AG-WF-022 | Do not block on subagents when non-overlapping work is available; poll sparingly | Manual review |
+| AG-WF-023 | Agents must make technical decisions independently; ask only when there is real operational impact | Manual review (decision log in PR) |
+| AG-WF-024 | Sub-agents need their own verified-clean working directory; never trust inherited/recycled worktree state; any force-push variant requires immediate pre-action re-verification before proceeding; sub-agents must read+accept governance and report back by name; check back before destructive actions | Manual review |
+| AG-WF-025 | A second occurrence of the same failure class requires proposing a new/strengthened AGENTS.md rule (with maintainer review), not just fixing the instance again | Manual review |
+| AG-WF-026 | Substantive knowledge must be consolidated and durably persisted in the surviving target (issue/PR/branch/etc.) and verified before a lifecycle transition (close/merge/supersede/abandon/handoff); local-only state is never a durable target | Manual review (closing-report/consolidation-comment inspection) |
+| AG-WF-027 | Fix identified problems (new or previously reported) in the same pass instead of leaving them as an unfixed Follow-up/Scope-Boundaries note; scope out and flag explicitly only when a genuine maintainer decision is required | Manual review (PR body/Follow-up-section inspection) |
 
 **Known Gaps and Planned Improvements:**
 
