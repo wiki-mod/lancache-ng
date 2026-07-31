@@ -10,31 +10,6 @@ set -e
 
 mkdir -p /var/log/chrony /var/lib/chrony
 
-# chronyd drops privileges to the packaged `chrony` user on its own
-# (compiled-in PRIVDROP default -- confirmed live: it runs as `chrony`/uid
-# 100 after startup even though this entrypoint execs it as root below), but
-# this entrypoint itself still runs as root here, so /var/log/chrony and
-# /var/lib/chrony can end up root-owned instead: the image's own
-# /var/log/chrony is created by the Dockerfile's `mkdir -p` at build time
-# (root, since no package pre-creates it the way chrony-nts's chrony-common
-# dependency pre-creates /var/lib/chrony as chrony:chrony), a fresh
-# Docker-managed named volume mounted over it copies that same root
-# ownership on first use, and a host bind mount (e.g. NTP_DATA_DIR) is
-# whatever the host directory already was before this container ever wrote
-# to it. Without this chown, the privilege-dropped chronyd cannot open its
-# own log files or driftfile there and fails silently -- confirmed live,
-# reproducibly, with real "Could not open /var/log/chrony/*.log :
-# Permission denied" errors, present identically on the pre-Alpine-migration
-# Debian image too (a real, pre-existing bug this validation pass found, not
-# something the base-image swap introduced). Deliberately best-effort, not a
-# hard failure under `set -e` above: logging/driftfile persistence are
-# secondary to this service's actual job (disciplining the clock and
-# serving LAN clients on UDP/123), which chronyd continues to do correctly
-# even when these particular writes fail.
-if ! chown chrony:chrony /var/log/chrony /var/lib/chrony; then
-    echo "WARNING: could not chown /var/log/chrony and/or /var/lib/chrony to the chrony user; chronyd's own log/driftfile writes may fail (the service will still discipline time and serve NTP clients normally)." >&2
-fi
-
 # The Admin UI persists its own settings (including this service's) to the
 # shared ui-data volume rather than mutating this container's environment
 # directly -- same mechanism services/dhcp-proxy/entrypoint.sh already uses,
@@ -153,6 +128,49 @@ validate_ntp_config() {
     return 0
 }
 
+# fix_chrony_dir_ownership [owner] [log_dir] [lib_dir]
+# chronyd drops privileges to the packaged `chrony` user on its own
+# (compiled-in PRIVDROP default -- confirmed live: it runs as `chrony`/uid
+# 100 after startup even though this entrypoint execs it as root below), but
+# this entrypoint itself still runs as root here, so log_dir/lib_dir can end
+# up root-owned instead: the image's own /var/log/chrony is created by the
+# Dockerfile's `mkdir -p` at build time (root, since no package pre-creates
+# it the way chrony-nts's chrony-common dependency pre-creates
+# /var/lib/chrony as chrony:chrony), a fresh Docker-managed named volume
+# mounted over it copies that same root ownership on first use, and a host
+# bind mount (e.g. NTP_DATA_DIR) is whatever the host directory already was
+# before this container ever wrote to it. Without this, the
+# privilege-dropped chronyd cannot open its own log files or driftfile
+# there and fails silently -- confirmed live, reproducibly, with real
+# "Could not open /var/log/chrony/*.log : Permission denied" errors,
+# present identically on the pre-Alpine-migration Debian image too (a real,
+# pre-existing bug this validation pass found, not something the
+# base-image swap introduced). Every start (not just first) so an already
+# wrong-owned pre-existing production volume self-heals on its very next
+# restart, not only on a fresh install.
+#
+# Deliberately always returns 0 (never propagates a chown failure to the
+# caller, so a bare call at the top level cannot trip `set -e` above): this
+# is optional, best-effort hardening, not a required step -- see
+# AG-VAL-004's carve-out for an explicitly documented optional fallback.
+# Logging/driftfile persistence are secondary to this service's actual job
+# (disciplining the clock and serving LAN clients on UDP/123), which
+# chronyd continues to do correctly even when these particular writes
+# fail. `owner`/`log_dir`/`lib_dir` are all overridable so
+# tests/bats/ntp_entrypoint_rendering.bats can exercise both the success
+# and the failure/warning path deterministically (chown to a fixture's own
+# uid:gid always succeeds even unprivileged; chown to an unrelated/invalid
+# owner reliably fails), the same optional-parameter pattern this file's
+# other functions already use.
+fix_chrony_dir_ownership() {
+    local owner="${1:-chrony:chrony}" log_dir="${2:-/var/log/chrony}" lib_dir="${3:-/var/lib/chrony}"
+
+    if ! chown "$owner" "$log_dir" "$lib_dir" 2>&1; then
+        echo "WARNING: could not chown $log_dir and/or $lib_dir to $owner; chronyd's own log/driftfile writes may fail (the service will still discipline time and serve NTP clients normally)." >&2
+    fi
+    return 0
+}
+
 # Removes chronyd's own pidfile if a stale one survives from a previously
 # crashed instance in THIS SAME container (issue #1318). Docker's
 # `restart: always` re-execs this entrypoint against the same writable
@@ -196,6 +214,7 @@ NTP_RUNTIME_CONF=/etc/chrony/chrony.conf
 render_ntp_config "$NTP_RUNTIME_CONF"
 validate_ntp_config "$NTP_RUNTIME_CONF" || exit 1
 cleanup_stale_ntp_pidfile
+fix_chrony_dir_ownership
 
 echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
 exec chronyd -n -f "$NTP_RUNTIME_CONF"

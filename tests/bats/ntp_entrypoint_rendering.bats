@@ -173,3 +173,65 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"/run/chrony/chronyd.pid"* ]]
 }
+
+# Real, root-cause regression test for the log/driftfile permission bug this
+# validation pass found (present identically on the pre-migration Debian
+# image, not something the Alpine base-image swap introduced): a directory
+# owned by someone other than the user chronyd eventually drops privileges
+# to must get its ownership corrected at every container start, not just on
+# first install, so an already-existing production volume self-heals too.
+# Chowns to this test process's OWN uid:gid (always succeeds even
+# unprivileged, unlike chowning to an arbitrary named user) to prove the
+# real chown mechanism works end-to-end against a genuinely wrong-owned
+# fixture directory, without requiring root in the test sandbox.
+@test "fix_chrony_dir_ownership corrects ownership of a wrong-owned fixture directory" {
+    log_dir="$BATS_TEST_TMPDIR/log-chrony"
+    lib_dir="$BATS_TEST_TMPDIR/lib-chrony"
+    mkdir -p "$log_dir" "$lib_dir"
+    self_owner="$(id -u):$(id -g)"
+
+    run fix_chrony_dir_ownership "$self_owner" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING"* ]]
+
+    run stat -c '%u:%g' "$log_dir"
+    [ "$output" = "$(id -u):$(id -g)" ]
+    run stat -c '%u:%g' "$lib_dir"
+    [ "$output" = "$(id -u):$(id -g)" ]
+}
+
+# A previously-existing production volume must self-heal on every restart,
+# not only the first time it's ever corrected -- repeating the same chown
+# against an already-correctly-owned directory must stay a no-op success,
+# matching this project's convergence/idempotence expectations (issue #456)
+# the same way cleanup_stale_ntp_pidfile's own idempotence test above does.
+@test "fix_chrony_dir_ownership is idempotent when called twice against an already-correct owner" {
+    log_dir="$BATS_TEST_TMPDIR/log-chrony"
+    lib_dir="$BATS_TEST_TMPDIR/lib-chrony"
+    mkdir -p "$log_dir" "$lib_dir"
+    self_owner="$(id -u):$(id -g)"
+
+    run fix_chrony_dir_ownership "$self_owner" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    run fix_chrony_dir_ownership "$self_owner" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING"* ]]
+}
+
+# The warning path (AG-VAL-024's "a set -e fail-closed branch needs a real
+# failing-input run, not manual reasoning" applied to this function's own
+# non-fatal-failure branch): a chown that genuinely cannot succeed (an
+# invalid/unrelated owner spec, guaranteed to fail for an unprivileged test
+# process) must print a WARNING and still return 0, so a bare call at the
+# real entrypoint's top level can never trip `set -e` and abort the whole
+# service over a non-essential logging/driftfile permission failure.
+@test "fix_chrony_dir_ownership warns but returns non-fatally when chown genuinely fails" {
+    log_dir="$BATS_TEST_TMPDIR/log-chrony-unwritable"
+    lib_dir="$BATS_TEST_TMPDIR/lib-chrony-unwritable"
+    mkdir -p "$log_dir" "$lib_dir"
+
+    run fix_chrony_dir_ownership "root:root" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING"* ]]
+    [[ "$output" == *"$log_dir"* ]]
+}

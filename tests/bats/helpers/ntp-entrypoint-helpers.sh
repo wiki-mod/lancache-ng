@@ -3,10 +3,10 @@
 #
 # Bats helper that loads services/ntp/entrypoint.sh's pure config-rendering
 # functions (`is_ip_literal`, `render_ntp_config`, `validate_ntp_config`,
-# `cleanup_stale_ntp_pidfile`) directly, without executing the rest of the
-# entrypoint (the fail-closed empty-upstream-list check that would `exit 1`
-# under bats, and the final `exec chronyd`, which does not exist in the test
-# environment).
+# `cleanup_stale_ntp_pidfile`, `fix_chrony_dir_ownership`) directly, without
+# executing the rest of the entrypoint (the fail-closed empty-upstream-list
+# check that would `exit 1` under bats, and the final `exec chronyd`, which
+# does not exist in the test environment).
 
 load_ntp_entrypoint_helpers() {
     local repo_root="$1" helper_file="$2"
@@ -24,6 +24,9 @@ load_ntp_entrypoint_helpers() {
         /^cleanup_stale_ntp_pidfile\(\) \{/ { in_fn4 = 1 }
         in_fn4 { print }
         in_fn4 && /^\}$/ { in_fn4 = 0 }
+        /^fix_chrony_dir_ownership\(\) \{/ { in_fn5 = 1 }
+        in_fn5 { print }
+        in_fn5 && /^\}$/ { in_fn5 = 0 }
     ' "$repo_root/services/ntp/entrypoint.sh" > "$helper_file"
 
     # shellcheck disable=SC1090
