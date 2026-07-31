@@ -1,15 +1,15 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-07-31T09:44:24Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-07-31T15:52:38Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
-  "timestamp": "2026-07-31T09:44:24Z",
+  "timestamp": "2026-07-31T15:52:38Z",
   "version": 1,
   "statements": [
     {
       "vulnerability": {
         "name": "CVE-2026-34040"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -31,7 +31,7 @@
       "vulnerability": {
         "name": "CVE-2026-41567"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -53,7 +53,7 @@
       "vulnerability": {
         "name": "CVE-2026-42306"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -75,7 +75,7 @@
       "vulnerability": {
         "name": "CVE-2026-12064"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -83,13 +83,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- not a non-exploitability disposition; curl's vulnerable code genuinely is present here. CVE-2026-12064 is an SSH host-verification bypass triggered by schemeless URLs used with SFTP/SCP. Affects `curl`/`libcurl4t64` identically at both 8.14.1-2+deb13u4 (plain Debian trixie) and 8.21.0-2~bpo13+1 (trixie-backports) across every first-party image that installs curl at all: `services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, and `services/ntp` -- confirmed by a real, controlled before/after Trivy scan run separately against each of those 5 images (see issue #1304 for the full investigation and the maintainer's recorded acceptance decision). No fix exists anywhere as of 2026-07-30 (`FixedVersion: None` in Trivy's DB for trixie, backports, and sid alike) -- disclosed 2026-07-03, after curl 8.21.0 itself shipped, so the backports move that fixed an earlier, different CVE set for this same package does not touch this one. Accepted for now because curl's actual usage across these 5 images is narrow and, case by case, does not reach any of these CVEs' trigger conditions -- not one single shared usage pattern, so stated precisely per image rather than generalized: `services/proxy` and `services/ui` invoke curl only for a Compose healthcheck's plain loopback GET (`curl -sf http://127.0.0.1/...` / `curl -ksf https://127.0.0.1/...`, see each Dockerfile's own comment block and the matching `healthcheck:` block in `deploy/prod`, `deploy/quickstart`, and `deploy/full-setup`); no SFTP/SCP schemeless URL, no proxy configuration, no mTLS client certificates, no custom libcurl callback API usage, and no long-lived process reusing a cached TLS session (each healthcheck run is a fresh, short-lived curl process). `services/dns` invokes curl only for `nats-subscriber`'s internal rollback-listener probe, run via `docker compose exec` -- a comparable narrow, internal, loopback-only invocation, but not a Compose `healthcheck:` block itself (see `services/dns/Dockerfile`'s own comment for the exact usage). `services/watchdog` invokes curl repeatedly from `watchdog.sh`'s own monitoring loop (`get_health()`/`restart_container()`) against `DOCKER_PROXY_URL` (`http://docker-socket-proxy:2375` by default) -- periodic plain-HTTP GET/POST calls to an internal, non-TLS Docker-network service (`docker-socket-proxy`), not a loopback Compose healthcheck and not TLS at all, so no SFTP/SCP schemeless URL, no mTLS, and no TLS session reuse either; each call is bounded by an explicit `--max-time`. `services/ntp` is the exception to all of the above: curl is installed but genuinely never invoked at all -- confirmed by PR #1311 (`services/ntp/entrypoint.sh` renders `chrony.conf` with plain shell, not `curl`, and its Compose healthcheck uses `chronyc tracking`, not curl) -- an even stronger argument for acceptance here than a narrow-but-real invocation, since no code path in this image executes curl at all today. No `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected here, being installed via `apt`/`dpkg` rather than a language-specific analyzer -- carries no `PkgPath` at all, unlike this file's existing Go-binary entries above (`docker-compose`/`docker-buildx`, scanned by Trivy's `gobinary` analyzer, which genuinely does report a file path). Confirmed empirically on a real build of the proxy image: an ignore entry for this same CVE ID with a populated but bogus `paths:` value (`usr/bin/curl`) did NOT suppress the finding, while an otherwise identical entry with no `paths:` field at all DID suppress it cleanly -- for exactly this CVE ID, on both `curl` and `libcurl4t64`, and nothing else (diffed the full before/after finding list, not just exit code). A `paths:` list on this entry would therefore silently never match and the finding would remain unsuppressed; scoping is instead inherent to the CVE ID itself, since every ID in this group of 7 is curl/libcurl-specific in Trivy's own vulnerability database and cannot match any other package. This is a time-boxed acceptance, not an indefinite one: re-review on or before 2026-08-15 -- if trixie, backports, or sid has shipped a fix for any of these 7 CVE IDs by then, drop the corresponding entries and rebuild; if not, this decision needs to be revisited (extend the acceptance, or migrate the affected images off curl entirely). See issue #1304 for the complete before/after Trivy evidence per image and the maintainer's recorded decision. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
+      "action_statement": "Accepted, tracked risk -- not a non-exploitability disposition; curl's vulnerable code genuinely is present here. CVE-2026-12064 is an SSH host-verification bypass triggered by schemeless URLs used with SFTP/SCP. Affects `curl`/`libcurl4t64` identically at both 8.14.1-2+deb13u4 (plain Debian trixie) and 8.21.0-2~bpo13+1 (trixie-backports) across every first-party image that installs curl at all: `services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, and `services/ntp` -- confirmed by a real, controlled before/after Trivy scan run separately against each of those 5 images (see issue #1304 for the full investigation and the maintainer's recorded acceptance decision). No fix exists anywhere as of 2026-07-30 (`FixedVersion: None` in Trivy's DB for trixie, backports, and sid alike) -- disclosed 2026-07-03, after curl 8.21.0 itself shipped, so the backports move that fixed an earlier, different CVE set for this same package does not touch this one. Accepted for now because curl's actual usage across these 5 images is narrow and, case by case, does not reach any of these CVEs' trigger conditions -- not one single shared usage pattern, so stated precisely per image rather than generalized: `services/proxy` and `services/ui` invoke curl only for a Compose healthcheck's plain loopback GET (`curl -sf http://127.0.0.1/...` / `curl -ksf https://127.0.0.1/...`, see each Dockerfile's own comment block and the matching `healthcheck:` block in `deploy/prod`, `deploy/quickstart`, and `deploy/full-setup`); no SFTP/SCP schemeless URL, no proxy configuration, no mTLS client certificates, no custom libcurl callback API usage, and no long-lived process reusing a cached TLS session (each healthcheck run is a fresh, short-lived curl process). `services/dns` invokes curl only for `nats-subscriber`'s internal rollback-listener probe, run via `docker compose exec` -- a comparable narrow, internal, loopback-only invocation, but not a Compose `healthcheck:` block itself (see `services/dns/Dockerfile`'s own comment for the exact usage). `services/watchdog` invokes curl repeatedly from `watchdog.sh`'s own monitoring loop (`get_health()`/`restart_container()`) against `DOCKER_PROXY_URL` (`http://docker-socket-proxy:2375` by default) -- periodic plain-HTTP GET/POST calls to an internal, non-TLS Docker-network service (`docker-socket-proxy`), not a loopback Compose healthcheck and not TLS at all, so no SFTP/SCP schemeless URL, no mTLS, and no TLS session reuse either; each call is bounded by an explicit `--max-time`. Accuracy update (2026-07-31): `services/watchdog` migrated off `debian:13-slim` to `alpine:3.24` (issue #815's watchdog carve-out) after this entry was written, so it no longer carries the `curl`/`libcurl4t64` package versions named above -- it now ships Alpine's own `curl` 8.21.0-r0 build. A real Trivy scan of the rebuilt image (with and without `--ignore-unfixed`, same flags this project's CI uses) shows none of this CVE-2026-12064 finding group present at all for that image, so this entry's own watchdog-specific risk-acceptance narrative above is now historical background for that one image, not a live disposition it still needs -- the entry stays in force for the other Debian-based images it still names (`services/proxy`, `services/dns`, `services/ui`; `services/ntp`'s own status is tracked separately and not asserted here). `services/ntp` is the exception to all of the above: curl is installed but genuinely never invoked at all -- confirmed by PR #1311 (`services/ntp/entrypoint.sh` renders `chrony.conf` with plain shell, not `curl`, and its Compose healthcheck uses `chronyc tracking`, not curl) -- an even stronger argument for acceptance here than a narrow-but-real invocation, since no code path in this image executes curl at all today. No `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected here, being installed via `apt`/`dpkg` rather than a language-specific analyzer -- carries no `PkgPath` at all, unlike this file's existing Go-binary entries above (`docker-compose`/`docker-buildx`, scanned by Trivy's `gobinary` analyzer, which genuinely does report a file path). Confirmed empirically on a real build of the proxy image: an ignore entry for this same CVE ID with a populated but bogus `paths:` value (`usr/bin/curl`) did NOT suppress the finding, while an otherwise identical entry with no `paths:` field at all DID suppress it cleanly -- for exactly this CVE ID, on both `curl` and `libcurl4t64`, and nothing else (diffed the full before/after finding list, not just exit code). A `paths:` list on this entry would therefore silently never match and the finding would remain unsuppressed; scoping is instead inherent to the CVE ID itself, since every ID in this group of 7 is curl/libcurl-specific in Trivy's own vulnerability database and cannot match any other package. This is a time-boxed acceptance, not an indefinite one: re-review on or before 2026-08-15 -- if trixie, backports, or sid has shipped a fix for any of these 7 CVE IDs by then, drop the corresponding entries and rebuild; if not, this decision needs to be revisited (extend the acceptance, or migrate the affected images off curl entirely). See issue #1304 for the complete before/after Trivy evidence per image and the maintainer's recorded decision. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-15 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-8286"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -103,7 +103,7 @@
       "vulnerability": {
         "name": "CVE-2026-8927"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -117,7 +117,7 @@
       "vulnerability": {
         "name": "CVE-2026-8932"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -131,7 +131,7 @@
       "vulnerability": {
         "name": "CVE-2026-9079"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -145,7 +145,7 @@
       "vulnerability": {
         "name": "CVE-2026-9080"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -159,7 +159,7 @@
       "vulnerability": {
         "name": "CVE-2026-9545"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -173,7 +173,7 @@
       "vulnerability": {
         "name": "CVE-2025-59375"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -187,7 +187,7 @@
       "vulnerability": {
         "name": "CVE-2026-25210"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -201,7 +201,7 @@
       "vulnerability": {
         "name": "CVE-2026-45186"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -215,7 +215,7 @@
       "vulnerability": {
         "name": "CVE-2026-56131"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -229,7 +229,7 @@
       "vulnerability": {
         "name": "CVE-2026-56408"
       },
-      "timestamp": "2026-07-31T09:44:24Z",
+      "timestamp": "2026-07-31T15:52:38Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
