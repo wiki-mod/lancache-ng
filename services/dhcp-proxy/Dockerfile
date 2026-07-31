@@ -31,11 +31,47 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 # (no separate `apk update` needed, mirroring `apk add --no-cache`'s own
 # convention) picks it up and, per a real `find /var/cache/apk` check
 # afterward, leaves no persistent index cache behind either.
+#
+# `findutils` and `coreutils` (issue #840, found while validating a later,
+# unrelated Alpine migration for services/watchdog -- PR #1346): this
+# Dockerfile's original Alpine migration (this PR) omitted both, and two
+# real, silent regressions resulted in entrypoint.sh's known-good-config
+# snapshot machinery (docs/known-good-config-snapshots.md, #614):
+#
+# 1. `kgs_list_snapshots()` uses `find ... -printf '%f\n'` to sort snapshot
+#    ids by name. Confirmed live on a real `alpine:3.24` container: BusyBox's
+#    bundled `find` does not support the GNU-findutils-only `-printf` action
+#    at all ("find: unrecognized: -printf"), fails with exit 1, and writes
+#    that error to stderr -- which the function's own `2>/dev/null` silently
+#    swallows, leaving `sort` with empty input and the function silently
+#    returning an empty snapshot list. `findutils` installs GNU `find`/
+#    `xargs` at `/usr/bin/find`, ahead of BusyBox's own `find` applet earlier
+#    in `$PATH` -- the same fix already verified and shipped for
+#    `services/watchdog` (PR #1346).
+# 2. `kgs_new_snapshot_id()` uses `date -u +%Y%m%dT%H%M%S.%N` for
+#    "practically collision-free" snapshot ids. Confirmed live: BusyBox's
+#    `date` does not error on the unsupported `%N` (nanoseconds) specifier --
+#    it silently produces empty output for it instead, so every id generated
+#    on Alpine ended in a bare `.` with no nanosecond suffix, and the
+#    collision-avoidance the comment claims no longer held (two snapshots
+#    created within the same whole second collided on the same id).
+#    `coreutils` (GNU coreutils, which `date` ships as part of, not
+#    `findutils`) installs a real `date` binary at `/bin/date` that
+#    correctly implements `%N` -- confirmed live: `date -u
+#    +%Y%m%dT%H%M%S.%N` produces a real 9-digit nanosecond suffix, not an
+#    empty one. Installing the full `coreutils` package (rather than trying
+#    to cherry-pick just `date`, which Alpine does not package standalone)
+#    also replaces several other BusyBox applets in this image (`ls`, `cp`,
+#    `stat`, `sort`, `wc`, etc.) with their real GNU equivalents -- verified
+#    this introduces no `apk` conflicts and no behavior change for anything
+#    else this entrypoint calls.
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
     dnsmasq \
     gettext-envsubst \
+    findutils \
+    coreutils \
     nano \
     lsof \
     ripgrep
