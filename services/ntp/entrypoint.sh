@@ -128,26 +128,27 @@ validate_ntp_config() {
     return 0
 }
 
-# fix_chrony_dir_ownership [owner] [log_dir] [lib_dir]
-# chronyd drops privileges to the packaged `chrony` user on its own
-# (compiled-in PRIVDROP default -- confirmed live: it runs as `chrony`/uid
-# 100 after startup even though this entrypoint execs it as root below), but
-# this entrypoint itself still runs as root here, so log_dir/lib_dir can end
-# up root-owned instead: the image's own /var/log/chrony is created by the
-# Dockerfile's `mkdir -p` at build time (root, since no package pre-creates
-# it the way chrony-nts's chrony-common dependency pre-creates
-# /var/lib/chrony as chrony:chrony), a fresh Docker-managed named volume
-# mounted over it copies that same root ownership on first use, and a host
-# bind mount (e.g. NTP_DATA_DIR) is whatever the host directory already was
-# before this container ever wrote to it. Without this, the
-# privilege-dropped chronyd cannot open its own log files or driftfile
-# there and fails silently -- confirmed live, reproducibly, with real
-# "Could not open /var/log/chrony/*.log : Permission denied" errors,
-# present identically on the pre-Alpine-migration Debian image too (a real,
-# pre-existing bug this validation pass found, not something the
-# base-image swap introduced). Every start (not just first) so an already
-# wrong-owned pre-existing production volume self-heals on its very next
-# restart, not only on a fresh install.
+# _fix_chrony_dir_ownership_core <owner> <log_dir> <lib_dir>
+# Real logic, shared by production and tests, all three arguments required
+# (not optional): chronyd drops privileges to the packaged `chrony` user on
+# its own (compiled-in PRIVDROP default -- confirmed live: it runs as
+# `chrony`/uid 100 after startup even though this entrypoint execs it as
+# root below), but this entrypoint itself still runs as root here, so
+# log_dir/lib_dir can end up root-owned instead: the image's own
+# /var/log/chrony is created by the Dockerfile's `mkdir -p` at build time
+# (root, since no package pre-creates it the way chrony-nts's chrony-common
+# dependency pre-creates /var/lib/chrony as chrony:chrony), a fresh
+# Docker-managed named volume mounted over it copies that same root
+# ownership on first use, and a host bind mount (e.g. NTP_DATA_DIR) is
+# whatever the host directory already was before this container ever wrote
+# to it. Without this, the privilege-dropped chronyd cannot open its own
+# log files or driftfile there and fails silently -- confirmed live,
+# reproducibly, with real "Could not open /var/log/chrony/*.log :
+# Permission denied" errors, present identically on the pre-Alpine-migration
+# Debian image too (a real, pre-existing bug this validation pass found, not
+# something the base-image swap introduced). Called every start (not just
+# first) so an already wrong-owned pre-existing production volume self-heals
+# on its very next restart, not only on a fresh install.
 #
 # Deliberately always returns 0 (never propagates a chown failure to the
 # caller, so a bare call at the top level cannot trip `set -e` above): this
@@ -155,27 +156,43 @@ validate_ntp_config() {
 # AG-VAL-004's carve-out for an explicitly documented optional fallback.
 # Logging/driftfile persistence are secondary to this service's actual job
 # (disciplining the clock and serving LAN clients on UDP/123), which
-# chronyd continues to do correctly even when these particular writes
-# fail. `owner`/`log_dir`/`lib_dir` are all overridable so
-# tests/bats/ntp_entrypoint_rendering.bats can exercise both the success
-# and the failure/warning path deterministically (chown to a fixture's own
-# uid:gid always succeeds even unprivileged; chown to an unrelated/invalid
-# owner reliably fails), the same optional-parameter pattern this file's
-# other functions already use.
-# shellcheck disable=SC2120 # the real call site below intentionally passes
-# no arguments (always wants the production chrony:chrony/real-path
-# defaults); the optional overrides exist purely so the bats cases above
-# can exercise this function against fixture paths/owners instead of the
-# real system directories and the chrony user, the same pattern
-# cleanup_stale_ntp_pidfile's own identical disable comment already covers
-# below.
-fix_chrony_dir_ownership() {
-    local owner="${1:-chrony:chrony}" log_dir="${2:-/var/log/chrony}" lib_dir="${3:-/var/lib/chrony}"
+# chronyd continues to do correctly even when these particular writes fail.
+#
+# Deliberately takes required (not optional/defaulted) parameters, unlike
+# render_ntp_config's `template` or cleanup_stale_ntp_pidfile's `pidfile`:
+# an earlier version of this file gave THIS function optional defaults too
+# and suppressed the resulting shellcheck SC2120 finding ("references
+# arguments, but none are ever passed" -- true within this file alone,
+# since the one production call site passed none) with a disable comment.
+# That shipped without maintainer sign-off and was reverted on maintainer
+# instruction: a lint suppression is not an acceptable default response to
+# an inconvenient warning, even a plausible one, without asking first. This
+# split (a real, parameterized, directly-testable core plus a fixed-value
+# production entry point below) removes the warning by construction instead
+# -- `fix_chrony_dir_ownership` below has no parameters to flag, and this
+# function genuinely IS called with real arguments in production code (by
+# that entry point), so shellcheck's premise for SC2120 no longer holds
+# either. tests/bats/ntp_entrypoint_rendering.bats calls this function
+# directly with fixture owners/paths to exercise the exact same logic
+# production uses, without needing a second, divergent test-only
+# reimplementation.
+_fix_chrony_dir_ownership_core() {
+    local owner="$1" log_dir="$2" lib_dir="$3"
 
     if ! chown "$owner" "$log_dir" "$lib_dir" 2>&1; then
         echo "WARNING: could not chown $log_dir and/or $lib_dir to $owner; chronyd's own log/driftfile writes may fail (the service will still discipline time and serve NTP clients normally)." >&2
     fi
     return 0
+}
+
+# fix_chrony_dir_ownership
+# Production entry point: no parameters at all, so there is nothing for a
+# future shellcheck pass to flag as unused. Hardcodes the real values this
+# service always uses -- see _fix_chrony_dir_ownership_core's comment above
+# for why this exists as a separate function instead of giving that
+# function optional/defaulted parameters directly.
+fix_chrony_dir_ownership() {
+    _fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony
 }
 
 # Removes chronyd's own pidfile if a stale one survives from a previously

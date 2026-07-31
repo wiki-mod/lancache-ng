@@ -180,17 +180,21 @@ setup() {
 # owned by someone other than the user chronyd eventually drops privileges
 # to must get its ownership corrected at every container start, not just on
 # first install, so an already-existing production volume self-heals too.
-# Chowns to this test process's OWN uid:gid (always succeeds even
-# unprivileged, unlike chowning to an arbitrary named user) to prove the
-# real chown mechanism works end-to-end against a genuinely wrong-owned
-# fixture directory, without requiring root in the test sandbox.
-@test "fix_chrony_dir_ownership corrects ownership of a wrong-owned fixture directory" {
+# Calls the parameterized _core function directly (not the zero-arg
+# fix_chrony_dir_ownership production entry point -- see that function's
+# own comment for why the two are split) so this test exercises the real
+# chown logic against fixture paths without needing root or touching the
+# real system directories. Chowns to this test process's OWN uid:gid
+# (always succeeds even unprivileged, unlike chowning to an arbitrary named
+# user) to prove the real chown mechanism works end-to-end against a
+# genuinely wrong-owned fixture directory.
+@test "_fix_chrony_dir_ownership_core corrects ownership of a wrong-owned fixture directory" {
     log_dir="$BATS_TEST_TMPDIR/log-chrony"
     lib_dir="$BATS_TEST_TMPDIR/lib-chrony"
     mkdir -p "$log_dir" "$lib_dir"
     self_owner="$(id -u):$(id -g)"
 
-    run fix_chrony_dir_ownership "$self_owner" "$log_dir" "$lib_dir"
+    run _fix_chrony_dir_ownership_core "$self_owner" "$log_dir" "$lib_dir"
     [ "$status" -eq 0 ]
     [[ "$output" != *"WARNING"* ]]
 
@@ -205,15 +209,15 @@ setup() {
 # against an already-correctly-owned directory must stay a no-op success,
 # matching this project's convergence/idempotence expectations (issue #456)
 # the same way cleanup_stale_ntp_pidfile's own idempotence test above does.
-@test "fix_chrony_dir_ownership is idempotent when called twice against an already-correct owner" {
+@test "_fix_chrony_dir_ownership_core is idempotent when called twice against an already-correct owner" {
     log_dir="$BATS_TEST_TMPDIR/log-chrony"
     lib_dir="$BATS_TEST_TMPDIR/lib-chrony"
     mkdir -p "$log_dir" "$lib_dir"
     self_owner="$(id -u):$(id -g)"
 
-    run fix_chrony_dir_ownership "$self_owner" "$log_dir" "$lib_dir"
+    run _fix_chrony_dir_ownership_core "$self_owner" "$log_dir" "$lib_dir"
     [ "$status" -eq 0 ]
-    run fix_chrony_dir_ownership "$self_owner" "$log_dir" "$lib_dir"
+    run _fix_chrony_dir_ownership_core "$self_owner" "$log_dir" "$lib_dir"
     [ "$status" -eq 0 ]
     [[ "$output" != *"WARNING"* ]]
 }
@@ -225,13 +229,28 @@ setup() {
 # process) must print a WARNING and still return 0, so a bare call at the
 # real entrypoint's top level can never trip `set -e` and abort the whole
 # service over a non-essential logging/driftfile permission failure.
-@test "fix_chrony_dir_ownership warns but returns non-fatally when chown genuinely fails" {
+@test "_fix_chrony_dir_ownership_core warns but returns non-fatally when chown genuinely fails" {
     log_dir="$BATS_TEST_TMPDIR/log-chrony-unwritable"
     lib_dir="$BATS_TEST_TMPDIR/lib-chrony-unwritable"
     mkdir -p "$log_dir" "$lib_dir"
 
-    run fix_chrony_dir_ownership "root:root" "$log_dir" "$lib_dir"
+    run _fix_chrony_dir_ownership_core "root:root" "$log_dir" "$lib_dir"
     [ "$status" -eq 0 ]
     [[ "$output" == *"WARNING"* ]]
     [[ "$output" == *"$log_dir"* ]]
+}
+
+# fix_chrony_dir_ownership itself (the zero-parameter production entry
+# point, not the _core function the three cases above exercise directly):
+# confirms it really does forward to the real system paths and the real
+# chrony:chrony owner with no parameters of its own to pass -- reads the
+# loaded function's own body (via `type`), the same technique
+# cleanup_stale_ntp_pidfile's own default-path test above uses, rather than
+# actually chowning the real /var/log/chrony and /var/lib/chrony (which
+# would require root and would mutate real system paths this test sandbox
+# must not touch).
+@test "fix_chrony_dir_ownership forwards to the real chrony user and system paths with no parameters" {
+    run type fix_chrony_dir_ownership
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"_fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony"* ]]
 }
