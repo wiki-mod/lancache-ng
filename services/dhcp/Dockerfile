@@ -58,7 +58,13 @@
 # installs GNU `find`/`xargs` at `/usr/bin/find`, ahead of BusyBox's own
 # `find` applet earlier in `$PATH` -- the same fix already verified and
 # shipped for `services/watchdog` (PR #1346): `findutils`, not `coreutils`,
-# since `find` is a GNU findutils binary, not a GNU coreutils one.
+# since `find` is a GNU findutils binary, not a GNU coreutils one. This
+# Dockerfile's other `find` call (`KEA_LEASE_CMDS_HOOK_PATH`'s
+# `find /usr/lib -maxdepth 5 -name libdhcp_lease_cmds.so` fail-closed check,
+# documented above) was never broken by BusyBox -- it only uses portable
+# `-maxdepth`/`-name` actions, no `-printf` -- and is unaffected by this
+# change: confirmed on the real built image that it still resolves the
+# real hook path with GNU `find` now ahead of BusyBox's own in `$PATH`.
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 

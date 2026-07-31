@@ -61,10 +61,19 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 #    +%Y%m%dT%H%M%S.%N` produces a real 9-digit nanosecond suffix, not an
 #    empty one. Installing the full `coreutils` package (rather than trying
 #    to cherry-pick just `date`, which Alpine does not package standalone)
-#    also replaces several other BusyBox applets in this image (`ls`, `cp`,
-#    `stat`, `sort`, `wc`, etc.) with their real GNU equivalents -- verified
-#    this introduces no `apk` conflicts and no behavior change for anything
-#    else this entrypoint calls.
+#    also replaces several other BusyBox applets in this image (`basename`,
+#    `cp`, `install`, `mktemp`, `mv`, `rm`, `sort`, etc.) with their real GNU
+#    equivalents. `apk add coreutils` itself installs cleanly with no
+#    conflicts; every external command this entrypoint actually calls
+#    (`basename`, `cp`, `date`, `envsubst`, `find`, `install`, `mktemp`,
+#    `mv`, `rm`, `sort`, `xargs` -- confirmed by grepping the whole file, not
+#    guessed) was confirmed present and resolving to the expected GNU/
+#    findutils binary on the real built image, and the full known-good-
+#    snapshot lifecycle that exercises most of them (`kgs_snapshot_create`/
+#    `kgs_snapshot_apply`/`kgs_snapshot_prune`, including the
+#    "no snapshot validates, restore the original live file" backup path)
+#    was run end-to-end against a real `dnsmasq --test` validator and
+#    behaved identically to the pre-migration Debian image.
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
