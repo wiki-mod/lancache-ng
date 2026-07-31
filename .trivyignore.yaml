@@ -127,7 +127,19 @@ vulnerabilities:
       Docker-network service (`docker-socket-proxy`), not a loopback
       Compose healthcheck and not TLS at all, so no SFTP/SCP schemeless
       URL, no mTLS, and no TLS session reuse either; each call is bounded
-      by an explicit `--max-time`. `services/ntp` is the
+      by an explicit `--max-time`. Accuracy update (2026-07-31): `services/watchdog`
+      migrated off `debian:13-slim` to `alpine:3.24` (issue #815's watchdog
+      carve-out) after this entry was written, so it no longer carries the
+      `curl`/`libcurl4t64` package versions named above -- it now ships
+      Alpine's own `curl` 8.21.0-r0 build. A real Trivy scan of the rebuilt
+      image (with and without `--ignore-unfixed`, same flags this project's
+      CI uses) shows none of this CVE-2026-12064 finding group present at
+      all for that image, so this entry's own watchdog-specific
+      risk-acceptance narrative above is now historical background for that
+      one image, not a live disposition it still needs -- the entry stays in
+      force for the other Debian-based images it still names
+      (`services/proxy`, `services/dns`, `services/ui`; `services/ntp`'s own
+      status is tracked separately and not asserted here). `services/ntp` is the
       exception to all of the above: curl is installed but genuinely never
       invoked at all -- confirmed by PR #1311 (`services/ntp/entrypoint.sh`
       renders `chrony.conf` with plain shell, not `curl`, and its Compose
