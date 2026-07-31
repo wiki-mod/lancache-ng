@@ -461,19 +461,66 @@ _registrable_domain() {
 _load_public_suffix_list
 
 # Reads $DOMAINS_FILE (cdn-domains.txt) once, derives each line's
-# registrable root domain, and populates two globals shared by every
+# registrable root domain, and populates the globals shared by every
 # generation loop below: _UNIQUE_DOMAINS (first-seen order of unique
-# derived roots) and _DOMAIN_IS_ROOT (root -> 1, always — every derived
-# root needs both bare and wildcard cert/map coverage, since the DNS side
-# already treats every cdn-domains.txt entry as covering its whole
-# subdomain tree). Multiple DNS entries commonly derive the same root (e.g.
-# drivers.amd.com and pat.downloads.amd.com both derive amd.com), so this
-# also deduplicates by root — without that, each map-generation loop below
-# would emit the identical map key more than once, and nginx's map
-# directive rejects duplicate keys at "nginx -t" time, leaving the SSL
-# proxy unable to start.
+# derived roots), _DOMAIN_IS_ROOT (root -> 1, always — every derived root
+# needs both bare and wildcard cert/map coverage), _EXTRA_WILDCARD_BASES
+# (leading-dot entries needing their own deeper wildcard cert), and
+# _EXTRA_EXACT_HOSTS (bare entries needing their own deeper exact-match
+# cert). Both "extra" sets exist for the same underlying reason: an X.509
+# wildcard SAN only ever covers ONE label (RFC 6125) -- a "*.ea.com" cert
+# (generated from the root alone) validates "cdn.ea.com" but never
+# "x.cdn.ea.com" (two labels below the root). This affects a cdn-domains.txt
+# entry regardless of whether it's written as a leading-dot wildcard or a
+# bare exact host:
+#   - ".cdn.ea.com" (wildcard-only) spoofs hosts of the form "*.cdn.ea.com"
+#     -- always ONE label deeper than the entry's own text -- so it needs
+#     its own "*.cdn.ea.com" cert whenever the entry text differs from the
+#     root AT ALL, even by exactly one label (i.e. "cdn.ea.com" != root
+#     "ea.com" already qualifies -- there is no "more than one label"
+#     threshold for this case, unlike the bare-entry case below).
+#   - "tlu.dl.delivery.mp.microsoft.com" (bare) spoofs exactly that one
+#     literal host -- no extra "one label deeper" step -- so it needs its
+#     own exact-match cert whenever the HOST ITSELF is more than one label
+#     past the root (stripping exactly one leading label from it does not
+#     land back on the root, meaning "*.<root>" cannot possibly cover it
+#     either). A bare entry that's exactly one label past the root, like
+#     "cdn.ea.com" itself, needs nothing extra: "*.ea.com" already covers
+#     it.
+# Without the matching dedicated cert, SSL-mode clients hitting these hosts
+# get a certificate that does not validate for their SNI and the connection
+# fails, even though DNS resolution and standard-mode (SNI-passthrough, no
+# cert involved) both work fine.
+#
+# KNOWN LIMITATION (issue #1322): this only ever adds ONE extra label of
+# wildcard depth per leading-dot entry. A leading-dot entry's real DNS-side
+# match scope is arbitrary depth (services/dns/entrypoint.sh's RPZ generation
+# spoofs every subdomain of it, at any depth), but no static, pre-generated
+# X.509 cert scheme can match that: a client two or more labels below the
+# entry (e.g. "a.b.cdn.ea.com" under a ".cdn.ea.com" entry) still fails TLS
+# hostname verification. Mitigation that works today: add the specific
+# deeper level as its own leading-dot entry (e.g. ".b.cdn.ea.com") -- nginx's
+# hostnames map picks the more specific of two matching wildcard keys, so
+# the new, more specific cert wins for that level. This does not generalize
+# to arbitrary depth; the same gap recurs one level further for a CDN that
+# genuinely serves from unpredictable subdomain depths. Fully closing this
+# needs dynamic per-SNI certificate issuance at handshake time, a materially
+# different architecture than this pre-generated-cert design (see CLAUDE.md's
+# "Pre-generated wildcard certs" decision) -- a maintainer decision, not a
+# fix reachable here. STATUS: as of 2026-07-30, unresolved; see issue #1322.
+#
+# Multiple DNS entries commonly derive the
+# same root (e.g. drivers.amd.com and pat.downloads.amd.com both derive
+# amd.com), so this also deduplicates by root — without that, each
+# map-generation loop below would emit the identical map key more than
+# once, and nginx's map directive rejects duplicate keys at "nginx -t"
+# time, leaving the SSL proxy unable to start.
 declare -a _UNIQUE_DOMAINS=()
 declare -A _DOMAIN_IS_ROOT=()
+declare -a _EXTRA_WILDCARD_BASES=()
+declare -A _SEEN_EXTRA_WILDCARD_BASE=()
+declare -a _EXTRA_EXACT_HOSTS=()
+declare -A _SEEN_EXTRA_EXACT_HOST=()
 # Set to 1 by _collect_domain_rows when any cdn-domains.txt row is skipped
 # (invalid entry, or a root domain that could not be derived). A config
 # generated from a domain list with skipped rows can still pass `nginx -t`
@@ -483,11 +530,29 @@ declare -A _DOMAIN_IS_ROOT=()
 # would prune away a possibly-complete prior snapshot in favor of this
 # incomplete one). See _proxy_validate_snapshot_or_rollback below.
 _DOMAIN_ROWS_SKIPPED=0
+
+# _proxy_is_one_label_past <domain> <root>
+# True (0) if stripping exactly ONE leading label from <domain> lands
+# exactly on <root> -- i.e. <domain> is precisely the depth "*.<root>"
+# already covers. False (1) if <domain> IS <root> itself (bare root, a
+# different case the callers handle separately) or if <domain> is two or
+# more labels past <root> (needs its own dedicated cert).
+_proxy_is_one_label_past() {
+    local domain="$1" root="$2"
+    [ "$domain" = "$root" ] && return 1
+    local stripped="${domain#*.}"
+    [ "$stripped" = "$root" ]
+}
+
 _collect_domain_rows() {
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
+    _EXTRA_WILDCARD_BASES=()
+    _SEEN_EXTRA_WILDCARD_BASE=()
+    _EXTRA_EXACT_HOSTS=()
+    _SEEN_EXTRA_EXACT_HOST=()
     _DOMAIN_ROWS_SKIPPED=0
-    local raw_domain domain root
+    local raw_domain domain root is_wildcard_only
 
     while IFS= read -r raw_domain || [ -n "$raw_domain" ]; do
         domain="${raw_domain#"${raw_domain%%[![:space:]]*}"}"
@@ -502,6 +567,13 @@ _collect_domain_rows() {
         # row does. Mirrors services/dns/entrypoint.sh's RPZ generation
         # handling of the same marker on the same file.
         [[ "$domain" == !* ]] && continue
+
+        # Captured before _is_valid_domain/_normalize_domain, both of which
+        # strip a leading dot -- same "leading dot = wildcard-only" flag
+        # services/dns/entrypoint.sh's RPZ generation derives from the same
+        # raw row on the same file.
+        is_wildcard_only=0
+        [[ "$domain" == .* ]] && is_wildcard_only=1
 
         # Validate and normalize domain before using it anywhere
         if ! _is_valid_domain "$domain"; then
@@ -522,6 +594,29 @@ _collect_domain_rows() {
             _UNIQUE_DOMAINS+=("$root")
         fi
         _DOMAIN_IS_ROOT["$root"]=1
+
+        if [ "$is_wildcard_only" -eq 1 ]; then
+            # A wildcard-only entry's actual matched hosts are always one
+            # label deeper than the entry text itself -- so it needs its
+            # own cert whenever the entry text is already past the root at
+            # all (not just past by more than one label).
+            if [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
+                _EXTRA_WILDCARD_BASES+=("$domain")
+                _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+            fi
+        else
+            # A bare entry's matched host IS the entry text itself -- needs
+            # its own cert only once it's more than one label past the
+            # root (exactly one label past is already covered by the
+            # root's own "*.<root>" wildcard).
+            if ! _proxy_is_one_label_past "$domain" "$root" \
+                && [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_EXACT_HOST[$domain]+set}" ]]; then
+                _EXTRA_EXACT_HOSTS+=("$domain")
+                _SEEN_EXTRA_EXACT_HOST["$domain"]=1
+            fi
+        fi
     done < "$DOMAINS_FILE"
 }
 
@@ -554,6 +649,35 @@ case "$PROXY_SECURITY_MODE" in
 esac
 
 export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS
+
+# Deterministic, length-bounded cert/key filename for a domain that may
+# be up to 253 bytes long (_is_valid_domain's own limit) -- well past
+# Linux's 255-byte NAME_MAX once combined with any ".crt"/".key" suffix,
+# if the raw hostname were used as the filename directly. $2 (a short
+# namespace tag, e.g. "wildcard"/"exact") is mixed into the HASH INPUT
+# (see the sha256sum call below), not appended as filename text -- the
+# output is always a plain 32-character hex string plus the ordinary
+# ".crt"/".key" suffix, with no extra namespace marker in the filename
+# itself. Hashing the namespace-prefixed input is what keeps a bare and a
+# leading-dot cdn-domains.txt entry for the same base resolving to two
+# DIFFERENT names, matching this file's own existing requirement that
+# those need two distinct certs. The real hostname is never lost -- it
+# lives in each cert's SAN (see _sign_cert below) and in the nginx maps
+# that select a cert by hostname, neither of which has an equivalent
+# filesystem constraint.
+#
+# Defined here, unconditionally, rather than inside the SSL_ENABLED
+# block below: the map-generation block further down (see "2. Generate
+# request-time access policy maps") calls this for every
+# _EXTRA_WILDCARD_BASES/_EXTRA_EXACT_HOSTS entry regardless of
+# SSL_ENABLED, since those maps exist even when SSL mode is off. Defining
+# it only inside the SSL_ENABLED=1 branch left it undefined ("command not
+# found") whenever SSL_ENABLED=0 and cdn-domains.txt had any deep entry,
+# breaking the generated map file and failing nginx -t on startup.
+_bounded_cert_name() {
+    printf '%s' "${2}:${1}" | sha256sum | cut -c1-32
+}
+
 # ────────────────────────────────────────────────────────────────────────────
 # 1. SSL mode: Generate CA and certs if needed
 # ────────────────────────────────────────────────────────────────────────────
@@ -614,7 +738,16 @@ if [ "${SSL_ENABLED}" = "1" ]; then
 
     _sign_cert() {
         local cn="$1" key="$2" crt="$3" ext="${4:-}"
-        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=${cn}" \
+        # Subject CN is a fixed, short placeholder, not the real hostname:
+        # OpenSSL's default policy caps commonName at 64 bytes
+        # (ASN1_mbstring_ncopy rejects longer values with "string too long"),
+        # but _is_valid_domain allows domains up to 253 bytes -- a deep
+        # wildcard base or exact host past 64 bytes would otherwise fail
+        # `openssl req -new` outright and abort startup. TLS clients validate
+        # against subjectAltName, not CN (RFC 6125 / CA/Browser Forum
+        # baseline), so the real hostname belongs only in $ext's SAN, which
+        # has no such length limit here.
+        if ! openssl req -new -newkey rsa:2048 -nodes -subj "/CN=lancache-ng" \
             -keyout "$key" -out /tmp/lancache-cert.csr; then
             rm -f /tmp/lancache-cert.csr
             echo "[lancache] ERROR: Failed to generate certificate request for ${cn}" >&2
@@ -696,6 +829,44 @@ if [ "${SSL_ENABLED}" = "1" ]; then
             exit 1
         fi
     done
+    # One additional cert per deeper wildcard base (see _EXTRA_WILDCARD_BASES'
+    # declaration above) -- SAN is wildcard-only, no bare DNS: entry, since a
+    # leading-dot cdn-domains.txt entry never covers its own bare form either.
+    for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+        cert_name="$(_bounded_cert_name "$domain" wildcard)"
+        [ -f "$CERT_DIR/${cert_name}.crt" ] && [ -f "$CERT_DIR/${cert_name}.key" ] && continue
+
+        echo "[lancache] Generating deeper wildcard cert for *.$domain..."
+        if ! _sign_cert "$domain" \
+            "$CERT_DIR/${cert_name}.key" \
+            "$CERT_DIR/${cert_name}.crt" \
+            "subjectAltName=DNS:*.${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for *.$domain" >&2
+            exit 1
+        fi
+    done
+    # One additional cert per deeper bare/exact host (see _EXTRA_EXACT_HOSTS'
+    # declaration above) -- SAN is the exact hostname only, no wildcard,
+    # since a bare cdn-domains.txt entry matches only that literal host.
+    # File name comes from _bounded_cert_name's "exact" namespace, NOT the
+    # bare domain string: cdn-domains.txt can legally list both
+    # "x.cdn.ea.com" (bare) and ".x.cdn.ea.com" (wildcard) as separate
+    # entries for the same base -- those need two DIFFERENT certs (one
+    # exact-only SAN, one wildcard-only SAN), and the "exact"/"wildcard"
+    # namespace tag keeps their hashed names from colliding.
+    for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+        cert_name="$(_bounded_cert_name "$domain" exact)"
+        [ -f "$CERT_DIR/${cert_name}.crt" ] && [ -f "$CERT_DIR/${cert_name}.key" ] && continue
+
+        echo "[lancache] Generating deeper exact-match cert for $domain..."
+        if ! _sign_cert "$domain" \
+            "$CERT_DIR/${cert_name}.key" \
+            "$CERT_DIR/${cert_name}.crt" \
+            "subjectAltName=DNS:${domain}"; then
+            echo "[lancache] ERROR: Failed to generate certificate for $domain" >&2
+            exit 1
+        fi
+    done
 
     # Keep new keys in the nginx group and make existing/generated keys readable
     # by nginx workers during TLS handshakes.
@@ -721,6 +892,19 @@ fi
             printf "    %-45s %s;\n" "$domain" "$domain"
         fi
     done
+    # More specific than the root entries above -- nginx's hostnames map
+    # picks the longest matching "*."-prefixed wildcard, so an SNI value
+    # under one of these deeper bases (e.g. x.cdn.ea.com) resolves here
+    # instead of to its root's cert, which would not validate for it.
+    for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+        printf "    %-45s %s;\n" "*.${domain}" "$(_bounded_cert_name "$domain" wildcard)"
+    done
+    # Exact-host entries (see _EXTRA_EXACT_HOSTS' declaration above) map the
+    # literal hostname to its dedicated cert -- no "*."-prefix key, since a
+    # bare cdn-domains.txt entry is never a wildcard match.
+    for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+        printf "    %-45s %s;\n" "$domain" "$(_bounded_cert_name "$domain" exact)"
+    done
     echo "    default default;"
     echo "}"
 
@@ -734,6 +918,12 @@ fi
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
                 printf "    %-45s 1;\n" "$domain"
             fi
+        done
+        for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+            printf "    %-45s 1;\n" "*.${domain}"
+        done
+        for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+            printf "    %-45s 1;\n" "$domain"
         done
     else
         echo "    default 1;"
@@ -768,6 +958,23 @@ mkdir -p /etc/nginx/stream.d
             if [ "${_DOMAIN_IS_ROOT[$domain]}" -eq 1 ]; then
                 printf "    %-45s %s:443;\n" "$domain" "$domain"
             fi
+        done
+        for domain in "${_EXTRA_WILDCARD_BASES[@]}"; do
+            # Forward to the requested SNI itself, NOT to "$domain:443" --
+            # unlike a registrable root (_UNIQUE_DOMAINS above), a deeper
+            # wildcard base is a cert-selection boundary, not necessarily a
+            # real, independently resolvable host: passthrough must reach
+            # whatever the client actually asked for (e.g. ftp.de.debian.org),
+            # not the wildcard base's own name (de.debian.org), which may
+            # have no DNS record or point at an unrelated endpoint. The
+            # registrable-root loop above has this same class of bug for its
+            # own case (a listed drivers.amd.com forwards to amd.com:443, not
+            # drivers.amd.com:443) -- confirmed separately, tracked as issue
+            # #1297, not fixed here (out of this change's scope).
+            printf "    %-45s \$ssl_preread_server_name:443;\n" "*.${domain}"
+        done
+        for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+            printf "    %-45s %s:443;\n" "$domain" "$domain"
         done
     fi
     echo "}"

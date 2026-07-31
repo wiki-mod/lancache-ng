@@ -69,6 +69,173 @@ setup() {
     [ "${_UNIQUE_DOMAINS[0]}" = "enabled.example.com" ]
 }
 
+# These four tests exercise the "domain != root" branch, which the shared
+# identity _registrable_domain stub (see the helper file's own comment) can
+# never trigger on its own -- each locally overrides it to collapse its
+# specific multi-label fixture to a shorter root, the same way real
+# PSL-based derivation collapses "cdn.ea.com" to "ea.com", without touching
+# the shared default every other test in this file still relies on.
+@test "_collect_domain_rows tracks a deep leading-dot entry as an extra wildcard base" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_UNIQUE_DOMAINS[@]}" -eq 1 ]
+    [ "${_UNIQUE_DOMAINS[0]}" = "ea.com" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
+}
+
+@test "_collect_domain_rows does NOT track a root-level leading-dot entry as an extra wildcard base" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.steamcontent.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_UNIQUE_DOMAINS[@]}" -eq 1 ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows does NOT track a bare (non-leading-dot) deep entry as an extra wildcard base" {
+    _registrable_domain() { [ "$1" = "download2.cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'download2.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows collects distinct extra wildcard bases" {
+    _registrable_domain() {
+        case "$1" in
+            cdn.ea.com) printf 'ea.com' ;;
+            secure.dyn.riotcdn.net) printf 'riotcdn.net' ;;
+            *) printf '%s' "$1" ;;
+        esac
+    }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' '.secure.dyn.riotcdn.net' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 2 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
+    [ "${_EXTRA_WILDCARD_BASES[1]}" = "secure.dyn.riotcdn.net" ]
+}
+
+# Distinct from the test above: this feeds the SAME base twice (once via a
+# leading-dot entry, once as a descendant of that same base under a
+# different entry), which is the actual duplicate-key case
+# _SEEN_EXTRA_WILDCARD_BASE exists to guard against -- a duplicate wildcard
+# map key makes nginx reject the generated stream/https config outright, so
+# a regression here is a real startup failure, not just a cosmetic one.
+@test "_collect_domain_rows deduplicates a genuinely repeated extra wildcard base" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "cdn.ea.com" ]
+}
+
+@test "_collect_domain_rows tracks a deep bare entry as an extra exact host" {
+    _registrable_domain() { [ "$1" = "tlu.dl.delivery.mp.microsoft.com" ] && printf 'microsoft.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'tlu.dl.delivery.mp.microsoft.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_UNIQUE_DOMAINS[@]}" -eq 1 ]
+    [ "${_UNIQUE_DOMAINS[0]}" = "microsoft.com" ]
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+    [ "${_EXTRA_EXACT_HOSTS[0]}" = "tlu.dl.delivery.mp.microsoft.com" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 0 ]
+}
+
+# The "no fundamental limit" case explicitly requested by the maintainer:
+# an absurdly deep bare entry must still get its own exact-host cert,
+# regardless of how many labels separate it from its registrable root.
+@test "_collect_domain_rows tracks an arbitrarily deep bare entry (many labels past root)" {
+    long_host="a.b.c.d.e.f.g.h.i.j.k.l.m.n.o.p.example.com"
+    _registrable_domain() { [ "$1" = "$long_host" ] && printf 'example.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' "$long_host" > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+    [ "${_EXTRA_EXACT_HOSTS[0]}" = "$long_host" ]
+}
+
+@test "_collect_domain_rows does NOT track a bare entry exactly one label past root as an extra exact host" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows does NOT track a bare root-level entry as an extra exact host" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'steamcontent.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 0 ]
+}
+
+@test "_collect_domain_rows does NOT track a deep leading-dot entry as an extra exact host" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 0 ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+}
+
+# The same base can legitimately appear once bare and once wildcard-only
+# ("x.cdn.ea.com" plus ".x.cdn.ea.com") -- these need two DIFFERENT certs
+# (exact-only SAN vs wildcard-only SAN), which is exactly why the real
+# entrypoint.sh's _bounded_cert_name mixes a "wildcard"/"exact" namespace
+# tag into its SHA-256 hash INPUT (not into the output filename, which is
+# always a plain hash plus ".crt"/".key" -- see _bounded_cert_name's own
+# comment) so the two cases never collide on the same cert/key filename.
+# This test only asserts both tracking arrays end up populated
+# independently for the same base string; the cert-file-naming collision
+# itself is a real-file concern verified separately (not unit-testable
+# through this stubbed helper, which never touches $CERT_DIR).
+@test "_collect_domain_rows tracks the same base in both extra arrays when listed both ways" {
+    _registrable_domain() { [ "$1" = "x.cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'x.cdn.ea.com' '.x.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+    [ "${_EXTRA_EXACT_HOSTS[0]}" = "x.cdn.ea.com" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+    [ "${_EXTRA_WILDCARD_BASES[0]}" = "x.cdn.ea.com" ]
+}
+
+@test "_collect_domain_rows deduplicates repeated extra exact hosts" {
+    _registrable_domain() { [ "$1" = "tlu.dl.delivery.mp.microsoft.com" ] && printf 'microsoft.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'tlu.dl.delivery.mp.microsoft.com' 'tlu.dl.delivery.mp.microsoft.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
+}
+
 @test "_collect_domain_rows collects only enabled entries from a mixed file" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     {

@@ -31,9 +31,17 @@
 
 # Stand-in for the real _registrable_domain (services/proxy/entrypoint.sh),
 # which needs the vendored public suffix list loaded to compute a true
-# registrable root. Returning the input unchanged is sufficient for these
-# tests: they only assert which rows make it into _UNIQUE_DOMAINS/
-# _DOMAIN_IS_ROOT at all, not what the derived root looks like.
+# registrable root. Returning the input unchanged is sufficient for most of
+# these tests: they only assert which rows make it into _UNIQUE_DOMAINS/
+# _DOMAIN_IS_ROOT at all, not what the derived root looks like. The
+# _EXTRA_WILDCARD_BASES tests further down need a root that genuinely
+# differs from a multi-label input (the same way real PSL-based derivation
+# collapses "cdn.ea.com" to "ea.com") -- rather than changing this shared
+# default and risking every OTHER test's "root == full input" assumption
+# (several fixtures here are already 3-label, e.g. "enabled.example.com",
+# and rely on getting that exact string back), each such test locally
+# redefines this function for its own fixture domain only; bats forks a
+# fresh subshell per @test, so the override never leaks between tests.
 _registrable_domain() {
     printf '%s' "$1"
     return 0
@@ -54,14 +62,31 @@ _registrable_domain() {
 # inside a function, so they are genuinely global there already.
 declare -ag _UNIQUE_DOMAINS=()
 declare -Ag _DOMAIN_IS_ROOT=()
+declare -ag _EXTRA_WILDCARD_BASES=()
+declare -Ag _SEEN_EXTRA_WILDCARD_BASE=()
+declare -ag _EXTRA_EXACT_HOSTS=()
+declare -Ag _SEEN_EXTRA_EXACT_HOST=()
 _DOMAIN_ROWS_SKIPPED=0
+
+# Kept in sync by hand with services/proxy/entrypoint.sh's real
+# _proxy_is_one_label_past().
+_proxy_is_one_label_past() {
+    local domain="$1" root="$2"
+    [ "$domain" = "$root" ] && return 1
+    local stripped="${domain#*.}"
+    [ "$stripped" = "$root" ]
+}
 
 _collect_domain_rows() {
     local domains_file="$1"
     _UNIQUE_DOMAINS=()
     _DOMAIN_IS_ROOT=()
+    _EXTRA_WILDCARD_BASES=()
+    _SEEN_EXTRA_WILDCARD_BASE=()
+    _EXTRA_EXACT_HOSTS=()
+    _SEEN_EXTRA_EXACT_HOST=()
     _DOMAIN_ROWS_SKIPPED=0
-    local raw_domain domain root
+    local raw_domain domain root is_wildcard_only
 
     while IFS= read -r raw_domain || [ -n "$raw_domain" ]; do
         domain="${raw_domain#"${raw_domain%%[![:space:]]*}"}"
@@ -72,6 +97,9 @@ _collect_domain_rows() {
         # it silently (no _DOMAIN_ROWS_SKIPPED, no WARNING), same as the real
         # services/proxy/entrypoint.sh loop.
         [[ "$domain" == !* ]] && continue
+
+        is_wildcard_only=0
+        [[ "$domain" == .* ]] && is_wildcard_only=1
 
         # Validate and normalize domain before using it anywhere
         if ! _is_valid_domain "$domain"; then
@@ -92,5 +120,20 @@ _collect_domain_rows() {
             _UNIQUE_DOMAINS+=("$root")
         fi
         _DOMAIN_IS_ROOT["$root"]=1
+
+        if [ "$is_wildcard_only" -eq 1 ]; then
+            if [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
+                _EXTRA_WILDCARD_BASES+=("$domain")
+                _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+            fi
+        else
+            if ! _proxy_is_one_label_past "$domain" "$root" \
+                && [ "$domain" != "$root" ] \
+                && [[ -z "${_SEEN_EXTRA_EXACT_HOST[$domain]+set}" ]]; then
+                _EXTRA_EXACT_HOSTS+=("$domain")
+                _SEEN_EXTRA_EXACT_HOST["$domain"]=1
+            fi
+        fi
     done < "$domains_file"
 }
