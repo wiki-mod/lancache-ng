@@ -4978,16 +4978,25 @@ jobs:
     # They build every service image and routinely dominate PR runtime on
     # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
     # The build job depends on this gate before it can push normal service
-    # images. Build-tools receives an additional exact pushed-digest scan in the
-    # build job because the multi-arch published image is produced there.
+    # images. UPDATED (Schritt 3, issue #1095): every service now also
+    # receives an additional exact pushed-digest scan in the build job,
+    # because the multi-arch published image is produced there and can
+    # differ from the throwaway image this job builds and scans below (a
+    # fresh `docker buildx build` stamps a new `created` timestamp into the
+    # image config on every invocation, so the two builds' digests never
+    # match even given byte-identical inputs -- see "Determine per-service
+    # publish scan reuse" below and "Scan pushed service digest with Trivy"
+    # in build/build-arm64). This used to be build-tools-only; Schritt 3
+    # generalized the same already-proven mechanism to the other 7 services
+    # rather than inventing a new one.
     #
     # UPDATED (issue #1290): this used to be a bare `if:` relying on GitHub's
     # implicit `&& success()`, which was safe only while `validate-compose`
     # and (since #1095 Part 1) `push-supersession-check` stayed root jobs
     # with no `if:`/`needs:` of their own -- see the INVARIANT note this
     # comment used to end on. Adding `determine-push-reuse-scope` to
-    # `needs:` below (so "Enable build-tools publish scan" can read its
-    # real, already-verified reuse decision instead of a hardcoded
+    # `needs:` below (so "Determine per-service publish scan reuse" can read
+    # its real, already-verified reuse decision instead of a hardcoded
     # should-scan=true) breaks that invariant: determine-push-reuse-scope's
     # own `if:` only fires on `push` to a branch ref, so it legitimately
     # shows `skipped` on pull_request/schedule/workflow_dispatch/tag-push --
@@ -5181,52 +5190,84 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Enable build-tools publish scan
-        # UPDATED (issue #1290, maintainer decision): build-tools no longer
-        # unconditionally builds a local image just to scan it on every
-        # trusted-ref push. This reuses determine-push-reuse-scope's
-        # `reuse_build_tools` output -- the SAME already-verified three-part
-        # decision (channel image revision label + real git ancestry + a
-        # real content diff via scripts/classify-image-impact.sh; see that
-        # job and scripts/lib/push-reuse.sh) that build/build-arm64's own
-        # "Determine whether this service needs building" step trusts for
-        # the retag-vs-rebuild decision -- rather than a second, weaker,
+      - name: Determine per-service publish scan reuse
+        # Schritt 3 (issue #1095): generalizes what used to be
+        # build-tools-only ("Enable build-tools publish scan", issue #1290,
+        # maintainer decision) to every matrix.service. No service
+        # unconditionally builds a local throwaway image just to scan it on
+        # every trusted-ref push when determine-push-reuse-scope has already
+        # proven it's safe to reuse the published channel image instead.
+        # This reads determine-push-reuse-scope's `reuse_<service>` output --
+        # the SAME already-verified three-part decision (channel image
+        # revision label + real git ancestry + a real content diff via
+        # scripts/classify-image-impact.sh; see that job and
+        # scripts/lib/push-reuse.sh) that build/build-arm64's own "Determine
+        # whether this service needs building" step trusts for the
+        # retag-vs-rebuild decision -- rather than a second, weaker,
         # independently-computed check. Consuming the SAME decision here
         # instead of recomputing a narrower one (e.g. just "did this push's
-        # own before..sha diff touch build-tools") matters concretely: a
+        # own before..sha diff touch this service") matters concretely: a
         # narrower check could say "unchanged" while the wider one correctly
         # falls back to a real rebuild (channel image stale/unverifiable --
         # the exact #808 failure shape push-reuse.sh's own header describes)
         # -- if that ever happened with two independently-computed checks, a
         # freshly rebuilt-and-published sha-* image could go completely
         # unscanned this run (should-scan=false here scans the OLD channel
-        # image, see "Scan build-tools channel image with Trivy" further
+        # image, see "Scan channel image with Trivy (no rebuild)" further
         # below, while should-build=true there publishes a genuinely new
         # one). Sharing one decision makes that disagreement structurally
-        # impossible instead of merely unlikely.
+        # impossible instead of merely unlikely -- this is also exactly what
+        # closes the scan-coverage hole named in issue #1095's own
+        # "Correction 1": since should-scan and should-build are both derived
+        # from the identical determine-push-reuse-scope output per service,
+        # neither can go to false while the other stays true, so a reused
+        # service is never left with zero scan coverage.
         # Fails safe to a full scan whenever determine-push-reuse-scope did
         # not run or did not succeed (schedule/workflow_dispatch/tag-push,
         # where its own `if:` never fires -- see this job's own `if:`
         # comment above), matching this job's own hardened `if:`.
-        id: build-tools-scan-changes
-        if: matrix.service == 'build-tools'
+        id: push-scan-changes
         env:
+          MATRIX_SERVICE: ${{ matrix.service }}
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
+          REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
+          REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
+          REUSE_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_watchdog }}
+          REUSE_DHCP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dhcp }}
+          REUSE_DHCP_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dhcp_proxy }}
+          REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
+          REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
         run: |
           set -euo pipefail
 
-          if [ "$REUSE_JOB_RESULT" = "success" ] && [ "$REUSE_BUILD_TOOLS" = "true" ]; then
+          # Mirrors build/build-arm64's own "Determine whether this service
+          # needs building" case mapping exactly -- single source for which
+          # reuse_* output belongs to which matrix.service, not a second copy
+          # that could drift out of sync with it.
+          case "$MATRIX_SERVICE" in
+            proxy) reuse="$REUSE_PROXY" ;;
+            dns) reuse="$REUSE_DNS" ;;
+            watchdog) reuse="$REUSE_WATCHDOG" ;;
+            dhcp) reuse="$REUSE_DHCP" ;;
+            dhcp-proxy) reuse="$REUSE_DHCP_PROXY" ;;
+            ntp) reuse="$REUSE_NTP" ;;
+            ui) reuse="$REUSE_UI" ;;
+            build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+            *) reuse="false" ;;
+          esac
+
+          if [ "$REUSE_JOB_RESULT" = "success" ] && [ "$reuse" = "true" ]; then
             should_scan=false
-            echo "::notice::determine-push-reuse-scope confirmed build-tools is unchanged and safe to reuse this push; skipping the local rebuild and scanning the unchanged published channel image directly instead."
+            echo "::notice::determine-push-reuse-scope confirmed $MATRIX_SERVICE is unchanged and safe to reuse this push; skipping the local rebuild and scanning the unchanged published channel image directly instead."
           else
             should_scan=true
-            echo "::notice::determine-push-reuse-scope result was '$REUSE_JOB_RESULT' (reuse_build_tools='$REUSE_BUILD_TOOLS'); build-tools scan stays enabled, scanning a freshly built local image."
+            echo "::notice::determine-push-reuse-scope result was '$REUSE_JOB_RESULT' (reuse='$reuse' for $MATRIX_SERVICE); scan stays enabled, scanning a freshly built local image."
           fi
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
-        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        if: steps.push-scan-changes.outputs.should-scan == 'true'
         id: docker-build-jobs
         run: |
           set -euo pipefail
@@ -5264,10 +5305,7 @@ jobs:
         # GitHub-hosted runner and always scan an unaccelerated native build.
         if: >-
           ${{
-            (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-scan-changes.outputs.should-scan == 'true'
-            ) &&
+            steps.push-scan-changes.outputs.should-scan == 'true' &&
             matrix.rust == true &&
             matrix.platform_tag == 'amd64' &&
             github.actor != 'dependabot[bot]' &&
@@ -5416,7 +5454,7 @@ jobs:
         # limit, so it keeps the plain, unretried setup step.
         if: >-
           matrix.platform_tag == 'amd64' &&
-          (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+          steps.push-scan-changes.outputs.should-scan == 'true'
         id: buildx-amd64
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
@@ -5431,7 +5469,7 @@ jobs:
         # by the amd64 row above.
         if: >-
           matrix.platform_tag == 'arm64' &&
-          (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true')
+          steps.push-scan-changes.outputs.should-scan == 'true'
         id: buildx-arm64
         uses: ./.github/actions/buildx-setup-retry
 
@@ -5445,7 +5483,7 @@ jobs:
         # worth the added editing surface on a file with this much incident
         # history; see this job's `needs:` comment for the invariant this
         # relies on.
-        if: (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') && needs['push-supersession-check'].outputs.superseded != 'true'
+        if: steps.push-scan-changes.outputs.should-scan == 'true' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           CARGO_BUILD_JOBS: ${{ steps.docker-build-jobs.outputs.jobs }}
           SCCACHE_REDIS_FILE: ${{ steps.sccache-secret.outputs.redis-file }}
@@ -5514,7 +5552,7 @@ jobs:
       # Same should-scan gate as "Build local scan image" above: nothing to
       # remove when that step (and therefore the builder setup) was skipped.
       - name: Remove buildx builder
-        if: ${{ always() && (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') }}
+        if: ${{ always() && steps.push-scan-changes.outputs.should-scan == 'true' }}
         run: |
           docker buildx rm "${{ steps.buildx-amd64.outputs.name || steps.buildx-arm64.outputs.name }}" || true
 
@@ -5589,7 +5627,7 @@ jobs:
         # branch refs (`master`, `v[0-9]*`), which are bounded (one dir per
         # service+platform per active branch, reused on every push).
         id: trivy-cache
-        if: matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true'
+        if: steps.push-scan-changes.outputs.should-scan == 'true'
         run: |
           set -euo pipefail
           sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
@@ -5672,7 +5710,7 @@ jobs:
         # Same push-supersession-check gate as "Build local scan image"
         # above (this step scans the image that step builds -- if that step
         # was skipped there is nothing here to scan).
-        if: (matrix.service != 'build-tools' || steps.build-tools-scan-changes.outputs.should-scan == 'true') && needs['push-supersession-check'].outputs.superseded != 'true'
+        if: steps.push-scan-changes.outputs.should-scan == 'true' && needs['push-supersession-check'].outputs.superseded != 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }}
@@ -5687,26 +5725,28 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      # Companion to "Enable build-tools publish scan" above (issue #1290):
-      # when build-tools is unchanged this run, no local image was built to
-      # scan, but the point of scanning at all is to catch a newly disclosed
-      # CVE in the already-published channel image -- skipping the scan
-      # entirely would defeat that, so this resolves the same channel image
-      # build/build-arm64's own "Retag unchanged service image" step (this
-      # file, the `build`/`build-arm64` jobs) would retag from, and scans
-      # THAT directly. No registry write happens here -- this job never
-      # gained `packages:` permissions and doesn't need them for a read-only
-      # scan.
-      - name: Resolve build-tools channel image for unchanged-scan retag
-        id: build-tools-channel-image
+      # Companion to "Determine per-service publish scan reuse" above
+      # (originally issue #1290, build-tools-only; generalized to every
+      # service by Schritt 3, issue #1095): when a service is unchanged this
+      # run, no local image was built to scan, but the point of scanning at
+      # all is to catch a newly disclosed CVE in the already-published
+      # channel image -- skipping the scan entirely would defeat that, so
+      # this resolves the same channel image build/build-arm64's own "Retag
+      # unchanged service image" step (this file, the `build`/`build-arm64`
+      # jobs) would retag from, and scans THAT directly. No registry write
+      # happens here -- this job never gained `packages:` permissions and
+      # doesn't need them for a read-only scan.
+      - name: Resolve channel image for unchanged-scan retag
+        id: channel-image
         # Same push-supersession-check gate as "Build local scan image"/"Scan
         # image with Trivy" above (issue #1095 Part 1): a push that is
         # already superseded before this job started has no reason to pay
         # for a channel-image registry read and a Trivy scan either -- the
         # newer push that supersedes it runs this same step for real.
-        if: matrix.service == 'build-tools' && steps.build-tools-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
+        if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           CHANNEL_REF: ${{ github.ref_name }}
+          MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -5717,8 +5757,14 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
+          # resolve_build_tools_channel is plain ref-to-channel-name mapping
+          # (master -> latest, everything else -> nightly) with nothing
+          # build-tools-specific in its actual logic despite this file's
+          # name -- reused as-is here rather than duplicating the same
+          # mapping a second time, matching determine-push-reuse-scope's own
+          # reuse of it.
           channel="$(resolve_build_tools_channel "$CHANNEL_REF")"
-          channel_image="ghcr.io/${{ github.repository }}/build-tools:${channel}"
+          channel_image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}:${channel}"
           # Scan by the immutable digest, never the mutable channel tag
           # (AG-VAL-026): Trivy's own persistent result cache is keyed by
           # image reference, not by digest, so scanning the mutable tag
@@ -5734,8 +5780,8 @@ jobs:
             echo "::error::Could not resolve a digest for $channel_image." >&2
             exit 1
           fi
-          image="ghcr.io/${{ github.repository }}/build-tools@${digest}"
-          echo "::notice::build-tools is unchanged on this push; scanning $image (resolved from the $channel channel tag) instead of rebuilding it."
+          image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}@${digest}"
+          echo "::notice::$MATRIX_SERVICE is unchanged on this push; scanning $image (resolved from the $channel channel tag) instead of rebuilding it."
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
       # A multi-platform image-ref: Trivy/Docker resolve it to the runner's
@@ -5743,11 +5789,11 @@ jobs:
       # self-hosted pool, its arm64 row on the GitHub-hosted arm64 runner),
       # exactly mirroring "Scan image with Trivy" above scanning its own
       # single platform each -- no extra platform selection needed here.
-      - name: Scan build-tools channel image with Trivy (no rebuild)
-        if: matrix.service == 'build-tools' && steps.build-tools-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
+      - name: Scan channel image with Trivy (no rebuild)
+        if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
-          image-ref: ${{ steps.build-tools-channel-image.outputs.image }}
+          image-ref: ${{ steps.channel-image.outputs.image }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -5788,10 +5834,7 @@ jobs:
         if: >-
           ${{
             always() &&
-            (
-              matrix.service != 'build-tools' ||
-              steps.build-tools-scan-changes.outputs.should-scan == 'true'
-            )
+            steps.push-scan-changes.outputs.should-scan == 'true'
           }}
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
@@ -5991,9 +6034,10 @@ jobs:
     # on self-hosted runners because the heavy Rust/image path depends on the
     # shared build-tools image, sccache/distcc acceleration, and registry
     # credentials. It still waits for lightweight validation, policy checks,
-    # and trusted-ref vulnerability scans before publishing. For build-tools,
-    # it also scans the exact pushed digest before attestation/promotion can
-    # proceed.
+    # and trusted-ref vulnerability scans before publishing. UPDATED (Schritt
+    # 3, issue #1095): for every service (originally build-tools only), it
+    # also scans the exact pushed digest before attestation/promotion can
+    # proceed -- see "Scan pushed service digest with Trivy" below.
     #
     # Also skipped on a metadata-only pull_request event (labeled/unlabeled/
     # milestoned/demilestoned -- see the trigger's own `types:` comment at the
@@ -6303,17 +6347,17 @@ jobs:
       # content diff; see that job and scripts/lib/push-reuse.sh), so this
       # step only needs to resolve the same channel image's linux/amd64
       # child digest and retag it. No rebuild, no recompilation needed here.
-      # No separate Trivy scan needed here either: for the other 7 services,
-      # container-scan is not (yet) push-scoped, so their rows already ran a
-      # full local scan of a freshly built image earlier in this exact run
-      # (that provenance gap -- scanning the actually-published digest
-      # rather than a separately-built local one -- is Schritt 3,
-      # deliberately out of scope for this change). For build-tools
-      # specifically, container-scan's own "Scan build-tools channel image
-      # with Trivy (no rebuild)" step already scanned this exact channel
-      # image directly this run, reading the SAME determine-push-reuse-scope
-      # decision this step does -- so build-tools's published digest is
-      # covered too, just via that job instead of a local build here.
+      # No separate Trivy scan needed here either: UPDATED (Schritt 3, issue
+      # #1095) -- container-scan's "Determine per-service publish scan
+      # reuse" step reads this exact same determine-push-reuse-scope
+      # decision for every service now (generalized from build-tools-only),
+      # so whenever this step's own should-build is false for a service,
+      # container-scan's "Scan channel image with Trivy (no rebuild)" step
+      # already scanned that exact channel image directly this run, for that
+      # same service -- covered via that job instead of a local build here.
+      # Because both steps read the identical determine-push-reuse-scope
+      # output, the two decisions can't disagree, so no service is ever left
+      # without a real scan on this path (issue #1095's own "Correction 1").
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
         env:
@@ -6764,14 +6808,20 @@ jobs:
             mv "$BUILDX_CACHE_DEST" "$cache_dir"
           ) 9>"$lock_file"
 
-      - name: Prepare pushed build-tools Trivy cache
+      - name: Prepare pushed service Trivy cache
         # Same shared-cache-directory race as container-scan's own Trivy step
         # above (#904): this job's own concurrency group (see top of `build`)
         # is keyed by service+ref[+run_id], so two different trusted refs (or
-        # a dispatch/rerun overlapping a fresh push) building `build-tools`
-        # can now run this step concurrently, and a static `build-tools-
-        # pushed` directory would let them race on the same BoltDB cache
-        # file. Mirrors that job's concurrency-group key exactly (sanitized
+        # a dispatch/rerun overlapping a fresh push) building the SAME
+        # service can now run this step concurrently, and a cache-dir key
+        # that omits matrix.service would let two DIFFERENT services race on
+        # the same BoltDB cache file whenever this job runs its full 8-way
+        # matrix concurrently (originally this was build-tools-only, so a
+        # static `build-tools-pushed` prefix could not yet collide across
+        # services; Schritt 3, issue #1095, generalized this step to every
+        # service, so the key must now include matrix.service too, matching
+        # container-scan's own pre-build Trivy cache dir, which already did).
+        # Mirrors that job's concurrency-group key exactly (sanitized
         # `github.ref`, plus a `run_id` suffix in the identical
         # workflow_dispatch/rerun condition the group uses) -- see
         # container-scan's equivalent step above for the full invariant this
@@ -6780,14 +6830,15 @@ jobs:
         # and the same ephemeral-dir classification and cleanup rationale
         # (#912): dispatch/rerun and tag-ref dirs are cold-by-design, never
         # reused by a later run, and are deleted again by the "Remove
-        # ephemeral pushed build-tools Trivy cache" step below the scan.
+        # ephemeral pushed service Trivy cache" step below the scan.
         id: trivy-cache
         if: >-
           ${{
             github.event_name != 'pull_request' &&
-            matrix.service == 'build-tools' &&
             steps.build.outcome == 'success'
           }}
+        env:
+          MATRIX_SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
           sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
@@ -6795,7 +6846,7 @@ jobs:
             echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
             exit 1
           fi
-          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-pushed-${sanitized_ref}"
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/${MATRIX_SERVICE}-pushed-${sanitized_ref}"
           if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ] \
             || [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
             cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
@@ -6806,11 +6857,11 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
-      - name: Enforce pushed build-tools Trivy cache generation retention
+      - name: Enforce pushed service Trivy cache generation retention
         # Same rationale, sentinel-file mechanism, and #927 build-tools.yml
         # deferral as container-scan's "Enforce Trivy cache generation
         # retention" step above -- see that step's comment for the full
-        # reasoning. This is the `build-tools-pushed-<ref>` persistent dir's
+        # reasoning. This is the `<service>-pushed-<ref>` persistent dir's
         # equivalent: reused on every non-PR push/schedule run, never
         # touched by the ephemeral cleanup step below or by host-level
         # tmpfiles aging (#928).
@@ -6837,13 +6888,18 @@ jobs:
           mkdir -p -- "$TRIVY_CACHE_DIR"
           touch -- "$stamp"
 
-      - name: Scan pushed build-tools digest with Trivy
-        # Build-tools influences every downstream validation job, so the exact
-        # pushed digest is scanned before provenance and channel promotion.
+      - name: Scan pushed service digest with Trivy
+        # Schritt 3 (issue #1095): generalized from build-tools-only to
+        # every service -- the exact pushed digest is scanned before
+        # provenance and channel promotion for all 8 services now, closing
+        # the provenance gap where the artifact Trivy scanned (container-scan's
+        # own throwaway local build) was never the artifact actually
+        # published (this step's own image-ref, `steps.build.outputs.digest`,
+        # already resolved generically per matrix.service before this
+        # change -- only this `if:` was build-tools-only).
         if: >-
           ${{
             github.event_name != 'pull_request' &&
-            matrix.service == 'build-tools' &&
             steps.build.outcome == 'success'
           }}
         timeout-minutes: 20
@@ -6861,7 +6917,7 @@ jobs:
           timeout: 10m
           exit-code: "1"
 
-      - name: Remove ephemeral pushed build-tools Trivy cache
+      - name: Remove ephemeral pushed service Trivy cache
         # Same rationale and fail-closed path guard as container-scan's
         # "Remove ephemeral Trivy cache" step above: ephemeral dirs
         # (dispatch/rerun/tag) are never read by any later run, so they are
@@ -7366,13 +7422,16 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      - name: Scan pushed build-tools digest with Trivy
+      - name: Scan pushed service digest with Trivy
         # Same exact-pushed-digest scan build performs for its linux/amd64
-        # build-tools image, mirrored here for the linux/arm64 digest.
+        # image, mirrored here for the linux/arm64 digest. Schritt 3 (issue
+        # #1095) generalized this from build-tools-only to every service; no
+        # persistent Trivy cache here (unlike build's own equivalent step) --
+        # this job runs on an ephemeral GitHub-hosted runner with nothing to
+        # persist across runs.
         if: >-
           ${{
             github.event_name != 'pull_request' &&
-            matrix.service == 'build-tools' &&
             steps.build.outcome == 'success'
           }}
         timeout-minutes: 20
@@ -8948,7 +9007,7 @@ jobs:
       - name: Generate CycloneDX SBOM with Trivy
         # Same pinned trivy-action the scan jobs use, in SBOM mode. Scans the
         # digest-qualified reference resolved above (mirrors build-arm64's
-        # "Scan pushed build-tools digest with Trivy" step, which likewise
+        # "Scan pushed service digest with Trivy" step, which likewise
         # scans a ghcr.io/...@sha256:... reference after the GHCR login).
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
