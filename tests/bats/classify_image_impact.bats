@@ -180,3 +180,46 @@ val() {
     [ "$(val docs_only)" = "false" ]
     [ "$(val IMAGE_IMPACT)" = "false" ]
 }
+
+# --- --all-changed push fail-safe (#1095) ---
+
+# When build-push.yml's detect-changes push step cannot diff github.event.before
+# (all-zeros first push, force-push, GC'd base), it calls the classifier with
+# --all-changed so an undeterminable diff degrades to "rebuild/retest
+# everything" instead of silently skipping a real change. Every per-service and
+# per-path build/test-scoping boolean must come back true, IMAGE_IMPACT true.
+@test "--all-changed forces every build/test-scoping boolean true" {
+    run bash "$script" --all-changed
+    [ "$status" -eq 0 ]
+    [ "$(val proxy)" = "true" ]
+    [ "$(val dns_image)" = "true" ]
+    [ "$(val dns_rust)" = "true" ]
+    [ "$(val ui)" = "true" ]
+    [ "$(val watchdog)" = "true" ]
+    [ "$(val dhcp)" = "true" ]
+    [ "$(val dhcp_proxy)" = "true" ]
+    [ "$(val build_tools)" = "true" ]
+    [ "$(val workflow)" = "true" ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+}
+
+# docs_only must be false in the fallback: "everything changed" is never a
+# docs-only skip, so no downstream consumer can treat the fail-safe as a
+# reason to skip heavy work.
+@test "--all-changed is never docs_only" {
+    run bash "$script" --all-changed
+    [ "$status" -eq 0 ]
+    [ "$(val docs_only)" = "false" ]
+}
+
+# The fallback must not depend on (or read) any diff input: it stays correct
+# even with a stale CHANGED_FILES pointing at a docs-only list in the
+# environment, because --all-changed short-circuits before any file is read.
+@test "--all-changed ignores a stale CHANGED_FILES docs-only list" {
+    printf '%s\n' "README.md" > "$files"
+    CHANGED_FILES="$files" run bash "$script" --all-changed
+    [ "$status" -eq 0 ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+    [ "$(val docs_only)" = "false" ]
+    [ "$(val ui)" = "true" ]
+}

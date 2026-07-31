@@ -132,11 +132,10 @@ EOF
 
     # The NATS entrypoint's static nats.conf generator (since #811) lives inline
     # in each deploy/*/docker-compose.yml `command:` block -- the guard tracks
-    # all three generating compose files against a single shared bats evidence
+    # both generating compose files against a single shared bats evidence
     # file. The compose fixtures only need to EXIST (the guard's writer check is
     # existence-only); the evidence bats file carries the repeat-run marker.
-    mkdir -p "$fixture_root/deploy/dev" "$fixture_root/deploy/prod" "$fixture_root/deploy/quickstart"
-    printf 'services:\n  nats:\n    command: ["true"]\n' > "$fixture_root/deploy/dev/docker-compose.yml"
+    mkdir -p "$fixture_root/deploy/prod" "$fixture_root/deploy/quickstart"
     printf 'services:\n  nats:\n    command: ["true"]\n' > "$fixture_root/deploy/prod/docker-compose.yml"
     printf 'services:\n  nats:\n    command: ["true"]\n' > "$fixture_root/deploy/quickstart/docker-compose.yml"
     cat > "$fixture_root/tests/bats/nats_conf_entrypoint_idempotence.bats" <<EOF
@@ -270,7 +269,6 @@ EOF
 
     run "$script" "$fixture_root"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"deploy/dev/docker-compose.yml"* ]]
     [[ "$output" == *"deploy/prod/docker-compose.yml"* ]]
     [[ "$output" == *"deploy/quickstart/docker-compose.yml"* ]]
 }

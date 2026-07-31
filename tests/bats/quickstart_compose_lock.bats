@@ -184,23 +184,52 @@ wait_for_marker() {
 @test "all 3 real call sites source the helper and call the function, none re-rolls the inline exec/flock pattern" {
     for workflow in \
         "$repo_root/.github/workflows/full-setup-deep-validate.yml" \
-        "$repo_root/.github/workflows/full-setup-validate.yml"; do
+        "$repo_root/.github/workflows/full-setup-validate.yml" \
+        "$repo_root/.github/workflows/full-setup-sims.yml"; do
         [ -f "$workflow" ] || fail "$workflow not found"
     done
 
-    # full-setup-deep-validate.yml carries 2 call sites (setup-cli-simulation
-    # and syslog-forwarding-simulation), full-setup-validate.yml carries 1 --
-    # 3 total, matching the original 3-copy inline pattern this replaces.
-    deep_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-deep-validate.yml")"
-    validate_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-validate.yml")"
-    [ "$deep_count" -eq 2 ]
-    [ "$validate_count" -eq 1 ]
+    # Issue #1112 (ci: extract shared full-setup jobs into reusable workflow +
+    # composite actions) moved the setup-cli-simulation job -- and its
+    # quickstart_compose_lock_acquire call site -- out of
+    # full-setup-deep-validate.yml/full-setup-validate.yml and into the new
+    # shared full-setup-sims.yml reusable workflow, invoked by both callers via
+    # `uses:` instead of being duplicated per caller. syslog-forwarding-
+    # simulation's own call site was NOT moved -- that job stayed inline in
+    # full-setup-deep-validate.yml. The physical-file counts below reflect that
+    # redistribution (issue #1171): full-setup-sims.yml carries the one shared
+    # setup-cli-simulation call site (exercised by both full-setup-validate.yml
+    # and full-setup-deep-validate.yml at run time even though it is written
+    # only once), full-setup-deep-validate.yml keeps its one direct
+    # syslog-forwarding-simulation call site, and full-setup-validate.yml now
+    # has zero of its own -- it delegates entirely to full-setup-sims.yml. This
+    # is still 2 logical call sites reachable through full-setup-deep-
+    # validate.yml (1 direct + 1 via full-setup-sims.yml) and 1 through
+    # full-setup-validate.yml (via full-setup-sims.yml only), matching the
+    # original 2/1 split this replaces -- just no longer expressed as 2/1
+    # duplicated inline copies. Scoped to current_dev's post-#1112 topology
+    # only -- master and any archived vY.X.Z branch still predate #1112 and
+    # keep the original inline-duplicated shape.
+    # `grep -c` exits 1 (while still printing "0") when a file has zero
+    # matches -- full-setup-validate.yml is expected to be exactly that case
+    # post-#1112, so `|| true` is required here to keep that a legitimate
+    # zero-count result instead of letting bats' errexit-like test execution
+    # abort the test right here, before the explicit `-eq 0` assertion below
+    # ever runs.
+    sims_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-sims.yml" || true)"
+    deep_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-deep-validate.yml" || true)"
+    validate_count="$(grep -c 'quickstart_compose_lock_acquire' "$repo_root/.github/workflows/full-setup-validate.yml" || true)"
+    [ "$sims_count" -eq 1 ] || fail "full-setup-sims.yml: expected 1 quickstart_compose_lock_acquire call site (setup-cli-simulation), found $sims_count"
+    [ "$deep_count" -eq 1 ] || fail "full-setup-deep-validate.yml: expected 1 quickstart_compose_lock_acquire call site (syslog-forwarding-simulation), found $deep_count"
+    [ "$validate_count" -eq 0 ] || fail "full-setup-validate.yml: expected 0 quickstart_compose_lock_acquire call sites (it delegates entirely to full-setup-sims.yml), found $validate_count"
 
     # Regression guard: the old hand-rolled inline form must not reappear in
-    # either workflow -- its presence would mean a new call site re-added the
+    # any of the three -- its presence would mean a new call site re-added the
     # exact copy-paste mistake this helper exists to stop.
     ! grep -q 'exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-deep-validate.yml" \
         || fail "full-setup-deep-validate.yml still contains the old inline exec/flock pattern"
     ! grep -q 'exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-validate.yml" \
         || fail "full-setup-validate.yml still contains the old inline exec/flock pattern"
+    ! grep -q 'exec {lock_fd}>/tmp/lancache-setup-cli-simulation.lock' "$repo_root/.github/workflows/full-setup-sims.yml" \
+        || fail "full-setup-sims.yml still contains the old inline exec/flock pattern"
 }

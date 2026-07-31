@@ -256,6 +256,40 @@ EOF
     [[ "$output" == *"has no action.yml/action.yaml"* ]]
 }
 
+@test "skips a job-level reusable-workflow reference instead of treating it as a missing local action" {
+    # A `uses: ./.github/workflows/<wf>.yml` at job level is a reusable-workflow
+    # call, not a composite action: it points at a workflow FILE, not a
+    # directory holding an action.yml, and has no runs.using to check. The
+    # reusable workflow file itself is scanned directly (it lives under
+    # .github/workflows), so skipping the reference loses no coverage. Before
+    # this was handled, the script misread the `./`-prefixed value as a local
+    # action and failed on a missing action.yml -- issue #1014 introduced the
+    # repo's first local reusable workflow and surfaced exactly that.
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  call-reusable:
+    uses: ./.github/workflows/reusable.yml
+EOF
+    # The referenced reusable workflow must exist as a real file so the scan of
+    # workflow_files includes it; it declares no external `uses:` of its own.
+    cat > "$fixture_root/.github/workflows/reusable.yml" <<'EOF'
+name: Reusable
+on:
+  workflow_call:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo hi
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
 @test "fails when a local action declares a deprecated Node runtime" {
     write_workflow <<'EOF'
 name: CI

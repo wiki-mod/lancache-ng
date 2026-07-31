@@ -1,24 +1,23 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Drift guard (issue #1091) for the three compose `dhcp` service healthchecks'
+# Drift guard (issue #1091) for the two compose `dhcp` service healthchecks'
 # KEA_CTRL_TOKEN placeholder detection. Each healthcheck must decide "is the
 # compose-injected KEA_CTRL_TOKEN still a placeholder that the entrypoint would
 # have discarded in favour of the shared-secret file?" using the SAME rule the
 # entrypoint actually applies (services/dhcp/entrypoint.sh's KEA_CTRL_TOKEN
 # resolution: secret_is_placeholder()'s lowercase + "-"/"_" normalization, plus
-# the three exact legacy literals). Before #1091 the three healthchecks each
+# the three exact legacy literals). Before #1091 the two healthchecks each
 # hand-rolled a different, weaker case pattern, so an operator whose placeholder
 # value was case/dash-varied got a permanently `unhealthy` container while Kea
 # ran fine on the real, shared-secret-resolved token. This test fails loudly if
-# the three ever diverge again or drift from secret_is_placeholder's verdict --
+# the two ever diverge again or drift from secret_is_placeholder's verdict --
 # the same class of guard tests/bats/shared_secret_bootstrap_sync.bats provides
 # for the bash-side embedded copies.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     compose_files=(
-        "$repo_root/deploy/dev/docker-compose.yml"
         "$repo_root/deploy/prod/docker-compose.yml"
         "$repo_root/deploy/quickstart/docker-compose.yml"
     )
@@ -49,9 +48,9 @@ classify() {
     if [ -z "$token" ]; then printf placeholder; else printf real; fi
 }
 
-# The three healthchecks must be byte-identical in their detection logic --
+# The two healthchecks must be byte-identical in their detection logic --
 # divergence between them is exactly the #1091 bug.
-@test "all three dhcp healthchecks share an identical placeholder-detection fragment" {
+@test "both dhcp healthchecks share an identical placeholder-detection fragment" {
     reference="$(extract_detection "${compose_files[0]}")"
     [ -n "$reference" ]
     for f in "${compose_files[@]}"; do
@@ -89,11 +88,12 @@ classify() {
     done
 }
 
-# deploy/dev/.env ships a real, intentional dev secret whose "-change-me"
-# INFIX must not be mistaken for a "change_me" PREFIX -- exactly the case
-# secret_is_placeholder() is documented to keep as real, and which the fixed
-# healthcheck must also keep as real.
-@test "healthcheck keeps dev's real KEA_CTRL_TOKEN value real" {
+# lancache-dev-kea-control-token-change-me was the now-retired deploy/dev/.env's
+# (v0.3.0, #766) real, intentional KEA_CTRL_TOKEN default -- kept here as a
+# regression case because its "-change-me" INFIX must not be mistaken for a
+# "change_me" PREFIX, exactly the case secret_is_placeholder() is documented to
+# keep as real, and which the healthcheck must also keep as real.
+@test "healthcheck keeps a -change-me-infixed real KEA_CTRL_TOKEN value real" {
     snippet="$(extract_detection "${compose_files[0]}")"
     [ "$(classify "$snippet" "lancache-dev-kea-control-token-change-me")" = real ]
 }

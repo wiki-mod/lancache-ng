@@ -88,10 +88,12 @@ anything-HERE placeholder real real
 # path must never mistake a stale template default for a real secret it
 # should preserve; the Rust check protects a single security-sensitive
 # token). The shared read-path library deliberately does NOT include this
-# pattern, because deploy/dev/docker-compose.yml and deploy/dev/.env ship
-# real, working dev-mode secrets in exactly this shape (e.g.
-# lancache-nats-ui-dev-secret, lancache-pdns-dev-secret) that the dns/dhcp/ui
-# entrypoints must accept as configured values, not silently regenerate.
+# pattern, because the now-retired deploy/dev/docker-compose.yml and
+# deploy/dev/.env (v0.3.0, #766) shipped real, working dev-mode secrets in
+# exactly this shape (e.g. lancache-nats-ui-dev-secret, lancache-pdns-dev-secret)
+# that the dns/dhcp/ui entrypoints had to accept as configured values, not
+# silently regenerate. Kept as a regression-pin case below so this shape is
+# never misclassified if an operator's own secret happens to match it.
 lancache-nats-ui-dev-secret real placeholder placeholder
 lancache-pdns-dev-secret real placeholder placeholder
 LANCACHE-NATS-UI-DEV-SECRET real placeholder placeholder

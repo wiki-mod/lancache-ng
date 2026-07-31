@@ -17,6 +17,24 @@ setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-validation-subnet-wrapper-coverage.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
     mkdir -p "$fixture_root/.github/workflows"
+    # full-setup-sims.yml is one of the guard's scanned files (#1014), so every
+    # fixture needs it present or the guard's "file no longer exists" path fires.
+    # Default to a trivial stub with no raw-output job; tests exercising the
+    # reusable-workflow's own shape overwrite it.
+    write_trivial_sims_yml
+}
+
+write_trivial_sims_yml() {
+    cat > "$fixture_root/.github/workflows/full-setup-sims.yml" <<'EOF'
+name: Full-Setup Simulations (reusable)
+on:
+  workflow_call:
+jobs:
+  noop:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo noop
+EOF
 }
 
 # write_validate_yml <content>
@@ -143,7 +161,7 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"ui-reachability-crash-loop-simulation"* ]]
     [[ "$output" == *"full-setup-validate.yml"* ]]
-    [[ "$output" == *"neither a"* ]]
+    [[ "$output" == *"none of:"* ]]
 }
 
 @test "fails when the raw output is referenced in GitHub Actions bracket-notation form" {
@@ -383,6 +401,73 @@ EOF
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
+}
+
+@test "passes when a full-setup-sims.yml job reserves via the reserve-validation-subnet-stack composite action" {
+    # #1014 shape: full-setup-validate's cross-several-steps inline reservation
+    # loop was extracted into a composite action. A job that references the raw
+    # output but reserves through `uses: ./.github/actions/
+    # reserve-validation-subnet-stack` holds the same flock-locked reservation
+    # and must count as protected, not flagged.
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+'
+    write_trivial_deep_validate_yml
+    cat > "$fixture_root/.github/workflows/full-setup-sims.yml" <<'EOF'
+name: Full-Setup Simulations (reusable)
+on:
+  workflow_call:
+jobs:
+  full-setup-validate:
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+    steps:
+      - uses: ./.github/actions/reserve-validation-subnet-stack
+        with:
+          image-tag: dev
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "fails when a full-setup-sims.yml job consumes the raw output with no protection" {
+    # The #896/#907 collision class in the reusable workflow's new home: a job
+    # threads the raw subnet at job level and starts its stack directly, with
+    # none of the wrapper / inline reservation / composite-action protections.
+    # This is the regression the guard must still catch after #1014 moved the
+    # jobs into full-setup-sims.yml.
+    write_validate_yml '  compute-validation-network:
+    runs-on: ubuntu-latest
+    outputs:
+      subnet: ${{ steps.derive.outputs.subnet }}
+    steps:
+      - run: echo derive
+'
+    write_trivial_deep_validate_yml
+    cat > "$fixture_root/.github/workflows/full-setup-sims.yml" <<'EOF'
+name: Full-Setup Simulations (reusable)
+on:
+  workflow_call:
+jobs:
+  rogue-simulation:
+    runs-on: ubuntu-latest
+    env:
+      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
+    steps:
+      - run: docker compose up -d
+EOF
+
+    run "$script" "$fixture_root"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"rogue-simulation"* ]]
+    [[ "$output" == *"full-setup-sims.yml"* ]]
 }
 
 @test "the guard also passes when pointed at the real repository tree" {

@@ -44,7 +44,7 @@ teardown() {
 @test "logbundle_key_looks_like_secret matches every credential-shaped key name this script manages" {
     for key in KEA_CTRL_TOKEN DDNS_TSIG_KEY PDNS_API_KEY NATS_UI_PASSWORD \
         NATS_DNS_WRITER_PASSWORD NATS_DNS_REPLICA_PASSWORD NATS_CALLOUT_PASSWORD \
-        SECONDARY_REGISTRATION_TOKEN UI_AUTH_PASSWORD; do
+        NATS_SYS_PASSWORD SECONDARY_REGISTRATION_TOKEN UI_AUTH_PASSWORD; do
         run logbundle_key_looks_like_secret "$key"
         [ "$status" -eq 0 ]
     done
@@ -59,12 +59,12 @@ teardown() {
 
 # ── logbundle_secret_env_keys ─────────────────────────────────────────────────
 
-@test "logbundle_secret_env_keys lists the nine keys this script generates/manages" {
+@test "logbundle_secret_env_keys lists the ten keys this script generates/manages" {
     run logbundle_secret_env_keys
     [ "$status" -eq 0 ]
     expected=$(printf '%s\n' KEA_CTRL_TOKEN DDNS_TSIG_KEY PDNS_API_KEY \
         NATS_UI_PASSWORD NATS_DNS_WRITER_PASSWORD NATS_DNS_REPLICA_PASSWORD \
-        NATS_CALLOUT_PASSWORD SECONDARY_REGISTRATION_TOKEN UI_AUTH_PASSWORD)
+        NATS_CALLOUT_PASSWORD NATS_SYS_PASSWORD SECONDARY_REGISTRATION_TOKEN UI_AUTH_PASSWORD)
     [ "$(echo "$output" | sort)" = "$(echo "$expected" | sort)" ]
 }
 

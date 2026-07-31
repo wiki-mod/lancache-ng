@@ -105,6 +105,19 @@ val() {
     [ "$(val should_run)" = "true" ]
 }
 
+@test "ntp change: ntp touched, should_run true (#1296)" {
+    # Mirrors the dhcp/dhcp-proxy test above: a services/ntp/ change must set
+    # ntp=true (and only ntp, not the unrelated dhcp flags) so
+    # ensure-pr-staging-images.sh's fail-closed guard treats a PR that
+    # actually changes the ntp container as touched, instead of silently
+    # backfilling it from the base commit.
+    run_detect "services/ntp/entrypoint.sh"
+    [ "$(val ntp)" = "true" ]
+    [ "$(val dhcp)" = "false" ]
+    [ "$(val dhcp_proxy)" = "false" ]
+    [ "$(val should_run)" = "true" ]
+}
+
 @test "build-tools change: build_tools true, should_run true" {
     run_detect "tools/build-tools/Dockerfile"
     [ "$(val build_tools)" = "true" ]
