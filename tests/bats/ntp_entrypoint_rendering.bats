@@ -136,13 +136,18 @@ setup() {
 # sequence -- a pidfile written by a "previous" crashed instance, present
 # on disk before this function ever runs -- and asserts it's gone
 # afterward, the same convergence property issue #456's checklist expects
-# of any stateful write path this entrypoint touches.
-@test "cleanup_stale_ntp_pidfile removes a pidfile left behind by a previously crashed instance" {
+# of any stateful write path this entrypoint touches. Calls the
+# parameterized _core function directly (not the zero-arg
+# cleanup_stale_ntp_pidfile production entry point -- see that function's
+# own comment for why the two are split, same reasoning as
+# _fix_chrony_dir_ownership_core/fix_chrony_dir_ownership above) so this
+# test exercises the real removal logic against a fixture path.
+@test "_cleanup_stale_ntp_pidfile_core removes a pidfile left behind by a previously crashed instance" {
     stale_pidfile="$BATS_TEST_TMPDIR/chronyd.pid"
     echo "1" > "$stale_pidfile"
     [ -f "$stale_pidfile" ]
 
-    cleanup_stale_ntp_pidfile "$stale_pidfile"
+    _cleanup_stale_ntp_pidfile_core "$stale_pidfile"
 
     [ ! -f "$stale_pidfile" ]
 }
@@ -151,27 +156,28 @@ setup() {
 # cycle) must stay a no-op rather than erroring -- `rm -f` already gives
 # this for free, but this test makes the idempotence property an explicit,
 # checked assertion rather than an implicit side effect of the flag choice.
-@test "cleanup_stale_ntp_pidfile is idempotent across repeated calls with no pidfile present" {
+@test "_cleanup_stale_ntp_pidfile_core is idempotent across repeated calls with no pidfile present" {
     missing_pidfile="$BATS_TEST_TMPDIR/does-not-exist/chronyd.pid"
     [ ! -f "$missing_pidfile" ]
 
-    run cleanup_stale_ntp_pidfile "$missing_pidfile"
+    run _cleanup_stale_ntp_pidfile_core "$missing_pidfile"
     [ "$status" -eq 0 ]
-    run cleanup_stale_ntp_pidfile "$missing_pidfile"
+    run _cleanup_stale_ntp_pidfile_core "$missing_pidfile"
     [ "$status" -eq 0 ]
 }
 
-# Confirms the default argument (chrony's real, confirmed-live default
-# pidfile path -- see cleanup_stale_ntp_pidfile's own comment in
-# entrypoint.sh) is what gets used when no explicit path is passed, the
-# same shape the real (non-test) call site in entrypoint.sh relies on.
-# Reads the loaded function's own body (via `type`) rather than calling it
-# with no argument against the real /run/chrony/chronyd.pid path, which
-# would require root/real filesystem access this test sandbox doesn't need.
-@test "cleanup_stale_ntp_pidfile defaults to chrony's real pidfile path when called with no argument" {
+# cleanup_stale_ntp_pidfile itself (the zero-parameter production entry
+# point, not the _core function the two cases above exercise directly):
+# confirms it really does forward to chrony's real, confirmed-live default
+# pidfile path with no parameters of its own to pass. Reads the loaded
+# function's own body (via `type`) rather than calling it against the real
+# /run/chrony/chronyd.pid path, which would require root/real filesystem
+# access this test sandbox doesn't need -- the same technique
+# fix_chrony_dir_ownership's own forwarding test above uses.
+@test "cleanup_stale_ntp_pidfile forwards to chrony's real pidfile path with no parameters" {
     run type cleanup_stale_ntp_pidfile
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/run/chrony/chronyd.pid"* ]]
+    [[ "$output" == *"_cleanup_stale_ntp_pidfile_core /run/chrony/chronyd.pid"* ]]
 }
 
 # Real, root-cause regression test for the log/driftfile permission bug this

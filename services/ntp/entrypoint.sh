@@ -195,6 +195,7 @@ fix_chrony_dir_ownership() {
     _fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony
 }
 
+# _cleanup_stale_ntp_pidfile_core <pidfile>
 # Removes chronyd's own pidfile if a stale one survives from a previously
 # crashed instance in THIS SAME container (issue #1318). Docker's
 # `restart: always` re-execs this entrypoint against the same writable
@@ -217,21 +218,33 @@ fix_chrony_dir_ownership() {
 # could be protecting against -- a fresh start always replaces whatever was
 # PID 1 before, stale or not.
 #
-# Path confirmed directly against this image's own real chronyd build
-# (AG-VAL-023: checked the tool's actual behavior, not assumed it) --
-# chrony.conf.template sets no explicit `pidfile` directive, so chronyd
-# uses its Debian package's compiled-in default, and a real crash's own
-# fatal-error message named this exact path: "Another chronyd may already
-# be running (pid=1), check /run/chrony/chronyd.pid".
-# shellcheck disable=SC2120 # the real call site below intentionally passes
-# no argument (always wants chrony's real default path); the optional
-# override exists purely so tests/bats/ntp_entrypoint_rendering.bats can
-# point this at a throwaway fixture path instead of the real
-# /run/chrony/chronyd.pid, the same optional-parameter pattern
-# render_ntp_config's own template argument already uses above.
-cleanup_stale_ntp_pidfile() {
-    local pidfile="${1:-/run/chrony/chronyd.pid}"
+# Deliberately takes a required (not optional/defaulted) parameter, the
+# same restructuring _fix_chrony_dir_ownership_core/fix_chrony_dir_ownership
+# above went through and for the same reason (maintainer decision, AG-WF-027
+# "mitbereinigen" -- fix this failure class everywhere it's found in the
+# same pass, not just where it was first noticed): an earlier version gave
+# this function an optional `${1:-real-path}` default and suppressed the
+# resulting shellcheck SC2120 finding with a disable comment instead of
+# restructuring around it. That pattern is what this file no longer uses
+# anywhere -- see cleanup_stale_ntp_pidfile below for the zero-parameter
+# production entry point that supplies the real path.
+_cleanup_stale_ntp_pidfile_core() {
+    local pidfile="$1"
     rm -f "$pidfile"
+}
+
+# cleanup_stale_ntp_pidfile
+# Production entry point: no parameters, so there is nothing for a lint
+# pass to flag as unused. Path confirmed directly against this image's own
+# real chronyd build (AG-VAL-023: checked the tool's actual behavior, not
+# assumed it) -- chrony.conf.template sets no explicit `pidfile` directive,
+# so chronyd uses its packaged compiled-in default, and a real crash's own
+# fatal-error message named this exact path: "Another chronyd may already
+# be running (pid=1), check /run/chrony/chronyd.pid". This path is
+# confirmed identical on both the pre-Alpine-migration Debian image and the
+# current Alpine image.
+cleanup_stale_ntp_pidfile() {
+    _cleanup_stale_ntp_pidfile_core /run/chrony/chronyd.pid
 }
 
 NTP_RUNTIME_CONF=/etc/chrony/chrony.conf
