@@ -73,6 +73,21 @@ data-encoding = { version = "2", optional = true }
 # needed so the Admin UI reader can transparently read either outcome.
 zstd = { version = "0.13", optional = true }
 flate2 = { version = "1", optional = true }
+# DHCPv4 wire-format encode/decode for the native DHCP probe (issue #1288),
+# replacing the former dhcp-probe.sh's use of nmap (rogue-server detection)
+# and dhclient (client dry-run) -- both EOL/no longer packaged on Alpine. A
+# pure protocol crate (no socket/state-machine handling of its own), paired
+# with our own broadcast UDP socket code in dhcp_probe_native.rs. Chosen
+# over mozim (the issue's other researched candidate, a higher-level DHCP
+# client library) specifically because a pure wire-format crate keeps this
+# project's own code in full control of socket lifecycle and, critically,
+# guarantees the negotiated lease is never bound to a real network
+# interface -- a higher-level client library's own state machine would need
+# individual auditing for that same guarantee before it could be trusted
+# here. Maintained by BlueCat Engineering, a real DDI (DNS/DHCP/IPAM)
+# vendor -- a strong trust signal for a crate this project uses to speak
+# the DHCP protocol directly on a LAN segment.
+dhcproto = { version = "0.15", optional = true }
 
 [features]
 default = ["runtime"]
@@ -100,6 +115,7 @@ runtime = [
     "dep:data-encoding",
     "dep:zstd",
     "dep:flate2",
+    "dep:dhcproto",
 ]
 
 [dev-dependencies]
