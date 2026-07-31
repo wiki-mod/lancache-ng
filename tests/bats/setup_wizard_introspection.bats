@@ -13,6 +13,17 @@
 # Invoked as `run bash "$setup_sh" ...`, not `run "$setup_sh" ...` (AG-VAL-024):
 # removes any dependency on the committed executable bit, unverifiable from a
 # Windows/core.filemode=false authoring sandbox.
+#
+# Required for `run !` below (used for the one negative assertion that greps
+# a real file rather than the `$output` string) -- a bare `!` before a
+# command is a real bug under Bats, not just a style nit (SC2314): Bats runs
+# each test body under `set -e`, and bash's own well-known `!`-negation quirk
+# means a negated command's failure/success never reaches errexit the way an
+# ordinary command's does, so a bare `! cmd` silently passes the test no
+# matter what `cmd` actually returns. Negative checks against `$output`
+# itself use a plain `[[ "$output" != *pattern* ]]` instead, which needs no
+# minimum-version guard and sidesteps the same quirk entirely.
+bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -55,7 +66,7 @@ write_answers() {
     # unconditionally either way (it is not itself a prompt), so a plain
     # `grep -F 'Release channel'` would false-positive on that header text
     # even when the actual prompt was correctly skipped.
-    ! printf '%s\n' "$output" | grep -qF $'PROMPT\tRelease channel'
+    [[ "$output" != *$'PROMPT\tRelease channel'* ]]
 }
 
 @test "list-prompts never creates the install directory or any other real file" {
@@ -89,7 +100,7 @@ EOF
     PATH="$stub_bin:$PATH" LANCACHE_IMAGE_CHANNEL=nightly \
         run bash "$setup_sh" list-prompts "$BATS_TEST_TMPDIR/answers.txt"
     [ "$status" -eq 0 ]
-    ! grep -qF 'addr add' "$ip_calls"
+    run ! grep -qF 'addr add' "$ip_calls"
 }
 
 # ─── list-prompts: branch-following (the actual #1176 blind spot) ───
@@ -105,7 +116,7 @@ EOF
     printf '%s\n' "$output" | grep -qF 'IP pool start'
     printf '%s\n' "$output" | grep -qF 'IP pool end'
     # disabled-path-only prompts must NOT appear once kea is chosen.
-    ! printf '%s\n' "$output" | grep -qF 'DHCP subnet start for dnsmasq-proxy'
+    [[ "$output" != *'DHCP subnet start for dnsmasq-proxy'* ]]
 }
 
 @test "list-prompts walks the SSL-enabled branch and reports the SSL follow-up prompts" {
@@ -119,8 +130,8 @@ EOF
 @test "list-prompts does NOT report the SSL follow-up prompts when SSL mode is left disabled" {
     LANCACHE_IMAGE_CHANNEL=nightly run bash "$setup_sh" list-prompts
     [ "$status" -eq 0 ]
-    ! printf '%s\n' "$output" | grep -qF 'SSL mode IP (second LAN IP)'
-    ! printf '%s\n' "$output" | grep -qF 'Add now?'
+    [[ "$output" != *'SSL mode IP (second LAN IP)'* ]]
+    [[ "$output" != *'Add now?'* ]]
 }
 
 @test "list-prompts is repeat-run stable for identical answers (AG-OP-006/007 convergence)" {
