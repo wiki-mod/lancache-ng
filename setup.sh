@@ -22,7 +22,10 @@ export LANG=C LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
-DHCP_PROBE_SCRIPT="$SCRIPT_DIR/services/ui/dhcp-probe.sh"
+# dhcp-probe.sh (formerly copied the same way as the two scripts below) was
+# retired by issue #1288 -- the dhcp-probe container now runs the ui
+# image's own `lancache-ui --dhcp-probe` native CLI mode, so there is no
+# longer a separate script to track a source path for.
 # Shared-secret bootstrap helper (#858): the quickstart nats service sources this
 # to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
 # Copied flat into $install_dir/scripts/ like the two scripts above, so the
@@ -371,8 +374,18 @@ run_kea_dhcp_activation_preflight() {
     # fail its own execution on every single run, unconditionally forcing
     # the "could not be executed" confirmation path below regardless of
     # whether a real conflict existed. Letting nmap auto-select the
-    # interface (no -e at all) matches the already-proven working
-    # invocation in services/ui/dhcp-probe.sh.
+    # interface (no -e at all) is the already-proven working invocation.
+    #
+    # This is a SEPARATE nmap usage from the Admin UI's own dhcp-probe
+    # container: it runs nmap directly inside the `dhcp` (Kea) service
+    # image (services/dhcp/Dockerfile), not the `ui` image. Issue #1288
+    # replaced the `ui` image's former dhcp-probe.sh (nmap + dhclient) with
+    # a native Rust DHCP probe, but deliberately did not touch this
+    # `dhcp`-image nmap call -- out of that issue's stated scope (see its
+    # own "current architecture" section, which only describes
+    # services/ui) and flagged explicitly rather than silently left as
+    # unfinished parity. `services/dhcp/Dockerfile` still installs nmap for
+    # exactly this call site.
     if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
         nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
@@ -382,10 +395,9 @@ run_kea_dhcp_activation_preflight() {
         return 0
     fi
 
-    # Matches services/ui/dhcp-probe.sh's already-proven parsing: anchor at
-    # the start of the line (after stripping nmap's leading |/_ prefixes and
-    # whitespace) instead of a bare substring match, and take the first
-    # match rather than assuming there is exactly one.
+    # Anchors at the start of the line (after stripping nmap's leading |/_
+    # prefixes and whitespace) instead of a bare substring match, and takes
+    # the first match rather than assuming there is exactly one.
     server_identifier="$(printf '%s\n' "$output" | sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' | sed -n '1p')"
 
     if [[ -n "$server_identifier" ]]; then
@@ -1523,28 +1535,21 @@ compose_file_args_for_install_dir() {
 # on both first install and every update, so copied installs always run the
 # current container wiring). See the inline comment for the #538 workaround
 # that force-removes a stale auto-vivified directory before reinstalling
-# dhcp-probe.sh/docker-socket-proxy.sh.
+# docker-socket-proxy.sh.
+#
+# dhcp-probe.sh is no longer one of these copied assets (issue #1288): the
+# dhcp-probe container now runs the same lancache-ui image's own
+# `--dhcp-probe` CLI mode (a native Rust DHCP probe, see
+# services/ui/src/dhcp_probe_native.rs) instead of a bind-mounted external
+# script, so there is nothing left to install/copy for it -- the compose
+# file's dhcp-probe service no longer declares a `volumes:` entry at all.
 install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target dhcp_probe_target helper_target
+    local install_dir="$1" socket_proxy_target helper_target
 
     socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
-    dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
     helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
-    # A prior install that hit the missing-copy bug (#538) left Docker's own
-    # auto-vivified bind-mount source behind as an empty directory. GNU
-    # install(1) treats an existing directory target as "copy into", not
-    # "replace" — leaving it in place would install to dhcp-probe.sh/dhcp-probe.sh
-    # and still leave the actual mount source as a directory.
-    if [[ -d "$dhcp_probe_target" ]]; then
-        rm -rf "$dhcp_probe_target"
-    fi
-    if [[ "$(realpath -m "$DHCP_PROBE_SCRIPT")" != "$(realpath -m "$dhcp_probe_target")" ]]; then
-        install -m 0755 "$DHCP_PROBE_SCRIPT" "$dhcp_probe_target"
-    else
-        chmod 0755 "$dhcp_probe_target"
-    fi
     if [[ -d "$socket_proxy_target" ]]; then
         rm -rf "$socket_proxy_target"
     fi
