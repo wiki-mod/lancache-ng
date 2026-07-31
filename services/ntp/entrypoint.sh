@@ -21,9 +21,17 @@ if [ -f /data/lancache-ui-settings.env ]; then
     . /data/lancache-ui-settings.env
 fi
 
-# Curated default: the four official Debian NTP pool zones (this image's own
-# vendor pool, matching the base OS) plus Cloudflare's well-known anycast NTP
-# service, for a sensible default an operator never has to think about.
+# Curated default: the four official Debian NTP pool zones plus Cloudflare's
+# well-known anycast NTP service, for a sensible default an operator never
+# has to think about. These pool zone hostnames work identically regardless
+# of this image's own base OS -- pool.ntp.org vendor zones are just a
+# courtesy DNS naming convention for spreading load across the public pool,
+# not something tied to the querying host's own distro (any pool zone
+# resolves to real, usable NTP servers for any client). Kept as-is after
+# this image's Alpine migration (issue #815 Part B) rather than switched to
+# an Alpine-specific zone: Alpine has no comparably established dedicated
+# vendor pool zone, and changing this default would be a user-visible
+# behavior change out of scope for a base-image swap.
 : "${NTP_UPSTREAM_SERVERS:=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com}"
 : "${NTP_ALLOWED_CLIENT_CIDRS:=}"
 
