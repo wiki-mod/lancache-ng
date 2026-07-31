@@ -520,16 +520,21 @@ services:
 
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
-  # DHCP servers" feature. Reuses the UI image (already has nmap and dhclient
-  # installed). The Admin UI stops then starts this container on demand and
-  # reads its output — it never creates or removes it — so the narrowed
-  # docker-socket-proxy only needs to permit start/restart, the same capability
-  # class already used for the NATS and proxy-ssl reload flows, not generic
-  # container creation.
+  # DHCP servers" feature. Reuses the UI image, running the same lancache-ui
+  # binary in an alternate CLI mode (`--dhcp-probe`, see
+  # services/ui/src/dhcp_probe_native.rs) instead of the former separate
+  # dhcp-probe.sh script -- issue #1288 replaced that script's nmap/dhclient
+  # dependency (both EOL, dropped from current Alpine) with a native DHCPv4
+  # client speaking the wire protocol directly, so this image no longer
+  # installs either tool. The Admin UI stops then starts this container on
+  # demand and reads its output — it never creates or removes it — so the
+  # narrowed docker-socket-proxy only needs to permit start/restart, the same
+  # capability class already used for the NATS and proxy-ssl reload flows,
+  # not generic container creation.
   dhcp-probe:
     container_name: lancache-dhcp-probe
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
-    entrypoint: ["/usr/local/bin/dhcp-probe.sh"]
+    entrypoint: ["/usr/local/bin/lancache-ui", "--dhcp-probe"]
     network_mode: host
     restart: "no"
 

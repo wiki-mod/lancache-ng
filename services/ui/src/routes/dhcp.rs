@@ -21,6 +21,18 @@ use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
 use bollard::container::LogOutput;
 use lancache_ui::kea_response_parse::{Reservation, normalize_mac, parse_reservation_entry};
+// Native DHCP probe (issue #1288): dhcp-probe's container now runs
+// `lancache-ui --dhcp-probe` (see dhcp_probe_native.rs) instead of the
+// former dhcp-probe.sh's nmap/dhclient invocations, and prints a single
+// JSON-encoded NativeProbeReport line instead of text markers -- these are
+// the exact same types on both sides of that process boundary, so
+// parse_dhcp_probe_report below only ever deserializes, never re-parses
+// free text.
+use lancache_ui::dhcp_probe_native::{
+    ClientOutcome as NativeClientOutcome, ConflictOutcome as NativeConflictOutcome,
+    DHCP_PROBE_RESULT_MARKER, DHCP_PROBE_START_MARKER, LeaseInfo as NativeLeaseInfo,
+    ProbeReport as NativeProbeReport,
+};
 // The DHCP probe path deliberately uses only start/stop/wait/logs operations
 // because Docker exec and generic container creation are banned from the UI's
 // Docker API surface for security reasons.
@@ -150,21 +162,22 @@ fn html_escape(s: &str) -> String {
 // frontend can discriminate on one flat "status" string instead of
 // interpreting a nested Rust-shaped enum. Conflict and client are separate
 // enums (not one shared status type) because they come from two independent
-// checks the probe container runs (a network DHCP-conflict scan and a
-// dhclient dry-run) that can disagree with each other.
+// checks (a network DHCP-conflict scan and a client dry-run) that can
+// disagree with each other -- see dhcp_probe_native's module doc comment
+// for why, as of issue #1288, both actually come from a single native
+// broadcast DHCPDISCOVER round rather than two separate tool invocations.
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpConflictCheckStatus {
     // `output` stays the bare Server Identifier IP for backward compatibility
     // with the existing `data.conflict.output` usage in dhcp.html. `details`
-    // is additive: the extra identifying fields nmap's
-    // broadcast-dhcp-discover script reports for the same offer (Router,
-    // DNS, lease time, ...), so the Admin UI can show an operator the same
-    // "who is this other server" context that was previously only visible
-    // by reading the raw probe container logs. Populated by
-    // extract_dhcp_offer_details; empty (never absent, so the frontend
-    // never has to null-check the field itself) when the full nmap text
-    // had none of the known labels.
+    // is additive: the extra identifying fields the native probe decoded
+    // from the same DHCPOFFER (Router, DNS, lease time, ...), so the Admin
+    // UI can show an operator the same "who is this other server" context
+    // that was previously only visible by reading the raw probe container
+    // logs. Populated by native_lease_details; empty (never absent, so the
+    // frontend never has to null-check the field itself) when the offer had
+    // none of the known fields set.
     Found {
         output: String,
         details: Vec<DhcpProbeDetail>,
@@ -175,7 +188,7 @@ enum DhcpConflictCheckStatus {
     },
 }
 
-// One nmap broadcast-dhcp-discover field (e.g. `label: "Router", value:
+// One DHCPOFFER/DHCPACK field (e.g. `label: "Router", value:
 // "192.168.1.1"`), serialized as-is for the Admin UI's details list. Kept as
 // a plain label/value pair rather than named struct fields per known label,
 // since the set of fields present varies per DHCP server and the frontend
@@ -190,19 +203,15 @@ struct DhcpProbeDetail {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpClientCheckStatus {
     // `details` is additive, same rationale as DhcpConflictCheckStatus::Found's
-    // own `details` field above: dhclient's own -v transcript (`output`) only
-    // ever shows the DHCPDISCOVER/OFFER/REQUEST/ACK/bound protocol exchange,
-    // never the negotiated lease's actual fields (router, DNS, lease time,
-    // ...) -- those come from a separate source (the dhclient leases file,
-    // see extract_dhcp_lease_details) and are populated here so a SUCCESSFUL
-    // dry-run is as informative as a found-conflict result already is, not
-    // just a bare "it worked". Always present (never absent) so the frontend
-    // never has to null-check the field; empty when the leases file had none
-    // of the known fields. `Failed` intentionally has no `details`: a failed
-    // dry-run never receives a DHCPACK, so dhclient never writes a lease
-    // block at all -- there is no partial lease data to extract in that case
-    // (confirmed against a real failed run), unlike a conflict scan's
-    // `Found`, which always has full DHCPOFFER data available.
+    // own `details` field above: populated from the same DHCPACK the native
+    // probe's REQUEST/ACK exchange received, so a SUCCESSFUL dry-run is as
+    // informative as a found-conflict result already is, not just a bare
+    // "it worked". Always present (never absent) so the frontend never has
+    // to null-check the field; empty when the ACK had none of the known
+    // fields set. `Failed` intentionally has no `details`: a failed dry-run
+    // never receives a DHCPACK at all -- there is no partial lease data to
+    // extract in that case, unlike a conflict scan's `Found`, which always
+    // has full DHCPOFFER data available.
     Passed {
         output: String,
         details: Vec<DhcpProbeDetail>,
@@ -225,7 +234,7 @@ impl DhcpCheckReport {
     // Match arm order IS the priority order, most severe first: a found
     // conflict always wins regardless of the client check's own result
     // (a rogue DHCP server on the LAN matters even if this host's own
-    // dhclient dry-run happened to pass), and either check being
+    // client dry-run happened to pass), and either check being
     // "unavailable" (the probe container itself failed) outranks a merely
     // "failed" client check, since an operator can't trust a failed result
     // they can't distinguish from "never actually ran".
@@ -2967,35 +2976,28 @@ async fn check_dhcp_probe(state: &AppState) -> DhcpCheckReport {
     parse_dhcp_probe_report(&output)
 }
 
-// Strips nmap's own output decoration (`|` and `|_` prefixes nmap uses for
-// script-result lines) so parse_conflict_probe_result's plain-text fallback
-// scan (see below) can match "Server Identifier:" regardless of which
-// nmap output line style produced it.
-fn normalize_nmap_line(line: &str) -> &str {
-    line.trim_start_matches(|ch: char| ch == '|' || ch == '_' || ch.is_whitespace())
-        .trim_end()
-}
-
 const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
-const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
-const DHCP_CONFLICT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CONFLICT_RESULT__";
-const DHCP_CLIENT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CLIENT_RESULT__";
 
 // Bounded ceiling for a single dhcp-probe container wait (issue #1136: the
 // previous code awaited Docker's wait_container with no timeout at all, so
-// any future hang inside the probe script -- a stuck nmap scan, a dhclient
-// behavior change, an unrelated container-runtime hiccup -- would block the
-// Admin UI's /api/dhcp/check handler forever). Chosen against the actual
-// worst case the probe script (services/ui/dhcp-probe.sh) can legitimately
-// take today: nmap's own `broadcast-dhcp-discover.timeout=5` (5s) plus
-// dhclient's `-1` built-in no-offer timeout (60s -- dhclient.conf(5)'s
-// documented default when no explicit `timeout` statement is configured,
-// and this probe script sets none) gives ~65s for a clean run that simply
-// finds no DHCP server at all. 100s leaves a comfortable ~35s margin over
-// that for container start/log-flush overhead, while still resolving in
-// well under the "minutes" of masking the issue's follow-up comment warned
-// against, and sits inside the 90-120s range the issue itself suggested.
-const DHCP_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(100);
+// any future hang inside the probe would block the Admin UI's
+// /api/dhcp/check handler forever).
+//
+// Recomputed for the native probe (issue #1288, superseding this comment's
+// former nmap/dhclient-based math): dhcp_probe_native's own worst-case run
+// time is DISCOVER_WINDOW (5s, always waited out in full) plus
+// REQUEST_TIMEOUT (3s, only reached when at least one DHCPOFFER arrived) --
+// about 8s total, versus the former dhcp-probe.sh's ~65s worst case (nmap's
+// 5s scan plus dhclient's separate up-to-60s no-offer timeout). 30s leaves
+// a still-comfortable ~22s margin over that new 8s worst case for container
+// start/log-flush overhead -- proportionally similar headroom to the
+// previous 100s/65s ratio, just rescaled to the native probe's much faster
+// real run time. STATUS: as of 2026-07-31, this margin has not yet been
+// re-confirmed against a real container start/stop cycle on production
+// hardware (issue #1288's own scope explicitly defers real on-LAN
+// validation) -- revisit if real-world container start overhead turns out
+// to eat into it more than expected.
+const DHCP_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Trailing byte budget for the log tail captured at timeout time (see
 // ProbeError::TimedOut / wait_for_probe_container below) -- long enough to
@@ -3129,8 +3131,8 @@ where
 }
 
 // Restarts the predeclared dhcp-probe container fresh and runs it to
-// completion (an nmap DHCP-conflict scan plus a dhclient dry-run, see
-// services/dhcp-probe), then returns only the log output from this run.
+// completion (a native broadcast DHCP conflict scan plus a client dry-run,
+// see dhcp_probe_native.rs), then returns only the log output from this run.
 // Two layers keep an old run's output from leaking into a new result:
 // `started_since` (captured right after stopping the container) is passed
 // to Docker's own log API as a `since` filter, and current_probe_output
@@ -3185,304 +3187,152 @@ async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, ProbeError> 
     Ok(output)
 }
 
+// Deserializes the native probe's JSON result line (see dhcp_probe_native's
+// own module doc comment for the full wire contract) and maps it onto this
+// module's existing Admin-UI-facing shapes -- dhcp.html's rendering and the
+// /api/dhcp/check JSON contract are both unchanged by this issue #1288
+// rewrite, only how the container's raw log text gets turned into
+// DhcpCheckReport changed (a direct serde deserialize now, not text-marker
+// scraping).
 fn parse_dhcp_probe_report(output: &str) -> DhcpCheckReport {
-    DhcpCheckReport {
-        conflict: parse_conflict_probe_result(output),
-        client: parse_client_probe_result(output),
-    }
-}
-
-// Prefers the probe script's own explicit `__LANCACHE_DHCP_CONFLICT_RESULT__`
-// marker line (see parse_probe_result_line) when present, since that's an
-// unambiguous status the probe script itself computed (services/ui/dhcp-probe.sh
-// always emits it). The raw nmap-output scan below it is a defensive
-// fallback for output that doesn't include that marker line at all.
-fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
-    if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CONFLICT_RESULT_MARKER) {
-        return match status {
-            // `output` (the full multi-line container log, not `detail`,
-            // which is only the marker line's single-word IP) is scanned
-            // again here for the richer field list -- it still holds the
-            // raw `cat "$nmap_out"` text services/ui/dhcp-probe.sh printed
-            // before its own marker line (see current_probe_output, which
-            // preserves everything after the run's start marker).
-            "found" if !detail.is_empty() => DhcpConflictCheckStatus::Found {
-                output: detail.to_string(),
-                details: extract_dhcp_offer_details(output),
+    // Scans in reverse (last matching line wins), same reasoning the former
+    // marker-text parser used: a stale previous run's result line surviving
+    // Docker's own second-granularity `since` log filter must never shadow
+    // this run's real, final result line.
+    let Some(json) = output.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(DHCP_PROBE_RESULT_MARKER)
+            .map(str::trim)
+    }) else {
+        let reason = "dhcp-probe produced no JSON result line".to_string();
+        return DhcpCheckReport {
+            conflict: DhcpConflictCheckStatus::Unavailable {
+                reason: reason.clone(),
             },
-            "not_found" => DhcpConflictCheckStatus::NotFound,
-            "unavailable" => DhcpConflictCheckStatus::Unavailable {
-                reason: if detail.is_empty() {
-                    "nmap did not return a summary".to_string()
-                } else {
-                    detail.to_string()
-                },
-            },
-            _ => DhcpConflictCheckStatus::Unavailable {
-                reason: format!("unexpected conflict summary: {} {}", status, detail),
-            },
+            client: DhcpClientCheckStatus::Unavailable { reason },
         };
-    }
+    };
 
-    for line in output.lines() {
-        let line = normalize_nmap_line(line);
-        if let Some(rest) = line.strip_prefix("Server Identifier:") {
-            let ip = rest.trim().to_string();
-            if !ip.is_empty() {
-                return DhcpConflictCheckStatus::Found {
-                    output: ip,
-                    details: extract_dhcp_offer_details(output),
-                };
+    match serde_json::from_str::<NativeProbeReport>(json) {
+        Ok(report) => DhcpCheckReport {
+            conflict: map_native_conflict(report.conflict),
+            client: map_native_client(report.client),
+        },
+        Err(e) => {
+            let reason = format!("malformed dhcp-probe result: {e}");
+            DhcpCheckReport {
+                conflict: DhcpConflictCheckStatus::Unavailable {
+                    reason: reason.clone(),
+                },
+                client: DhcpClientCheckStatus::Unavailable { reason },
             }
         }
     }
-
-    DhcpConflictCheckStatus::NotFound
 }
 
-// Known field labels nmap's broadcast-dhcp-discover script prints for a
-// DHCPOFFER response, in the order the Admin UI should list them (not the
-// order they happen to appear on the wire, which nmap does not guarantee is
-// stable) -- see extract_dhcp_offer_details.
-const DHCP_OFFER_DETAIL_LABELS: &[&str] = &[
-    "Server Identifier",
-    "IP Offered",
-    "DHCP Message Type",
-    "IP Address Lease Time",
-    "Renewal Time Value",
-    "Rebinding Time Value",
-    "Subnet Mask",
-    "Router",
-    "Domain Name Server",
-    "Domain Name",
-    "Broadcast Address",
-    "TFTP Server Name",
-    "Vendor Class Identifier",
-];
-
-// Pulls the known identifying fields (see DHCP_OFFER_DETAIL_LABELS) nmap's
-// broadcast-dhcp-discover script reports for a DHCPOFFER out of the probe
-// container's full log text, so the Admin UI can show an operator more than
-// just the bare Server Identifier IP already in DhcpConflictCheckStatus::
-// Found's `output` field. Only the first response block is scanned:
-// nmap prints one "Response N of M:" block per answering DHCP server when
-// more than one replies, and mixing fields from a second, different server
-// into one details list would misattribute e.g. its Router to the first
-// server's Subnet Mask. Output that never has a "Response" line at all (the
-// overwhelmingly common single-rogue-server case) has no such boundary and
-// is scanned in full. First occurrence of each label wins, same as
-// server_identifier's "take the first match" rule elsewhere in this file.
-fn extract_dhcp_offer_details(output: &str) -> Vec<DhcpProbeDetail> {
-    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
-    let mut response_blocks_seen = 0u32;
-
-    for line in output.lines() {
-        let line = normalize_nmap_line(line);
-
-        if let Some(rest) = line.strip_prefix("Response ")
-            && rest.contains(" of ")
-        {
-            response_blocks_seen += 1;
-            if response_blocks_seen > 1 {
-                break;
-            }
-            continue;
-        }
-
-        // `.iter().copied()` (not a bare `for label in DHCP_OFFER_DETAIL_LABELS`)
-        // deliberately keeps `label` a single `&str` rather than `&&str` --
-        // `str::strip_prefix` below needs a `Pattern`, which `&str` (but not
-        // `&&str`) implements, and using the same single-reference type for
-        // both the BTreeMap key and the Pattern argument avoids relying on
-        // implicit deref coercion at either call site.
-        for label in DHCP_OFFER_DETAIL_LABELS.iter().copied() {
-            if found.contains_key(label) {
-                continue;
-            }
-            if let Some(value) = line
-                .strip_prefix(label)
-                .and_then(|rest| rest.strip_prefix(':'))
-            {
-                let value = value.trim();
-                if !value.is_empty() {
-                    found.insert(label, value.to_string());
-                }
-                break;
-            }
-        }
-    }
-
-    DHCP_OFFER_DETAIL_LABELS
-        .iter()
-        .copied()
-        .filter_map(|label| {
-            found.get(label).map(|value| DhcpProbeDetail {
+// Field labels for a rogue/conflicting server's DHCPOFFER, in the order the
+// Admin UI should list them -- the native-probe successor to the former
+// nmap-output-derived DHCP_OFFER_DETAIL_LABELS table. Kept as a fixed
+// display-order list (like that table was) even though the values now come
+// from real struct fields, not text scanning, since dhcp.html's rendering
+// contract (an ordered label/value list) is unchanged.
+fn native_lease_details(lease: &NativeLeaseInfo) -> Vec<DhcpProbeDetail> {
+    let mut details = Vec::new();
+    let mut push = |label: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            details.push(DhcpProbeDetail {
                 label: label.to_string(),
-                value: value.clone(),
-            })
-        })
-        .collect()
+                value,
+            });
+        }
+    };
+
+    push(
+        "Server Identifier",
+        lease.server_identifier.map(|ip| ip.to_string()),
+    );
+    push("IP Offered", lease.offered_ip.map(|ip| ip.to_string()));
+    push(
+        "IP Address Lease Time (seconds)",
+        lease.lease_time_secs.map(|v| v.to_string()),
+    );
+    push(
+        "Renewal Time (seconds)",
+        lease.renewal_time_secs.map(|v| v.to_string()),
+    );
+    push(
+        "Rebinding Time (seconds)",
+        lease.rebinding_time_secs.map(|v| v.to_string()),
+    );
+    push("Subnet Mask", lease.subnet_mask.map(|ip| ip.to_string()));
+    push("Router", lease.router.map(|ip| ip.to_string()));
+    if !lease.dns_servers.is_empty() {
+        push(
+            "Domain Name Server",
+            Some(
+                lease
+                    .dns_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        );
+    }
+    push("Domain Name", lease.domain_name.clone());
+    push(
+        "Broadcast Address",
+        lease.broadcast_address.map(|ip| ip.to_string()),
+    );
+
+    details
 }
 
-// Known fields dhclient's own leases file (`-lf`, ISC "lease { ... }" syntax)
-// records for a successfully bound lease, mapped to the human-readable label
-// the Admin UI should show -- in display order (see extract_dhcp_lease_details).
-// A dedicated table, not a reuse of DHCP_OFFER_DETAIL_LABELS: confirmed live
-// (a real dhclient run, see dhcp-probe.sh's own comment on the dhclient
-// invocation) that dhclient's stdout transcript never prints a "Label: value"
-// breakdown at all -- only protocol-exchange lines -- and the leases file's
-// own syntax uses ISC's internal option names (`routers`, `dhcp-lease-time`,
-// ...), not nmap's human-readable ones, with some units differing too (e.g.
-// `dhcp-lease-time` is a bare integer of seconds, unlike nmap's own
-// duration-formatted "1h00m00s" for the equivalent field) -- so reusing
-// DHCP_OFFER_DETAIL_LABELS's labels here would misleadingly imply identical
-// formatting. The first element of each pair is the exact leases-file field
-// name this label maps to (see extract_dhcp_lease_details for how bare vs
-// `option`-prefixed keys are both normalized to this same key space).
-const DHCP_LEASE_DETAIL_LABELS: &[(&str, &str)] = &[
-    ("fixed-address", "Assigned IP Address"),
-    ("dhcp-server-identifier", "Server Identifier"),
-    ("subnet-mask", "Subnet Mask"),
-    ("routers", "Router"),
-    ("domain-name-servers", "Domain Name Server"),
-    ("domain-name", "Domain Name"),
-    ("broadcast-address", "Broadcast Address"),
-    ("dhcp-lease-time", "Lease Time (seconds)"),
-    ("dhcp-renewal-time", "Renewal Time (seconds)"),
-    ("dhcp-rebinding-time", "Rebinding Time (seconds)"),
-    ("ntp-servers", "NTP Servers"),
-    ("host-name", "Host Name"),
-    ("netbios-name-servers", "NetBIOS Name Server"),
-];
-
-// Pulls the known lease fields (see DHCP_LEASE_DETAIL_LABELS) out of the
-// dhclient leases file text dhcp-probe.sh now cat's alongside a successful
-// client dry-run's own stdout transcript (see its comment on the dhclient
-// invocation). Only the LAST "lease { ... }" block is kept -- the opposite
-// direction from extract_dhcp_offer_details's "first response block wins":
-// a renewed/rebound lease appends a new block after the original rather than
-// replacing it in place, so the most recent block is the one that reflects
-// the lease dhclient is actually holding now. `found` is cleared every time
-// a new "lease {" line is seen for exactly this reason: by the time every
-// line has been scanned, only the final block's fields remain in it.
-fn extract_dhcp_lease_details(output: &str) -> Vec<DhcpProbeDetail> {
-    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
-
-    for line in output.lines() {
-        let line = line.trim().trim_end_matches(';');
-
-        if line == "lease {" {
-            found.clear();
-            continue;
+// Maps dhcp_probe_native's ConflictOutcome onto the existing
+// DhcpConflictCheckStatus the Admin UI template renders. When more than one
+// server answered (real rogue-conflict case), the first offer's identifier
+// stays in `output` for backward compatibility with dhcp.html's existing
+// `data.conflict.output` usage, and every offer's fields are folded into a
+// single `details` list -- multiple full offers would need a richer
+// per-server UI this issue does not add; see the PR description's
+// documented scope boundary.
+fn map_native_conflict(outcome: NativeConflictOutcome) -> DhcpConflictCheckStatus {
+    match outcome {
+        NativeConflictOutcome::Found { offers } => {
+            let output = offers
+                .first()
+                .and_then(|o| o.server_identifier)
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let details = offers.iter().flat_map(native_lease_details).collect();
+            DhcpConflictCheckStatus::Found { output, details }
         }
-
-        // Distinguishes `option <name> <value>` lines from the leases
-        // file's own bare keyword lines (`fixed-address ...`, `renew ...`)
-        // -- both end up compared against the same DHCP_LEASE_DETAIL_LABELS
-        // key space below, since dhclient's option names never collide with
-        // its bare structural keywords.
-        let rest = line.strip_prefix("option ").unwrap_or(line);
-        let Some((key, value)) = rest.split_once(char::is_whitespace) else {
-            continue;
-        };
-
-        // Look up the label FIRST, then check/insert keyed by that
-        // `&'static str` label -- not by `key` itself, which only borrows
-        // from `output` and would be the wrong (and, for an unknown key,
-        // entirely absent) thing to key `found` by. This also gives "first
-        // occurrence within the current block wins", same rule as
-        // extract_dhcp_offer_details.
-        let Some((_, label)) = DHCP_LEASE_DETAIL_LABELS
-            .iter()
-            .copied()
-            .find(|&(known_key, _)| known_key == key)
-        else {
-            continue;
-        };
-        if found.contains_key(label) {
-            continue;
+        NativeConflictOutcome::NotFound => DhcpConflictCheckStatus::NotFound,
+        NativeConflictOutcome::Unavailable { reason } => {
+            DhcpConflictCheckStatus::Unavailable { reason }
         }
-        // Only a curated subset of fields (see DHCP_LEASE_DETAIL_LABELS) are
-        // ever bare-quoted single strings (`domain-name`, `host-name`) --
-        // deliberately not e.g. `domain-search`, whose value is itself a
-        // comma-separated list of quoted strings that this simple
-        // outer-quote strip would mangle. Since none of the curated fields
-        // have that shape, stripping one matching outer quote pair here is
-        // safe and just tidies up the Admin UI's rendered value.
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value);
-        if !value.is_empty() {
-            found.insert(label, value.to_string());
-        }
-    }
-
-    DHCP_LEASE_DETAIL_LABELS
-        .iter()
-        .copied()
-        .filter_map(|(_, label)| {
-            found.get(label).map(|value| DhcpProbeDetail {
-                label: label.to_string(),
-                value: value.clone(),
-            })
-        })
-        .collect()
-}
-
-// Same marker-line-first strategy as parse_conflict_probe_result, but for
-// the dhclient dry-run's own result marker. Unlike that function, there is
-// no plain-text fallback scan here -- if the marker line is absent, this
-// falls straight through to "dhclient summary missing" below.
-fn parse_client_probe_result(output: &str) -> DhcpClientCheckStatus {
-    if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CLIENT_RESULT_MARKER) {
-        return match status {
-            "passed" => DhcpClientCheckStatus::Passed {
-                output: if detail.is_empty() {
-                    "dhclient dry-run succeeded".to_string()
-                } else {
-                    detail.to_string()
-                },
-                details: extract_dhcp_lease_details(output),
-            },
-            "failed" => DhcpClientCheckStatus::Failed {
-                output: if detail.is_empty() {
-                    "dhclient dry-run failed".to_string()
-                } else {
-                    detail.to_string()
-                },
-            },
-            "unavailable" => DhcpClientCheckStatus::Unavailable {
-                reason: if detail.is_empty() {
-                    "dhclient dry-run unavailable".to_string()
-                } else {
-                    detail.to_string()
-                },
-            },
-            _ => DhcpClientCheckStatus::Unavailable {
-                reason: format!("unexpected client summary: {} {}", status, detail),
-            },
-        };
-    }
-
-    DhcpClientCheckStatus::Unavailable {
-        reason: "dhclient summary missing".to_string(),
     }
 }
 
-// Scans lines in reverse (last line matching the marker wins) so a marker
-// that happens to appear earlier in unrelated log noise (e.g. echoed from a
-// previous probe run's leftover buffer) never shadows this run's real,
-// final result line.
-fn parse_probe_result_line<'a>(output: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
-    output.lines().rev().find_map(|line| {
-        let line = line.trim();
-        let rest = line.strip_prefix(marker)?;
-        let rest = rest.trim_start();
-        let (status, detail) = rest.split_once(' ').unwrap_or((rest, ""));
-        Some((status.trim(), detail.trim()))
-    })
+// Maps dhcp_probe_native's ClientOutcome onto the existing
+// DhcpClientCheckStatus the Admin UI template renders.
+fn map_native_client(outcome: NativeClientOutcome) -> DhcpClientCheckStatus {
+    match outcome {
+        NativeClientOutcome::Passed { lease } => {
+            let output = match lease.offered_ip {
+                Some(ip) => format!("DHCP client dry-run succeeded, assigned {ip}"),
+                None => "DHCP client dry-run succeeded".to_string(),
+            };
+            DhcpClientCheckStatus::Passed {
+                output,
+                details: native_lease_details(&lease),
+            }
+        }
+        NativeClientOutcome::Failed { reason } => DhcpClientCheckStatus::Failed { output: reason },
+        NativeClientOutcome::Unavailable { reason } => {
+            DhcpClientCheckStatus::Unavailable { reason }
+        }
+    }
 }
 
 // Reads every stdout/stderr log chunk emitted since `since` and concatenates
@@ -4726,64 +4576,98 @@ mod tests {
         std::env::temp_dir().join(format!("lancache-ng-dhcp-rs-{name}-{stamp}"))
     }
 
-    // The probe's two result markers (conflict scan, dhclient dry-run) are
-    // parsed independently and can disagree (e.g. a conflict found but the
-    // client check still passes) -- overall_status() must reflect whichever
+    // Builds the exact stdout text dhcp_probe_native's run_cli_and_print
+    // emits for a given ProbeReport (start marker line, then the result
+    // marker + real serde_json-encoded JSON) -- used by every test below
+    // instead of hand-typed JSON literals, so a test fixture can never
+    // silently drift from the real wire shape the two sides of this
+    // process boundary actually exchange.
+    fn native_probe_output(report: &NativeProbeReport) -> String {
+        format!(
+            "{DHCP_PROBE_START_MARKER}\n{DHCP_PROBE_RESULT_MARKER} {}\n",
+            serde_json::to_string(report).expect("test fixture report must serialize")
+        )
+    }
+
+    // The probe's two outcomes (conflict scan, client dry-run) are mapped
+    // independently and can disagree (e.g. a conflict found but the client
+    // check still passes) -- overall_status() must reflect whichever
     // signal is worse, not just the last one parsed.
     #[test]
     fn parses_dual_dhcp_probe_report_with_conflict_and_client_success() {
-        let report = parse_dhcp_probe_report(
-            "__LANCACHE_DHCP_PROBE_START__ 1\n\
-             __LANCACHE_DHCP_CONFLICT_RESULT__ found 192.168.1.1\n\
-             __LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
-        );
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::Found {
+                offers: vec![NativeLeaseInfo {
+                    server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    ..Default::default()
+                }],
+            },
+            client: NativeClientOutcome::Passed {
+                lease: NativeLeaseInfo {
+                    offered_ip: Some(Ipv4Addr::new(192, 168, 1, 211)),
+                    ..Default::default()
+                },
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
 
         assert_eq!(report.overall_status(), "conflict_found");
         match report.conflict {
             DhcpConflictCheckStatus::Found { output, details } => {
                 assert_eq!(output, "192.168.1.1");
-                // No extra nmap fields in this fixture's single-line input --
-                // details must default to empty, not panic or fabricate data.
-                assert!(details.is_empty());
+                assert_eq!(
+                    details,
+                    vec![DhcpProbeDetail {
+                        label: "Server Identifier".to_string(),
+                        value: "192.168.1.1".to_string(),
+                    }]
+                );
             }
             other => panic!("unexpected conflict result: {:?}", other),
         }
         match report.client {
             DhcpClientCheckStatus::Passed { output, details } => {
-                assert_eq!(output, "dhclient succeeded on eth0");
-                // No leases-file text in this fixture's single-line input --
-                // details must default to empty, not panic or fabricate data.
-                assert!(details.is_empty());
+                assert_eq!(output, "DHCP client dry-run succeeded, assigned 192.168.1.211");
+                assert_eq!(
+                    details,
+                    vec![DhcpProbeDetail {
+                        label: "IP Offered".to_string(),
+                        value: "192.168.1.211".to_string(),
+                    }]
+                );
             }
             other => panic!("unexpected client result: {:?}", other),
         }
     }
 
-    // A real dhcp-probe.sh run prints the full `cat "$nmap_out"` text
-    // before its own result marker, so this fixture mirrors that -- the
-    // marker line alone only carries the bare Server Identifier IP, but the
-    // Admin UI should also get the surrounding nmap fields out of the same
-    // container log text.
+    // Full-field fixture: every known LeaseInfo field set at once, checking
+    // native_lease_details' fixed display order (not the struct's own
+    // declaration order, which differs -- see the function's own comment).
     #[test]
-    fn parses_dhcp_probe_report_extracts_offer_details_alongside_marker_ip() {
-        let report = parse_dhcp_probe_report(
-            "__LANCACHE_DHCP_PROBE_START__ 1\n\
-             Pre-scan script results:\n\
-             | broadcast-dhcp-discover: \n\
-             |   IP Offered: 192.168.1.50\n\
-             |   DHCP Message Type: DHCPOFFER\n\
-             |   Server Identifier: 192.168.1.1\n\
-             |   IP Address Lease Time: 1d00h00m00s\n\
-             |   Subnet Mask: 255.255.255.0\n\
-             |   Router: 192.168.1.1\n\
-             |_  Domain Name Server: 192.168.1.1\n\
-             __LANCACHE_DHCP_CONFLICT_RESULT__ found 192.168.1.1\n\
-             __LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
-        );
+    fn parses_dhcp_probe_report_extracts_full_offer_details_in_display_order() {
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::Found {
+                offers: vec![NativeLeaseInfo {
+                    offered_ip: Some(Ipv4Addr::new(192, 168, 1, 50)),
+                    server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    subnet_mask: Some(Ipv4Addr::new(255, 255, 255, 0)),
+                    router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    dns_servers: vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(1, 1, 1, 1)],
+                    domain_name: Some("lan.local".to_string()),
+                    broadcast_address: Some(Ipv4Addr::new(192, 168, 1, 255)),
+                    lease_time_secs: Some(3600),
+                    renewal_time_secs: Some(1800),
+                    rebinding_time_secs: Some(3150),
+                }],
+            },
+            client: NativeClientOutcome::Unavailable {
+                reason: "not reached in this fixture".to_string(),
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
 
         match report.conflict {
-            DhcpConflictCheckStatus::Found { output, details } => {
-                assert_eq!(output, "192.168.1.1");
+            DhcpConflictCheckStatus::Found { details, .. } => {
                 assert_eq!(
                     details,
                     vec![
@@ -4796,12 +4680,16 @@ mod tests {
                             value: "192.168.1.50".to_string(),
                         },
                         DhcpProbeDetail {
-                            label: "DHCP Message Type".to_string(),
-                            value: "DHCPOFFER".to_string(),
+                            label: "IP Address Lease Time (seconds)".to_string(),
+                            value: "3600".to_string(),
                         },
                         DhcpProbeDetail {
-                            label: "IP Address Lease Time".to_string(),
-                            value: "1d00h00m00s".to_string(),
+                            label: "Renewal Time (seconds)".to_string(),
+                            value: "1800".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Rebinding Time (seconds)".to_string(),
+                            value: "3150".to_string(),
                         },
                         DhcpProbeDetail {
                             label: "Subnet Mask".to_string(),
@@ -4813,7 +4701,15 @@ mod tests {
                         },
                         DhcpProbeDetail {
                             label: "Domain Name Server".to_string(),
-                            value: "192.168.1.1".to_string(),
+                            value: "192.168.1.1, 1.1.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Domain Name".to_string(),
+                            value: "lan.local".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Broadcast Address".to_string(),
+                            value: "192.168.1.255".to_string(),
                         },
                     ]
                 );
@@ -4822,44 +4718,128 @@ mod tests {
         }
     }
 
-    // Two answering DHCP servers (nmap's "Response N of M:" block separator)
-    // must not have their fields merged -- only the first server's details
-    // may end up in the list, even though both blocks contain fields this
-    // parser knows how to extract.
+    // Deliberate behavior change from the former nmap-based parser (flagged
+    // in this issue's PR description, not a silent regression): when
+    // multiple servers answer the broadcast DISCOVER, the FIRST server's
+    // identifier still becomes `output` (dhcp.html's existing bare-IP
+    // contract), but EVERY answering server's fields are now folded into
+    // `details` -- the old nmap-text parser discarded every response block
+    // after the first entirely. Real per-server grouping in the UI is not
+    // added here; see the PR's documented scope boundary.
     #[test]
-    fn extract_dhcp_offer_details_stops_at_second_response_block() {
-        let details = extract_dhcp_offer_details(
-            "| broadcast-dhcp-discover: \n\
-             |   Response 1 of 2: \n\
-             |     Server Identifier: 192.168.1.1\n\
-             |     Router: 192.168.1.1\n\
-             |   Response 2 of 2: \n\
-             |     Server Identifier: 10.0.0.1\n\
-             |_    Router: 10.0.0.1\n",
-        );
+    fn parses_dhcp_probe_report_includes_every_answering_servers_details() {
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::Found {
+                offers: vec![
+                    NativeLeaseInfo {
+                        server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                        router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                        ..Default::default()
+                    },
+                    NativeLeaseInfo {
+                        server_identifier: Some(Ipv4Addr::new(10, 0, 0, 1)),
+                        router: Some(Ipv4Addr::new(10, 0, 0, 1)),
+                        ..Default::default()
+                    },
+                ],
+            },
+            client: NativeClientOutcome::Unavailable {
+                reason: "not reached in this fixture".to_string(),
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
 
-        assert_eq!(
-            details,
-            vec![
-                DhcpProbeDetail {
-                    label: "Server Identifier".to_string(),
-                    value: "192.168.1.1".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Router".to_string(),
-                    value: "192.168.1.1".to_string(),
-                },
-            ]
-        );
+        match report.conflict {
+            DhcpConflictCheckStatus::Found { output, details } => {
+                assert_eq!(output, "192.168.1.1", "first server's IP wins `output`");
+                assert_eq!(
+                    details,
+                    vec![
+                        DhcpProbeDetail {
+                            label: "Server Identifier".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Router".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Server Identifier".to_string(),
+                            value: "10.0.0.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Router".to_string(),
+                            value: "10.0.0.1".to_string(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("unexpected conflict result: {:?}", other),
+        }
     }
 
-    // No known label present anywhere in the input (e.g. a probe run that
-    // never got far enough to print nmap's field breakdown) must yield an
-    // empty list, not a panic -- the caller (DhcpConflictCheckStatus::Found)
-    // relies on this being a safe default.
+    // No JSON result line at all (e.g. the probe binary crashed before
+    // printing one) must mark BOTH checks unavailable, not just the client
+    // side -- unlike the former text-marker parser, there is no plain-text
+    // fallback scan to fall back to for the conflict side either, since
+    // there is no more free-text nmap output to scan.
     #[test]
-    fn extract_dhcp_offer_details_returns_empty_for_unrelated_text() {
-        assert!(extract_dhcp_offer_details("some unrelated log line\n").is_empty());
+    fn parses_dhcp_probe_report_with_no_result_line_marks_both_checks_unavailable() {
+        let report = parse_dhcp_probe_report("__LANCACHE_DHCP_PROBE_START__ 1\n");
+
+        assert_eq!(report.overall_status(), "unavailable");
+        assert!(matches!(
+            report.conflict,
+            DhcpConflictCheckStatus::Unavailable { .. }
+        ));
+        assert!(matches!(
+            report.client,
+            DhcpClientCheckStatus::Unavailable { .. }
+        ));
+    }
+
+    // A result line whose JSON payload doesn't actually deserialize (a
+    // truncated write, a future format change on one side without the
+    // other) must fail closed as Unavailable with a diagnostic reason, not
+    // panic the whole /api/dhcp/check handler.
+    #[test]
+    fn parses_dhcp_probe_report_with_malformed_json_marks_both_checks_unavailable() {
+        let report = parse_dhcp_probe_report(&format!(
+            "{DHCP_PROBE_START_MARKER}\n{DHCP_PROBE_RESULT_MARKER} {{not valid json\n"
+        ));
+
+        match report.conflict {
+            DhcpConflictCheckStatus::Unavailable { reason } => {
+                assert!(reason.contains("malformed"), "reason was: {reason}");
+            }
+            other => panic!("unexpected conflict result: {:?}", other),
+        }
+        assert!(matches!(
+            report.client,
+            DhcpClientCheckStatus::Unavailable { .. }
+        ));
+    }
+
+    // A failed dry-run (no DHCPOFFER at all, or a NAK) must render as
+    // Failed with the native probe's own reason text, and must never carry
+    // details -- there is no partial lease data in that case.
+    #[test]
+    fn parses_dhcp_probe_report_client_failed_has_no_details() {
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::NotFound,
+            client: NativeClientOutcome::Failed {
+                reason: "no DHCPOFFER received within 5s".to_string(),
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
+
+        assert!(matches!(report.conflict, DhcpConflictCheckStatus::NotFound));
+        match report.client {
+            DhcpClientCheckStatus::Failed { output } => {
+                assert_eq!(output, "no DHCPOFFER received within 5s");
+            }
+            other => panic!("unexpected client result: {:?}", other),
+        }
     }
 
     // ─── Issue #1136: bounded dhcp-probe wait timeout ───
@@ -5010,203 +4990,6 @@ mod tests {
             }
             other => panic!("expected ProbeError::TimedOut, got {other:?}"),
         }
-    }
-
-    // Fixture text is a real dhclient.leases file captured from a live
-    // dhclient -4 -1 -v run against a real DHCP server (see dhcp-probe.sh's
-    // own comment on the dhclient invocation for how this was confirmed) --
-    // not a hand-guessed approximation of ISC's lease syntax.
-    #[test]
-    fn extract_dhcp_lease_details_parses_a_real_captured_lease_block() {
-        let details = extract_dhcp_lease_details(concat!(
-            "lease {\n",
-            "  interface \"eth0\";\n",
-            "  fixed-address 192.168.1.211;\n",
-            "  filename \"boot/grub/i386-pc/core.0\";\n",
-            "  server-name \"192.168.1.10\";\n",
-            "  option subnet-mask 255.255.255.0;\n",
-            "  option routers 192.168.1.2;\n",
-            "  option dhcp-lease-time 3600;\n",
-            "  option dhcp-message-type 5;\n",
-            "  option domain-name-servers 192.168.1.22,192.168.1.23;\n",
-            "  option dhcp-server-identifier 192.168.1.19;\n",
-            "  option interface-mtu 1500;\n",
-            "  option domain-search \"lan.local.\", \"local.\";\n",
-            "  option dhcp-renewal-time 1800;\n",
-            "  option ntp-servers 192.168.1.10;\n",
-            "  option broadcast-address 192.168.1.255;\n",
-            "  option dhcp-rebinding-time 3150;\n",
-            "  option host-name \"sccache-build-slave-240\";\n",
-            "  option netbios-name-servers 192.168.1.22,192.168.1.23;\n",
-            "  option domain-name \"lan.local\";\n",
-            "  renew 4 2026/07/23 13:03:59;\n",
-            "  rebind 4 2026/07/23 13:30:17;\n",
-            "  expire 4 2026/07/23 13:37:47;\n",
-            "}\n",
-        ));
-
-        assert_eq!(
-            details,
-            vec![
-                DhcpProbeDetail {
-                    label: "Assigned IP Address".to_string(),
-                    value: "192.168.1.211".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Server Identifier".to_string(),
-                    value: "192.168.1.19".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Subnet Mask".to_string(),
-                    value: "255.255.255.0".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Router".to_string(),
-                    value: "192.168.1.2".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Domain Name Server".to_string(),
-                    value: "192.168.1.22,192.168.1.23".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Domain Name".to_string(),
-                    value: "lan.local".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Broadcast Address".to_string(),
-                    value: "192.168.1.255".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Lease Time (seconds)".to_string(),
-                    value: "3600".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Renewal Time (seconds)".to_string(),
-                    value: "1800".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Rebinding Time (seconds)".to_string(),
-                    value: "3150".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "NTP Servers".to_string(),
-                    value: "192.168.1.10".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Host Name".to_string(),
-                    value: "sccache-build-slave-240".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "NetBIOS Name Server".to_string(),
-                    value: "192.168.1.22,192.168.1.23".to_string(),
-                },
-            ]
-        );
-    }
-
-    // A renewed lease appends a NEW "lease { ... }" block after the original
-    // rather than replacing it -- only the second (last) block's fields may
-    // end up in the result, even though the first block has fields this
-    // parser also knows how to extract. Opposite direction from
-    // extract_dhcp_offer_details_stops_at_second_response_block, which keeps
-    // the FIRST block: documented explicitly on extract_dhcp_lease_details.
-    #[test]
-    fn extract_dhcp_lease_details_keeps_only_the_last_lease_block() {
-        let details = extract_dhcp_lease_details(concat!(
-            "lease {\n",
-            "  fixed-address 192.168.1.50;\n",
-            "  option routers 192.168.1.1;\n",
-            "}\n",
-            "lease {\n",
-            "  fixed-address 192.168.1.211;\n",
-            "  option routers 192.168.1.2;\n",
-            "}\n",
-        ));
-
-        assert_eq!(
-            details,
-            vec![
-                DhcpProbeDetail {
-                    label: "Assigned IP Address".to_string(),
-                    value: "192.168.1.211".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Router".to_string(),
-                    value: "192.168.1.2".to_string(),
-                },
-            ]
-        );
-    }
-
-    // No "lease {" block at all (e.g. a probe run that never reached the
-    // dhclient stage, or a failed dry-run where dhcp-probe.sh never cats an
-    // empty leases file) must yield an empty list, not a panic -- the caller
-    // (DhcpClientCheckStatus::Passed) relies on this being a safe default.
-    #[test]
-    fn extract_dhcp_lease_details_returns_empty_for_unrelated_text() {
-        assert!(extract_dhcp_lease_details("some unrelated log line\n").is_empty());
-    }
-
-    // parse_client_probe_result must wire extract_dhcp_lease_details into a
-    // real "passed" marker line's surrounding output, the same way
-    // parse_conflict_probe_result already wires extract_dhcp_offer_details in
-    // for the conflict path -- this is the actual code path the Admin UI
-    // depends on, not just the extractor function in isolation.
-    #[test]
-    fn parses_dhcp_probe_report_extracts_lease_details_alongside_passed_marker() {
-        let report = parse_dhcp_probe_report(concat!(
-            "__LANCACHE_DHCP_PROBE_START__ 1\n",
-            "__LANCACHE_DHCP_CONFLICT_RESULT__ not_found\n",
-            "Internet Systems Consortium DHCP Client 4.4.3-P1\n",
-            "DHCPACK of 192.168.1.211 from 192.168.1.19\n",
-            "bound to 192.168.1.211 -- renewal in 1572 seconds.\n",
-            "lease {\n",
-            "  fixed-address 192.168.1.211;\n",
-            "  option routers 192.168.1.2;\n",
-            "  option domain-name-servers 192.168.1.22,192.168.1.23;\n",
-            "}\n",
-            "__LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
-        ));
-
-        match report.client {
-            DhcpClientCheckStatus::Passed { output, details } => {
-                assert_eq!(output, "dhclient succeeded on eth0");
-                assert_eq!(
-                    details,
-                    vec![
-                        DhcpProbeDetail {
-                            label: "Assigned IP Address".to_string(),
-                            value: "192.168.1.211".to_string(),
-                        },
-                        DhcpProbeDetail {
-                            label: "Router".to_string(),
-                            value: "192.168.1.2".to_string(),
-                        },
-                        DhcpProbeDetail {
-                            label: "Domain Name Server".to_string(),
-                            value: "192.168.1.22,192.168.1.23".to_string(),
-                        },
-                    ]
-                );
-            }
-            other => panic!("unexpected client result: {:?}", other),
-        }
-    }
-
-    // A probe run that never reaches the dhclient stage (e.g. the container
-    // crashed after the conflict scan) must render as "unavailable", not as
-    // a silent pass -- an operator must not read a missing client check as
-    // "no problems found".
-    #[test]
-    fn parses_dual_dhcp_probe_report_marks_missing_client_summary_unavailable() {
-        let report = parse_dhcp_probe_report("__LANCACHE_DHCP_PROBE_START__ 1\n");
-
-        assert_eq!(report.overall_status(), "unavailable");
-        assert!(matches!(report.conflict, DhcpConflictCheckStatus::NotFound));
-        assert!(matches!(
-            report.client,
-            DhcpClientCheckStatus::Unavailable { .. }
-        ));
     }
 
     // Every DHCP-mutating route calls require_kea_mode() first; if this

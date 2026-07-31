@@ -23,3 +23,16 @@
 
 pub mod kea_response_parse;
 pub mod netdata_url;
+
+// The native DHCP probe (issue #1288) depends on the `dhcproto` crate for
+// DHCPv4 wire-format encode/decode, which is only pulled in behind the
+// default-on `runtime` feature (see Cargo.toml's `[features]` section) --
+// the same reason every other real-server dependency (tokio, bollard, ...)
+// is gated the same way: `fuzz/Cargo.toml` links this crate with
+// `default-features = false` to avoid a real rustc ICE hit under
+// cargo-fuzz's sanitizer instrumentation (see this file's own doc comment
+// above), and a new mandatory dependency here would silently widen that
+// fuzz build again even though the fuzz harnesses never call into this
+// module at all.
+#[cfg(feature = "runtime")]
+pub mod dhcp_probe_native;
