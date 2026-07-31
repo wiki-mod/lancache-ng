@@ -1018,7 +1018,9 @@ mod tests {
     fn loopback_port(socket: &UdpSocket) -> u16 {
         match socket.local_addr().expect("bound socket has a local addr") {
             SocketAddr::V4(addr) => addr.port(),
-            SocketAddr::V6(_) => unreachable!("a socket bound to a V4 loopback address never yields a V6 local_addr"),
+            SocketAddr::V6(_) => {
+                unreachable!("a socket bound to a V4 loopback address never yields a V6 local_addr")
+            }
         }
     }
 
@@ -1098,7 +1100,9 @@ mod tests {
         let observed_xid = xid_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the fake server thread must report the xid it decoded");
-        server_thread.join().expect("fake server thread must not panic");
+        server_thread
+            .join()
+            .expect("fake server thread must not panic");
 
         assert_eq!(
             observed_xid, expected_xid,
@@ -1187,7 +1191,9 @@ mod tests {
             Duration::from_secs(2),
             request_dest,
         );
-        request_thread.join().expect("fake server thread must not panic");
+        request_thread
+            .join()
+            .expect("fake server thread must not panic");
         assert!(
             matches!(outcome, ClientOutcome::Passed { .. }),
             "the dry-run must pass before a RELEASE is even attempted, got {outcome:?}"
@@ -1274,7 +1280,9 @@ mod tests {
         let observed = count_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("the fake server thread must report a retransmit count");
-        server_thread.join().expect("fake server thread must not panic");
+        server_thread
+            .join()
+            .expect("fake server thread must not panic");
 
         assert_eq!(
             observed, DISCOVER_RETRANSMITS,
