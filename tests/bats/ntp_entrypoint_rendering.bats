@@ -136,13 +136,18 @@ setup() {
 # sequence -- a pidfile written by a "previous" crashed instance, present
 # on disk before this function ever runs -- and asserts it's gone
 # afterward, the same convergence property issue #456's checklist expects
-# of any stateful write path this entrypoint touches.
-@test "cleanup_stale_ntp_pidfile removes a pidfile left behind by a previously crashed instance" {
+# of any stateful write path this entrypoint touches. Calls the
+# parameterized _core function directly (not the zero-arg
+# cleanup_stale_ntp_pidfile production entry point -- see that function's
+# own comment for why the two are split, same reasoning as
+# _fix_chrony_dir_ownership_core/fix_chrony_dir_ownership above) so this
+# test exercises the real removal logic against a fixture path.
+@test "_cleanup_stale_ntp_pidfile_core removes a pidfile left behind by a previously crashed instance" {
     stale_pidfile="$BATS_TEST_TMPDIR/chronyd.pid"
     echo "1" > "$stale_pidfile"
     [ -f "$stale_pidfile" ]
 
-    cleanup_stale_ntp_pidfile "$stale_pidfile"
+    _cleanup_stale_ntp_pidfile_core "$stale_pidfile"
 
     [ ! -f "$stale_pidfile" ]
 }
@@ -151,25 +156,107 @@ setup() {
 # cycle) must stay a no-op rather than erroring -- `rm -f` already gives
 # this for free, but this test makes the idempotence property an explicit,
 # checked assertion rather than an implicit side effect of the flag choice.
-@test "cleanup_stale_ntp_pidfile is idempotent across repeated calls with no pidfile present" {
+@test "_cleanup_stale_ntp_pidfile_core is idempotent across repeated calls with no pidfile present" {
     missing_pidfile="$BATS_TEST_TMPDIR/does-not-exist/chronyd.pid"
     [ ! -f "$missing_pidfile" ]
 
-    run cleanup_stale_ntp_pidfile "$missing_pidfile"
+    run _cleanup_stale_ntp_pidfile_core "$missing_pidfile"
     [ "$status" -eq 0 ]
-    run cleanup_stale_ntp_pidfile "$missing_pidfile"
+    run _cleanup_stale_ntp_pidfile_core "$missing_pidfile"
     [ "$status" -eq 0 ]
 }
 
-# Confirms the default argument (chrony's real, confirmed-live default
-# pidfile path -- see cleanup_stale_ntp_pidfile's own comment in
-# entrypoint.sh) is what gets used when no explicit path is passed, the
-# same shape the real (non-test) call site in entrypoint.sh relies on.
-# Reads the loaded function's own body (via `type`) rather than calling it
-# with no argument against the real /run/chrony/chronyd.pid path, which
-# would require root/real filesystem access this test sandbox doesn't need.
-@test "cleanup_stale_ntp_pidfile defaults to chrony's real pidfile path when called with no argument" {
+# cleanup_stale_ntp_pidfile itself (the zero-parameter production entry
+# point, not the _core function the two cases above exercise directly):
+# confirms it really does forward to chrony's real, confirmed-live default
+# pidfile path with no parameters of its own to pass. Reads the loaded
+# function's own body (via `type`) rather than calling it against the real
+# /run/chrony/chronyd.pid path, which would require root/real filesystem
+# access this test sandbox doesn't need -- the same technique
+# fix_chrony_dir_ownership's own forwarding test above uses.
+@test "cleanup_stale_ntp_pidfile forwards to chrony's real pidfile path with no parameters" {
     run type cleanup_stale_ntp_pidfile
     [ "$status" -eq 0 ]
-    [[ "$output" == *"/run/chrony/chronyd.pid"* ]]
+    [[ "$output" == *"_cleanup_stale_ntp_pidfile_core /run/chrony/chronyd.pid"* ]]
+}
+
+# Real, root-cause regression test for the log/driftfile permission bug this
+# validation pass found (present identically on the pre-migration Debian
+# image, not something the Alpine base-image swap introduced): a directory
+# owned by someone other than the user chronyd eventually drops privileges
+# to must get its ownership corrected at every container start, not just on
+# first install, so an already-existing production volume self-heals too.
+# Calls the parameterized _core function directly (not the zero-arg
+# fix_chrony_dir_ownership production entry point -- see that function's
+# own comment for why the two are split) so this test exercises the real
+# chown logic against fixture paths without needing root or touching the
+# real system directories. Chowns to this test process's OWN uid:gid
+# (always succeeds even unprivileged, unlike chowning to an arbitrary named
+# user) to prove the real chown mechanism works end-to-end against a
+# genuinely wrong-owned fixture directory.
+@test "_fix_chrony_dir_ownership_core corrects ownership of a wrong-owned fixture directory" {
+    log_dir="$BATS_TEST_TMPDIR/log-chrony"
+    lib_dir="$BATS_TEST_TMPDIR/lib-chrony"
+    mkdir -p "$log_dir" "$lib_dir"
+    self_owner="$(id -u):$(id -g)"
+
+    run _fix_chrony_dir_ownership_core "$self_owner" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING"* ]]
+
+    run stat -c '%u:%g' "$log_dir"
+    [ "$output" = "$(id -u):$(id -g)" ]
+    run stat -c '%u:%g' "$lib_dir"
+    [ "$output" = "$(id -u):$(id -g)" ]
+}
+
+# A previously-existing production volume must self-heal on every restart,
+# not only the first time it's ever corrected -- repeating the same chown
+# against an already-correctly-owned directory must stay a no-op success,
+# matching this project's convergence/idempotence expectations (issue #456)
+# the same way cleanup_stale_ntp_pidfile's own idempotence test above does.
+@test "_fix_chrony_dir_ownership_core is idempotent when called twice against an already-correct owner" {
+    log_dir="$BATS_TEST_TMPDIR/log-chrony"
+    lib_dir="$BATS_TEST_TMPDIR/lib-chrony"
+    mkdir -p "$log_dir" "$lib_dir"
+    self_owner="$(id -u):$(id -g)"
+
+    run _fix_chrony_dir_ownership_core "$self_owner" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    run _fix_chrony_dir_ownership_core "$self_owner" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"WARNING"* ]]
+}
+
+# The warning path (AG-VAL-024's "a set -e fail-closed branch needs a real
+# failing-input run, not manual reasoning" applied to this function's own
+# non-fatal-failure branch): a chown that genuinely cannot succeed (an
+# invalid/unrelated owner spec, guaranteed to fail for an unprivileged test
+# process) must print a WARNING and still return 0, so a bare call at the
+# real entrypoint's top level can never trip `set -e` and abort the whole
+# service over a non-essential logging/driftfile permission failure.
+@test "_fix_chrony_dir_ownership_core warns but returns non-fatally when chown genuinely fails" {
+    log_dir="$BATS_TEST_TMPDIR/log-chrony-unwritable"
+    lib_dir="$BATS_TEST_TMPDIR/lib-chrony-unwritable"
+    mkdir -p "$log_dir" "$lib_dir"
+
+    run _fix_chrony_dir_ownership_core "root:root" "$log_dir" "$lib_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"WARNING"* ]]
+    [[ "$output" == *"$log_dir"* ]]
+}
+
+# fix_chrony_dir_ownership itself (the zero-parameter production entry
+# point, not the _core function the three cases above exercise directly):
+# confirms it really does forward to the real system paths and the real
+# chrony:chrony owner with no parameters of its own to pass -- reads the
+# loaded function's own body (via `type`), the same technique
+# cleanup_stale_ntp_pidfile's own default-path test above uses, rather than
+# actually chowning the real /var/log/chrony and /var/lib/chrony (which
+# would require root and would mutate real system paths this test sandbox
+# must not touch).
+@test "fix_chrony_dir_ownership forwards to the real chrony user and system paths with no parameters" {
+    run type fix_chrony_dir_ownership
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"_fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony"* ]]
 }
