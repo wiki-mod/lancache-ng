@@ -7,6 +7,13 @@ live in the repo, PR-reviewable and consistent across all hosts).
 ## Files
 - `lancache-ci-cleanup.sh` — the cleanup script.
 - `lancache-ci-cleanup.service` / `lancache-ci-cleanup.timer` — systemd units.
+- `lancache-ci-docker-daemon-config.sh` — the go-gated `/etc/docker/daemon.json`
+  bounded-build-cache + log-rotation rollout (see below). Separate from the
+  cleanup script above: the cleanup script reclaims space on a timer; this
+  script bounds how large the build cache is allowed to grow *between* those
+  runs in the first place, and (unlike the cleanup script) requires a full
+  `dockerd` restart to take effect, which is why it is never wired into a
+  timer and is only ever run by hand, one host at a time.
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
@@ -65,10 +72,13 @@ Tunables (env): `REAP_BUILD_TOOLS_AFTER_HOURS`, `BUILD_TOOLS_IMAGE_MATCH`,
 `REAP_BUILDX_BUILDER_AFTER_HOURS`, `BUILDX_BUILDER_NAME_MATCH`,
 `TRIVY_CACHE_ROOT`, `REAP_TRIVY_CACHE_AFTER_DAYS`, `LANCACHE_CI_CLEANUP_LOG`.
 
-## Related, not done here (needs maintainer go — a daemon restart)
-Bound the docker build cache and container logs at the daemon level so they can
-never grow unbounded between cleanups. Proposed `/etc/docker/daemon.json`
-additions (overlay2 is already active):
+## `daemon.json` build-cache-GC + log-rotation rollout (needs maintainer go — a daemon restart)
+
+Bounds the docker build cache and container logs at the daemon level so they
+can never grow unbounded between `lancache-ci-cleanup.sh` runs (that script's
+own scheduled reap is what caused one host to accumulate ~40 GB before the
+2026-07-25 incident, per section 7 of issue #1255). `lancache-ci-docker-
+daemon-config.sh` (in this directory) applies these additions safely:
 
 ```json
 {
@@ -77,3 +87,71 @@ additions (overlay2 is already active):
   "log-opts": { "max-size": "10m", "max-file": "3" }
 }
 ```
+
+**Verified against the authoritative dockerd docs (issue #1255, 2026-07-25
+comment): neither `builder` nor `log-driver`/`log-opts` is in dockerd's
+SIGHUP-reloadable config subset** (only `debug`, `labels`, `live-restore`,
+`max-concurrent-*`, `runtimes`, `authorization-plugin`, registries,
+`shutdown-timeout`, and `features` are) — applying either one requires a full
+`dockerd` restart, which drops every container currently running on that
+host, including any in-flight CI job. There is no way to avoid that
+disruption with a reload; the only lever is *when* the restart happens.
+
+**Verified real per-host state (direct SSH inspection, 2026-07-31):** three
+of the four runner hosts (`.229`, `.240`, `.241`) already carry a real
+`/etc/docker/daemon.json` with `max-concurrent-downloads`/`-uploads` and
+`storage-driver` set; the fourth (`.243`) has no `daemon.json` at all (pure
+Docker defaults, confirmed by an empty `/etc/docker/` directory). The script
+below merges into whichever of these is actually present on a given host
+rather than assuming a fixed starting point — it deep-merges its additions
+via `jq`'s `*` operator, so a host's existing keys are always preserved.
+
+### Rollout procedure (one host at a time, during an agreed quiet window)
+
+The script defaults to safe, non-destructive modes; only its `restart` mode
+is disruptive, and that mode refuses to run unless explicitly confirmed.
+
+```sh
+# 1. Copy the script to the target host (or `git pull` this repo there).
+scp tools/runner-host/lancache-ci-docker-daemon-config.sh <host>:/tmp/
+
+# 2. On the host: read-only preview of what would change. Writes nothing.
+sudo bash /tmp/lancache-ci-docker-daemon-config.sh check
+
+# 3. Write the merged config to a staged file for manual review (still does
+#    not touch the live /etc/docker/daemon.json).
+sudo bash /tmp/lancache-ci-docker-daemon-config.sh stage
+cat /etc/docker/daemon.json.staged   # review
+
+# 4. Back up the live file and install the merged config as the new live
+#    file. Does NOT restart dockerd -- the new settings are inert until step 5.
+sudo bash /tmp/lancache-ci-docker-daemon-config.sh apply
+
+# 5. THE DISRUPTIVE STEP. Only during the agreed quiet window, one host at a
+#    time: restarts dockerd (stopping every container currently running on
+#    this host) and verifies the new builder/logging settings actually took
+#    effect via `docker info`. Requires an explicit confirmation env var so
+#    it can never fire from a copy-pasted one-liner without a deliberate
+#    extra step:
+sudo CONFIRM_DOCKERD_RESTART=yes bash /tmp/lancache-ci-docker-daemon-config.sh restart
+
+# 6. Confirm the runner picks up CI jobs normally again before moving on to
+#    the next host. Repeat steps 1-6 per host -- never restart all four at
+#    once.
+```
+
+If step 5 fails verification or the host misbehaves afterward, restore from
+the timestamped backup step 4 created (`/etc/docker/daemon.json.bak.<timestamp>`)
+and restart `docker.service` again.
+
+Env overrides (same tunable-via-env style as `lancache-ci-cleanup.sh`):
+`DAEMON_JSON` (default `/etc/docker/daemon.json`), `BUILDER_GC_KEEP_STORAGE`
+(default `20GB`), `LOG_MAX_SIZE` (default `10m`), `LOG_MAX_FILE` (default `3`).
+
+**Status as of 2026-07-31: the script above is prepared and verified (`bash
+-n`, `shellcheck`, and a functional `check`/`stage`/`apply` smoke test against
+a copy of each real host's actual `daemon.json`, all run in the pinned
+build-tools container / on-host, never against the live file). The actual
+`restart` step has deliberately NOT been run against any real runner host —
+that remains a maintainer-scheduled action for an agreed quiet window, one
+host at a time**, per issue #1255.
