@@ -30,11 +30,26 @@ is_excluded() {
         # JSON despite the .conf extension — see AGENTS.md for why these
         # three specifically are excluded.
         services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
+        # Machine-generated OpenVEX document (JSON has no comment syntax, so it
+        # cannot carry the repo header); produced by scripts/generate-vex.sh
+        # from .trivyignore.yaml and kept in sync by scripts/check-vex-drift.sh.
+        vex.openvex.json | */vex.openvex.json) return 0 ;;
+        # Validation-state tracking record (JSON, no comment syntax) referenced
+        # by docs/release-validation-plan.md — same exclusion rationale as
+        # vex.openvex.json above.
+        docs/validation-state.json | */docs/validation-state.json) return 0 ;;
         # Vendored third-party file and generated/compiled build output.
         services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;
         # Vendored third-party data file (Mozilla Public Suffix List) —
         # already carries its own upstream MPL-2.0 header.
         services/proxy/public_suffix_list.dat) return 0 ;;
+        # cargo-fuzz seed corpus fixtures (issue #1252): raw bytes libFuzzer
+        # feeds directly to the harness under test (JSON in this repo's
+        # current targets, but this exclusion is by directory, not
+        # extension, since a fuzz corpus is fixture data in whatever shape
+        # the target parses). A header would corrupt the exact bytes being
+        # fuzzed — the same reason JSON config files are excluded above.
+        */fuzz/corpus/* | fuzz/corpus/*) return 0 ;;
         # Binary/compiled asset types a comment header cannot apply to.
         *.png | *.jpg | *.jpeg | *.gif | *.ico | *.svg | *.woff | *.woff2 | *.ttf | *.eot | *.crt | *.key | *.pem) return 0 ;;
         *) return 1 ;;

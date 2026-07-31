@@ -17,9 +17,16 @@
 # or fail this check. A hardcoded canonical set would go stale in exactly the
 # same silent way it is meant to prevent.
 #
-# `full_setup_services=(...)` is deliberately a SUBSET (it intentionally omits
-# dhcp/dhcp-proxy), so it is checked as a subset of the canonical set, not for
-# equality -- a naive "all lists identical" check would be wrong here.
+# `full_setup_services=(...)` is deliberately a SUBSET, so it is checked as a
+# subset of the canonical set, not for equality -- a naive "all lists
+# identical" check would be wrong here. The two `full_setup_services=(...)`
+# copies below no longer share one exclusion set as of #1296 (2026-07-30):
+# build-push.yml's own copy (the compose-only, product-stack membership list)
+# still intentionally omits dhcp/dhcp-proxy/ntp, but scripts/ensure-pr-staging-
+# images.sh's copy (the deep-validation staging-image list) now includes all
+# three -- see FULL_SETUP_EXACT_EXCLUSIONS below, whose exclusion set for that
+# file is now empty (ntp was the last member, added #1296). Do not assume the
+# two arrays mirror each other's exclusions; check each file's own comment.
 #
 # This same #822 recurrence shape was found again, beyond build-push.yml's 4
 # internal copies (issue #935's original scope), in 3 more real files that
@@ -203,17 +210,38 @@ check_services_arrays() {
 # Files where full_setup_services=(...) must equal canonical minus a KNOWN,
 # EXACT exclusion set (not just "no phantom members") -- same reasoning as
 # SUBSET_SERVICES_FILES above: membership-only checking would silently accept
-# a real service being dropped. Scoped to ensure-pr-staging-images.sh, since
-# its full_setup_services=(...) is meant to mirror build-push.yml's own
-# full_setup_services=(...) exactly (both represent the same full-setup
-# validation scope). build-push.yml's own copy intentionally keeps the
-# original, looser membership-only check below -- it has an established bats
-# test (further up this file) exercising an arbitrary smaller subset as a
-# valid case, so tightening it to exact-equality is a separate, pre-existing-
-# design decision outside the scope of this 3-file extension.
+# a real service being dropped. Scoped to ensure-pr-staging-images.sh. Before
+# #1296 (2026-07-30), its full_setup_services=(...) exclusion set mirrored
+# build-push.yml's own full_setup_services=(...) exactly (both represented
+# the same full-setup validation scope); since #1296, the two have
+# deliberately diverged -- ensure-pr-staging-images.sh's own list is now
+# narrower (as of the #1296 completion below, EMPTY -- see the entry's own
+# comment), because it must ensure a staging image exists for every service a
+# deep-validation simulation actually pulls, which is not the same scope as
+# build-push.yml's compose-membership list. Do not "fix" this file's
+# exclusion set back to matching build-push.yml's -- that would reintroduce
+# #1296. build-push.yml's own copy intentionally keeps the original, looser
+# membership-only check below -- it has an established bats test (further up
+# this file) exercising an arbitrary smaller subset as a valid case, so
+# tightening it to exact-equality is a separate, pre-existing-design decision
+# outside the scope of this 3-file extension.
 declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
-    ["ensure-pr-staging-images.sh"]="dhcp
-dhcp-proxy"
+    # #1296 (2026-07-30): dhcp and dhcp-proxy moved OUT of this exclusion set
+    # first -- ensure-pr-staging-images.sh started ensuring both, since
+    # scripts/syslog-forwarding-simulation.sh's Triggers 7/8 (added by #864,
+    # after this exclusion set was first written) pull both images directly.
+    # ntp (the last remaining member) moved out too once
+    # scripts/syslog-forwarding-simulation.sh gained a real ntp
+    # start+healthcheck consumer (see ensure-pr-staging-images.sh's own
+    # full_setup_services=(...) comment) -- completing #1296's original 3-of-3
+    # ask. The key is kept PRESENT with an empty value (rather than deleted
+    # outright) so this file stays routed through the exact-equality branch
+    # below instead of falling back to the looser membership-only check that
+    # applies to a file with no entry here at all -- see that branch's own
+    # comment for why a key-EXISTENCE test, not a non-empty-VALUE test, is
+    # what makes an empty exclusion set actually behave as "equals canonical
+    # exactly" rather than silently degrading to the weaker check.
+    ["ensure-pr-staging-images.sh"]=""
 )
 
 # Checks every `full_setup_services=(...)` array in $1. For files listed in
@@ -238,7 +266,18 @@ check_full_setup_arrays() {
         return
     fi
 
-    if [[ -n "${FULL_SETUP_EXACT_EXCLUSIONS[$file_basename]:-}" ]]; then
+    # `-v` (key EXISTENCE), not `-n "${...:-}"` (non-empty VALUE): the latter
+    # would have been a real, silent bug the moment #1296 emptied out
+    # ensure-pr-staging-images.sh's exclusion entry above -- an empty-but-
+    # present value makes `-n` false, which would route this file into the
+    # looser membership-only branch below instead of the exact-equality
+    # branch its own array entry documents it as belonging to. `-v` correctly
+    # treats "key present, value empty" as "yes, exact-equality-checked, with
+    # zero exclusions" -- exactly what an empty exclusion set is supposed to
+    # mean (equals canonical exactly), not "not scoped into this check at
+    # all." Requires bash >= 4.3 (`-v` on an array subscript), already implied
+    # by this script's associative-array usage throughout.
+    if [[ -v FULL_SETUP_EXACT_EXCLUSIONS[$file_basename] ]]; then
         expected=$(canonical_minus "${FULL_SETUP_EXACT_EXCLUSIONS[$file_basename]}")
         expected_oneline=$(printf '%s' "$expected" | tr '\n' ' ')
         for entry in "${entries[@]}"; do

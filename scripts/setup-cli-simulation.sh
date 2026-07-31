@@ -150,13 +150,17 @@ trap cleanup EXIT
 # deploy/quickstart/docker-compose.yml previously left nats/ui without one
 # (no http_port set for nats, no HEALTHCHECK in the ui image), which is why
 # they were absent from this list; both now have one, matching
-# full-setup-validate.yml's own list. Everything else here (docker-socket-
-# proxy, watchdog, netdata) is only checked for "running" plus a
-# restart-count ceiling (catches a crash loop without needing a healthcheck
-# definition for every service).
+# full-setup-validate.yml's own list. docker-socket-proxy and netdata joined
+# this list under #1169 (real HTTP probes against /_ping and /api/v1/info
+# respectively) -- previously both had no Docker healthcheck at all, so this
+# script could never have reported them "healthy" regardless of timing.
+# watchdog is the one remaining service still only checked for "running" plus
+# a restart-count ceiling here, despite already having a real (freshness-
+# based) healthcheck of its own -- unlike the additions above, that gap
+# predates #1169 and is not something this issue's scope covers fixing.
 wait_for_stack_healthy() {
     local compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env")
-    local services_with_healthcheck="proxy dns-standard nats ui"
+    local services_with_healthcheck="proxy dns-standard nats ui docker-socket-proxy netdata"
     local all_services="proxy dns-standard nats docker-socket-proxy watchdog ui netdata"
     local deadline=$((SECONDS + 90)) service cid status all_ready
 
@@ -255,15 +259,11 @@ expect_prompt {Server IP \(Standard mode\)} "127.0.0.2"
 expect_prompt {Enable SSL mode\? \[y/N\]} ""
 expect_prompt {Directory[^\n]*\[} $install_dir
 expect_prompt {Cache directory \(absolute path\)} ""
-# Explicit small answer (not "" for the 50 GiB default): issue #1069 added a
-# real free-disk-space check against this runner's filesystem, and this
-# phase must not depend on however much space happens to be free on whichever
-# self-hosted runner picks up the job.
-expect_prompt {Cache size in GiB} "5"
+expect_prompt {Cache size in GiB} ""
 expect_prompt {Cache RAM buffer in MB} ""
-expect_prompt {Cache entry max age} ""
 expect_prompt {Enable scheduled automatic updates\?} ""
-expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy\)} ""
+expect_prompt {DHCP mode \(disabled, kea, dnsmasq-proxy, dnsmasq-relay\)} ""
+expect_prompt {Enable LanCache-NG-NTP\? \[y/N\]} ""
 expect_prompt {Protect Admin-UI with password\? \[Y/n\]} ""
 expect_prompt {Username[^\n]*\[admin\]} ""
 expect_prompt {Start now\? \[Y/n\]} ""
@@ -383,7 +383,7 @@ echo "== Phase 2b: repeat-run idempotence (setup.sh update run twice in a row, s
 # real CLI -- not just the extracted function -- lands on the same fixed
 # point instead of drifting or rotating secrets.
 cp "$install_dir/.env" "$install_dir/.env.after-first-update"
-secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
+secret_keys='^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN|UI_AUTH_PASSWORD)='
 grep -E "$secret_keys" "$install_dir/.env.after-first-update" | sort > "$install_dir/.secrets-after-first-update"
 
 bash setup.sh update "$install_dir"

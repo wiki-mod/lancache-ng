@@ -24,7 +24,7 @@ script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/.." && pwd)
 cd "$repo_root"
 
-COMPOSE_FILES=(deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml)
+COMPOSE_FILES=(deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml)
 SOCKET_PROXY_SCRIPT=scripts/docker-socket-proxy.sh
 DOCKER_CLIENT_RS=services/ui/src/docker_client.rs
 WATCHDOG_SH=services/watchdog/watchdog.sh

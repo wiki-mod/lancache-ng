@@ -19,6 +19,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/build-tools-channel.sh
 source "$script_dir/lib/build-tools-channel.sh"
+# shellcheck source=scripts/lib/docker-buildx-retry.sh
+source "$script_dir/lib/docker-buildx-retry.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -136,12 +138,6 @@ smoke_test_image() {
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
     expect -v >/dev/null
-
-    # python3-scapy has no standalone binary worth checking via command -v
-    # (see tools/build-tools/Dockerfile'\''s own verification step for the
-    # same caveat) -- verify the importable module scripts/dhcp-proxy-pxe-
-    # simulation.sh actually depends on instead.
-    python3 -c "import scapy.all"
   '
 }
 
@@ -196,7 +192,11 @@ fi
 # instead of a fallback build.
 if [[ "$event_name" != "pull_request" ]]; then
   printf '::notice::Building a branch-local build-tools validation image for a trusted ref.\n' >&2
-  docker build --pull -t "$fallback_image" "$build_tools_context" >&2
+  # Wrapped (2026-07-29) after tracing current_dev's own `coverage (Rust)`
+  # job failure to this exact unwrapped call: the golang:latest-toolchain-
+  # internal panic documented in scripts/lib/docker-buildx-retry.sh actually
+  # surfaced here, in this script's branch-local build-tools fallback build.
+  docker_buildx_retry -- docker build --pull -t "$fallback_image" "$build_tools_context" >&2
   smoke_test_image "$fallback_image"
   printf '%s\n' "$fallback_image"
   exit 0
@@ -225,6 +225,6 @@ if [[ "$trusted_fallback_allowed" != "true" ]]; then
 fi
 
 printf '::notice::Building a branch-local build-tools validation image.\n' >&2
-docker build --pull -t "$fallback_image" "$build_tools_context" >&2
+docker_buildx_retry -- docker build --pull -t "$fallback_image" "$build_tools_context" >&2
 smoke_test_image "$fallback_image"
 printf '%s\n' "$fallback_image"

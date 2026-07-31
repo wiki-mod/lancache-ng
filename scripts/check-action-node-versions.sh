@@ -233,6 +233,17 @@ fetch_external_action_yaml() {
 
 for value in "${uses_values[@]}"; do
   if [[ "$value" == ./* ]]; then
+    # A job-level reusable-workflow reference (`uses: ./.github/workflows/<wf>.yml`)
+    # is NOT a composite action: it points at a workflow FILE, not a directory
+    # holding an action.yml, and has no runs.using/Node runtime to check. Those
+    # workflow files are already scanned directly (they are in workflow_files
+    # above), so their own pinned actions are still covered -- skip the reference
+    # itself here rather than misreading it as a local action with a missing
+    # action.yml. Matched on the .yml/.yaml suffix, which a composite action's
+    # directory reference never has.
+    if [[ "$value" == *.yml || "$value" == *.yaml ]]; then
+      continue
+    fi
     # --- Local composite action (read action.yml/action.yaml off disk) ----
     local_dir="${value#./}"
     resolved=""
