@@ -93,6 +93,50 @@ val() {
     [ "$(val should_run)" = "true" ]
 }
 
+# F-16 (issue #1095): a CI-tooling-only script (verified zero stack
+# dependency, see the ci_tooling_only_scripts allowlist and its header
+# comment in detect-full-setup-changes.sh) must no longer force the deep
+# suite to run on its own. Reproduces the real, confirmed regression
+# (PR #1333, run 30616274721: touching only AGENTS.md +
+# scripts/check-pr-title-convention.sh ran the full ~15-job simulation
+# suite) so this test fails again if the narrowing regresses.
+@test "F-16: CI-tooling-only script change alone does not force should_run" {
+    run_detect "AGENTS.md" "scripts/check-pr-title-convention.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "false" ]
+}
+
+@test "F-16: a mix of an allowlisted CI-tooling script and a real simulation script still runs the suite" {
+    # Not every touched scripts/ path is on the allowlist here, so should_run
+    # must stay true -- the allowlist only narrows the all-safe case, never a
+    # mixed diff.
+    run_detect "scripts/check-pr-title-convention.sh" "scripts/ssl-mitm-cache-simulation.sh"
+    [ "$(val should_run)" = "true" ]
+}
+
+@test "F-16: an unclassified/new scripts/ file still fails closed to should_run true" {
+    run_detect "scripts/some-brand-new-script-not-yet-classified.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "true" ]
+}
+
+@test "F-16: scripts/lib/ changes still fail closed to should_run true (allowlist never widens to a prefix)" {
+    run_detect "scripts/lib/ghcr-retry.sh"
+    [ "$(val should_run)" = "true" ]
+}
+
+@test "F-16: any path under scripts/tracked/ is recognized as CI-tooling-only, even without an array entry" {
+    run_detect "scripts/tracked/some-newly-migrated-guard.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "false" ]
+}
+
+@test "F-16: scripts/untracked/ gets no special prefix handling and still fails closed to should_run true" {
+    run_detect "scripts/untracked/some-utility.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "true" ]
+}
+
 @test "dhcp and dhcp-proxy flags are detected independently" {
     run_detect "services/dhcp/entrypoint.sh"
     [ "$(val dhcp)" = "true" ]
