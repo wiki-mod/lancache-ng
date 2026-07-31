@@ -21,9 +21,17 @@ if [ -f /data/lancache-ui-settings.env ]; then
     . /data/lancache-ui-settings.env
 fi
 
-# Curated default: the four official Debian NTP pool zones (this image's own
-# vendor pool, matching the base OS) plus Cloudflare's well-known anycast NTP
-# service, for a sensible default an operator never has to think about.
+# Curated default: the four official Debian NTP pool zones plus Cloudflare's
+# well-known anycast NTP service, for a sensible default an operator never
+# has to think about. These pool zone hostnames work identically regardless
+# of this image's own base OS -- pool.ntp.org vendor zones are just a
+# courtesy DNS naming convention for spreading load across the public pool,
+# not something tied to the querying host's own distro (any pool zone
+# resolves to real, usable NTP servers for any client). Kept as-is after
+# this image's Alpine migration (issue #815 Part B) rather than switched to
+# an Alpine-specific zone: Alpine has no comparably established dedicated
+# vendor pool zone, and changing this default would be a user-visible
+# behavior change out of scope for a base-image swap.
 : "${NTP_UPSTREAM_SERVERS:=0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com}"
 : "${NTP_ALLOWED_CLIENT_CIDRS:=}"
 
@@ -120,6 +128,74 @@ validate_ntp_config() {
     return 0
 }
 
+# _fix_chrony_dir_ownership_core <owner> <log_dir> <lib_dir>
+# Real logic, shared by production and tests, all three arguments required
+# (not optional): chronyd drops privileges to the packaged `chrony` user on
+# its own (compiled-in PRIVDROP default -- confirmed live: it runs as
+# `chrony`/uid 100 after startup even though this entrypoint execs it as
+# root below), but this entrypoint itself still runs as root here, so
+# log_dir/lib_dir can end up root-owned instead: the image's own
+# /var/log/chrony is created by the Dockerfile's `mkdir -p` at build time
+# (root, since no package pre-creates it the way chrony-nts's chrony-common
+# dependency pre-creates /var/lib/chrony as chrony:chrony), a fresh
+# Docker-managed named volume mounted over it copies that same root
+# ownership on first use, and a host bind mount (e.g. NTP_DATA_DIR) is
+# whatever the host directory already was before this container ever wrote
+# to it. Without this, the privilege-dropped chronyd cannot open its own
+# log files or driftfile there and fails silently -- confirmed live,
+# reproducibly, with real "Could not open /var/log/chrony/*.log :
+# Permission denied" errors, present identically on the pre-Alpine-migration
+# Debian image too (a real, pre-existing bug this validation pass found, not
+# something the base-image swap introduced). Called every start (not just
+# first) so an already wrong-owned pre-existing production volume self-heals
+# on its very next restart, not only on a fresh install.
+#
+# Deliberately always returns 0 (never propagates a chown failure to the
+# caller, so a bare call at the top level cannot trip `set -e` above): this
+# is optional, best-effort hardening, not a required step -- see
+# AG-VAL-004's carve-out for an explicitly documented optional fallback.
+# Logging/driftfile persistence are secondary to this service's actual job
+# (disciplining the clock and serving LAN clients on UDP/123), which
+# chronyd continues to do correctly even when these particular writes fail.
+#
+# Deliberately takes required (not optional/defaulted) parameters, unlike
+# render_ntp_config's `template` or cleanup_stale_ntp_pidfile's `pidfile`:
+# an earlier version of this file gave THIS function optional defaults too
+# and suppressed the resulting shellcheck SC2120 finding ("references
+# arguments, but none are ever passed" -- true within this file alone,
+# since the one production call site passed none) with a disable comment.
+# That shipped without maintainer sign-off and was reverted on maintainer
+# instruction: a lint suppression is not an acceptable default response to
+# an inconvenient warning, even a plausible one, without asking first. This
+# split (a real, parameterized, directly-testable core plus a fixed-value
+# production entry point below) removes the warning by construction instead
+# -- `fix_chrony_dir_ownership` below has no parameters to flag, and this
+# function genuinely IS called with real arguments in production code (by
+# that entry point), so shellcheck's premise for SC2120 no longer holds
+# either. tests/bats/ntp_entrypoint_rendering.bats calls this function
+# directly with fixture owners/paths to exercise the exact same logic
+# production uses, without needing a second, divergent test-only
+# reimplementation.
+_fix_chrony_dir_ownership_core() {
+    local owner="$1" log_dir="$2" lib_dir="$3"
+
+    if ! chown "$owner" "$log_dir" "$lib_dir" 2>&1; then
+        echo "WARNING: could not chown $log_dir and/or $lib_dir to $owner; chronyd's own log/driftfile writes may fail (the service will still discipline time and serve NTP clients normally)." >&2
+    fi
+    return 0
+}
+
+# fix_chrony_dir_ownership
+# Production entry point: no parameters at all, so there is nothing for a
+# future shellcheck pass to flag as unused. Hardcodes the real values this
+# service always uses -- see _fix_chrony_dir_ownership_core's comment above
+# for why this exists as a separate function instead of giving that
+# function optional/defaulted parameters directly.
+fix_chrony_dir_ownership() {
+    _fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony
+}
+
+# _cleanup_stale_ntp_pidfile_core <pidfile>
 # Removes chronyd's own pidfile if a stale one survives from a previously
 # crashed instance in THIS SAME container (issue #1318). Docker's
 # `restart: always` re-execs this entrypoint against the same writable
@@ -142,27 +218,40 @@ validate_ntp_config() {
 # could be protecting against -- a fresh start always replaces whatever was
 # PID 1 before, stale or not.
 #
-# Path confirmed directly against this image's own real chronyd build
-# (AG-VAL-023: checked the tool's actual behavior, not assumed it) --
-# chrony.conf.template sets no explicit `pidfile` directive, so chronyd
-# uses its Debian package's compiled-in default, and a real crash's own
-# fatal-error message named this exact path: "Another chronyd may already
-# be running (pid=1), check /run/chrony/chronyd.pid".
-# shellcheck disable=SC2120 # the real call site below intentionally passes
-# no argument (always wants chrony's real default path); the optional
-# override exists purely so tests/bats/ntp_entrypoint_rendering.bats can
-# point this at a throwaway fixture path instead of the real
-# /run/chrony/chronyd.pid, the same optional-parameter pattern
-# render_ntp_config's own template argument already uses above.
-cleanup_stale_ntp_pidfile() {
-    local pidfile="${1:-/run/chrony/chronyd.pid}"
+# Deliberately takes a required (not optional/defaulted) parameter, the
+# same restructuring _fix_chrony_dir_ownership_core/fix_chrony_dir_ownership
+# above went through and for the same reason (maintainer decision, AG-WF-027
+# "mitbereinigen" -- fix this failure class everywhere it's found in the
+# same pass, not just where it was first noticed): an earlier version gave
+# this function an optional `${1:-real-path}` default and suppressed the
+# resulting shellcheck SC2120 finding with a disable comment instead of
+# restructuring around it. That pattern is what this file no longer uses
+# anywhere -- see cleanup_stale_ntp_pidfile below for the zero-parameter
+# production entry point that supplies the real path.
+_cleanup_stale_ntp_pidfile_core() {
+    local pidfile="$1"
     rm -f "$pidfile"
+}
+
+# cleanup_stale_ntp_pidfile
+# Production entry point: no parameters, so there is nothing for a lint
+# pass to flag as unused. Path confirmed directly against this image's own
+# real chronyd build (AG-VAL-023: checked the tool's actual behavior, not
+# assumed it) -- chrony.conf.template sets no explicit `pidfile` directive,
+# so chronyd uses its packaged compiled-in default, and a real crash's own
+# fatal-error message named this exact path: "Another chronyd may already
+# be running (pid=1), check /run/chrony/chronyd.pid". This path is
+# confirmed identical on both the pre-Alpine-migration Debian image and the
+# current Alpine image.
+cleanup_stale_ntp_pidfile() {
+    _cleanup_stale_ntp_pidfile_core /run/chrony/chronyd.pid
 }
 
 NTP_RUNTIME_CONF=/etc/chrony/chrony.conf
 render_ntp_config "$NTP_RUNTIME_CONF"
 validate_ntp_config "$NTP_RUNTIME_CONF" || exit 1
 cleanup_stale_ntp_pidfile
+fix_chrony_dir_ownership
 
 echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
 exec chronyd -n -f "$NTP_RUNTIME_CONF"
