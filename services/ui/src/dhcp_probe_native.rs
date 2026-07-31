@@ -1285,16 +1285,11 @@ mod tests {
                 .expect("setting a read timeout must not fail");
             let mut count = 0u32;
             let mut buf = [0u8; 1500];
-            loop {
-                match server_socket.recv_from(&mut buf) {
-                    Ok((n, _from)) => {
-                        if let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n])) {
-                            if msg.xid() == xid {
-                                count += 1;
-                            }
-                        }
-                    }
-                    Err(_) => break,
+            while let Ok((n, _from)) = server_socket.recv_from(&mut buf) {
+                if let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n]))
+                    && msg.xid() == xid
+                {
+                    count += 1;
                 }
             }
             let _ = count_tx.send(count);
