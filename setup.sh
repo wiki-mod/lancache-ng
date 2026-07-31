@@ -6659,6 +6659,14 @@ if [[ "${REPLY,,}" = "y" ]]; then
         && env_key_has_usable_secret UI_AUTH_PASSWORD "$INSTALL_DIR/.env"; then
         UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$INSTALL_DIR/.env")
         print_ok "Existing Admin-UI password preserved"
+    elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+        # Issue #1176: introspection mode must not fabricate and print a real
+        # random secret on every run -- it never gets written anywhere, and
+        # doing so would also make list-prompts' own output non-deterministic
+        # across repeat runs with identical answers (AG-OP-006/007), even
+        # though the actual PROMPT sequence itself is unaffected either way.
+        UI_AUTH_PASSWORD=""
+        print_ok "Admin-UI password would be generated (skipped: introspection mode)"
     else
         UI_AUTH_PASSWORD=$(generate_secret_value UI_AUTH_PASSWORD alnum20)
         printf "\n"

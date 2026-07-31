@@ -50,7 +50,12 @@ write_answers() {
     [ "$status" -eq 0 ]
     prompt_count="$(printf '%s\n' "$output" | grep -c '^PROMPT	')"
     [ "$prompt_count" -eq 12 ]
-    ! printf '%s\n' "$output" | grep -qF 'Release channel'
+    # Checked against the "PROMPT\t" tag specifically, not a bare substring:
+    # setup.sh's own `print_step "Release channel"` section header prints
+    # unconditionally either way (it is not itself a prompt), so a plain
+    # `grep -F 'Release channel'` would false-positive on that header text
+    # even when the actual prompt was correctly skipped.
+    ! printf '%s\n' "$output" | grep -qF $'PROMPT\tRelease channel'
 }
 
 @test "list-prompts never creates the install directory or any other real file" {
@@ -61,19 +66,21 @@ write_answers() {
     [ ! -e "$fake_install_dir" ]
 }
 
-@test "list-prompts never invokes the real 'ip' binary, even when 'Add now?' is answered y" {
+@test "list-prompts never invokes 'ip addr add', even when 'Add now?' is answered y" {
     # Stubs ip on PATH to record every invocation instead of touching real
-    # host network state -- introspection mode must skip this call
-    # entirely (setup.sh's own WIZARD_INTROSPECT_MODE guard around `ip addr
-    # add`), so this file must stay empty regardless of what the answers
-    # file says for "Add now?".
+    # host network state. setup.sh's "Network configuration" step also
+    # legitimately calls the real, read-only `ip -4 addr show` / `ip -4
+    # route show default` in introspection mode too (to suggest sensible
+    # defaults) -- those are harmless reads, not the mutation this test
+    # guards against, so only the "addr add" write sub-command must never
+    # appear, not `ip` invocations in general.
     stub_bin="$BATS_TEST_TMPDIR/stub-bin"
     mkdir -p "$stub_bin"
     ip_calls="$BATS_TEST_TMPDIR/ip-calls.log"
     : > "$ip_calls"
     cat > "$stub_bin/ip" <<EOF
 #!/bin/bash
-echo "\$@" >> "$ip_calls"
+echo "\$*" >> "$ip_calls"
 EOF
     chmod +x "$stub_bin/ip"
 
@@ -82,7 +89,7 @@ EOF
     PATH="$stub_bin:$PATH" LANCACHE_IMAGE_CHANNEL=nightly \
         run bash "$setup_sh" list-prompts "$BATS_TEST_TMPDIR/answers.txt"
     [ "$status" -eq 0 ]
-    [ ! -s "$ip_calls" ]
+    ! grep -qF 'addr add' "$ip_calls"
 }
 
 # ─── list-prompts: branch-following (the actual #1176 blind spot) ───
