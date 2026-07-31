@@ -387,15 +387,28 @@ const DISCOVER_RETRANSMITS: u32 = 3;
 /// clients' own DISCOVERs/ACKs) that this probe must ignore rather than
 /// choke on. Returns `Err` only for a real socket-level send/configure
 /// failure; a receive timeout is normal completion, not an error.
+///
+/// `discover_dest` is where every DISCOVER retransmit is actually sent --
+/// [`run_probe`] always passes the real limited-broadcast target
+/// (`255.255.255.255:67`); this is a caller-supplied parameter rather than a
+/// constant computed in here specifically so the test suite can substitute a
+/// loopback fake-server address instead. Real broadcast delivery cannot be
+/// exercised deterministically inside this project's own build-tools
+/// container test run (that run is unprivileged per Rule-Ref: AG-VAL-016,
+/// and actual L2 broadcast delivery depends on host/container network
+/// configuration this test suite does not control either way) -- making the
+/// destination a parameter is what lets the retransmission-count and
+/// xid-propagation logic be proven against a real UDP socket round trip
+/// instead of being mocked away entirely. See the `tests` module below.
 fn collect_offers(
     socket: &UdpSocket,
     xid: u32,
     chaddr: &[u8; 6],
     window: Duration,
+    discover_dest: SocketAddrV4,
 ) -> io::Result<Vec<LeaseInfo>> {
     let deadline = Instant::now() + window;
     let retransmit_interval = window / DISCOVER_RETRANSMITS;
-    let broadcast_addr = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
     let mut offers = Vec::new();
     let mut seen_servers: std::collections::HashSet<Ipv4Addr> = std::collections::HashSet::new();
     let mut recv_buf = [0u8; 1500];
@@ -406,7 +419,7 @@ fn collect_offers(
         discover
             .encode(&mut Encoder::new(&mut send_buf))
             .map_err(io::Error::other)?;
-        socket.send_to(&send_buf, broadcast_addr)?;
+        socket.send_to(&send_buf, discover_dest)?;
 
         // The last retransmit listens all the way to `deadline`; earlier
         // ones only listen until their own slice of the window ends, then
@@ -553,12 +566,23 @@ fn wait_for_ack(
 /// make every real-server dry-run fail while still passing every unit test
 /// that only exercises this function's own request-building logic in
 /// isolation.
+///
+/// `request_dest` is where the DHCPREQUEST is sent -- [`run_probe`] always
+/// passes the same real limited-broadcast target [`collect_offers`] used for
+/// the DISCOVER; it is a parameter here for the same test-substitution
+/// reason documented on [`collect_offers`]. The DHCPRELEASE below
+/// deliberately does NOT reuse `request_dest`'s address (RFC 2131 4.4.4
+/// requires RELEASE to be unicast to the specific leasing server, not
+/// broadcast) -- only its port is reused, since RELEASE still goes to the
+/// same well-known DHCP server port as everything else, just at the
+/// server's own unicast address instead of the broadcast one.
 fn perform_client_dry_run(
     socket: &UdpSocket,
     xid: u32,
     chaddr: &[u8; 6],
     offer: &LeaseInfo,
     timeout: Duration,
+    request_dest: SocketAddrV4,
 ) -> ClientOutcome {
     let Some(request) = build_request(xid, chaddr, offer) else {
         return ClientOutcome::Failed {
@@ -574,8 +598,7 @@ fn perform_client_dry_run(
             reason: format!("failed to encode DHCPREQUEST: {e}"),
         };
     }
-    let broadcast_addr = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
-    if let Err(e) = socket.send_to(&buf, broadcast_addr) {
+    if let Err(e) = socket.send_to(&buf, request_dest) {
         return ClientOutcome::Unavailable {
             reason: format!("failed to send DHCPREQUEST: {e}"),
         };
@@ -612,7 +635,11 @@ fn perform_client_dry_run(
         let release = build_release(rand::random(), chaddr, client_ip, server_id);
         let mut release_buf = Vec::new();
         if release.encode(&mut Encoder::new(&mut release_buf)).is_ok() {
-            let release_addr = SocketAddrV4::new(server_id, DHCP_SERVER_PORT);
+            // Unicast to the server's own address, not `request_dest` --
+            // only the port is shared with request_dest (the well-known DHCP
+            // server port), never the address (see this function's own doc
+            // comment on why RELEASE must not go to the broadcast target).
+            let release_addr = SocketAddrV4::new(server_id, request_dest.port());
             let _ = socket.send_to(&release_buf, release_addr);
         }
     }
@@ -643,6 +670,33 @@ pub fn run_probe(discover_window: Duration, request_timeout: Duration) -> ProbeR
         }
     };
 
+    // The one real destination every DISCOVER and REQUEST is sent to in
+    // production -- see collect_offers/perform_client_dry_run's own
+    // comments on why this is passed in rather than hardcoded inside them.
+    let broadcast_dest = SocketAddrV4::new(Ipv4Addr::BROADCAST, DHCP_SERVER_PORT);
+    run_probe_on_socket(&socket, discover_window, request_timeout, broadcast_dest)
+}
+
+/// The actual probe sequence, taking an already-bound socket and the
+/// destination every DISCOVER/REQUEST is sent to as parameters, split out
+/// from [`run_probe`] (which only adds the real privileged-port bind and
+/// the real broadcast destination) for the same test-substitution reason
+/// documented on [`collect_offers`]/[`perform_client_dry_run`]: this is the
+/// level at which the ONE shared `xid` -- generated once here and passed
+/// unchanged to both `collect_offers` and `perform_client_dry_run` below --
+/// can be observed end-to-end over a real loopback socket pair, rather than
+/// only checking that `perform_client_dry_run` forwards whatever `xid` it
+/// was individually given (a regression that stopped generating a fresh xid
+/// inside `perform_client_dry_run` but started generating one HERE instead
+/// would still pass a test that only exercised that one function in
+/// isolation -- see the `tests` module's
+/// `run_probe_on_socket_reuses_one_xid_across_discover_and_request`).
+fn run_probe_on_socket(
+    socket: &UdpSocket,
+    discover_window: Duration,
+    request_timeout: Duration,
+    server_dest: SocketAddrV4,
+) -> ProbeReport {
     // Every DISCOVER retransmit, and the REQUEST that follows the first
     // offer, share this ONE transaction ID -- see perform_client_dry_run's
     // own comment on why the REQUEST specifically must not generate a new
@@ -650,7 +704,7 @@ pub fn run_probe(discover_window: Duration, request_timeout: Duration) -> ProbeR
     let xid = rand::random();
     let chaddr = random_locally_administered_mac();
 
-    let offers = match collect_offers(&socket, xid, &chaddr, discover_window) {
+    let offers = match collect_offers(socket, xid, &chaddr, discover_window, server_dest) {
         Ok(offers) => offers,
         Err(e) => {
             let reason = format!("failed to broadcast DHCPDISCOVER: {e}");
@@ -678,9 +732,14 @@ pub fn run_probe(discover_window: Duration, request_timeout: Duration) -> ProbeR
                 discover_window.as_secs_f64()
             ),
         },
-        Some(first_offer) => {
-            perform_client_dry_run(&socket, xid, &chaddr, first_offer, request_timeout)
-        }
+        Some(first_offer) => perform_client_dry_run(
+            socket,
+            xid,
+            &chaddr,
+            first_offer,
+            request_timeout,
+            server_dest,
+        ),
     };
 
     ProbeReport { conflict, client }
@@ -942,5 +1001,442 @@ mod tests {
             round_tripped.conflict,
             ConflictOutcome::Unavailable { reason } if reason == "no interface"
         ));
+    }
+
+    // ---- Real-socket regression coverage for the three review-pass fixes
+    // (issue #1288, PR #1336's follow-up): REQUEST xid-chaining (RFC 2131
+    // 4.3.2), unicast RELEASE targeting (RFC 2131 4.4.4), and bounded
+    // DISCOVER retransmission. All three live in collect_offers/
+    // perform_client_dry_run, which only take an already-bound `socket` and
+    // now a caller-supplied destination address (see those two functions'
+    // own doc comments) -- so unlike the tests above, these bind real
+    // ephemeral-port loopback UDP sockets and run the actual wire logic
+    // through a real send/receive round trip, rather than only building and
+    // decoding an in-memory Message. They do not exercise real network
+    // broadcast (255.255.255.255) or the real privileged DHCP ports
+    // (67/68): both require root/host-network-level guarantees this
+    // project's own build-tools container test run does not have (Rule-Ref:
+    // AG-VAL-016 runs tests as a non-root user), which is exactly why
+    // `discover_dest`/`request_dest` exist as parameters in the first place.
+    use std::net::SocketAddr;
+    use std::sync::mpsc;
+    use std::thread;
+
+    /// Binds an ephemeral-port UDP socket on the given loopback address.
+    /// The whole 127.0.0.0/8 block is loopback on Linux with no extra host
+    /// configuration needed, so tests below can use several distinct
+    /// addresses (not just 127.0.0.1) to stand in for "the real DHCP
+    /// server's own address" versus "wherever DISCOVER/REQUEST are sent",
+    /// without needing a real second network interface.
+    fn bind_loopback(ip: Ipv4Addr) -> UdpSocket {
+        UdpSocket::bind(SocketAddrV4::new(ip, 0))
+            .expect("binding an ephemeral loopback UDP port must not fail")
+    }
+
+    /// Reads back the actual port the OS assigned a loopback-bound socket --
+    /// used to point a second, separately-bound socket at "the same port,
+    /// different address" without a fixed magic-number port that could
+    /// collide with another test running concurrently (`cargo test` runs
+    /// tests in parallel by default).
+    fn loopback_port(socket: &UdpSocket) -> u16 {
+        match socket.local_addr().expect("bound socket has a local addr") {
+            SocketAddr::V4(addr) => addr.port(),
+            SocketAddr::V6(_) => {
+                unreachable!("a socket bound to a V4 loopback address never yields a V6 local_addr")
+            }
+        }
+    }
+
+    #[test]
+    // Regression coverage for the RFC 2131 4.3.2 xid-chaining fix:
+    // perform_client_dry_run's DHCPREQUEST must carry the EXACT SAME xid it
+    // was given (the transaction ID the prior DISCOVER/OFFER exchange
+    // already used), never a freshly generated one -- a real server has no
+    // reason to honor a REQUEST under a transaction ID it never offered
+    // anything for (see the function's own doc comment). Proven over a real
+    // UDP socket round trip: a fake-server thread decodes the actual
+    // REQUEST bytes that were sent on the wire and reports the xid it truly
+    // saw back to this test over a channel, rather than this test only
+    // inspecting build_request's in-memory return value in isolation.
+    fn perform_client_dry_run_request_reuses_the_given_xid() {
+        let client_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let server_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let server_port = loopback_port(&server_socket);
+        let server_ip = Ipv4Addr::LOCALHOST;
+        let request_dest = SocketAddrV4::new(server_ip, server_port);
+
+        let expected_xid: u32 = 0xCAFE_BABE;
+        let (xid_tx, xid_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            server_socket
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("setting a read timeout must not fail");
+            let mut buf = [0u8; 1500];
+            let (n, from) = server_socket
+                .recv_from(&mut buf)
+                .expect("must receive the DHCPREQUEST perform_client_dry_run sends");
+            let request = Message::decode(&mut Decoder::new(&buf[..n]))
+                .expect("must decode a well-formed DHCPREQUEST");
+            xid_tx
+                .send(request.xid())
+                .expect("test thread must still be listening for the observed xid");
+
+            // Reply with a real DHCPACK so perform_client_dry_run reports
+            // Passed -- this test's assertion is the xid seen above, but a
+            // Failed/Unavailable outcome here would itself be a sign
+            // something upstream broke, so it is checked too.
+            // Message::new_with_id's address params are (ciaddr, yiaddr,
+            // siaddr, giaddr) in that order -- the granted lease address
+            // belongs in yiaddr (3rd), matching how a real server's ACK is
+            // shaped and how lease_info_from_message reads it back via
+            // msg.yiaddr(), not ciaddr (which this client never has bound).
+            let mut ack = Message::new_with_id(
+                request.xid(),
+                Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::new(192, 168, 50, 77),
+                Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::UNSPECIFIED,
+                request.chaddr(),
+            );
+            ack.opts_mut()
+                .insert(DhcpOption::MessageType(MessageType::Ack));
+            ack.opts_mut()
+                .insert(DhcpOption::ServerIdentifier(server_ip));
+            let mut ack_buf = Vec::new();
+            ack.encode(&mut Encoder::new(&mut ack_buf))
+                .expect("a freshly-built ACK must always encode");
+            server_socket
+                .send_to(&ack_buf, from)
+                .expect("sending the ACK back must not fail");
+        });
+
+        let offer = LeaseInfo {
+            offered_ip: Some(Ipv4Addr::new(192, 168, 50, 1)),
+            server_identifier: Some(server_ip),
+            ..Default::default()
+        };
+        let chaddr = [0x02, 9, 9, 9, 9, 9];
+        let outcome = perform_client_dry_run(
+            &client_socket,
+            expected_xid,
+            &chaddr,
+            &offer,
+            Duration::from_secs(2),
+            request_dest,
+        );
+
+        let observed_xid = xid_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the fake server thread must report the xid it decoded");
+        server_thread
+            .join()
+            .expect("fake server thread must not panic");
+
+        assert_eq!(
+            observed_xid, expected_xid,
+            "the REQUEST on the wire must carry the same xid as the exchange it is answering, \
+             not a freshly generated one"
+        );
+        assert!(
+            matches!(outcome, ClientOutcome::Passed { .. }),
+            "a matching xid/server-identifier ACK must be accepted as a passed dry-run, got {outcome:?}"
+        );
+    }
+
+    #[test]
+    // Regression coverage for the RFC 2131 4.4.4 unicast-RELEASE fix:
+    // perform_client_dry_run must send the DHCPRELEASE as a unicast
+    // datagram addressed directly to the leasing server
+    // (offer.server_identifier), never to the same broadcast/request
+    // destination DISCOVER/REQUEST used (see the function's own doc
+    // comment). Proven with two separate real UDP listeners on different
+    // loopback aliases sharing one port: one stands in for "wherever
+    // DISCOVER/REQUEST go" (request_dest, on 127.0.0.1), the other for the
+    // server's own real identity (server_identifier, on 127.0.0.2). If the
+    // RELEASE were mistakenly sent to request_dest instead of the server's
+    // own address, the server-identity listener below would time out
+    // waiting for it, and this test would fail exactly as designed.
+    fn perform_client_dry_run_release_is_unicast_to_the_server_identifier() {
+        let client_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let request_listener = bind_loopback(Ipv4Addr::LOCALHOST);
+        let shared_port = loopback_port(&request_listener);
+        let request_dest = SocketAddrV4::new(Ipv4Addr::LOCALHOST, shared_port);
+
+        // A distinct loopback alias from 127.0.0.1 -- not just a different
+        // port -- so the two listeners are unambiguously different
+        // destinations, matching how a real broadcast address and a real
+        // specific server address are genuinely different IPs on a LAN.
+        let server_ip = Ipv4Addr::new(127, 0, 0, 2);
+        let release_listener = UdpSocket::bind(SocketAddrV4::new(server_ip, shared_port))
+            .expect("binding the server-identity loopback alias on the shared port must not fail");
+        release_listener
+            .set_read_timeout(Some(Duration::from_millis(800)))
+            .expect("setting a read timeout must not fail");
+
+        let xid: u32 = 0x1111_2222;
+        let chaddr = [0x02, 8, 8, 8, 8, 8];
+        let request_thread = thread::spawn(move || {
+            request_listener
+                .set_read_timeout(Some(Duration::from_secs(2)))
+                .expect("setting a read timeout must not fail");
+            let mut buf = [0u8; 1500];
+            let (n, from) = request_listener
+                .recv_from(&mut buf)
+                .expect("must receive the DHCPREQUEST");
+            let request = Message::decode(&mut Decoder::new(&buf[..n]))
+                .expect("must decode a well-formed DHCPREQUEST");
+
+            // See the xid-chaining test's own comment: the granted lease
+            // address belongs in yiaddr (3rd positional arg), not ciaddr.
+            let mut ack = Message::new_with_id(
+                request.xid(),
+                Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::new(192, 168, 77, 5),
+                Ipv4Addr::UNSPECIFIED,
+                Ipv4Addr::UNSPECIFIED,
+                request.chaddr(),
+            );
+            ack.opts_mut()
+                .insert(DhcpOption::MessageType(MessageType::Ack));
+            ack.opts_mut()
+                .insert(DhcpOption::ServerIdentifier(server_ip));
+            let mut ack_buf = Vec::new();
+            ack.encode(&mut Encoder::new(&mut ack_buf))
+                .expect("a freshly-built ACK must always encode");
+            request_listener
+                .send_to(&ack_buf, from)
+                .expect("sending the ACK back must not fail");
+        });
+
+        let offer = LeaseInfo {
+            offered_ip: Some(Ipv4Addr::new(192, 168, 77, 1)),
+            server_identifier: Some(server_ip),
+            ..Default::default()
+        };
+        let outcome = perform_client_dry_run(
+            &client_socket,
+            xid,
+            &chaddr,
+            &offer,
+            Duration::from_secs(2),
+            request_dest,
+        );
+        request_thread
+            .join()
+            .expect("fake server thread must not panic");
+        assert!(
+            matches!(outcome, ClientOutcome::Passed { .. }),
+            "the dry-run must pass before a RELEASE is even attempted, got {outcome:?}"
+        );
+
+        let mut release_buf = [0u8; 1500];
+        let (n, _from) = release_listener.recv_from(&mut release_buf).expect(
+            "the DHCPRELEASE must arrive at the server-identifier loopback alias -- if this \
+             times out, the RELEASE was sent to request_dest (the broadcast target) instead \
+             of unicast to the server",
+        );
+        let release = Message::decode(&mut Decoder::new(&release_buf[..n]))
+            .expect("must decode a well-formed DHCPRELEASE");
+        assert!(matches!(
+            release.opts().get(OptionCode::MessageType),
+            Some(DhcpOption::MessageType(MessageType::Release))
+        ));
+        assert_eq!(
+            release.ciaddr(),
+            Ipv4Addr::new(192, 168, 77, 5),
+            "the RELEASE's ciaddr must be the address the ACK actually granted"
+        );
+    }
+
+    #[test]
+    // Regression coverage for the bounded-DISCOVER-retransmission fix:
+    // collect_offers must retransmit exactly DISCOVER_RETRANSMITS times
+    // within one window, never more (an unbounded retry loop, or an
+    // off-by-one in the loop bound, is exactly the failure mode that
+    // constant's own doc comment exists to prevent). Proven by literally
+    // counting real DISCOVER datagrams a fake-server socket receives over
+    // one full (shortened, for test speed) window -- a regression that
+    // changes the real retransmit count changes what this test observes,
+    // it does not just move alongside a re-read of the same constant.
+    fn collect_offers_retransmits_the_bounded_number_of_times() {
+        let client_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let server_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let server_port = loopback_port(&server_socket);
+        let discover_dest = SocketAddrV4::new(Ipv4Addr::LOCALHOST, server_port);
+
+        let xid: u32 = 0x0BAD_F00D;
+        let chaddr = [0x02, 7, 7, 7, 7, 7];
+        // collect_offers takes `window` as a caller-supplied parameter
+        // specifically so callers -- including this test -- can shorten it;
+        // this test only cares how many DISCOVERs arrive, not the
+        // production 5s window's real-world timing.
+        let window = Duration::from_millis(300);
+
+        let (count_tx, count_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            // Never replies: collect_offers must keep retransmitting for
+            // the whole window regardless of whether an offer already came
+            // in (see the module doc comment: every offering server
+            // matters, not just the first) -- a silent server is what
+            // proves the retransmit count, rather than an early-exit-on
+            // -first-offer shortcut this test could otherwise be fooled by.
+            server_socket
+                .set_read_timeout(Some(window + Duration::from_millis(500)))
+                .expect("setting a read timeout must not fail");
+            let mut count = 0u32;
+            let mut buf = [0u8; 1500];
+            while let Ok((n, _from)) = server_socket.recv_from(&mut buf) {
+                if let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n]))
+                    && msg.xid() == xid
+                {
+                    count += 1;
+                }
+            }
+            let _ = count_tx.send(count);
+        });
+
+        let offers = collect_offers(&client_socket, xid, &chaddr, window, discover_dest)
+            .expect("collect_offers must not hard-fail against a live loopback socket");
+        assert!(
+            offers.is_empty(),
+            "a silent fake server must yield no offers"
+        );
+
+        let observed = count_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the fake server thread must report a retransmit count");
+        server_thread
+            .join()
+            .expect("fake server thread must not panic");
+
+        assert_eq!(
+            observed, DISCOVER_RETRANSMITS,
+            "collect_offers must retransmit exactly DISCOVER_RETRANSMITS times per window, \
+             no more (unbounded) and no fewer (under-retrying)"
+        );
+    }
+
+    #[test]
+    // Regression coverage for the OTHER half of the xid-chaining fix:
+    // run_probe_on_socket generates exactly one xid and passes the SAME
+    // value to both collect_offers and perform_client_dry_run (see that
+    // function's own doc comment on why this needs a test distinct from
+    // perform_client_dry_run_request_reuses_the_given_xid above -- that
+    // test only proves perform_client_dry_run forwards whatever xid it is
+    // individually given; it cannot catch a regression where
+    // run_probe_on_socket itself started generating two different xids and
+    // handing the wrong one to each call). Proven end-to-end: a single
+    // fake-server thread handles both the DISCOVER and the later REQUEST on
+    // one dispatching receive loop (not two sequential one-shot recv_from
+    // calls, since collect_offers always waits its full window before
+    // perform_client_dry_run's REQUEST follows), and reports both xids it
+    // actually saw on the wire back to this test.
+    fn run_probe_on_socket_reuses_one_xid_across_discover_and_request() {
+        let client_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let server_socket = bind_loopback(Ipv4Addr::LOCALHOST);
+        let server_port = loopback_port(&server_socket);
+        let server_ip = Ipv4Addr::new(127, 0, 0, 3);
+        let server_dest = SocketAddrV4::new(Ipv4Addr::LOCALHOST, server_port);
+
+        let (xid_tx, xid_rx) = mpsc::channel();
+        let server_thread = thread::spawn(move || {
+            server_socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .expect("setting a read timeout must not fail");
+            let mut buf = [0u8; 1500];
+            let mut discover_xid = None;
+
+            loop {
+                let (n, from) = server_socket
+                    .recv_from(&mut buf)
+                    .expect("must receive a DHCP message from run_probe_on_socket");
+                let Ok(msg) = Message::decode(&mut Decoder::new(&buf[..n])) else {
+                    continue;
+                };
+                match msg.opts().get(OptionCode::MessageType) {
+                    Some(DhcpOption::MessageType(MessageType::Discover)) => {
+                        discover_xid = Some(msg.xid());
+                        let mut offer = Message::new_with_id(
+                            msg.xid(),
+                            Ipv4Addr::UNSPECIFIED,
+                            Ipv4Addr::new(192, 168, 60, 20),
+                            Ipv4Addr::UNSPECIFIED,
+                            Ipv4Addr::UNSPECIFIED,
+                            msg.chaddr(),
+                        );
+                        offer
+                            .opts_mut()
+                            .insert(DhcpOption::MessageType(MessageType::Offer));
+                        offer
+                            .opts_mut()
+                            .insert(DhcpOption::ServerIdentifier(server_ip));
+                        let mut offer_buf = Vec::new();
+                        offer
+                            .encode(&mut Encoder::new(&mut offer_buf))
+                            .expect("a freshly-built OFFER must always encode");
+                        server_socket
+                            .send_to(&offer_buf, from)
+                            .expect("sending the OFFER back must not fail");
+                    }
+                    Some(DhcpOption::MessageType(MessageType::Request)) => {
+                        let discover_xid =
+                            discover_xid.expect("a REQUEST must not arrive before a DISCOVER");
+                        xid_tx
+                            .send((discover_xid, msg.xid()))
+                            .expect("test thread must still be listening");
+                        let mut ack = Message::new_with_id(
+                            msg.xid(),
+                            Ipv4Addr::UNSPECIFIED,
+                            Ipv4Addr::new(192, 168, 60, 20),
+                            Ipv4Addr::UNSPECIFIED,
+                            Ipv4Addr::UNSPECIFIED,
+                            msg.chaddr(),
+                        );
+                        ack.opts_mut()
+                            .insert(DhcpOption::MessageType(MessageType::Ack));
+                        ack.opts_mut()
+                            .insert(DhcpOption::ServerIdentifier(server_ip));
+                        let mut ack_buf = Vec::new();
+                        ack.encode(&mut Encoder::new(&mut ack_buf))
+                            .expect("a freshly-built ACK must always encode");
+                        server_socket
+                            .send_to(&ack_buf, from)
+                            .expect("sending the ACK back must not fail");
+                        return;
+                    }
+                    _ => continue,
+                }
+            }
+        });
+
+        // A short discover window keeps this test fast -- run_probe_on_socket
+        // takes it as a parameter for exactly this reason (see
+        // collect_offers' own doc comment).
+        let report = run_probe_on_socket(
+            &client_socket,
+            Duration::from_millis(300),
+            Duration::from_secs(2),
+            server_dest,
+        );
+
+        let (discover_xid, request_xid) = xid_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the fake server thread must report both xids it observed");
+        server_thread
+            .join()
+            .expect("fake server thread must not panic");
+
+        assert_eq!(
+            discover_xid, request_xid,
+            "run_probe_on_socket must reuse the SAME xid for the REQUEST that it used for the \
+             DISCOVER/OFFER exchange -- generating a second, independent xid at this level \
+             would make every real-server dry-run fail even though perform_client_dry_run \
+             itself correctly forwards whatever xid it is given"
+        );
+        assert!(
+            matches!(report.client, ClientOutcome::Passed { .. }),
+            "a matching xid/server-identifier ACK must be accepted as a passed dry-run, got {:?}",
+            report.client
+        );
     }
 }
