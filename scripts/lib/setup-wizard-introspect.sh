@@ -91,7 +91,6 @@ build_expect_prompt_block() {
     local setup_sh="$1" answers_file="$2"
     shift 2
     local -a replies=("$@")
-    local reply
     printf '%s\n' "${replies[@]}" > "$answers_file"
 
     local -a patterns=()
