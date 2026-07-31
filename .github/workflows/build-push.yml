@@ -4867,21 +4867,30 @@ jobs:
     # images. Build-tools receives an additional exact pushed-digest scan in the
     # build job because the multi-arch published image is produced there.
     #
-    # This bare `if:` (implicit `&& success()`) is deliberately NOT hardened
-    # with `!cancelled()` like promote/release/publish_coverage_badge, because
-    # the implicit success() only walks this job's transitive needs graph --
-    # here just `validate-compose`, a root job with no `if:`/`needs:` of its
-    # own, so it can never be legitimately *skipped* (only success/failure/
-    # cancelled). With no skippable upstream, the implicit-success() silent-skip
-    # trap that bit publish_coverage_badge (#677) and promote (#532) cannot fire
-    # here. INVARIANT: this holds ONLY while validate-compose stays a root job.
-    # If validate-compose ever gains an `if:` or a `needs:` on something that
-    # can skip, this bare condition would start silently skipping container-scan
-    # (and, transitively, weakening the build gate) -- switch it to
-    # `!cancelled() && needs['validate-compose'].result == 'success' && ...`
-    # then, matching the established fix pattern.
-    if: github.event_name != 'pull_request'
-    needs: validate-compose
+    # UPDATED (issue #1290): this used to be a bare `if:` relying on GitHub's
+    # implicit `&& success()`, which was safe only while `validate-compose`
+    # (the sole entry in `needs:`) stayed a root job that could never be
+    # skipped -- see the INVARIANT note this comment used to end on. Adding
+    # `determine-push-reuse-scope` to `needs:` below (so "Enable build-tools
+    # publish scan" can read its real, already-verified reuse decision
+    # instead of a hardcoded should-scan=true) breaks that invariant:
+    # determine-push-reuse-scope's own `if:` only fires on `push` to a branch
+    # ref, so it legitimately shows `skipped` on pull_request/schedule/
+    # workflow_dispatch/tag-push -- and implicit success() treats a skipped
+    # need exactly like a failed one, which would have silently skipped
+    # container-scan (and, transitively, weakened the build gate) on every
+    # one of those events. Hardened below to explicitly tolerate
+    # `determine-push-reuse-scope` showing either `success` or `skipped`,
+    # matching the same fail-safe idiom used for the four Rust jobs' own
+    # detect-changes dependency elsewhere in this file.
+    if: >-
+      ${{
+        always() &&
+        github.event_name != 'pull_request' &&
+        needs['validate-compose'].result == 'success' &&
+        (needs['determine-push-reuse-scope'].result == 'success' || needs['determine-push-reuse-scope'].result == 'skipped')
+      }}
+    needs: [validate-compose, determine-push-reuse-scope]
     # Job-level concurrency (#888): keyed per matrix row (service + platform)
     # and per ref. cancel-in-progress is pull_request-only -- see `build`'s
     # group comment for the full #979 rationale. On push, `build`'s `if:`
@@ -5048,13 +5057,47 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Enable build-tools publish scan
+        # UPDATED (issue #1290, maintainer decision): build-tools no longer
+        # unconditionally builds a local image just to scan it on every
+        # trusted-ref push. This reuses determine-push-reuse-scope's
+        # `reuse_build_tools` output -- the SAME already-verified three-part
+        # decision (channel image revision label + real git ancestry + a
+        # real content diff via scripts/classify-image-impact.sh; see that
+        # job and scripts/lib/push-reuse.sh) that build/build-arm64's own
+        # "Determine whether this service needs building" step trusts for
+        # the retag-vs-rebuild decision -- rather than a second, weaker,
+        # independently-computed check. Consuming the SAME decision here
+        # instead of recomputing a narrower one (e.g. just "did this push's
+        # own before..sha diff touch build-tools") matters concretely: a
+        # narrower check could say "unchanged" while the wider one correctly
+        # falls back to a real rebuild (channel image stale/unverifiable --
+        # the exact #808 failure shape push-reuse.sh's own header describes)
+        # -- if that ever happened with two independently-computed checks, a
+        # freshly rebuilt-and-published sha-* image could go completely
+        # unscanned this run (should-scan=false here scans the OLD channel
+        # image, see "Scan build-tools channel image with Trivy" further
+        # below, while should-build=true there publishes a genuinely new
+        # one). Sharing one decision makes that disagreement structurally
+        # impossible instead of merely unlikely.
+        # Fails safe to a full scan whenever determine-push-reuse-scope did
+        # not run or did not succeed (schedule/workflow_dispatch/tag-push,
+        # where its own `if:` never fires -- see this job's own `if:`
+        # comment above), matching this job's own hardened `if:`.
         id: build-tools-scan-changes
         if: matrix.service == 'build-tools'
+        env:
+          REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
+          REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
         run: |
           set -euo pipefail
 
-          should_scan=true
-          echo "::notice::build-tools scan remains enabled on trusted refs so publish coverage includes the sha-* source image, for both the amd64 and arm64 matrix rows."
+          if [ "$REUSE_JOB_RESULT" = "success" ] && [ "$REUSE_BUILD_TOOLS" = "true" ]; then
+            should_scan=false
+            echo "::notice::determine-push-reuse-scope confirmed build-tools is unchanged and safe to reuse this push; skipping the local rebuild and scanning the unchanged published channel image directly instead."
+          else
+            should_scan=true
+            echo "::notice::determine-push-reuse-scope result was '$REUSE_JOB_RESULT' (reuse_build_tools='$REUSE_BUILD_TOOLS'); build-tools scan stays enabled, scanning a freshly built local image."
+          fi
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
       - name: Compute Docker build parallelism
@@ -5506,6 +5549,74 @@ jobs:
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
           timeout: 10m
           exit-code: "1"
+
+      # Companion to "Enable build-tools publish scan" above (issue #1290):
+      # when build-tools is unchanged this run, no local image was built to
+      # scan, but the point of scanning at all is to catch a newly disclosed
+      # CVE in the already-published channel image -- skipping the scan
+      # entirely would defeat that, so this resolves the same channel image
+      # build/build-arm64's own "Retag unchanged service image" step (this
+      # file, the `build`/`build-arm64` jobs) would retag from, and scans
+      # THAT directly. No registry write happens here -- this job never
+      # gained `packages:` permissions and doesn't need them for a read-only
+      # scan.
+      - name: Resolve build-tools channel image for unchanged-scan retag
+        id: build-tools-channel-image
+        if: matrix.service == 'build-tools' && steps.build-tools-scan-changes.outputs.should-scan == 'false'
+        env:
+          CHANNEL_REF: ${{ github.ref_name }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/build-tools-channel.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          channel="$(resolve_build_tools_channel "$CHANNEL_REF")"
+          channel_image="ghcr.io/${{ github.repository }}/build-tools:${channel}"
+          # Scan by the immutable digest, never the mutable channel tag
+          # (AG-VAL-026): Trivy's own persistent result cache is keyed by
+          # image reference, not by digest, so scanning the mutable tag
+          # directly risks serving a stale cached result for whatever digest
+          # it pointed at the last time this cache dir was populated, not
+          # the digest actually published under that tag right now.
+          # Resolving to the exact digest first, and scanning that digest
+          # (not the tag), removes that ambiguity.
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$channel_image" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"
+          digest="${digest#\"}"
+          if [[ -z "$digest" || "$digest" == "null" ]]; then
+            echo "::error::Could not resolve a digest for $channel_image." >&2
+            exit 1
+          fi
+          image="ghcr.io/${{ github.repository }}/build-tools@${digest}"
+          echo "::notice::build-tools is unchanged on this push; scanning $image (resolved from the $channel channel tag) instead of rebuilding it."
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      # A multi-platform image-ref: Trivy/Docker resolve it to the runner's
+      # own native platform automatically (this job's amd64 row on the
+      # self-hosted pool, its arm64 row on the GitHub-hosted arm64 runner),
+      # exactly mirroring "Scan image with Trivy" above scanning its own
+      # single platform each -- no extra platform selection needed here.
+      - name: Scan build-tools channel image with Trivy (no rebuild)
+        if: matrix.service == 'build-tools' && steps.build-tools-scan-changes.outputs.should-scan == 'false'
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.build-tools-channel-image.outputs.image }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
+          timeout: 10m
+          exit-code: "1"
+
       - name: Remove ephemeral Trivy cache
         # Ephemeral dirs (dispatch/rerun/tag -- see the prepare step's own
         # comment) are cold-by-design and never read by any later run, so
@@ -5603,6 +5714,7 @@ jobs:
       reuse_dhcp: ${{ steps.decide.outputs.reuse_dhcp }}
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
+      reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
     steps:
       # fetch-depth: 0 (not the default shallow depth-1 clone) so
       # sif_is_ancestor_or_equal below can prove real git ancestry between a
@@ -5644,6 +5756,7 @@ jobs:
           DHCP_CHANGED: ${{ needs['detect-changes'].outputs.dhcp }}
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
+          BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
         run: |
           set -euo pipefail
 
@@ -5664,14 +5777,21 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # Schritt 4 allowlist (issue #1095): starting narrow -- ntp only --
+          # Schritt 4 allowlist (issue #1095): started narrow -- ntp only --
           # to prove the mechanism end-to-end with a real push before
-          # widening to the remaining services in this same PR (per the PR
-          # body's proof sequence), rather than staging this as several
-          # separate PRs (this is one shared job-matrix change, not
-          # independently splittable per service). Widen this array to bring
-          # in the remaining services; no other logic here changes.
-          allowlist=(ntp)
+          # widening to the remaining services (per the original PR body's
+          # proof sequence), rather than staging this as several separate
+          # PRs (this is one shared job-matrix change, not independently
+          # splittable per service). build-tools joins here too (issue
+          # #1290): its own separate, hand-rolled implementation of this
+          # exact same three-part verification (revision label + ancestry +
+          # real content diff) was built independently and in parallel with
+          # this job, before the two efforts were noticed to be duplicating
+          # each other -- reusing push_reuse_decide here instead of that
+          # parallel copy removes the duplication rather than merging it.
+          # Widen this array to bring in the remaining services; no other
+          # logic here changes.
+          allowlist=(ntp build-tools)
 
           is_allowlisted() {
             case " ${allowlist[*]} " in
@@ -5721,6 +5841,7 @@ jobs:
             printf 'reuse_dhcp=%s\n' "$(decide_one dhcp dhcp "$DHCP_CHANGED")"
             printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
             printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
+            printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
   build:
@@ -5891,6 +6012,7 @@ jobs:
           REUSE_DHCP_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dhcp_proxy }}
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
+          REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
         run: |
           set -euo pipefail
 
@@ -5917,13 +6039,6 @@ jobs:
             if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
-          elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
-            # Build-tools publishes the sha-* source image on every trusted ref
-            # so the promotion job always has a source image to move. Its own
-            # push-reuse mechanism is issue #1290's separate, in-progress
-            # scope -- deliberately not touched here (see this file's Schritt
-            # 4 job comment).
-            should_build=true
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # Schritt 4 (issue #1095): determine-push-reuse-scope already did
             # the real verification (channel image revision label + git
@@ -5933,7 +6048,13 @@ jobs:
             # unconditionally 'false' from that job (not allowlisted yet, or
             # this push's own before..sha diff already showed a real
             # change), so this case is a plain pass-through, not a second
-            # copy of that job's decision logic.
+            # copy of that job's decision logic. build-tools (issue #1290)
+            # is allowlisted here too -- it used to have its own dedicated
+            # `elif` branch with a hand-rolled copy of this exact same
+            # three-part verification, built independently and in parallel
+            # with this job before the duplication was noticed; folding it
+            # into the shared allowlist here removes that copy instead of
+            # keeping two implementations of the same check in sync by hand.
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
               dns) reuse="$REUSE_DNS" ;;
@@ -5942,6 +6063,7 @@ jobs:
               dhcp-proxy) reuse="$REUSE_DHCP_PROXY" ;;
               ntp) reuse="$REUSE_NTP" ;;
               ui) reuse="$REUSE_UI" ;;
+              build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
               *) reuse="false" ;;
             esac
             if [ "$reuse" = "true" ]; then
@@ -5976,7 +6098,7 @@ jobs:
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' ||
-            (github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false')
+            (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
           }}
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
@@ -5999,7 +6121,7 @@ jobs:
           ${{
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false')
+              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
             ) &&
             (
               github.event_name != 'pull_request' ||
@@ -6015,21 +6137,26 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Schritt 4 (issue #1095): mirrors issue #1290's "Retag unchanged
-      # build-tools image" step exactly, generalized to whichever service
-      # this matrix row is currently building -- determine-push-reuse-scope
-      # already did the real verification (channel image revision label +
-      # git ancestry + a real content diff; see that job and
-      # scripts/lib/push-reuse.sh), so this step only needs to resolve the
-      # same channel image's linux/amd64 child digest and retag it. No
-      # rebuild, no recompilation, and no separate Trivy scan needed here --
-      # unlike build-tools's own path, these 7 services do not yet get a
-      # scan-the-published-digest step (that provenance gap is Schritt 3,
-      # deliberately out of scope for this change); their container-scan
-      # rows already ran a full local scan of a freshly built image earlier
-      # in this exact run since container-scan is not (yet) push-scoped.
+      # Schritt 4 (issue #1095): generalized to whichever service this
+      # matrix row is currently building, including build-tools (issue
+      # #1290) -- determine-push-reuse-scope already did the real
+      # verification (channel image revision label + git ancestry + a real
+      # content diff; see that job and scripts/lib/push-reuse.sh), so this
+      # step only needs to resolve the same channel image's linux/amd64
+      # child digest and retag it. No rebuild, no recompilation needed here.
+      # No separate Trivy scan needed here either: for the other 7 services,
+      # container-scan is not (yet) push-scoped, so their rows already ran a
+      # full local scan of a freshly built image earlier in this exact run
+      # (that provenance gap -- scanning the actually-published digest
+      # rather than a separately-built local one -- is Schritt 3,
+      # deliberately out of scope for this change). For build-tools
+      # specifically, container-scan's own "Scan build-tools channel image
+      # with Trivy (no rebuild)" step already scanned this exact channel
+      # image directly this run, reading the SAME determine-push-reuse-scope
+      # decision this step does -- so build-tools's published digest is
+      # covered too, just via that job instead of a local build here.
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
-        if: github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false'
+        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
         env:
           CHANNEL_REF: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
@@ -6443,7 +6570,7 @@ jobs:
             always() &&
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false')
+              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
             )
           }}
         run: |
@@ -6744,6 +6871,7 @@ jobs:
           REUSE_DHCP_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dhcp_proxy }}
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
+          REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
         run: |
           set -euo pipefail
 
@@ -6770,17 +6898,18 @@ jobs:
             if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
-          elif [ "$MATRIX_SERVICE" = "build-tools" ]; then
-            should_build=true
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # Mirrors build's own (the amd64 leg) identical branch here --
-            # see that job's comment for the full Schritt 4/#1095 rationale.
-            # Both legs must agree on should-build for the same commit:
-            # build-arm64's own "Retag unchanged service image" step below
-            # only produces the linux/arm64 leg when this resolves to false,
-            # exactly mirroring what build produces for linux/amd64 -- both
-            # read the SAME determine-push-reuse-scope outputs, so they
-            # provably cannot disagree.
+            # see that job's comment for the full Schritt 4/#1095 rationale,
+            # including why build-tools (issue #1290) is folded into this
+            # same allowlisted case statement instead of keeping its own
+            # separate hand-rolled copy of the same verification. Both legs
+            # must agree on should-build for the same commit: build-arm64's
+            # own "Retag unchanged service image" step below only produces
+            # the linux/arm64 leg when this resolves to false, exactly
+            # mirroring what build produces for linux/amd64 -- both read the
+            # SAME determine-push-reuse-scope outputs, so they provably
+            # cannot disagree.
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
               dns) reuse="$REUSE_DNS" ;;
@@ -6789,6 +6918,7 @@ jobs:
               dhcp-proxy) reuse="$REUSE_DHCP_PROXY" ;;
               ntp) reuse="$REUSE_NTP" ;;
               ui) reuse="$REUSE_UI" ;;
+              build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
               *) reuse="false" ;;
             esac
             if [ "$reuse" = "true" ]; then
@@ -6827,7 +6957,7 @@ jobs:
         if: >-
           ${{
             steps.should-build.outputs.should-build == 'true' ||
-            (github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false')
+            (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
           }}
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
@@ -6841,7 +6971,7 @@ jobs:
           ${{
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false')
+              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
             ) &&
             (
               github.event_name != 'pull_request' ||
@@ -6863,7 +6993,7 @@ jobs:
       # jobs but resolve the same channel image and the same commit's short
       # SHA, so they always agree on which digest to retag.
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
-        if: github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false'
+        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
         env:
           CHANNEL_REF: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
@@ -7062,7 +7192,7 @@ jobs:
             always() &&
             (
               steps.should-build.outputs.should-build == 'true' ||
-              (github.event_name == 'push' && matrix.service != 'build-tools' && steps.should-build.outputs.should-build == 'false')
+              (github.event_name == 'push' && steps.should-build.outputs.should-build == 'false')
             )
           }}
         run: |
