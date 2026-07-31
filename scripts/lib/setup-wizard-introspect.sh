@@ -54,9 +54,20 @@ tcl_brace_quote() {
 # per real "PROMPT" line it reports, in order, on stdout (one pattern per
 # line, NOT wrapped in the outer {} an `expect_prompt {pattern} reply` call
 # needs -- callers add that). Each pattern reproduces ask()'s own literal
-# rendering ("$prompt [$default]: "), so it validates both the prompt text
-# AND the exact default value the wizard offers at that step -- strictly
-# stronger than a pattern that only matches the prompt text.
+# rendering, so it validates both the prompt text AND the exact default
+# value the wizard offers at that step -- strictly stronger than a pattern
+# that only matches the prompt text.
+#
+# `[^\n]*` (not a plain literal space) between the escaped prompt and the
+# opening bracket, mirroring the hand-written patterns this replaces (e.g.
+# "Directory[^\n]*\[", "Username[^\n]*\[admin\]"): ask()'s real printf format
+# is `"  ${BOLD}%s${RESET} [%s]: "` -- the ANSI RESET escape sequence lands
+# BETWEEN "$prompt" and the literal " [", so a pattern assuming the two are
+# directly adjacent never matches against real terminal output (confirmed by
+# a real `expect` timeout during end-to-end validation on lancache-240: the
+# introspection-derived pattern for "Server IP (Standard mode)" was correct
+# text but missing this gap, and hung waiting for a prompt that had, in
+# fact, already been printed).
 #
 # <setup_sh_path> is invoked via `bash`, not executed directly, so this
 # works whether or not the caller's checkout preserved the executable bit
@@ -67,7 +78,7 @@ wizard_prompt_patterns() {
 
     while IFS=$'\t' read -r tag prompt default; do
         [[ "$tag" = "PROMPT" ]] || continue
-        printf '%s \\[%s\\]\n' "$(escape_tcl_re "$prompt")" "$(escape_tcl_re "$default")"
+        printf '%s[^\\n]*\\[%s\\]\n' "$(escape_tcl_re "$prompt")" "$(escape_tcl_re "$default")"
     done < <(bash "$setup_sh" list-prompts "$answers_file")
 }
 
