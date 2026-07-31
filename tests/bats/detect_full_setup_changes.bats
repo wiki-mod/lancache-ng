@@ -125,6 +125,18 @@ val() {
     [ "$(val should_run)" = "true" ]
 }
 
+@test "F-16: any path under scripts/tracked/ is recognized as CI-tooling-only, even without an array entry" {
+    run_detect "scripts/tracked/some-newly-migrated-guard.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "false" ]
+}
+
+@test "F-16: scripts/untracked/ gets no special prefix handling and still fails closed to should_run true" {
+    run_detect "scripts/untracked/some-utility.sh"
+    [ "$(val scripts)" = "true" ]
+    [ "$(val should_run)" = "true" ]
+}
+
 @test "dhcp and dhcp-proxy flags are detected independently" {
     run_detect "services/dhcp/entrypoint.sh"
     [ "$(val dhcp)" = "true" ]

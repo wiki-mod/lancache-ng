@@ -120,6 +120,21 @@ touches_exact() {
 # list (a brand-new script, an unclassified one, or anything under
 # scripts/lib/) still counts as should_run-relevant, exactly as
 # touches_prefix "scripts/" did before this allowlist existed.
+#
+# scripts/tracked/ vs scripts/untracked/ (issue #1095 F-16, decided
+# 2026-07-31, not yet populated -- the directory-by-directory migration of
+# the scripts above out of this array and into scripts/tracked/ is deferred
+# until after the v0.3.0 release; "nothing happens before the release" is an
+# explicit maintainer instruction, not an oversight): once a script has been
+# individually re-verified and moved into scripts/tracked/, ANY path under
+# that prefix is recognized as CI-tooling-only below, same as an exact match
+# against the array -- this is the one deliberate, narrow exception to the
+# "never widen by directory/prefix" rule just above, because scripts/tracked/
+# is itself defined to contain only already-individually-verified scripts (the
+# verification happens at move time, not at check time). scripts/untracked/
+# (like scripts/lib/) is NOT given any special prefix handling -- it needs
+# none, since anything not matched below already falls through to
+# should_run-relevant by default, exactly like an unclassified script today.
 ci_tooling_only_scripts=(
     "scripts/check-action-node-versions.sh"
     "scripts/check-bats-path-filter-coverage.sh"
@@ -158,12 +173,16 @@ touches_scripts_beyond_ci_tooling_allowlist() {
     while IFS= read -r path; do
         [[ "$path" == "scripts/"* ]] || continue
         allowed=false
-        for known in "${ci_tooling_only_scripts[@]}"; do
-            if [[ "$path" == "$known" ]]; then
-                allowed=true
-                break
-            fi
-        done
+        if [[ "$path" == "scripts/tracked/"* ]]; then
+            allowed=true
+        else
+            for known in "${ci_tooling_only_scripts[@]}"; do
+                if [[ "$path" == "$known" ]]; then
+                    allowed=true
+                    break
+                fi
+            done
+        fi
         [[ "$allowed" == "false" ]] && return 0
     done < "$changed_files"
     return 1
