@@ -27,18 +27,19 @@ load_setup_quickstart_helpers() {
     # shellcheck source=/dev/null
     source "$helper_file"
 
-    # install_quickstart_compose_assets() reads these three globals (normally
-    # set once near the top of setup.sh from $SCRIPT_DIR). Point them at the
+    # install_quickstart_compose_assets() reads these globals (normally set
+    # once near the top of setup.sh from $SCRIPT_DIR). Point them at the
     # real repo files so tests exercise the actual shipped assets. shellcheck
     # can't see the read inside the separately-sourced $helper_file, so it
     # flags these as unused (SC2034) even though install_quickstart_compose_assets
-    # reads all three at runtime.
+    # reads both at runtime. DHCP_PROBE_SCRIPT is deliberately not set here
+    # any more (issue #1288 retired dhcp-probe.sh and the global along with
+    # it -- see setup.sh's own comment where that variable used to be
+    # declared).
     # shellcheck disable=SC2034
     QUICKSTART_COMPOSE="$repo_root/deploy/quickstart/docker-compose.yml"
     # shellcheck disable=SC2034
     DOCKER_SOCKET_PROXY_SCRIPT="$repo_root/scripts/docker-socket-proxy.sh"
-    # shellcheck disable=SC2034
-    DHCP_PROBE_SCRIPT="$repo_root/services/ui/dhcp-probe.sh"
     # shellcheck disable=SC2034
     SHARED_SECRET_BOOTSTRAP_SCRIPT="$repo_root/scripts/lib/shared-secret-bootstrap.sh"
 }

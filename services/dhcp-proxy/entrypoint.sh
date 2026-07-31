@@ -472,9 +472,9 @@ _dhcp_proxy_render_optional_directives() {
         # the directive the dnsmasq man page documents as working together
         # with ProxyDHCP mode ("it is possible, and useful, to configure
         # dnsmasq as both a PXE proxy-DHCP server and a DHCP relay"), and it
-        # is what the existing services/dhcp-probe.sh-adjacent PXE tooling
-        # expects. Server-name is left empty; only filename and (optionally)
-        # server-address are operator-configurable here.
+        # is what the existing PXE tooling (scripts/dhcp-proxy-pxe-simulation.sh,
+        # tools/pxe-client-probe) expects. Server-name is left empty; only
+        # filename and (optionally) server-address are operator-configurable here.
         printf 'dhcp-boot=%s,,%s\n' "$DHCP_PROXY_BOOT_FILENAME" "$DHCP_PROXY_BOOT_SERVER" >> "$dest_conf"
     elif [ -n "$DHCP_PROXY_BOOT_SERVER" ]; then
         echo "WARNING: DHCP_PROXY_BOOT_SERVER is set without DHCP_PROXY_BOOT_FILENAME; a boot server address alone is not meaningful to PXE clients, so no dhcp-boot line was rendered." >&2

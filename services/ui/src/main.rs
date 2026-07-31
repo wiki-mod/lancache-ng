@@ -784,6 +784,27 @@ fn init_tracing() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Alternate CLI mode (issue #1288): this same binary/image is also the
+    // `dhcp-probe` container's entrypoint (see deploy/*/docker-compose.yml,
+    // `["/usr/local/bin/lancache-ui", "--dhcp-probe"]`), replacing the
+    // former separate `dhcp-probe.sh` script. Intercepted before any of the
+    // real Admin UI server's config/tracing/AppState setup below because
+    // the dhcp-probe container deliberately runs with none of the Admin
+    // UI's own environment configured (no `environment:`/`env_file:` entry
+    // at all on that compose service) -- this mode must not depend on any
+    // of it. Runs the (blocking, socket-only) probe on its own thread via
+    // spawn_blocking rather than blocking this async runtime's worker
+    // thread directly, then exits 0 unconditionally: see
+    // dhcp_probe_native::run_probe's own comment on why every outcome,
+    // including an internal failure, must still exit 0 (issues
+    // #1155/#1156's one-shot update-health-gate contract).
+    if std::env::args().nth(1).as_deref() == Some("--dhcp-probe") {
+        tokio::task::spawn_blocking(lancache_ui::dhcp_probe_native::run_cli_and_print)
+            .await
+            .ok();
+        return Ok(());
+    }
+
     init_tracing();
 
     let mut cfg = match config::Config::from_env() {
