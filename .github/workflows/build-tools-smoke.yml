@@ -166,6 +166,13 @@ on:
       # pointed at the real repository tree" case), not a fixture -- the
       # same "the guard proves itself against today's real tree" property
       # called out for the other four-file group above.
+      # tools/runner-host/lancache-ci-docker-daemon-config.sh (#1255): its
+      # own tests/bats/lancache_ci_docker_daemon_config.bats fixture suite
+      # sources this script directly to exercise its daemon.json merge
+      # logic -- without this entry, a PR touching only this script would
+      # not already match any other path above and so would never run that
+      # suite.
+      - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
       - "services/dhcp/entrypoint.sh"
@@ -225,6 +232,13 @@ on:
       - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
       - ".github/actions/wait-validation-stack-health/action.yml"
+      # tools/runner-host/lancache-ci-docker-daemon-config.sh (#1255): its
+      # own tests/bats/lancache_ci_docker_daemon_config.bats fixture suite
+      # sources this script directly to exercise its daemon.json merge
+      # logic -- without this entry, a PR touching only this script would
+      # not already match any other path above and so would never run that
+      # suite.
+      - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
       - "services/dhcp/entrypoint.sh"
