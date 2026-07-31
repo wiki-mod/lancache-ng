@@ -334,12 +334,18 @@ RUN docker --version; \
     docker buildx version
 
 # isc-dhcp-client (dhclient) is needed by
-# scripts/dhcp-kea-lease-flow-simulation.sh (issue #448) to perform a real
+# scripts/dhcp-kea-lease-flow-simulation.sh (issue #448) and
+# scripts/syslog-forwarding-simulation.sh to perform a real
 # Discover/Offer/Request/Ack exchange against a Kea container on an isolated
-# Docker bridge network, then read the resulting lease file's options. This
-# is the same client binary services/ui/dhcp-probe.sh already uses for its
-# own (separate, host-interface) dry-run check -- reusing it here keeps the
-# project to one DHCP client implementation instead of two.
+# Docker bridge network, then read the resulting lease file's options.
+# STATUS (updated by issue #1288): the Admin UI's own dhcp-probe container
+# used to rely on this exact same binary for a separate, host-interface dry
+# run (services/ui/dhcp-probe.sh) -- that usage was replaced by a native
+# Rust DHCP client (services/ui/src/dhcp_probe_native.rs) with no dhclient
+# dependency at all, so `isc-dhcp-client` is kept in THIS image solely for
+# the two CI simulation scripts named above, which test Kea's own server
+# behavior in an isolated test network and are a genuinely separate concern
+# from the Admin UI's probe feature.
 #
 # tcpdump is needed by scripts/dhcp-proxy-pxe-simulation.sh (issue #705) to
 # reliably capture dnsmasq's real DHCPOFFER reply to the synthetic PXE

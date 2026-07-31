@@ -28,6 +28,15 @@
 # classify-image-impact.sh (source the shared booleans, keep should_run on top)
 # is a viable next step but revisits #715's deliberate decoupling, so it is
 # surfaced for maintainer review (#819) rather than done unilaterally here.
+# F-16 (#1095, 2026-07-31) note: should_run's ci_tooling_only_scripts
+# allowlist (added below) is this script's own addition -- classify-
+# image-impact.sh has no should_run concept and therefore no equivalent
+# allowlist to mirror. Narrowing should_run here does not create mirror
+# drift against classify-image-impact.sh's own `scripts`/`setup_runtime`
+# outputs, which stay untouched and blunt (see that script's own comments --
+# they only drive an informational ci_scope_policy notice, with no heavy-job
+# effect, so narrowing them would carry real collision risk against PR #1331
+# for zero CI-cost benefit).
 # Kept as a standalone script (not inline YAML) so
 # tests/bats/detect_full_setup_changes.bats can exercise the rules against
 # canned file lists without a runner.
@@ -85,6 +94,100 @@ touches_exact() {
     return 1
 }
 
+# F-16 (issue #1095, 2026-07-31): scripts/ has no subdirectory structure to
+# path-filter against, so before this allowlist existed ANY change under
+# scripts/ -- including a pure CI/governance-lint script with zero product or
+# stack dependency -- forced should_run=true below, running this suite's
+# entire ~15-job real Docker-Compose deep validation (DNS/DHCP/NATS/proxy
+# TLS/syslog/Admin UI). Confirmed for real against PR #1333 (changed only
+# AGENTS.md + scripts/check-pr-title-convention.sh): run 30616274721 ran the
+# full simulation suite end to end.
+#
+# Every script below was individually verified (not classified by name
+# pattern alone, per AG-WF-028) via a full-repo grep sweep -- every
+# .github/workflows/*.yml, every other scripts/** file, setup.sh, and every
+# services/**/Dockerfile -- to confirm it is invoked only from build-push.yml's
+# own PR-gate jobs, build-tools-smoke.yml, backfill-stack-latest.yml, or
+# orphaned-branches.yml, none of which are part of this suite's job graph, and
+# is never sourced/invoked/COPYed by anything
+# full-setup-deep-validate.yml/full-setup-sims.yml/full-setup-validate.yml (or
+# the simulation scripts they run) exercises. A change to one of these, and
+# ONLY these, does not need to re-run the deep suite.
+#
+# Fail-closed by construction: this list may only ever be used to NARROW
+# should_run for a script that has been individually re-verified this way --
+# never to widen it by directory/prefix. Any scripts/ path not in this exact
+# list (a brand-new script, an unclassified one, or anything under
+# scripts/lib/) still counts as should_run-relevant, exactly as
+# touches_prefix "scripts/" did before this allowlist existed.
+#
+# scripts/tracked/ vs scripts/untracked/ (issue #1095 F-16, decided
+# 2026-07-31, not yet populated -- the directory-by-directory migration of
+# the scripts above out of this array and into scripts/tracked/ is deferred
+# until after the v0.3.0 release; "nothing happens before the release" is an
+# explicit maintainer instruction, not an oversight): once a script has been
+# individually re-verified and moved into scripts/tracked/, ANY path under
+# that prefix is recognized as CI-tooling-only below, same as an exact match
+# against the array -- this is the one deliberate, narrow exception to the
+# "never widen by directory/prefix" rule just above, because scripts/tracked/
+# is itself defined to contain only already-individually-verified scripts (the
+# verification happens at move time, not at check time). scripts/untracked/
+# (like scripts/lib/) is NOT given any special prefix handling -- it needs
+# none, since anything not matched below already falls through to
+# should_run-relevant by default, exactly like an unclassified script today.
+ci_tooling_only_scripts=(
+    "scripts/check-action-node-versions.sh"
+    "scripts/check-bats-path-filter-coverage.sh"
+    "scripts/check-build-tools-smoke-coverage.sh"
+    "scripts/check-changelog-direct-edit.sh"
+    "scripts/check-compose-healthchecks.sh"
+    "scripts/check-executable-bits.sh"
+    "scripts/check-file-headers.sh"
+    "scripts/check-governance-guards.sh"
+    "scripts/check-idempotence-test-coverage.sh"
+    "scripts/check-language-policy.sh"
+    "scripts/check-line-endings.sh"
+    "scripts/check-logging-matrix.sh"
+    "scripts/check-mutable-refs.sh"
+    "scripts/check-naming-consistency.sh"
+    "scripts/check-orphaned-branches.sh"
+    "scripts/check-pr-title-convention.sh"
+    "scripts/check-pr-tracking-metadata.sh"
+    "scripts/check-setup-prompt-drift.sh"
+    "scripts/check-stable-external-images.sh"
+    "scripts/check-validation-subnet-wrapper-coverage.sh"
+    "scripts/check-vex-drift.sh"
+    "scripts/check-workflow-service-lists.sh"
+    "scripts/test-governance-guards.sh"
+    "scripts/validate-pr-template.sh"
+)
+
+# True when at least one changed path is under scripts/ AND that path is NOT
+# on the allowlist above. False when every scripts/-prefixed changed path is a
+# known-safe CI-tooling script, or when nothing under scripts/ changed at all
+# (mirrors touches_prefix's own "no match" semantics so the should_run clause
+# below reads as a drop-in narrowing of the old touches_prefix "scripts/"
+# check, not a different kind of condition).
+touches_scripts_beyond_ci_tooling_allowlist() {
+    local path allowed known
+    while IFS= read -r path; do
+        [[ "$path" == "scripts/"* ]] || continue
+        allowed=false
+        if [[ "$path" == "scripts/tracked/"* ]]; then
+            allowed=true
+        else
+            for known in "${ci_tooling_only_scripts[@]}"; do
+                if [[ "$path" == "$known" ]]; then
+                    allowed=true
+                    break
+                fi
+            done
+        fi
+        [[ "$allowed" == "false" ]] && return 0
+    done < "$changed_files"
+    return 1
+}
+
 # docs_only is true only when at least one file changed AND every changed
 # file is documentation (*.md or docs/**). An empty diff is NOT docs_only
 # (nothing to reason about), matching build-push.yml's own handling.
@@ -135,6 +238,15 @@ emit() {
     output_bool "ntp" touches_prefix "services/ntp/"
     output_bool "build_tools" touches_prefix "tools/build-tools/"
     output_bool "deploy" touches_prefix "deploy/"
+    # `scripts`/`setup_runtime` deliberately stay a blunt, unnarrowed
+    # touches_prefix "scripts/" here (unlike should_run's own scripts/ clause
+    # below, which the F-16 allowlist narrows) -- neither is declared as an
+    # output of full-setup-deep-validate.yml's `plan` job (confirmed: only
+    # should_run/image_tag/pr_staging_available/base_channel_tag/workflow/
+    # proxy/dns_image/watchdog/ui/build_tools/dhcp/dhcp_proxy/ntp are), so
+    # narrowing them would change nothing any consumer reads. They exist here
+    # only as a raw "did anything under scripts/ change at all" signal for
+    # anyone reading this script's own stdout/log output directly.
     output_bool "scripts" touches_prefix "scripts/"
 
     if touches_exact "setup.sh" || touches_prefix "scripts/"; then
@@ -168,7 +280,9 @@ emit() {
     # real end-to-end simulation could catch a regression in. A docs-only (or
     # empty) diff skips the expensive suite. Deliberately broad: #715 states
     # CI time is not the constraint, catching real runtime regressions
-    # automatically is.
+    # automatically is -- see the scripts/ clause below (F-16, #1095) for the
+    # one place this pass narrows that breadth, and why #715's own intent is
+    # preserved rather than overridden.
     if [[ "$docs_only" == "true" || "$any_changed" == "false" ]]; then
         printf 'should_run=false\n'
         return 0
@@ -178,9 +292,20 @@ emit() {
     # deep workflow file), because such a change can alter what the suite
     # itself does and should be exercised -- even though it does not force a
     # service rebuild in build-push.
+    #
+    # The scripts/ clause is intentionally narrower than a plain
+    # touches_prefix "scripts/" (F-16, #1095): #715's "driver scripts" intent
+    # was scripts the running stack actually exercises (the *-simulation.sh
+    # scripts, setup.sh's own helpers, etc.), not a pure CI/governance-lint
+    # script with zero stack dependency -- see
+    # touches_scripts_beyond_ci_tooling_allowlist's own header comment above
+    # for exactly which scripts were verified to fall in the latter bucket and
+    # how. This still fails closed: any scripts/ change NOT on that verified
+    # allowlist keeps firing should_run exactly as the old blanket prefix
+    # check did.
     if touches_prefix "services/" \
         || touches_prefix "deploy/" \
-        || touches_prefix "scripts/" \
+        || touches_scripts_beyond_ci_tooling_allowlist \
         || touches_prefix "tools/build-tools/" \
         || touches_prefix ".github/workflows/" \
         || touches_prefix ".github/actions/" \
