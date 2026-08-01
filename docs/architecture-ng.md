@@ -538,3 +538,5 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 5. syslog-ng
 6. Cache warmer
 7. Admin UI
+
+<!-- diagnostic marker, throwaway PR #1381, paths-ignore repro test -->
