@@ -6,6 +6,197 @@
 
 This file contains repository-wide agent rules. It applies to all paths in this repository, including `.github/**`, `setup.sh`, `deploy/**`, `config/**`, `scripts/**`, and `services/**`.
 
+## Rule Enforcement Matrix
+
+This matrix maps the hard rules defined below to how they are currently enforced. An entry marked "Known gap, not currently enforced" is not a failure of this governance — it is more informative than claiming coverage that does not exist. Over time, gaps may close as CI infrastructure or validation tooling matures.
+
+| Rule ID | Rule Name | Current Enforcement |
+|---------|-----------|-------------------|
+| AG-CC-002 | Chat/session/thinking language German, code language English | Manual review (session transcript / code review) |
+| AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | Manual review (repo inspection — no second domain file exists) |
+| AG-CI-001 | Runner baseline: assume no tools | Manual review (workflow inspection) |
+| AG-CI-002 | Runner tier routing | Manual review (runner labels inspection) |
+| AG-CI-003 | Runner portability (don't depend only on self-hosted) | Manual review (CI job inspection, documentation) |
+| AG-CI-004 | sccache configuration | Manual review (environment variable and secrets wiring) |
+| AG-CI-005 | distcc/pump configuration | Manual review (Dockerfile and PATH wiring) |
+| AG-CI-006 | Build parallelism (CARGO_BUILD_JOBS rule) | Manual review (hardcoded value detection) |
+| AG-CI-007 | Build acceleration wiring chain | Manual review (full chain inspection) |
+| AG-CI-008 | Dockerfile ARG defaults for tool images are not a real CI consumption path | Manual review (check for an actual --build-arg consumer before treating the default as a bug) |
+| AG-CI-009 | Build acceleration scope: sccache/distcc/Buildx cache are Dev/CI-only; production/setup/update stay pull-only | Manual review |
+| AG-CI-010 | Tool image rebuilds only when tools/build-tools or the build workflow changed; release tags always build tag-scoped image | Manual review |
+| AG-CI-011 | Release-adjacent jobs using build acceleration must document optional/preferred/hard-gate fallback behavior | Manual review |
+| AG-CI-012 | Branch-trigger completeness at branch creation/promotion, and every later branch-routing change, must be audited repo-wide and proven with a real executed run (not static validation alone); advisor/equivalent second check mandatory before reporting complete | Manual review |
+| AG-CI-013 | Flaky external CI operations (registry push/pull, Docker/BuildKit builds, network downloads) must use a documented retry wrapper matching `scripts/lib/ghcr-retry.sh`'s established pattern, not fail outright or use bespoke ad hoc retries | Manual review (workflow/script inspection) |
+| AG-CI-014 | A diagnosed CI/release-pipeline failure with a known, narrow fix must be fixed in the same pass, not merely recorded for a future pass to pick up, even if the affected step can only be exercised on a real production event | Manual review (issue/PR timeline inspection) |
+| AG-CI-015 | CI is one interlocking system (workflows, actions, scripts, their tests, and runner infra) treated as a single failure class, not independent files; CI behavior claims require real verification against actual runner infrastructure/API state, never static YAML review or a workflow's own reported status alone | Manual review |
+| AG-CI-016 | CI resource lifecycle: container-run CI steps must bound the in-container command with an unignorable kill-timeout (step `timeout-minutes` alone cannot reap a signal-deaf container); every job sets explicit `timeout-minutes`; every runner host runs a versioned, in-repo, scheduled cleanup that reaps stale containers/images/cache and re-measures disk; caches must be size-bounded; ad-hoc runner-host work dirs need an owner + location + cleanup policy | Manual review (workflow/script + runner-host inspection) |
+| AG-CI-017 | Concurrency on shared runner-host resources (esp. a Docker/BuildKit daemon + content store shared by several runner instances per host) must be bounded at the source (concurrency group / per-instance isolation / a cap), not absorbed by retries; a retry (Rule-Ref: AG-CI-013) is only a secondary net, and a recurrence after a retry-based fix proves a source-level concurrency defect. Root-causing this class requires direct runner-host access (SSH process/container inspection), not CI logs alone | Manual review (workflow/script + runner-host inspection) |
+| AG-CI-018 | A `schedule:`/cron trigger only fires from the workflow file's copy on the repository's *default* branch, never from a non-default branch's copy no matter how correct the YAML is; verify the file actually exists on the real default branch (not just the branch it was merged onto), and don't treat a `workflow_dispatch` test run as proof the schedule itself works | Manual review (compare workflow file presence across branches; confirm actual default branch setting) |
+| AG-CI-019 | Which branch supplies a GitHub automation's event depends on its trigger type (schedule = always default-branch; branch-scoped push/pull_request_target = that branch's own copy) — verify per-mechanism, don't assume either way; no CI/governance issue or PR may be closed until its change is confirmed live on master (current_dev state alone is not enough, no "open follow-up" exception); CI/governance PRs use `Refs #N`, never a closing keyword, so current-dev-auto-close.yml cannot prematurely close the issue; CI/governance file changes get a dedicated sync PR to master before their originating issue/PR closes | Manual review (check each automation's trigger type and evaluation semantics; periodic diff of current_dev vs master over CI/governance paths; closing-report check for explicit master-confirmation, not just current_dev; PR-body keyword check) |
+| AG-CI-020 | Any loop polling a GitHub Actions check/run status must sleep at least 5 minutes (300s) between polls, never single/double-digit seconds — this repo's CI runs in the minutes range at a minimum, so faster polling only burns wall-clock/API calls/token cost without ever observing a real state change sooner; prefer an event-based Monitor over polling at all where available, and never run two overlapping polling loops against the same PR | Manual review (spot-check any `sleep`-based polling loop's interval against actual CI job durations) |
+| AG-CODE-001 | Code must be human-readable/documented; comment liberally (WHY, not WHAT — see AG-CODE-002) | Manual review |
+| AG-CODE-002 | Comments document WHY | Manual review |
+| AG-CODE-003 | No task/PR refs in comments | Manual review |
+| AG-CODE-004 | Structured notes for deferred work | Manual review |
+| AG-CODE-005 | Remove TODO markers once implemented | Manual review + grep before finishing PR |
+| AG-CODE-006 | Code must stay human-readable | Manual review |
+| AG-CODE-007 | Structural/orientation step-comments allowed | Manual review |
+| AG-CODE-008 | Touching any part of a file requires checking the entire file for missing WHY-comments | Manual review |
+| AG-CODE-009 | A descriptive name/identifier alone is not a valid comment | Manual review |
+| AG-CODE-010 | Every `#[test]` function needs at least a short comment | Manual review |
+| AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
+| AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
+| AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
+| AG-DOC-004 | Precedence: area-specific AGENTS files (item 3) | Manual review |
+| AG-DOC-005 | Precedence: `SECURITY.md` (item 4) | Manual review |
+| AG-DOC-006 | Precedence: architecture/release documentation (item 5) | Manual review |
+| AG-DOC-007 | Precedence: `README.md`/user-facing docs (item 6) | Manual review |
+| AG-DOC-008 | Do not silently pick a side on a real conflict | Manual review |
+| AG-DOC-009 | Surface conflicts explicitly | Manual review |
+| AG-DOC-010 | Fix one side of a conflict or ask for guidance | Manual review |
+| AG-DOC-011 | Documented exceptions must follow the Scope/Reason/Tracking/Validation/Non-Expansion format | Manual review |
+| AG-FEAT-001 | Treat the Admin UI as an unfinished control plane | Manual review |
+| AG-FEAT-002 | Backend-only features not exposed in the Admin UI count as UI delivery debt by default | Manual review |
+| AG-FEAT-003 | Do not remove partially implemented features for being incomplete; finish and wire them correctly in the same pass, including within the PR currently in progress when reachable -- not deferred as a follow-up | Manual review |
+| AG-FEAT-004 | Prefer completing API-backed integrations (Kea, PowerDNS) over deleting the feature surface | Manual review |
+| AG-GH-001 | All GitHub content in English | Manual review (PR description language scan, commit message review) |
+| AG-GH-002 | Issue descriptions include links | Manual review |
+| AG-GH-003 | PRs reference tracking issue | Manual review |
+| AG-GH-004 | Closes vs Refs keywords | Manual review |
+| AG-GH-005 | Non-closing Refs for drafts | Manual review |
+| AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
+| AG-GH-007 | Project-facing text is English | Manual review |
+| AG-GH-008 | PRs carry issue's labels/Milestone/Project | CI-enforced (`pr-tracking-metadata-check` in build-push.yml, blocking on non-draft PRs); Project-board sub-check requires `PROJECT_AUTOMATION_PAT` (see enforcement notes) |
+| AG-GH-009 | Issues carry labels/Type/Milestone/Project-board/parent-sub-issue relationship | Manual review |
+| AG-GH-010 | PR body includes a changelog-style summary (change, impact, validation, risk, follow-up) | Manual review |
+| AG-GH-011 | Scaffold/partial-fix PRs must say so and use `Refs #123`, not `Fixes`/`Closes`, for the unresolved remainder | Manual review |
+| AG-GH-012 | Compare merge commit/current master against the original issue before claiming completion | Manual review |
+| AG-GH-013 | Actively maintain issues/PRs with comments as work happens, not only a one-time body; concrete 15-min-initial + every-15-min cadence, verified via a real time/date command | Manual review |
+| AG-GH-014 | Issues must carry enough detail to be independently actionable | Manual review |
+| AG-GH-015 | A narrowing follow-up issue must state explicitly whether it covers the original's full scope | Manual review |
+| AG-GH-016 | Diff acceptance criteria before closing an issue as resolved/superseded/duplicate | Manual review |
+| AG-GH-017 | Branches must be traceable via PR or linked issue comment at/near creation; check for existing coverage before starting new branch work | Manual review; automated guard tracked in #990 |
+| AG-GH-018 | PR titles follow the Conventional-Commit taxonomy (allowed types incl. `security`/scopes, pre-1.0 `!`/`BREAKING CHANGE:` bumps minor not major) | CI (`pr-title-convention-check`/`pr-title-convention-check-hosted` in build-push.yml); currently `PR_TITLE_LINT_MODE=warn` by default (maintainer decision, #850, 2026-07-23 — a transitional grace period, not a permanent downgrade: a warn finding is still a defect that must be fixed before merge, it just doesn't hard-block CI yet); set the `PR_TITLE_LINT_MODE` repository variable to `block` for full enforcement |
+| AG-HDR-001 | Every source/config file should open with the standard `lancache-ng (https://github.com/wiki-mod/lancache-ng)` header, in the comment syntax valid for that file's language | CI (`file-headers` job runs `scripts/check-file-headers.sh` in build-push.yml) |
+| AG-HDR-002 | Check what actually parses a `.conf`/`.json`/`.txt` file before adding a header; genuinely JSON content (e.g. the Kea config files) gets no header | CI (`scripts/check-file-headers.sh` exclusion list) |
+| AG-HDR-003 | Do not add a header to a file consumed as a single raw value by a strict parser (e.g. the root `VERSION` file) | CI (`scripts/check-file-headers.sh` exclusion list) |
+| AG-HDR-004 | Do not add a header to a vendored third-party file or a generated/compiled build artifact | CI (`scripts/check-file-headers.sh` exclusion list) |
+| AG-HDR-005 | Scale header detail to the file's actual complexity; do not pad a simple file's header | Manual review |
+| AG-HDR-006 | Every technical claim in a header must be verified against the actual file content and git history | Manual review |
+| AG-HDR-007 | Excluded file types/paths for headers (`.md`, root `.env`/`.env.example`, lockfiles, `.gitkeep`, `VERSION`, vendored/generated artifacts, JSON-as-`.conf`) | CI (`scripts/check-file-headers.sh`'s `is_excluded()` function) |
+| AG-HDR-008 | AGPL-3.0-or-later adopted (root `LICENSE` file); per-file SPDX headers are a separate, not-yet-decided follow-up | Manual review |
+| AG-HDR-009 | Repo-wide header backfill is complete; CI fails a PR missing a header on any non-excluded tracked file; add headers immediately for new files | CI (`file-headers` job in build-push.yml) |
+| AG-IPV6-001 | Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` | Manual review (documentation only; no CI check) |
+| AG-KD-002 | OpenSSL serial file (`ca.srl`) is stored alongside the CA certificate/key in the certs directory, not in `/tmp`, so it survives container restarts | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
+| AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | Manual review (`tools/build-tools/Dockerfile` inspection) |
+| AG-KD-004 | nginx instead of Squid: reads `Host`/`$ssl_server_name` directly rather than needing iptables DNAT + `SO_ORIGINAL_DST`, which a DNS-spoof scenario (no real DNAT) cannot provide | Code review (`services/proxy` architecture inspection) |
+| AG-KD-005 | Pre-generated per-domain wildcard certs, incl. the leading-dot-vs-bare-exact-host deeper-cert threshold, fixed placeholder CN, and SHA-256-hashed filenames for deeper entries | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
+| AG-KD-006 | `proxy_cache_lock on` (only one nginx worker fetches a cache-miss URL at a time) | Code review (nginx config inspection) |
+| AG-KD-007 | nginx installed from nginx.org's mainline apt repo (statically-compiled stream module, no `load_module` directive), not Debian's own `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
+| AG-KD-008 | No separate dev deployment profile — `deploy/prod/` is the only profile; do not reintroduce a parallel `deploy/dev/`/`config/dev/` pair | Manual review (repo inspection — no second deployment profile exists) |
+| AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
+| AG-OP-002 | DNS resolver points to real upstream DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | Code review (nginx resolver config inspection) |
+| AG-OP-003 | Lazy proxy default | Manual review + documentation |
+| AG-OP-004 | Strict behavior is opt-in | Manual review + documentation |
+| AG-OP-005 | Do not silently invert defaults | Manual review |
+| AG-OP-006 | Setup/update idempotence | `tests/bats/setup_update_idempotence.bats` (repeat-run fixture against `migrate_env_for_update`) + `scripts/setup-cli-simulation.sh` Phase 2b (real CLI run twice, live). Covers the `.env`-migration path; watchdog's restart-counter/status-write convergence is covered separately by `tests/bats/watchdog_idempotence.bats` (repeat-cycle fixture against `check_and_maybe_restart`/`write_status`). Kea/PDNS/NATS writers still rely on manual review — see #456/#640 follow-ups. |
+| AG-OP-007 | Setup/update convergence | `tests/bats/setup_update_idempotence.bats` (legacy-fixture convergence case) + `scripts/setup-cli-simulation.sh` Phase 2 (legacy `.env` through the real CLI). Same scope note as AG-OP-006. |
+| AG-OP-008 | Missing values rejected or generated | Manual review (code inspection) |
+| AG-OP-009 | Preserve existing local values | Manual review (code inspection) |
+| AG-OP-010 | Validate before restart/pull | Manual review (code inspection and test guidance) |
+| AG-OP-011 | Re-running update safe | `tests/bats/setup_update_idempotence.bats` + `scripts/setup-cli-simulation.sh` Phase 2b (second consecutive `setup.sh update`, no input change, asserts a byte-identical `.env` and unrotated secrets) |
+| AG-OP-012 | Do not use `proxy_cache_key $request_uri` | Code review (nginx config inspection) |
+| AG-OP-013 | Convergence/idempotence PRs answer the 5 questions | Manual review (PR body inspection) |
+| AG-OP-014 | DHCP NTP defaults/semantics are a project-wide policy decision, not a per-PR cleanup target | Manual review |
+| AG-OP-015 | Domain scope semantics: a leading-dot entry is an explicit wildcard scope, not equivalent to the root domain | Manual review |
+| AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
+| AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
+| AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
+| AG-REL-004 | Project language is Rust | Manual review |
+| AG-REL-005 | Retired 2026-07-10, merged into AG-REL-001 (was redundant) | N/A |
+| AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
+| AG-REL-007 | Retired 2026-07-10, merged into AG-REL-001 (was triplicative) | N/A |
+| AG-REL-008 | Rust service builders should consume a prebuilt build-tools image; ad-hoc local toolchain compilation needs a documented reason | Manual review (Dockerfile inspection) |
+| AG-REL-009 | Channel semantics: `latest`=stable from `master`, `nightly`=once-daily/on-demand green-gated build of `current_dev`'s tip (not republished on every push), release tags immutable | Manual review (documentation/workflow inspection) |
+| AG-REL-010 | Stack versioning, GHCR package/channel definitions, and release documentation must move together (`docs/release-versioning.md`, `release/stack-images.yml`, `scripts/validate-stack-images.sh`) | `scripts/validate-stack-images.sh` + manual review |
+| AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
+| AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
+| AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
+| AG-SEC-004 | Use GitHub Secrets/Variables | Manual review |
+| AG-SEC-005 | Do not hardcode Redis/distcc/runner IPs | Manual review (grep for hardcoded IPs) |
+| AG-SEC-006 | Remove sensitive data from branch | Manual review + process discipline |
+| AG-SEC-007 | Do not hardcode LAN IPs | Manual review (grep for hardcoded IPs) |
+| AG-SETUP-001 | Prod deployment requires two LAN IPs | Manual review (documentation only; no CI check for external LAN IP provisioning) |
+| AG-VAL-001 | Warnings are errors | CI (all build jobs fail on warnings) + manual review |
+| AG-VAL-002 | Standard failures are hard failures | CI (non-zero exit codes block merge) + manual review |
+| AG-VAL-003 | Quote search patterns | Manual review (shell command inspection) |
+| AG-VAL-004 | Do not hide failures with `\|\| true` | Manual review (fallback inspection) |
+| AG-VAL-005 | Use deterministic search (rg/grep) | Manual review |
+| AG-VAL-006 | Run narrowest relevant checks | Manual review (PR validation coverage) |
+| AG-VAL-007 | Shell validation (bash -n, shellcheck) | CI (shell workflow files: actionlint; shell scripts: shellcheck in build-tools) |
+| AG-VAL-008 | Rust validation (fmt, check, clippy, test) | CI (`build-tools` container runs cargo checks; PR checklist guidance) |
+| AG-VAL-009 | Docker/Compose validation | CI (`docker compose config` for Compose changes) + manual review |
+| AG-VAL-010 | Compose stack `.env` resolution behavior | Manual review (docs and test guidance) |
+| AG-VAL-011 | Workflow syntax and runner labels | CI (actionlint) + manual review |
+| AG-VAL-012 | Setup/update migration coverage | Manual review (fixture/dry-run documentation) |
+| AG-VAL-013 | DNS real response check | Manual review (`dig` commands required in test/verification guidance) |
+| AG-VAL-014 | Proxy/cache behavior check | Manual review (integration test guidance) |
+| AG-VAL-015 | Do not weaken checks for green | Manual review |
+| AG-VAL-016 | Build-tools container (only valid path) | Manual review (CI inspection, PR guidelines) |
+| AG-VAL-017 | Build-tools image tools/PATH | CI (`build-tools` image build and smoke-test) |
+| AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
+| AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
+| AG-VAL-021 | CodeQL #394 carve-out for findings in actually macro-*generated* code | Manual review (requires test-coverage evidence per rule text) |
+| AG-VAL-022 | CodeQL #394 carve-out for extraction warnings on ordinary macro *invocations* in human-authored source | Manual review |
+| AG-VAL-023 | Check a third-party tool's own docs for config options before assuming/building around observed default behavior | Manual review |
+| AG-VAL-024 | New scripts: prefer explicit-interpreter invocation over relying on the committed executable bit (unverifiable on Windows/`core.filemode=false`); `set -e` fail-closed branches need a real failing-input CI run, not manual reasoning | Manual review (PR diff inspection for invocation style; CI run inspection for fail-closed branch coverage) |
+| AG-VAL-025 | Local Docker builds proving build/cache performance must mirror CI acceleration wiring (BUILD_TOOLS_IMAGE, CARGO_BUILD_JOBS, BuildKit secrets) | Manual review |
+| AG-VAL-026 | Inside a blocking CI gate, never trust a mutable channel tag or a runner-local cached image as current — resolve to an immutable per-commit tag/digest and/or pull fresh immediately before the dependent check | Manual review (workflow/script inspection for tag-vs-digest resolution) |
+| AG-VAL-027 | Adding a new service requires wiring it into full-stack CI validation (or an explicit reasoned Scope-Boundaries exclusion) | Manual review (PR scope inspection). Partial mechanical aid: `scripts/check-workflow-service-lists.sh` keeps the duplicated service-list copies in sync once a service is in the build matrix, but does not enforce that a new service is added to the full-setup validation stack in the first place |
+| AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
+| AG-WF-002 | Separate worktree per PR | Manual review |
+| AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
+| AG-WF-004 | No direct master push | GitHub branch protection (`master` branch requires PR) |
+| AG-WF-005 | Do not merge without explicit ask | Manual review |
+| AG-WF-006 | Keep PRs in draft until ready | Manual review (PR draft status + CI sign-off) |
+| AG-WF-007 | Review findings must be fixed before resolve | Manual review |
+| AG-WF-008 | Fixed findings need factual reply | Manual review |
+| AG-WF-009 | Reply on unresolvable threads | Manual review |
+| AG-WF-010 | Read full context before acting | Manual review (finding quality inspection) |
+| AG-WF-011 | Treat findings as failure classes | Manual review |
+| AG-WF-012 | Verify GitHub API calls upload content | Manual review (GitHub object inspection) |
+| AG-WF-013 | Consider bigger picture; when fixing a problem, treat the whole file (connected/adjacent lines), not just the edited line, as the smallest unit of correctness | Manual review (scope and impact assessment; file-wide consistency check around any edited line) |
+| AG-WF-014 | No direct master push (redundant) | GitHub branch protection |
+| AG-WF-015 | User is not a programmer; agents decide independently | Manual review (decision log in PR) |
+| AG-WF-016 | Do not silently remove, narrow, or "simplify" any AGENTS.md content without maintainer consent; no rule number may be reused; reference existing rules via `Rule-Ref: <ID>`, never a bare repeated ID | Manual review (diff inspection for content removal/narrowing; grep for bare repeated rule IDs) |
+| AG-WF-017 | Agent-authored commits/comments/actions carry an identifying marker (`<PREFIX>-<timestamp>`, e.g. `CLD-`/`CDX-`/`CPT-`/`GEM-` per AI system) | Manual review (commit message / GitHub object inspection) |
+| AG-WF-018 | Search existing issues before filing a new one, even for topics that feel novel | Manual review (`gh issue list --search` before `gh issue create`) |
+| AG-WF-019 | Chain `cd "<path>" && pwd && <command>` in one invocation; never trust a bare `cd` to persist across tool calls | Manual review (command history inspection) |
+| AG-WF-020 | Fetch/rebase/verify before making readiness, mergeability, or integration-order statements | Manual review |
+| AG-WF-021 | Treat subagent results as stale until verified against current remote base and PR head | Manual review |
+| AG-WF-022 | Do not block on subagents when non-overlapping work is available; poll sparingly | Manual review |
+| AG-WF-023 | Agents must make technical decisions independently; ask only when there is real operational impact | Manual review (decision log in PR) |
+| AG-WF-024 | Sub-agents need their own verified-clean working directory; never trust inherited/recycled worktree state; any force-push variant requires immediate pre-action re-verification before proceeding; sub-agents must read+accept governance and report back by name; check back before destructive actions | Manual review |
+| AG-WF-025 | A second occurrence of the same failure class requires proposing a new/strengthened AGENTS.md rule (with maintainer review), not just fixing the instance again | Manual review |
+| AG-WF-026 | Substantive knowledge must be consolidated and durably persisted in the surviving target (issue/PR/branch/etc.) and verified before a lifecycle transition (close/merge/supersede/abandon/handoff); local-only state is never a durable target | Manual review (closing-report/consolidation-comment inspection) |
+| AG-WF-027 | Fix identified problems (new or previously reported) in the same pass instead of leaving them as an unfixed Follow-up/Scope-Boundaries note; scope out and flag explicitly only when a genuine maintainer decision is required | Manual review (PR body/Follow-up-section inspection) |
+| AG-WF-028 | No artifact (branch/commit/comment/file) may be declared dead/stale/unsalvageable/safe-to-delete based on aggregate diff size alone; the artifact's own unique contribution must be inspected first, regardless of proximity to active work; actual deletion still requires the maintainer's fresh explicit instruction | Manual review (diff-vs-unique-commit inspection before any dead/stale/delete characterization) |
+| AG-WF-029 | A maintainer's answer to a recommendation/preference question is not execution authorization; only the literal ACK/DISACK token counts, silence is never implicit consent; pending decisions must be recorded as a structured, formatted list in a GitHub issue/PR comment, not only stated in chat | Manual review (chat/session transcript inspection for a literal ACK before implementation commits; PR/issue comment inspection for structured decision lists) |
+| AG-WF-030 | Documentation can lag behind current code/governance decisions; do not treat it as automatically authoritative when it conflicts with current architecture or an agreed rule | Manual review |
+| AG-WF-031 | Prefer GraphQL (`gh api graphql`) over plain `gh issue`/`gh pr` comment/body-update commands for GitHub writes; read the result back immediately | Manual review |
+| AG-WF-032 | When sending Markdown through GraphQL string variables, upload raw file content via the CLI's file-upload mode, not pre-encoded JSON; read back and treat malformed artifacts (leading JSON quotes, escaped newlines, literal file paths) as failed writes | Manual review |
+
+**Known Gaps and Planned Improvements:**
+
+- **AG-DOC-001** (Documentation drift): No automated script yet checks whether docs match code. This is a manual review burden. A future CI job could parse documentation headers, extract key terms (e.g., "PowerDNS," "Admin UI authentication required," "console domains excluded from DNS"), and compare them against corresponding code values. Until then, the rule exists as guidance; enforcement is manual.
+
+- **AG-GH-001 and related language rules**: Enforced by human reviewers reading PRs, not by an automated language detector. An automated spell-checker or language-detection tool could help, but none is currently integrated.
+
+- **AG-GH-008**: Enforced by `scripts/check-pr-tracking-metadata.sh`, run as the `pr-tracking-metadata-check` job in `build-push.yml` and gating the `build`/`build-arm64` jobs on pull requests, the same way `pr-template-check` does. It reads labels and milestone directly from the pull-request webhook payload (no extra permissions needed) and fails a non-draft PR missing either. Runs inside the pinned build-tools container (per AG-VAL-016), same as `shellcheck`/`check-governance-guards.sh`, since the script depends on `python3` and `curl`, which must not be treated as guaranteed present on the runner host. The project-board sub-check additionally requires a `PROJECT_AUTOMATION_PAT` repository secret (a classic PAT with the `project` scope) because the default `GITHUB_TOKEN` cannot read or write Projects v2 data for an org-owned board; without that secret configured, the project-board sub-check is skipped with a warning rather than failing the job. This also happens unconditionally for pull requests from forked repositories: GitHub does not pass repository secrets (other than the read-only `GITHUB_TOKEN`) to `pull_request`-triggered runs from forks, so `GH_TOKEN` is empty there even once `PROJECT_AUTOMATION_PAT` is configured for same-repo PRs. The check is told which case it's in via a `PR_IS_FORK` flag computed by the workflow (comparing head/base repo full names) and warns with the correct explanation either way; labels and milestone, read from the webhook payload rather than a secret, are still fully enforced for fork PRs. This is treated as an accepted limitation rather than something to work around with `pull_request_target`: that trigger would need to apply to this entire monolithic workflow (`needs:`-based job gating only works within one workflow file, so the check can't move to a separate `pull_request_target` workflow without losing the ability to gate `build`/`build-arm64`), and `pull_request_target` combined with checking out and building fork-supplied code (as `build-push.yml`'s other jobs do) is a known secret-exfiltration risk this repo does not take. A maintainer must add fork PRs to the project board manually regardless, since external contributors cannot write to an org-owned Projects v2 board themselves. If a token IS configured but is rejected (HTTP 401/403) or the GraphQL response itself carries an `errors` array (expired/revoked/insufficient-scope token), the check fails the job instead of warning -- that is a configuration bug in the secret, not the documented absent-token gap, and warning there would silently disable the project-board gate for the exact misconfiguration case this enforcement exists to catch. `.github/workflows/add-to-project.yml` (using the same secret) and `.github/workflows/labeler.yml` (path-based auto-labeling, no secret needed) reduce how often labels/project placement need to be set by hand in the first place. Dependabot PRs used to be exempted from this whole check outright (`PR_AUTHOR == "dependabot[bot]"` short-circuited to an explicit pass, #1061-#1064) because Dependabot cannot set its own milestone or add itself to the project board; that exemption was removed (issue #1278) once it became clear labels and project-board placement were already handled for Dependabot PRs without it (GitHub's own dependency labels plus `labeler.yml`'s path-based labels; `add-to-project.yml`'s unconditional `pull_request_target` trigger), and a new "Auto-assign Dependabot PR milestone" step was added to `pr-tracking-metadata-check`/`-hosted` (using `PROJECT_AUTOMATION_PAT`, run before the live label/milestone re-fetch) to auto-assign milestone #11 ("LanCache-NG Roadmap") to a Dependabot PR that doesn't already have one -- the one real gap. Dependabot PRs now go through the exact same real check as everyone else. `add-to-project.yml`'s job is itself skipped outright (`if: secrets.PROJECT_AUTOMATION_PAT != ''`) rather than run-and-fail when that secret is absent, since `actions/add-to-project` errors immediately on a blank `github-token` input -- a hard failure on every new issue/PR before the secret exists, not the harmless no-op that file's header describes. The check requires a milestone unconditionally (it cannot cheaply determine whether the rule's "when one applies" exception genuinely applies to a given PR without an extra API call to inspect the referenced issue); every issue in this project has carried a milestone in practice so far, so this is stricter than the written rule but has not yet rejected a legitimately milestone-less PR. Revisit if that changes. `build-push.yml`'s `pull_request` trigger includes `labeled`/`unlabeled`/`milestoned`/`demilestoned`/`ready_for_review` in addition to the GitHub default `opened`/`synchronize`/`reopened`, so the check (and the rest of this monolithic workflow) reruns whenever metadata that feeds it actually changes, rather than showing a stale result until the next commit; this reruns the whole pipeline, not just this job, which is a deliberate cost/correctness tradeoff since labels/milestones change far less often than commits -- see the `on:` block's own comment in `build-push.yml`.
+
+- Several operational rules (AG-OP-*) and comment style rules (AG-CODE-*) rely entirely on manual code review. No linting tools currently enforce these at CI time.
+
 ## Language
 
 **[AG-GH-001]** All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**. (CLAUDE.md's `AG-GOV-002` retired 2026-07-30: merged here, an exact duplicate. Not reused per AG-WF-016.)
@@ -568,193 +759,3 @@ Every agent, on being spawned as a sub-agent (by another agent or by the main th
 
 This applies at every level of a spawn chain, not only to agents dispatched directly by the main thread—a sub-agent that itself spawns further sub-agents must apply this same protocol to each one, and must itself have already gone through it with its own parent.
 
-## Rule Enforcement Matrix
-
-This matrix maps the hard rules defined above to how they are currently enforced. An entry marked "Known gap, not currently enforced" is not a failure of this governance — it is more informative than claiming coverage that does not exist. Over time, gaps may close as CI infrastructure or validation tooling matures.
-
-| Rule ID | Rule Name | Current Enforcement |
-|---------|-----------|-------------------|
-| AG-CC-002 | Chat/session/thinking language German, code language English | Manual review (session transcript / code review) |
-| AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | Manual review (repo inspection — no second domain file exists) |
-| AG-CI-001 | Runner baseline: assume no tools | Manual review (workflow inspection) |
-| AG-CI-002 | Runner tier routing | Manual review (runner labels inspection) |
-| AG-CI-003 | Runner portability (don't depend only on self-hosted) | Manual review (CI job inspection, documentation) |
-| AG-CI-004 | sccache configuration | Manual review (environment variable and secrets wiring) |
-| AG-CI-005 | distcc/pump configuration | Manual review (Dockerfile and PATH wiring) |
-| AG-CI-006 | Build parallelism (CARGO_BUILD_JOBS rule) | Manual review (hardcoded value detection) |
-| AG-CI-007 | Build acceleration wiring chain | Manual review (full chain inspection) |
-| AG-CI-008 | Dockerfile ARG defaults for tool images are not a real CI consumption path | Manual review (check for an actual --build-arg consumer before treating the default as a bug) |
-| AG-CI-009 | Build acceleration scope: sccache/distcc/Buildx cache are Dev/CI-only; production/setup/update stay pull-only | Manual review |
-| AG-CI-010 | Tool image rebuilds only when tools/build-tools or the build workflow changed; release tags always build tag-scoped image | Manual review |
-| AG-CI-011 | Release-adjacent jobs using build acceleration must document optional/preferred/hard-gate fallback behavior | Manual review |
-| AG-CI-012 | Branch-trigger completeness at branch creation/promotion, and every later branch-routing change, must be audited repo-wide and proven with a real executed run (not static validation alone); advisor/equivalent second check mandatory before reporting complete | Manual review |
-| AG-CI-013 | Flaky external CI operations (registry push/pull, Docker/BuildKit builds, network downloads) must use a documented retry wrapper matching `scripts/lib/ghcr-retry.sh`'s established pattern, not fail outright or use bespoke ad hoc retries | Manual review (workflow/script inspection) |
-| AG-CI-014 | A diagnosed CI/release-pipeline failure with a known, narrow fix must be fixed in the same pass, not merely recorded for a future pass to pick up, even if the affected step can only be exercised on a real production event | Manual review (issue/PR timeline inspection) |
-| AG-CI-015 | CI is one interlocking system (workflows, actions, scripts, their tests, and runner infra) treated as a single failure class, not independent files; CI behavior claims require real verification against actual runner infrastructure/API state, never static YAML review or a workflow's own reported status alone | Manual review |
-| AG-CI-016 | CI resource lifecycle: container-run CI steps must bound the in-container command with an unignorable kill-timeout (step `timeout-minutes` alone cannot reap a signal-deaf container); every job sets explicit `timeout-minutes`; every runner host runs a versioned, in-repo, scheduled cleanup that reaps stale containers/images/cache and re-measures disk; caches must be size-bounded; ad-hoc runner-host work dirs need an owner + location + cleanup policy | Manual review (workflow/script + runner-host inspection) |
-| AG-CI-017 | Concurrency on shared runner-host resources (esp. a Docker/BuildKit daemon + content store shared by several runner instances per host) must be bounded at the source (concurrency group / per-instance isolation / a cap), not absorbed by retries; a retry (Rule-Ref: AG-CI-013) is only a secondary net, and a recurrence after a retry-based fix proves a source-level concurrency defect. Root-causing this class requires direct runner-host access (SSH process/container inspection), not CI logs alone | Manual review (workflow/script + runner-host inspection) |
-| AG-CI-018 | A `schedule:`/cron trigger only fires from the workflow file's copy on the repository's *default* branch, never from a non-default branch's copy no matter how correct the YAML is; verify the file actually exists on the real default branch (not just the branch it was merged onto), and don't treat a `workflow_dispatch` test run as proof the schedule itself works | Manual review (compare workflow file presence across branches; confirm actual default branch setting) |
-| AG-CI-019 | Which branch supplies a GitHub automation's event depends on its trigger type (schedule = always default-branch; branch-scoped push/pull_request_target = that branch's own copy) — verify per-mechanism, don't assume either way; no CI/governance issue or PR may be closed until its change is confirmed live on master (current_dev state alone is not enough, no "open follow-up" exception); CI/governance PRs use `Refs #N`, never a closing keyword, so current-dev-auto-close.yml cannot prematurely close the issue; CI/governance file changes get a dedicated sync PR to master before their originating issue/PR closes | Manual review (check each automation's trigger type and evaluation semantics; periodic diff of current_dev vs master over CI/governance paths; closing-report check for explicit master-confirmation, not just current_dev; PR-body keyword check) |
-| AG-CI-020 | Any loop polling a GitHub Actions check/run status must sleep at least 5 minutes (300s) between polls, never single/double-digit seconds — this repo's CI runs in the minutes range at a minimum, so faster polling only burns wall-clock/API calls/token cost without ever observing a real state change sooner; prefer an event-based Monitor over polling at all where available, and never run two overlapping polling loops against the same PR | Manual review (spot-check any `sleep`-based polling loop's interval against actual CI job durations) |
-| AG-CODE-001 | Code must be human-readable/documented; comment liberally (WHY, not WHAT — see AG-CODE-002) | Manual review |
-| AG-CODE-002 | Comments document WHY | Manual review |
-| AG-CODE-003 | No task/PR refs in comments | Manual review |
-| AG-CODE-004 | Structured notes for deferred work | Manual review |
-| AG-CODE-005 | Remove TODO markers once implemented | Manual review + grep before finishing PR |
-| AG-CODE-006 | Code must stay human-readable | Manual review |
-| AG-CODE-007 | Structural/orientation step-comments allowed | Manual review |
-| AG-CODE-008 | Touching any part of a file requires checking the entire file for missing WHY-comments | Manual review |
-| AG-CODE-009 | A descriptive name/identifier alone is not a valid comment | Manual review |
-| AG-CODE-010 | Every `#[test]` function needs at least a short comment | Manual review |
-| AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
-| AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
-| AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
-| AG-DOC-004 | Precedence: area-specific AGENTS files (item 3) | Manual review |
-| AG-DOC-005 | Precedence: `SECURITY.md` (item 4) | Manual review |
-| AG-DOC-006 | Precedence: architecture/release documentation (item 5) | Manual review |
-| AG-DOC-007 | Precedence: `README.md`/user-facing docs (item 6) | Manual review |
-| AG-DOC-008 | Do not silently pick a side on a real conflict | Manual review |
-| AG-DOC-009 | Surface conflicts explicitly | Manual review |
-| AG-DOC-010 | Fix one side of a conflict or ask for guidance | Manual review |
-| AG-DOC-011 | Documented exceptions must follow the Scope/Reason/Tracking/Validation/Non-Expansion format | Manual review |
-| AG-FEAT-001 | Treat the Admin UI as an unfinished control plane | Manual review |
-| AG-FEAT-002 | Backend-only features not exposed in the Admin UI count as UI delivery debt by default | Manual review |
-| AG-FEAT-003 | Do not remove partially implemented features for being incomplete; finish and wire them correctly in the same pass, including within the PR currently in progress when reachable -- not deferred as a follow-up | Manual review |
-| AG-FEAT-004 | Prefer completing API-backed integrations (Kea, PowerDNS) over deleting the feature surface | Manual review |
-| AG-GH-001 | All GitHub content in English | Manual review (PR description language scan, commit message review) |
-| AG-GH-002 | Issue descriptions include links | Manual review |
-| AG-GH-003 | PRs reference tracking issue | Manual review |
-| AG-GH-004 | Closes vs Refs keywords | Manual review |
-| AG-GH-005 | Non-closing Refs for drafts | Manual review |
-| AG-GH-006 | Issue/PR links in GitHub not chat | Manual review |
-| AG-GH-007 | Project-facing text is English | Manual review |
-| AG-GH-008 | PRs carry issue's labels/Milestone/Project | CI-enforced (`pr-tracking-metadata-check` in build-push.yml, blocking on non-draft PRs); Project-board sub-check requires `PROJECT_AUTOMATION_PAT` (see enforcement notes) |
-| AG-GH-009 | Issues carry labels/Type/Milestone/Project-board/parent-sub-issue relationship | Manual review |
-| AG-GH-010 | PR body includes a changelog-style summary (change, impact, validation, risk, follow-up) | Manual review |
-| AG-GH-011 | Scaffold/partial-fix PRs must say so and use `Refs #123`, not `Fixes`/`Closes`, for the unresolved remainder | Manual review |
-| AG-GH-012 | Compare merge commit/current master against the original issue before claiming completion | Manual review |
-| AG-GH-013 | Actively maintain issues/PRs with comments as work happens, not only a one-time body; concrete 15-min-initial + every-15-min cadence, verified via a real time/date command | Manual review |
-| AG-GH-014 | Issues must carry enough detail to be independently actionable | Manual review |
-| AG-GH-015 | A narrowing follow-up issue must state explicitly whether it covers the original's full scope | Manual review |
-| AG-GH-016 | Diff acceptance criteria before closing an issue as resolved/superseded/duplicate | Manual review |
-| AG-GH-017 | Branches must be traceable via PR or linked issue comment at/near creation; check for existing coverage before starting new branch work | Manual review; automated guard tracked in #990 |
-| AG-GH-018 | PR titles follow the Conventional-Commit taxonomy (allowed types incl. `security`/scopes, pre-1.0 `!`/`BREAKING CHANGE:` bumps minor not major) | CI (`pr-title-convention-check`/`pr-title-convention-check-hosted` in build-push.yml); currently `PR_TITLE_LINT_MODE=warn` by default (maintainer decision, #850, 2026-07-23 — a transitional grace period, not a permanent downgrade: a warn finding is still a defect that must be fixed before merge, it just doesn't hard-block CI yet); set the `PR_TITLE_LINT_MODE` repository variable to `block` for full enforcement |
-| AG-HDR-001 | Every source/config file should open with the standard `lancache-ng (https://github.com/wiki-mod/lancache-ng)` header, in the comment syntax valid for that file's language | CI (`file-headers` job runs `scripts/check-file-headers.sh` in build-push.yml) |
-| AG-HDR-002 | Check what actually parses a `.conf`/`.json`/`.txt` file before adding a header; genuinely JSON content (e.g. the Kea config files) gets no header | CI (`scripts/check-file-headers.sh` exclusion list) |
-| AG-HDR-003 | Do not add a header to a file consumed as a single raw value by a strict parser (e.g. the root `VERSION` file) | CI (`scripts/check-file-headers.sh` exclusion list) |
-| AG-HDR-004 | Do not add a header to a vendored third-party file or a generated/compiled build artifact | CI (`scripts/check-file-headers.sh` exclusion list) |
-| AG-HDR-005 | Scale header detail to the file's actual complexity; do not pad a simple file's header | Manual review |
-| AG-HDR-006 | Every technical claim in a header must be verified against the actual file content and git history | Manual review |
-| AG-HDR-007 | Excluded file types/paths for headers (`.md`, root `.env`/`.env.example`, lockfiles, `.gitkeep`, `VERSION`, vendored/generated artifacts, JSON-as-`.conf`) | CI (`scripts/check-file-headers.sh`'s `is_excluded()` function) |
-| AG-HDR-008 | AGPL-3.0-or-later adopted (root `LICENSE` file); per-file SPDX headers are a separate, not-yet-decided follow-up | Manual review |
-| AG-HDR-009 | Repo-wide header backfill is complete; CI fails a PR missing a header on any non-excluded tracked file; add headers immediately for new files | CI (`file-headers` job in build-push.yml) |
-| AG-IPV6-001 | Production Docker daemon needs `"ipv6": true` in `/etc/docker/daemon.json` | Manual review (documentation only; no CI check) |
-| AG-KD-002 | OpenSSL serial file (`ca.srl`) is stored alongside the CA certificate/key in the certs directory, not in `/tmp`, so it survives container restarts | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
-| AG-KD-003 | build-tools CI tools: prebuilt binary by default; source-build (actionlint, Docker CLI, docker-compose) only for a documented, re-justified concrete reason | Manual review (`tools/build-tools/Dockerfile` inspection) |
-| AG-KD-004 | nginx instead of Squid: reads `Host`/`$ssl_server_name` directly rather than needing iptables DNAT + `SO_ORIGINAL_DST`, which a DNS-spoof scenario (no real DNAT) cannot provide | Code review (`services/proxy` architecture inspection) |
-| AG-KD-005 | Pre-generated per-domain wildcard certs, incl. the leading-dot-vs-bare-exact-host deeper-cert threshold, fixed placeholder CN, and SHA-256-hashed filenames for deeper entries | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
-| AG-KD-006 | `proxy_cache_lock on` (only one nginx worker fetches a cache-miss URL at a time) | Code review (nginx config inspection) |
-| AG-KD-007 | nginx installed from nginx.org's mainline apt repo (statically-compiled stream module, no `load_module` directive), not Debian's own `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
-| AG-KD-008 | No separate dev deployment profile — `deploy/prod/` is the only profile; do not reintroduce a parallel `deploy/dev/`/`config/dev/` pair | Manual review (repo inspection — no second deployment profile exists) |
-| AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
-| AG-OP-002 | DNS resolver points to real upstream DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | Code review (nginx resolver config inspection) |
-| AG-OP-003 | Lazy proxy default | Manual review + documentation |
-| AG-OP-004 | Strict behavior is opt-in | Manual review + documentation |
-| AG-OP-005 | Do not silently invert defaults | Manual review |
-| AG-OP-006 | Setup/update idempotence | `tests/bats/setup_update_idempotence.bats` (repeat-run fixture against `migrate_env_for_update`) + `scripts/setup-cli-simulation.sh` Phase 2b (real CLI run twice, live). Covers the `.env`-migration path; watchdog's restart-counter/status-write convergence is covered separately by `tests/bats/watchdog_idempotence.bats` (repeat-cycle fixture against `check_and_maybe_restart`/`write_status`). Kea/PDNS/NATS writers still rely on manual review — see #456/#640 follow-ups. |
-| AG-OP-007 | Setup/update convergence | `tests/bats/setup_update_idempotence.bats` (legacy-fixture convergence case) + `scripts/setup-cli-simulation.sh` Phase 2 (legacy `.env` through the real CLI). Same scope note as AG-OP-006. |
-| AG-OP-008 | Missing values rejected or generated | Manual review (code inspection) |
-| AG-OP-009 | Preserve existing local values | Manual review (code inspection) |
-| AG-OP-010 | Validate before restart/pull | Manual review (code inspection and test guidance) |
-| AG-OP-011 | Re-running update safe | `tests/bats/setup_update_idempotence.bats` + `scripts/setup-cli-simulation.sh` Phase 2b (second consecutive `setup.sh update`, no input change, asserts a byte-identical `.env` and unrotated secrets) |
-| AG-OP-012 | Do not use `proxy_cache_key $request_uri` | Code review (nginx config inspection) |
-| AG-OP-013 | Convergence/idempotence PRs answer the 5 questions | Manual review (PR body inspection) |
-| AG-OP-014 | DHCP NTP defaults/semantics are a project-wide policy decision, not a per-PR cleanup target | Manual review |
-| AG-OP-015 | Domain scope semantics: a leading-dot entry is an explicit wildcard scope, not equivalent to the root domain | Manual review |
-| AG-REL-001 | No new languages without approval, examples, one-off command exception, test-tooling disclosure | Manual review (new file type / import detection) |
-| AG-REL-002 | Service builders consume the prebuilt build-tools image via BUILD_TOOLS_IMAGE | Manual review (Dockerfile inspection) |
-| AG-REL-003 | TLS in Rust uses rustls, not openssl-sys | Manual review (dependency choice in `Cargo.toml`). **Known gap**: CI runs `cargo-audit` for the DNS and UI crates, but that only scans for known CVEs in already-present dependencies — it does not detect or block adding `openssl-sys` itself. No dependency-ban tooling (e.g. `cargo-deny`) is configured. |
-| AG-REL-004 | Project language is Rust | Manual review |
-| AG-REL-005 | Retired 2026-07-10, merged into AG-REL-001 (was redundant) | N/A |
-| AG-REL-006 | Shell uses Bash by default | Manual review (shebang and syntax inspection) |
-| AG-REL-007 | Retired 2026-07-10, merged into AG-REL-001 (was triplicative) | N/A |
-| AG-REL-008 | Rust service builders should consume a prebuilt build-tools image; ad-hoc local toolchain compilation needs a documented reason | Manual review (Dockerfile inspection) |
-| AG-REL-009 | Channel semantics: `latest`=stable from `master`, `nightly`=once-daily/on-demand green-gated build of `current_dev`'s tip (not republished on every push), release tags immutable | Manual review (documentation/workflow inspection) |
-| AG-REL-010 | Stack versioning, GHCR package/channel definitions, and release documentation must move together (`docs/release-versioning.md`, `release/stack-images.yml`, `scripts/validate-stack-images.sh`) | `scripts/validate-stack-images.sh` + manual review |
-| AG-SEC-001 | Admin-UI auth gate behavior | Manual review (documentation and code inspection) |
-| AG-SEC-002 | Placeholders rejected at startup | Manual review (code inspection of `entrypoint.sh` reject paths, e.g. `services/dns/entrypoint.sh`, `services/dhcp/entrypoint.sh`). **Known gap**: no CI job was found that actually starts a service with a `CHANGE_ME_*` placeholder and asserts it fails closed — CI does start the full stack with `ALLOW_INSECURE_UI=true` (an unrelated auth-gate flag, not a placeholder check), which is not the same coverage. |
-| AG-SEC-003 | Never commit credentials | **Known gap, not currently enforced by CI** — no secret-scanning job (e.g. truffleHog, gitleaks) exists in `.github/workflows/` today, and the repo's `.gitignore` does not list `ca.key` or `*.env.local` specifically. Enforcement is manual review only. |
-| AG-SEC-004 | Use GitHub Secrets/Variables | Manual review |
-| AG-SEC-005 | Do not hardcode Redis/distcc/runner IPs | Manual review (grep for hardcoded IPs) |
-| AG-SEC-006 | Remove sensitive data from branch | Manual review + process discipline |
-| AG-SEC-007 | Do not hardcode LAN IPs | Manual review (grep for hardcoded IPs) |
-| AG-SETUP-001 | Prod deployment requires two LAN IPs | Manual review (documentation only; no CI check for external LAN IP provisioning) |
-| AG-VAL-001 | Warnings are errors | CI (all build jobs fail on warnings) + manual review |
-| AG-VAL-002 | Standard failures are hard failures | CI (non-zero exit codes block merge) + manual review |
-| AG-VAL-003 | Quote search patterns | Manual review (shell command inspection) |
-| AG-VAL-004 | Do not hide failures with `\|\| true` | Manual review (fallback inspection) |
-| AG-VAL-005 | Use deterministic search (rg/grep) | Manual review |
-| AG-VAL-006 | Run narrowest relevant checks | Manual review (PR validation coverage) |
-| AG-VAL-007 | Shell validation (bash -n, shellcheck) | CI (shell workflow files: actionlint; shell scripts: shellcheck in build-tools) |
-| AG-VAL-008 | Rust validation (fmt, check, clippy, test) | CI (`build-tools` container runs cargo checks; PR checklist guidance) |
-| AG-VAL-009 | Docker/Compose validation | CI (`docker compose config` for Compose changes) + manual review |
-| AG-VAL-010 | Compose stack `.env` resolution behavior | Manual review (docs and test guidance) |
-| AG-VAL-011 | Workflow syntax and runner labels | CI (actionlint) + manual review |
-| AG-VAL-012 | Setup/update migration coverage | Manual review (fixture/dry-run documentation) |
-| AG-VAL-013 | DNS real response check | Manual review (`dig` commands required in test/verification guidance) |
-| AG-VAL-014 | Proxy/cache behavior check | Manual review (integration test guidance) |
-| AG-VAL-015 | Do not weaken checks for green | Manual review |
-| AG-VAL-016 | Build-tools container (only valid path) | Manual review (CI inspection, PR guidelines) |
-| AG-VAL-017 | Build-tools image tools/PATH | CI (`build-tools` image build and smoke-test) |
-| AG-VAL-018 | DNS health checks use real probes | Manual review + documentation |
-| AG-VAL-019 | `ping` alone insufficient for DNS | Manual review + documentation |
-| AG-VAL-020 | `ss` alone insufficient for DNS | Manual review + documentation |
-| AG-VAL-021 | CodeQL #394 carve-out for findings in actually macro-*generated* code | Manual review (requires test-coverage evidence per rule text) |
-| AG-VAL-022 | CodeQL #394 carve-out for extraction warnings on ordinary macro *invocations* in human-authored source | Manual review |
-| AG-VAL-023 | Check a third-party tool's own docs for config options before assuming/building around observed default behavior | Manual review |
-| AG-VAL-024 | New scripts: prefer explicit-interpreter invocation over relying on the committed executable bit (unverifiable on Windows/`core.filemode=false`); `set -e` fail-closed branches need a real failing-input CI run, not manual reasoning | Manual review (PR diff inspection for invocation style; CI run inspection for fail-closed branch coverage) |
-| AG-VAL-025 | Local Docker builds proving build/cache performance must mirror CI acceleration wiring (BUILD_TOOLS_IMAGE, CARGO_BUILD_JOBS, BuildKit secrets) | Manual review |
-| AG-VAL-026 | Inside a blocking CI gate, never trust a mutable channel tag or a runner-local cached image as current — resolve to an immutable per-commit tag/digest and/or pull fresh immediately before the dependent check | Manual review (workflow/script inspection for tag-vs-digest resolution) |
-| AG-VAL-027 | Adding a new service requires wiring it into full-stack CI validation (or an explicit reasoned Scope-Boundaries exclusion) | Manual review (PR scope inspection). Partial mechanical aid: `scripts/check-workflow-service-lists.sh` keeps the duplicated service-list copies in sync once a service is in the build matrix, but does not enforce that a new service is added to the full-setup validation stack in the first place |
-| AG-WF-001 | Start branches from fresh base | Manual review (history inspection) |
-| AG-WF-002 | Separate worktree per PR | Manual review |
-| AG-WF-003 | Fanout for bounded work | Manual review (task delegation context) |
-| AG-WF-004 | No direct master push | GitHub branch protection (`master` branch requires PR) |
-| AG-WF-005 | Do not merge without explicit ask | Manual review |
-| AG-WF-006 | Keep PRs in draft until ready | Manual review (PR draft status + CI sign-off) |
-| AG-WF-007 | Review findings must be fixed before resolve | Manual review |
-| AG-WF-008 | Fixed findings need factual reply | Manual review |
-| AG-WF-009 | Reply on unresolvable threads | Manual review |
-| AG-WF-010 | Read full context before acting | Manual review (finding quality inspection) |
-| AG-WF-011 | Treat findings as failure classes | Manual review |
-| AG-WF-012 | Verify GitHub API calls upload content | Manual review (GitHub object inspection) |
-| AG-WF-013 | Consider bigger picture; when fixing a problem, treat the whole file (connected/adjacent lines), not just the edited line, as the smallest unit of correctness | Manual review (scope and impact assessment; file-wide consistency check around any edited line) |
-| AG-WF-014 | No direct master push (redundant) | GitHub branch protection |
-| AG-WF-015 | User is not a programmer; agents decide independently | Manual review (decision log in PR) |
-| AG-WF-016 | Do not silently remove, narrow, or "simplify" any AGENTS.md content without maintainer consent; no rule number may be reused; reference existing rules via `Rule-Ref: <ID>`, never a bare repeated ID | Manual review (diff inspection for content removal/narrowing; grep for bare repeated rule IDs) |
-| AG-WF-017 | Agent-authored commits/comments/actions carry an identifying marker (`<PREFIX>-<timestamp>`, e.g. `CLD-`/`CDX-`/`CPT-`/`GEM-` per AI system) | Manual review (commit message / GitHub object inspection) |
-| AG-WF-018 | Search existing issues before filing a new one, even for topics that feel novel | Manual review (`gh issue list --search` before `gh issue create`) |
-| AG-WF-019 | Chain `cd "<path>" && pwd && <command>` in one invocation; never trust a bare `cd` to persist across tool calls | Manual review (command history inspection) |
-| AG-WF-020 | Fetch/rebase/verify before making readiness, mergeability, or integration-order statements | Manual review |
-| AG-WF-021 | Treat subagent results as stale until verified against current remote base and PR head | Manual review |
-| AG-WF-022 | Do not block on subagents when non-overlapping work is available; poll sparingly | Manual review |
-| AG-WF-023 | Agents must make technical decisions independently; ask only when there is real operational impact | Manual review (decision log in PR) |
-| AG-WF-024 | Sub-agents need their own verified-clean working directory; never trust inherited/recycled worktree state; any force-push variant requires immediate pre-action re-verification before proceeding; sub-agents must read+accept governance and report back by name; check back before destructive actions | Manual review |
-| AG-WF-025 | A second occurrence of the same failure class requires proposing a new/strengthened AGENTS.md rule (with maintainer review), not just fixing the instance again | Manual review |
-| AG-WF-026 | Substantive knowledge must be consolidated and durably persisted in the surviving target (issue/PR/branch/etc.) and verified before a lifecycle transition (close/merge/supersede/abandon/handoff); local-only state is never a durable target | Manual review (closing-report/consolidation-comment inspection) |
-| AG-WF-027 | Fix identified problems (new or previously reported) in the same pass instead of leaving them as an unfixed Follow-up/Scope-Boundaries note; scope out and flag explicitly only when a genuine maintainer decision is required | Manual review (PR body/Follow-up-section inspection) |
-| AG-WF-028 | No artifact (branch/commit/comment/file) may be declared dead/stale/unsalvageable/safe-to-delete based on aggregate diff size alone; the artifact's own unique contribution must be inspected first, regardless of proximity to active work; actual deletion still requires the maintainer's fresh explicit instruction | Manual review (diff-vs-unique-commit inspection before any dead/stale/delete characterization) |
-| AG-WF-029 | A maintainer's answer to a recommendation/preference question is not execution authorization; only the literal ACK/DISACK token counts, silence is never implicit consent; pending decisions must be recorded as a structured, formatted list in a GitHub issue/PR comment, not only stated in chat | Manual review (chat/session transcript inspection for a literal ACK before implementation commits; PR/issue comment inspection for structured decision lists) |
-| AG-WF-030 | Documentation can lag behind current code/governance decisions; do not treat it as automatically authoritative when it conflicts with current architecture or an agreed rule | Manual review |
-| AG-WF-031 | Prefer GraphQL (`gh api graphql`) over plain `gh issue`/`gh pr` comment/body-update commands for GitHub writes; read the result back immediately | Manual review |
-| AG-WF-032 | When sending Markdown through GraphQL string variables, upload raw file content via the CLI's file-upload mode, not pre-encoded JSON; read back and treat malformed artifacts (leading JSON quotes, escaped newlines, literal file paths) as failed writes | Manual review |
-
-**Known Gaps and Planned Improvements:**
-
-- **AG-DOC-001** (Documentation drift): No automated script yet checks whether docs match code. This is a manual review burden. A future CI job could parse documentation headers, extract key terms (e.g., "PowerDNS," "Admin UI authentication required," "console domains excluded from DNS"), and compare them against corresponding code values. Until then, the rule exists as guidance; enforcement is manual.
-
-- **AG-GH-001 and related language rules**: Enforced by human reviewers reading PRs, not by an automated language detector. An automated spell-checker or language-detection tool could help, but none is currently integrated.
-
-- **AG-GH-008**: Enforced by `scripts/check-pr-tracking-metadata.sh`, run as the `pr-tracking-metadata-check` job in `build-push.yml` and gating the `build`/`build-arm64` jobs on pull requests, the same way `pr-template-check` does. It reads labels and milestone directly from the pull-request webhook payload (no extra permissions needed) and fails a non-draft PR missing either. Runs inside the pinned build-tools container (per AG-VAL-016), same as `shellcheck`/`check-governance-guards.sh`, since the script depends on `python3` and `curl`, which must not be treated as guaranteed present on the runner host. The project-board sub-check additionally requires a `PROJECT_AUTOMATION_PAT` repository secret (a classic PAT with the `project` scope) because the default `GITHUB_TOKEN` cannot read or write Projects v2 data for an org-owned board; without that secret configured, the project-board sub-check is skipped with a warning rather than failing the job. This also happens unconditionally for pull requests from forked repositories: GitHub does not pass repository secrets (other than the read-only `GITHUB_TOKEN`) to `pull_request`-triggered runs from forks, so `GH_TOKEN` is empty there even once `PROJECT_AUTOMATION_PAT` is configured for same-repo PRs. The check is told which case it's in via a `PR_IS_FORK` flag computed by the workflow (comparing head/base repo full names) and warns with the correct explanation either way; labels and milestone, read from the webhook payload rather than a secret, are still fully enforced for fork PRs. This is treated as an accepted limitation rather than something to work around with `pull_request_target`: that trigger would need to apply to this entire monolithic workflow (`needs:`-based job gating only works within one workflow file, so the check can't move to a separate `pull_request_target` workflow without losing the ability to gate `build`/`build-arm64`), and `pull_request_target` combined with checking out and building fork-supplied code (as `build-push.yml`'s other jobs do) is a known secret-exfiltration risk this repo does not take. A maintainer must add fork PRs to the project board manually regardless, since external contributors cannot write to an org-owned Projects v2 board themselves. If a token IS configured but is rejected (HTTP 401/403) or the GraphQL response itself carries an `errors` array (expired/revoked/insufficient-scope token), the check fails the job instead of warning -- that is a configuration bug in the secret, not the documented absent-token gap, and warning there would silently disable the project-board gate for the exact misconfiguration case this enforcement exists to catch. `.github/workflows/add-to-project.yml` (using the same secret) and `.github/workflows/labeler.yml` (path-based auto-labeling, no secret needed) reduce how often labels/project placement need to be set by hand in the first place. Dependabot PRs used to be exempted from this whole check outright (`PR_AUTHOR == "dependabot[bot]"` short-circuited to an explicit pass, #1061-#1064) because Dependabot cannot set its own milestone or add itself to the project board; that exemption was removed (issue #1278) once it became clear labels and project-board placement were already handled for Dependabot PRs without it (GitHub's own dependency labels plus `labeler.yml`'s path-based labels; `add-to-project.yml`'s unconditional `pull_request_target` trigger), and a new "Auto-assign Dependabot PR milestone" step was added to `pr-tracking-metadata-check`/`-hosted` (using `PROJECT_AUTOMATION_PAT`, run before the live label/milestone re-fetch) to auto-assign milestone #11 ("LanCache-NG Roadmap") to a Dependabot PR that doesn't already have one -- the one real gap. Dependabot PRs now go through the exact same real check as everyone else. `add-to-project.yml`'s job is itself skipped outright (`if: secrets.PROJECT_AUTOMATION_PAT != ''`) rather than run-and-fail when that secret is absent, since `actions/add-to-project` errors immediately on a blank `github-token` input -- a hard failure on every new issue/PR before the secret exists, not the harmless no-op that file's header describes. The check requires a milestone unconditionally (it cannot cheaply determine whether the rule's "when one applies" exception genuinely applies to a given PR without an extra API call to inspect the referenced issue); every issue in this project has carried a milestone in practice so far, so this is stricter than the written rule but has not yet rejected a legitimately milestone-less PR. Revisit if that changes. `build-push.yml`'s `pull_request` trigger includes `labeled`/`unlabeled`/`milestoned`/`demilestoned`/`ready_for_review` in addition to the GitHub default `opened`/`synchronize`/`reopened`, so the check (and the rest of this monolithic workflow) reruns whenever metadata that feeds it actually changes, rather than showing a stale result until the next commit; this reruns the whole pipeline, not just this job, which is a deliberate cost/correctness tradeoff since labels/milestones change far less often than commits -- see the `on:` block's own comment in `build-push.yml`.
-
-- Several operational rules (AG-OP-*) and comment style rules (AG-CODE-*) rely entirely on manual code review. No linting tools currently enforce these at CI time.
