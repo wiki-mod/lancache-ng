@@ -154,8 +154,9 @@ on:
     # (or `opened`/`reopened`) already validated, so re-running the Rust
     # build/test/lint/audit jobs and the multi-arch image builds for them buys
     # nothing: a prior run already produced the authoritative result for this exact
-    # commit. Each of build/build-arm64/dns_rust_quality/ui_rust_quality/dns_test/
-    # ui_test/dns_cargo_audit/ui_cargo_audit/rust_coverage's own `if:` therefore
+    # commit. Each of build/build-arm64/dns_rust_quality/ui_rust_quality/
+    # watchdog_rust_quality/dns_test/ui_test/watchdog_test/dns_cargo_audit/
+    # ui_cargo_audit/watchdog_cargo_audit/rust_coverage's own `if:` therefore
     # additionally requires the pull_request event's `action` to be one of
     # opened/synchronize/reopened/ready_for_review before it will run at all (see
     # each job's own comment) -- this list and that inline per-job condition must be
@@ -249,8 +250,9 @@ defaults:
     shell: bash
 
 jobs:
-  # Change classification for PR path-scoping and (as of #1095) push-event
-  # scoping of the four redundant Rust jobs. On a pull_request it diffs the PR's
+  # Change classification for PR path-scoping and (as of #1095, extended to
+  # watchdog's own Rust crate by the 2026-08 watchdog Rust CI wiring update)
+  # push-event scoping of the six redundant Rust jobs. On a pull_request it diffs the PR's
   # merge-base..head; on a push it diffs github.event.before..github.sha (the
   # commits that push actually introduced), degrading to --all-changed when that
   # base is absent/unreachable (all-zeros first push, force-push, GC'd base) so
@@ -262,18 +264,20 @@ jobs:
   # workflows remain release contract changes, and build-tools rebuilds stay
   # tied to build-tools inputs.
   #
-  # SCOPE (#1095): the push-event outputs currently gate ONLY dns_test/ui_test/
-  # dns_cargo_audit/ui_cargo_audit -- work that already ran and passed on the PR
-  # that produced the push (AG-WF-004 forbids direct master pushes), so skipping
-  # it on a push that did not touch the relevant crate reuses that known-good
-  # result. build/build-arm64/container-scan still run the FULL per-service set
-  # on push: their should-build/should-scan gates keep their push branch
-  # unchanged here, because per-service build/scan reuse on push additionally
-  # needs a safe way to re-tag a prior commit's already-built sha-* image, which
-  # depends on cross-run ordering this job cannot provide by itself. That is
-  # deferred to Part 1 of #1095. workflow_dispatch is left unscoped (detect-
-  # changes does not run for it); the four jobs' own if: fail safe to running
-  # whenever this job did not produce a successful classification.
+  # SCOPE (#1095, extended 2026-08 to watchdog): the push-event outputs
+  # currently gate dns_test/ui_test/watchdog_test/dns_cargo_audit/
+  # ui_cargo_audit/watchdog_cargo_audit -- work that already ran and passed on
+  # the PR that produced the push (AG-WF-004 forbids direct master pushes), so
+  # skipping it on a push that did not touch the relevant crate reuses that
+  # known-good result. build/build-arm64/container-scan still run the FULL
+  # per-service set on push: their should-build/should-scan gates keep their
+  # push branch unchanged here, because per-service build/scan reuse on push
+  # additionally needs a safe way to re-tag a prior commit's already-built
+  # sha-* image, which depends on cross-run ordering this job cannot provide
+  # by itself. That is deferred to Part 1 of #1095. workflow_dispatch is left
+  # unscoped (detect-changes does not run for it); the six jobs' own if: fail
+  # safe to running whenever this job did not produce a successful
+  # classification.
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -437,7 +441,8 @@ jobs:
     # Job-level concurrency (#891, extending #888/#892's proven build/
     # container-scan pattern): a superseded commit's file-headers run gets
     # reclaimed instead of running to completion. Safe to cancel mid-flight:
-    # unlike detect-changes/dns_test/ui_test/dns_cargo_audit/ui_cargo_audit
+    # unlike detect-changes/dns_test/ui_test/watchdog_test/dns_cargo_audit/
+    # ui_cargo_audit/watchdog_cargo_audit
     # (excluded from this pattern -- see this workflow's ci_scope_policy job),
     # nothing asserts file-headers' result with a hard-failing script. The
     # only consumers are build/build-arm64's own `if:` gates
@@ -1272,9 +1277,10 @@ jobs:
   # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
   # second acceptance criterion): NOT feasible as a real fallback today, and
   # deliberately not attempted here. ci_scope_policy's whole job is to check
-  # the *results* of dns_rust_quality/ui_rust_quality/dns_test/ui_test/
-  # watchdog_test/dns_cargo_audit/ui_cargo_audit -- all self-hosted-only Rust
-  # jobs with no hosted equivalent of their own yet. A "ci_scope_policy-hosted"
+  # the *results* of dns_rust_quality/ui_rust_quality/watchdog_rust_quality/
+  # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/
+  # watchdog_cargo_audit -- all self-hosted-only Rust jobs with no hosted
+  # equivalent of their own yet. A "ci_scope_policy-hosted"
   # job would have to depend on those same self-hosted jobs, so if self-hosted
   # runners are genuinely unavailable (the scenario this fallback exists for),
   # it would sit queued waiting on its own needs: forever, same as the jobs
@@ -1626,9 +1632,12 @@ jobs:
     #
     # NOTE: because validate-compose no longer cancels on push, its downstream
     # `skipped` cascade onto dns_test/ui_test/watchdog_test/dns_cargo_audit/
-    # ui_cargo_audit can no longer fire on push. dns_test/ui_test/
-    # dns_cargo_audit/ui_cargo_audit still keep their own cancel-on-push
-    # groups (deliberately unchanged -- they are NOT on the publish path, so
+    # ui_cargo_audit/watchdog_cargo_audit can no longer fire on push. dns_test/
+    # ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/watchdog_cargo_audit
+    # (watchdog_test/watchdog_cargo_audit added by the 2026-08 watchdog Rust CI
+    # wiring update, now that they compile the watchdog crate the same way
+    # dns/ui already did) still keep their own cancel-on-push groups
+    # (deliberately unchanged -- they are NOT on the publish path, so
     # cancelling a superseded push's copy saves scarce runners at no
     # freshness cost), so ci_scope_policy still needs its direct-cancellation
     # tolerance for them; see ci_scope_policy's comment.
@@ -3891,6 +3900,81 @@ jobs:
         with:
           command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
+  watchdog_rust_quality:
+    # Watchdog Rust quality mirrors dns_rust_quality/ui_rust_quality exactly
+    # (same toolchain-isolation/sccache/fmt/check/clippy shape), now that
+    # services/watchdog/Cargo.toml exists (#1355) alongside the crate's
+    # pre-existing shell runtime. This job covers only the Rust crate; the
+    # shell-script syntax/executable-bit check stays in watchdog_test below,
+    # unchanged, since it validates a different artifact (watchdog.sh, still
+    # the production entrypoint -- the Rust crate is a scaffold not yet wired
+    # into the Dockerfile ENTRYPOINT, see #1355's own Scope Boundaries).
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's identical comment above for the full reasoning.
+    name: rust-quality (watchdog)
+    needs: detect-changes
+    if: >-
+      ${{
+        always() &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          github.event_name != 'pull_request' ||
+          needs['detect-changes'].outputs.watchdog == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning as dns_rust_quality/ui_rust_quality above: this job's own
+    # "cargo clippy" step below already carries a 35-minute timeout, so the
+    # job-level bound must exceed it.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/watchdog'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/watchdog'
+          } >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+          components: rustfmt, clippy
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+      - name: cargo fmt --check (watchdog)
+        run: cargo fmt --manifest-path services/watchdog/Cargo.toml -- --check
+      - name: cargo check with warnings denied (watchdog)
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        env:
+          RUSTFLAGS: "-D warnings"
+        with:
+          command: cargo check --locked --all-targets --manifest-path services/watchdog/Cargo.toml
+      - name: cargo clippy with warnings denied (watchdog)
+        timeout-minutes: 35
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo clippy --locked --all-targets --manifest-path services/watchdog/Cargo.toml -- -D warnings
+
   dns_test:
     # DNS unit tests are separate from quality checks so failures identify
     # whether the regression is lint/format level or behavioral.
@@ -4073,6 +4157,17 @@ jobs:
     # but it already tolerates a clean `skipped` result today for any PR whose
     # path scoping below finds no relevant Rust change (e.g. a docs-only PR);
     # this adds one more, equally clean skip source, not a new failure mode.
+    #
+    # Scope note (2026-08 watchdog Rust CI wiring update): watchdog is
+    # deliberately NOT added to this job's `needs:`/tarpaulin invocation even
+    # though it now has its own dns/ui-shaped rust-quality/test/cargo-audit
+    # jobs above. Coverage here uses a per-crate PASS/FAIL threshold model
+    # (see the "Run coverage" step below) that would need a new threshold
+    # number deliberately chosen for the watchdog crate, which is a separate
+    # decision this CI-wiring change does not make on its own; the watchdog
+    # crate's own 38 unit tests already run and gate merges via watchdog_test
+    # above, just without a tracked coverage percentage yet. Revisit if/when a
+    # maintainer wants a coverage threshold for this crate specifically.
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
     if: >-
@@ -4456,30 +4551,97 @@ jobs:
           done
 
   watchdog_test:
-    # Watchdog has its own small shell runtime and therefore its own scoped
-    # syntax/executable gate instead of being folded into larger Rust jobs.
+    # Watchdog test now covers two different artifacts under one job: the
+    # shell-script syntax/executable-bit gate for watchdog.sh (still the
+    # production entrypoint) below, PLUS (new, #1355 follow-up) a real
+    # `cargo test` run for the Rust crate now living alongside it in the same
+    # services/watchdog/ directory. This mirrors dns_test/ui_test's shape
+    # (gated on its own rust_quality job's result, running on lancache-heavy
+    # since it now compiles, same metadata-only-event and content-change
+    # scoping) rather than staying on the cheap lancache-light tier the
+    # shell-only version used before the Rust crate existed -- the compile
+    # cost is now real, so this job needs the same tier and job-level
+    # concurrency treatment its dns/ui counterparts already have. See
+    # ci_scope_policy's own comment for the corresponding policy-side change
+    # this requires (watchdog_test moves from require_success_or_intentional_
+    # skip() to require_success_or_intentional_cancellation() on push, the
+    # same tolerance dns_test/ui_test already needed once they gained their
+    # own cancel-on-push groups).
     name: test (watchdog)
-    needs: [validate-compose, detect-changes]
+    needs: [validate-compose, watchdog_rust_quality, detect-changes]
+    # Path-scoped like dns_test/ui_test (#1095's shape) -- see
+    # dns_rust_quality's comment above for the full metadata-only-event
+    # reasoning. This is a behavior change from this job's pre-Rust-crate
+    # shape, which intentionally ran unconditionally at near-zero cost; now
+    # that it does real compile work, reusing a prior run's known-good result
+    # on an unchanged event is the same trade dns_test/ui_test already make.
     if: >-
       ${{
         always() &&
         needs['validate-compose'].result == 'success' &&
+        (needs.watchdog_rust_quality.result == 'success' || needs.watchdog_rust_quality.result == 'skipped') &&
         (
           github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          needs['detect-changes'].result != 'success' ||
           needs['detect-changes'].outputs.watchdog == 'true' ||
           needs['detect-changes'].outputs.workflow == 'true'
         )
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 6-13s (bash -n + a file-permission check, no compilation).
-    # Same 15-minute floor as detect-changes above.
-    timeout-minutes: 15
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_test/ui_test above (compiles via the
+    # same cargo-with-sccache-fallback path, so shares its cold-compile risk).
+    timeout-minutes: 45
+    # Job-level concurrency, mirroring dns_test/ui_test's own group (#891/#979
+    # pattern): now that this job does real compile work on the scarce
+    # lancache-heavy pool, a superseded commit's run should be reclaimed the
+    # same way those two already are.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-watchdog-test-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-watchdog-test-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: test (watchdog)
+      - name: test (watchdog shell script)
         run: |
           bash -n services/watchdog/watchdog.sh
           test -x services/watchdog/watchdog.sh
+      - name: Isolate Rust toolchain paths
+        run: |
+          {
+            echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/watchdog'
+            echo 'RUSTUP_HOME=${{ runner.temp }}/rustup-home/watchdog'
+          } >> "$GITHUB_ENV"
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+        with:
+          toolchain: stable
+      - name: Configure Redis-backed sccache
+        if: >-
+          ${{
+            github.actor != 'dependabot[bot]' &&
+            (
+              github.event_name != 'pull_request' ||
+              github.event.pull_request.head.repo.full_name == github.repository
+            )
+          }}
+        uses: ./.github/actions/configure-rust-sccache
+        with:
+          mode: ${{ vars.SCCACHE_REDIS_MODE }}
+          redis-url: ${{ secrets.SCCACHE_REDIS_URL }}
+          key-prefix: lancache-ci-${{ github.job }}
+          dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
+          dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
+      - name: test (watchdog Rust crate)
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
 
   watchdog_test-hosted:
     # Unlike watchdog_test above, this fallback deliberately does not gate on
@@ -4491,6 +4653,15 @@ jobs:
     # queued forever. The check itself (bash -n plus an executable-bit test
     # on one small script) is cheap enough to run unconditionally every time,
     # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
+    #
+    # This hosted fallback deliberately covers only the shell-script half of
+    # watchdog_test above -- it does NOT run `cargo test` for the Rust crate
+    # (2026-08 watchdog Rust CI wiring update), for the same reason dns/ui
+    # never got a hosted fallback for their own rust-quality/test/cargo-audit
+    # jobs: real Rust compilation depends on the shared build-tools image and
+    # sccache/distcc acceleration, which have no safe hosted equivalent yet
+    # (see docs/ci-github-hosted-fallback-decision.md). A green run here is
+    # NOT proof the watchdog crate compiles or its tests pass.
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
@@ -4644,6 +4815,76 @@ jobs:
                 exit 1
               fi'
 
+  watchdog_cargo_audit:
+    # Watchdog dependency audit mirrors the DNS/UI audits and stays parallel
+    # to avoid serializing independent Rust checks. Added alongside
+    # watchdog_rust_quality/watchdog_test now that services/watchdog/Cargo.toml
+    # exists (#1355).
+    #
+    # Also skipped on a metadata-only pull_request event -- see
+    # dns_rust_quality's comment above for the full reasoning.
+    name: cargo-audit (watchdog)
+    needs: [validate-compose, detect-changes]
+    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
+    # comment above for the full reasoning.
+    if: >-
+      ${{
+        always() &&
+        needs['validate-compose'].result == 'success' &&
+        (
+          github.event_name != 'pull_request' ||
+          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
+        ) &&
+        (
+          needs['detect-changes'].result != 'success' ||
+          needs['detect-changes'].outputs.watchdog == 'true' ||
+          needs['detect-changes'].outputs.workflow == 'true'
+        )
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Same reasoning and value as dns_cargo_audit/ui_cargo_audit above
+    # (prebuilt cargo-audit binary, no crate compilation).
+    timeout-minutes: 20
+    # Job-level concurrency (mirroring dns_cargo_audit/ui_cargo_audit's own
+    # pattern): scarce lancache-heavy capacity, no other consumer besides
+    # ci_scope_policy, whose push-branch check on this job's result uses
+    # require_success_or_intentional_cancellation().
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name == 'workflow_dispatch' || github.run_attempt != '1') &&
+          format('{0}-watchdog-cargo-audit-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+          format('{0}-watchdog-cargo-audit-{1}', github.workflow, github.ref)
+        }}
+      cancel-in-progress: true
+    env:
+      BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Audit Rust dependencies (watchdog)
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -e HOME=/tmp \
+            -e CARGO_HOME=/tmp/cargo-home \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -c 'set -euo pipefail
+              audit_log="$(mktemp)"
+              trap '"'"'rm -f "$audit_log"'"'"' EXIT
+              if ! cargo audit --deny warnings --file services/watchdog/Cargo.lock >"$audit_log" 2>&1; then
+                cat "$audit_log"
+                exit 1
+              fi
+              cat "$audit_log"
+              if grep -Eiq '"'"'(^|[[:space:]])warning:'"'"' "$audit_log"; then
+                echo "::error::cargo-audit emitted warnings."
+                exit 1
+              fi'
+
   ci_scope_policy:
     # Central policy reconciliation for PR path filtering. Individual jobs may
     # skip for speed, but this job verifies that every required check really ran
@@ -4701,13 +4942,10 @@ jobs:
     # Fix: on the push-event branch below, dns_test/ui_test/dns_cargo_audit/
     # ui_cargo_audit still use require_success_or_intentional_cancellation()
     # (success|skipped|cancelled) because they can still show a direct
-    # `cancelled` from their own cancel-on-push groups. watchdog_test does NOT
-    # get its own group, and with validate-compose no longer cancelling on
-    # push it can no longer be `skipped` on push either, so on a push it now
-    # only ever shows `success` (or a real failure); its
-    # require_success_or_intentional_skip() helper stays as defensive tolerance
-    # for the pull_request path, where the validate-compose skip-cascade still
-    # applies.
+    # `cancelled` from their own cancel-on-push groups. watchdog_test used to
+    # not get its own group, tolerating only `success`/`skipped` on push via
+    # require_success_or_intentional_skip() -- see the 2026-08 watchdog Rust
+    # CI wiring update below for why that changed.
     #
     # (#1095 update) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit now have a
     # SECOND legitimate `skipped` source on push, independent of the
@@ -4719,21 +4957,43 @@ jobs:
     # already tolerates `skipped`, so it covers this new source with no change;
     # this note just records that on push a `skipped` here can now mean
     # "path-scoped out by detect-changes" as well as "superseded mid-flight".
-    # watchdog_test and rust_coverage are NOT path-scoped on push (rust_coverage
-    # stays unconditional for the badge, and still runs the crates' tests under
-    # tarpaulin regardless), so this change does not touch their tolerance.
+    # rust_coverage stays unconditional for the badge (still runs the crates'
+    # tests under tarpaulin regardless), so this change does not touch its
+    # tolerance. watchdog_test WAS also NOT path-scoped on push at this point
+    # in the file's history -- see the 2026-08 watchdog Rust CI wiring update
+    # below for why that is no longer true.
     #
-    # dns_rust_quality/ui_rust_quality are deliberately left on strict
-    # require_success(): they are not in #891's enumerated candidate list
-    # (PR #915 explicitly flagged them, and watchdog_test, as out of scope so
-    # they would not be silently mistaken for "already considered and
-    # rejected"), and they do not depend on validate-compose at all -- only on
-    # detect-changes, which never runs on push -- so nothing in this change
-    # gives them a legitimate way to show anything but `success` on a push
-    # event. A `cancelled` there would mean a real anomaly (e.g. a manual
-    # workflow cancellation), not a supersession, and should keep failing
-    # loudly. Extending the pattern to this pair is a clean, separate,
-    # mechanically identical follow-up if ever wanted -- not folded in here.
+    # dns_rust_quality/ui_rust_quality were, at this point in the file's
+    # history, deliberately left on strict require_success(): they were not in
+    # #891's enumerated candidate list (PR #915 explicitly flagged them, and
+    # watchdog_test, as out of scope so they would not be silently mistaken
+    # for "already considered and rejected"), and neither depends on
+    # validate-compose -- only on detect-changes, which never runs on push --
+    # so nothing at that point gave them a legitimate way to show anything but
+    # `success` on a push event. That reasoning about dns_rust_quality/
+    # ui_rust_quality themselves is still accurate today; only the "clean,
+    # separate, mechanically identical follow-up if ever wanted" framing is
+    # superseded, since watchdog_rust_quality (added below) IS now exactly
+    # that follow-up, applied to the new watchdog crate rather than to dns/ui.
+    #
+    # (2026-08 watchdog Rust CI wiring update) services/watchdog/Cargo.toml
+    # was added (#1355), so watchdog gained the same three-job Rust shape
+    # dns/ui already had: watchdog_rust_quality (fmt/check/clippy, strict
+    # require_success() on push, exactly like dns_rust_quality/ui_rust_quality
+    # above -- no group, does not depend on validate-compose), watchdog_test
+    # (now ALSO compiles and runs `cargo test`, so it gained its own
+    # cancel-on-push concurrency group and moved to
+    # require_success_or_intentional_cancellation() on push, matching dns_test/
+    # ui_test exactly instead of the require_success_or_intentional_skip()
+    # tolerance described above, which was correct only for its old
+    # shell-check-only shape), and watchdog_cargo_audit (prebuilt cargo-audit
+    # binary, no compilation, same cancel-on-push group shape and
+    # require_success_or_intentional_cancellation() tolerance as
+    # dns_cargo_audit/ui_cargo_audit). watchdog_test is also now path-scoped on
+    # push the same way dns_test/ui_test are (detect-changes' `watchdog`/
+    # `workflow` outputs), which it was NOT before this update -- a plain push
+    # that does not touch services/watchdog/ or the workflow contract now
+    # reuses the PR's already-passing result instead of recompiling.
     #
     # detect-changes stays excluded from concurrency scoping for the same
     # reason #915 already found: it only runs
@@ -4748,11 +5008,13 @@ jobs:
       - detect-changes
       - dns_rust_quality
       - ui_rust_quality
+      - watchdog_rust_quality
       - dns_test
       - ui_test
       - watchdog_test
       - dns_cargo_audit
       - ui_cargo_audit
+      - watchdog_cargo_audit
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # Real runs: 7-14s (this job only reads its upstream needs' results and
@@ -4806,11 +5068,13 @@ jobs:
           SCRIPTS_CHANGED: ${{ needs['detect-changes'].outputs.scripts }}
           DNS_RUST_QUALITY_RESULT: ${{ needs.dns_rust_quality.result }}
           UI_RUST_QUALITY_RESULT: ${{ needs.ui_rust_quality.result }}
+          WATCHDOG_RUST_QUALITY_RESULT: ${{ needs.watchdog_rust_quality.result }}
           DNS_TEST_RESULT: ${{ needs.dns_test.result }}
           UI_TEST_RESULT: ${{ needs.ui_test.result }}
           WATCHDOG_TEST_RESULT: ${{ needs.watchdog_test.result }}
           DNS_CARGO_AUDIT_RESULT: ${{ needs.dns_cargo_audit.result }}
           UI_CARGO_AUDIT_RESULT: ${{ needs.ui_cargo_audit.result }}
+          WATCHDOG_CARGO_AUDIT_RESULT: ${{ needs.watchdog_cargo_audit.result }}
         run: |
           set -euo pipefail
 
@@ -4869,13 +5133,20 @@ jobs:
           # not a real failure, so this dedicated helper (mirroring the
           # existing require_success_or_intentional_skip() naming) tolerates
           # all three: success, skipped, or cancelled. It is intentionally
-          # NOT used for dns_rust_quality/ui_rust_quality (no group, no
-          # validate-compose dependency -- see the job-level comment above
-          # for why those two stay on strict require_success()) or for
-          # watchdog_test (no group of its own, so it can only ever show the
-          # validate-compose skip cascade, never a direct cancelled --
-          # require_success_or_intentional_skip() below is the precise tool
-          # for that, not this one).
+          # NOT used for dns_rust_quality/ui_rust_quality/watchdog_rust_quality
+          # (no group, no validate-compose dependency -- see the job-level
+          # comment above for why these three stay on strict
+          # require_success()). watchdog_test and watchdog_cargo_audit (added
+          # alongside watchdog_rust_quality, 2026-08 watchdog Rust CI wiring
+          # update) DO use this helper now, on the same reasoning as their
+          # dns/ui counterparts: both carry their own cancel-on-push
+          # concurrency group and depend on validate-compose, so both can show
+          # a direct `cancelled` or the validate-compose `skipped` cascade.
+          # watchdog_test's shell-only predecessor could only ever show the
+          # validate-compose skip cascade, never a direct `cancelled` (no
+          # group of its own) -- that older, narrower case is what
+          # require_success_or_intentional_skip() below remains the precise
+          # tool for, on jobs that still have no group of their own.
           require_success_or_intentional_cancellation() {
             local name="$1" value="$2"
             case "$value" in
@@ -4891,11 +5162,13 @@ jobs:
           if [ "$EVENT_NAME" != "pull_request" ]; then
             require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
             require_success "rust-quality (ui)" "$UI_RUST_QUALITY_RESULT"
+            require_success "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success_or_intentional_cancellation "test (dns/nats-subscriber)" "$DNS_TEST_RESULT"
             require_success_or_intentional_cancellation "test (ui)" "$UI_TEST_RESULT"
-            require_success_or_intentional_skip "test (watchdog)" "$WATCHDOG_TEST_RESULT"
+            require_success_or_intentional_cancellation "test (watchdog)" "$WATCHDOG_TEST_RESULT"
             require_success_or_intentional_cancellation "cargo-audit (dns/nats-subscriber)" "$DNS_CARGO_AUDIT_RESULT"
             require_success_or_intentional_cancellation "cargo-audit (ui)" "$UI_CARGO_AUDIT_RESULT"
+            require_success_or_intentional_cancellation "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
             exit 0
           fi
 
@@ -4917,17 +5190,17 @@ jobs:
             require_boolean "$output" "${!output}"
           done
 
-          # dns_rust_quality/dns_test/dns_cargo_audit (and the UI equivalents)
-          # are now additionally gated in their own job `if:` on the PR event's
-          # `action`: labeled/unlabeled/milestoned/demilestoned carry no new
-          # commit, so those jobs deliberately skip on such an event even when
-          # the diff itself would otherwise mark the crate as changed (that
-          # diff was already validated by the opened/synchronize/reopened/
-          # ready_for_review run for this exact commit). Fail-safe default of
-          # true (content event) mirrors the rest of this file's posture of
-          # running the full pipeline whenever a classification is uncertain,
-          # rather than silently skipping for an event type not in this known
-          # metadata-only list.
+          # dns_rust_quality/dns_test/dns_cargo_audit (and the UI/watchdog
+          # equivalents) are now additionally gated in their own job `if:` on
+          # the PR event's `action`: labeled/unlabeled/milestoned/demilestoned
+          # carry no new commit, so those jobs deliberately skip on such an
+          # event even when the diff itself would otherwise mark the crate as
+          # changed (that diff was already validated by the
+          # opened/synchronize/reopened/ready_for_review run for this exact
+          # commit). Fail-safe default of true (content event) mirrors the
+          # rest of this file's posture of running the full pipeline whenever
+          # a classification is uncertain, rather than silently skipping for
+          # an event type not in this known metadata-only list.
           content_event=true
           case "$EVENT_ACTION" in
             labeled|unlabeled|milestoned|demilestoned)
@@ -4942,6 +5215,7 @@ jobs:
             if [ "$WORKFLOW_CHANGED" = "true" ]; then
               dns_rust_required=true
               ui_required=true
+              watchdog_required=true
             fi
             if [ "$DNS_RUST_CHANGED" = "true" ]; then
               dns_rust_required=true
@@ -4949,15 +5223,21 @@ jobs:
             if [ "$UI_CHANGED" = "true" ]; then
               ui_required=true
             fi
+            if [ "$WATCHDOG_CHANGED" = "true" ]; then
+              watchdog_required=true
+            fi
           fi
-          # watchdog_test is intentionally NOT gated on content_event (its own
-          # job `if:` was left unchanged -- see its job-level comment): it
-          # runs on the lancache-light tier at a few seconds' cost, not the
-          # scarce lancache-heavy pool this change targets, so its
-          # requiredness still follows path scoping alone, on every PR event.
-          if [ "$WORKFLOW_CHANGED" = "true" ] || [ "$WATCHDOG_CHANGED" = "true" ]; then
-            watchdog_required=true
-          fi
+          # (2026-08 watchdog Rust CI wiring update) watchdog_required used to
+          # be computed separately below, deliberately NOT gated on
+          # content_event, because the old shell-only watchdog_test ran on
+          # the lancache-light tier at a few seconds' cost -- cheap enough
+          # that skipping it only on a metadata-only event bought nothing.
+          # Now that watchdog_rust_quality/watchdog_test/watchdog_cargo_audit
+          # compile the crate on the scarce lancache-heavy pool (the same
+          # cost dns/ui already paid), watchdog_required is folded into the
+          # content_event-gated block above so it follows the exact same
+          # rule dns_rust_required/ui_required do, instead of the separate,
+          # always-on check this file used to have here.
 
           if [ "$dns_rust_required" = "true" ]; then
             require_success "rust-quality (dns/nats-subscriber)" "$DNS_RUST_QUALITY_RESULT"
@@ -4980,9 +5260,13 @@ jobs:
           fi
 
           if [ "$watchdog_required" = "true" ]; then
+            require_success "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success "test (watchdog)" "$WATCHDOG_TEST_RESULT"
+            require_success "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
           else
+            require_success_or_intentional_skip "rust-quality (watchdog)" "$WATCHDOG_RUST_QUALITY_RESULT"
             require_success_or_intentional_skip "test (watchdog)" "$WATCHDOG_TEST_RESULT"
+            require_success_or_intentional_skip "cargo-audit (watchdog)" "$WATCHDOG_CARGO_AUDIT_RESULT"
           fi
 
           if [ "$DOCS_ONLY" = "true" ]; then
