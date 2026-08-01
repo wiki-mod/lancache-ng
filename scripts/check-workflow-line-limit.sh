@@ -19,6 +19,16 @@
 # own tested reference point (an earlier revision of this script defaulted
 # to 8500, an AI-chosen safety margin the maintainer had not been consulted
 # on and did not want -- corrected here per direct maintainer instruction).
+#
+# MAX_WORKFLOW_BYTES adds a second, independent dimension at the maintainer's
+# request: measured byte sizes from the same bisection were ~504-505KB at
+# 8998/8999 lines (dispatches fine) vs. ~512KB at the real 9104-line failing
+# size and ~518KB at 9216 lines (both dead) -- so byte size tracks the same
+# boundary as line count here, but is checked separately in case a future
+# file has unusually short or long lines where the two diverge.
+# MAX_WORKFLOW_BYTES defaults to 512000 (500 KiB, the maintainer's own stated
+# reference point: "493kb ging, 500kb nicht ... sollten wir auch unter 500kb
+# bleiben").
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -27,28 +37,42 @@ target_root="${1:-$repo_root}"
 cd "$target_root"
 
 MAX_WORKFLOW_LINES="${MAX_WORKFLOW_LINES:-8999}"
+MAX_WORKFLOW_BYTES="${MAX_WORKFLOW_BYTES:-512000}"
 
-offenders=()
+line_offenders=()
+byte_offenders=()
 while IFS= read -r -d '' file; do
     lines=$(wc -l < "$file")
+    bytes=$(wc -c < "$file")
     if [ "$lines" -gt "$MAX_WORKFLOW_LINES" ]; then
-        offenders+=("$file:$lines")
+        line_offenders+=("$file:$lines")
+    fi
+    if [ "$bytes" -gt "$MAX_WORKFLOW_BYTES" ]; then
+        byte_offenders+=("$file:$bytes")
     fi
 done < <(find .github/workflows -maxdepth 1 -name '*.yml' -print0)
 
-if [ "${#offenders[@]}" -gt 0 ]; then
-    echo "Workflow file(s) over the ${MAX_WORKFLOW_LINES}-line hard limit:" >&2
-    for entry in "${offenders[@]}"; do
-        echo "  ${entry%:*} (${entry##*:} lines)" >&2
-    done
+if [ "${#line_offenders[@]}" -gt 0 ] || [ "${#byte_offenders[@]}" -gt 0 ]; then
+    if [ "${#line_offenders[@]}" -gt 0 ]; then
+        echo "Workflow file(s) over the ${MAX_WORKFLOW_LINES}-line hard limit:" >&2
+        for entry in "${line_offenders[@]}"; do
+            echo "  ${entry%:*} (${entry##*:} lines)" >&2
+        done
+    fi
+    if [ "${#byte_offenders[@]}" -gt 0 ]; then
+        echo "Workflow file(s) over the ${MAX_WORKFLOW_BYTES}-byte hard limit:" >&2
+        for entry in "${byte_offenders[@]}"; do
+            echo "  ${entry%:*} (${entry##*:} bytes)" >&2
+        done
+    fi
     echo "" >&2
     echo "This limit exists because GitHub silently stops dispatching pull_request" >&2
     echo "runs for a workflow file that modifies itself past some threshold above" >&2
-    echo "~9000 lines (no error, no skipped conclusion -- the run is never created" >&2
-    echo "at all). See scripts/check-workflow-line-limit.sh's own header comment" >&2
-    echo "and issue #1095 for the reproduction. Split the file or trim its" >&2
-    echo "comments rather than raising this limit." >&2
+    echo "~9000 lines / ~500KB (no error, no skipped conclusion -- the run is never" >&2
+    echo "created at all). See scripts/check-workflow-line-limit.sh's own header" >&2
+    echo "comment and issue #1095 for the reproduction. Split the file or trim its" >&2
+    echo "comments rather than raising either limit." >&2
     exit 1
 fi
 
-echo "All .github/workflows/*.yml files are within the ${MAX_WORKFLOW_LINES}-line hard limit."
+echo "All .github/workflows/*.yml files are within the ${MAX_WORKFLOW_LINES}-line and ${MAX_WORKFLOW_BYTES}-byte hard limits."

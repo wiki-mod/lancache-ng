@@ -30,30 +30,51 @@ write_lines() {
     done > "$path"
 }
 
-@test "passes when every workflow file is under the limit" {
+# write_bytes <path> <byte count>: a single long comment line (not many short
+# ones) so line count stays trivially low while byte count hits the target --
+# keeps the two dimensions independently testable.
+write_bytes() {
+    local path="$1" count="$2"
+    printf '# %*s\n' "$((count - 3))" '' | tr ' ' 'x' > "$path"
+}
+
+@test "passes when every workflow file is under both limits" {
     write_lines "$fixture_root/.github/workflows/a.yml" 50
     write_lines "$fixture_root/.github/workflows/b.yml" 99
 
-    MAX_WORKFLOW_LINES=100 run bash "$script" "$fixture_root"
+    MAX_WORKFLOW_LINES=100 MAX_WORKFLOW_BYTES=100000 run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"within the 100-line hard limit"* ]] || fail "unexpected output: $output"
+    [[ "$output" == *"within the 100-line and 100000-byte hard limits"* ]] || fail "unexpected output: $output"
 }
 
-@test "fails and names the offending file(s) when over the limit" {
+@test "fails and names the offending file(s) when over the line limit" {
     write_lines "$fixture_root/.github/workflows/a.yml" 50
     write_lines "$fixture_root/.github/workflows/too-big.yml" 150
 
-    MAX_WORKFLOW_LINES=100 run bash "$script" "$fixture_root"
+    MAX_WORKFLOW_LINES=100 MAX_WORKFLOW_BYTES=100000 run bash "$script" "$fixture_root"
     [ "$status" -eq 1 ]
+    [[ "$output" == *"line hard limit"* ]] || fail "did not report the line-limit violation: $output"
     [[ "$output" == *"too-big.yml"* ]] || fail "did not name the offending file: $output"
     [[ "$output" == *"a.yml"* ]] && fail "should not have flagged the file under the limit: $output"
     return 0
 }
 
-@test "MAX_WORKFLOW_LINES is overridable via environment" {
+@test "fails and names the offending file(s) when over the byte limit, even with few lines" {
+    write_lines "$fixture_root/.github/workflows/a.yml" 5
+    write_bytes "$fixture_root/.github/workflows/too-heavy.yml" 500
+
+    MAX_WORKFLOW_LINES=100 MAX_WORKFLOW_BYTES=200 run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"byte hard limit"* ]] || fail "did not report the byte-limit violation: $output"
+    [[ "$output" == *"too-heavy.yml"* ]] || fail "did not name the offending file: $output"
+    [[ "$output" == *"a.yml"* ]] && fail "should not have flagged the file under the limit: $output"
+    return 0
+}
+
+@test "MAX_WORKFLOW_LINES and MAX_WORKFLOW_BYTES are independently overridable via environment" {
     write_lines "$fixture_root/.github/workflows/a.yml" 60
 
-    MAX_WORKFLOW_LINES=50 run bash "$script" "$fixture_root"
+    MAX_WORKFLOW_LINES=50 MAX_WORKFLOW_BYTES=100000 run bash "$script" "$fixture_root"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"a.yml"* ]] || fail "did not respect the overridden threshold: $output"
+    [[ "$output" == *"a.yml"* ]] || fail "did not respect the overridden line threshold: $output"
 }
