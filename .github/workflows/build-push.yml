@@ -1,120 +1,7 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Diagnostic marker line, single-hunk test (temporary, throwaway PR #1381).
 # Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
 # crates and shell scripts, validates the docker-compose files, scans
-# diagnostic padding line 0 (throwaway, part of #1381)
-# diagnostic padding line 1 (throwaway, part of #1381)
-# diagnostic padding line 2 (throwaway, part of #1381)
-# diagnostic padding line 3 (throwaway, part of #1381)
-# diagnostic padding line 4 (throwaway, part of #1381)
-# diagnostic padding line 5 (throwaway, part of #1381)
-# diagnostic padding line 6 (throwaway, part of #1381)
-# diagnostic padding line 7 (throwaway, part of #1381)
-# diagnostic padding line 8 (throwaway, part of #1381)
-# diagnostic padding line 9 (throwaway, part of #1381)
-# diagnostic padding line 10 (throwaway, part of #1381)
-# diagnostic padding line 11 (throwaway, part of #1381)
-# diagnostic padding line 12 (throwaway, part of #1381)
-# diagnostic padding line 13 (throwaway, part of #1381)
-# diagnostic padding line 14 (throwaway, part of #1381)
-# diagnostic padding line 15 (throwaway, part of #1381)
-# diagnostic padding line 16 (throwaway, part of #1381)
-# diagnostic padding line 17 (throwaway, part of #1381)
-# diagnostic padding line 18 (throwaway, part of #1381)
-# diagnostic padding line 19 (throwaway, part of #1381)
-# diagnostic padding line 20 (throwaway, part of #1381)
-# diagnostic padding line 21 (throwaway, part of #1381)
-# diagnostic padding line 22 (throwaway, part of #1381)
-# diagnostic padding line 23 (throwaway, part of #1381)
-# diagnostic padding line 24 (throwaway, part of #1381)
-# diagnostic padding line 25 (throwaway, part of #1381)
-# diagnostic padding line 26 (throwaway, part of #1381)
-# diagnostic padding line 27 (throwaway, part of #1381)
-# diagnostic padding line 28 (throwaway, part of #1381)
-# diagnostic padding line 29 (throwaway, part of #1381)
-# diagnostic padding line 30 (throwaway, part of #1381)
-# diagnostic padding line 31 (throwaway, part of #1381)
-# diagnostic padding line 32 (throwaway, part of #1381)
-# diagnostic padding line 33 (throwaway, part of #1381)
-# diagnostic padding line 34 (throwaway, part of #1381)
-# diagnostic padding line 35 (throwaway, part of #1381)
-# diagnostic padding line 36 (throwaway, part of #1381)
-# diagnostic padding line 37 (throwaway, part of #1381)
-# diagnostic padding line 38 (throwaway, part of #1381)
-# diagnostic padding line 39 (throwaway, part of #1381)
-# diagnostic padding line 40 (throwaway, part of #1381)
-# diagnostic padding line 41 (throwaway, part of #1381)
-# diagnostic padding line 42 (throwaway, part of #1381)
-# diagnostic padding line 43 (throwaway, part of #1381)
-# diagnostic padding line 44 (throwaway, part of #1381)
-# diagnostic padding line 45 (throwaway, part of #1381)
-# diagnostic padding line 46 (throwaway, part of #1381)
-# diagnostic padding line 47 (throwaway, part of #1381)
-# diagnostic padding line 48 (throwaway, part of #1381)
-# diagnostic padding line 49 (throwaway, part of #1381)
-# diagnostic padding line 50 (throwaway, part of #1381)
-# diagnostic padding line 51 (throwaway, part of #1381)
-# diagnostic padding line 52 (throwaway, part of #1381)
-# diagnostic padding line 53 (throwaway, part of #1381)
-# diagnostic padding line 54 (throwaway, part of #1381)
-# diagnostic padding line 55 (throwaway, part of #1381)
-# diagnostic padding line 56 (throwaway, part of #1381)
-# diagnostic padding line 57 (throwaway, part of #1381)
-# diagnostic padding line 58 (throwaway, part of #1381)
-# diagnostic padding line 59 (throwaway, part of #1381)
-# diagnostic padding line 60 (throwaway, part of #1381)
-# diagnostic padding line 61 (throwaway, part of #1381)
-# diagnostic padding line 62 (throwaway, part of #1381)
-# diagnostic padding line 63 (throwaway, part of #1381)
-# diagnostic padding line 64 (throwaway, part of #1381)
-# diagnostic padding line 65 (throwaway, part of #1381)
-# diagnostic padding line 66 (throwaway, part of #1381)
-# diagnostic padding line 67 (throwaway, part of #1381)
-# diagnostic padding line 68 (throwaway, part of #1381)
-# diagnostic padding line 69 (throwaway, part of #1381)
-# diagnostic padding line 70 (throwaway, part of #1381)
-# diagnostic padding line 71 (throwaway, part of #1381)
-# diagnostic padding line 72 (throwaway, part of #1381)
-# diagnostic padding line 73 (throwaway, part of #1381)
-# diagnostic padding line 74 (throwaway, part of #1381)
-# diagnostic padding line 75 (throwaway, part of #1381)
-# diagnostic padding line 76 (throwaway, part of #1381)
-# diagnostic padding line 77 (throwaway, part of #1381)
-# diagnostic padding line 78 (throwaway, part of #1381)
-# diagnostic padding line 79 (throwaway, part of #1381)
-# diagnostic padding line 80 (throwaway, part of #1381)
-# diagnostic padding line 81 (throwaway, part of #1381)
-# diagnostic padding line 82 (throwaway, part of #1381)
-# diagnostic padding line 83 (throwaway, part of #1381)
-# diagnostic padding line 84 (throwaway, part of #1381)
-# diagnostic padding line 85 (throwaway, part of #1381)
-# diagnostic padding line 86 (throwaway, part of #1381)
-# diagnostic padding line 87 (throwaway, part of #1381)
-# diagnostic padding line 88 (throwaway, part of #1381)
-# diagnostic padding line 89 (throwaway, part of #1381)
-# diagnostic padding line 90 (throwaway, part of #1381)
-# diagnostic padding line 91 (throwaway, part of #1381)
-# diagnostic padding line 92 (throwaway, part of #1381)
-# diagnostic padding line 93 (throwaway, part of #1381)
-# diagnostic padding line 94 (throwaway, part of #1381)
-# diagnostic padding line 95 (throwaway, part of #1381)
-# diagnostic padding line 96 (throwaway, part of #1381)
-# diagnostic padding line 97 (throwaway, part of #1381)
-# diagnostic padding line 98 (throwaway, part of #1381)
-# diagnostic padding line 99 (throwaway, part of #1381)
-# diagnostic padding line 100 (throwaway, part of #1381)
-# diagnostic padding line 101 (throwaway, part of #1381)
-# diagnostic padding line 102 (throwaway, part of #1381)
-# diagnostic padding line 103 (throwaway, part of #1381)
-# diagnostic padding line 104 (throwaway, part of #1381)
-# diagnostic padding line 105 (throwaway, part of #1381)
-# diagnostic padding line 106 (throwaway, part of #1381)
-# diagnostic padding line 107 (throwaway, part of #1381)
-# diagnostic padding line 108 (throwaway, part of #1381)
-# diagnostic padding line 109 (throwaway, part of #1381)
-# diagnostic padding line 110 (throwaway, part of #1381)
-# diagnostic padding line 111 (throwaway, part of #1381)
 # container images, then builds, pushes, promotes, and releases the stack
 # images on the relevant triggers.
 
@@ -152,7 +39,6 @@ on:
     # dispatches this same workflow against current_dev's tip once a day
     # (same 01:00 UTC cron time as this one, for the identical DST-drift
     # reason documented below) plus on-demand. That file's own header
-    # documents the one gap this split still carries: GitHub's `schedule:`
     # trigger only fires from a workflow file as it exists on the default
     # branch, so nightly-refresh.yml's cron is inert until it has itself been
     # merged to master, even though it lives in a repo whose active
@@ -186,7 +72,6 @@ on:
     # riding along with a docs change in the same push.
     #
     # Force-push / no-common-ancestor pushes (a new branch's first push, or a
-    # history rewrite) are NOT a blind spot: GitHub's own paths-ignore
     # evaluation fails open and runs the workflow whenever it cannot compute
     # a definitive changed-file list for the push, the same fail-safe
     # philosophy detect-changes' own before/after diff below already relies
@@ -226,7 +111,6 @@ on:
     # `validate-compose`, `CI scope policy`, `line endings`,
     # `file purpose headers`, `PR template validation`,
     # `PR tracking metadata (labels/milestone/project)`, `coverage (Rust)`,
-    # `validate full-setup image`). A `paths-ignore` match means the whole
     # workflow run is never created -- not one job, not even a synthetic
     # `skipped` conclusion for any of them -- so GitHub shows every one of
     # those required checks as "Expected -- Waiting for status to be
@@ -257,7 +141,6 @@ on:
     # `needs:` of its own).
     #
     # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
-    # pr-tracking-metadata-check reads labels/milestone/draft state straight out of
     # the github.event.pull_request webhook snapshot for this run (see that job's
     # own comment) -- with only the default types, a label added by labeler.yml or
     # a human, a milestone set later, or a draft marked ready-for-review would never
@@ -291,7 +174,6 @@ on:
 permissions:
   contents: read
   # Workflow-level floor for pull-requests: a job's own `permissions:` block
-  # can only NARROW this, never widen it (#903 follow-up -- pr-template-check
   # and pr-template-check-hosted added `pull-requests: read` at the job level
   # to fetch the PR body live via `gh pr view`, but without it granted here
   # too, that job-level grant was silently capped back down to nothing,
@@ -324,7 +206,6 @@ concurrency:
   # `cancel-in-progress: true` cancels the entire previous run, including
   # every job already in progress, not just still-queued ones -- a job's
   # own separate concurrency group offers no immunity from that. Rather
-  # than take that risk, per-job cancellation for the actual
   # runner-hogging jobs (`build`, `container-scan`) is scoped directly on
   # those jobs below, keyed by service+ref, so a superseded commit's heavy
   # self-hosted-runner work gets reclaimed promptly while
@@ -354,7 +235,6 @@ concurrency:
   # independent of this setting), so rapid-fire pushes to a PR branch still
   # get the intended benefit without this failure mode. See #888 for the
   # full investigation and #889-adjacent discussion for why this stays a
-  # code-comment rather than a CHANGELOG essay.
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
@@ -403,7 +283,6 @@ jobs:
     # 6-17s. 15 minutes is a generous, round floor (not derived by scaling
     # that tiny number -- see the shared job-timeout rollout PR for why every
     # cheap self-hosted script job in this file uses the same 15-minute
-    # floor) that still turns any future hang into a fast, bounded failure.
     timeout-minutes: 15
     outputs:
       dns_rust: ${{ steps.filter.outputs.dns_rust }}
@@ -481,7 +360,6 @@ jobs:
   # push that is provably already superseded before its heavy jobs even
   # start self-skips.
   #
-  # Deliberately its own job with NO `if:`/`needs:` of its own (same shape as
   # validate-compose today): this can only ever resolve to
   # success/failure/cancelled, never "skipped", so consumers that read its
   # `superseded` output through an already-existing `needs:` edge (build,
@@ -547,7 +425,6 @@ jobs:
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
   file-headers:
-    # Cheap repository hygiene gate. It runs before expensive Rust/image work so
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -623,7 +500,6 @@ jobs:
           # github.event.pull_request.body: that field is a snapshot taken
           # when THIS event fired, and a rerun/retrigger of an older event
           # (or, per a real 2026-07-16 incident, an event whose payload
-          # lagged the PR's actual current body for other reasons) can carry
           # a stale value -- causing this check to report sections "missing"
           # that a live look at the PR shows are genuinely present and
           # filled. A live fetch is always current regardless of why/when
@@ -692,7 +568,6 @@ jobs:
     # reads github.event.pull_request context plus one outbound call to
     # api.github.com, no self-hosted-specific resource needed -- but kept
     # on the self-hosted pool as the primary job with a hosted fallback
-    # below, matching every other zero-LAN check in this file.
     #
     # check-pr-tracking-metadata.sh runs python3 (JSON parsing) and curl (the
     # project-board GraphQL call) -- per AG-VAL-016, host-local tools on the
@@ -735,7 +610,6 @@ jobs:
         #
         # Uses PROJECT_AUTOMATION_PAT, not the default GITHUB_TOKEN: this
         # project already standardized on that PAT for every other
-        # Dependabot-adjacent write (add-to-project.yml, the project-board
         # sub-check two steps down) since GITHUB_TOKEN cannot write Projects
         # v2 data; reusing the same secret for this REST write keeps the
         # permission model in one place. Confirmed live (PR #1270's
@@ -782,7 +656,6 @@ jobs:
           fi
           # `if !` (rather than a bare command) keeps this under `set -e`
           # per AG-VAL-004: a command forming an `if` test is exempt from
-          # errexit, so a real API failure here degrades to a warning
           # instead of aborting the job -- the authoritative gate is the
           # milestone check inside check-pr-tracking-metadata.sh a couple of
           # steps below, which will still fail with a clear, actionable
@@ -868,7 +741,6 @@ jobs:
         # on validate-compose's output (like the self-hosted job above does)
         # -- it exists specifically for when self-hosted runners (and
         # anything that depends on them, including validate-compose) are
-        # unavailable, so a needs: dependency on that job would defeat the
         # fallback's purpose. Matches shellcheck-hosted's own resolution step.
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -969,7 +841,6 @@ jobs:
     # hosted fallback below, matching every other zero-LAN check in this
     # file.
     #
-    # check-pr-title-convention.sh only needs bash itself, but still runs
     # inside the pinned build-tools image (per AG-VAL-016), the same
     # pattern pr-tracking-metadata-check uses for python3/curl: project
     # verification should not depend on whichever bash happens to be
@@ -1049,7 +920,6 @@ jobs:
         # -- it exists specifically for when self-hosted runners (and
         # anything that depends on them, including validate-compose) are
         # unavailable, so a needs: dependency on that job would defeat the
-        # fallback's purpose. Matches pr-tracking-metadata-check-hosted's own
         # resolution step.
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -1140,7 +1010,6 @@ jobs:
     # root job per the documented invariant in `container-scan`'s comment),
     # so it is a stable place for content-agnostic per-PR checks that must
     # never be silently skipped.
-    #
     # DO NOT RENAME `name: line endings` below -- it IS the required-status-
     # check context string in `current_dev`'s classic branch protection
     # (confirmed via the GitHub API). Despite this job now also running
@@ -1184,7 +1053,6 @@ jobs:
     # step below to fetch the PR title/body live via `gh pr view` (issue
     # #805; this permission need moved here from `shellcheck` along with the
     # step itself, #1245). contents: read is restated matching the
-    # pr-template-check/shellcheck convention (#903) -- job-level permissions
     # replace rather than extend the workflow-level defaults, and this job
     # still needs contents: read for actions/checkout.
     permissions:
@@ -1249,7 +1117,6 @@ jobs:
           # stale snapshot and failed identically, even once the content was
           # actually fixed. Fetched live instead, via the same `gh pr view`
           # pattern #903/#905 already established (and proved working in
-          # this repo's own CI) for pr-template-check's PR-body fetch.
           governance_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
           governance_pr_body="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
 
@@ -1337,7 +1204,6 @@ jobs:
     # fail every real run with "could not process any code" -- a scan that
     # can never pass again is not a useful gate. This job instead fails the
     # moment a banned-language file reappears, which is the actual property
-    # AG-REL-001 wants enforced.
     name: language policy
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -1407,7 +1273,6 @@ jobs:
     # to be installed on the runner host.
     #
     # DO NOT RENAME this job's `name:`/key (it has no explicit `name:`, so the
-    # job key `shellcheck` IS the required-status-check context string) --
     # `current_dev`'s classic branch protection names it literally
     # (confirmed via `gh api .../branches/current_dev/protection`). Renaming
     # it would silently create a brand-new, never-satisfied required check
@@ -1438,7 +1303,6 @@ jobs:
     # see `container-scan`'s job comment for the documented invariant that
     # it must stay a root job, and `line-endings`'/`pr-tracking-metadata-
     # check`'s `needs: validate-compose` (with no status function in their
-    # own `if:`) would otherwise silently skip those two unrelated required
     # checks too via GitHub's implicit success() default.
     # `github.event_name != 'pull_request' ||` keeps this unconditional on
     # push (mirrors full-setup-validate's/rust_coverage's own push-side
@@ -1494,7 +1358,6 @@ jobs:
 
       # Real incident (2026-07-24/25): actionlint's default invocation embeds
       # its own shellcheck integration, which intermittently hangs INDEFINITELY
-      # in a Go-runtime deadlock (observed on-host: STAT Ssl, WCHAN
       # futex_do_wait, no child processes, signal-deaf) -- a normal run finishes
       # in ~1-2s. `timeout-minutes: 15` alone is NOT sufficient against this:
       # GitHub cancels a timed-out step by sending SIGTERM to the `docker run`
@@ -1560,7 +1423,6 @@ jobs:
         # from compute-validation-network's raw per-run subnet in
         # scripts/lib/run-in-validation-subnet.sh's collision-safe
         # reservation, but only for the jobs that existed at the time. #896
-        # found two jobs added later that never got wired through it and hit
         # a real "Pool overlaps" collision under concurrent CI load; #907
         # fixed those two. This check is what stops a THIRD job from
         # silently repeating the same gap -- a pure text/YAML-structure
@@ -1626,7 +1488,6 @@ jobs:
         # Always resolve through the digest-pinned, smoke-tested selector --
         # never fall back to a bare :latest tag here. This job exists so
         # ShellCheck/ActionLint still run when self-hosted runners are down;
-        # it shouldn't trade the self-hosted job's verified image for an
         # unpinned, unverified one just because the runner changed.
         # BUILD_TOOLS_REQUIRE_PUBLISHED=true matches validate-compose's own
         # resolution (no local-build fallback -- this hosted runner shouldn't
@@ -1719,7 +1580,6 @@ jobs:
   validate-compose:
     # This job is the lightweight project-wide gate. It validates compose/setup
     # contracts and exports one smoke-tested build-tools image reference for all
-    # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # Real runs: 20-72s (the docker-run/grep checks in this job are cheap).
     # 30 minutes rather than the 15-minute floor used by the other light
@@ -1751,7 +1611,6 @@ jobs:
     # groups (deliberately unchanged -- they are NOT on the publish path, so
     # cancelling a superseded push's copy saves scarce runners at no
     # freshness cost), so ci_scope_policy still needs its direct-cancellation
-    # tolerance for them; see ci_scope_policy's comment.
     concurrency:
       group: >-
         ${{
@@ -1867,7 +1726,6 @@ jobs:
           # - optional per-service keys are preserved only for real legacy/custom paths
           # - setup.sh must not treat a bare /srv/lancache directory as active state
           #
-          # CACHE_DIR_STANDARD/CACHE_DIR_SSL are deliberately NOT in this loop.
           # Every other key here is a legitimate, permanent advanced override
           # an operator may still want (see set_optional_env_path_override_if_needed's
           # own "preserve intentionally templated/custom values" behavior). The two
@@ -2130,7 +1988,6 @@ jobs:
           # The HAProxy allowlist itself lives in exactly one place,
           # scripts/docker-socket-proxy.sh (see docs/naming-conventions.md's
           # "Docker socket proxy allowlist" section) -- it used to also be
-          # duplicated into an unreferenced x-docker-socket-proxy-command
           # anchor in each of the three Compose files, which this check used
           # to validate instead of the real script. Those anchors were dead
           # (never aliased) and have been removed; validate the one real
@@ -2670,7 +2527,6 @@ jobs:
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
           # Positive check (not a "must NOT contain the old pattern" negative
           # check): the old negative form quoted the forbidden pattern as its
-          # own grep -F argument using single quotes, so the check's own
           # source line was a byte-for-byte match of the thing it was
           # supposed to detect as absent -- it would have failed
           # unconditionally, forever, regardless of the real code below.
@@ -2752,7 +2608,6 @@ jobs:
             && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
           # build/build-arm64's "Build and push" step (#822) now runs through
-          # .github/actions/ghcr-build-push-retry instead of a bare
           # docker/build-push-action + inline "retry-build" sibling step, so
           # steps.build.outputs.digest above already resolves to whichever
           # internal attempt succeeded -- there is no separate retry-build
@@ -2796,7 +2651,6 @@ jobs:
           # Anchored on the plain substring "sanitized_ref=" (no regex
           # metacharacters) rather than a fuller literal match: this awk
           # script must behave identically on CI's mawk and on gawk used
-          # for local testing, and mid-pattern "$" escaping is exactly where
           # those implementations are known to diverge in ERE mode.
           promote_tags_script="$(awk '
             /name: Promote mutable tags/ { in_step = 1 }
@@ -3048,7 +2902,6 @@ jobs:
           # #1254/#1255 (2026-07-25) supersedes the current_dev half of the
           # #825/#1141 mapping above: a current_dev PUSH must NOT auto-publish
           # the nightly channel anymore (nightly is now a real once-daily
-          # scheduled/dispatch-only, green-gated channel -- see the `promote`
           # job's own "Branch-to-channel mapping" comment for the full
           # reasoning). This guard is the mirror image of the old one: it
           # fails if the auto-publish regresses back in, rather than failing
@@ -3119,7 +2972,6 @@ jobs:
         # the script checks build-push.yml's own 4 copies (this file) PLUS
         # gc-pr-staging-images.yml, backfill-stack-latest.yml, and
         # scripts/ensure-pr-staging-images.sh -- all real files found to
-        # duplicate this same #822 recurrence shape. Runs in the build-tools
         # container because it needs GNU grep -P, same as the
         # naming-consistency guard above.
         run: |
@@ -3194,7 +3046,6 @@ jobs:
         # silently never run for the exact changes most likely to need it.
         # Runs in the build-tools container because it needs the same real
         # bash/grep/awk semantics (word-boundary-safe path extraction, GNU
-        # sed -E) the other check-*.sh guards above already require.
         run: |
           set -euo pipefail
 
@@ -3336,7 +3187,6 @@ jobs:
   # runner hosts (#623) -- `needs:` only serializes jobs *within* one run.
   # Deriving the subnet from this run's own id/attempt gives every run its
   # own subnet, so two runs on the same host (almost) never collide.
-  #
   # Deliberately unconditional (no `needs`/`if` gating on detect-changes):
   # `detect-changes` itself only runs `if: github.event_name ==
   # 'pull_request'`, so on a push event it's skipped -- and a job that
@@ -3391,7 +3241,6 @@ jobs:
     # push events (master/vX.Y.Z), this job still waits for `promote` so it
     # validates the freshly-promoted channel state of the commit it's
     # actually running for, instead of racing ahead of it or checking a
-    # stale channel tag left over from a previous push.
     needs: [detect-changes, merge-manifests, promote, compute-validation-network]
     if: >-
       ${{
@@ -3441,7 +3290,6 @@ jobs:
     # A job-level `env:` entry is re-applied on top of every step's
     # accumulated $GITHUB_ENV state, so a fixed entry here would always win
     # in every later step, silently overriding whatever a retry inside that
-    # step writes via $GITHUB_ENV -- exactly why none of these are set here.
     steps:
       # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so the
       # "Ensure PR staging tags exist for full-setup services" step below can
@@ -3482,7 +3330,6 @@ jobs:
           BASE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || github.ref_name }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # github.sha, NOT github.event.pull_request.head.sha: for a
-          # pull_request event this is the synthetic merge commit actually
           # checked out and built (head merged into the base branch's tip
           # AT THE TIME OF THIS EVENT), and -- critically -- it changes
           # whenever that merge result changes even if the PR's own head
@@ -3540,7 +3387,6 @@ jobs:
 
       # deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for
       # every service, and the "Run client simulation" step below pulls
-      # build-tools at that same tag -- but build/build-arm64 only push the
       # PR staging tag for services detect-changes says this PR actually
       # touched (real, deliberate additional push cost -- see #626 -- not
       # "rebuild everything per PR for free"). Any of those services this PR
@@ -3583,7 +3429,6 @@ jobs:
       # tag would make this job green while testing exactly the stale image
       # #626 exists to stop testing, just now hidden behind a tag name that
       # LOOKS PR-specific. Fail loudly instead; only a genuinely untouched [diag]
-      # service gets the base-commit back-fill (#1254/#1255: sourced from the
       # PR base commit's own durable sha-<short> tag, not a mutable channel).
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
@@ -3637,7 +3482,6 @@ jobs:
           # confirmed every non-PR push still publishes a fresh per-commit
           # tag for every service (issue #1095's "build all services per
           # push" behavior, not yet changed), so this image reliably exists
-          # (or appears shortly after -- the bounded poll below still handles
           # that race exactly as it did for the base channel before).
           base_sha_short="${BASE_SHA:0:7}"
 
@@ -3687,7 +3531,6 @@ jobs:
               # Wrapped in ghcr_retry: unlike merge-manifests' per-arch
               # probes, a missing tag here is always a real error (this job
               # runs after merge-manifests, so a touched service's PR staging
-              # tag is expected to already exist) -- retrying protects
               # against a transient 401 being misreported as "never pushed".
               if ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pr_image" >/dev/null 2>&1; then
                 echo "::notice::$service already has a staging image at $PR_TAG (this PR touched it)."
@@ -3771,7 +3614,6 @@ jobs:
       # same self-hosted host (#703): two runs could derive the same slot,
       # both pass a `docker network ls`-based pre-flight check (only catches
       # a leftover Docker network, not another run mid-way through its own
-      # check-then-create window), and then race the kernel to actually
       # create the bridge, with only one winning.
       #
       # This step closes that gap with the same host-local `flock` idiom this
@@ -3836,7 +3678,6 @@ jobs:
           # shellcheck source=scripts/lib/reserve-validation-subnet.sh
           source "$GITHUB_WORKSPACE/scripts/lib/reserve-validation-subnet.sh"
           # This step runs unconditionally (`if: always()`), including when
-          # the "Reserve a validation subnet and start the stack" step above
           # failed before ever setting COMPOSE_PROJECT_NAME -- under
           # `set -u`, a bare "$COMPOSE_PROJECT_NAME" would abort this whole
           # step with "unbound variable" in exactly that case (confirmed in
@@ -3896,7 +3737,6 @@ jobs:
     # step already carries a 35-minute timeout (a deliberately generous
     # bound for sccache/sccache-dist fallback to a full local compile) -- a
     # job-level timeout must exceed every step timeout it contains, or the
-    # job would fail before that step's own allowance runs out. 45 minutes
     # covers the clippy step's 35-minute budget plus this job's other steps.
     timeout-minutes: 45
     steps:
@@ -4050,7 +3890,6 @@ jobs:
     # Real warm-cache runs: 26-56s. Same class of risk as dns_rust_quality's
     # clippy step above (this job's own "test" step compiles the crate via
     # the same cargo-with-sccache-fallback path, so an sccache/sccache-dist
-    # miss forces the same full local recompile) -- 45 minutes matches
     # dns_rust_quality/ui_rust_quality's bound for that reason, not derived
     # from the fast warm-cache samples alone.
     timeout-minutes: 45
@@ -4142,7 +3981,6 @@ jobs:
     # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
     # above for the same reason): scarce lancache-heavy capacity, safe to
     # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
-    # result now uses require_success_or_intentional_cancellation(), and
     # rust_coverage's own `success`/`skipped` gate on ui_test already treats
     # a non-matching result as a clean skip.
     concurrency:
@@ -4246,7 +4084,6 @@ jobs:
       # This job resolves its own build-tools image rather than reusing
       # validate-compose's exported build_tools_image output. That output is
       # deliberately locked to the published, digest-qualified image (never a
-      # branch-local fallback) because dns_cargo_audit/ui_cargo_audit need a
       # reproducible, previously-audited image. Coverage measurement has no
       # such reproducibility requirement, so it can accept a branch-local
       # rebuild when a PR's own Dockerfile change (like adding tarpaulin)
@@ -4403,7 +4240,6 @@ jobs:
             coverage-ui/tarpaulin-report.json
           retention-days: 30
       # The badge JSON is handed off as an artifact rather than pushed from this
-      # job directly: this job runs on every trigger including same-repo pull_request
       # runs that execute PR-controlled test code (cargo tarpaulin), and a job-level
       # `permissions: contents: write` would apply to that untrusted code too --
       # GitHub Actions has no step-level permissions to scope the write down to just
@@ -4447,7 +4283,6 @@ jobs:
     # Deliberately per-ref, NOT workflow-wide: a single shared group would
     # let unrelated branches queue behind each other, and GitHub's
     # concurrency queue only ever holds one pending job per group -- a
-    # burst of publishes for OTHER branches can bump a given branch's
     # already-queued publish out of the queue entirely before it ever [diag]
     # starts, silently skipping that branch's badge update for this push
     # (see the "Queue badge publishes instead of replacing them" review
@@ -4503,7 +4338,6 @@ jobs:
           # the branch's current tip directly from the remote and skip as a
           # no-op if a newer commit has already landed; that newer commit's
           # own run (already published, or about to) is the correct source of
-          # truth.
           current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
           if [[ -z "$current_tip" ]]; then
             echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
@@ -4606,7 +4440,6 @@ jobs:
     # detect-changes/validate-compose (both self-hosted-only). Depending on
     # them here would reintroduce the same trap that ruled out a
     # ci_scope_policy-hosted job elsewhere in this file: if self-hosted
-    # runners are genuinely unavailable (the scenario this fallback exists
     # for), a needs: dependency on a self-hosted-only job would just sit
     # queued forever. The check itself (bash -n plus an executable-bit test
     # on one small script) is cheap enough to run unconditionally every time,
@@ -4722,7 +4555,6 @@ jobs:
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
-    # binary, no crate compilation). Real runs: 10-18s.
     timeout-minutes: 20
     # Job-level concurrency (#891 follow-up, same pattern/reasoning as
     # dns_cargo_audit above): scarce lancache-heavy capacity, no other
@@ -4790,7 +4622,6 @@ jobs:
     # storm. This workflow's top-level concurrency group (top of file)
     # already fully serializes pull_request-triggered runs for the same ref
     # (`{workflow}-{ref}`, cancel-in-progress: false): a burst of opened +
-    # labeled + milestoned events for one PR queues each run behind the
     # previous one rather than running them concurrently, so two PR runs for
     # the same ref can never have an in-progress job for the same job-level
     # group at the same time -- confirmed live on #915, and re-confirmed live
@@ -4821,7 +4652,6 @@ jobs:
     # Fix: on the push-event branch below, dns_test/ui_test/dns_cargo_audit/
     # ui_cargo_audit still use require_success_or_intentional_cancellation()
     # (success|skipped|cancelled) because they can still show a direct
-    # `cancelled` from their own cancel-on-push groups. watchdog_test does NOT
     # get its own group, and with validate-compose no longer cancelling on
     # push it can no longer be `skipped` on push either, so on a push it now
     # only ever shows `success` (or a real failure); its
@@ -4851,7 +4681,6 @@ jobs:
     # detect-changes, which never runs on push -- so nothing in this change
     # gives them a legitimate way to show anything but `success` on a push
     # event. A `cancelled` there would mean a real anomaly (e.g. a manual
-    # workflow cancellation), not a supersession, and should keep failing
     # loudly. Extending the pattern to this pair is a clean, separate,
     # mechanically identical follow-up if ever wanted -- not folded in here.
     #
@@ -4903,7 +4732,6 @@ jobs:
       # self-hosted runner happened to leave in the shared `_work` workspace
       # directory. Under real concurrent load (many PRs' runs sharing a small
       # runner pool) that workspace can hold a different, unrelated run's
-      # checkout -- or nothing at all -- producing both a false "file not
       # found" failure and, worse, a silent false pass/fail against the wrong
       # commit's content. Every other job in this workflow already checks out
       # its own commit; this is the one job that didn't.
@@ -5038,7 +4866,6 @@ jobs:
           done
 
           # dns_rust_quality/dns_test/dns_cargo_audit (and the UI equivalents)
-          # are now additionally gated in their own job `if:` on the PR event's
           # `action`: labeled/unlabeled/milestoned/demilestoned carry no new
           # commit, so those jobs deliberately skip on such an event even when
           # the diff itself would otherwise mark the crate as changed (that
@@ -5132,7 +4959,6 @@ jobs:
     # generalized the same already-proven mechanism to the other 7 services
     # rather than inventing a new one.
     #
-    # UPDATED (issue #1290): this used to be a bare `if:` relying on GitHub's
     # implicit `&& success()`, which was safe only while `validate-compose`
     # and (since #1095 Part 1) `push-supersession-check` stayed root jobs
     # with no `if:`/`needs:` of their own -- see the INVARIANT note this
@@ -5171,7 +4997,6 @@ jobs:
     # and per ref. cancel-in-progress is pull_request-only -- see `build`'s
     # group comment for the full #979 rationale. On push, `build`'s `if:`
     # requires `needs['container-scan'].result == 'success'` (the non-PR
-    # branch), so this scan is a hard gate on the channel publish path:
     # cancelling it in a merge cascade makes `build` skip and publishes no channel
     # image for that commit, starving the channel. On a PR it is safe to
     # cancel a superseded scan -- it only reads/builds a local image to scan
@@ -5337,7 +5162,6 @@ jobs:
         # build-tools-only ("Enable build-tools publish scan", issue #1290,
         # maintainer decision) to every matrix.service. No service
         # unconditionally builds a local throwaway image just to scan it on
-        # every trusted-ref push when determine-push-reuse-scope has already
         # proven it's safe to reuse the published channel image instead.
         # This reads determine-push-reuse-scope's `reuse_<service>` output --
         # the SAME already-verified three-part decision (channel image
@@ -5383,7 +5207,6 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Mirrors build/build-arm64's own "Determine whether this service
           # needs building" case mapping exactly -- single source for which
           # reuse_* output belongs to which matrix.service, not a second copy
           # that could drift out of sync with it.
@@ -5604,7 +5427,6 @@ jobs:
         # Issue #930: this row runs on a GitHub-hosted arm64 runner, a fresh
         # VM every run with no local image cache, which has hit Docker Hub's
         # anonymous-pull rate limit (surfacing as "unauthorized:
-        # authentication required") while bootstrapping
         # moby/buildkit:buildx-stable-1. Confirmed transient: a rerun with
         # zero code changes succeeded. Retried via
         # .github/actions/buildx-setup-retry instead of the plain action used
@@ -5699,7 +5521,6 @@ jobs:
           docker buildx rm "${{ steps.buildx-amd64.outputs.name || steps.buildx-arm64.outputs.name }}" || true
 
       - name: Prepare local Trivy cache
-        # Trivy's cache backend (BoltDB) only allows one process to hold a
         # given cache directory open at a time. This directory used to be
         # keyed only by service+platform, not by ref -- safe back when the
         # top-level "publish" concurrency group serialized whole pipeline
@@ -5729,7 +5550,6 @@ jobs:
         #     ref, or a rerun of an already-superseded run overlapping a
         #     fresh push, must not cancel each other, and per this same
         #     reasoning must not share a cache dir either.
-        # An earlier revision of this fix keyed only on sanitized
         # `ref_name` with no run_id component -- strictly coarser than the
         # concurrency-group key above, so it left exactly this race open
         # for the dispatch/rerun case despite "closing" the ordinary-push
@@ -5760,7 +5580,6 @@ jobs:
         #   - tag refs (`refs/tags/*`): release tags are immutable and
         #     pushed exactly once, so a tag's cache dir can never be reused
         #     by a later run either; without cleanup, one dir per release
-        #     would accumulate per runner host forever. Tag refs take the
         #     run_id suffix too -- strictly finer than their concurrency
         #     group key (allowed by the invariant above) -- so the delete
         #     below can never touch a directory any other concurrency-group
@@ -5810,7 +5629,6 @@ jobs:
         # exact reason host-level tmpfiles aging cannot solve this either.
         # The sentinel file is only ever written by this step, so its age
         # tracks "time since last forced reset", not "time since last use".
-        #
         # Runs before the scan (not after) so the run that crosses the age
         # threshold pays the one-time re-download cost itself, rather than
         # leaving the next run to discover an already-wiped, cold directory.
@@ -5880,7 +5698,6 @@ jobs:
       # doesn't need them for a read-only scan.
       - name: Resolve channel image for unchanged-scan retag
         id: channel-image
-        # Same push-supersession-check gate as "Build local scan image"/"Scan
         # image with Trivy" above (issue #1095 Part 1): a push that is
         # already superseded before this job started has no reason to pay
         # for a channel-image registry read and a Trivy scan either -- the
@@ -5953,7 +5770,6 @@ jobs:
         # keeping them would only leak one ~1-2.5 GB directory per run onto
         # the runner host (#912). `always()` so a failed or cancelled scan
         # still cleans up; when the prepare step was skipped its output is
-        # empty and this step skips too. The case guard fails closed rather
         # than trusting the interpolated path blindly: `rm -rf` on a
         # step-output-derived path must never be able to escape the
         # dedicated cache root, even after a future refactor of the prepare
@@ -6006,7 +5822,6 @@ jobs:
     # own predecessor commit) is the reuse source, and why ancestry alone
     # (without the additional content diff) is not sufficient evidence of
     # "safe to reuse" -- issue #1095's own investigation (its "C-7" finding)
-    # and issue #1290's corrected implementation converge on this same
     # three-part verification.
     name: determine push reuse scope (Schritt 4)
     needs: detect-changes
@@ -6059,7 +5874,6 @@ jobs:
         # lower GHCR rate limit that has already failed for real under
         # concurrent CI load in this exact workflow (see "Resolve compose
         # validation image"'s own comment earlier in this file for the
-        # confirmed incident: "denied: denied" under a real push burst).
         # This job exists specifically to help with burst/push-cost
         # behavior, so skipping this login would risk reintroducing the
         # exact class of failure it's meant to reduce.
@@ -6129,7 +5943,6 @@ jobs:
 
           # decide_one <classify_key> <matrix_service> <before_sha_changed>
           #
-          # <before_sha_changed> is detect-changes' own before..sha verdict
           # for this service -- a cheap pre-check that lets a service known
           # to have changed in THIS push skip the registry round-trip
           # entirely (it must rebuild regardless of channel state; see
@@ -6229,7 +6042,6 @@ jobs:
     # -- container-scan/build-arm64 and the shellcheck/validate-compose/
     # line-endings/ci_scope_policy gates all point here for the full story.
     #
-    # cancel-in-progress is scoped to pull_request events ONLY (issue #979).
     # On a PR, a newer push to the same branch supersedes the older commit,
     # so cancelling the older service build reclaims a scarce lancache-heavy
     # slot (otherwise pinned for the full ~150-minute timeout) with no
@@ -6259,7 +6071,6 @@ jobs:
     # never a cancellation to suppress there.
     #
     # The group key still isolates workflow_dispatch and reruns
-    # (`github.run_attempt != '1'`) with a run_id suffix so a PR rerun cannot
     # cancel the original PR run's build; on push/tag the flag is false anyway.
     concurrency:
       group: >-
@@ -6406,7 +6217,6 @@ jobs:
           # push-supersession-check's own comment). Applies uniformly to
           # every service, including build-tools -- an already-superseded
           # push gets no exception. Deliberately placed AFTER both branches
-          # above (not folded into either) so it can override should_build
           # back to false regardless of which branch set it true, and
           # deliberately does NOT apply on pull_request (build/container-scan
           # already get real per-commit cancellation there via their own
@@ -6488,7 +6298,6 @@ jobs:
       # verification (channel image revision label + git ancestry + a real
       # content diff; see that job and scripts/lib/push-reuse.sh), so this
       # step only needs to resolve the same channel image's linux/amd64
-      # child digest and retag it. No rebuild, no recompilation needed here.
       # No separate Trivy scan needed here either: UPDATED (Schritt 3, issue
       # #1095) -- container-scan's "Determine per-service publish scan
       # reuse" step reads this exact same determine-push-reuse-scope
@@ -6564,7 +6373,6 @@ jobs:
       # the same across a re-run of the identical event (GitHub reuses the
       # original event's github.sha for re-runs, not a freshly re-resolved
       # one). Tagging by the PR head SHA alone let two different events for
-      # the same head, merged against two different base states, collide on
       # one tag -- and since this workflow's concurrency group does not
       # cancel in-progress PR runs, a slower/older run could overwrite a
       # newer run's tag with different image content after the fact. The
@@ -6845,7 +6653,6 @@ jobs:
         # #822 ("Pattern D"): ghcr.io push-token issuance intermittently
         # fails with "403 Forbidden"/"denied: denied"/"401 Unauthorized" for
         # the slowest (Rust) builds in this matrix; a manual `gh run rerun`
-        # (fresh login, some time elapsed) has fixed every occurrence so far.
         # This composite action is the shared retry+re-login policy every
         # GHCR-writing step in the project now uses (see
         # .github/actions/ghcr-build-push-retry and scripts/lib/ghcr-retry.sh
@@ -6905,7 +6712,6 @@ jobs:
       # removes on its own. "Build and push" above is the only step in this
       # job that uses it for a real build; "Retag unchanged service image"
       # above also uses it (for `imagetools create`, on a Schritt 4
-      # retag-only path) -- matches "Set up Docker Buildx"'s own widened
       # condition so a builder that step actually created always gets torn
       # down. "Rotate local Buildx cache" below only manipulates the local
       # cache directory on disk, not the builder itself.
@@ -7005,7 +6811,6 @@ jobs:
         # retention" step above -- see that step's comment for the full
         # reasoning. This is the `<service>-pushed-<ref>` persistent dir's
         # equivalent: reused on every non-PR push/schedule run, never
-        # touched by the ephemeral cleanup step below or by host-level
         # tmpfiles aging (#928).
         if: ${{ steps.trivy-cache.outputs.ephemeral == 'false' }}
         env:
@@ -7111,7 +6916,6 @@ jobs:
     # merge-manifests below combines this job's per-service linux/arm64 tag
     # with build's linux/amd64 tag into the real sha-<commit> multi-platform
     # tag; this job never writes that tag directly.
-    #
     # Also skipped on a metadata-only pull_request event -- see `build`'s
     # identical comment above for the full reasoning.
     needs:
@@ -7314,7 +7118,6 @@ jobs:
         # Issue #930: retried via .github/actions/buildx-setup-retry -- this
         # GitHub-hosted arm64 runner is a fresh VM every run and has hit
         # Docker Hub's anonymous-pull rate limit (surfacing as
-        # "unauthorized: authentication required") while bootstrapping
         # moby/buildkit:buildx-stable-1. Confirmed transient: a rerun with
         # zero code changes succeeded. The self-hosted amd64 `build` job's
         # equivalent step keeps the plain, unretried action -- it persists
@@ -7505,7 +7308,6 @@ jobs:
       - name: Build and push
         # No secret-files/network/allow here: this runner cannot reach the
         # LAN-only Redis/sccache-dist/distcc acceleration infrastructure, so
-        # this always builds as a plain, uncached (but native) cargo build.
         # Uses the GitHub Actions cache backend (type=gha) instead of the
         # self-hosted local Buildx cache, since this runner is ephemeral and
         # has no persistent /var/tmp to reuse across runs.
@@ -7610,7 +7412,6 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
 
   merge-manifests:
-    # Combines build's linux/amd64 per-service tag with build-arm64's
     # linux/arm64 per-service tag into the real sha-<commit> multi-platform
     # tag that promote/release/setup.sh consume. Uses imagetools create --
     # the same tool promote already uses to move channel tags -- so no image
@@ -7684,7 +7485,6 @@ jobs:
 
           # Same wording as this same file's build/build-arm64 matrix.description
           # entries -- kept in sync manually, not sourced from one shared place,
-          # because merge-manifests has no matrix of its own to read
           # matrix.description from directly. This is where the OCI
           # org.opencontainers.image.description annotation is actually set
           # (issue #620): per-platform images upstream stay unannotated on
@@ -7743,7 +7543,6 @@ jobs:
             # into a ~90s stall per service, and worse, could misclassify a
             # genuine transient 401 as "not built" and silently skip merging
             # a service that actually was pushed -- the retry policy exists
-            # to protect real registry-write operations below, not this
             # expected-failure control flow.
             if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
               echo "::notice::Skipping $service: no linux/amd64 image was published for this commit (likely unchanged on a pull request)."
@@ -7848,7 +7647,6 @@ jobs:
 
       # "Set up Docker Buildx" above runs unconditionally (unlike the two
       # mutually-exclusive "Create ..." steps that consume it), so this
-      # teardown is unconditional too -- exactly one of those two steps ever
       # uses the builder per run, but it was created either way.
       - name: Remove buildx builder
         if: always()
@@ -8028,7 +7826,6 @@ jobs:
     # detect-changes/file-headers/pr-template-check are intentionally
     # `if: github.event_name == 'pull_request'` (they skip on every push),
     # but `success()` treats a skipped job the same as a failed one -- so on
-    # every real push to master or a vX.Y.Z branch, the implicit success()
     # check silently evaluated false and this job never ran, even though
     # `build` itself completed successfully (confirmed directly: run
     # 28958519247 on v0.2.0, all 7 build matrix legs succeeded, promote still
@@ -8063,7 +7860,6 @@ jobs:
     # while it was still queued, before it ever started (#777). Giving
     # promote its own group here stops it from competing for that same
     # single pending slot.
-    #
     # CORRECTION (#888): this job-level group does NOT, by itself, protect
     # promote from being killed *mid-execution* if the top-level group's own
     # cancel-in-progress were ever true and cancelled the whole run out from
@@ -8094,7 +7890,6 @@ jobs:
     # steps never get to run for the cancelled instance. #892 (narrowing
     # cancellation to `build`/`container-scan` instead of the whole run) made
     # this practically reachable: multiple tag pushes/dispatches can now
-    # build in parallel and reach this point at nearly the same time. Real
     # mutual exclusion (still GLOBAL, not per-ref -- re-scoping per-ref would
     # reintroduce #777, a promotion racing backfill-stack-latest.yml's own
     # tag move for a *different* ref) now comes from
@@ -8136,7 +7931,6 @@ jobs:
       # (issue #897 -- see this job's own `permissions:`/removed
       # `concurrency:` comments for the full reasoning). Runs immediately
       # after checkout, before any image work starts, so a run that cannot
-      # get the lock never touches GHCR at all. Fails closed: if every
       # attempt is exhausted, promote_lock_acquire_with_retry prints
       # ::error:: and returns 1, which -- under `set -euo pipefail` --
       # stops this step (and therefore the job) before any tag is moved.
@@ -8256,7 +8050,6 @@ jobs:
           # up back-to-back across a burst of merges, each pointing at a
           # moment-in-time commit that a later one will immediately
           # supersede. Before actually moving any tag, re-resolve the ref's
-          # current tip directly from the remote and bail out as a no-op if
           # a newer commit already landed: that later commit's own promote
           # run (already queued or about to be) will move the tag correctly,
           # so this run briefly (and pointlessly) setting dev/nightly to an
@@ -8298,7 +8091,6 @@ jobs:
           # REQUESTED_CHANNEL path a few lines below, the same path a human
           # operator already had available for an ad-hoc spot-check
           # promotion. Because promote only runs after build/test/scan
-          # succeed (see this job's own `needs: merge-manifests` /
           # `if:` above), this keeps nightly green-gated and fail-closed: a
           # broken current_dev tip simply never reaches this job, so nightly
           # holds its last good state instead of being force-moved onto a
@@ -8392,7 +8184,6 @@ jobs:
           COPY stack.env /stack.env
           CMD ["true"]
           DOCKERFILE
-          # This build is always genuinely multi-platform ($RELEASE_PLATFORMS
           # is always 2+ platforms), so unlike the per-platform service
           # builds above, an index already exists here for --annotation to
           # attach to -- confirmed live while fixing issue #620. This step
@@ -8474,7 +8265,6 @@ jobs:
       # Minor/major bumps stay a manual maintainer tag push; only Z is ever
       # computed here (see scripts/compute-next-release-tag.sh).
       #
-      # `if:` is written as `success() && ...`, not a bare `github.ref == ...`
       # condition, for the same reason the job-level `if:` above carries its
       # own long comment: a step's own `if:` REPLACES (does not extend) the
       # implicit `success()` GitHub Actions would otherwise apply, so leaving
@@ -8530,7 +8320,6 @@ jobs:
           # immediately before pushing the version tag itself. Two releases
           # landing back-to-back within the few seconds between that earlier
           # check and this one is a low-probability ("lottery odds") window,
-          # but it is a single, near-free git ls-remote call, so there is no
           # reason not to close it -- this run must never tag a commit that a
           # later push has already superseded.
           current_tip="$(git ls-remote origin refs/heads/master | cut -f1)"
@@ -8577,7 +8366,6 @@ jobs:
           # `/proc/<pid>/environ`, which the standard Linux permission model
           # restricts to the same user or root), so this closes that
           # remaining exposure. The real PAT header (index 1 below) is
-          # scoped to this exact push URL (`http.<url>.extraheader`, not a
           # bare `http.extraheader`) so it cannot leak into unrelated git
           # operations in this same shell -- index 0 is a separate,
           # unrelated key (see below) that resets checkout's own persisted
@@ -8608,7 +8396,6 @@ jobs:
           #
           # PR #1230 (2026-07-24) tried to fix this with the
           # `git config --local --unset-all ...` line below, on the theory
-          # that checkout's header lived directly in .git/config's own
           # [http ...] section. It does not: `--local` only ever reads/writes
           # .git/config itself, never a file merely `includeIf`-referenced
           # from it, so that command always exits 5 ("no such section") and
@@ -8638,7 +8425,6 @@ jobs:
           # supplied via GIT_CONFIG_COUNT, clears the file-based value for
           # this one `git push` invocation only, without touching any on-disk
           # file. This does NOT collapse into a single reset+set pair on one
-          # key: checkout's bare-host key and the PROJECT_AUTOMATION_PAT's
           # repo-path-scoped key below are two DIFFERENT config keys
           # (different URL-match specificity) that both matched this same
           # push URL simultaneously -- which is exactly why both headers were
@@ -8668,7 +8454,6 @@ jobs:
           # for `git ls-remote`); confirmed `--local --unset-all` alone left
           # it reproducing every time; then confirmed adding this empty-value
           # reset entry eliminates it -- exactly one `Authorization` header
-          # sent, and GitHub's ordinary auth-rejection response returned
           # instead of the duplicate-header 400. Nothing later in this job
           # needs the original GITHUB_TOKEN git credential -- the next step
           # authenticates its own registry call explicitly via
@@ -8736,7 +8521,6 @@ jobs:
     needs: promote
     if: "!cancelled() && needs.promote.result == 'success' && startsWith(github.ref, 'refs/tags/v')"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # NO REAL RUN DATA: this job only runs on an actual `refs/tags/v*` push,
     # and no such run of this workflow has completed in the recorded history
     # checked for this rollout (2026-07, ~3800 total workflow runs) -- tags
     # v0.1.0/v0.2.0/v0.3.0/v0.3.1 exist as GitHub releases, but none was
@@ -8806,7 +8590,6 @@ jobs:
       # outside those markers survives a re-run of this job (e.g. a manual
       # `workflow_dispatch` re-promotion of the same tag, or a rerun after a
       # transient failure). A brand-new release has no existing body to
-      # preserve, so its notes are just the auto-generated section verbatim.
       # The prerelease-state check further down exists because GitHub's
       # PATCH endpoint for releases would otherwise happily flip a release's
       # prerelease flag to match whatever this run computes -- silently
@@ -9067,7 +8850,6 @@ jobs:
     # vetted image scanner (AG-KD-003) -- to emit a CycloneDX SBOM per released
     # image digest, then attaches each as a <service>.cdx.json GitHub release
     # asset. That delivery path mirrors how provenance evidence rides alongside
-    # the release and needs only contents:write, with no attestation-permission
     # expansion. A GHCR OCI-referrer SBOM attestation (actions/attest-sbom) is a
     # possible future complement, deliberately not added here to keep a single,
     # fully release-asset-based publication path.
