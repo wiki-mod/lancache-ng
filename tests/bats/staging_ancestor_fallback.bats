@@ -255,11 +255,11 @@ STUB
 }
 
 @test "saf_query_run_count: GH_TOKEN never appears in ghcr_retry's own retry/failure diagnostics" {
-    # Codex P2 finding: ghcr_retry logs its own wrapped command verbatim via
-    # \$* in its ::warning::/::error:: lines on every failed attempt (see
-    # scripts/lib/ghcr-retry.sh). An earlier version of _saf_github_api_get
-    # took the token as one of ITS OWN positional arguments, which meant that
-    # argument became part of \$* too -- the token would be echoed into the
+    # ghcr_retry logs its own wrapped command verbatim via \$* in its
+    # ::warning::/::error:: lines on every failed attempt (see
+    # scripts/lib/ghcr-retry.sh). If _saf_github_api_get ever took the token
+    # as one of ITS OWN positional arguments again, that argument would
+    # become part of \$* too -- the token would be echoed into the
     # job log in plain text on every single retry, not just once, relying
     # entirely on GitHub Actions' own best-effort exact-string log masking as
     # the only protection (which does not help at all for a manually-supplied
@@ -293,6 +293,41 @@ STUB
     # Retried the full GHCR_RETRY_MAX_ATTEMPTS times -- a non-200 status is
     # genuinely retried, not accepted on the first attempt.
     [ "$(wc -l < "$call_log")" -eq 4 ]
+}
+
+@test "saf_query_run_count: a 401 (invalid token) fails fast on the first attempt instead of exhausting the full retry budget" {
+    # A 401 is a permanent, configuration-level failure (an invalid/expired
+    # GH_TOKEN) -- retrying with backoff cannot fix it. _saf_github_api_get
+    # must classify this into GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE so
+    # ghcr_retry stops after one attempt, not GHCR_RETRY_MAX_ATTEMPTS (4)
+    # attempts with a 30s-equivalent backoff between each -- both real
+    # callers repeat this query once per untouched service, so a genuine
+    # auth misconfiguration could otherwise burn a large fraction of the
+    # caller's own job timeout before reaching the inevitable failure.
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_HTTP_STATUS=401
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [ "$(wc -l < "$call_log")" -eq 1 ]
+    [[ "$stderr" == *"permanent (non-retryable) error"* ]]
+}
+
+@test "saf_query_run_count: a 404 (wrong endpoint/repository) fails fast on the first attempt instead of exhausting the full retry budget" {
+    # Mirror of the 401 test above: a 404 is equally permanent (a genuinely
+    # wrong repository/workflow path), not a transient condition retrying
+    # could resolve.
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_HTTP_STATUS=404
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    [ "$(wc -l < "$call_log")" -eq 1 ]
+    [[ "$stderr" == *"permanent (non-retryable) error"* ]]
 }
 
 @test "saf_base_commit_has_confirmed_run: a persistent failure is treated as inconclusive (2), not confirmed-zero" {
@@ -758,6 +793,163 @@ STUB
     [[ "$output" == *"could not be positively determined"* ]]
 }
 
+@test "saf_find_built_ancestor: caches a definitive run-existence answer across repeated calls for the same candidate -- the redundant-lookups-across-services fix" {
+    # Simulates two different untouched services (this test's two separate
+    # saf_find_built_ancestor invocations) independently walking the exact
+    # same base_sha's ancestor history in the same job run -- the real
+    # "long docs-only chain, redundant per-service run lookups against a
+    # shared repository-scoped GitHub API rate limit" finding this cache
+    # exists to fix. The underlying run-existence check for the SAME
+    # candidate must be queried at most once total, not once per call.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    call_count_file="$BATS_TEST_TMPDIR/run_exists_call_count"
+    echo 0 > "$call_count_file"
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+count="\$(cat "$call_count_file")"
+count=\$((count + 1))
+echo "\$count" > "$call_count_file"
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    install_revision_stub_for "$ancestor_sha"
+
+    # Uses bats' `run` deliberately, not despite it: `run` captures output
+    # via a command substitution, which forks a subshell -- exactly the same
+    # shape both real callers use (`resolved_source="$(saf_resolve_untouched_backfill_source ...)"`
+    # once per service, inside a loop). This is precisely why the cache is a
+    # real file under $SAF_ANCESTOR_RUN_CACHE_DIR rather than a shell
+    # variable/array: a file written inside one `run`-forked subshell is
+    # still there for the NEXT `run`-forked subshell to read, unlike shell
+    # state, which a subshell can never write back to its parent (an
+    # in-memory version of this cache was caught live failing this exact
+    # test for that reason -- proof the underlying mechanism, not just this
+    # test's own plumbing, is what's being checked here).
+    # First "service": a real query, exactly once.
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 1 ]
+
+    # Second "service", same base_sha/candidate chain -- must hit the cache,
+    # not issue a second real query, even though this is a completely
+    # separate saf_find_built_ancestor call (a different service in the same
+    # process, exactly like scripts/ensure-pr-staging-images.sh's own loop
+    # over full_setup_services).
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 1 ]
+}
+
+@test "saf_find_built_ancestor: an inconclusive run-check for a candidate is never cached -- a later, independent query can still succeed" {
+    # Regression guard for the deliberate "only cache a definitive answer"
+    # scoping in the fix above: an inconclusive (status 2) result reflects a
+    # query FAILURE, not a historical fact, so caching it could make one
+    # transient blip permanently fail every later service's own check too,
+    # even ones that would have queried successfully on their own. This
+    # proves the opposite: a fresh saf_find_built_ancestor call for the same
+    # candidate after an earlier inconclusive result genuinely re-queries
+    # (the call count increases) and can still succeed.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    call_count_file="$BATS_TEST_TMPDIR/run_exists_call_count"
+    echo 0 > "$call_count_file"
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+count="\$(cat "$call_count_file")"
+count=\$((count + 1))
+echo "\$count" > "$call_count_file"
+# Inconclusive on the first call ever, a confirmed run on every call after.
+if [ "\$count" -eq 1 ]; then
+    exit 2
+else
+    exit 0
+fi
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    install_revision_stub_for "$ancestor_sha"
+
+    # Uses bats' `run` deliberately -- see the analogous caching test above
+    # for why this file-based cache is specifically designed to survive the
+    # subshell `run` (and both real callers' own `$(...)`) forks, unlike an
+    # in-memory version would have.
+    # First call: inconclusive -> fails closed, per the existing JUDGMENT
+    # CALL, and must NOT cache that inconclusive answer.
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -ne 0 ]
+    [ "$(cat "$call_count_file")" -eq 1 ]
+
+    # Second call, same candidate: must genuinely re-query (call count
+    # increases to 2, proving no stale inconclusive answer was cached) and
+    # this time succeeds since the stub now reports a confirmed run.
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 2 ]
+}
+
+@test "saf_resolve_untouched_backfill_source: BASE_SHA's own pre/post push-run re-derivation is unaffected by the ancestor-candidate cache" {
+    # Regression guard for the fix's own scoping: the ancestor-candidate
+    # cache above must never leak into saf_base_commit_has_confirmed_run's
+    # OTHER call sites -- specifically BASE_SHA's own pre_run_status/
+    # post_run_status pair in saf_resolve_untouched_backfill_source, which is
+    # INTENTIONALLY queried twice, independently, so a fast-path bug can only
+    # cost time, never safety (that function's own header). Proves the two
+    # BASE_SHA push-run checks still both genuinely execute (call count
+    # reaches 2), not silently collapsed into one by a cache leaking across
+    # this file's other functions.
+    setup_linear_fixture
+    call_count_file="$BATS_TEST_TMPDIR/run_exists_call_count"
+    echo 0 > "$call_count_file"
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+count="\$(cat "$call_count_file")"
+count=\$((count + 1))
+echo "\$count" > "$call_count_file"
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    # base_sha has a confirmed push run every time it's asked (per the stub
+    # above) -- the pre-check sees it, and (since the normal-path wait then
+    # fails, per the empty revision stub) the post-check re-derives it too.
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
+    [ "$status" -ne 0 ]
+    # Exactly 2 calls: the pre-check and the post-check, both genuinely
+    # executed -- not 1, which would mean the second silently reused the
+    # first's cached answer.
+    [ "$(cat "$call_count_file")" -eq 2 ]
+}
+
 @test "saf_find_built_ancestor: a candidate whose own build is confirmed still active gets a second, extended-budget attempt" {
     # Real race this project has confirmed happens: a candidate commit's own
     # push run has not finished yet by the time the ancestor walk reaches
@@ -916,11 +1108,11 @@ STUB
 
 @test "saf_find_built_ancestor: a 0/0 extended budget still performs one real re-check, not zero -- succeeds if the image is fresh by then" {
     # build-push.yml's own "Ensure PR staging tags exist for full-setup
-    # services" step now passes 0 0 for the extended budget specifically
-    # (see that step's own comment for why its 30-minute job cannot afford
-    # more) -- its PR reply describes this as "a single immediate re-check",
-    # not "the extended retry is skipped entirely". This proves that claim:
-    # sif_wait_for_fresh_base_image always performs its freshness check once
+    # services" step passes 0 0 for the extended budget specifically (see
+    # that step's own comment for why its 30-minute job cannot afford more).
+    # A 0/0 budget is "a single immediate re-check", not "the extended retry
+    # is skipped entirely" -- this proves that: sif_wait_for_fresh_base_image
+    # always performs its freshness check once
     # BEFORE ever consulting the hard ceiling (hard_deadline == start_time
     # when hard_ceiling_seconds is 0, but the check itself runs first every
     # iteration), so even the tightest possible extended budget still gives
@@ -1139,25 +1331,24 @@ STUB
 }
 
 @test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
-    # Regression guard for the exact Codex P1 finding that split these two
-    # budgets apart (this file's own header, saf_resolve_untouched_backfill_source
-    # comment, documents the full reasoning): an earlier version of this
-    # orchestrator reused base_freshness_* as saf_find_built_ancestor's own
-    # extended-retry budget too, which meant ANY caller passing a generous
-    # base_freshness pair (scripts/ensure-pr-staging-images.sh's real 900/5400)
-    # would silently force that same generous extension onto the ancestor
-    # candidate's extended retry regardless of what ancestor_extended_freshness_*
-    # itself said -- exactly what let build-push.yml's 30-minute
-    # full-setup-validate job inherit an up-to-90-minute wait it cannot
-    # survive. Proves the fix by the opposite angle from that incident: base
-    # commit's own base_freshness is set generously (300/600), but
-    # ancestor_extended_freshness is 0/0 -- if the two were ever collapsed
-    # back together, the ancestor candidate below would resolve at ~3 real
-    # seconds, comfortably inside a 600s ceiling, and this call would
-    # succeed. With them genuinely independent, the extended retry gets only
-    # one immediate (0s) re-check -- too early to see the image -- so this
-    # must fail closed, and fast, not after actually waiting anywhere close
-    # to 3s.
+    # Regression guard for the reason these two budgets are kept separate
+    # (this file's own header, saf_resolve_untouched_backfill_source comment,
+    # documents the full reasoning): if ancestor_extended_freshness_* were
+    # ever collapsed back into sharing base_freshness_*'s value, ANY caller
+    # passing a generous base_freshness pair (scripts/ensure-pr-staging-images.sh's
+    # real 900/5400) would silently force that same generous extension onto
+    # the ancestor candidate's extended retry too, regardless of what
+    # ancestor_extended_freshness_* itself said -- exactly the shape of bug
+    # that would let build-push.yml's 30-minute full-setup-validate job
+    # inherit an up-to-90-minute wait it cannot survive. Proven here from the
+    # opposite angle: base commit's own base_freshness is set generously
+    # (300/600), but ancestor_extended_freshness is 0/0 -- if the two were
+    # ever collapsed back together, the ancestor candidate below would
+    # resolve at ~3 real seconds, comfortably inside a 600s ceiling, and this
+    # call would succeed. With them genuinely independent, the extended retry
+    # gets only one immediate (0s) re-check -- too early to see the image --
+    # so this must fail closed, and fast, not after actually waiting anywhere
+    # close to 3s.
     setup_linear_fixture
     install_run_exists_stub
     # base_sha: confirmed zero push runs (activates the fast path, since its

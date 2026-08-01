@@ -32,6 +32,77 @@
 # ghcr-retry.sh/staging-image-freshness.sh aren't: this file only defines
 # functions for a caller to invoke under the caller's own shell options.
 
+# Process-lifetime cache for saf_find_built_ancestor's own per-candidate run
+# lookups (see that function's own comment at its one read/write site for the
+# full reasoning): a long docs-only chain means every untouched service's own
+# call re-walks the SAME candidate commits and would otherwise re-query the
+# SAME (repository, candidate) run-existence fact from scratch every time --
+# a fact that cannot change mid-job, so repeating the query is pure waste
+# against a shared, repository-scoped GitHub API rate limit.
+#
+# Deliberately a DIRECTORY OF FILES, not a shell associative array: both real
+# callers (scripts/ensure-pr-staging-images.sh, build-push.yml's own step)
+# invoke saf_resolve_untouched_backfill_source via
+# `resolved_source="$(saf_resolve_untouched_backfill_source ...)"` once per
+# service, inside a loop -- and `$(...)` command substitution ALWAYS forks a
+# subshell in bash. An in-memory associative array populated inside that
+# subshell (by saf_find_built_ancestor, called from deep inside that same
+# `$(...)`) only ever exists in the subshell's own memory and is gone the
+# instant that subshell exits and the loop moves to the next service -- an
+# array-based cache would therefore never actually share anything across
+# services in real production use, even though it can look like it works in
+# a test that happens not to go through the same subshell-forking call
+# shape (caught live while writing this file's own bats coverage: two
+# `run`-wrapped calls -- `run` also forks a subshell for the same reason --
+# could not observe the array-based version's cache hits at all). A real
+# file on disk, by contrast, is written by one subshell and later read by a
+# completely different (sibling) subshell without issue, since subshells
+# share the same filesystem even though they don't share each other's
+# in-memory shell state.
+#
+# The directory path itself is established ONCE, right here, at the moment
+# this file is FIRST sourced -- which for both real callers happens directly
+# in the top-level script process, before any subshell has been forked yet
+# (the `for service in ...` loop that later forks one via `$(...)` per
+# service comes afterward). `export`ing it here means every later subshell
+# (no matter how deeply nested inside saf_resolve_untouched_backfill_source ->
+# saf_find_built_ancestor -> ...) inherits the SAME value and therefore
+# agrees on the SAME cache directory, even though none of them can see each
+# other's own shell-variable writes. `mktemp -d` (not a fixed, predictable
+# path) keeps two independent script runs on the same long-lived self-hosted
+# runner host from ever colliding on the same directory; `:-}` guards against
+# re-running this block if the file is somehow sourced twice in the same
+# process (keep the first directory rather than silently orphaning it and
+# starting a second, empty one).
+#
+# No explicit cleanup: this is a plain-file, best-effort, process-lifetime
+# optimization, not a resource whose leak would be unsafe -- a handful of
+# small leftover files under $TMPDIR is a negligible, self-limiting cost
+# (mktemp's own uniqueness means these never accumulate under one shared
+# name), and installing an EXIT trap here (a sourced library, not the
+# top-level script) risks silently overwriting a trap the actual caller
+# script has already set for its own purposes.
+if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
+  SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
+fi
+export SAF_ANCESTOR_RUN_CACHE_DIR
+
+# _saf_ancestor_run_cache_key_to_path <repository> <candidate>
+#
+# Internal helper: turns a (repository, candidate) pair into a filesystem-safe
+# path under $SAF_ANCESTOR_RUN_CACHE_DIR. <repository> contains a literal `/`
+# (e.g. "wiki-mod/lancache-ng"), which is not a valid bare filename component
+# on its own -- replace it with `_` (repository names and commit SHAs never
+# contain `_` in a way that could collide with this substitution in practice
+# for this project's own real values) rather than nesting an actual
+# subdirectory per repository, which would need its own `mkdir -p` at every
+# read AND write site for no benefit here (this cache only ever serves one
+# repository per process anyway).
+_saf_ancestor_run_cache_key_to_path() {
+  local repository="$1" candidate="$2"
+  printf '%s/%s__%s\n' "$SAF_ANCESTOR_RUN_CACHE_DIR" "${repository//\//_}" "$candidate"
+}
+
 # saf_paths_are_ignorable <newline-separated-paths>
 #
 # Pure function: returns 0 if every path in the given newline-separated list
@@ -146,9 +217,23 @@ saf_base_commit_paths_are_ignorable() {
 # actually makes ghcr_retry's retry loop retry on a bad response, not just
 # on a dropped connection.
 #
-# Deliberately does NOT take the token as a positional argument (an earlier
-# version did): ghcr_retry logs its own failing command verbatim via `$*` in
-# its ::warning::/::error:: lines on every failed attempt (see
+# --connect-timeout/--max-time (matching the same flags/values reasoning
+# scripts/ssl-mitm-cache-simulation.sh's own curl_timeouts comment documents
+# for the identical hazard): without them, curl has no bound on either
+# establishing the connection or on how long a stalled transfer can sit
+# there once GitHub has accepted the connection but stops sending data --
+# neither case is a curl-level failure on its own, so ghcr_retry's bounded
+# retry loop would never even get a chance to run; the whole call (and the
+# job around it) would simply hang until GitHub Actions' own job-level
+# timeout eventually kills it, defeating this entire file's "bounded and
+# reasoned about" design. 10s to establish the connection, 30s total transfer
+# time -- generous for these small JSON responses, but still short enough
+# that a real stall becomes a retryable failure well within one attempt
+# instead of consuming a large fraction of the caller's own job budget.
+#
+# Deliberately does NOT take the token as a positional argument: ghcr_retry
+# logs its own failing command verbatim via `$*` in its ::warning::/::error::
+# lines on every failed attempt (see
 # scripts/lib/ghcr-retry.sh lines around its retry-exhausted/backoff
 # messages) -- a token passed as one of this function's own arguments would
 # therefore be echoed into the job log in plain text on every retry, not just
@@ -162,14 +247,41 @@ saf_base_commit_paths_are_ignorable() {
 # environment here instead keeps it out of `"$@"`/`"$*"` entirely, so it can
 # never appear in ghcr_retry's own diagnostic output regardless of how many
 # attempts fail.
+#
+# A 401 (invalid/expired token) or 404 (wrong endpoint/repository) is a
+# permanent, configuration-level failure -- no amount of retrying or
+# re-authenticating (ghcr_retry's own relogin step needs a registry
+# username/password anyway, which this call never has) fixes either, so
+# exiting with GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE (see
+# scripts/lib/ghcr-retry.sh) tells ghcr_retry to stop immediately instead of
+# spending its whole backoff budget on an error retrying can never resolve --
+# both real callers repeat this query once per untouched service, so a
+# genuine auth/endpoint misconfiguration could otherwise burn a large
+# fraction of the caller's own job timeout before reaching the inevitable
+# failure. Every other non-200 status (5xx, 403/429 -- ambiguous between a
+# real permission error and a transient rate limit -- a malformed/empty
+# status) stays in the ordinary retryable path exactly as before:
+# deliberately conservative, since misclassifying a genuinely transient
+# error as permanent (giving up too early) is a worse failure mode here than
+# a few extra retries on a real permanent one.
 _saf_github_api_get() {
   local url="$1" body_file="$2"
   local status
-  status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+  status="$(curl -sS --connect-timeout 10 --max-time 30 -o "$body_file" -w '%{http_code}' \
     -H "Accept: application/vnd.github+json" \
     -H "Authorization: Bearer ${GH_TOKEN:?_saf_github_api_get: GH_TOKEN is required}" \
     "$url" 2>/dev/null)" || return 1
-  [[ "$status" == "200" ]]
+  if [[ "$status" == "200" ]]; then
+    return 0
+  fi
+  case "$status" in
+    401|404)
+      return "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
 }
 
 # saf_query_run_count <repository> <sha> <event-or-empty>
@@ -584,11 +696,46 @@ saf_find_built_ancestor() {
   while IFS= read -r candidate; do
     [[ -z "$candidate" ]] && continue
 
-    has_run=0
-    # Empty event filter ("any event"): see saf_base_commit_has_confirmed_run's
-    # own header for why non-push-triggered runs must count for an ancestor
-    # candidate, unlike the stricter push-only check used for BASE_SHA itself.
-    saf_base_commit_has_confirmed_run "$repository" "$candidate" "" || has_run=$?
+    # Cached by (repository, candidate) via a file under
+    # $SAF_ANCESTOR_RUN_CACHE_DIR -- see that variable's own declaration-site
+    # comment for the full "why a file, not a shell variable" reasoning (in
+    # short: both real callers invoke this whole chain through a `$(...)`
+    # command substitution once per service, which forks a fresh subshell
+    # every time -- only a real file on disk, not an in-memory shell
+    # variable, actually persists across those calls). Deliberately scoped
+    # to ONLY this ancestor-candidate lookup, not to
+    # saf_base_commit_has_confirmed_run generally: BASE_SHA's own push-run
+    # check (saf_resolve_untouched_backfill_source's pre_run_status/
+    # post_run_status pair) is INTENTIONALLY queried twice, independently,
+    # specifically so a fast-path bug can only cost time, never safety (see
+    # that function's own header) -- caching at a lower, shared level would
+    # silently defeat that deliberate re-derivation. No such independent-
+    # re-derivation requirement exists for an ancestor candidate: each
+    # candidate's run-existence fact is looked up exactly once per call to
+    # THIS function already, so sharing that same answer across repeated
+    # calls for OTHER services walking the identical candidate chain removes
+    # pure redundancy, not a safety check.
+    #
+    # Only a DEFINITIVE answer (0 = a run exists, 1 = confirmed zero) is ever
+    # cached, never an inconclusive one (2): an inconclusive result reflects
+    # a query failure, not a historical fact, and permanently caching it
+    # could make a transient blip (that a later, independent query for a
+    # different service might not have hit at all) needlessly fail every
+    # subsequent service's own check too.
+    local cache_file
+    cache_file="$(_saf_ancestor_run_cache_key_to_path "$repository" "$candidate")"
+    if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]] && [[ -f "$cache_file" ]]; then
+      has_run="$(cat "$cache_file")"
+    else
+      has_run=0
+      # Empty event filter ("any event"): see saf_base_commit_has_confirmed_run's
+      # own header for why non-push-triggered runs must count for an ancestor
+      # candidate, unlike the stricter push-only check used for BASE_SHA itself.
+      saf_base_commit_has_confirmed_run "$repository" "$candidate" "" || has_run=$?
+      if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]] && (( has_run == 0 || has_run == 1 )); then
+        printf '%s' "$has_run" > "$cache_file" 2>/dev/null || true
+      fi
+    fi
     if (( has_run == 1 )); then
       # Positively confirmed zero runs of any kind for THIS candidate -- but
       # zero runs alone is not proof this candidate was itself a deliberate
@@ -715,28 +862,27 @@ saf_find_built_ancestor() {
 #     check above already failed. Deliberately NOT the same parameter as
 #     base_freshness_* even though this project's own two real callers
 #     currently pass the identical VALUE for both (900/5400) for
-#     scripts/ensure-pr-staging-images.sh: a Codex review on this PR (thread
-#     on this file's own extended-retry call site) correctly identified that
-#     reusing base_freshness_* here made build-push.yml's "Ensure PR staging
-#     tags exist for full-setup services" step (inside the full-setup-validate
-#     job, timeout-minutes: 30) implicitly inherit a fresh, up-to-5400s
-#     (90-minute) wait it structurally cannot afford -- that job would simply
-#     be killed by its own GitHub Actions job timeout partway through the
-#     extension, wasting the runner's time on a wait that can never complete
-#     and never rescuing an image that appears more than roughly the job's
-#     remaining budget into the extension. Making this its own explicit
-#     parameter lets each of the two real callers size it honestly against
-#     its OWN job envelope instead of silently inheriting a value tuned for
-#     the other caller's very different (100-minute) budget -- see each real
-#     call site's own comment for the value it actually passes and why.
+#     scripts/ensure-pr-staging-images.sh: reusing base_freshness_* here would
+#     make build-push.yml's "Ensure PR staging tags exist for full-setup
+#     services" step (inside the full-setup-validate job, timeout-minutes: 30)
+#     implicitly inherit a fresh, up-to-5400s (90-minute) wait it structurally
+#     cannot afford -- that job would simply be killed by its own GitHub
+#     Actions job timeout partway through the extension, wasting the runner's
+#     time on a wait that can never complete and never rescuing an image that
+#     appears more than roughly the job's remaining budget into the
+#     extension. Making this its own explicit parameter lets each of the two
+#     real callers size it honestly against its OWN job envelope instead of
+#     silently inheriting a value tuned for the other caller's very different
+#     (100-minute) budget -- see each real call site's own comment for the
+#     value it actually passes and why.
 #   Collapsing any of these three into a shared pair is a real failure mode,
 #   not a theoretical one: a short ceiling tuned for "an already-checked
 #   historical ancestor commit's image either exists now or never will" is far
 #   too short for BASE_SHA's own wait, where a confirmed push-triggered run
 #   can still legitimately be mid-build; and a budget generous enough for a
 #   100-minute-timeout caller's extended retry is not automatically safe for
-#   every OTHER caller sharing this same function, as the Codex finding above
-#   demonstrates concretely.
+#   every OTHER caller sharing this same function -- build-push.yml's own
+#   30-minute-timeout call site is the concrete proof.
 #
 # Sequence:
 #   1. FAST PATH (reordering): before running the full bounded freshness

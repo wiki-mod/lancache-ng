@@ -186,10 +186,10 @@ STUB
     # ONE-TIME extended retry (an ancestor candidate whose run is confirmed
     # still active) -- see this script's own ANCESTOR_EXTENDED_FRESHNESS_POLL_*
     # comment and scripts/lib/staging-ancestor-fallback.sh's
-    # saf_resolve_untouched_backfill_source header for why this is no longer
-    # the same parameter as BASE_FRESHNESS_POLL_* (the Codex P1 finding this
-    # third budget exists to fix). Kept at 0 here for the same
-    # "no real waiting in tests" reason as the other two pairs.
+    # saf_resolve_untouched_backfill_source header for why this is its own
+    # parameter rather than sharing BASE_FRESHNESS_POLL_*'s value. Kept at 0
+    # here for the same "no real waiting in tests" reason as the other two
+    # pairs.
     export ANCESTOR_EXTENDED_FRESHNESS_POLL_TIMEOUT_SECONDS=0
     export ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS=0
     export REPOSITORY="wiki-mod/lancache-ng"

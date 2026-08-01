@@ -3590,11 +3590,11 @@ jobs:
             # own call: this job (full-setup-validate) has timeout-minutes: 30
             # total, not the 100-minute budget full-setup-deep-validate.yml's
             # "ensure PR staging images" job explicitly carries for exactly
-            # this scenario. A Codex review on this PR correctly identified
-            # that reusing 900/5400 here would let an ancestor candidate
-            # confirmed still building consume a fresh, up-to-90-minute wait
-            # this 30-minute job cannot survive -- it would simply be killed
-            # by its own GitHub Actions job timeout partway through, wasting
+            # this scenario. Reusing 900/5400 here would let an ancestor
+            # candidate confirmed still building consume a fresh, up-to-90-
+            # minute wait this 30-minute job cannot survive -- it would
+            # simply be killed by its own GitHub Actions job timeout partway
+            # through, wasting
             # the runner's time on a wait that can never complete and never
             # rescuing an image landing more than a few minutes into it. This
             # job's own real runs are 30-71s (see timeout-minutes: 30's own
@@ -3619,27 +3619,25 @@ jobs:
             # that becomes fresh moments later is still caught.
             #
             # JUDGMENT CALL (flagged for maintainer review, not guessed
-            # silently): the pre-existing 300/600 ancestor_freshness_* pair
-            # above (the INITIAL per-candidate check, unrelated to the
-            # extended-retry fix this comment otherwise documents) has the
-            # exact same "shared across every untouched service this loop
-            # checks" exposure in principle -- up to 5 untouched services
-            # (full_setup_services below) each attempting up to 600s before
-            # falling through, in the worst case, is itself more than this
-            # 30-minute job's own timeout. This was NOT the Codex finding
-            # this round's fix addresses (that finding was specifically about
-            # the extended retry silently inheriting a 900/5400 budget), and
-            # is left unchanged here rather than silently widening this
-            # fix's scope -- in the realistic case this ceiling protects
-            # against a genuinely rare/broken state, since an ancestor
+            # silently): the 300/600 ancestor_freshness_* pair above (the
+            # INITIAL per-candidate check, distinct from the "0 0"
+            # extended-retry pair right above it) has the same "shared across
+            # every untouched service this loop checks" exposure in
+            # principle as the extended-retry budget does -- up to 5
+            # untouched services (full_setup_services below) each attempting
+            # up to 600s before falling through, in the worst case, is itself
+            # more than this 30-minute job's own timeout. Left as its current
+            # shared value rather than a caller-specific one (unlike the
+            # extended-retry pair, which does get one) because in the
+            # realistic case this ceiling protects against a genuinely
+            # rare/broken state, not the expected cost: an ancestor
             # candidate's image (by construction, from a commit further back
             # in history than a confirmed-unbuilt BASE_SHA) has normally
-            # already existed for a while by the time this step runs, so
-            # this check resolves in well under a second per service in
-            # practice, not anywhere near 600s. Whether that pre-existing
-            # 300/600 pair itself also needs a caller-specific value here is
-            # a separate question for the maintainer, not decided by this
-            # fix.
+            # already existed for a while by the time this step runs, so this
+            # check resolves in well under a second per service in practice,
+            # not anywhere near 600s. Whether it should also get a smaller,
+            # caller-specific value here (the same approach the extended-retry
+            # pair above takes) is an open question for the maintainer.
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" 900 5400 300 600 0 0 15 50 "$GITHUB_WORKSPACE")"; then
               exit 1
             fi
