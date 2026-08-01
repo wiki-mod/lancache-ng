@@ -95,6 +95,15 @@
 # sif_is_ancestor_or_equal runs against a real disposable git repo via
 # STAGING_FRESHNESS_GIT_DIR (same file). PUSH_REUSE_CLASSIFY_CMD mirrors that
 # same convention for the one primitive genuinely new to this file.
+#
+# AG-CI-012 note: this function has two real outcomes (fail-closed rebuild,
+# or reuse=true retag), and both need independent real-push-event evidence,
+# not just code review -- a passing test suite proves the logic is
+# internally consistent, not that GitHub Actions actually exercises the
+# reuse=true branch end to end on a live push. Current verification status
+# for either branch belongs in the PR/issue trail, not here, per this
+# project's convention of keeping durable rationale in source comments and
+# dated status/evidence out of them.
 push_reuse_decide() {
   local service_key="${1:?push_reuse_decide: service_key is required}"
   local channel_image="${2:?push_reuse_decide: channel_image is required}"
