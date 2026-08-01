@@ -432,7 +432,7 @@ jobs:
     # generated files and hand-written scripts keep the expected project header.
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its
+    # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its [diag]
     # comment) -- generous relative to real observed duration, not tight.
     timeout-minutes: 15
     # Job-level concurrency (#891, extending #888/#892's proven build/
@@ -869,7 +869,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Fetch current PR title live
-        # Same class of bug found and fixed in pr-template-check and
+        # Same class of bug found and fixed in pr-template-check and [diag]
         # pr-tracking-metadata-check (2026-07-16): github.event.pull_request
         # .title is a snapshot taken when THIS event fired, and an edited
         # title (without a new commit, which does not retrigger this
@@ -1297,7 +1297,7 @@ jobs:
     needs: [validate-compose, detect-changes]
     # Issue #1245: this is the load-bearing self-skip in this workflow. On a
     # pull_request event whose ENTIRE diff is docs-only (detect-changes'
-    # `docs_only` output, matching `*.md`/`docs/**`), none of this job's
+    # `docs_only` output, matching `*.md`/`docs/**`), none of this job's [diag]
     # remaining steps have anything new to check -- ShellCheck/ActionLint
     # lint the whole repo tree's *.sh/*.bats and workflow files, and the
     # other steps below (setup-migration-semantics, action-node-version,
@@ -1743,7 +1743,7 @@ jobs:
             exit 1
           fi
 
-          # State-root migration contract:
+          # State-root migration contract: [diag]
           # - manual prod keeps one normal root knob (LANCACHE_STATE_DIR)
           # - optional per-service keys are preserved only for real legacy/custom paths
           # - setup.sh must not treat a bare /srv/lancache directory as active state
@@ -2172,7 +2172,7 @@ jobs:
           grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
 
-          # Issue #705: PXE boot-pointer opt-in surface. Same guard shape as
+          # Issue #705: PXE boot-pointer opt-in surface. Same guard shape as [diag]
           # #450 above -- a PR review (#765) found the quickstart Compose
           # environment allowlist silently stopped before these three keys,
           # leaving the opt-in feature unreachable there even when set in
@@ -2597,7 +2597,7 @@ jobs:
             && { echo "::error::The build-tools workflow must not reintroduce QEMU emulation for its arm64 leg."; exit 1; }
           awk '
             /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
-            # Anchored on an actual step declaration ("- name: ..."), not a
+            # Anchored on an actual step declaration ("- name: ..."), not a [diag]
             # bare /name: / substring match: a with: input ending in name
             # (for example a username input on the ghcr-build-push-retry
             # composite action) also contains the literal substring
@@ -3032,7 +3032,7 @@ jobs:
             bash scripts/check-vex-drift.sh
 
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
-        # services/netdata/Dockerfile installs netdata's official static musl
+        # services/netdata/Dockerfile installs netdata's official static musl [diag]
         # build, which statically links its OWN vendored curl (confirmed via
         # `ldd`: not a distro package Trivy's os-pkg scanner can see -- see
         # PR #1352). This is the maintainer-approved (option (c)) tracking
@@ -3463,7 +3463,7 @@ jobs:
       # commit's own per-commit image into that service's pr-<N>-sha-<short>
       # tag would make this job green while testing exactly the stale image
       # #626 exists to stop testing, just now hidden behind a tag name that
-      # LOOKS PR-specific. Fail loudly instead; only a genuinely untouched
+      # LOOKS PR-specific. Fail loudly instead; only a genuinely untouched [diag]
       # service gets the base-commit back-fill (#1254/#1255: sourced from the
       # PR base commit's own durable sha-<short> tag, not a mutable channel).
       - name: Ensure PR staging tags exist for full-setup services
@@ -3896,7 +3896,7 @@ jobs:
     # DNS unit tests are separate from quality checks so failures identify
     # whether the regression is lint/format level or behavioral.
     #
-    # Also skipped on a metadata-only pull_request event -- see
+    # Also skipped on a metadata-only pull_request event -- see [diag]
     # dns_rust_quality's comment above for the full reasoning (no new commit,
     # so no new behavior to test).
     name: test (dns/nats-subscriber)
@@ -4329,7 +4329,7 @@ jobs:
     # let unrelated branches queue behind each other, and GitHub's
     # concurrency queue only ever holds one pending job per group -- a
     # burst of publishes for OTHER branches can bump a given branch's
-    # already-queued publish out of the queue entirely before it ever
+    # already-queued publish out of the queue entirely before it ever [diag]
     # starts, silently skipping that branch's badge update for this push
     # (see the "Queue badge publishes instead of replacing them" review
     # finding). Per-ref scoping gives every branch its own queue slot, so
@@ -4763,7 +4763,7 @@ jobs:
     # cancel-in-progress is pull_request-only -- see `build`'s group comment
     # for the full #979 rationale. build/build-arm64 require
     # `needs.ci_scope_policy.result == 'success'` unconditionally, so on push
-    # this is a hard gate on the channel publish path: cancelling it in a
+    # this is a hard gate on the channel publish path: cancelling it in a [diag]
     # merge cascade makes the build path skip and starves the channel. The
     # push-branch tolerance logic below already lets THIS job reach `success`
     # despite its upstream test jobs being superseded, so it stays a reliable
@@ -5214,7 +5214,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
-        # Schritt 3 (issue #1095): generalizes what used to be
+        # Schritt 3 (issue #1095): generalizes what used to be [diag]
         # build-tools-only ("Enable build-tools publish scan", issue #1290,
         # maintainer decision) to every matrix.service. No service
         # unconditionally builds a local throwaway image just to scan it on
@@ -5629,7 +5629,7 @@ jobs:
         # each ref gets its own directory on the self-hosted runner.
         # Retention (#912, investigated live on the runner hosts): a
         # populated cache dir is >99.9% redundant copies of the two global
-        # Trivy DBs (~1.2 GB trivy.db + ~1.5 GB trivy-java.db apparent
+        # Trivy DBs (~1.2 GB trivy.db + ~1.5 GB trivy-java.db apparent [diag]
         # size); the actually image-specific fanal cache is ~100 KB. Only
         # dirs a future run can reuse are worth keeping, so dirs that are
         # cold-by-design are marked `ephemeral=true` here and deleted again
@@ -6062,7 +6062,7 @@ jobs:
     # also scans the exact pushed digest before attestation/promotion can
     # proceed -- see "Scan pushed service digest with Trivy" below.
     #
-    # Also skipped on a metadata-only pull_request event (labeled/unlabeled/
+    # Also skipped on a metadata-only pull_request event (labeled/unlabeled/ [diag]
     # milestoned/demilestoned -- see the trigger's own `types:` comment at the
     # top of this file): those events never carry a new commit, so there is no
     # new image content for this job to build or push -- a prior opened/
@@ -6941,7 +6941,7 @@ jobs:
           exit-code: "1"
 
       - name: Remove ephemeral pushed service Trivy cache
-        # Same rationale and fail-closed path guard as container-scan's
+        # Same rationale and fail-closed path guard as container-scan's [diag]
         # "Remove ephemeral Trivy cache" step above: ephemeral dirs
         # (dispatch/rerun/tag) are never read by any later run, so they are
         # deleted at job end instead of leaking ~1-2.5 GB per run onto the
@@ -7368,7 +7368,7 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: same reasoning as build's own identically-named step --
+      # Issue #1147: same reasoning as build's own identically-named step -- [diag]
       # this job's `type=gha` cache (see the "Build and push" step's own
       # `cache-from`/`cache-to` below) also has no wall-clock expiry, so this
       # arm64 leg needs the same periodic bust as the amd64 leg. Computed
@@ -7819,7 +7819,7 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/build-tools
           subject-digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest }}
 
-      # Fork PRs self-skip here without any extra guard needed: build/build-arm64
+      # Fork PRs self-skip here without any extra guard needed: build/build-arm64 [diag]
       # never push a fork PR's per-arch legs, so create-pr-staging-manifests'
       # own loop above never emits these *_digest outputs for a fork PR, and
       # every one of these seven steps is gated off by its own `if:` as a result.
@@ -8234,7 +8234,7 @@ jobs:
             exit 0
           fi
 
-          # Wrapped in ghcr_retry: unlike merge-manifests' per-arch checks,
+          # Wrapped in ghcr_retry: unlike merge-manifests' per-arch checks, [diag]
           # a missing source image here is always treated as an error, never
           # an expected skip -- retrying protects against a transient read
           # failure being reported as a genuinely missing image.
@@ -8681,7 +8681,7 @@ jobs:
             bash scripts/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
           done
 
-      # Patches (rather than overwrites) an existing release body: the
+      # Patches (rather than overwrites) an existing release body: the [diag]
       # image_notes_start/end HTML-comment markers bound exactly the
       # auto-generated section, so any text a maintainer added by hand
       # outside those markers survives a re-run of this job (e.g. a manual
