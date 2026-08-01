@@ -348,6 +348,57 @@ STUB
     [ "$(wc -l < "$call_log")" -eq 3 ]
 }
 
+@test "saf_query_run_count: the Authorization header is present via stdin on every retry attempt, not just the first" {
+    # _saf_github_api_get is re-invoked as a genuinely fresh function call
+    # on every ghcr_retry attempt (ghcr_retry's own loop calls "$@" itself
+    # again each iteration, not just re-running a single already-started
+    # curl process) -- so the here-string/-K - config it builds should be
+    # recomputed fresh each time too, but this is exactly the kind of thing
+    # worth proving directly rather than only reasoning about: a stub that
+    # actually reads stdin (install_fake_curl_flaky's own stub never does,
+    # since it doesn't need to) confirms the Authorization line is genuinely
+    # present, unconsumed-elsewhere, and correctly formed on the LAST
+    # (successful, third) attempt -- not just on the first one before any
+    # retry has happened.
+    fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin_dir"
+    call_count_file="$BATS_TEST_TMPDIR/curl_call_count"
+    echo 0 > "$call_count_file"
+    stdin_capture_dir="$BATS_TEST_TMPDIR/stdin_captures"
+    mkdir -p "$stdin_capture_dir"
+    cat > "$fake_bin_dir/curl" <<STUB
+#!/usr/bin/env bash
+count="\$(cat "$call_count_file")"
+count=\$((count + 1))
+echo "\$count" > "$call_count_file"
+cat > "$stdin_capture_dir/attempt_\$count.txt"
+out_file=""
+prev=""
+for arg in "\$@"; do
+    if [ "\$prev" = "-o" ]; then
+        out_file="\$arg"
+    fi
+    prev="\$arg"
+done
+if [ "\$count" -lt 3 ]; then
+    exit 1
+fi
+printf '{"total_count":1,"workflow_runs":[]}' > "\$out_file"
+printf '200'
+STUB
+    chmod +x "$fake_bin_dir/curl"
+    export PATH="$fake_bin_dir:$PATH"
+    run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 3 ]
+    # Every attempt (not just the last) must have genuinely received the
+    # header config via stdin -- proves the here-string is freshly
+    # (re-)supplied on each call, never empty on a retry.
+    for attempt_file in "$stdin_capture_dir"/attempt_*.txt; do
+        grep -qF 'Authorization: Bearer test-token' "$attempt_file"
+    done
+}
+
 @test "saf_query_run_count: exhausts retries and fails closed (no output) on a persistent network failure" {
     export FAKE_CURL_FAIL_COUNT=99
     export FAKE_CURL_RUN_COUNT=0
@@ -385,15 +436,14 @@ STUB
 
 @test "saf_query_run_count: the token never appears in curl's own invoked argv either, not just in ghcr_retry's diagnostics" {
     # Even with the token kept out of ghcr_retry's own \$*-logged diagnostics
-    # (the test above), _saf_github_api_get previously still passed
-    # "-H" "Authorization: Bearer <token>" as a literal argument TO curl
-    # itself -- visible for curl's own process lifetime to any other process
-    # running as the same host user (e.g. via /proc/<pid>/cmdline on a
-    # shared self-hosted runner), regardless of what ghcr_retry logs.
+    # (the test above), the token must also never be a literal argument TO
+    # curl itself -- visible for curl's own process lifetime to any other
+    # process running as the same host user (e.g. via /proc/<pid>/cmdline on
+    # a shared self-hosted runner), regardless of what ghcr_retry logs.
     # install_fake_curl_flaky's own call_log records curl's REAL argv on
     # every invocation, so this proves the fix at the level that actually
-    # matters: the token must never appear there, only a "-H" "@<file>"
-    # reference to a header file passed by path.
+    # matters: the token must never appear there, only the literal,
+    # harmless "-K -" (config read from stdin, never from an argument).
     export FAKE_CURL_FAIL_COUNT=0
     export FAKE_CURL_RUN_COUNT=1
     install_fake_curl_flaky
@@ -401,89 +451,54 @@ STUB
     [ "$status" -eq 0 ]
     [[ "$(cat "$call_log")" != *"test-token"* ]]
     [[ "$(cat "$call_log")" != *"Authorization"* ]]
-    [[ "$(cat "$call_log")" == *"-H @"* ]]
+    [[ "$(cat "$call_log")" == *"-K -"* ]]
 }
 
-@test "saf_query_run_count: the header file passed to curl via -H @<file> is removed after the call, never left behind" {
-    # The Authorization header is written to a short-lived, mode-600 temp
-    # file that curl reads via -H @<file> instead of taking the token as a
-    # literal argument. That file must not outlive the single curl
-    # invocation it was created for -- verified here by having the fake curl
-    # itself capture the header file's own path (the argument immediately
-    # following "-H", stripped of its leading "@") into a separate file this
-    # test can inspect AFTER saf_query_run_count has already returned, proving
-    # the real cleanup (not just curl's own view of the file while it ran).
+@test "saf_query_run_count: the Authorization header reaches curl without ever being written to a file on disk" {
+    # A mode-600 temp file passed via -H @<file> would keep the token out of
+    # argv, but not out of reach of another process running as the SAME host
+    # user (file permission bits protect against other users, not other
+    # processes owned by the identical UID) -- curl's own -K - (config from
+    # stdin) closes that gap: the header text is piped in via a bash
+    # here-string, which this project's own pinned bash implements as a
+    # PIPE, not a temp file, so no file containing the token's actual value
+    # ever exists on disk at any point. Proven here by having the fake curl
+    # itself recursively grep every file under a disposable $TMPDIR for the
+    # literal token value at the moment it runs -- legitimate, unrelated
+    # temp files this same call also creates (e.g. saf_query_run_count's own
+    # response-body file) are expected to exist and are not what this test
+    # cares about; only the SECRET VALUE itself must never appear in any of
+    # them.
+    fake_tmpdir="$BATS_TEST_TMPDIR/fake_tmpdir"
+    mkdir -p "$fake_tmpdir"
+    export TMPDIR="$fake_tmpdir"
     export FAKE_CURL_FAIL_COUNT=0
     export FAKE_CURL_RUN_COUNT=1
     install_fake_curl_flaky
-    header_path_capture="$BATS_TEST_TMPDIR/header_path_seen.txt"
-    # Rewrite the fake curl to also record the header file's path (still
-    # honoring FAKE_CURL_FAIL_COUNT/FAKE_CURL_RUN_COUNT exactly as before).
+    tmpdir_grep_capture="$BATS_TEST_TMPDIR/tmpdir_grep_result.txt"
     cat > "$fake_bin_dir/curl" <<STUB
 #!/usr/bin/env bash
+grep -rl "test-token" "$fake_tmpdir" > "$tmpdir_grep_capture" 2>/dev/null
 echo "\$*" >> "$call_log"
-remaining=\$(cat "$fail_count_file")
-if [ "\$remaining" -gt 0 ]; then
-    remaining=\$((remaining - 1))
-    echo "\$remaining" > "$fail_count_file"
-    exit 1
-fi
 out_file=""
-url=""
 prev=""
 for arg in "\$@"; do
     if [ "\$prev" = "-o" ]; then
         out_file="\$arg"
     fi
-    case "\$prev" in
-        -H) [ "\${arg#@}" != "\$arg" ] && echo "\${arg#@}" >> "$header_path_capture" ;;
-    esac
     prev="\$arg"
-    url="\$arg"
 done
-count="${FAKE_CURL_RUN_COUNT:-0}"
-printf '{"total_count":%s,"workflow_runs":[]}' "\$count" > "\$out_file"
-printf '%s' "${FAKE_CURL_HTTP_STATUS:-200}"
+printf '{"total_count":1,"workflow_runs":[]}' > "\$out_file"
+printf '200'
 STUB
     chmod +x "$fake_bin_dir/curl"
     run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
     [ "$status" -eq 0 ]
-    [ -s "$header_path_capture" ]
-    header_file_path="$(cat "$header_path_capture")"
-    [ ! -e "$header_file_path" ]
-}
-
-@test "SAF_ANCESTOR_RUN_CACHE_DIR: the outstanding curl header temp file is removed even if the process is killed mid-call" {
-    # GitHub Actions cancelling the job, or the job's own timeout-minutes
-    # firing, sends SIGTERM to the running process while curl may still be
-    # in flight -- _saf_github_api_get's own `rm -f` after the call can never
-    # run in that case, since the process never returns from curl at all.
-    # Mirrors exactly what _saf_github_api_get does right before curl runs
-    # (mktemp + chmod 600 + track the path in _SAF_CURRENT_CURL_HEADER_FILE),
-    # then self-signals SIGTERM at exactly that point to simulate the kill,
-    # relying on the same process-wide EXIT trap installed alongside
-    # SAF_ANCESTOR_RUN_CACHE_DIR's own cleanup (verified empirically, bash
-    # 5.2 -- the version in the pinned build-tools image -- that its EXIT
-    # trap fires on SIGTERM even with no explicit TERM trap of its own).
-    reported_header_file="$BATS_TEST_TMPDIR/reported_header_file.txt"
-    # `run` (not a bare invocation): the child deliberately terminates itself
-    # via SIGTERM, which is the exact scenario under test, not a test
-    # failure -- a bare invocation would let bats treat that nonzero exit
-    # (143 = 128+SIGTERM) as this test's own failure.
-    run env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
-        source '$repo_root/scripts/lib/ghcr-retry.sh'
-        source '$repo_root/scripts/lib/staging-image-freshness.sh'
-        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
-        header_file=\"\$(mktemp)\"
-        chmod 600 \"\$header_file\"
-        _SAF_CURRENT_CURL_HEADER_FILE=\"\$header_file\"
-        printf '%s' \"\$header_file\" > '$reported_header_file'
-        kill -TERM \"\$\$\"
-    "
-    [ "$status" -eq 143 ]
-    header_file="$(cat "$reported_header_file")"
-    [ -n "$header_file" ]
-    [ ! -e "$header_file" ]
+    [ -f "$tmpdir_grep_capture" ]
+    # No file anywhere under $TMPDIR contains the token's value -- proves the
+    # secret itself never touches disk, regardless of what other, unrelated
+    # temp files this same call legitimately creates.
+    [ -z "$(cat "$tmpdir_grep_capture")" ]
 }
 
 @test "saf_query_run_count: a non-200 HTTP status is treated as a retryable failure, not a false zero" {
@@ -1212,6 +1227,54 @@ STUB
     run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "$(cat "$call_count_file")" -eq 2 ]
+}
+
+@test "saf_find_built_ancestor: a corrupted (empty) cache file is treated as a miss, never as a false has_run == 0" {
+    # A cache write that failed partway (e.g. the runner's disk filling up
+    # mid-write) could leave an empty regular file behind even with the
+    # write's own \`|| true\` swallowing the error. Reading that empty string
+    # back into \`(( has_run == 1 ))\`/\`(( has_run == 2 ))\` would silently
+    # evaluate it as 0 -- the single MOST PERMISSIVE outcome ("a run
+    # positively confirmed to exist"), skipping the required API proof
+    # entirely. Simulates exactly that: writes an empty file directly at the
+    # cache path a real write would have used, then proves a genuine query
+    # still happens (the call count increases) rather than the corrupted
+    # entry being trusted.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    cache_file="$(_saf_ancestor_run_cache_key_to_path "wiki-mod/lancache-ng" "$ancestor_sha")"
+    : > "$cache_file"
+    [ -e "$cache_file" ]
+    [ -z "$(cat "$cache_file")" ]
+
+    call_count_file="$BATS_TEST_TMPDIR/run_exists_call_count"
+    echo 0 > "$call_count_file"
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+count="\$(cat "$call_count_file")"
+count=\$((count + 1))
+echo "\$count" > "$call_count_file"
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    install_revision_stub_for "$ancestor_sha"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    # A trusted (but wrong) empty-file read would never have called the real
+    # run-exists stub at all (call count stays 0); a correct cache-miss
+    # re-query calls it exactly once.
+    [ "$(cat "$call_count_file")" -eq 1 ]
 }
 
 @test "saf_resolve_untouched_backfill_source: BASE_SHA's own pre/post push-run re-derivation is unaffected by the ancestor-candidate cache" {

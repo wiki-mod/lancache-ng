@@ -91,22 +91,6 @@
 # (a no-op `:` if none was set) -- composing with the caller's own cleanup
 # instead of clobbering it, however many EXIT traps get layered here in the
 # future.
-# Tracks the single, currently-outstanding curl header temp file (see
-# _saf_github_api_get below), if any, so the same EXIT trap installed for the
-# cache directory can also remove it if the process is killed (e.g. GitHub
-# Actions cancelling the job, or the job's own timeout-minutes firing) while
-# curl is still running -- verified empirically (bash 5.2, the version in the
-# pinned build-tools image) that bash's own EXIT trap DOES fire when the
-# process receives SIGTERM/SIGINT with no signal-specific trap of its own, so
-# a single EXIT trap is sufficient here without also needing to separately
-# trap TERM/INT/HUP (which would additionally risk altering this process's
-# own signal-termination semantics for the caller script as a whole, well
-# beyond what this cleanup needs). _saf_github_api_get sets this right after
-# creating its own header file and clears it again once that file is
-# removed, so at most one file is ever tracked at a time (each call is
-# synchronous, never concurrent with another within the same process).
-_SAF_CURRENT_CURL_HEADER_FILE=""
-
 if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
   SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
   if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]]; then
@@ -116,20 +100,20 @@ if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
       # ALREADY a single, correctly bash-quoted word -- any single quote
       # <command> itself contains is represented using bash's own '\''
       # escaping convention. Naively slicing off just the outer quote
-      # CHARACTERS (as an earlier version of this fix did) leaves that
-      # internal '\'' escaping un-decoded, corrupting <command> the moment it
-      # contained an embedded quote (verified: a prior trap running
-      # `printf "%s" "it's ok"` would silently become `it'\''s ok` once
-      # re-embedded that way). Stripping the fixed "trap -- "/" EXIT" wrapper
-      # textually is still safe (neither ever appears as <command>'s own
-      # data, only at these fixed positions in trap -p's own output format),
-      # but recovering <command> itself needs bash's OWN quote-removal, not
-      # manual slicing -- done here via `eval`, defining a wrapper function
-      # whose body is a second, nested `eval` of the still-quoted word: the
-      # OUTER eval below performs bash's normal quote-removal once (handing
-      # the inner eval its properly recovered, unescaped <command> text as a
-      # single argument), and invoking that inner eval later re-parses and
-      # runs <command> exactly as it was originally registered.
+      # CHARACTERS leaves that internal '\'' escaping un-decoded, corrupting
+      # <command> the moment it contains an embedded quote (e.g. a prior trap
+      # running `printf "%s" "it's ok"` would silently become `it'\''s ok`
+      # once re-embedded that way). Stripping the fixed "trap -- "/" EXIT"
+      # wrapper textually is still safe (neither ever appears as
+      # <command>'s own data, only at these fixed positions in trap -p's own
+      # output format), but recovering <command> itself needs bash's OWN
+      # quote-removal, not manual slicing -- done here via `eval`, defining a
+      # wrapper function whose body is a second, nested `eval` of the still-
+      # quoted word: the OUTER eval below performs bash's normal quote-
+      # removal once (handing the inner eval its properly recovered,
+      # unescaped <command> text as a single argument), and invoking that
+      # inner eval later re-parses and runs <command> exactly as it was
+      # originally registered.
       _saf_prior_exit_trap_line="${_saf_prior_exit_trap_line% EXIT}"
       _saf_prior_exit_trap_line="${_saf_prior_exit_trap_line#trap -- }"
       eval "_saf_run_prior_exit_trap() { eval ${_saf_prior_exit_trap_line}; }"
@@ -137,7 +121,6 @@ if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
       _saf_run_prior_exit_trap() { :; }
     fi
     _saf_cleanup_ancestor_run_cache_dir() {
-      [[ -n "$_SAF_CURRENT_CURL_HEADER_FILE" ]] && rm -f "$_SAF_CURRENT_CURL_HEADER_FILE" 2>/dev/null
       rm -rf "$SAF_ANCESTOR_RUN_CACHE_DIR" 2>/dev/null || true
     }
     trap '_saf_cleanup_ancestor_run_cache_dir; _saf_run_prior_exit_trap' EXIT
@@ -333,21 +316,36 @@ saf_base_commit_paths_are_ignorable() {
 # literal `-H "Authorization: Bearer <token>"` argument either: curl's own
 # argv (the expanded header value included) is visible for the lifetime of
 # the curl process to any other process running as the same host user, e.g.
-# via /proc/<pid>/cmdline on Linux -- a real exposure on a shared,
-# long-lived self-hosted runner, not a hypothetical one, and one GitHub
-# Actions' own log masking cannot help with at all since it only ever
-# touches log output, never a live process's argv. curl (>= 7.55.0, and
-# specifically supported by the pinned build-tools image's own curl) accepts
-# `-H @<file>` to read header lines from a file instead: the header value
-# briefly exists in a mode-600 temp file under $TMPDIR, owned solely by this
-# process's own user, unlinked immediately after the single curl invocation
-# that reads it -- never in argv, and never outliving that one call. Tracked
-# in _SAF_CURRENT_CURL_HEADER_FILE (see that variable's own declaration-site
-# comment) so the same process-wide EXIT trap that cleans up
-# SAF_ANCESTOR_RUN_CACHE_DIR also removes this file if the process is killed
-# (job cancellation, or the job's own timeout) while curl is still running --
-# the plain `rm -f` below only covers this function returning normally,
-# which a killed process never reaches.
+# via /proc/<pid>/cmdline on Linux -- a real exposure on a shared, long-lived
+# self-hosted runner, not a hypothetical one, and one GitHub Actions' own log
+# masking cannot help with at all since it only ever touches log output,
+# never a live process's argv.
+#
+# A mode-600 temp file passed via `-H @<file>` would get the token out of
+# argv, but not out of reach of another process running as the SAME host
+# user: file permission bits protect against other USERS, not other
+# processes owned by the identical UID, and that same-UID process could
+# trivially derive the file's own path from curl's own argv (`-H @<path>`,
+# itself still visible via /proc/<pid>/cmdline) and then just open() the file
+# directly -- no real improvement against exactly the threat model this
+# whole concern is about.
+#
+# curl's `-K -` (read config from stdin) closes that gap instead: config
+# lines (`header = "..."`) are piped in via a bash here-string, which this
+# project's own pinned bash (verified: bash 5.2, the build-tools image's
+# version) implements as a PIPE, not a temp file on disk -- so no file with
+# the token ever exists at any point for anything to open, and curl's own
+# argv now only ever contains the literal, harmless string `-K -`, with
+# nothing left for another process to even derive a path from. The
+# underlying pipe's own buffer is finite and consumed by curl essentially
+# immediately, narrowing the theoretical remaining same-UID exposure from
+# "open a file at leisure over up to a 30-second window" down to "must
+# already be actively intercepting this exact process's own pipe fd in real
+# time" -- as close to eliminated as a single script can get without
+# changing the runner's own same-UID process isolation, which is a genuine,
+# separate architectural question this one function cannot resolve by
+# itself (Unix file/process permissions fundamentally do not isolate
+# same-UID processes from each other at all).
 #
 # A 401 (invalid/expired token) or 404 (wrong endpoint/repository) is a
 # permanent, configuration-level failure -- no amount of retrying or
@@ -368,17 +366,12 @@ saf_base_commit_paths_are_ignorable() {
 _saf_github_api_get() {
   local url="$1" body_file="$2"
   : "${GH_TOKEN:?_saf_github_api_get: GH_TOKEN is required}"
-  local status curl_status header_file
-  header_file="$(mktemp "${TMPDIR:-/tmp}/saf-gh-header.XXXXXX" 2>/dev/null)" || return 1
-  chmod 600 "$header_file" 2>/dev/null || true
-  _SAF_CURRENT_CURL_HEADER_FILE="$header_file"
-  printf 'Accept: application/vnd.github+json\nAuthorization: Bearer %s\n' "$GH_TOKEN" > "$header_file"
+  local status curl_status header_config
+  header_config="$(printf 'header = "Accept: application/vnd.github+json"\nheader = "Authorization: Bearer %s"\n' "$GH_TOKEN")"
   status="$(curl -sS --connect-timeout 10 --max-time 30 -o "$body_file" -w '%{http_code}' \
-    -H "@${header_file}" \
-    "$url" 2>/dev/null)"
+    -K - \
+    "$url" 2>/dev/null <<< "$header_config")"
   curl_status=$?
-  rm -f "$header_file"
-  _SAF_CURRENT_CURL_HEADER_FILE=""
   if (( curl_status != 0 )); then
     return 1
   fi
@@ -833,10 +826,27 @@ saf_find_built_ancestor() {
     # could make a transient blip (that a later, independent query for a
     # different service might not have hit at all) needlessly fail every
     # subsequent service's own check too.
-    local cache_file
+    local cache_file cache_file_content cache_file_valid=0
     cache_file="$(_saf_ancestor_run_cache_key_to_path "$repository" "$candidate")"
+    cache_file_content=""
     if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]] && [[ -f "$cache_file" ]]; then
-      has_run="$(cat "$cache_file")"
+      cache_file_content="$(cat "$cache_file" 2>/dev/null)"
+      # A cache file's content must be EXACTLY "0" or "1" to be trusted --
+      # not just non-empty. A write that failed partway (e.g. the runner's
+      # disk filling up mid-write) can leave an empty regular file behind
+      # even with the write's own `|| true` swallowing the error; reading
+      # that empty string back into an arithmetic comparison
+      # (`(( has_run == 1 ))`/`(( has_run == 2 ))`) would silently evaluate
+      # it as 0 -- the single MOST PERMISSIVE outcome ("a run positively
+      # confirmed to exist"), the opposite of what a failed, unproven write
+      # should ever be read back as. Anything other than exactly "0" or "1"
+      # is treated as a cache miss and re-queried below instead.
+      if [[ "$cache_file_content" == "0" ]] || [[ "$cache_file_content" == "1" ]]; then
+        cache_file_valid=1
+      fi
+    fi
+    if (( cache_file_valid )); then
+      has_run="$cache_file_content"
     else
       has_run=0
       # Empty event filter ("any event"): see saf_base_commit_has_confirmed_run's
@@ -844,7 +854,19 @@ saf_find_built_ancestor() {
       # candidate, unlike the stricter push-only check used for BASE_SHA itself.
       saf_base_commit_has_confirmed_run "$repository" "$candidate" "" || has_run=$?
       if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]] && (( has_run == 0 || has_run == 1 )); then
-        printf '%s' "$has_run" > "$cache_file" 2>/dev/null || true
+        # Write via a temp file + atomic rename, not a direct redirection
+        # into the final path: `mv` within the same directory/filesystem is
+        # an atomic rename, so any reader of $cache_file either sees the
+        # complete prior content (none yet, for a first write) or the
+        # complete new content -- never a partially-written, torn file, even
+        # if this process is killed mid-write. The `|| true` on this whole
+        # attempt is still fine to keep permissive: a failed write here just
+        # means the NEXT read finds no cache file at all (a clean miss,
+        # re-queried like any cold cache entry), never a corrupted one.
+        local cache_tmp_file
+        cache_tmp_file="$(mktemp "${cache_file}.XXXXXX" 2>/dev/null)" && {
+          printf '%s' "$has_run" > "$cache_tmp_file" 2>/dev/null && mv -f "$cache_tmp_file" "$cache_file" 2>/dev/null || rm -f "$cache_tmp_file" 2>/dev/null
+        } || true
       fi
     fi
     if (( has_run == 1 )); then
