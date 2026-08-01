@@ -1,5 +1,6 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
+# Diagnostic marker line, single-hunk test (temporary, throwaway PR #1381).
 # Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
 # crates and shell scripts, validates the docker-compose files, scans
 # container images, then builds, pushes, promotes, and releases the stack
