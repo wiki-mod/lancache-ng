@@ -95,6 +95,15 @@
 # sif_is_ancestor_or_equal runs against a real disposable git repo via
 # STAGING_FRESHNESS_GIT_DIR (same file). PUSH_REUSE_CLASSIFY_CMD mirrors that
 # same convention for the one primitive genuinely new to this file.
+#
+# Real push-event proof status (AG-CI-012, issue #1095): as of 2026-08-01,
+# every observed real push run has hit the fail-closed branch above (no
+# readable revision label match / not-yet-ancestor / real content diff) --
+# the actual reuse=true retag branch has never been directly observed firing
+# in a real push run. Testing this now with an intentionally unrelated,
+# non-docs push (this comment) while nightly is at parity with current_dev
+# for both allowlisted services (ntp, build-tools) to close that gap; see the
+# follow-up commit/comment on issue #1095 for the actual result once known.
 push_reuse_decide() {
   local service_key="${1:?push_reuse_decide: service_key is required}"
   local channel_image="${2:?push_reuse_decide: channel_image is required}"
