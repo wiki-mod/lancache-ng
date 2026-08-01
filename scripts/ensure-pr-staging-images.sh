@@ -217,28 +217,47 @@ fi
 congestion_check_interval_seconds="${STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS:-60}"
 
 # #808: bounded wait for the back-fill source image itself to become fresh
-# enough (see scripts/lib/staging-image-freshness.sh for the mechanism).
-# Deliberately a MUCH shorter ceiling than the touched-image wait above: this
-# path is only reached for a base commit that already has a confirmed
-# push-triggered build-push.yml run (base_commit_has_confirmed_push_run()
-# gates entry to this wait), so the image is expected to already exist or
-# appear within a normal build's runtime, not to require the same
-# congestion-driven headroom as the touched-image wait. Keeping this ceiling
-# short also bounds the worst case across the untouched-service loop in
-# full-setup-deep-validate.yml's own job timeout, where a per-service wait
-# anywhere near the touched-image ceiling would starve later services in the
-# same loop. The normal budget is shorter still (900s/15min): in the common
-# case the base commit's own sha-<short> image is already fresh (its
-# push-triggered build finished before this PR's validation even started)
-# and this check resolves on the first poll, so 900s is purely the "start
-# logging that we're still waiting" threshold, not a tuned estimate of
-# typical wait time.
-base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-300}"
-base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-600}"
+# enough (see scripts/lib/staging-image-freshness.sh for the mechanism). This
+# governs ONLY the wait against BASE_SHA's own image
+# (saf_resolve_untouched_backfill_source's "normal path", step 2) -- NOT the
+# separate, much shorter ancestor-candidate budget below. This wait can
+# genuinely be racing a real, still-building push run: it is reached whenever
+# a confirmed push-triggered build-push.yml run for BASE_SHA exists (or its
+# status could not be positively ruled out), which is exactly the case where
+# the image may simply not have finished pushing yet, the same congestion
+# scenario wait_for_touched_image() above already gets headroom for. A short
+# ceiling here would hard-fail this gate on a perfectly healthy,
+# still-running build, which is strictly worse than the never-built-base-
+# commit problem this whole mechanism exists to fix. 5400s/90min matches the
+# touched-image hard ceiling above (same worst-case build-push runtime, since
+# this is fundamentally the same pipeline building the same commit); 900s/
+# 15min is, as before, purely the "start logging that we're still waiting"
+# threshold for the common case where the image is already fresh and this
+# resolves on the first poll.
+base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
+base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
 if (( base_freshness_hard_ceiling_seconds < base_freshness_timeout_seconds )); then
     base_freshness_hard_ceiling_seconds=$base_freshness_timeout_seconds
 fi
 base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15}"
+
+# Separate, deliberately SHORT budget for saf_find_built_ancestor's own
+# per-candidate freshness checks (used only once BASE_SHA's own wait above
+# has failed AND both fail-closed gates confirm a genuine deliberate skip, or
+# via the fast-path pre-check). An ancestor candidate is, by construction,
+# already confirmed (via saf_base_commit_has_confirmed_run) to have a REAL
+# recorded build-push.yml run further back in history than BASE_SHA -- if its
+# image doesn't already exist by the time this mechanism looks, it never
+# will, since there is no "still building" scenario for a commit further in
+# the past than one already checked. A long, congestion-scale ceiling here
+# would only slow down every ancestor-fallback case for no correctness
+# benefit, and would multiply badly across up to ancestor_search_depth
+# candidates if an early one's run somehow never produced an image.
+ancestor_freshness_timeout_seconds="${ANCESTOR_FRESHNESS_POLL_TIMEOUT_SECONDS:-300}"
+ancestor_freshness_hard_ceiling_seconds="${ANCESTOR_FRESHNESS_POLL_HARD_CEILING_SECONDS:-600}"
+if (( ancestor_freshness_hard_ceiling_seconds < ancestor_freshness_timeout_seconds )); then
+    ancestor_freshness_hard_ceiling_seconds=$ancestor_freshness_timeout_seconds
+fi
 
 # How many of BASE_SHA's own ancestor commits (nearest-first, first-parent
 # only) scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor()
@@ -430,8 +449,9 @@ for service in "${full_setup_services[@]}"; do
     # resolution sequence (exact-BASE_SHA wait, then the ancestor fallback
     # when that wait genuinely cannot succeed).
     if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" \
-        "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$base_freshness_poll_interval_seconds" \
-        "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}")"; then
+        "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" \
+        "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" \
+        "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}")"; then
         exit 1
     fi
     echo "::notice::(re)pointing $PR_TAG at $resolved_source."

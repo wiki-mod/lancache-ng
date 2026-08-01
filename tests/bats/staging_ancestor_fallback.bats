@@ -23,6 +23,11 @@
 #     wrapping it in the project's existing ghcr_retry policy
 #   - an ancestor candidate's own non-push-triggered run being skipped
 #     without a chance, asymmetric with how BASE_SHA's own image is checked
+#   - a single shared freshness budget applied to both BASE_SHA's own wait
+#     (which can legitimately be racing a real in-flight build) and the
+#     ancestor-candidate checks (which never can, since a candidate is
+#     already confirmed to be further back in history than BASE_SHA) --
+#     fixed by splitting into two independent budget pairs
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -416,7 +421,7 @@ STUB
     # regression reintroducing the slow path fails this assertion in
     # seconds rather than hanging the suite for up to 10 minutes.
     start_epoch="$(date +%s)"
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 3 3 1 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 3 3 3 3 1 50 "$git_dir"
     end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${ancestor2_sha:0:7}" ]]
@@ -445,7 +450,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$real_change_sha" 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$real_change_sha" 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
     [[ "$output" != *"Substituting"* ]]
 }
@@ -467,7 +472,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
 }
 
@@ -482,8 +487,46 @@ STUB
 
     install_revision_stub_for "$base_sha"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 15 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 300 600 15 50 "$git_dir"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${base_sha:0:7}" ]]
     [[ "$output" != *"ancestor"* ]]
+}
+
+@test "saf_resolve_untouched_backfill_source: a confirmed-in-flight BASE_SHA build gets the long budget, not the short ancestor-candidate one" {
+    setup_linear_fixture
+    install_run_exists_stub
+    # A confirmed push-triggered run exists for BASE_SHA (a real, in-flight
+    # build) -- this must always follow the LONG base_freshness_* budget for
+    # BASE_SHA's own wait (step 2), never the short ancestor_freshness_*
+    # budget saf_find_built_ancestor's own per-candidate checks use. If the
+    # two budgets were ever collapsed back into one shared pair, a
+    # still-building base commit would hard-fail this gate at the short
+    # ceiling well before its image has any chance to appear.
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+
+    start_epoch="$(date +%s)"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+now="\$(date +%s)"
+elapsed=\$((now - $start_epoch))
+# Resolves only once 4 real seconds have elapsed: longer than the short
+# ancestor ceiling (2s) below, well inside the long base ceiling (10s).
+if (( elapsed >= 4 )); then
+    echo "$base_sha"
+else
+    exit 1
+fi
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 10 10 2 2 1 50 "$git_dir"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sha-${base_sha:0:7}" ]]
 }

@@ -355,7 +355,8 @@ saf_find_built_ancestor() {
 }
 
 # saf_resolve_untouched_backfill_source <repository> <service> <base_sha> \
-#     <freshness_timeout_seconds> <freshness_hard_ceiling_seconds> \
+#     <base_freshness_timeout_seconds> <base_freshness_hard_ceiling_seconds> \
+#     <ancestor_freshness_timeout_seconds> <ancestor_freshness_hard_ceiling_seconds> \
 #     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir]
 #
 # The single shared orchestrator both callers (scripts/ensure-pr-staging-images.sh
@@ -368,6 +369,34 @@ saf_find_built_ancestor() {
 # unwinnable wait in one caller's job while the other caller has already
 # been fixed -- reimplementing this logic a second time anywhere is a defect
 # in itself, not just a maintenance inconvenience.
+#
+# TWO SEPARATE budget pairs on purpose, not one shared pair:
+#   - <base_freshness_timeout_seconds>/<base_freshness_hard_ceiling_seconds>
+#     govern ONLY the wait against BASE_SHA's own image (the NORMAL PATH,
+#     step 2 below). This is the one wait in this whole mechanism that can
+#     legitimately be racing a real, still-building push run -- exactly the
+#     scenario a confirmed push-triggered run (pre_run_status/post_run_status
+#     == 0 below) describes -- so it needs the same congestion-scale headroom
+#     wait_for_touched_image() in scripts/ensure-pr-staging-images.sh already
+#     gets for the identical reason, not a short ceiling tuned for "this
+#     should already exist or never will".
+#   - <ancestor_freshness_timeout_seconds>/<ancestor_freshness_hard_ceiling_seconds>
+#     govern ONLY saf_find_built_ancestor's per-candidate checks (both the
+#     fast-path and step-3 call sites below). An ancestor candidate is, by
+#     construction, a commit further back in history than BASE_SHA that
+#     saf_base_commit_has_confirmed_run already confirmed has a REAL recorded
+#     run -- if that run's image doesn't already exist by the time this
+#     mechanism looks, it never will (there is no "still building" case for a
+#     commit further in the past than one already checked), so a short ceiling
+#     here is a deliberate tuning choice, not a correctness gap.
+#   Collapsing these into one shared pair is a real failure mode, not a
+#   theoretical one: a short ceiling tuned for "an already-checked historical
+#   ancestor commit's image either exists now or never will" is far too short
+#   for BASE_SHA's own wait, where a confirmed push-triggered run can still
+#   legitimately be mid-build -- applying the short ceiling there would
+#   hard-fail this gate on a perfectly healthy, still-running build, which is
+#   strictly worse than the "unwinnable wait on a never-built base commit"
+#   bug this whole file exists to fix.
 #
 # Sequence:
 #   1. FAST PATH (reordering): before running the full bounded freshness
@@ -411,9 +440,10 @@ saf_find_built_ancestor() {
 # before this mechanism existed).
 saf_resolve_untouched_backfill_source() {
   local repository="$1" service="$2" base_sha="$3"
-  local freshness_timeout_seconds="$4" freshness_hard_ceiling_seconds="$5"
-  local freshness_poll_interval_seconds="$6" ancestor_search_depth="$7"
-  local git_dir="${8:-.}"
+  local base_freshness_timeout_seconds="$4" base_freshness_hard_ceiling_seconds="$5"
+  local ancestor_freshness_timeout_seconds="$6" ancestor_freshness_hard_ceiling_seconds="$7"
+  local freshness_poll_interval_seconds="$8" ancestor_search_depth="$9"
+  local git_dir="${10:-.}"
   # See saf_find_built_ancestor's own comment for why this export is needed:
   # sif_wait_for_fresh_base_image (called directly below, and indirectly via
   # saf_find_built_ancestor) reads STAGING_FRESHNESS_GIT_DIR from the
@@ -453,7 +483,7 @@ saf_resolve_untouched_backfill_source() {
       return 0
     fi
     if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
-      "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" "$git_dir")"; then
+      "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" "$git_dir")"; then
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
       return 1
     fi
@@ -462,11 +492,14 @@ saf_resolve_untouched_backfill_source() {
     return 0
   fi
 
-  # Step 2: normal path -- the full bounded wait, unchanged from this
-  # mechanism's pre-fallback behavior.
+  # Step 2: normal path -- the full bounded wait against BASE_SHA's own
+  # image, unchanged from this mechanism's pre-fallback behavior. Uses the
+  # LONG (base_freshness_*) budget deliberately -- see this function's own
+  # header for why this specific wait, unlike the ancestor-candidate checks,
+  # needs congestion-scale headroom.
   echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $base_sha before backfilling..." >&2
   if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" \
-    "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
     printf '%s\n' "$base_image"
     return 0
   fi
@@ -495,7 +528,7 @@ saf_resolve_untouched_backfill_source() {
 
   echo "::notice::$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
   if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
-    "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" "$git_dir")"; then
+    "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" "$git_dir")"; then
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
     return 1
   fi

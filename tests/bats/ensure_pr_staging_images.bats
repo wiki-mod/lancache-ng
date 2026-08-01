@@ -175,6 +175,13 @@ STUB
     export BASE_FRESHNESS_POLL_TIMEOUT_SECONDS=0
     export BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS=0
     export BASE_FRESHNESS_POLL_INTERVAL_SECONDS=0
+    # Separate short-budget pair for saf_find_built_ancestor's own
+    # per-candidate checks (see scripts/lib/staging-ancestor-fallback.sh's
+    # saf_resolve_untouched_backfill_source header for why this is now a
+    # second, independent pair rather than sharing the BASE_FRESHNESS_* pair
+    # above) -- kept at 0 here for the same "no real waiting in tests" reason.
+    export ANCESTOR_FRESHNESS_POLL_TIMEOUT_SECONDS=0
+    export ANCESTOR_FRESHNESS_POLL_HARD_CEILING_SECONDS=0
     export REPOSITORY="wiki-mod/lancache-ng"
     export PR_TAG="pr-715-sha-abcdef0"
 }

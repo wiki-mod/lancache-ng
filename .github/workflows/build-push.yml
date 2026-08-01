@@ -3574,14 +3574,17 @@ jobs:
             # fallback when that wait genuinely cannot succeed) that this
             # step now shares with scripts/ensure-pr-staging-images.sh
             # instead of carrying an independent copy of the same logic.
-            # 300/600/15 (normal budget / hard ceiling / poll interval, in
-            # seconds) intentionally match scripts/ensure-pr-staging-images.sh's
-            # own BASE_FRESHNESS_POLL_* defaults exactly -- keep in sync by
-            # hand if those defaults ever change, same as the rest of this
-            # step's touched-vs-untouched logic already must be. The "50"
-            # ancestor-search-depth argument likewise matches that script's
-            # own STAGING_ANCESTOR_SEARCH_DEPTH default.
-            if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" 300 600 15 50 "$GITHUB_WORKSPACE")"; then
+            # 900/5400 (BASE_SHA's own wait) and 300/600 (ancestor-candidate
+            # checks) intentionally match scripts/ensure-pr-staging-images.sh's
+            # own BASE_FRESHNESS_POLL_*/ANCESTOR_FRESHNESS_POLL_* defaults
+            # exactly -- see saf_resolve_untouched_backfill_source's own
+            # header for why these are two separate budgets, not one shared
+            # pair, and keep both in sync by hand if those defaults ever
+            # change, same as the rest of this step's touched-vs-untouched
+            # logic already must be. The "50" ancestor-search-depth argument
+            # likewise matches that script's own STAGING_ANCESTOR_SEARCH_DEPTH
+            # default.
+            if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" 900 5400 300 600 15 50 "$GITHUB_WORKSPACE")"; then
               exit 1
             fi
             echo "::notice::(re)pointing $PR_TAG at $resolved_source."
