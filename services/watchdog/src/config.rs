@@ -335,6 +335,51 @@ pub fn resolve_container_names(
     })
 }
 
+/// watchdog.sh's `resolve_cache_dir()`: `CACHE_DIR` wins outright if set;
+/// otherwise an older installation may still have the pre-`CACHE_DIR`
+/// split `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` pair set instead. Those two
+/// existing only to disagree is fail-closed (an ambiguous "which
+/// filesystem is actually the cache" is worse than crashing loudly), a
+/// single one of the pair is honored on its own, and the historical
+/// `/var/cache/lancache` default applies only once none of the three are
+/// set. Returning `Result` rather than silently picking a default mirrors
+/// the bash's own `exit 1` on the conflicting-values case -- the caller
+/// (`main.rs`) is expected to log the message and exit nonzero exactly
+/// like `resolve_container_names`'s fatal-mismatch path.
+pub fn resolve_cache_dir(
+    cache_dir: Option<&str>,
+    cache_dir_standard: Option<&str>,
+    cache_dir_ssl: Option<&str>,
+) -> Result<String, String> {
+    const DEFAULT_CACHE_DIR: &str = "/var/cache/lancache";
+
+    let cache_dir = non_empty(cache_dir);
+    let cache_dir_standard = non_empty(cache_dir_standard);
+    let cache_dir_ssl = non_empty(cache_dir_ssl);
+
+    if let Some(cache_dir) = cache_dir {
+        return Ok(cache_dir.to_string());
+    }
+
+    if let (Some(std), Some(ssl)) = (cache_dir_standard, cache_dir_ssl)
+        && std != ssl
+    {
+        return Err(format!(
+            "FATAL: CACHE_DIR_STANDARD={std} and CACHE_DIR_SSL={ssl} point to different paths without CACHE_DIR. Set CACHE_DIR to one shared cache directory."
+        ));
+    }
+
+    if let Some(std) = cache_dir_standard {
+        return Ok(std.to_string());
+    }
+
+    if let Some(ssl) = cache_dir_ssl {
+        return Ok(ssl.to_string());
+    }
+
+    Ok(DEFAULT_CACHE_DIR.to_string())
+}
+
 /// One entry in the data-driven service table the main loop iterates over
 /// -- this is the typed per-service definition (health-check kind,
 /// restart policy, startup grace period) the maintainer's own rewrite
@@ -587,5 +632,62 @@ mod tests {
         assert!(resolve_container_names(None, Some("renamed"), None, None, true).is_err());
         assert!(resolve_container_names(None, None, Some("renamed"), None, true).is_err());
         assert!(resolve_container_names(None, None, None, Some("renamed"), true).is_err());
+    }
+
+    #[test]
+    // CACHE_DIR wins outright over the legacy split pair, matching
+    // resolve_cache_dir()'s first branch in the bash.
+    fn resolve_cache_dir_prefers_cache_dir_when_set() {
+        let dir =
+            resolve_cache_dir(Some("/mnt/cache"), Some("/mnt/std"), Some("/mnt/ssl")).unwrap();
+        assert_eq!(dir, "/mnt/cache");
+    }
+
+    #[test]
+    // With CACHE_DIR unset, an older installation's CACHE_DIR_STANDARD/
+    // CACHE_DIR_SSL pair must still be honored -- reading only CACHE_DIR
+    // and silently defaulting to /var/cache/lancache would report disk
+    // usage for the wrong filesystem on any install still using the
+    // pre-CACHE_DIR split variables.
+    fn resolve_cache_dir_falls_back_to_legacy_split_vars() {
+        assert_eq!(
+            resolve_cache_dir(None, Some("/mnt/legacy"), None).unwrap(),
+            "/mnt/legacy"
+        );
+        assert_eq!(
+            resolve_cache_dir(None, None, Some("/mnt/legacy-ssl")).unwrap(),
+            "/mnt/legacy-ssl"
+        );
+        // Both set but agreeing is fine, not a conflict.
+        assert_eq!(
+            resolve_cache_dir(None, Some("/mnt/same"), Some("/mnt/same")).unwrap(),
+            "/mnt/same"
+        );
+    }
+
+    #[test]
+    // Conflicting legacy values with no CACHE_DIR to arbitrate is
+    // fail-closed, matching the bash's own `exit 1` -- an ambiguous "which
+    // filesystem is the real cache" must never be silently guessed at.
+    fn resolve_cache_dir_rejects_conflicting_legacy_values() {
+        let err = resolve_cache_dir(None, Some("/mnt/std"), Some("/mnt/ssl")).unwrap_err();
+        assert!(err.contains("/mnt/std"));
+        assert!(err.contains("/mnt/ssl"));
+    }
+
+    #[test]
+    // Nothing set at all falls back to the historical default, and empty
+    // env values (e.g. CACHE_DIR= set but blank) are treated as unset, not
+    // as a real value -- consistent with every other setting in this
+    // module.
+    fn resolve_cache_dir_defaults_when_all_unset() {
+        assert_eq!(
+            resolve_cache_dir(None, None, None).unwrap(),
+            "/var/cache/lancache"
+        );
+        assert_eq!(
+            resolve_cache_dir(Some(""), Some(""), Some("")).unwrap(),
+            "/var/cache/lancache"
+        );
     }
 }

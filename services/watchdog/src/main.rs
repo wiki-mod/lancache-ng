@@ -133,9 +133,26 @@ fn load_settings() -> Settings {
     let status_file = env("STATUS_FILE")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("/var/run/watchdog/status.json"));
-    let cache_dir = env("CACHE_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from("/var/cache/lancache"));
+
+    // Mirrors watchdog.sh's resolve_cache_dir(): CACHE_DIR wins outright,
+    // but an older installation may still only have the pre-CACHE_DIR
+    // split CACHE_DIR_STANDARD/CACHE_DIR_SSL pair set -- reading only
+    // CACHE_DIR here would silently fall back to the default and report
+    // disk usage for the wrong filesystem on such an install. Conflicting
+    // legacy values with no CACHE_DIR to arbitrate is fatal, matching the
+    // bash's own exit 1, via the same log_err-then-exit(1) pattern
+    // resolve_container_names's fail-closed mismatch uses above.
+    let cache_dir = match config::resolve_cache_dir(
+        env("CACHE_DIR").as_deref(),
+        env("CACHE_DIR_STANDARD").as_deref(),
+        env("CACHE_DIR_SSL").as_deref(),
+    ) {
+        Ok(dir) => PathBuf::from(dir),
+        Err(msg) => {
+            log_err(&msg);
+            std::process::exit(1);
+        }
+    };
 
     Settings {
         docker_proxy_url,
