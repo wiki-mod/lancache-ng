@@ -15,9 +15,10 @@
 #
 # The exact cutoff between 8999 and 9216 was not pinned down further (this is
 # a defensive guardrail, not a root-cause fix -- GitHub Support has been
-# notified separately) -- MAX_WORKFLOW_LINES stays well under the lowest
-# confirmed-bad value with real margin, not right at the edge of the last
-# confirmed-good one.
+# notified separately). MAX_WORKFLOW_LINES is set to 8999, the maintainer's
+# own tested reference point (an earlier revision of this script defaulted
+# to 8500, an AI-chosen safety margin the maintainer had not been consulted
+# on and did not want -- corrected here per direct maintainer instruction).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -25,7 +26,7 @@ repo_root=$(cd "$script_dir/.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
 
-MAX_WORKFLOW_LINES="${MAX_WORKFLOW_LINES:-8500}"
+MAX_WORKFLOW_LINES="${MAX_WORKFLOW_LINES:-8999}"
 
 offenders=()
 while IFS= read -r -d '' file; do
