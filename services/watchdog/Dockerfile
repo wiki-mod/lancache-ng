@@ -6,13 +6,25 @@
 # (maintainer decision, 2026-07-25) said watchdog.sh will eventually be
 # rewritten as a real Rust service, and migrating the CURRENT bash image
 # seemed like immediately-obsoleted work. Revisited and approved anyway
-# (maintainer decision, 2026-07-31): #842's rewrite has not started -- only
-# the decision is recorded, no implementation -- and has no scheduled
-# timeline, while this migration is trivial (no builder stage, no compiled
-# binary, a plain apt->apk package-name swap) and brings real value
-# (smaller image, smaller package-count attack surface) on its own, entirely
-# independent of whatever base-image decision the eventual Rust rewrite
-# makes for itself. All seven packages this Dockerfile previously installed
+# (maintainer decision, 2026-07-31): at the time, #842's rewrite had not
+# started -- only the decision was recorded, no implementation -- and had
+# no scheduled timeline, while this migration was trivial (no builder
+# stage, no compiled binary, a plain apt->apk package-name swap) and
+# brought real value (smaller image, smaller package-count attack surface)
+# on its own, entirely independent of whatever base-image decision the
+# eventual Rust rewrite makes for itself.
+#
+# STATUS (2026-08-01): #842's Rust rewrite now exists as a scaffold
+# (services/watchdog/Cargo.toml + src/), covering the health-check/restart
+# core (see that crate's own src/lib.rs module doc comment for exactly
+# what is and isn't ported yet). It is NOT wired into this Dockerfile --
+# `ENTRYPOINT` below still runs the bash `watchdog.sh`, and this image
+# still builds nothing from the Rust crate. Whether/when this Dockerfile
+# switches to a compiled Rust binary depends on an open scope question
+# (whether watchdog.sh's three filesystem-retention passes get ported into
+# the same crate first) that has not been decided yet -- this base-image
+# choice remains independent of that decision either way. All seven
+# packages this Dockerfile previously installed
 # on `debian:13-slim` were confirmed present on Alpine 3.24 during #815's own
 # research (curl 8.21.0-r0, jq 1.8.1-r0, ca-certificates 20260611-r0, nano
 # 9.1-r0, lsof 4.99.6-r0, ripgrep 15.1.0-r0, zstd 1.5.7-r2) -- no

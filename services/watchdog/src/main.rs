@@ -1,11 +1,11 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Binary entry point for the Rust rewrite of watchdog.sh's health-check/
-//! restart loop (issue #842). See `lib.rs`'s module doc comment for the
-//! current scope (health checks + restart + status.json + the
-//! docker-socket-proxy alert probe; NOT yet the three filesystem-retention
-//! passes) and why `services/watchdog/Dockerfile`'s `ENTRYPOINT` still
-//! points at the bash script rather than this binary.
+//! restart loop. See `lib.rs`'s module doc comment for the current scope
+//! (health checks + restart + status.json + the docker-socket-proxy alert
+//! probe; NOT yet the three filesystem-retention passes) and why
+//! `services/watchdog/Dockerfile`'s `ENTRYPOINT` still points at the bash
+//! script rather than this binary.
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -45,8 +45,13 @@ struct Settings {
     docker_proxy_url: String,
     check_interval: Duration,
     restart_after: u32,
-    curl_max_time: Duration,
-    curl_max_time_restart: Duration,
+    // `None` means "no timeout", matching curl's own `--max-time 0`
+    // semantics for CURL_MAX_TIME/CURL_MAX_TIME_RESTART -- see
+    // config::parse_curl_timeout's doc comment. Never represented as
+    // `Duration::ZERO`: docker_client's bounded()/apply_timeout() treat
+    // that as "essentially instant", the opposite of "unbounded".
+    curl_max_time: Option<Duration>,
+    curl_max_time_restart: Option<Duration>,
     disk_warn_pct: u32,
     disk_alarm_pct: u32,
     status_file: PathBuf,
@@ -55,7 +60,19 @@ struct Settings {
 }
 
 fn load_settings() -> Settings {
-    let env = |name: &str| std::env::var(name).ok();
+    // Filters an explicitly-empty env value (e.g. `DOCKER_PROXY_URL=` set
+    // but blank) down to `None` here, at the single point every setting in
+    // this function reads from -- see config::non_empty's own doc comment
+    // for why bash's `${VAR:-default}` treats empty and unset identically.
+    // This also makes the equivalent filtering inside config::resolve_bool/
+    // parse_u64_with_default/resolve_container_names redundant for THESE
+    // call sites specifically, which is fine: those functions still need
+    // their own guard so they stay correct for any other caller, not just
+    // this one.
+    let env = |name: &str| {
+        let value = std::env::var(name).ok();
+        config::non_empty(value.as_deref()).map(str::to_string)
+    };
 
     let docker_proxy_url =
         env("DOCKER_PROXY_URL").unwrap_or_else(|| "http://docker-socket-proxy:2375".to_string());
@@ -70,28 +87,28 @@ fn load_settings() -> Settings {
         log(&w);
     }
 
-    let (curl_max_time, warning) =
-        config::parse_u64_with_default(env("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME", 5);
-    if let Some(w) = warning {
+    let (curl_max_time, warnings) =
+        config::parse_curl_timeout(env("CURL_MAX_TIME").as_deref(), "CURL_MAX_TIME", 5);
+    for w in warnings {
         log(&w);
     }
-    let (curl_max_time_restart, warning) = config::parse_u64_with_default(
+    let (curl_max_time_restart, warnings) = config::parse_curl_timeout(
         env("CURL_MAX_TIME_RESTART").as_deref(),
         "CURL_MAX_TIME_RESTART",
         30,
     );
-    if let Some(w) = warning {
+    for w in warnings {
         log(&w);
     }
 
-    let (disk_warn_pct, warning) =
-        config::parse_u64_with_default(env("DISK_WARN_PCT").as_deref(), "DISK_WARN_PCT", 85);
-    if let Some(w) = warning {
+    let (disk_warn_pct, warnings) =
+        config::parse_u32_with_default(env("DISK_WARN_PCT").as_deref(), "DISK_WARN_PCT", 85);
+    for w in warnings {
         log(&w);
     }
-    let (disk_alarm_pct, warning) =
-        config::parse_u64_with_default(env("DISK_ALARM_PCT").as_deref(), "DISK_ALARM_PCT", 95);
-    if let Some(w) = warning {
+    let (disk_alarm_pct, warnings) =
+        config::parse_u32_with_default(env("DISK_ALARM_PCT").as_deref(), "DISK_ALARM_PCT", 95);
+    for w in warnings {
         log(&w);
     }
 
@@ -124,10 +141,10 @@ fn load_settings() -> Settings {
         docker_proxy_url,
         check_interval,
         restart_after,
-        curl_max_time: Duration::from_secs(curl_max_time),
-        curl_max_time_restart: Duration::from_secs(curl_max_time_restart),
-        disk_warn_pct: disk_warn_pct as u32,
-        disk_alarm_pct: disk_alarm_pct as u32,
+        curl_max_time,
+        curl_max_time_restart,
+        disk_warn_pct,
+        disk_alarm_pct,
         status_file,
         cache_dir,
         container_names,
@@ -140,7 +157,7 @@ async fn main() {
     let client = DockerProxyClient::new(settings.docker_proxy_url.clone())
         .expect("building the reqwest client must not fail (no invalid static config)");
 
-    // The data-driven service table issue #842's maintainer follow-up
+    // The data-driven service table the maintainer's own rewrite brief
     // asked for, replacing watchdog.sh's four individually-named
     // C_PROXY/C_DNS_STD/C_DNS_SSL/C_NATS variables. Built fresh from
     // ContainerNames rather than stored on Settings: this is the shape the
@@ -239,9 +256,9 @@ async fn main() {
             );
         }
 
-        // Alert-only docker-socket-proxy probe (issue #1170 Part 1):
-        // deliberately never restarted -- see docker_client::ping's and
-        // health::AlertCounter's own doc comments for why.
+        // Alert-only docker-socket-proxy probe: deliberately never
+        // restarted -- see docker_client::ping's and health::AlertCounter's
+        // own doc comments for why.
         let reachable = client.ping(settings.curl_max_time).await;
         let docker_proxy_name = settings.container_names.docker_socket_proxy;
         match docker_proxy_alert_counter.record(reachable) {
@@ -251,10 +268,23 @@ async fn main() {
                 "UNHEALTHY {docker_proxy_name} ({count} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel (see issue #1170)"
             )),
         }
+        // watchdog.sh's probe_docker_socket_proxy() stores the literal
+        // string "healthy"/"unhealthy" into H_DOCKER_PROXY (never
+        // "unreachable" -- that string is reserved for get_health()'s
+        // per-container Docker-API failures). Using HealthReading::Unhealthy
+        // here (not ::Unreachable) matches that exactly: health_color()
+        // renders it red, the correct alarm-level color for "the management
+        // plane's own Docker API gateway is down," not the yellow
+        // indeterminate-warning color ::Unreachable maps to. This is purely
+        // a status.json/dashboard representation choice -- it does not run
+        // through FailureCounter/restart logic at all, so it carries none of
+        // ::Unhealthy's restart-triggering meaning for the four monitored
+        // containers above; only AlertCounter (which never restarts
+        // anything) drives this probe's actual behavior.
         let docker_proxy_reading = if reachable {
             HealthReading::Healthy
         } else {
-            HealthReading::Unreachable
+            HealthReading::Unhealthy
         };
         services_status.insert(
             docker_proxy_name.to_string(),

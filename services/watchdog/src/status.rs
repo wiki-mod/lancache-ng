@@ -168,6 +168,8 @@ mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
     #[test]
+    // Pins the exact "updated" field format status.json has always had:
+    // no fractional seconds, no numeric offset, just a literal trailing Z.
     fn format_updated_timestamp_matches_date_dash_u_shape() {
         // Built via the calendar-date constructor (not a hand-computed
         // Unix timestamp) so the expected instant is unambiguous and never
@@ -209,6 +211,10 @@ mod tests {
     }
 
     #[test]
+    // End-to-end round trip: what write_status() writes must be valid JSON
+    // that deserializes back into the same shape services/ui/src/
+    // watchdog_status.rs expects, and the atomic-rename path must leave no
+    // stray .tmp file behind for a concurrent reader to ever observe.
     fn write_status_is_readable_back_with_identical_content() {
         let nonce = SystemTime::now()
             .duration_since(UNIX_EPOCH)

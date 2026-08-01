@@ -1,16 +1,16 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-# Manifest for the lancache-watchdog health-monitor/auto-restart daemon
-# (issue #842's Rust rewrite of the former services/watchdog/watchdog.sh).
+# Manifest for the lancache-watchdog health-monitor/auto-restart daemon,
+# a Rust rewrite of the former services/watchdog/watchdog.sh.
 #
 # Scope note (2026-07-31/08-01): this crate currently ports only
 # watchdog.sh's health-check/restart state machine (proxy/dns-standard/
 # dns-ssl/nats), the status.json writer, disk-usage probe, and the
 # docker-socket-proxy alert-only probe -- NOT watchdog.sh's three
 # filesystem-retention passes (maybe_purge/maybe_prune_syslog/
-# maybe_rotate_fluent_bit_selflog). See src/lib.rs's module doc comment and
-# issue #842's WIP comment (2026-07-31) for the open scope question this
-# depends on. services/watchdog/Dockerfile's ENTRYPOINT still points at the
-# bash watchdog.sh; this crate is not wired in as a replacement yet.
+# maybe_rotate_fluent_bit_selflog). See src/lib.rs's module doc comment for
+# the open scope question this depends on. services/watchdog/Dockerfile's
+# ENTRYPOINT still points at the bash watchdog.sh; this crate is not wired
+# in as a replacement yet.
 
 [package]
 name = "lancache-watchdog"

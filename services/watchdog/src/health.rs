@@ -179,7 +179,7 @@ impl FailureCounter {
 /// reachability probe. Deliberately a distinct type from [`FailureCounter`]
 /// rather than the same type reused with an unreachable restart threshold:
 /// this counter genuinely never resets via a restart (there is none --
-/// watchdog cannot restart its own Docker API gateway, see issue #1170) and
+/// watchdog cannot restart its own Docker API gateway, by design) and
 /// climbs for as long as docker-socket-proxy stays unreachable, which is
 /// itself useful operator-visible information, not a bug to cap.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -224,6 +224,10 @@ mod tests {
     use super::*;
 
     #[test]
+    // Pins the exact mapping get_health() relies on, including the two
+    // synthetic/fallback cases ("none" for an absent healthcheck, and any
+    // unrecognized string collapsing into Other rather than panicking or
+    // silently coercing to a known variant).
     fn from_docker_status_maps_known_values() {
         assert_eq!(
             HealthReading::from_docker_status("healthy"),
@@ -248,6 +252,9 @@ mod tests {
     }
 
     #[test]
+    // Pins watchdog.sh's health_color() case statement exactly, including
+    // its default branch (every non-healthy/non-unhealthy reading, known
+    // or not, must fall through to yellow, never green or red).
     fn color_matches_health_color_case_statement() {
         assert_eq!(HealthReading::Healthy.color(), "green");
         assert_eq!(HealthReading::Starting.color(), "yellow");
@@ -278,6 +285,10 @@ mod tests {
     }
 
     #[test]
+    // Verifies the restart threshold triggers exactly on the configured
+    // count (not one before or after) and that reaching it resets the
+    // counter to 0 in the same step, matching watchdog.sh's
+    // `restart_container "$name"; _fcount=0` sequencing.
     fn unhealthy_increments_and_restarts_at_threshold() {
         let mut counter = FailureCounter::default();
         assert_eq!(
@@ -304,6 +315,10 @@ mod tests {
     }
 
     #[test]
+    // A healthy reading while the counter is already 0 must stay silent
+    // (Action::None) -- only a transition FROM a nonzero counter counts as
+    // a real recovery worth logging, matching the bash's
+    // `[ "$_fcount" -gt 0 ] && log "RECOVERED"` guard.
     fn healthy_resets_and_only_reports_recovered_if_counter_was_nonzero() {
         let mut counter = FailureCounter::default();
         // Already healthy -> healthy: no RECOVERED spam on every steady
@@ -319,6 +334,10 @@ mod tests {
     }
 
     #[test]
+    // Confirms the alert-only probe's counter has no restart-triggered
+    // reset path at all (unlike FailureCounter) and keeps climbing across
+    // repeated failures, then verifies a single reachable reading resets
+    // it to 0 and reports a recovery exactly once.
     fn alert_counter_never_resets_via_restart_and_climbs_unbounded() {
         let mut counter = AlertCounter::default();
         assert_eq!(counter.record(false), AlertAction::Unreachable { count: 1 });

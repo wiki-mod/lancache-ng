@@ -9,6 +9,28 @@
 
 use std::time::Duration;
 
+/// Normalizes an already-read env value the way this whole crate treats
+/// them: empty and unset are equivalent. Bash's `${VAR:-default}` (the
+/// colon form, which every corresponding watchdog.sh env read uses)
+/// triggers its default for BOTH an unset variable AND one explicitly set
+/// to the empty string -- `std::env::var(name).ok()` alone only captures
+/// "unset" (`None`); an operator setting `CONTAINER_PROXY=`,
+/// `DOCKER_PROXY_URL=`, or any other knob to an empty string would
+/// otherwise survive as `Some("")` and be treated as a real, present
+/// value by every function below, diverging from bash for that entire
+/// class of input (e.g. an empty `CONTAINER_PROXY` would fail the
+/// `!= DEFAULT_PROXY` mismatch check and exit fatally, where bash would
+/// silently fall back to the default). Applied at the entry point of
+/// every public function in this module that takes a raw `Option<&str>`.
+/// Public (not just used internally) so `main.rs`'s own direct env reads
+/// for `DOCKER_PROXY_URL`/`STATUS_FILE`/`CACHE_DIR` (which don't route
+/// through any function in this module) share the exact same "empty ==
+/// unset" logic rather than a second, hand-duplicated copy that could
+/// silently drift from this one.
+pub fn non_empty(raw: Option<&str>) -> Option<&str> {
+    raw.filter(|v| !v.is_empty())
+}
+
 /// Canonical truthy-parsing contract shared with the Admin UI's
 /// `env_bool()` (`services/ui/src/config.rs`) and watchdog.sh's own
 /// `is_truthy()`. Recognizes `1`/`true`/`yes`/`on` as truthy,
@@ -31,7 +53,7 @@ pub fn is_truthy(raw: &str) -> bool {
 /// Resolves a boolean-style env var using [`is_truthy`], falling back to
 /// `default` when unset. Mirrors the Admin UI's `env_bool(name, default)`.
 pub fn resolve_bool(raw: Option<&str>, default: bool) -> bool {
-    match raw {
+    match non_empty(raw) {
         Some(v) => is_truthy(v),
         None => default,
     }
@@ -60,10 +82,10 @@ pub fn parse_u64_with_default(
     field_name: &str,
     default: u64,
 ) -> (u64, Option<String>) {
-    let Some(raw) = raw else {
+    let Some(raw) = non_empty(raw) else {
         return (default, None);
     };
-    if raw.is_empty() || !raw.bytes().all(|b| b.is_ascii_digit()) {
+    if !raw.bytes().all(|b| b.is_ascii_digit()) {
         return (
             default,
             Some(format!(
@@ -132,6 +154,55 @@ pub fn parse_check_interval(raw: Option<&str>) -> (Duration, Vec<String>) {
     (Duration::from_secs(value), warnings)
 }
 
+/// Resolves a `CURL_MAX_TIME`-style knob (`CURL_MAX_TIME`/
+/// `CURL_MAX_TIME_RESTART`) into curl's own timeout semantics: curl
+/// documents `--max-time 0`/`CURLOPT_TIMEOUT` set to `0` as "no timeout at
+/// all," not "time out immediately" -- the literal opposite of what
+/// naively handing `Duration::from_secs(0)` to reqwest's `.timeout()`
+/// would produce (an instant timeout on every single request). Returns
+/// `None` for "no timeout"; every caller (`docker_client`'s `bounded()`/
+/// `apply_timeout()`) must skip its own timeout machinery entirely in that
+/// case rather than ever passing a zero-duration timeout through as a
+/// stand-in for "unbounded."
+pub fn parse_curl_timeout(raw: Option<&str>, field_name: &str, default_secs: u64) -> (Option<Duration>, Vec<String>) {
+    let (secs, warning) = parse_u64_with_default(raw, field_name, default_secs);
+    let warnings: Vec<String> = warning.into_iter().collect();
+    if secs == 0 {
+        (None, warnings)
+    } else {
+        (Some(Duration::from_secs(secs)), warnings)
+    }
+}
+
+/// Like [`parse_u64_with_default`], but for knobs this crate stores as
+/// `u32` (`RESTART_AFTER`'s threshold, compared directly against a `u32`
+/// `health::FailureCounter`; the two disk-percentage thresholds). A
+/// blind `as u32` cast on the resulting `u64` would silently truncate
+/// modulo 2^32 instead of rejecting an out-of-range value: an operator
+/// setting `RESTART_AFTER=4294967296` (exactly one past `u32::MAX`) is a
+/// typo, not an intentional "wrap to zero," but `as u32` would produce
+/// exactly `0`, defeating the minimum-one floor this same knob's caller
+/// applies right below and restarting the monitored container on *every*
+/// unhealthy reading -- the identical zero-debounce failure that floor
+/// exists to prevent, reached through a different door. A value that
+/// parses cleanly as `u64` but does not fit in `u32` is treated the same
+/// as any other out-of-range input: fall back to `default`, with a
+/// warning naming the value so an operator can see what was rejected.
+pub fn parse_u32_with_default(raw: Option<&str>, field_name: &str, default: u32) -> (u32, Vec<String>) {
+    let (value, warning) = parse_u64_with_default(raw, field_name, u64::from(default));
+    let mut warnings: Vec<String> = warning.into_iter().collect();
+    match u32::try_from(value) {
+        Ok(v) => (v, warnings),
+        Err(_) => {
+            warnings.push(format!(
+                "{field_name}={value} exceeds the supported maximum ({}); using default {default}",
+                u32::MAX
+            ));
+            (default, warnings)
+        }
+    }
+}
+
 /// `RESTART_AFTER` gets the same treatment: watchdog.sh's bash never
 /// validates this knob at all (`[ "$_fcount" -ge "$RESTART_AFTER" ]` under
 /// `set -e` either crashes on non-numeric input or, for a literal `0`,
@@ -144,20 +215,20 @@ pub fn parse_check_interval(raw: Option<&str>) -> (Duration, Vec<String>) {
 /// documented, if aggressive, configuration; just never zero rapid-fire
 /// restarts with no debounce at all).
 pub fn parse_restart_after(raw: Option<&str>) -> (u32, Vec<String>) {
-    let (value, warning) = parse_u64_with_default(raw, "RESTART_AFTER", 3);
-    let mut warnings: Vec<String> = warning.into_iter().collect();
-    let (value, floored_raw) = floor_u64_raw(value, 1, raw);
-    if let Some(raw_display) = floored_raw {
+    let (value, mut warnings) = parse_u32_with_default(raw, "RESTART_AFTER", 3);
+    // Floor stays in u32 space here: `value` is already a validated u32
+    // (parse_u32_with_default rejected anything that wouldn't fit), so
+    // there is no risk of the truncation this function's own doc comment
+    // warns against -- unlike parse_check_interval's Duration-based floor,
+    // this one never needs to round-trip through u64/floor_u64_raw at all.
+    if value < 1 {
+        let raw_display = non_empty(raw).unwrap_or("0");
         warnings.push(format!(
             "RESTART_AFTER={raw_display} is below the supported minimum (1); using 1"
         ));
+        return (1, warnings);
     }
-    // RESTART_AFTER is used as a small threshold compared directly against
-    // a u32 failure counter (see health::FailureCounter) -- truncating a
-    // u64 this small is not a real-world concern (no caller ever sets a
-    // restart threshold anywhere near u32::MAX), unlike the disk/interval
-    // knobs above which stay u64/Duration throughout.
-    (value as u32, warnings)
+    (value, warnings)
 }
 
 /// The four Docker container names watchdog's health checks/restarts
@@ -202,6 +273,15 @@ pub fn resolve_container_names(
     const DEFAULT_DNS_STANDARD: &str = "lancache-dns-standard";
     const DEFAULT_DNS_SSL: &str = "lancache-dns-ssl";
     const DEFAULT_NATS: &str = "lancache-nats";
+
+    // Empty overrides (e.g. CONTAINER_PROXY= set but blank) must resolve
+    // to the default, not be compared against it as a literal empty
+    // string -- see non_empty()'s own doc comment for why an empty env
+    // value is not the same thing as "operator explicitly renamed this."
+    let proxy_override = non_empty(proxy_override);
+    let dns_standard_override = non_empty(dns_standard_override);
+    let dns_ssl_override = non_empty(dns_ssl_override);
+    let nats_override = non_empty(nats_override);
 
     let proxy = proxy_override.unwrap_or(DEFAULT_PROXY).to_string();
     if proxy != DEFAULT_PROXY {
@@ -248,11 +328,11 @@ pub fn resolve_container_names(
 }
 
 /// One entry in the data-driven service table the main loop iterates over
-/// -- this is the "typed per-service definition (health-check kind,
-/// restart policy, startup grace period)" issue #842's maintainer follow-up
-/// comment (2026-07-15) asked for, replacing watchdog.sh's four
-/// individually-named `C_PROXY`/`C_DNS_STD`/`C_DNS_SSL`/`C_NATS` variables
-/// and its hand-written `if`/sequence of `check_and_maybe_restart` calls.
+/// -- this is the typed per-service definition (health-check kind,
+/// restart policy, startup grace period) the maintainer's own rewrite
+/// brief asked for, replacing watchdog.sh's four individually-named
+/// `C_PROXY`/`C_DNS_STD`/`C_DNS_SSL`/`C_NATS` variables and its
+/// hand-written `if`/sequence of `check_and_maybe_restart` calls.
 #[derive(Debug, Clone)]
 pub struct MonitoredService {
     /// Real Docker container name -- also the `status.json` key and the
@@ -294,6 +374,10 @@ mod tests {
     }
 
     #[test]
+    // Verifies both directions of the default fallback: an unset var uses
+    // whichever default the caller passed (true or false), and a present,
+    // real value always wins over that default regardless of which way it
+    // points.
     fn resolve_bool_falls_back_to_default_when_unset() {
         assert!(resolve_bool(None, true));
         assert!(!resolve_bool(None, false));
@@ -302,9 +386,23 @@ mod tests {
     }
 
     #[test]
+    // An explicitly empty value (e.g. SSL_ENABLED= set but blank) must be
+    // treated exactly like "unset," matching bash's `${VAR:-default}`
+    // (the colon form triggers on empty OR unset) -- before this fix,
+    // Some("") reached is_truthy("") directly, which returns false, so an
+    // empty SSL_ENABLED silently turned SSL mode off instead of falling
+    // back to its documented default (true).
+    fn resolve_bool_treats_empty_value_as_unset() {
+        assert!(resolve_bool(Some(""), true));
+        assert!(!resolve_bool(Some(""), false));
+    }
+
+    #[test]
     // CHECK_INTERVAL's digit-only guard: unset keeps the default, and any
     // non-digit garbage (including a leading '-') falls back rather than
-    // reaching a numeric comparison with an invalid operand.
+    // reaching a numeric comparison with an invalid operand. An empty
+    // value is deliberately distinguished from garbage below: both fall
+    // back to the same default, but only garbage produces a warning.
     fn parse_u64_with_default_rejects_non_digit_input() {
         assert_eq!(parse_u64_with_default(None, "X", 30).0, 30);
         assert_eq!(parse_u64_with_default(Some(""), "X", 30).0, 30);
@@ -315,6 +413,34 @@ mod tests {
         // clean value -- callers rely on `None` to mean "nothing to log".
         assert!(parse_u64_with_default(Some("12"), "X", 30).1.is_none());
         assert!(parse_u64_with_default(Some("abc"), "X", 30).1.is_some());
+        // An empty value is treated as "unset," not "invalid" -- bash's
+        // `${VAR:-default}` never logs a warning for an empty variable
+        // either, only for a value that is present but not a plain
+        // integer, so a silent fallback here is the correct parity, not
+        // a missed diagnostic.
+        assert!(parse_u64_with_default(Some(""), "X", 30).1.is_none());
+    }
+
+    #[test]
+    // RESTART_AFTER=4294967296 (one past u32::MAX) parses cleanly as u64
+    // but does not fit in the u32 this crate stores the threshold as -- a
+    // blind `as u32` cast would wrap it to exactly 0, and combined with
+    // the floor below (which only ever sees an already-validated u32),
+    // that would silently restart the monitored container on every single
+    // unhealthy reading. Confirms the checked conversion rejects it and
+    // falls back to the caller's default instead of truncating.
+    fn parse_u32_with_default_rejects_values_that_overflow_u32() {
+        let (value, warnings) = parse_u32_with_default(Some("4294967296"), "RESTART_AFTER", 3);
+        assert_eq!(value, 3);
+        assert!(
+            warnings.iter().any(|w| w.contains("RESTART_AFTER=4294967296")),
+            "warning must name the rejected out-of-range value, got: {warnings:?}"
+        );
+
+        // A value that fits exactly at the boundary must still be honored.
+        let (value, warnings) = parse_u32_with_default(Some("4294967295"), "RESTART_AFTER", 3);
+        assert_eq!(value, u32::MAX);
+        assert!(warnings.is_empty());
     }
 
     #[test]
@@ -350,6 +476,24 @@ mod tests {
     }
 
     #[test]
+    // CURL_MAX_TIME=0/CURL_MAX_TIME_RESTART=0 means "no timeout" in curl's
+    // own documented semantics -- must resolve to None, never to
+    // Some(Duration::ZERO) (which would make reqwest time out almost
+    // instantly, the opposite of the operator's intent).
+    fn parse_curl_timeout_treats_zero_as_no_timeout() {
+        let (timeout, warnings) = parse_curl_timeout(Some("0"), "CURL_MAX_TIME", 5);
+        assert_eq!(timeout, None);
+        assert!(warnings.is_empty(), "an explicit 0 is valid input, not a warning-worthy one");
+
+        let (timeout, _) = parse_curl_timeout(Some("10"), "CURL_MAX_TIME", 5);
+        assert_eq!(timeout, Some(Duration::from_secs(10)));
+
+        // Unset keeps the documented default, wrapped as Some(..).
+        let (timeout, _) = parse_curl_timeout(None, "CURL_MAX_TIME", 5);
+        assert_eq!(timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
     // RESTART_AFTER=0 would otherwise restart the monitored container on
     // every single unhealthy reading with no debounce at all -- floored to
     // 1, matching this crate's own established reasoning for CHECK_INTERVAL's
@@ -377,6 +521,10 @@ mod tests {
     }
 
     #[test]
+    // Baseline: with every CONTAINER_* override unset, every resolved name
+    // must be the project's fixed default, including the docker-socket-proxy
+    // constant that has no override at all (see ContainerNames's own field
+    // doc comment for why it's deliberately not sourced from an env var).
     fn resolve_container_names_defaults_when_unset() {
         let names = resolve_container_names(None, None, None, None, true).unwrap();
         assert_eq!(names.proxy, "lancache-proxy");
@@ -384,6 +532,22 @@ mod tests {
         assert_eq!(names.dns_ssl.as_deref(), Some("lancache-dns-ssl"));
         assert_eq!(names.nats, "lancache-nats");
         assert_eq!(names.docker_socket_proxy, "lancache-docker-socket-proxy");
+    }
+
+    #[test]
+    // An explicitly empty override (e.g. CONTAINER_PROXY= set but blank)
+    // must resolve to the default, not be compared against it as a real
+    // rename attempt -- before this fix, Some("") reached the `!=
+    // DEFAULT_PROXY` mismatch check directly and failed it (an empty
+    // string is never equal to "lancache-proxy"), making an accidentally
+    // blank env value a fatal startup error instead of the no-op bash's
+    // `${CONTAINER_PROXY:-lancache-proxy}` would produce.
+    fn resolve_container_names_treats_empty_overrides_as_unset() {
+        let names = resolve_container_names(Some(""), Some(""), Some(""), Some(""), true).unwrap();
+        assert_eq!(names.proxy, "lancache-proxy");
+        assert_eq!(names.dns_standard, "lancache-dns-standard");
+        assert_eq!(names.dns_ssl.as_deref(), Some("lancache-dns-ssl"));
+        assert_eq!(names.nats, "lancache-nats");
     }
 
     #[test]

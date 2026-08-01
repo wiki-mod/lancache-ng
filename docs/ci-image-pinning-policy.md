@@ -106,7 +106,9 @@ as the pull source for their runtime bases (Debian for most services;
 Alpine base as the first two stages of issue #815's staged Alpine migration,
 and `services/watchdog/Dockerfile` separately migrated to the same Alpine base
 (issue #815's own watchdog carve-out, revisited and approved 2026-07-31,
-independent of #842's still-unstarted Rust rewrite)
+independent of #842's Rust rewrite -- a scaffold now exists for that rewrite,
+see `services/watchdog/Cargo.toml`, but it is not yet built or used as this
+container's entrypoint, so this base-image decision stays unaffected either way)
 -- `services/dns/Dockerfile` remains on Debian, that stage still open),
 including `services/ui/Dockerfile`. This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
@@ -126,7 +128,7 @@ undocumented per-Dockerfile fallback logic.
 - `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
 - `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
 - `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's still-unstarted Rust rewrite)
+- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
 
 **Status**: ✅ All runtime base images are pinned.
 
