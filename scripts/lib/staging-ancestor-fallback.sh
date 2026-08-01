@@ -186,6 +186,19 @@ _saf_github_api_get() {
 # that function's own header for the confirmed AG-CI-001/AG-VAL-017
 # reasoning).
 #
+# `curl` ITSELF is also not blindly assumed present: AG-CI-001's own text
+# requires "pinned GitHub Actions, the repository build-tools image, or
+# explicit fail-closed capability checks instead of relying on host-
+# installed utilities" -- it does not carve out an exception for `curl`
+# just because it is a near-universal base-OS utility in practice. This
+# function therefore explicitly checks `command -v curl` before ever
+# invoking it, exactly the same explicit capability-check pattern the
+# previous `gh`-based implementation already used (`command -v gh`),
+# failing this query the same "inconclusive" way a missing `gh` did before,
+# rather than assuming curl works and letting a genuinely tool-less runner
+# fail with a raw "command not found" instead of this file's own
+# documented, handled failure mode.
+#
 # Wrapped in scripts/lib/ghcr-retry.sh's ghcr_retry: this query's result is
 # load-bearing -- turning a transient API hiccup into a hard "confirmed zero
 # runs" or a false "a run exists" would either wrongly unlock or wrongly
@@ -205,13 +218,16 @@ _saf_github_api_get() {
 # empty.
 #
 # Returns non-zero with no output if the query fails even after retries
-# (GH_TOKEN unset, network error, non-200 response after retries, or a
-# malformed response body with no parseable total_count).
+# (GH_TOKEN unset, `curl` missing, network error, non-200 response after
+# retries, or a malformed response body with no parseable total_count).
 saf_query_run_count() {
   local repository="${1:?saf_query_run_count: repository is required}"
   local sha="${2:?saf_query_run_count: sha is required}"
   local event="${3-}"
   if [[ -z "${GH_TOKEN:-}" ]]; then
+    return 1
+  fi
+  if ! command -v curl >/dev/null 2>&1; then
     return 1
   fi
   local url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&per_page=1"
@@ -295,6 +311,74 @@ saf_query_tag_publishing_run_count() {
   printf '%s\n' "0"
 }
 
+# saf_candidate_run_is_active <repository> <sha>
+#
+# Answers whether any TAG-PUBLISHING-eligible run (push, workflow_dispatch,
+# schedule -- see saf_query_tag_publishing_run_count's own header for why
+# only these event types count) recorded for <sha> is still non-completed
+# (queued, in_progress, or any other non-terminal status GitHub reports).
+# Used by saf_find_built_ancestor to distinguish "this candidate's own
+# build is still genuinely running" (a real, still-in-flight push landing
+# very close in wall-clock time to the docs-only commit ahead of it in
+# history -- confirmed as a real, not hypothetical, race: this project's
+# own real build-push.yml runs have taken 34-90 minutes end to end, and
+# "further back in a commit's own first-parent history" does not imply
+# "further back in wall-clock time" when several commits merge in rapid
+# succession) from "this candidate's build already finished (or never
+# started) and its image still hasn't appeared" (no amount of further
+# waiting will help -- a genuinely broken/stuck build, worth surfacing on
+# its own, not hunting around).
+#
+# Fetches up to 20 recent runs per event type (matching
+# build_push_run_active()'s own per_page=20 convention in
+# scripts/ensure-pr-staging-images.sh) and inspects every returned run's
+# own `status` field, not just the newest one -- the same "a single commit
+# can have more than one recorded run" reasoning #975 already established
+# for that congestion probe applies here too. Stops at the first event type
+# that turns up a non-completed run, mirroring saf_query_tag_publishing_run_count's
+# own early-exit reasoning (the caller only needs a yes/no answer).
+#
+# Returns 0 if at least one non-completed run is found (a real signal to
+# extend the wait). Returns 1 if every queried event type positively
+# confirms zero runs or all-completed runs. Returns 2 if any underlying
+# query fails before a definitive answer is reached, or if GH_TOKEN/curl
+# are unavailable -- an inconclusive activity check is deliberately NOT
+# collapsed into either 0 or 1: callers must decide for themselves which
+# direction is safe for their own use of this answer (saf_find_built_ancestor
+# below treats 2 the same as 1 -- it does not extend the wait on an
+# unconfirmed "maybe active" guess, since that would risk stacking an
+# unbounded number of long waits for no positive reason).
+#
+# Indirection so tests can stub this without a real network call, same
+# convention as saf_base_commit_has_confirmed_run's own
+# STAGING_BASE_BUILD_RUN_EXISTS_CMD hook.
+saf_candidate_run_is_active() {
+  local repository="${1:?saf_candidate_run_is_active: repository is required}"
+  local sha="${2:?saf_candidate_run_is_active: sha is required}"
+  if [[ -n "${STAGING_CANDIDATE_RUN_ACTIVE_CMD:-}" ]]; then
+    "$STAGING_CANDIDATE_RUN_ACTIVE_CMD" "$sha"
+    return $?
+  fi
+  if [[ -z "${GH_TOKEN:-}" ]] || ! command -v curl >/dev/null 2>&1; then
+    return 2
+  fi
+  local event url body
+  for event in push workflow_dispatch schedule; do
+    url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=${event}&per_page=20"
+    body="$(mktemp)"
+    if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body" "$GH_TOKEN"; then
+      rm -f "$body"
+      return 2
+    fi
+    if grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$body" | grep -qv '"status"[[:space:]]*:[[:space:]]*"completed"'; then
+      rm -f "$body"
+      return 0
+    fi
+    rm -f "$body"
+  done
+  return 1
+}
+
 # saf_base_commit_has_confirmed_run <repository> <sha> <event-or-empty>
 #
 # Answers "does at least one build-push.yml run (optionally filtered to
@@ -367,7 +451,8 @@ saf_base_commit_has_confirmed_run() {
 
 # saf_find_built_ancestor <repository> <base_sha> <service> <search_depth> \
 #     <freshness_timeout_seconds> <freshness_hard_ceiling_seconds> \
-#     <freshness_poll_interval_seconds> [git_dir]
+#     <freshness_poll_interval_seconds> \
+#     <extended_timeout_seconds> <extended_hard_ceiling_seconds> [git_dir]
 #
 # Only meaningful to call once the caller has already confirmed <base_sha>'s
 # own image is unavailable via a direct check. Walks <base_sha>'s own
@@ -377,6 +462,21 @@ saf_base_commit_has_confirmed_run() {
 # header for why non-push runs count here) and a freshness-confirmed
 # per-commit image for <service> (reusing sif_wait_for_fresh_base_image,
 # never skipping that proof).
+#
+# TWO budget pairs, not one: <freshness_timeout_seconds>/<freshness_hard_ceiling_seconds>
+# (short -- an already-confirmed-run historical candidate's image normally
+# either exists already or never will) govern the FIRST attempt at each
+# candidate. If that first attempt fails, this does NOT immediately give up
+# the way it used to: it calls saf_candidate_run_is_active() to positively
+# check whether that candidate's own build is still genuinely running (a
+# real race this project has confirmed happens -- see that function's own
+# header). Only when that check POSITIVELY confirms activity does this
+# retry the SAME candidate once more, this time with
+# <extended_timeout_seconds>/<extended_hard_ceiling_seconds> (the caller
+# passes its own base_freshness_* pair here -- the same patience BASE_SHA's
+# own possibly-in-progress build already gets, not a new invented number).
+# An inconclusive or confirmed-not-active answer preserves the original
+# JUDGMENT CALL below unchanged: stop, fail, do not walk further.
 #
 # A candidate with zero recorded runs is not simply skipped in favor of an
 # older one: exactly the same "zero runs alone does not prove a deliberate
@@ -427,16 +527,17 @@ saf_base_commit_has_confirmed_run() {
 # JUDGMENT CALL (flagged for maintainer review, matching this project's own
 # convention for calling these out explicitly -- see
 # scripts/lib/staging-image-freshness.sh's own JUDGMENT CALL comment): if a
-# run-bearing candidate's freshness proof itself fails (the run existed, but
-# no confirmed-fresh image ever appeared within budget), this function stops
-# and reports failure immediately; it does NOT keep walking further back.
-# Stacking many bounded waits (each up to <freshness_hard_ceiling_seconds>)
-# across up to <search_depth> candidates would be a worse failure mode than
-# the structural problem this mechanism exists to solve, and reaching
-# further and further back in history for a substitute risks the same
-# stale-content class of bug this file exists to avoid. A commit with a
-# real, seemingly-broken build is a genuine CI problem worth surfacing on
-# its own, not a reason to keep hunting for an even older substitute.
+# run-bearing candidate's freshness proof still fails even after the one
+# activity-confirmed extended retry above, this function stops and reports
+# failure immediately; it does NOT keep walking further back. Stacking many
+# bounded waits (each up to <extended_hard_ceiling_seconds>) across up to
+# <search_depth> candidates would be a worse failure mode than the
+# structural problem this mechanism exists to solve, and reaching further
+# and further back in history for a substitute risks the same stale-content
+# class of bug this file exists to avoid. A commit with a real, seemingly-
+# broken build (confirmed not active, or its activity inconclusive) is a
+# genuine CI problem worth surfacing on its own, not a reason to keep
+# hunting for an even older substitute.
 #
 # Echoes the confirmed-good ancestor's full commit SHA on stdout on success;
 # returns non-zero with no output if no usable ancestor is found within the
@@ -446,7 +547,8 @@ saf_find_built_ancestor() {
   local repository="$1" base_sha="$2" service="$3" search_depth="$4"
   local freshness_timeout_seconds="$5" freshness_hard_ceiling_seconds="$6"
   local freshness_poll_interval_seconds="$7"
-  local git_dir="${8:-.}"
+  local extended_timeout_seconds="$8" extended_hard_ceiling_seconds="$9"
+  local git_dir="${10:-.}"
   # sif_wait_for_fresh_base_image (called below) delegates its own ancestry
   # check to sif_is_ancestor_or_equal, which reads STAGING_FRESHNESS_GIT_DIR
   # from the environment rather than taking a git_dir argument -- exporting
@@ -524,9 +626,28 @@ saf_find_built_ancestor() {
       return 0
     fi
 
+    # The short-ceiling attempt failed. Before giving up per the JUDGMENT
+    # CALL below, positively check whether this candidate's own build is
+    # still genuinely running -- a real race (see saf_candidate_run_is_active's
+    # own header), not a hypothetical: only a POSITIVE confirmation of
+    # activity is worth a second, longer-budget attempt at the exact same
+    # candidate; an inconclusive or confirmed-not-active answer changes
+    # nothing about the JUDGMENT CALL that already applied before this
+    # check existed.
+    local activity_status=0
+    saf_candidate_run_is_active "$repository" "$candidate" || activity_status=$?
+    if (( activity_status == 0 )); then
+      echo "::warning::Ancestor candidate $candidate's own build-push.yml run for $service appears to still be active (not yet completed) -- extending the wait to ${extended_hard_ceiling_seconds}s (the same patience BASE_SHA's own possibly-in-progress build gets) before giving up on this candidate." >&2
+      if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
+        "$extended_timeout_seconds" "$extended_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+    fi
+
     # Found a run-bearing candidate whose image never became confirmed-fresh
-    # -- per the JUDGMENT CALL above, stop here instead of walking further
-    # back.
+    # -- even after the activity-confirmed extended retry, if one applied --
+    # per the JUDGMENT CALL above, stop here instead of walking further back.
     return 1
   done <<< "$candidates"
 
@@ -662,7 +783,8 @@ saf_resolve_untouched_backfill_source() {
       return 0
     fi
     if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
-      "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" "$git_dir")"; then
+      "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
+      "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$git_dir")"; then
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
       return 1
     fi
@@ -707,7 +829,8 @@ saf_resolve_untouched_backfill_source() {
 
   echo "::notice::$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
   if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
-    "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" "$git_dir")"; then
+    "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
+    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$git_dir")"; then
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
     return 1
   fi

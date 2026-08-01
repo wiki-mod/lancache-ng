@@ -43,6 +43,20 @@
 #     on -- fixed by talking to the GitHub REST API directly via curl +
 #     GH_TOKEN, matching this project's own established precedent for
 #     exactly this situation
+#   - `curl` itself also being assumed present without an explicit
+#     capability check -- AG-CI-001 does not carve out an exception for it
+#     just because it's a near-universal base-OS utility -- fixed by
+#     checking `command -v curl` explicitly, the same fail-closed pattern
+#     the old `gh`-based code already used
+#   - an ancestor candidate whose own build is still genuinely in progress
+#     (a real race: several commits merging in rapid succession does not
+#     mean each one's build finished before the next one's ancestor walk
+#     runs) getting only the short ancestor-candidate ceiling and never a
+#     chance to actually finish -- fixed by positively checking whether
+#     that candidate's own run is still active before giving up, and only
+#     then retrying once with the same long budget BASE_SHA's own
+#     possibly-in-progress build already gets (not a blind timeout bump --
+#     AG-CI-013)
 #
 # `run --separate-stderr` (Bats >= 1.5.0) is used for the curl-based query
 # tests below: ghcr_retry's own ::warning::/::error:: diagnostics land on
@@ -280,6 +294,23 @@ STUB
     export GH_TOKEN="test-token"
 }
 
+@test "saf_query_run_count: curl missing is treated as inconclusive, an explicit capability check, not an assumption" {
+    # AG-CI-001 does not carve out an exception for curl just because it's
+    # a near-universal base-OS utility -- this must be an explicit,
+    # fail-closed `command -v curl` check (mirroring the old `command -v gh`
+    # check exactly), not a bare assumption that calling curl will work.
+    # Simulated by pointing PATH at an empty directory so no `curl` (real
+    # or fake) can be found at all.
+    empty_path_dir="$BATS_TEST_TMPDIR/empty_path"
+    mkdir -p "$empty_path_dir"
+    old_path="$PATH"
+    export PATH="$empty_path_dir"
+    run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    export PATH="$old_path"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
 @test "saf_query_tag_publishing_run_count: genuinely zero everywhere checks push/workflow_dispatch/schedule, never pull_request" {
     export FAKE_CURL_FAIL_COUNT=0
     export FAKE_CURL_RUN_COUNT=0
@@ -334,6 +365,64 @@ STUB
     run saf_base_commit_has_confirmed_run "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" ""
     [ "$status" -eq 1 ]
     [[ "$(cat "$call_log")" != *"event=pull_request"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# saf_candidate_run_is_active: direct unit coverage against a fake curl that
+# can return runs with real `status` fields (install_fake_curl_flaky above
+# always returns an empty workflow_runs array, which can never exercise the
+# "found a non-completed status" branch).
+# ---------------------------------------------------------------------------
+
+# Installs a fake `curl` returning a fixed JSON body (one workflow run with
+# FAKE_CURL_STATUS's own value) for every call, logging each call's args.
+install_fake_curl_with_status() {
+    fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin_dir"
+    call_log="$BATS_TEST_TMPDIR/curl_calls.log"
+    : > "$call_log"
+    cat > "$fake_bin_dir/curl" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$call_log"
+out_file=""
+prev=""
+for arg in "\$@"; do
+    if [ "\$prev" = "-o" ]; then
+        out_file="\$arg"
+    fi
+    prev="\$arg"
+done
+printf '{"total_count":1,"workflow_runs":[{"status":"${FAKE_CURL_STATUS:-completed}"}]}' > "\$out_file"
+printf '200'
+STUB
+    chmod +x "$fake_bin_dir/curl"
+    export PATH="$fake_bin_dir:$PATH"
+}
+
+@test "saf_candidate_run_is_active: a non-completed status is reported as active" {
+    export FAKE_CURL_STATUS="in_progress"
+    install_fake_curl_with_status
+    run saf_candidate_run_is_active "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
+    [ "$status" -eq 0 ]
+    # Stops at the first event type (push) that turns up a non-completed
+    # status -- not all three.
+    [ "$(wc -l < "$call_log")" -eq 1 ]
+    grep -qF "event=push" "$call_log"
+}
+
+@test "saf_candidate_run_is_active: every run completed across all three event types is confirmed not active" {
+    export FAKE_CURL_STATUS="completed"
+    install_fake_curl_with_status
+    run saf_candidate_run_is_active "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
+    [ "$status" -eq 1 ]
+    [ "$(wc -l < "$call_log")" -eq 3 ]
+}
+
+@test "saf_candidate_run_is_active: GH_TOKEN unset is inconclusive (2), not confirmed-inactive" {
+    unset GH_TOKEN
+    run saf_candidate_run_is_active "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
+    [ "$status" -eq 2 ]
+    export GH_TOKEN="test-token"
 }
 
 # ---------------------------------------------------------------------------
@@ -426,7 +515,7 @@ STUB
     # while saf_find_built_ancestor's own confirmed-sha result is the last
     # line on stdout) -- check the LAST line specifically, not $output's
     # exact full text, which would also contain that diagnostic line.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 3 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 3 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$third_ancestor_sha" ]
 }
@@ -488,7 +577,7 @@ STUB
     # line (not $output's full text) is checked -- bats' `run` merges
     # stdout+stderr, and sif_wait_for_fresh_base_image's own ::notice::
     # diagnostics land on stderr ahead of the confirmed sha itself.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$merge_sha" "proxy" 10 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$merge_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$t1_sha" ]
 }
@@ -525,7 +614,7 @@ STUB
 
     # See the SIGPIPE regression test's own comment above for why the LAST
     # line (not $output's full text) is checked.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$ancestor_sha" ]
 }
@@ -574,11 +663,16 @@ STUB
 
     install_revision_stub_for "$grandparent_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -ne 0 ]
     # Must NOT have substituted grandparent -- confirms this is a genuine
     # fail-closed stop, not a successful (wrong) resolution.
     [[ "$output" != *"$grandparent_sha"* ]]
+    # The diagnostic must actually name real_change_parent_sha as the
+    # candidate that blocked the walk -- proves the failure is attributed
+    # to the right commit, not just "some" failure that happens to also
+    # not mention grandparent.
+    [[ "$output" == *"$real_change_parent_sha"* ]]
 }
 
 @test "saf_find_built_ancestor: an inconclusive run-check for a candidate fails closed even if its image would otherwise pass freshness" {
@@ -611,7 +705,7 @@ STUB
 
     install_revision_stub_for "$ancestor_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -ne 0 ]
     # Fails via the new inconclusive-run-check branch specifically (its own
     # diagnostic legitimately names the candidate, unlike a successful
@@ -619,6 +713,162 @@ STUB
     # checked by requiring the diagnostic text, not by requiring the
     # candidate's sha be absent from $output.
     [[ "$output" == *"could not be positively determined"* ]]
+}
+
+@test "saf_find_built_ancestor: a candidate whose own build is confirmed still active gets a second, extended-budget attempt" {
+    # Real race this project has confirmed happens: a candidate commit's own
+    # push run has not finished yet by the time the ancestor walk reaches
+    # it. The short ceiling below (0s -- a single non-polling attempt) must
+    # fail first; only because STAGING_CANDIDATE_RUN_ACTIVE_CMD positively
+    # confirms activity does this get a second attempt with the extended
+    # (10s) budget, which succeeds once the image resolves at ~3 real
+    # seconds -- proving the extension is genuinely happening, not that the
+    # short attempt happened to eventually succeed on its own.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$active_stub"
+
+    start_epoch="$(date +%s)"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+now="\$(date +%s)"
+elapsed=\$((now - $start_epoch))
+if (( elapsed >= 3 )); then
+    echo "$ancestor_sha"
+else
+    exit 1
+fi
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    # freshness (short) = 0/0, extended = 10/10 -- image resolves at ~3s,
+    # well past the short budget but comfortably inside the extended one.
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 10 10 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$ancestor_sha" ]
+}
+
+@test "saf_find_built_ancestor: a candidate confirmed NOT active is never retried with the extended budget" {
+    # Mirror of the previous test with one flip: STAGING_CANDIDATE_RUN_ACTIVE_CMD
+    # confirms the candidate's build is NOT active. Even though the same
+    # time-based revision stub WOULD eventually resolve if the extended
+    # budget were used, this must fail fast (well under the 10s extended
+    # ceiling) -- proving the extended retry is never attempted for a
+    # confirmed-inactive candidate, matching the unchanged JUDGMENT CALL.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    inactive_stub="$BATS_TEST_TMPDIR/inactive.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inactive_stub"
+
+    start_epoch="$(date +%s)"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+now="\$(date +%s)"
+elapsed=\$((now - $start_epoch))
+if (( elapsed >= 3 )); then
+    echo "$ancestor_sha"
+else
+    exit 1
+fi
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    start_test_epoch="$(date +%s)"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 10 10 "$git_dir"
+    end_test_epoch="$(date +%s)"
+    [ "$status" -ne 0 ]
+    # Must fail in well under the 10s extended ceiling -- proves no
+    # extended retry was attempted at all.
+    [ "$((end_test_epoch - start_test_epoch))" -lt 2 ]
+}
+
+@test "saf_find_built_ancestor: an inconclusive activity check does not trigger the extended retry either" {
+    # Same shape again, but STAGING_CANDIDATE_RUN_ACTIVE_CMD itself fails
+    # (status 2, inconclusive) -- must be treated the same as confirmed-
+    # not-active here, not as "maybe active, extend anyway".
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    inconclusive_active_stub="$BATS_TEST_TMPDIR/inconclusive_active.sh"
+    cat > "$inconclusive_active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 2
+STUB
+    chmod +x "$inconclusive_active_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inconclusive_active_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    start_test_epoch="$(date +%s)"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 10 10 "$git_dir"
+    end_test_epoch="$(date +%s)"
+    [ "$status" -ne 0 ]
+    [ "$((end_test_epoch - start_test_epoch))" -lt 2 ]
 }
 
 # ---------------------------------------------------------------------------
