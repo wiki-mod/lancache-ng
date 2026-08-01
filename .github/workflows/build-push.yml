@@ -4,6 +4,11 @@
 # crates and shell scripts, validates the docker-compose files, scans
 # container images, then builds, pushes, promotes, and releases the stack
 # images on the relevant triggers.
+#
+# Trivial diagnostic touch (2026-08-01, issue #1095/#1356): this line exists
+# solely to test whether ANY pull_request-scoped change to this file fails to
+# trigger a workflow run right now, or whether that failure is specific to
+# PR #1356's own diff (see #1356's comment thread for the full investigation).
 
 name: Build & Push
 
