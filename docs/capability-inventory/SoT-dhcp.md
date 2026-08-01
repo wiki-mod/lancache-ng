@@ -67,12 +67,15 @@ broadcast-dhcp-discover ...` -- this is caught by `entrypoint.sh`'s very
 first `case "${1:-}" in nmap|/usr/bin/nmap|/bin/nmap) exec "$@" ;; esac`
 (lines 175-179), which bypasses the entire Kea startup sequence and execs
 `nmap` directly. This is a **separate** rogue-DHCP-server discovery
-mechanism from the Admin UI's own `GET /api/dhcp/check` (`dhcp.rs`'s
-`run_dhcp_probe`), which runs `nmap` inside the **`ui`** image's own
-`dhcp-probe` container instead (`services/ui/dhcp-probe.sh`, which also
-installs `nmap` -- `services/ui/Dockerfile` line 461) -- same underlying
-technique, two independent trigger points (one-time pre-activation setup
-gate vs. on-demand Admin UI page action), not shared code.
+mechanism from the Admin UI's own `POST /api/dhcp/check`
+(`dhcp.rs`'s `check_dhcp_conflict`/`check_dhcp_probe`), which runs inside
+the **`ui`** image's own `dhcp-probe` container instead -- since #1288/#1336,
+that container runs a from-scratch native Rust DHCPv4 client
+(`services/ui/src/dhcp_probe_native.rs`), not `nmap`; the former
+`services/ui/dhcp-probe.sh` (`nmap --script broadcast-dhcp-discover`) was
+deleted as part of that rewrite. Two independent trigger points (one-time
+pre-activation setup gate here vs. on-demand Admin UI page action there),
+not shared code, and no longer the same underlying technique either.
 
 `EXPOSE 67/udp 8000`. `chmod +x /entrypoint.sh` at build time -- this
 combined with `ENTRYPOINT ["/entrypoint.sh"]` is why the executable bit
@@ -365,14 +368,16 @@ High-Availability hook command.
   known-good snapshot (§9), reusing the same `config-test → config-set →
   config-write` chain, membership-checked against `list_snapshot_ids`
   (path-traversal guard).
-- `GET /api/dhcp/check` -- on-demand rogue-DHCP-server discovery (§1's `ui`
-  image path, distinct from `setup.sh`'s). Since PR #978, this route is
-  explicitly CSRF-exempted-as-a-`GET` **but validated as actually mutating
-  state** (starts/stops the `dhcp-probe` container) -- `dhcp.html` fires it
-  automatically via `DOMContentLoaded`, so simply loading the `/dhcp` page
-  triggers a real container restart + broadcast nmap scan on every page
-  view (already flagged in the sibling `ui-core`/`ui-routes` bug-hunt
-  passes, not repeated in full here).
+- `POST /api/dhcp/check` -- on-demand rogue-DHCP-server discovery (§1's `ui`
+  image path, distinct from `setup.sh`'s). Since PR #978, this is a POST
+  route with header-only CSRF protection (`verify_csrf_header`), matching
+  its real side effect (starts/stops the `dhcp-probe` container). `dhcp.html`
+  only registers its `DOMContentLoaded` auto-run inside the
+  `{% if dhcp_has_kea %}` block, so this fires on page load only when Kea is
+  already the active DHCP mode -- an on-demand/post-activation status probe,
+  not a pre-activation guard; `update_dhcp_mode` itself proceeds straight to
+  `reconcile_dhcp_mode` without ever calling it, so switching into Kea mode
+  can complete without this check running at all.
 - `POST /dhcp/mode`, `/dhcp/proxy` -- whole-stack DHCP mode switch
   (`disabled`/`kea`/`dnsmasq-proxy`) and dnsmasq-proxy field configuration
   (out of this Kea-scoped inventory's depth).
