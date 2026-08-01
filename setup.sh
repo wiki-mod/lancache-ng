@@ -1929,6 +1929,20 @@ assert_resolved_image_tag_platform_supported() {
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
 }
 
+# True if a real systemd instance is actually managing this host as PID 1, not
+# merely if the `systemctl` binary happens to be present. A present binary
+# with no real init process behind it (e.g. inside a plain Docker container,
+# or certain LXC/chroot environments) still fails every systemctl call
+# ("Failed to connect to system scope bus... Host is down"), so `command -v
+# systemctl` alone is not sufficient to gate an unconditional systemctl call.
+# /run/systemd/system is the standard, side-effect-free way to check for a
+# real running systemd instance (the same check systemd's own tooling and
+# many other init-detection scripts use) without attempting a bus call that
+# could itself fail and abort the caller under set -e.
+systemd_available() {
+    command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
+
 # True if systemctl is present AND the given unit file is known to it. Used to
 # make all convergence-timer handling a no-op on hosts without systemd or
 # without the lancache-converge units installed, instead of erroring out.
@@ -6978,7 +6992,7 @@ fi
 print_step "Installing systemd watchdog"
 
 SYSTEMD_AVAILABLE=0
-if ! command -v systemctl >/dev/null 2>&1; then
+if ! systemd_available; then
     print_warn "systemd not found — watchdog will not be installed"
     print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
 else
