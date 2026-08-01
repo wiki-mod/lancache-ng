@@ -59,47 +59,37 @@ on:
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # Issue #1203 added a trigger-level `paths-ignore` (docs-only) here to spare this
-    # workflow's light jobs from queuing behind heavy work on the saturated self-hosted
-    # pool. Issue #1245's audit (2026-07-30) checked that comment's claim ("current_dev has
-    # no branch protection, so this is safe") against the live GitHub API and found it
-    # false: current_dev DOES enforce required status checks by job name. A `paths-ignore`
-    # match means the whole run never exists -- not even a synthetic `skipped` for any job
-    # -- so every required check shows "Expected -- Waiting" forever and the PR can never
-    # merge (confirmed live: PR #1242, a pure wording fix, sat permanently BLOCKED this
-    # way). This was never just a current_dev-safe/master-risky split either -- paths-ignore
-    # cannot scope per target branch, so it was broken for every branch in the list above.
+    # Issue #1203 added a trigger-level `paths-ignore` (docs-only) here to spare light
+    # jobs from queuing behind heavy work. Issue #1245's audit (2026-07-30) found its
+    # safety claim false: current_dev DOES enforce required status checks by job name, and
+    # a `paths-ignore` match means the whole run never exists -- not even a synthetic
+    # `skipped` -- so every required check shows "Expected -- Waiting" forever and the PR
+    # can never merge (confirmed live: PR #1242 sat permanently BLOCKED this way). It also
+    # cannot scope per target branch, so this was broken for every branch in the list above.
     #
-    # Fix (#1245): removed `paths-ignore` entirely; the runner-conservation goal moved to
-    # the job level, where a job with nothing to do posts a real `skipped` conclusion
-    # (satisfies a required check) instead of never existing. `full-setup-validate` and
-    # `coverage (Rust)` already had this kind of self-skip; `shellcheck` did not, and
-    # matters most: `build`/`build-arm64` hard-require `needs.shellcheck.result ==
-    # 'success'` with no path tolerance of their own, so shellcheck's own clean skip is
-    # what stops the entire heavy build/scan/full-setup-validate chain from scheduling on
-    # `lancache-heavy` for a trivial doc PR (see that job's own `if:` comment).
-    # `validate-compose` deliberately did NOT get the same treatment -- see
-    # `container-scan`'s job comment for the documented invariant that it stays a root job.
+    # Fix (#1245): removed `paths-ignore` entirely; runner conservation moved to the job
+    # level, where a job with nothing to do posts a real `skipped` conclusion instead of
+    # never existing. `shellcheck` matters most: `build`/`build-arm64` hard-require
+    # `needs.shellcheck.result == 'success'` with no path tolerance of their own, so its
+    # clean skip is what stops the whole heavy pipeline from scheduling for a docs-only PR
+    # (see that job's `if:`). `validate-compose` deliberately did NOT get the same
+    # treatment -- see `container-scan`'s comment for the invariant that it stays root.
     #
     # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
     # pr-tracking-metadata-check reads labels/milestone/draft state from the webhook
-    # snapshot for this run -- with only the defaults, a label/milestone change or a draft
-    # marked ready-for-review would never re-trigger this workflow. Adding
-    # labeled/unlabeled/milestoned/demilestoned/ready_for_review fixes that. `edited` is
-    # deliberately excluded -- it fires on title/body/base-ref edits, unrelated to
-    # labels/milestone, and would add much higher-frequency reruns for no benefit.
+    # snapshot, so with only the defaults a label/milestone change or ready-for-review
+    # would never re-trigger this workflow. Added labeled/unlabeled/milestoned/
+    # demilestoned/ready_for_review to fix that; `edited` stays excluded (unrelated to
+    # metadata, would add high-frequency reruns for no benefit).
     #
-    # Those four metadata-only types carry no new commit -- the content under test is
-    # byte-identical to whatever the last synchronize/opened/reopened already validated, so
-    # re-running the Rust build/test/lint/audit jobs and multi-arch builds buys nothing.
-    # Each of build/build-arm64/dns_rust_quality/ui_rust_quality/dns_test/ui_test/
-    # dns_cargo_audit/ui_cargo_audit/rust_coverage's own `if:` therefore additionally
-    # requires the event `action` to be opened/synchronize/reopened/ready_for_review (keep
-    # this list and those per-job conditions in sync). pr-tracking-metadata-check is
-    # deliberately NOT scoped this way (webhook-only, depends only on validate-compose), so
-    # it still re-evaluates on every type. ci_scope_policy's per-path required-success logic
-    # knows the same event-action distinction so a metadata-only skip is never mistaken for
-    # a real failure.
+    # Those four metadata-only types carry no new commit, so re-running the Rust build/
+    # test/lint/audit jobs buys nothing -- a prior run already validated this commit. Each
+    # of build/build-arm64/dns_rust_quality/ui_rust_quality/dns_test/ui_test/
+    # dns_cargo_audit/ui_cargo_audit/rust_coverage's own `if:` additionally requires the
+    # event `action` to be opened/synchronize/reopened/ready_for_review (keep this list and
+    # those per-job conditions in sync). pr-tracking-metadata-check is NOT scoped this way
+    # (webhook-only), so it still re-evaluates on every type. ci_scope_policy knows the same
+    # distinction so a metadata-only skip is never mistaken for a real failure.
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
@@ -114,40 +104,31 @@ permissions:
   pull-requests: read
 
 concurrency:
-  # Push/tag events use a run_id-suffixed key instead of the old `{workflow}-publish`
-  # one: this deliberately never collides with itself, so it no longer serializes whole
-  # runs one at a time (the old key also never included the ref, so master and v0.2.0
-  # pushes contended for the same pending slot). That whole-run serialization used to be
-  # the only thing stopping a rapid burst of pushes from tearing `promote` down mid-write
-  # (`promote` had its own job-level group shared with backfill-stack-latest.yml, added by
-  # #793, but that only serialized `promote` against other users of that same group name
-  # -- it did not protect it from this top-level group's cancel-in-progress cancelling the
-  # whole run out from under it). #897 replaced that job-level group with
-  # scripts/lib/promote-lock.sh's git-ref lock (see the `promote` job's own comments) for
-  # an unrelated reason (the group could also silently drop a still-queued run entirely)
-  # -- the reasoning below about this top-level group's cancel-in-progress is independent
-  # and still applies. Confirmed against GitHub's own docs: workflow-level
-  # `cancel-in-progress: true` cancels the entire previous run, including every
-  # in-progress job, not just queued ones -- a job's own separate group offers no
-  # immunity. Per-job cancellation for the real runner-hogging jobs (`build`,
-  # `container-scan`) is scoped directly on those jobs below instead, keyed by
-  # service+ref, so a superseded commit's heavy work gets reclaimed promptly while
-  # merge-manifests/promote/release simply never start for it via their existing
-  # `needs.<job>.result == 'success'` gates, instead of being torn down mid-write.
+  # Push/tag events use a run_id-suffixed key instead of the old `{workflow}-publish` one
+  # (which never included the ref, so master and v0.2.0 pushes contended for the same
+  # pending slot): this never collides with itself, so it no longer serializes whole runs
+  # one at a time. That whole-run serialization used to be the only thing stopping a rapid
+  # burst of pushes from tearing `promote` down mid-write; #897 replaced the mechanism that
+  # protected it with scripts/lib/promote-lock.sh's git-ref lock instead (see the `promote`
+  # job's own comments) -- independent of this group, which still matters because
+  # workflow-level `cancel-in-progress: true` cancels the entire previous run including
+  # every in-progress job, not just queued ones (confirmed against GitHub's own docs).
+  # Per-job cancellation for the real runner-hogging jobs (`build`, `container-scan`) is
+  # scoped directly on those jobs below instead, keyed by service+ref, so a superseded
+  # commit's heavy work gets reclaimed promptly while merge-manifests/promote/release
+  # simply never start for it via their existing `needs.<job>.result == 'success'` gates.
   #
-  # `cancel-in-progress` stays false for BOTH branches of the group key below, on
-  # purpose: for push/tag it no longer matters (the key is run-id-scoped and never
-  # collides); for pull_request it matters a lot. Live-tested flipping it to true on this
-  # exact PR (#888) and it backfired immediately: opening a PR with labels/milestone
-  # already set (AG-GH-008) fires `opened` plus a `labeled`/`milestoned` event within the
-  # same second, each spawning a competing run for the same per-PR-ref group -- with
-  # cancel-in-progress:true, the first run's `detect-changes` job was killed mid-execution
-  # by the very next event, producing a spurious "got 'cancelled'" failure on a healthy
-  # PR. `promote`/`release` never run on `pull_request` events at all, so there was never
-  # a registry-correctness reason to flip this branch -- only a scheduling one, not worth
-  # the reintroduced noise. `build`/`container-scan` still get real per-commit
-  # cancellation on PR branches via their own job-level groups below, independent of this
-  # setting. See #888 for the full investigation.
+  # `cancel-in-progress` stays false for BOTH branches of the group key: for push/tag it no
+  # longer matters (run-id-scoped, never collides); for pull_request it matters a lot.
+  # Live-tested flipping it to true (#888) and it backfired immediately: opening a PR with
+  # labels/milestone already set (AG-GH-008) fires `opened` plus a `labeled`/`milestoned`
+  # event within the same second, each spawning a competing run for the same per-PR-ref
+  # group -- with cancel-in-progress:true, the first run's `detect-changes` job was killed
+  # mid-execution by the very next event, producing a spurious "got 'cancelled'" failure on
+  # a healthy PR. `promote`/`release` never run on `pull_request` at all, so there was never
+  # a registry-correctness reason to flip this branch, only a scheduling one not worth the
+  # reintroduced noise. `build`/`container-scan` still get real per-commit cancellation on
+  # PR branches via their own job-level groups below, independent of this setting.
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
@@ -251,23 +232,17 @@ jobs:
 
   # Issue #1095 Part 1 (Option B): a start-of-job supersession self-skip for the heavy
   # publish-path jobs (build/build-arm64/container-scan), mirroring the pattern `promote`
-  # already trusts for itself (its own `git ls-remote origin "$GITHUB_REF"` debounce
-  # check) rather than inventing a new mechanism. This is a START gate only, evaluated
-  # once per job before any heavy work begins -- NOT `cancel-in-progress` on an
-  # already-running job, which is exactly what #979 showed starves the channel. The
-  # newest push in a burst always resolves as the current tip and runs its full
-  # pipeline; only a push already provably superseded before its heavy jobs start
-  # self-skips.
+  # already trusts for itself (its own `git ls-remote` debounce check). This is a START
+  # gate only, evaluated once before any heavy work begins -- NOT `cancel-in-progress` on
+  # an already-running job, which is exactly what #979 showed starves the channel. Only a
+  # push already provably superseded before its heavy jobs start self-skips.
   #
   # Deliberately its own job with NO `if:`/`needs:` of its own (same shape as
   # validate-compose): it can only ever resolve success/failure/cancelled, never
-  # "skipped", so consumers reading its `superseded` output (build, build-arm64,
-  # container-scan) do not reintroduce the implicit-success()-over-a-skippable-dependency
-  # hazard documented on container-scan/promote's own `if:` blocks. It does NOT touch
-  # validate-compose (must keep surviving to completion on push) or
-  # merge-manifests/promote's existing tag-move logic.
-  #
-  # Runs on the light tier: it only ever does one `git ls-remote`.
+  # "skipped", so consumers reading its `superseded` output do not reintroduce the
+  # implicit-success()-over-a-skippable-dependency hazard documented on
+  # container-scan/promote's own `if:` blocks. Runs on the light tier: it only ever does
+  # one `git ls-remote`.
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -1122,24 +1097,18 @@ jobs:
     needs: [validate-compose, detect-changes]
     # Issue #1245: this is the load-bearing self-skip in this workflow. On a pull_request
     # event whose ENTIRE diff is docs-only (detect-changes' `docs_only` output), none of
-    # this job's remaining steps have anything new to check -- ShellCheck/ActionLint lint
-    # the whole repo tree, and the other steps below (setup-migration-semantics,
-    # action-node-version, validation-subnet-wrapper, executable-bits,
-    # build-tools-smoke-coverage) all inspect scripts/tests/workflows/.githooks, none of
-    # which a genuinely docs-only diff can have touched. Skipping cleanly is what matters:
-    # build/build-arm64 (lancache-heavy) hard-require `needs.shellcheck.result ==
-    # 'success'` with no path tolerance of their own, so this is the ONE place that stops
-    # the entire heavy pipeline from scheduling for a trivial doc-only PR. Two steps that
-    # DO need to run regardless of docs-only-ness (governance guardrails, the CHANGELOG
-    # direct-edit warn) were moved out of this job into `line-endings` (see that job's
-    # comment) specifically so this skip does not silently drop them. `validate-compose`
-    # deliberately does NOT get the same self-skip -- see `container-scan`'s job comment
-    # for the invariant that it must stay a root job (its `needs: validate-compose`-only
-    # dependents would otherwise silently skip via GitHub's implicit success() default).
-    # `github.event_name != 'pull_request' ||` keeps this unconditional on push (mirrors
-    # full-setup-validate's/rust_coverage's own push-side tolerance): a push always runs
-    # shellcheck regardless of docs-only-ness, so a docs-only merge commit still publishes
-    # its sha-<commit> images instead of starving the channel.
+    # this job's remaining steps (ShellCheck/ActionLint plus setup-migration-semantics/
+    # action-node-version/validation-subnet-wrapper/executable-bits/
+    # build-tools-smoke-coverage) have anything new to check. Skipping cleanly is what
+    # matters: build/build-arm64 hard-require `needs.shellcheck.result == 'success'` with
+    # no path tolerance of their own, so this is the ONE place that stops the entire heavy
+    # pipeline from scheduling for a trivial doc-only PR. Two steps that DO need to run
+    # regardless of docs-only-ness (governance guardrails, the CHANGELOG direct-edit warn)
+    # were moved out into `line-endings` specifically so this skip does not drop them.
+    # `validate-compose` deliberately does NOT get the same self-skip -- see
+    # `container-scan`'s comment for why it must stay a root job. `github.event_name !=
+    # 'pull_request' ||` keeps this unconditional on push, so a docs-only merge commit
+    # still publishes its sha-<commit> images instead of starving the channel.
     if: >-
       ${{
         always() &&
@@ -4306,31 +4275,24 @@ jobs:
     # `cancelled`/`skipped` outcomes on push instead of hard-failing on them -- see the
     # per-job comments on each of those jobs for the concurrency-group side of this.
     #
-    # (#979) validate-compose used to be the sharpest case: cancelling it forced
-    # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit to `skipped` via their
-    # `needs['validate-compose']` guard. It is now pull_request-only for cancellation (a
-    # hard publish-path gate), so that cascade can no longer fire on push.
+    # (#979) validate-compose is now pull_request-only for cancellation (a hard
+    # publish-path gate), so its old `skipped`-cascade onto dns_test/ui_test/
+    # watchdog_test/dns_cargo_audit/ui_cargo_audit can no longer fire on push.
     # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit still use
-    # require_success_or_intentional_cancellation() (they can show a direct `cancelled`
-    # from their own groups); watchdog_test has no group of its own and, with
-    # validate-compose no longer cancelling on push, can no longer be `skipped` on push
-    # either, so it now only shows `success` there -- its
-    # require_success_or_intentional_skip() helper stays as pull_request-path tolerance.
+    # require_success_or_intentional_cancellation() (a direct `cancelled` from their own
+    # groups is still possible); watchdog_test has no group of its own, so on push it now
+    # only shows `success` -- its require_success_or_intentional_skip() helper stays as
+    # pull_request-path tolerance only.
     #
-    # (#1095) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit have a SECOND legitimate
-    # `skipped` source on push: detect-changes runs on push too, and these jobs' own `if:`
-    # gates skip a push that did not touch the relevant crate (the PR that produced it
-    # already passed them, AG-WF-004). require_success_or_intentional_cancellation()
-    # already tolerates `skipped`, so no code change was needed, just this note.
-    # watchdog_test/rust_coverage are not path-scoped on push, so untouched.
-    #
-    # dns_rust_quality/ui_rust_quality stay on strict require_success(): PR #915 explicitly
-    # flagged them (and watchdog_test) as out of #891's scope, and they depend only on
-    # detect-changes (never runs on push), so nothing gives them a legitimate way to show
-    # anything but `success` on push. detect-changes itself stays excluded from
-    # concurrency scoping for the same reason: it only runs on pull_request, where it is
-    # already serialization-protected by the top-level group, so a group would be a pure
-    # no-op -- its own require_success() check (PR-branch only) is also left strict.
+    # (#1095) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit also get a SECOND
+    # legitimate `skipped` source on push (detect-changes now runs on push too, and these
+    # jobs' own `if:` skip an untouched crate) -- already tolerated by the same helper, no
+    # code change needed, just this note. dns_rust_quality/ui_rust_quality stay on strict
+    # require_success(): PR #915 flagged them (and watchdog_test) as out of #891's scope,
+    # and they depend only on detect-changes (never runs on push), so nothing gives them a
+    # legitimate way to show anything but `success` there. detect-changes itself stays
+    # excluded from concurrency scoping for the same reason -- it only runs on
+    # pull_request, already serialization-protected by the top-level group.
     name: CI scope policy
     needs:
       - detect-changes
