@@ -914,6 +914,80 @@ STUB
     [ "$((end_test_epoch - start_test_epoch))" -lt 2 ]
 }
 
+@test "saf_find_built_ancestor: a 0/0 extended budget still performs one real re-check, not zero -- succeeds if the image is fresh by then" {
+    # build-push.yml's own "Ensure PR staging tags exist for full-setup
+    # services" step now passes 0 0 for the extended budget specifically
+    # (see that step's own comment for why its 30-minute job cannot afford
+    # more) -- its PR reply describes this as "a single immediate re-check",
+    # not "the extended retry is skipped entirely". This proves that claim:
+    # sif_wait_for_fresh_base_image always performs its freshness check once
+    # BEFORE ever consulting the hard ceiling (hard_deadline == start_time
+    # when hard_ceiling_seconds is 0, but the check itself runs first every
+    # iteration), so even the tightest possible extended budget still gives
+    # a confirmed-active candidate one more real chance to be seen fresh --
+    # not nothing. Modeled with a call-count-based stub (not elapsed time,
+    # which cannot meaningfully distinguish two back-to-back 0-budget checks
+    # from each other): the image resolves as stale on the short check's own
+    # single attempt, but fresh from the very next call onward -- exactly
+    # "not ready yet, then ready a moment later", the scenario this 0/0
+    # extended budget must still be able to catch.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$active_stub"
+
+    call_count_file="$BATS_TEST_TMPDIR/revision_call_count"
+    echo 0 > "$call_count_file"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+count="\$(cat "$call_count_file")"
+count=\$((count + 1))
+echo "\$count" > "$call_count_file"
+# First call ever (the short 0/0 check's own single attempt) reports stale;
+# every call after that (the extended 0/0 check's own single attempt, and
+# any further calls) reports fresh.
+if [ "\$count" -eq 1 ]; then
+    exit 1
+else
+    echo "$ancestor_sha"
+fi
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    # short = 0/0 (one attempt, sees "stale"), extended = 0/0 (one more
+    # attempt, sees "fresh") -- must still succeed via that second attempt.
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$ancestor_sha" ]
+    # Exactly 2 real revision checks (short + extended), proving the
+    # extended budget genuinely ran its own check rather than the short
+    # check's single attempt somehow being counted twice or the extended
+    # attempt being skipped outright.
+    [ "$(cat "$call_count_file")" -eq 2 ]
+}
+
 # ---------------------------------------------------------------------------
 # saf_resolve_untouched_backfill_source: end-to-end orchestration --
 # reordering (fast path), the paths-are-ignorable safety gate, and the

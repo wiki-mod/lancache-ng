@@ -3611,7 +3611,35 @@ jobs:
             # step already had before the activity-check mechanism existed --
             # while scripts/ensure-pr-staging-images.sh's own call still gets
             # the full benefit of that mechanism, since its job was actually
-            # sized for it.
+            # sized for it. Proven by
+            # "saf_find_built_ancestor: a 0/0 extended budget still performs
+            # one real re-check, not zero" in
+            # tests/bats/staging_ancestor_fallback.bats: 0/0 still gives one
+            # genuine freshness check, not none at all, so an ancestor image
+            # that becomes fresh moments later is still caught.
+            #
+            # JUDGMENT CALL (flagged for maintainer review, not guessed
+            # silently): the pre-existing 300/600 ancestor_freshness_* pair
+            # above (the INITIAL per-candidate check, unrelated to the
+            # extended-retry fix this comment otherwise documents) has the
+            # exact same "shared across every untouched service this loop
+            # checks" exposure in principle -- up to 5 untouched services
+            # (full_setup_services below) each attempting up to 600s before
+            # falling through, in the worst case, is itself more than this
+            # 30-minute job's own timeout. This was NOT the Codex finding
+            # this round's fix addresses (that finding was specifically about
+            # the extended retry silently inheriting a 900/5400 budget), and
+            # is left unchanged here rather than silently widening this
+            # fix's scope -- in the realistic case this ceiling protects
+            # against a genuinely rare/broken state, since an ancestor
+            # candidate's image (by construction, from a commit further back
+            # in history than a confirmed-unbuilt BASE_SHA) has normally
+            # already existed for a while by the time this step runs, so
+            # this check resolves in well under a second per service in
+            # practice, not anywhere near 600s. Whether that pre-existing
+            # 300/600 pair itself also needs a caller-specific value here is
+            # a separate question for the maintainer, not decided by this
+            # fix.
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" 900 5400 300 600 0 0 15 50 "$GITHUB_WORKSPACE")"; then
               exit 1
             fi
