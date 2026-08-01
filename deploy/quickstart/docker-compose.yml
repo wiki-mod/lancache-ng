@@ -1822,6 +1822,10 @@ volumes:
   pdns-config-snapshots-standard:
   pdns-config-snapshots-ssl:
   watchdog-status:
+  # #842 Teil 2: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately
+  # separate from watchdog-status above -- see the `retention:` service's own
+  # comment for the architecture decision behind this split.
+  retention-state:
   nats-data:
   nats-conf:
   netdataconfig:
