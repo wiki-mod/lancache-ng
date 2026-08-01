@@ -241,3 +241,7 @@ This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Qual
 And reinforces:
 
 > release-capable paths must not depend on mutable `build-tools:latest`
+
+## Note: `workflow_dispatch` always does a full rebuild
+
+The per-push "skip rebuild when nothing relevant changed, retag and scan the existing published image instead" reuse mechanism (`determine push reuse scope`, #1095 Steps 2/4) only evaluates on `push` events -- and even in the reuse case, the resolved channel image still gets a real security scan; nothing here skips scanning. A manual `workflow_dispatch` run of `build-push.yml` (e.g. to force-advance a channel) always performs a full build for every service regardless of whether anything changed -- confirmed live 2026-08-01 (run 30686435421: `determine push reuse scope` reported `skipped`, every `build`/`container-scan` job ran a real, non-trivial-duration build). Do not use a `workflow_dispatch` run as evidence for or against the push-triggered reuse path; it exercises a different, always-rebuild code path entirely.
