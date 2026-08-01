@@ -425,6 +425,21 @@ STUB
     export GH_TOKEN="test-token"
 }
 
+@test "saf_candidate_run_is_active: curl missing is treated as inconclusive (2), the same explicit capability check as saf_query_run_count" {
+    # This function has its own "command -v curl" guard, separate from
+    # saf_query_run_count's -- it must fail closed the same way rather than
+    # relying on the caller to have already checked. Simulated the same way
+    # as the saf_query_run_count curl-missing test: point PATH at an empty
+    # directory so no curl (real or fake) can be found at all.
+    empty_path_dir="$BATS_TEST_TMPDIR/empty_path_active"
+    mkdir -p "$empty_path_dir"
+    old_path="$PATH"
+    export PATH="$empty_path_dir"
+    run saf_candidate_run_is_active "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
+    export PATH="$old_path"
+    [ "$status" -eq 2 ]
+}
+
 # ---------------------------------------------------------------------------
 # saf_find_built_ancestor: --first-parent, SIGPIPE/max-count regression, and
 # non-push-run acceptance for candidates.
