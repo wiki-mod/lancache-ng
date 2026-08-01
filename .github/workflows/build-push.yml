@@ -94,6 +94,13 @@ on:
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
+    # DIAGNOSTIC TEST (throwaway, part of #1381): reintroducing #1245's
+    # removed paths-ignore on purpose, to reproduce its documented
+    # zero-run-object signature as a known-cause positive control.
+    paths-ignore:
+      - "**/*.md"
+      - "docs/**"
+      - "!CHANGELOG.md"
     # Issue #1203 added a trigger-level `paths-ignore` (`**/*.md`, `docs/**`,
     # with CHANGELOG.md un-ignored) here to keep doc-only PRs from queueing
     # this workflow's light jobs behind heavy work on the same saturated
