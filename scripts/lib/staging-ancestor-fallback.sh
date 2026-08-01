@@ -255,6 +255,17 @@ saf_base_commit_has_confirmed_run() {
 # per-commit image for <service> (reusing sif_wait_for_fresh_base_image,
 # never skipping that proof).
 #
+# A candidate with zero recorded runs is not simply skipped in favor of an
+# older one: exactly the same "zero runs alone does not prove a deliberate
+# skip" reasoning saf_base_commit_paths_are_ignorable's own header documents
+# for <base_sha> applies to every candidate walked here too. Before walking
+# past a run-less candidate, this positively confirms that candidate's own
+# changed paths also all match the ignore list; if that check is anything
+# other than a positive confirmation (a real non-doc path, or an
+# inconclusive diff), this stops and fails rather than silently substituting
+# an older ancestor that could omit a real, unbuilt change at that
+# candidate.
+#
 # `--first-parent`: this project does not squash-merge, so nearly every
 # commit on a target branch is itself a merge commit. A plain `git log <sha>`
 # walks EVERY parent of every merge commit it encounters, which can surface a
@@ -317,7 +328,7 @@ saf_find_built_ancestor() {
     return 1
   fi
 
-  local candidate has_run ancestor_image
+  local candidate has_run ancestor_image candidate_paths_status
   while IFS= read -r candidate; do
     [[ -z "$candidate" ]] && continue
 
@@ -327,9 +338,24 @@ saf_find_built_ancestor() {
     # candidate, unlike the stricter push-only check used for BASE_SHA itself.
     saf_base_commit_has_confirmed_run "$repository" "$candidate" "" || has_run=$?
     if (( has_run == 1 )); then
-      # Positively confirmed zero runs of any kind for this ancestor too --
-      # keep walking further back rather than wasting a freshness poll on a
-      # commit that provably has no image to find.
+      # Positively confirmed zero runs of any kind for THIS candidate -- but
+      # zero runs alone is not proof this candidate was itself a deliberate
+      # skip, exactly the same reasoning saf_base_commit_paths_are_ignorable's
+      # own header documents for BASE_SHA. A candidate with zero runs could
+      # be a genuine, unbuilt service change (e.g. build-push.yml's push
+      # trigger was temporarily disabled for that one push, or some other
+      # real CI outage), and silently walking past it to substitute an
+      # older, built ancestor would back-fill content that omits that real
+      # change -- the exact #626/#808 class of bug this whole mechanism must
+      # not reintroduce. So before skipping this candidate and continuing
+      # further back, positively confirm ITS OWN changed paths also all
+      # match the ignore list; only then is walking past it actually safe.
+      candidate_paths_status=0
+      saf_base_commit_paths_are_ignorable "$candidate" "$git_dir" || candidate_paths_status=$?
+      if (( candidate_paths_status != 0 )); then
+        echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but its changed paths could not be positively confirmed to all match build-push.yml's own paths-ignore list (status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
+        return 1
+      fi
       continue
     fi
 

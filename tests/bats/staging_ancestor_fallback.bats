@@ -28,6 +28,11 @@
 #     ancestor-candidate checks (which never can, since a candidate is
 #     already confirmed to be further back in history than BASE_SHA) --
 #     fixed by splitting into two independent budget pairs
+#   - a run-less ancestor candidate being skipped in favor of an older one
+#     without confirming THAT candidate's own changed paths are ignorable --
+#     zero runs alone does not prove a deliberate skip for a mid-walk
+#     candidate any more than it does for BASE_SHA itself -- fixed by
+#     applying the same paths-are-ignorable proof to every skipped candidate
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -249,8 +254,17 @@ STUB
     git -C "$git_dir" config user.email test@example.com
     git -C "$git_dir" config user.name test
     local i
+    # Real docs/*.md-touching commits, not --allow-empty: the two skipped
+    # candidates nearest base_sha must be positively confirmed
+    # paths-ignorable (saf_find_built_ancestor's own "validate every skipped
+    # ancestor" safety check), which an empty diff can never satisfy
+    # (inconclusive, not confirmed-ignorable -- see
+    # saf_base_commit_paths_are_ignorable's own header).
+    mkdir -p "$git_dir/docs"
     for i in 1 2 3 4 5 6 7 8; do
-        git -C "$git_dir" commit -q --allow-empty -m "commit-$i"
+        echo "commit-$i" > "$git_dir/docs/commit-$i.md"
+        git -C "$git_dir" add "docs/commit-$i.md"
+        git -C "$git_dir" commit -q -m "commit-$i"
     done
     base_sha="$(git -C "$git_dir" rev-parse HEAD)"
     # The 3rd ancestor back (search_depth=3's own boundary) is the one with
@@ -379,6 +393,57 @@ STUB
     run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$ancestor_sha" ]
+}
+
+@test "saf_find_built_ancestor: a skipped run-less candidate with a real (non-doc) path change blocks the walk instead of substituting an older ancestor" {
+    # A run-less candidate is not simply skipped in favor of an older one --
+    # zero runs alone does not prove THAT candidate was itself a deliberate
+    # skip (e.g. the push trigger could have been disabled for that one
+    # push). Fixture: grandparent (docs-only, HAS a real run+image) ->
+    # real_change_parent (touches a real script, ZERO runs) -> base_sha
+    # (docs-only, ZERO runs). If the walk silently skipped real_change_parent
+    # for lacking a run and substituted grandparent instead, the back-fill
+    # would omit real_change_parent's own real change -- exactly the
+    # #626/#808 class of bug this whole mechanism must not reintroduce.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/docs" "$git_dir/scripts"
+
+    echo "grandparent" > "$git_dir/docs/grandparent.md"
+    git -C "$git_dir" add docs/grandparent.md
+    git -C "$git_dir" commit -q -m grandparent
+    grandparent_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "real change" > "$git_dir/scripts/real-change.sh"
+    git -C "$git_dir" add scripts/real-change.sh
+    git -C "$git_dir" commit -q -m "real change parent"
+    real_change_parent_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "base" > "$git_dir/docs/base.md"
+    git -C "$git_dir" add docs/base.md
+    git -C "$git_dir" commit -q -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$grandparent_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    install_revision_stub_for "$grandparent_sha"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 "$git_dir"
+    [ "$status" -ne 0 ]
+    # Must NOT have substituted grandparent -- confirms this is a genuine
+    # fail-closed stop, not a successful (wrong) resolution.
+    [[ "$output" != *"$grandparent_sha"* ]]
 }
 
 # ---------------------------------------------------------------------------
