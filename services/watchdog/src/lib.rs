@@ -24,16 +24,22 @@
 //! 3. `probe_docker_socket_proxy()`'s alert-only reachability probe (see
 //!    [`health::AlertCounter`]) -- also a `status.json` key, same reasoning.
 //!
-//! **Deliberately NOT yet ported**: `maybe_purge()` (daily cache-age
-//! purge), `maybe_prune_syslog()` (daily syslog-ng retention), and
+//! **Deliberately NOT ported**: `maybe_purge()` (daily cache-age purge),
+//! `maybe_prune_syslog()` (daily syslog-ng retention), and
 //! `maybe_rotate_fluent_bit_selflog()` (per-cycle fluent-bit self-log
-//! rotation). Whether these belong in this same Rust binary, in a later
-//! separate pass, or should stay a bash helper permanently is an open
-//! question posed to the maintainer, not decided here. Until it is
-//! answered, `services/watchdog/Dockerfile`'s `ENTRYPOINT` still points at
-//! the bash `watchdog.sh`, and this crate is not wired in as a
-//! replacement: swapping it in today would silently regress cache purge
-//! and syslog retention for every existing install.
+//! rotation) never need to be ported into this crate at all: they were
+//! extracted out of `watchdog.sh` into their own script
+//! (`services/watchdog/retention.sh`), which now runs as its own dedicated
+//! `retention` Compose service/container (see
+//! `deploy/*/docker-compose.yml`'s `retention:` service block), entirely
+//! independent of whatever process ends up being this crate's `ENTRYPOINT`.
+//! Swapping `services/watchdog/Dockerfile`'s health-monitor `ENTRYPOINT` to
+//! this crate today would therefore NOT regress cache purge or syslog
+//! retention for any existing install -- that engine already runs on its
+//! own, separately from the health-check/restart loop this crate covers.
+//! The `ENTRYPOINT` swap remains a separate, not-yet-made maintainer
+//! decision for other reasons (this crate's own remaining scope, and
+//! full-stack validation), not because of the file-retention passes above.
 //!
 //! Also deliberately unchanged from today: no live startup-grace-period
 //! timer. `check_and_maybe_restart()` in the bash never treated a `starting`

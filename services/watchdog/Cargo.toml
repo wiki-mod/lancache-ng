@@ -5,12 +5,14 @@
 # Scope note (2026-07-31/08-01): this crate currently ports only
 # watchdog.sh's health-check/restart state machine (proxy/dns-standard/
 # dns-ssl/nats), the status.json writer, disk-usage probe, and the
-# docker-socket-proxy alert-only probe -- NOT watchdog.sh's three
+# docker-socket-proxy alert-only probe -- NOT watchdog.sh's former three
 # filesystem-retention passes (maybe_purge/maybe_prune_syslog/
-# maybe_rotate_fluent_bit_selflog). See src/lib.rs's module doc comment for
-# the open scope question this depends on. services/watchdog/Dockerfile's
-# ENTRYPOINT still points at the bash watchdog.sh; this crate is not wired
-# in as a replacement yet.
+# maybe_rotate_fluent_bit_selflog), which never need porting into this
+# crate at all: they now run independently as their own retention.sh /
+# dedicated `retention` Compose service (see src/lib.rs's module doc
+# comment). services/watchdog/Dockerfile's ENTRYPOINT still points at the
+# bash watchdog.sh; this crate is not wired in as a replacement yet, for
+# reasons unrelated to file retention.
 
 [package]
 name = "lancache-watchdog"

@@ -68,15 +68,19 @@ pub fn resolve_bool(raw: Option<&str>, default: bool) -> bool {
 /// own `log "Invalid ...; using default ..."` lines), so config parsing
 /// stays pure/testable while the caller decides how/whether to surface it.
 ///
-/// Extended here to `RESTART_AFTER`/`CURL_MAX_TIME`/`CURL_MAX_TIME_RESTART`/
-/// `DISK_WARN_PCT`/`DISK_ALARM_PCT` too: the current bash does NOT validate
-/// these at all (they flow straight into `curl --max-time` or a `set -e`
-/// numeric comparison), so a garbage value there crashes the whole daemon
-/// today rather than falling back to a sane default. That crash is an
-/// accidental bug, not a documented behavior worth preserving -- applying
-/// the file's own already-established clamp idiom uniformly is a
-/// deliberate, narrow hardening (AG-WF-011: same failure class, same fix),
-/// not a new invented behavior shape.
+/// Extended here to `RESTART_AFTER`/`DISK_WARN_PCT`/`DISK_ALARM_PCT` too:
+/// the current bash does NOT validate these at all (they flow straight into
+/// a `set -e` numeric comparison), so a garbage value there crashes the
+/// whole daemon today rather than falling back to a sane default. That
+/// crash is an accidental bug, not a documented behavior worth preserving
+/// -- applying the file's own already-established clamp idiom uniformly is
+/// a deliberate, narrow hardening (AG-WF-011: same failure class, same
+/// fix), not a new invented behavior shape. `CURL_MAX_TIME`/
+/// `CURL_MAX_TIME_RESTART` deliberately do NOT go through this digit-only
+/// integer guard -- curl (and the bash's own verbatim `curl --max-time`
+/// forwarding) accepts fractional seconds for those two knobs, which this
+/// guard's all-digits check would wrongly reject; see
+/// [`parse_curl_timeout`]'s own doc comment.
 pub fn parse_u64_with_default(
     raw: Option<&str>,
     field_name: &str,
@@ -164,17 +168,53 @@ pub fn parse_check_interval(raw: Option<&str>) -> (Duration, Vec<String>) {
 /// `apply_timeout()`) must skip its own timeout machinery entirely in that
 /// case rather than ever passing a zero-duration timeout through as a
 /// stand-in for "unbounded."
+///
+/// Parses as a floating-point number of seconds, not [`parse_u64_with_default`]'s
+/// all-digits integer guard: curl's own `--max-time`/`CURLOPT_TIMEOUT`
+/// documents fractional values (e.g. `0.5`) as valid, and the bash
+/// implementation forwards `CURL_MAX_TIME`/`CURL_MAX_TIME_RESTART` straight
+/// through to `curl --max-time "$CURL_MAX_TIME"` verbatim with no
+/// validation of its own. An existing install relying on a fractional
+/// value (e.g. `CURL_MAX_TIME=0.5`) would otherwise silently fall back to
+/// this crate's whole-second default after the Rust switch -- an integer
+/// digit-only guard would reject the decimal point as "invalid" input,
+/// changing real, already-configured timeout behavior rather than
+/// preserving it.
 pub fn parse_curl_timeout(
     raw: Option<&str>,
     field_name: &str,
     default_secs: u64,
 ) -> (Option<Duration>, Vec<String>) {
-    let (secs, warning) = parse_u64_with_default(raw, field_name, default_secs);
-    let warnings: Vec<String> = warning.into_iter().collect();
-    if secs == 0 {
-        (None, warnings)
-    } else {
-        (Some(Duration::from_secs(secs)), warnings)
+    let default = Some(Duration::from_secs(default_secs));
+    let Some(raw_str) = non_empty(raw) else {
+        return (default, Vec::new());
+    };
+    match raw_str.parse::<f64>() {
+        // An explicit zero (curl's own "no timeout at all" semantics) is
+        // valid input, not a warning-worthy fallback.
+        Ok(0.0) => (None, Vec::new()),
+        Ok(secs) if secs.is_finite() && secs > 0.0 => match Duration::try_from_secs_f64(secs) {
+            Ok(duration) => (Some(duration), Vec::new()),
+            // Finite but too large to fit in a Duration -- an operator
+            // typo (an extra digit or two), not a real timeout intent.
+            // Same out-of-range fallback shape parse_u64_with_default uses
+            // for its own overflow case.
+            Err(_) => (
+                default,
+                vec![format!(
+                    "Invalid {field_name}={raw_str} (out of range); using default {default_secs}"
+                )],
+            ),
+        },
+        // Negative, NaN, infinite, or not parseable as a number at all --
+        // curl itself rejects a negative --max-time, and none of these has
+        // a sane timeout interpretation.
+        _ => (
+            default,
+            vec![format!(
+                "Invalid {field_name}={raw_str}; using default {default_secs}"
+            )],
+        ),
     }
 }
 
@@ -549,6 +589,38 @@ mod tests {
         // Unset keeps the documented default, wrapped as Some(..).
         let (timeout, _) = parse_curl_timeout(None, "CURL_MAX_TIME", 5);
         assert_eq!(timeout, Some(Duration::from_secs(5)));
+    }
+
+    #[test]
+    // curl's own --max-time accepts fractional seconds, and the bash
+    // implementation forwards CURL_MAX_TIME/CURL_MAX_TIME_RESTART to curl
+    // verbatim with no validation -- an existing install relying on a
+    // fractional value like 0.5 must still resolve to a sub-second
+    // Duration after the Rust switch, not silently fall back to the
+    // whole-second default the way an all-digits integer guard would.
+    fn parse_curl_timeout_preserves_fractional_seconds() {
+        let (timeout, warnings) = parse_curl_timeout(Some("0.5"), "CURL_MAX_TIME", 5);
+        assert_eq!(timeout, Some(Duration::from_secs_f64(0.5)));
+        assert!(warnings.is_empty());
+
+        let (timeout, warnings) = parse_curl_timeout(Some("2.5"), "CURL_MAX_TIME_RESTART", 30);
+        assert_eq!(timeout, Some(Duration::from_secs_f64(2.5)));
+        assert!(warnings.is_empty());
+    }
+
+    #[test]
+    // A negative, non-numeric, or absurdly-oversized value must fall back
+    // to the caller's default with a warning naming the rejected value --
+    // curl itself rejects a negative --max-time, and none of these has a
+    // sane timeout interpretation.
+    fn parse_curl_timeout_rejects_invalid_input() {
+        let (timeout, warnings) = parse_curl_timeout(Some("bogus"), "CURL_MAX_TIME", 5);
+        assert_eq!(timeout, Some(Duration::from_secs(5)));
+        assert!(warnings.iter().any(|w| w.contains("CURL_MAX_TIME=bogus")));
+
+        let (timeout, warnings) = parse_curl_timeout(Some("-1.5"), "CURL_MAX_TIME", 5);
+        assert_eq!(timeout, Some(Duration::from_secs(5)));
+        assert!(warnings.iter().any(|w| w.contains("CURL_MAX_TIME=-1.5")));
     }
 
     #[test]

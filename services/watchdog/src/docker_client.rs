@@ -12,7 +12,19 @@
 //! three allowlisted paths -- a hand-rolled client with exactly three
 //! methods makes "watchdog cannot accidentally call an unallowlisted Docker
 //! endpoint" true by construction (there is no method that would let it),
-//! rather than true only by convention.
+//! rather than true only by convention. That same "only these three
+//! allowlisted paths" guarantee is why the client below disables HTTP
+//! redirects entirely: a misconfigured or compromised `docker-socket-proxy`
+//! (or an operator-supplied `DOCKER_PROXY_URL`) returning a 3xx would
+//! otherwise send reqwest's default client on to whatever arbitrary
+//! `Location` it names, which would defeat exactly the "only these three
+//! endpoints, never anything else" property this module exists to
+//! guarantee. The bash implementation never had this exposure: plain
+//! `curl` without `-L` never follows redirects either. With redirects
+//! disabled, a 3xx response is not an error to reqwest -- it is returned
+//! as an ordinary response whose status is not `2xx`, so the existing
+//! `is_success()` checks below already treat it the same as any other
+//! failed/unreachable response.
 
 use std::time::Duration;
 
@@ -80,7 +92,13 @@ pub struct DockerProxyClient {
 impl DockerProxyClient {
     pub fn new(base_url: impl Into<String>) -> reqwest::Result<Self> {
         Ok(Self {
-            client: reqwest::Client::builder().build()?,
+            // No-redirect policy: see this module's own doc comment above
+            // for why silently following a 3xx would defeat the "only
+            // these three allowlisted paths" guarantee this client exists
+            // to provide.
+            client: reqwest::Client::builder()
+                .redirect(reqwest::redirect::Policy::none())
+                .build()?,
             base_url: base_url.into(),
         })
     }
@@ -206,7 +224,14 @@ mod tests {
     // three request shapes this client makes are simple enough that a raw
     // TCP responder is less machinery than pulling in wiremock/mockito for
     // a handful of tests.
-    async fn serve_one_response(response_bytes: &'static str) -> String {
+    //
+    // Takes an owned `impl Into<String>` rather than `&'static str` so a
+    // caller can build the response body at runtime (e.g. embedding a
+    // second ephemeral server's address in a `Location` header for the
+    // redirect test below) -- a plain string literal still works at every
+    // existing call site via `Into`.
+    async fn serve_one_response(response_bytes: impl Into<String>) -> String {
+        let response_bytes = response_bytes.into();
         let listener = TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind an ephemeral local port");
@@ -352,5 +377,30 @@ mod tests {
         .await;
         let client = DockerProxyClient::new(base_url).unwrap();
         assert!(!client.ping(Some(Duration::from_secs(2))).await);
+    }
+
+    #[tokio::test]
+    // Regression test for the no-redirect policy documented on
+    // DockerProxyClient::new(): a 3xx response must never be followed to
+    // an arbitrary Location, since that would defeat the "only these three
+    // allowlisted paths" guarantee this module exists to provide. The
+    // redirect target below is a real, otherwise-healthy server -- if the
+    // client ever followed the redirect, this test would wrongly observe
+    // HealthReading::Healthy instead of the expected Unreachable, proving
+    // this is a real behavioral check and not just a status-code parse.
+    async fn get_health_does_not_follow_a_redirect_response() {
+        let redirect_target = serve_one_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{\"Health\":{\"Status\":\"healthy\"}}}",
+        )
+        .await;
+        let base_url = serve_one_response(format!(
+            "HTTP/1.1 302 Found\r\nLocation: {redirect_target}/containers/lancache-proxy/json\r\nConnection: close\r\n\r\n"
+        ))
+        .await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        let reading = client
+            .get_health("lancache-proxy", Some(Duration::from_secs(2)))
+            .await;
+        assert_eq!(reading, HealthReading::Unreachable);
     }
 }

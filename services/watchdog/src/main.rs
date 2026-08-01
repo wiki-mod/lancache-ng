@@ -318,11 +318,27 @@ async fn main() {
             services: services_status,
             disk: DiskInfo { cache: disk_cache },
         };
+        // A failed status write is treated as fatal, matching the bash
+        // implementation's behavior under `set -e`: a failing `mkdir`/
+        // tmp-file write/`mv` there exits the whole script. That distinction
+        // matters operationally, not just for parity's own sake -- the
+        // Compose `watchdog` service (deploy/*/docker-compose.yml) sets
+        // `restart: always`, so an exited process actually gets the
+        // orchestrator to restart it. `healthcheck.sh`'s own mtime-freshness
+        // check (see this loop's own comment further below) would correctly
+        // start reporting the container `unhealthy` once status.json goes
+        // stale even without this exit -- but `restart: always` alone only
+        // restarts a container whose process actually exits, not one that is
+        // merely reported unhealthy while still running; without this exit,
+        // the process would keep running, correctly flagged unhealthy, with
+        // no automatic recovery path unless something else (external to this
+        // Compose file) acts on that health status.
         if let Err(e) = status::write_status(&settings.status_file, &watchdog_status) {
             log_err(&format!(
                 "ERROR: failed to write {}: {e}",
                 settings.status_file.display()
             ));
+            std::process::exit(1);
         }
 
         // Deliberately NOT called here yet: maybe_purge()/
