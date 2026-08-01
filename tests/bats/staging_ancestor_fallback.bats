@@ -1399,3 +1399,72 @@ STUB
     # coincidental failure after actually waiting most of the way there.
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
+
+@test "saf_resolve_untouched_backfill_source: curl genuinely missing throughout never gets misread as a confirmed answer -- the ancestor substitution is never taken" {
+    # AG-CI-001's actual question for this whole file is not "does it check
+    # curl's presence" -- it's "does an inconclusive answer (curl missing,
+    # GH_TOKEN unset, a query that fails after retries) ever get silently
+    # treated as if it were a genuine, POSITIVE confirmation" -- because that
+    # would misfire in the unsafe direction: a base commit that just
+    # couldn't be checked would look identical to one that was checked and
+    # genuinely confirmed as a deliberate skip, silently unlocking the
+    # ancestor substitution (the "fast path"/reuse-an-older-built-commit's
+    # image outcome) on no real evidence at all.
+    #
+    # This is an end-to-end proof, not just a unit test of the low-level
+    # query functions' own return codes: curl is genuinely absent from PATH
+    # (no fake/stub curl installed at all, and STAGING_BASE_BUILD_RUN_EXISTS_CMD
+    # is deliberately left UNSET so the real curl-based
+    # saf_base_commit_has_confirmed_run path is actually exercised, not
+    # bypassed by a test-only indirection hook), for the entire call --
+    # covering both the pre-check (fast-path eligibility) and the post-check
+    # (step 3's independent re-derivation) that saf_resolve_untouched_backfill_source
+    # itself performs.
+    #
+    # Traced through every call site this file has for
+    # saf_base_commit_has_confirmed_run's own return codes (0 = a run
+    # exists, 1 = confirmed zero, 2 = inconclusive):
+    #   - saf_resolve_untouched_backfill_source's fast-path pre-check only
+    #     sets fast_path_confirmed_zero=true when pre_run_status == 1
+    #     (confirmed zero) -- 2 (this test's case) leaves it false, so the
+    #     fast path is never entered on an inconclusive answer.
+    #   - Its post-wait decision treats post_run_status == 2 exactly the
+    #     same as == 0 (a confirmed run exists): both refuse the fallback
+    #     and fail closed, per that function's own explicit "(( post_run_status == 2 ))"
+    #     branch.
+    #   - saf_find_built_ancestor's own per-candidate has_run == 2 branch
+    #     fails closed immediately too (see the dedicated "an inconclusive
+    #     run-check for a candidate fails closed" test above) -- not
+    #     exercised in THIS test since the post-check above already stops
+    #     the call before the ancestor walk would ever start, but covered on
+    #     its own elsewhere.
+    # This test proves the outermost, user-visible consequence of all of
+    # that: the call fails, and never prints the "Substituting nearest built
+    # ancestor" success message that would mean the fast path fired.
+    empty_path_dir="$BATS_TEST_TMPDIR/empty_path"
+    mkdir -p "$empty_path_dir"
+    old_path="$PATH"
+
+    setup_linear_fixture
+    unset STAGING_BASE_BUILD_RUN_EXISTS_CMD
+
+    # Force the normal-path wait against BASE_SHA's own image to fail too
+    # (no override resolves base_sha's own suffix), so this genuinely
+    # reaches step 3's post-wait decision rather than resolving before curl
+    # is ever needed.
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    export PATH="$empty_path_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
+    export PATH="$old_path"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"Substituting nearest built ancestor"* ]]
+    [[ "$output" == *"could not be positively determined"* ]]
+}
