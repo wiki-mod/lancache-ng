@@ -4,6 +4,10 @@
 # crates and shell scripts, validates the docker-compose files, scans
 # container images, then builds, pushes, promotes, and releases the stack
 # images on the relevant triggers.
+#
+# Non-draft trigger diagnostic (2026-08-01, issue #1095/#1356): tests
+# whether a non-draft PR touching this file triggers a build-push.yml run,
+# after all four prior draft-PR tests failed to produce one (see #1356).
 
 name: Build & Push
 
