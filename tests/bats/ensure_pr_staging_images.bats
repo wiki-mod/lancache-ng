@@ -47,15 +47,14 @@
 # script no longer reads it at all); base_sha_short is computed here purely
 # for the tests' own assertions about which tag was backfilled from.
 #
-# Issue #1095 Part 1 follow-up (2026-08-01, PR #1355) ancestor-fallback
-# coverage: setup()'s disposable repo now has THREE commits, not two --
-# ancestor2 (the repo's own root commit) -> older -> base -- so the new
-# tests further down have real ancestor commits 1 and 2 steps back from
-# base_sha to walk through.
+# Ancestor-fallback coverage (scripts/lib/staging-ancestor-fallback.sh):
+# setup()'s disposable repo now has THREE commits, not two -- ancestor2 (the
+# repo's own root commit) -> older -> base -- so the tests further down have
+# real ancestor commits 1 and 2 steps back from base_sha to walk through.
 # older_sha/base_sha keep the exact same immediate-parent relationship as
 # before (older_sha is still base_sha's direct parent), so every pre-existing
 # test and assertion above is unaffected by the two added commits.
-# base_commit_has_confirmed_push_run's own indirection hook
+# saf_base_commit_has_confirmed_run's own indirection hook
 # (STAGING_BASE_BUILD_RUN_EXISTS_CMD) defaults to "a run exists" for any sha,
 # so every pre-existing test -- most of which never even reach this check,
 # since their default freshness stub already succeeds on BASE_SHA itself --
@@ -103,26 +102,46 @@ STUB
     # below. older_sha exists so staleness tests have a real, genuinely
     # older commit to report instead of needing to fabricate one.
     #
-    # Issue #1095 Part 1 follow-up: one MORE commit (ancestor2) added BEFORE
-    # older_sha, giving the ancestor-fallback tests further down a real
-    # commit 2 steps back from base_sha to walk through. ancestor2_sha is
+    # One MORE commit (ancestor2) added BEFORE older_sha, giving the
+    # ancestor-fallback tests further down a real commit 2 steps back from
+    # base_sha to walk through. ancestor2_sha is
     # this disposable repo's own root commit (no parent needed -- the first
     # commit in any repo stands on its own), so no separate throwaway "root"
     # commit is needed just to give it one. older_sha/base_sha keep the
     # exact same immediate-parent relationship every pre-existing test above
     # already relies on.
+    #
+    # Every commit here touches a real docs/*.md file (not --allow-empty):
+    # saf_base_commit_paths_are_ignorable() needs a REAL diff to confirm
+    # "every changed path matches build-push.yml's own paths-ignore
+    # patterns" against -- an empty diff (what --allow-empty produces) is
+    # inconclusive, not confirmed-ignorable, which would silently block the
+    # ancestor-fallback tests further down from ever reaching their intended
+    # scenario. Keeping every commit's own change under docs/ means the
+    # default fixture always reads as "a deliberate docs-only skip", which
+    # is exactly the shape every ancestor-fallback test below wants BASE_SHA
+    # (and its own ancestors) to have unless a test deliberately overrides
+    # it (see the dedicated "real (non-doc) path" test further down).
     git_dir="$BATS_TEST_TMPDIR/repo"
     git init -q "$git_dir"
     git -C "$git_dir" config user.email test@example.com
     git -C "$git_dir" config user.name test
-    git -C "$git_dir" commit -q --allow-empty -m ancestor2
+    mkdir -p "$git_dir/docs"
+    echo "ancestor2" > "$git_dir/docs/ancestor2.md"
+    git -C "$git_dir" add docs/ancestor2.md
+    git -C "$git_dir" commit -q -m ancestor2
     ancestor2_sha="$(git -C "$git_dir" rev-parse HEAD)"
-    git -C "$git_dir" commit -q --allow-empty -m older
+    echo "older" > "$git_dir/docs/older.md"
+    git -C "$git_dir" add docs/older.md
+    git -C "$git_dir" commit -q -m older
     older_sha="$(git -C "$git_dir" rev-parse HEAD)"
-    git -C "$git_dir" commit -q --allow-empty -m base
+    echo "base" > "$git_dir/docs/base.md"
+    git -C "$git_dir" add docs/base.md
+    git -C "$git_dir" commit -q -m base
     base_sha="$(git -C "$git_dir" rev-parse HEAD)"
     # #1254/#1255: the back-fill source image is now tagged sha-<this>, not a
-    # channel tag -- matches the script's own base_sha_short="${BASE_SHA:0:7}".
+    # channel tag -- matches scripts/lib/staging-ancestor-fallback.sh's own
+    # internal base_sha_short computation.
     base_sha_short="${base_sha:0:7}"
     revision_stub="$BATS_TEST_TMPDIR/revision.sh"
     cat > "$revision_stub" <<STUB
@@ -131,8 +150,8 @@ echo "$base_sha"
 STUB
     chmod +x "$revision_stub"
 
-    # Issue #1095 Part 1 follow-up: base_commit_has_confirmed_push_run's
-    # indirection hook. Defaults to "a run exists" (exit 0) for any sha, so
+    # saf_base_commit_has_confirmed_run's indirection hook. Defaults to "a
+    # run exists" (exit 0) for any sha, so
     # every pre-existing/unrelated test's untouched-service path keeps
     # today's strict fail-closed behavior deterministically -- with no real
     # `gh`/network dependency -- unless a test below explicitly overrides
@@ -506,18 +525,19 @@ STUB
     printf '%s\n' "$output" | grep -q "BASE_SHA"
 }
 
-# Issue #1095 Part 1 follow-up (2026-08-01, PR #1355): coverage for the
-# ancestor-fallback path. build-push.yml's own push-trigger paths-ignore
-# (#1095 Part 1) means a docs/governance-only BASE_SHA can NEVER get a
-# sha-<short> image built -- confirmed live on PR #1355 (base commit
-# 234f54a8, a pure docs(governance) merge), whose "ensure PR staging images"
-# job failed for 15+ hours for exactly this structurally-unwinnable reason.
-# These tests stub base_commit_has_confirmed_push_run (via
+# Integration coverage for the ancestor-fallback path
+# (scripts/lib/staging-ancestor-fallback.sh), exercised through the full
+# script rather than the library's own direct unit tests (see
+# tests/bats/staging_ancestor_fallback.bats for those). A docs/governance-
+# only BASE_SHA can never get a push-triggered sha-<short> image built,
+# because build-push.yml's own push trigger paths-ignore deliberately skips
+# it. These tests stub saf_base_commit_has_confirmed_run (via
 # STAGING_BASE_BUILD_RUN_EXISTS_CMD) and drive the freshness-revision stub
 # per-image (keyed off the image ref's own sha-<short> suffix) so the
 # ancestor walk's real logic -- not a mocked shortcut -- is exercised
 # end-to-end against setup()'s three-commit disposable repo
-# (ancestor2 -> older -> base).
+# (ancestor2 -> older -> base), each commit touching a real docs/*.md file
+# so the paths-are-ignorable gate reads them as a genuine deliberate skip.
 
 @test "#1095 ancestor fallback: BASE_SHA never built, nearest ancestor 2 commits back (with a real run+image) is used" {
     # base_sha and older_sha (1 commit back) both report ZERO push runs;
@@ -747,4 +767,55 @@ STUB
     # plain `[[ ... != *...* ]]` substring test is used instead of a bare `!`.
     [[ "$output" != *"Substituting nearest built ancestor"* ]]
     printf '%s\n' "$output" | grep -q "could not be positively determined"
+}
+
+@test "#1095 ancestor fallback: BASE_SHA changed a real (non-doc) path -> paths gate blocks the fallback even with zero push runs" {
+    # The single most important regression guard for this mechanism: a
+    # confirmed-zero-push-runs reading alone is not proof of a deliberate
+    # skip -- it only proves GitHub never created a run, not that BASE_SHA's
+    # own changed paths actually matched build-push.yml's paths-ignore list.
+    # If that trigger were ever temporarily disabled while a real,
+    # service-changing commit landed, a bare "zero runs" reading would
+    # misidentify that outage as a deliberate skip and back-fill an
+    # untouched service from a stale ancestor -- silently validating
+    # content that omits the real base change. Adds one more commit on top
+    # of setup()'s docs-only chain that touches a real script file, and
+    # points BASE_SHA at it instead of the default fixture's base_sha.
+    echo "real change" > "$git_dir/scripts_real_change.sh"
+    git -C "$git_dir" add scripts_real_change.sh
+    git -C "$git_dir" commit -q -m "real change"
+    real_change_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    export BASE_SHA="$real_change_sha"
+
+    # Confirmed zero push runs for this exact commit -- the same reading a
+    # real trigger outage would also produce.
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists_real_change.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+[ "\$1" = "$real_change_sha" ] && exit 1
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    # The exact-BASE_SHA freshness check must also fail first (no stub
+    # resolves this commit's own tag), so the script actually reaches the
+    # fallback decision instead of succeeding earlier.
+    stale_stub="$BATS_TEST_TMPDIR/stale_revision_real_change.sh"
+    cat > "$stale_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$stale_stub"
+    export STAGING_IMAGE_REVISION_CMD="$stale_stub"
+
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    [ "$(wc -l < "$backfill_log")" -eq 0 ]
+    [[ "$output" != *"Substituting nearest built ancestor"* ]]
+    printf '%s\n' "$output" | grep -q "paths could not be positively confirmed"
 }
