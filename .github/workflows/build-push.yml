@@ -317,6 +317,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Check repository header on all tracked files
         run: bash scripts/check-file-headers.sh
+      - name: Check workflow files stay under the hard line-count ceiling
+        # See scripts/check-workflow-line-limit.sh's own header comment for
+        # why this exists (issue #1095, 2026-08-01 build-push.yml trigger bug).
+        run: bash scripts/check-workflow-line-limit.sh
 
   compose-healthchecks:
     # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
