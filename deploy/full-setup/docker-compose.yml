@@ -208,7 +208,11 @@ services:
   watchdog:
     image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
     volumes:
-      - proxy-cache:/var/cache/lancache
+      # Read-only (#842 Teil 2): watchdog.sh only reads this tree now (disk
+      # usage reporting) -- the destructive purge moved to the `retention`
+      # service below. See deploy/prod/docker-compose.yml's identical
+      # comment for the full reasoning.
+      - proxy-cache:/var/cache/lancache:ro
       # Issue #870: shared with `ui` below (read-only) so this validation
       # stack exercises the same status.json hand-off dev/prod/quickstart use.
       - watchdog-status:/var/run/watchdog
@@ -231,6 +235,39 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
+
+  # ── Retention (file-retention daemon, #842 Teil 2) ────────────────────────
+  # See deploy/prod/docker-compose.yml's `retention:` service for the full
+  # cap_drop/DAC_OVERRIDE/read_only/network_mode rationale (not repeated
+  # verbatim in every profile, see that comment). No syslog-ng/fluent-bit
+  # services exist in this validation stack at all, so unlike prod/quickstart
+  # this container only needs the cache volume plus its own state volume --
+  # maybe_prune_syslog()/maybe_rotate_fluent_bit_selflog() simply no-op here
+  # (SYSLOG_ENABLED unset -> false; FLUENT_BIT_SELFLOG_DIR's default target
+  # does not exist in this stack -> skipped, logged, not fatal -- exactly the
+  # fail-closed "missing directory" behavior validate_retention_dir()'s
+  # caller already handles for a real deployment where the `logging` profile
+  # is never enabled). `network_mode: none` needs no `validation`/
+  # `validation-api` network assignment (mutually exclusive with
+  # `network_mode` regardless), matching prod/quickstart's identical choice.
+  retention:
+    image: "${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}"
+    entrypoint: ["/retention-entrypoint.sh"]
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+    read_only: true
+    tmpfs:
+      - /tmp
+    volumes:
+      - proxy-cache:/var/cache/lancache
+      - retention-state:/var/lib/lancache-retention-state
+    restart: unless-stopped
 
   # NATS message bus for DNS record sync
   #
@@ -559,3 +596,6 @@ volumes:
   # rely on (AG-VAL-027) -- previously this stack's watchdog wrote
   # status.json to its own container-local, unshared filesystem.
   watchdog-status:
+  # #842 Teil 2: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, separate
+  # from watchdog-status above -- see the `retention:` service's own comment.
+  retention-state:

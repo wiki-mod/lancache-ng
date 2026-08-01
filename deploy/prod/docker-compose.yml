@@ -252,84 +252,38 @@ services:
     # keeps working unchanged while fluent-bit also gets a file to tail.
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
-    # /entrypoint.sh, which itself execs into watchdog.sh, so watchdog.sh
-    # ends up as PID 1 and signal handling (restart/stop) is unaffected --
-    # this holds for watchdog.sh specifically, NOT for retention.sh (see the
-    # caveat below).
+    # /watchdog.sh directly, which becomes PID 1, so signal handling
+    # (restart/stop) is unaffected.
     #
-    # Calls /entrypoint.sh (#842, 2026-08-01) rather than /watchdog.sh
-    # directly: that wrapper is what actually launches retention.sh as a
-    # supervised, genuinely separate background OS process before exec'ing
-    # into watchdog.sh -- see services/watchdog/entrypoint.sh's own header
-    # for the full blast-radius-separation rationale and for why this
-    # supervisor logic lives in the image itself (shared by every
-    # deployment profile) rather than duplicated in this command override.
-    # Honest caveat: retention.sh runs as a *backgrounded* process, never
-    # PID 1, so `docker stop`/`restart` only ever deliver it SIGKILL at
-    # container teardown (Docker signals PID 1 only; PID 1 does not forward
-    # to background jobs here) -- there is no SIGTERM/graceful-shutdown path
-    # for retention.sh today. Worst case observed: an interrupted
-    # copytruncate mid-rotation leaves an uncompressed rotated backup file,
-    # which the next cycle's cap/cleanup logic corrects on its own -- not a
-    # data-loss or corruption risk, but worth stating plainly rather than
-    # implying full parity with watchdog.sh's own signal handling.
-    # Still the same container as watchdog.sh for now -- see that file's
-    # comment and issue #842 for the still-open question of whether this
-    # should become its own compose service/sidecar with a more tightly
-    # locked-down container.
+    # Calls /watchdog.sh directly again (#842 Teil 2, 2026-08-01): the
+    # earlier /entrypoint.sh wrapper that also launched retention.sh as a
+    # backgrounded process inside THIS container is gone -- retention.sh now
+    # runs as its own dedicated `retention` compose service below, with its
+    # own cap_drop/read_only/non-root lockdown that would make no sense
+    # applied to this container too (watchdog.sh still needs to reach
+    # docker-socket-proxy and write status.json). See that service's own
+    # comment block for the full container-hardening rationale, and
+    # retention.sh's own header for why the two were split into separate
+    # processes in the first place (blast-radius separation between
+    # destructive file-retention and health monitoring).
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         mkdir -p /var/log/lancache-watchdog
-        exec /entrypoint.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
+        exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
-    # watchdog does not touch this path at all on installs that never opt
-    # into the `logging` profile. Unlike every other consumer of this
-    # path (fluent-bit's syslog-ng destination reads/writes it as the
-    # owner; a future Admin UI reader would mount it `:ro`), watchdog needs
-    # read-write access here since maybe_prune_syslog() deletes files. Same
-    # bind-mount source as the syslog-ng service (SYSLOG_NG_LOG_DIR) so an
-    # operator-overridden host path is honored consistently by both.
-    environment:
-      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      # SYSLOG_LOG_ROOT is intentionally NOT wired here (#757 review):
-      # watchdog.sh defaults it to /var/log/lancache-syslog-ng, matching the
-      # mount target below. That target is a fixed in-container path shared
-      # with the syslog-ng service's own hard-coded destination -- an
-      # operator setting SYSLOG_LOG_ROOT here would only change where
-      # watchdog *looks*, not where the mount or syslog-ng actually write,
-      # so it would silently break pruning (log_root wouldn't exist) instead
-      # of doing anything useful. The var stays script-internal / test-only.
-      #
-      # Fluent-bit self-log rotation (#1236): deliberately NOT gated behind
-      # SYSLOG_ENABLED, unlike the three vars above. See
-      # maybe_rotate_fluent_bit_selflog()'s own comment in watchdog.sh for
-      # why the double-opt-in that protects the syslog-ng tree does not fit
-      # here -- this bounds fluent-bit's OWN operational log on its own
-      # /data volume, a disk-safety concern that applies whenever the
-      # `logging` profile is active at all, independent of whether the
-      # operator separately opted into SYSLOG_ENABLED's tree-wide pruning or
-      # the Admin UI's syslog viewer.
-      - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
-      - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
-      # Watchdog sees the same cache tree as nginx so disk alerts and purge
-      # decisions match the real proxy cache, not a stale split-cache path.
-      - proxy-cache:/var/cache/lancache
+      # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
+      # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
+      # card) -- the destructive maybe_purge() that used to need read-write
+      # access here moved to the `retention` service below when it became
+      # its own container. Confirmed watchdog.sh has no other write path
+      # left against this mount before narrowing it (grep for CACHE_DIR
+      # turns up exactly one read, `df`, plus the log line reporting it).
+      - proxy-cache:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
       - watchdog-logs:/var/log/lancache-watchdog
-      # Fluent-bit self-log rotation (#1236): same syslog-data named volume
-      # the `syslog` (fluent-bit) service below mounts as /data -- read-write
-      # here since maybe_rotate_fluent_bit_selflog() truncates/rotates the
-      # file in place. Mounted at a distinct in-container path (not /data)
-      # to avoid implying any relationship with watchdog's own unrelated
-      # paths above.
-      - syslog-data:/var/lib/lancache-syslog-data
     healthcheck:
       # Freshness-based (mtime), not just existence -- see
       # services/watchdog/healthcheck.sh's own comment for why a stalled
@@ -345,6 +299,140 @@ services:
     networks:
       - default
       - docker-api
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Retention (file-retention daemon, #842 Teil 2) ────────────────────────
+  # Dedicated sidecar for services/watchdog/retention.sh (cache-age purge,
+  # syslog-ng storage-budget retention, fluent-bit self-log rotation) --
+  # split into its own compose service, separate from `watchdog` above, on
+  # the maintainer's explicit architecture decision (issue #842 comment
+  # thread, 2026-08-01): a bug or compromise in this destructive
+  # find/rm-driven logic must be contained by real container-level
+  # boundaries (capabilities, filesystem, mounts), not merely by running in
+  # a different OS process inside the same container (Teil 1's own
+  # process-split, still true and still valuable, but not a Docker-level
+  # containment boundary by itself).
+  #
+  # `cap_drop: [ALL]` then adding back only what's proven necessary (not
+  # assumed):
+  #   - DAC_OVERRIDE: retention.sh deletes files it does not own, in
+  #     directories it does not control the permissions of -- confirmed live
+  #     on a real runner: nginx creates proxy-cache entries as
+  #     `www-data:www-data`, mode 0700/0600 (no group/other bits at all,
+  #     hardcoded by nginx itself -- confirmed even a process umask set
+  #     before nginx starts has zero effect on this); syslog-ng's own output
+  #     tree is root-owned, `dir-perm(0750)` (already `chgrp`'d to this same
+  #     gid 10001 for the Admin UI's READ-ONLY access, but group has no
+  #     WRITE bit, so that existing sharing does not extend to deletion);
+  #     fluent-bit's self-log is root-owned by that pinned image's own
+  #     default (`Config.User: "0"`, confirmed via `docker inspect`), a
+  #     third-party image whose Dockerfile this project does not control.
+  #     No single UID/GID choice satisfies all three (verified: matching
+  #     nginx's own www-data UID would solve only the cache path; the other
+  #     two are blocked by a different owner/permission scheme each,
+  #     regardless of which identity retention runs as) -- DAC_OVERRIDE is
+  #     the one mechanism that uniformly covers all three without touching
+  #     proxy/syslog-ng/fluent-bit's own configuration or images. (An
+  #     alternative -- unifying every service's UID and adjusting
+  #     syslog-ng's dir-perm plus fluent-bit's own compose `user:` to avoid
+  #     needing any capability at all -- was seriously evaluated and
+  #     rejected for this PR: it is not more secure (Docker's real isolation
+  #     boundary is the mount namespace, not matching UID numbers across
+  #     independently-isolated containers), but it touches three other
+  #     services' configuration, including a confirmed real side effect on
+  #     the Admin UI's nginx-log-reading path via the `adm` group, none of
+  #     which belongs in a PR scoped to retention.sh's own execution
+  #     environment. Worth its own future discussion, not built here.)
+  #   - SETUID, SETGID, SETPCAP: needed ONLY transiently, for
+  #     retention-entrypoint.sh's own root-to-`lancache`(10001) privilege
+  #     drop via `setpriv` -- confirmed empirically (`/proc/self/status`
+  #     before/after) that the final long-running retention.sh process
+  #     retains NONE of these three; only DAC_OVERRIDE survives in its
+  #     Effective/Permitted/Bounding/Ambient capability sets. See
+  #     retention-entrypoint.sh's own header for the full mechanism and why
+  #     a bare `user: "10001:10001"` here could not deliver both "non-root"
+  #     and "can still do its job" at once (a capability added via
+  #     `cap_add` does not reach a non-root process's effective set without
+  #     this drop sequence -- confirmed the naive way first, then fixed).
+  #
+  # CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks on
+  # every path this container can see -- not a small residual detail, and
+  # not oversold as one here. What actually bounds this container's blast
+  # radius is the mount set below (only the four paths retention.sh's own
+  # three functions and stamp file genuinely need, nothing else, no Docker
+  # socket, no other service's volumes) plus `read_only: true` (the
+  # capability bypasses permission CHECKS on paths the mount namespace
+  # already exposes; it does not expose any additional path, and does not
+  # defeat the read-only root filesystem itself). `network_mode: none`
+  # since retention.sh never makes or accepts a network connection (date,
+  # find, du, stat, rm, cp, zstd, mktemp, realpath only) -- verified this
+  # container still starts and completes a full purge/prune/rotate cycle
+  # with networking removed entirely, so this is real containment, not a
+  # theoretical one; note this replaces `networks:`, which is mutually
+  # exclusive with `network_mode`.
+  retention:
+    container_name: lancache-retention
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    entrypoint: ["/retention-entrypoint.sh"]
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+    read_only: true
+    tmpfs:
+      # retention.sh's mktemp calls (scan/error scratch files ahead of every
+      # find/rm pass) need a writable /tmp -- the rest of the root
+      # filesystem stays read-only.
+      - /tmp
+    env_file:
+      - ../../config/prod/watchdog.env
+    # Same rationale as watchdog's own identical block before this split --
+    # see git history for that comment; unchanged here since retention.sh is
+    # the process that actually acts on every one of these variables now.
+    environment:
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
+      - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
+    volumes:
+      # The three targets retention.sh's own three functions act on --
+      # exactly the mounts this container has, nothing else (no Docker
+      # socket, no other service's own volumes). Read-write, unlike
+      # watchdog's now-:ro mount above, since deletion is this container's
+      # entire job.
+      - proxy-cache:/var/cache/lancache
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
+      - syslog-data:/var/lib/lancache-syslog-data
+      # Own log file (retention.log), shared volume with watchdog.log --
+      # purely observability data, not part of the destructive-operation
+      # surface, so sharing this one volume with the watchdog container is
+      # fine (fluent-bit already expects both files at this same path).
+      - watchdog-logs:/var/log/lancache-watchdog
+      # Dedicated state volume (#842 Teil 2 architecture decision): holds
+      # ONLY PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately separate from
+      # watchdog-status (watchdog.sh's status.json, read by the Admin UI) --
+      # the two containers no longer share any state now that they don't
+      # share a process either.
+      - retention-state:/var/lib/lancache-retention-state
+    # No healthcheck (deliberate, not an oversight): this container's own
+    # liveness was never part of the health-check/restart state machine --
+    # that separation is the whole point of Teil 1's process split -- and
+    # inventing a heartbeat-file-based check here would be new scope beyond
+    # what this issue asked for. `restart: always` still recovers a crashed
+    # or OOM-killed container the same way every other unmonitored service
+    # in this file already relies on (e.g. dhcp-probe, netdata have none
+    # either). A lightweight heartbeat check is a reasonable future
+    # follow-up, not built speculatively here.
     restart: always
     logging:
       driver: json-file
@@ -1899,6 +1987,10 @@ volumes:
   pdns-config-snapshots-standard:
   pdns-config-snapshots-ssl:
   watchdog-status:
+  # #842 Teil 2: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately
+  # separate from watchdog-status above -- see the `retention:` service's own
+  # comment for the architecture decision behind this split.
+  retention-state:
   netdataconfig:
   netdatalib:
   netdatacache:

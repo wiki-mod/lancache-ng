@@ -1282,69 +1282,41 @@ services:
     # keeps working unchanged while fluent-bit also gets a file to tail.
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
-    # /entrypoint.sh, which itself execs into watchdog.sh, so watchdog.sh
-    # ends up as PID 1 and signal handling (restart/stop) is unaffected --
-    # this holds for watchdog.sh specifically, NOT for retention.sh, which
-    # only ever gets SIGKILL at teardown (see deploy/prod/docker-compose.yml's
-    # identical comment for the full caveat and its worst-case impact).
+    # /watchdog.sh directly, which becomes PID 1, so signal handling
+    # (restart/stop) is unaffected.
     #
-    # Calls /entrypoint.sh (#842, 2026-08-01) rather than /watchdog.sh
-    # directly -- see services/watchdog/entrypoint.sh's own header and
-    # deploy/prod/docker-compose.yml's identical comment for why (it
-    # launches retention.sh as a supervised background process before
-    # exec'ing into watchdog.sh).
+    # Calls /watchdog.sh directly again (#842 Teil 2, 2026-08-01): retention.sh
+    # now runs as its own dedicated `retention` compose service below, with
+    # its own cap_drop/read_only/non-root lockdown -- see that service's own
+    # comment block for the full container-hardening rationale, and
+    # deploy/prod/docker-compose.yml's identical watchdog comment for why this
+    # container no longer needs to launch a second process at all.
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         mkdir -p /var/log/lancache-watchdog
-        exec /entrypoint.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
+        exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - CHECK_INTERVAL=30
       - RESTART_AFTER=3
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
-      - CACHE_VALID_DAYS=365
       - CACHE_DIR=/var/cache/lancache
       - CONTAINER_PROXY=lancache-proxy
       - CONTAINER_DNS_STANDARD=lancache-dns-standard
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - CONTAINER_NATS=lancache-nats
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
-      # watchdog does not touch this path at all on installs that never opt
-      # into the `logging` profile.
-      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      # SYSLOG_LOG_ROOT is intentionally NOT wired here (#757 review): see
-      # the matching comment in deploy/prod/docker-compose.yml -- watchdog.sh
-      # already defaults it to /var/log/lancache-syslog-ng, matching the
-      # fixed mount target below, and exposing it as an independently
-      # settable compose var would silently break pruning if ever changed.
-      #
-      # Fluent-bit self-log rotation (#1236): deliberately NOT gated behind
-      # SYSLOG_ENABLED -- see the matching comment in
-      # deploy/prod/docker-compose.yml and maybe_rotate_fluent_bit_selflog()'s
-      # own comment in watchdog.sh for why.
-      - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
-      - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
-      # The watchdog reports and purges the same shared cache path the proxy uses.
-      # Do not point this at a per-mode subdirectory; the split paths no longer exist.
-      - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache
+      # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
+      # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see
+      # deploy/prod/docker-compose.yml's identical comment for the full
+      # reasoning. The destructive purge that used to need read-write access
+      # here moved to the `retention` service below.
+      - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
-      # Unlike every other consumer of this volume (fluent-bit's syslog-ng
-      # destination reads/writes it as the owner; a future Admin UI reader
-      # would mount it `:ro`), watchdog needs read-write access here since
-      # maybe_prune_syslog() deletes files.
-      - logs-syslog-ng:/var/log/lancache-syslog-ng
       - watchdog-logs:/var/log/lancache-watchdog
-      # Fluent-bit self-log rotation (#1236): same syslog-data named volume
-      # the `syslog` (fluent-bit) service mounts as /data -- read-write here
-      # since maybe_rotate_fluent_bit_selflog() truncates/rotates the file
-      # in place.
-      - syslog-data:/var/lib/lancache-syslog-data
     healthcheck:
       # Freshness-based (mtime), not just existence -- see
       # services/watchdog/healthcheck.sh's own comment for why a stalled
@@ -1360,6 +1332,49 @@ services:
     networks:
       - default
       - docker-api
+    restart: always
+    logging:
+      driver: json-file
+      options: {max-size: "5m", max-file: "2"}
+
+  # ── Retention (file-retention daemon, #842 Teil 2) ────────────────────────
+  # See deploy/prod/docker-compose.yml's identical `retention:` service block
+  # for the full cap_drop/DAC_OVERRIDE/read_only/network_mode rationale --
+  # not repeated verbatim here to avoid this comment drifting out of sync in
+  # one profile but not the other; the mechanism and the evidence behind it
+  # are identical across every deployment profile.
+  retention:
+    container_name: lancache-retention
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    entrypoint: ["/retention-entrypoint.sh"]
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+    read_only: true
+    tmpfs:
+      - /tmp
+    environment:
+      - CACHE_VALID_DAYS=365
+      - CACHE_DIR=/var/cache/lancache
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
+      - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
+    volumes:
+      - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache
+      - logs-syslog-ng:/var/log/lancache-syslog-ng
+      - syslog-data:/var/lib/lancache-syslog-data
+      - watchdog-logs:/var/log/lancache-watchdog
+      - retention-state:/var/lib/lancache-retention-state
+    # No healthcheck -- deliberate, see deploy/prod/docker-compose.yml's
+    # identical comment. restart: always recovers a crashed container the
+    # same way every other unmonitored service here already relies on.
     restart: always
     logging:
       driver: json-file

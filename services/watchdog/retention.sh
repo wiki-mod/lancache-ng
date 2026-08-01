@@ -16,10 +16,17 @@
 # process (not just separate functions inside one shared bash process, which
 # is how this code lived before this split) is what makes that true rather
 # than aspirational: an uncaught fatal error here (a `set -e` exit from an
-# edge case this file doesn't yet handle) kills only this process -- see
-# deploy/*/docker-compose.yml's watchdog `command:` override, which
-# supervises and respawns this script independently of watchdog.sh's own
-# main loop.
+# edge case this file doesn't yet handle) kills only this process.
+#
+# Since #842 Teil 2 (2026-08-01), that process is also a genuinely separate
+# CONTAINER (a dedicated `retention` compose service, see
+# deploy/*/docker-compose.yml), not merely a separate process backgrounded
+# inside watchdog's own container the way an earlier version of this split
+# had it -- restart/respawn on crash comes from Compose's own `restart:
+# always` on that service now, the same mechanism every other service in this
+# project already relies on, rather than this image re-implementing process
+# supervision itself. See retention-entrypoint.sh for that container's own
+# entrypoint and its non-root/capability-scoped privilege drop.
 #
 # Deliberately does NOT source any code from watchdog.sh, not even the
 # trivial log()/is_truthy() helpers duplicated below almost verbatim --
@@ -180,13 +187,22 @@ SYSLOG_LOG_ROOT_ALLOWED_PREFIX="${SYSLOG_LOG_ROOT_ALLOWED_PREFIX:-/var/log}"
 FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="${FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX:-/var/lib}"
 
 CACHE_VALID_DAYS="${CACHE_VALID_DAYS:-365}"
-PURGE_STAMP="${PURGE_STAMP:-/var/run/watchdog/purge.stamp}"
+# /var/lib/lancache-retention-state (#842 Teil 2, 2026-08-01): moved off
+# watchdog.sh's own /var/run/watchdog (shared with STATUS_FILE/status.json,
+# read by the Admin UI) onto a dedicated volume once retention.sh became its
+# own compose service/container -- these two stamp files are retention's own
+# rate-limiting state, unrelated to health-check status, and sharing that
+# volume stopped making sense once the two processes stopped sharing a
+# container. See services/watchdog/Dockerfile and retention-entrypoint.sh for
+# how this new path gets created/chowned for the non-root `lancache` user
+# this script now runs as in production.
+PURGE_STAMP="${PURGE_STAMP:-/var/lib/lancache-retention-state/purge.stamp}"
 
 # See watchdog.sh's identical comment block on SYSLOG_ENABLED for the full
 # fail-closed/truthy-parsing rationale; duplicated here since this is the
 # process that actually acts on it.
 SYSLOG_ENABLED="${SYSLOG_ENABLED:-false}"
-SYSLOG_PRUNE_STAMP="${SYSLOG_PRUNE_STAMP:-/var/run/watchdog/syslog-prune.stamp}"
+SYSLOG_PRUNE_STAMP="${SYSLOG_PRUNE_STAMP:-/var/lib/lancache-retention-state/syslog-prune.stamp}"
 
 CACHE_DIR="$(resolve_cache_dir)"
 

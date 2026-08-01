@@ -91,6 +91,7 @@ RUN apk upgrade --no-cache && \
     ca-certificates \
     findutils \
     coreutils \
+    util-linux \
     nano \
     lsof \
     ripgrep \
@@ -105,16 +106,60 @@ RUN apk upgrade --no-cache && \
 # syslog-ng's official image can't be given a custom Dockerfile, while this
 # project owns this Dockerfile directly, so a guaranteed build-time install
 # is simpler and doesn't depend on network egress at container start.
+#
+# util-linux (#842 Teil 2, 2026-08-01): provides `setpriv`, which
+# retention-entrypoint.sh uses to drop the `retention` sidecar container from
+# root to the unprivileged `lancache` user while carrying exactly one Linux
+# capability (CAP_DAC_OVERRIDE) across that privilege drop via its
+# `--ambient-caps` support -- see that file's own header for the full
+# empirical reasoning (a bare `cap_add` + non-root `user:` does NOT hand a
+# usable capability to a non-root process; confirmed via `/proc/self/status`
+# on a real runner). Alpine's BusyBox ships no equivalent tool. `shadow` is
+# NOT needed alongside it: BusyBox's own `addgroup`/`adduser` applets already
+# support every flag the `lancache` account creation below needs (`-g`, `-D`,
+# `-H`, `-G`, `-s`), confirmed directly against this exact base image.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 COPY watchdog.sh /watchdog.sh
 COPY healthcheck.sh /healthcheck.sh
 COPY retention.sh /retention.sh
-COPY entrypoint.sh /entrypoint.sh
-RUN chmod +x /watchdog.sh /healthcheck.sh /retention.sh /entrypoint.sh
+COPY retention-entrypoint.sh /retention-entrypoint.sh
+RUN chmod +x /watchdog.sh /healthcheck.sh /retention.sh /retention-entrypoint.sh
 VOLUME ["/var/run/watchdog"]
-# entrypoint.sh (#842) launches retention.sh as a supervised background
-# process before exec'ing into watchdog.sh -- see that file's own header for
-# why this lives in the image's own ENTRYPOINT rather than duplicated in
-# each deployment profile's compose command override.
-ENTRYPOINT ["/entrypoint.sh"]
+
+# `lancache` account (#842 Teil 2, 2026-08-01): fixed uid/gid 10001,
+# matching services/ui/Dockerfile's own existing account of the same name --
+# the maintainer's explicit instruction was to reuse this project-wide
+# convention rather than mint a new dedicated identity for this container.
+# Only the `retention` compose service actually runs as this user (via
+# retention-entrypoint.sh's root-to-lancache privilege drop, see that file);
+# the plain `watchdog` service still runs as root, unchanged -- Teil 2 of
+# #842 scoped the lockdown to retention.sh's own execution environment, not
+# watchdog.sh's, and extending it there is deliberately left as a follow-up,
+# not built speculatively here.
+#
+# /var/lib/lancache-retention-state (#842 Teil 2): retention.sh's own
+# PURGE_STAMP/SYSLOG_PRUNE_STAMP now live on their own dedicated volume,
+# separate from /var/run/watchdog's status.json (watchdog.sh's, read by the
+# Admin UI) -- the architecture decision from #842's own comment thread was
+# to stop sharing that volume between the health-check state and retention's
+# rate-limiting stamps, since they belong to genuinely different containers
+# now. Pre-chowning it here at build time is belt-and-suspenders: a fresh
+# named volume's first mount inherits an empty directory's ownership from the
+# image, but retention-entrypoint.sh ALSO re-chowns it at container start
+# (matching services/ui/docker-entrypoint.sh's identical reasoning) since a
+# bind-mount override or a volume that already existed from an older install
+# would not get this image-time ownership at all.
+RUN addgroup -g 10001 lancache && \
+    adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
+    mkdir -p /var/lib/lancache-retention-state && \
+    chown lancache:lancache /var/lib/lancache-retention-state
+
+# Default ENTRYPOINT: plain watchdog.sh, unchanged from before #842 Teil 2
+# split retention out into its own sidecar container/service. The
+# `retention` compose service overrides this with `entrypoint:
+# ["/retention-entrypoint.sh"]` (see deploy/*/docker-compose.yml's own
+# `retention:` service block) -- both scripts ship in this one image so a
+# single build serves either role, chosen entirely by which compose service
+# invokes it.
+ENTRYPOINT ["/watchdog.sh"]
