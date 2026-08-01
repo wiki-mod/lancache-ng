@@ -459,6 +459,59 @@ RUN set -euo pipefail; \
     python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server; \
     rm -rf /var/lib/apt/lists/*
 
+# musl cross-compilation target (issue #815): #815's services/ui OS-evaluation
+# research proved live, on this same unmodified build-tools image
+# (2026-07-31, runner lancache-240), that `apt-get install musl-tools
+# musl-dev` (Debian trixie's own repo, 1.2.5-3.1~deb13u1) plus `rustup target
+# add x86_64-unknown-linux-musl` builds services/ui's real crate --
+# `rusqlite` with bundled sqlite3, `zstd`'s C library, and `reqwest`'s rustls
+# backend on aws-lc-rs/aws-lc-sys all included, none of which is a
+# hypothetical toy dependency -- into a working static-pie binary with no
+# dynamic library dependencies. This RUN step makes that proven toolchain a
+# permanent, additive part of the shared image so every consumer that wants
+# to cross-compile to musl can do so without repeating the ad hoc apt-get/
+# rustup steps #815's research already validated once. #815 explicitly
+# recommends adding this once for both of its known consumers rather than
+# duplicating the toolchain setup per-crate: services/ui (this PR's own
+# network-verification build) and services/dns's nats-subscriber crate (its
+# own musl retargeting is a separate, not-in-scope-here migration -- see that
+# crate's own follow-up -- but must not be precluded by this image lacking
+# the toolchain).
+#
+# Deliberately additive only: this does not touch the image's existing
+# default glibc toolchain or target in any way. `rustup target add` only
+# downloads and registers a second target's prebuilt std library alongside
+# the one every other Rust build in this image already uses by default
+# (`rustup target list` still reports the glibc host triple as `(default)`;
+# nothing here runs `rustup default` or passes `--target` anywhere else in
+# this Dockerfile) -- an ordinary `cargo build`/`cargo test` invocation with
+# no explicit `--target` flag is completely unaffected by this block, it only
+# becomes available as an opt-in choice for a build that explicitly requests
+# musl.
+#
+# Native-arch target only, mirroring the cargo-audit/cargo-tarpaulin
+# architecture `case` block earlier in this stage: this image is built
+# separately for linux/amd64 and linux/arm64 (AG-CI-010), and each build gets
+# the musl target matching its own host architecture
+# (x86_64-unknown-linux-musl on amd64, aarch64-unknown-linux-musl on arm64)
+# rather than a cross target that would additionally need a cross-linker this
+# image does not otherwise carry. A future consumer that specifically needs
+# to cross-compile to the *other* architecture's musl target from this image
+# would need to add that cross-linker explicitly first -- it is not silently
+# assumed to already work here.
+RUN set -euo pipefail; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) musl_target="x86_64-unknown-linux-musl" ;; \
+      arm64) musl_target="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      musl-dev \
+      musl-tools; \
+    rustup target add "${musl_target}"; \
+    rm -rf /var/lib/apt/lists/*
+
 RUN set -euo pipefail; \
     required_tools=( \
       bash \
@@ -510,6 +563,7 @@ RUN set -euo pipefail; \
       make \
       mkdir \
       mktemp \
+      musl-gcc \
       mv \
       openssl \
       printf \
@@ -553,7 +607,15 @@ RUN set -euo pipefail; \
       *:/usr/local/cargo/bin:*) ;; \
       *) echo "/usr/local/cargo/bin is missing from PATH" >&2; exit 1 ;; \
     esac; \
-    bash -lc 'set -euo pipefail; cargo --version; rustc --version; rustfmt --version; cargo clippy --version'
+    bash -lc 'set -euo pipefail; cargo --version; rustc --version; rustfmt --version; cargo clippy --version'; \
+    musl-gcc --version; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) musl_target_check="x86_64-unknown-linux-musl" ;; \
+      arm64) musl_target_check="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported architecture for musl target verification: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    rustup target list --installed | grep -qx "${musl_target_check}"; \
+    rustup target list | grep -qF "(default)"
 
 WORKDIR /workspace
 
