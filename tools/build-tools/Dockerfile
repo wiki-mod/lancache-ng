@@ -519,17 +519,26 @@ RUN set -euo pipefail; \
 # the native-arch musl target registered, glibc still the default host
 # triple) alongside its existing required_tools verification. Both checks
 # were first written as `<producer> | grep -q...` and failed a real build on
-# lancache-240 with exit code 141 (SIGPIPE), not a logic error: `grep -q`
-# exits as soon as it finds its first match, closing its end of the pipe
-# early -- if the producer (`rustc -vV`, `rustup target list --installed`)
-# is still writing further lines at that moment (e.g. `host:` is not the
-# last line of `rustc -vV`'s output), it receives SIGPIPE and bash's
-# `pipefail` reports that as the pipeline's exit status even though the
-# `grep` itself matched successfully. Dropping `-q` (letting grep consume
-# the producer's full output, redirecting stdout to `/dev/null` explicitly
-# instead) avoids the early pipe close -- the same reason this Dockerfile's
-# earlier distcc-pump-parser checks already use `grep -F ... "$file"
-# >/dev/null` against a file rather than a live pipe.
+# lancache-240 with exit code 141 (SIGPIPE), not a logic error, and a real
+# CI run on this PR reproduced the identical failure: `grep -q` exits as
+# soon as it finds its first match, closing its end of the pipe early --
+# since the producer (`rustc -vV`, `rustup target list --installed`) is
+# still writing further lines at that moment (`host:` is not the last line
+# of `rustc -vV`'s output), it receives SIGPIPE, and bash's `pipefail`
+# reports that as the pipeline's exit status even though `grep` itself
+# matched successfully. This is the same "early-exiting consumer piped from
+# a still-writing producer under pipefail" failure shape as PR #1371's
+# `find_built_ancestor()` (`git log | tail | head -n 50`), just a different
+# consumer command -- fixed here by capturing each producer's full output
+# into a shell variable first (a command substitution runs the producer to
+# completion before the variable is even assigned, so there is no live pipe
+# for an early exit to break) and grepping the variable via a here-string,
+# rather than merely dropping `-q` from a live pipe (which also would have
+# worked here, but leaves the same footgun available for the next person to
+# reintroduce `-q` without knowing why that regresses). This Dockerfile's
+# earlier distcc-pump-parser checks sidestep the whole class differently,
+# by grepping a file (`grep -F ... "$file" >/dev/null`) rather than a live
+# process's stdout, which never has a producer to send SIGPIPE to.
 RUN set -euo pipefail; \
     required_tools=( \
       bash \
@@ -632,8 +641,10 @@ RUN set -euo pipefail; \
       arm64) musl_target_check="aarch64-unknown-linux-musl" ;; \
       *) echo "Unsupported architecture for musl target verification: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
-    rustup target list --installed | grep -x "${musl_target_check}" >/dev/null; \
-    rustc -vV | grep -E '^host: .*-gnu$' >/dev/null
+    installed_targets="$(rustup target list --installed)"; \
+    grep -qx "${musl_target_check}" <<<"${installed_targets}"; \
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
 
 WORKDIR /workspace
 
