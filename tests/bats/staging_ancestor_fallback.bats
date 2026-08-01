@@ -280,20 +280,41 @@ STUB
     export GH_TOKEN="test-token"
 }
 
-@test "saf_query_tag_publishing_run_count: sums push/workflow_dispatch/schedule, never queries pull_request" {
+@test "saf_query_tag_publishing_run_count: genuinely zero everywhere checks push/workflow_dispatch/schedule, never pull_request" {
     export FAKE_CURL_FAIL_COUNT=0
     export FAKE_CURL_RUN_COUNT=0
     install_fake_curl_flaky
     run saf_query_tag_publishing_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
     [ "$status" -eq 0 ]
     [ "$output" = "0" ]
-    # Exactly 3 calls (push, workflow_dispatch, schedule) -- not 1 (a single
-    # unfiltered query) and not 4+ (accidentally also querying pull_request).
+    # A genuine zero across every tag-publishing event type must check all
+    # three (push, workflow_dispatch, schedule) before concluding zero --
+    # not 1 (a single unfiltered query) and not 4+ (accidentally also
+    # querying pull_request).
     [ "$(wc -l < "$call_log")" -eq 3 ]
     grep -qF "event=push" "$call_log"
     grep -qF "event=workflow_dispatch" "$call_log"
     grep -qF "event=schedule" "$call_log"
     [[ "$(cat "$call_log")" != *"event=pull_request"* ]]
+}
+
+@test "saf_query_tag_publishing_run_count: stops at the first non-zero event type instead of querying all three" {
+    # A rate-limit/efficiency concern, not just a correctness one: the exact
+    # count is never needed by any caller (only zero vs non-zero), so once
+    # push confirms at least one run, workflow_dispatch/schedule must not
+    # also be queried.
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_RUN_COUNT_FOR_EVENT_NAME="push"
+    export FAKE_CURL_RUN_COUNT_FOR_EVENT=1
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run saf_query_tag_publishing_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
+    [ "$status" -eq 0 ]
+    [ "$output" = "1" ]
+    # Exactly 1 call -- push is queried first (see the function's own
+    # event-order loop) and its non-zero result short-circuits the rest.
+    [ "$(wc -l < "$call_log")" -eq 1 ]
+    grep -qF "event=push" "$call_log"
 }
 
 @test "saf_base_commit_has_confirmed_run: a pull_request-only run for a candidate does NOT count as a confirmed build" {

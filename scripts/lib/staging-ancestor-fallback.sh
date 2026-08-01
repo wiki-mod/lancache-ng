@@ -252,29 +252,47 @@ saf_query_run_count() {
 # proof an ancestor candidate was built.
 #
 # Issues one saf_query_run_count call per allowed event type (push,
-# workflow_dispatch, schedule) and sums the results, rather than one
-# unfiltered query filtered client-side by each run's own `event` field:
-# the Actions API's own `event=` filter already narrows server-side to
-# exactly the trigger types that matter, so this reuses saf_query_run_count
-# (and its curl/grep/retry machinery) unchanged three times instead of
-# parsing an array of per-run event strings out of an unfiltered response
+# workflow_dispatch, schedule), stopping at the FIRST non-zero count found,
+# rather than one unfiltered query filtered client-side by each run's own
+# `event` field: the Actions API's own `event=` filter already narrows
+# server-side to exactly the trigger types that matter, so this reuses
+# saf_query_run_count (and its curl/grep/retry machinery) unchanged instead
+# of parsing an array of per-run event strings out of an unfiltered response
 # with the same jq-free tooling constraint saf_query_run_count's own header
-# documents. Three queries per candidate is a deliberate, minor efficiency
-# trade against a much simpler and more robust implementation.
+# documents. The exact count is never needed by any caller (only "zero" vs
+# "at least one" -- see saf_base_commit_has_confirmed_run below), so
+# returning as soon as any event type confirms at least one run avoids
+# querying the remaining event types for no benefit.
 #
-# Returns non-zero with no output if any of the three underlying queries
-# fails (this function has no way to distinguish "genuinely zero
-# tag-publishing runs" from "one of the three sub-queries failed", so a
-# failure anywhere must propagate as inconclusive, not as a partial count).
+# RATE-LIMIT NOTE: this still issues up to 3 queries per candidate in the
+# genuinely-zero case (a real, unbroken run of docs-only commits with no
+# build anywhere -- confirmed realistic in this project's own history, not
+# a hypothetical), and saf_find_built_ancestor below can examine up to
+# ancestor_search_depth candidates -- a pathological worst case is still
+# real, just no longer the COMMON case (a candidate with any real run at all
+# now costs exactly 1 query, not 3). GITHUB_TOKEN-authenticated Actions
+# requests are rate-limited per-repository (not the higher personal-token
+# limit), so a caller examining many services against a long docs-only
+# chain should keep this in mind; the early-exit here is a real mitigation,
+# not a full elimination of that exposure.
+#
+# Returns non-zero with no output if any queried event type's own query
+# fails before a non-zero count is found (this function has no way to
+# distinguish "genuinely zero tag-publishing runs so far" from "a
+# sub-query failed", so a failure anywhere must propagate as inconclusive,
+# not as a partial/zero count).
 saf_query_tag_publishing_run_count() {
   local repository="${1:?saf_query_tag_publishing_run_count: repository is required}"
   local sha="${2:?saf_query_tag_publishing_run_count: sha is required}"
-  local event total=0 count
+  local event count
   for event in push workflow_dispatch schedule; do
     count="$(saf_query_run_count "$repository" "$sha" "$event")" || return 1
-    total=$((total + count))
+    if (( count > 0 )); then
+      printf '%s\n' "$count"
+      return 0
+    fi
   done
-  printf '%s\n' "$total"
+  printf '%s\n' "0"
 }
 
 # saf_base_commit_has_confirmed_run <repository> <sha> <event-or-empty>
