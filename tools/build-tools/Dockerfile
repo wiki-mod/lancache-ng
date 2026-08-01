@@ -515,6 +515,21 @@ RUN set -euo pipefail; \
     rustup target add "${musl_target}"; \
     rm -rf /var/lib/apt/lists/*
 
+# This RUN's own tail below adds two musl-related checks (musl-gcc present,
+# the native-arch musl target registered, glibc still the default host
+# triple) alongside its existing required_tools verification. Both checks
+# were first written as `<producer> | grep -q...` and failed a real build on
+# lancache-240 with exit code 141 (SIGPIPE), not a logic error: `grep -q`
+# exits as soon as it finds its first match, closing its end of the pipe
+# early -- if the producer (`rustc -vV`, `rustup target list --installed`)
+# is still writing further lines at that moment (e.g. `host:` is not the
+# last line of `rustc -vV`'s output), it receives SIGPIPE and bash's
+# `pipefail` reports that as the pipeline's exit status even though the
+# `grep` itself matched successfully. Dropping `-q` (letting grep consume
+# the producer's full output, redirecting stdout to `/dev/null` explicitly
+# instead) avoids the early pipe close -- the same reason this Dockerfile's
+# earlier distcc-pump-parser checks already use `grep -F ... "$file"
+# >/dev/null` against a file rather than a live pipe.
 RUN set -euo pipefail; \
     required_tools=( \
       bash \
@@ -617,8 +632,8 @@ RUN set -euo pipefail; \
       arm64) musl_target_check="aarch64-unknown-linux-musl" ;; \
       *) echo "Unsupported architecture for musl target verification: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
-    rustup target list --installed | grep -qx "${musl_target_check}"; \
-    rustc -vV | grep -qE '^host: .*-gnu$'
+    rustup target list --installed | grep -x "${musl_target_check}" >/dev/null; \
+    rustc -vV | grep -E '^host: .*-gnu$' >/dev/null
 
 WORKDIR /workspace
 
