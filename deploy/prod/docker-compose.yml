@@ -252,13 +252,25 @@ services:
     # keeps working unchanged while fluent-bit also gets a file to tail.
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
-    # watchdog.sh itself, so it stays PID 1 and signal handling (restart/
-    # stop) is unaffected.
+    # /entrypoint.sh, which itself execs into watchdog.sh, so watchdog.sh
+    # ends up as PID 1 and signal handling (restart/stop) is unaffected.
+    #
+    # Calls /entrypoint.sh (#842, 2026-08-01) rather than /watchdog.sh
+    # directly: that wrapper is what actually launches retention.sh as a
+    # supervised, genuinely separate background OS process before exec'ing
+    # into watchdog.sh -- see services/watchdog/entrypoint.sh's own header
+    # for the full blast-radius-separation rationale and for why this
+    # supervisor logic lives in the image itself (shared by every
+    # deployment profile) rather than duplicated in this command override.
+    # Still the same container as watchdog.sh for now -- see that file's
+    # comment and issue #842 for the still-open question of whether this
+    # should become its own compose service/sidecar with a more tightly
+    # locked-down container.
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         mkdir -p /var/log/lancache-watchdog
-        exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
+        exec /entrypoint.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
     # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so

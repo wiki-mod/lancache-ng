@@ -1282,13 +1282,19 @@ services:
     # keeps working unchanged while fluent-bit also gets a file to tail.
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
-    # watchdog.sh itself, so it stays PID 1 and signal handling (restart/
-    # stop) is unaffected.
+    # /entrypoint.sh, which itself execs into watchdog.sh, so watchdog.sh
+    # ends up as PID 1 and signal handling (restart/stop) is unaffected.
+    #
+    # Calls /entrypoint.sh (#842, 2026-08-01) rather than /watchdog.sh
+    # directly -- see services/watchdog/entrypoint.sh's own header and
+    # deploy/prod/docker-compose.yml's identical comment for why (it
+    # launches retention.sh as a supervised background process before
+    # exec'ing into watchdog.sh).
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         mkdir -p /var/log/lancache-watchdog
-        exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
+        exec /entrypoint.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - CHECK_INTERVAL=30
