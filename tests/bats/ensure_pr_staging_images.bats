@@ -709,11 +709,22 @@ STUB
     # otherwise setup()'s default revision stub (always fresh at BASE_SHA)
     # would let the ordinary backfill succeed before this scenario is even
     # reached, the same reason the dedicated "confirmed run" test below needs
-    # this override too.
+    # this override too. Scoped to the BASE_SHA image tag specifically (not a
+    # blanket "always answer older_sha" stub): this test's own fixture name
+    # ("no ancestor anywhere has a usable run") requires every OTHER image
+    # query -- in particular saf_find_built_ancestor's own direct
+    # image-existence check for a candidate whose paths could not be
+    # confirmed ignorable -- to correctly report "no such image" too, or this
+    # stub would inadvertently simulate an ancestor candidate's image
+    # existing when this fixture means for none to.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_no_ancestor.sh"
     cat > "$stale_stub" <<STUB
 #!/usr/bin/env bash
-echo "$older_sha"
+image="\$1"
+case "\$image" in
+    *":sha-${base_sha:0:7}") echo "$older_sha" ;;
+    *) exit 1 ;;
+esac
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"

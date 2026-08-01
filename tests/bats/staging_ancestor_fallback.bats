@@ -960,6 +960,60 @@ STUB
     [[ "$output" == *"$real_change_parent_sha"* ]]
 }
 
+@test "saf_find_built_ancestor: a run-less candidate with a real path change but a genuinely existing, correctly-labeled image is used directly, not blocked" {
+    # Workflow run history has a finite retention window (GitHub Actions,
+    # commonly 90 days), but this project's own durable per-commit
+    # sha-<short> image tags are not subject to that retention at all -- a
+    # candidate built long enough ago that its run record has since expired
+    # would report zero runs here even though it genuinely WAS built and its
+    # image still exists. Same fixture shape as the test above (a real,
+    # non-doc path change, zero recorded runs), except this candidate's own
+    # image genuinely exists and is correctly labeled -- proving that, unlike
+    # the test above (where checking the image ALSO comes up empty), a
+    # positively confirmed existing image is accepted directly instead of
+    # failing closed, since it is stronger, retention-independent proof of a
+    # real build than the (here misleadingly empty) run query.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/docs" "$git_dir/scripts"
+
+    echo "grandparent" > "$git_dir/docs/grandparent.md"
+    git -C "$git_dir" add docs/grandparent.md
+    git -C "$git_dir" commit -q -m grandparent
+    grandparent_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "real change" > "$git_dir/scripts/real-change.sh"
+    git -C "$git_dir" add scripts/real-change.sh
+    git -C "$git_dir" commit -q -m "real change parent"
+    real_change_parent_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "base" > "$git_dir/docs/base.md"
+    git -C "$git_dir" add docs/base.md
+    git -C "$git_dir" commit -q -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    # Every run query reports zero -- including for real_change_parent_sha,
+    # simulating its own genuine run record having since expired from
+    # Actions' retention window.
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    # The image itself, unlike the run record, genuinely still exists and is
+    # correctly labeled for real_change_parent_sha specifically.
+    install_revision_stub_for "$real_change_parent_sha"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$real_change_parent_sha" ]
+}
+
 @test "saf_find_built_ancestor: a run-less candidate that is itself a genuinely empty commit is walked past, not blocked" {
     # The positive counterpart to the test above: a run-less mid-walk
     # candidate is only a walk-blocking failure when its OWN changed paths

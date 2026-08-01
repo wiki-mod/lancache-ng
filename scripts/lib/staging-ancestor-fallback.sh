@@ -863,7 +863,36 @@ saf_find_built_ancestor() {
       candidate_paths_status=0
       saf_base_commit_paths_are_ignorable "$candidate" "$git_dir" || candidate_paths_status=$?
       if (( candidate_paths_status != 0 )); then
-        echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but its changed paths could not be positively confirmed to all match build-push.yml's own paths-ignore list (status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
+        # Before failing closed: "zero recorded runs" is only ever a PROXY
+        # for "never built", and that proxy has a real blind spot GitHub
+        # Actions itself creates -- workflow run history has a finite
+        # retention window (project-configurable, commonly 90 days), while
+        # this project's own durable per-commit `sha-<short>` image tags
+        # (docs/release-versioning.md) are not subject to that retention at
+        # all. A candidate built long enough ago that its run record has
+        # since expired would report "zero runs" here even though it
+        # genuinely WAS built and its image still exists -- and since a real
+        # (non-doc) candidate almost always fails the paths check above,
+        # this combination would make the whole ancestor-fallback mechanism
+        # silently and permanently unusable past that retention window for
+        # any repository/branch old enough to have candidates that predate
+        # it. The image's own existence and correct per-commit labeling
+        # (sif_wait_for_fresh_base_image, exactly the same check the
+        # has_run==0 branch below already performs, same short budget) is
+        # STRONGER, retention-independent proof of a genuine build than the
+        # run-query's answer -- if it succeeds, a real build unambiguously
+        # did happen here regardless of what the (possibly expired) run
+        # record says, so this candidate is exactly as safe to use as the
+        # has_run==0 case already is. Only when the image ALSO does not
+        # exist does this remain a genuine, unbuilt real change that must
+        # still fail closed.
+        ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
+        if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
+          "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+          printf '%s\n' "$candidate"
+          return 0
+        fi
+        echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but its changed paths could not be positively confirmed to all match build-push.yml's own paths-ignore list (status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either), and its own per-commit image could not be confirmed to exist either (checked directly, independent of run history, precisely because run retention can expire while the image itself does not). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
         return 1
       fi
       continue
