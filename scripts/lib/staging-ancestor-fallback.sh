@@ -266,6 +266,16 @@ saf_base_commit_has_confirmed_run() {
 # an older ancestor that could omit a real, unbuilt change at that
 # candidate.
 #
+# A candidate whose run-check itself is INCONCLUSIVE (saf_base_commit_has_confirmed_run
+# returns 2 -- gh unavailable, API error after retries, malformed response)
+# is likewise never treated as safe to act on: it fails closed immediately,
+# the same discipline BASE_SHA's own push-run check already applies. Falling
+# through to the freshness check for an unconfirmed candidate would accept
+# it as the resolved source purely because its image happens to satisfy
+# sif_is_ancestor_or_equal, with no positive proof any build-push.yml run
+# ever produced it -- exactly the missing proof this whole mechanism exists
+# to require before substituting anything.
+#
 # `--first-parent`: this project does not squash-merge, so nearly every
 # commit on a target branch is itself a merge commit. A plain `git log <sha>`
 # walks EVERY parent of every merge commit it encounters, which can surface a
@@ -358,7 +368,27 @@ saf_find_built_ancestor() {
       fi
       continue
     fi
+    if (( has_run == 2 )); then
+      # Whether a run exists at all for this candidate could not be
+      # positively determined (gh unavailable, API error after retries, a
+      # malformed response) -- the same inconclusive outcome
+      # saf_base_commit_has_confirmed_run's own header documents for
+      # BASE_SHA's push-run check, and it must be handled with the same
+      # "can't prove it, don't act on it" discipline here: falling through
+      # to the freshness check below would accept this candidate as the
+      # resolved source on nothing more than its image happening to satisfy
+      # sif_is_ancestor_or_equal, with no positive proof a real
+      # build-push.yml run ever produced it at all. Fail closed instead of
+      # walking further or attempting the freshness check on an unconfirmed
+      # candidate.
+      echo "::error::Whether any build-push.yml run exists for ancestor candidate $candidate could not be positively determined (see the error above). Refusing to treat this candidate as usable without positive proof of a recorded run, and refusing to walk past it to an older substitute either -- failing closed rather than guessing." >&2
+      return 1
+    fi
 
+    # has_run == 0 here: a build-push.yml run (any event) is positively
+    # confirmed to exist for this candidate -- proceed to the freshness
+    # check, the only remaining question being whether that run actually
+    # produced a confirmed-fresh image for <service>.
     ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
     # Deliberately NOT redirecting stderr here (only stdout): the
     # ::notice::/::warning::/::error:: diagnostic lines

@@ -446,6 +446,46 @@ STUB
     [[ "$output" != *"$grandparent_sha"* ]]
 }
 
+@test "saf_find_built_ancestor: an inconclusive run-check for a candidate fails closed even if its image would otherwise pass freshness" {
+    # A candidate's run-check returning inconclusive (status 2 -- gh
+    # unavailable, API error after retries) must never be treated the same
+    # as a confirmed run: falling through to the freshness check would
+    # accept this candidate purely because its image happens to satisfy
+    # sif_is_ancestor_or_equal, with no positive proof any build-push.yml
+    # run ever produced it. This candidate's own image WOULD resolve
+    # correctly if the freshness check were attempted (the revision stub
+    # below proves that) -- so if this test passes, it's specifically
+    # because the inconclusive run-check itself stopped the walk, not
+    # because no usable image existed.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m ancestor
+    ancestor_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 2
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    install_revision_stub_for "$ancestor_sha"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 "$git_dir"
+    [ "$status" -ne 0 ]
+    # Fails via the new inconclusive-run-check branch specifically (its own
+    # diagnostic legitimately names the candidate, unlike a successful
+    # resolution which would print it as the accepted answer on stdout) --
+    # checked by requiring the diagnostic text, not by requiring the
+    # candidate's sha be absent from $output.
+    [[ "$output" == *"could not be positively determined"* ]]
+}
+
 # ---------------------------------------------------------------------------
 # saf_resolve_untouched_backfill_source: end-to-end orchestration --
 # reordering (fast path), the paths-are-ignorable safety gate, and the
