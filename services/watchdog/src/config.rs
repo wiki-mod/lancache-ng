@@ -164,7 +164,11 @@ pub fn parse_check_interval(raw: Option<&str>) -> (Duration, Vec<String>) {
 /// `apply_timeout()`) must skip its own timeout machinery entirely in that
 /// case rather than ever passing a zero-duration timeout through as a
 /// stand-in for "unbounded."
-pub fn parse_curl_timeout(raw: Option<&str>, field_name: &str, default_secs: u64) -> (Option<Duration>, Vec<String>) {
+pub fn parse_curl_timeout(
+    raw: Option<&str>,
+    field_name: &str,
+    default_secs: u64,
+) -> (Option<Duration>, Vec<String>) {
     let (secs, warning) = parse_u64_with_default(raw, field_name, default_secs);
     let warnings: Vec<String> = warning.into_iter().collect();
     if secs == 0 {
@@ -188,7 +192,11 @@ pub fn parse_curl_timeout(raw: Option<&str>, field_name: &str, default_secs: u64
 /// parses cleanly as `u64` but does not fit in `u32` is treated the same
 /// as any other out-of-range input: fall back to `default`, with a
 /// warning naming the value so an operator can see what was rejected.
-pub fn parse_u32_with_default(raw: Option<&str>, field_name: &str, default: u32) -> (u32, Vec<String>) {
+pub fn parse_u32_with_default(
+    raw: Option<&str>,
+    field_name: &str,
+    default: u32,
+) -> (u32, Vec<String>) {
     let (value, warning) = parse_u64_with_default(raw, field_name, u64::from(default));
     let mut warnings: Vec<String> = warning.into_iter().collect();
     match u32::try_from(value) {
@@ -433,7 +441,9 @@ mod tests {
         let (value, warnings) = parse_u32_with_default(Some("4294967296"), "RESTART_AFTER", 3);
         assert_eq!(value, 3);
         assert!(
-            warnings.iter().any(|w| w.contains("RESTART_AFTER=4294967296")),
+            warnings
+                .iter()
+                .any(|w| w.contains("RESTART_AFTER=4294967296")),
             "warning must name the rejected out-of-range value, got: {warnings:?}"
         );
 
@@ -483,7 +493,10 @@ mod tests {
     fn parse_curl_timeout_treats_zero_as_no_timeout() {
         let (timeout, warnings) = parse_curl_timeout(Some("0"), "CURL_MAX_TIME", 5);
         assert_eq!(timeout, None);
-        assert!(warnings.is_empty(), "an explicit 0 is valid input, not a warning-worthy one");
+        assert!(
+            warnings.is_empty(),
+            "an explicit 0 is valid input, not a warning-worthy one"
+        );
 
         let (timeout, _) = parse_curl_timeout(Some("10"), "CURL_MAX_TIME", 5);
         assert_eq!(timeout, Some(Duration::from_secs(10)));

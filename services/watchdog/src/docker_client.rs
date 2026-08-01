@@ -37,7 +37,10 @@ use crate::health::HealthReading;
 /// matches curl's semantics precisely: a gateway that answers headers and
 /// then stalls before finishing the body is bounded the same way a gateway
 /// that never answers at all is.
-async fn bounded<T>(timeout: Option<Duration>, fut: impl std::future::Future<Output = T>) -> Option<T> {
+async fn bounded<T>(
+    timeout: Option<Duration>,
+    fut: impl std::future::Future<Output = T>,
+) -> Option<T> {
     match timeout {
         Some(t) => tokio::time::timeout(t, fut).await.ok(),
         None => Some(fut.await),
@@ -49,7 +52,10 @@ async fn bounded<T>(timeout: Option<Duration>, fut: impl std::future::Future<Out
 // entirely for "no timeout" rather than ever being called with
 // Duration::ZERO -- see bounded()'s doc comment for why zero is not a safe
 // stand-in for "unbounded").
-fn apply_timeout(builder: reqwest::RequestBuilder, timeout: Option<Duration>) -> reqwest::RequestBuilder {
+fn apply_timeout(
+    builder: reqwest::RequestBuilder,
+    timeout: Option<Duration>,
+) -> reqwest::RequestBuilder {
     match timeout {
         Some(t) => builder.timeout(t),
         None => builder,
@@ -88,10 +94,17 @@ impl DockerProxyClient {
     /// `curl -sf`'s own `-f` (fail on HTTP error) semantics plus the bash's
     /// explicit `|| { echo "unreachable"; return; }`/`|| echo
     /// "unreachable"` fallbacks on both the curl call and the jq parse.
-    pub async fn get_health(&self, container_name: &str, timeout: Option<Duration>) -> HealthReading {
+    pub async fn get_health(
+        &self,
+        container_name: &str,
+        timeout: Option<Duration>,
+    ) -> HealthReading {
         let url = format!("{}/containers/{container_name}/json", self.base_url);
         let body: Option<serde_json::Value> = bounded(timeout, async {
-            let response = apply_timeout(self.client.get(&url), timeout).send().await.ok()?;
+            let response = apply_timeout(self.client.get(&url), timeout)
+                .send()
+                .await
+                .ok()?;
             if !response.status().is_success() {
                 return None;
             }
@@ -118,6 +131,20 @@ impl DockerProxyClient {
     /// that failure back into the failure counter, so this deliberately
     /// returns a plain `bool` rather than a `Result` the caller might be
     /// tempted to propagate.
+    ///
+    /// Unlike `get_health`/`ping`, this method never reads a response body
+    /// (`.send()` plus a status check is the whole exchange), so the
+    /// specific "body can stall after headers arrive" race `bounded()` was
+    /// built for does not apply here -- `apply_timeout()`'s own
+    /// per-`send()` reqwest timeout already bounds this call on its own.
+    /// The outer `bounded()` wrapper is kept anyway, purely for a uniform
+    /// call shape across all three client methods; it applies the exact
+    /// same `timeout` duration as `apply_timeout()`, starting at
+    /// essentially the same instant, so it can only ever fire together
+    /// with (not meaningfully before) reqwest's own timeout -- it does not
+    /// shrink the 2s-stop-grace-period-plus-startup budget
+    /// `CURL_MAX_TIME_RESTART` was sized for, and reintroduce the false
+    /// "restart failed" positive that budget exists to avoid.
     pub async fn restart(&self, container_name: &str, timeout: Option<Duration>) -> bool {
         let url = format!("{}/containers/{container_name}/restart?t=2", self.base_url);
         let success = bounded(timeout, async {
@@ -149,7 +176,10 @@ impl DockerProxyClient {
     pub async fn ping(&self, timeout: Option<Duration>) -> bool {
         let url = format!("{}/_ping", self.base_url);
         let body: Option<String> = bounded(timeout, async {
-            let response = apply_timeout(self.client.get(&url), timeout).send().await.ok()?;
+            let response = apply_timeout(self.client.get(&url), timeout)
+                .send()
+                .await
+                .ok()?;
             if !response.status().is_success() {
                 return None;
             }
