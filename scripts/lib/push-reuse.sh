@@ -96,14 +96,14 @@
 # STAGING_FRESHNESS_GIT_DIR (same file). PUSH_REUSE_CLASSIFY_CMD mirrors that
 # same convention for the one primitive genuinely new to this file.
 #
-# Real push-event proof status (AG-CI-012, issue #1095): as of 2026-08-01,
-# every observed real push run has hit the fail-closed branch above (no
-# readable revision label match / not-yet-ancestor / real content diff) --
-# the actual reuse=true retag branch has never been directly observed firing
-# in a real push run. Testing this now with an intentionally unrelated,
-# non-docs push (this comment) while nightly is at parity with current_dev
-# for both allowlisted services (ntp, build-tools) to close that gap; see the
-# follow-up commit/comment on issue #1095 for the actual result once known.
+# AG-CI-012 note: this function has two real outcomes (fail-closed rebuild,
+# or reuse=true retag), and both need independent real-push-event evidence,
+# not just code review -- a passing test suite proves the logic is
+# internally consistent, not that GitHub Actions actually exercises the
+# reuse=true branch end to end on a live push. Current verification status
+# for either branch is tracked on issue #1095, not here, per this project's
+# convention of keeping durable rationale in source comments and dated
+# status/evidence in the issue/PR trail instead.
 push_reuse_decide() {
   local service_key="${1:?push_reuse_decide: service_key is required}"
   local channel_image="${2:?push_reuse_decide: channel_image is required}"
