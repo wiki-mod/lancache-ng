@@ -197,35 +197,60 @@ gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 # the warning printed an empty status every time). Encoding everything into
 # the one stdout stream this function already returns avoids that trap
 # entirely.
+# Bounded retry for the transient case only (AG-CI-013: flaky external CI
+# operations need a documented retry, not a bare single attempt). This repo
+# pins ~15 distinct external action refs, several referenced from multiple
+# workflow files (e.g. `aquasecurity/trivy-action` from build-push.yml,
+# build-tools.yml, and build-push-hosted-fallback.yml combined); every
+# service/build job in a single CI run invokes this whole script
+# independently, so the same hot ref can get requested by several parallel
+# jobs within moments of each other. Confirmed live (2026-08-01): this exact
+# ref hit a 403 in ~82% of a 20-run sample, every other pinned ref resolving
+# cleanly in the same runs -- consistent with GitHub's secondary/abuse rate
+# limiter tripping on one heavily-concurrent-requested resource, not a
+# general token-quota exhaustion (which would hit refs more evenly). A short
+# bounded retry, not a bigger architectural change (e.g. deduplicating this
+# check to run once centrally instead of once per parallel job), is the
+# targeted fix here: 404 (definitive not-found) and 200 (success) still
+# return immediately with no retry, since neither benefits from one.
+ACTION_YAML_FETCH_MAX_ATTEMPTS="${ACTION_YAML_FETCH_MAX_ATTEMPTS:-3}"
+ACTION_YAML_FETCH_BACKOFF_SECONDS="${ACTION_YAML_FETCH_BACKOFF_SECONDS:-3}"
+
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
-  local file body status auth=()
+  local file body status auth=() attempt
   if [ -n "$gh_token" ]; then
     auth=(-H "Authorization: Bearer ${gh_token}")
   fi
   for file in action.yml action.yaml; do
-    body="$(mktemp)"
-    status=$(curl -sS -o "$body" -w '%{http_code}' \
-      -H "Accept: application/vnd.github.raw+json" \
-      "${auth[@]}" \
-      "https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}" 2>/dev/null) || status="000"
-    case "$status" in
-      200)
-        printf 'OK\n'
-        cat "$body"
-        rm -f "$body"
-        return 0
-        ;;
-      404)
-        rm -f "$body"
-        continue
-        ;;
-      *)
-        printf 'INFRA:%s\n' "$status"
-        rm -f "$body"
-        return 0
-        ;;
-    esac
+    for (( attempt=1; attempt<=ACTION_YAML_FETCH_MAX_ATTEMPTS; attempt++ )); do
+      body="$(mktemp)"
+      status=$(curl -sS -o "$body" -w '%{http_code}' \
+        -H "Accept: application/vnd.github.raw+json" \
+        "${auth[@]}" \
+        "https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}" 2>/dev/null) || status="000"
+      case "$status" in
+        200)
+          printf 'OK\n'
+          cat "$body"
+          rm -f "$body"
+          return 0
+          ;;
+        404)
+          rm -f "$body"
+          break
+          ;;
+        *)
+          rm -f "$body"
+          if (( attempt < ACTION_YAML_FETCH_MAX_ATTEMPTS )); then
+            sleep "$ACTION_YAML_FETCH_BACKOFF_SECONDS"
+            continue
+          fi
+          printf 'INFRA:%s\n' "$status"
+          return 0
+          ;;
+      esac
+    done
   done
   printf 'NOTFOUND\n'
   return 0
