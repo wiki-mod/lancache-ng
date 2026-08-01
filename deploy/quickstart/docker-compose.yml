@@ -1283,7 +1283,10 @@ services:
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
     # /entrypoint.sh, which itself execs into watchdog.sh, so watchdog.sh
-    # ends up as PID 1 and signal handling (restart/stop) is unaffected.
+    # ends up as PID 1 and signal handling (restart/stop) is unaffected --
+    # this holds for watchdog.sh specifically, NOT for retention.sh, which
+    # only ever gets SIGKILL at teardown (see deploy/prod/docker-compose.yml's
+    # identical comment for the full caveat and its worst-case impact).
     #
     # Calls /entrypoint.sh (#842, 2026-08-01) rather than /watchdog.sh
     # directly -- see services/watchdog/entrypoint.sh's own header and

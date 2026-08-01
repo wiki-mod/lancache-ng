@@ -42,6 +42,20 @@ mkdir -p /var/log/lancache-watchdog
 # liveness is otherwise reflected in this container's Docker healthcheck
 # (that only watches watchdog.sh's status.json freshness, see
 # healthcheck.sh), so an unsupervised crash here would be invisible.
+#
+# Honest signal-handling caveat: only /watchdog.sh (via the final `exec`)
+# ends up as PID 1 and receives `docker stop`/`restart`'s SIGTERM. This
+# backgrounded retention-supervisor loop is not PID 1 and is not otherwise
+# signaled -- Docker kills the whole cgroup (SIGKILL) at container teardown,
+# so retention.sh has no graceful-shutdown path today. Worst case: a
+# SIGKILL mid-rotation in maybe_rotate_fluent_bit_selflog() interrupts a
+# copytruncate between the backup copy and the truncate, leaving an
+# uncompressed rotated backup file behind -- self-corrected by the next
+# cycle's own rotation-count cap, not a data-loss or corruption risk. Not
+# adding a trap-based graceful shutdown here without being asked, since
+# retention.sh's own destructive operations (find/rm passes) are already
+# short-lived per invocation, not long-running writes a SIGKILL could tear
+# mid-flight in a way that matters.
 (
     while true; do
         /retention.sh || echo "[retention-supervisor] retention.sh exited ($?), respawning in 5s" >&2

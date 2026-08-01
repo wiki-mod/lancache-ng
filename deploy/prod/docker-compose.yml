@@ -253,7 +253,9 @@ services:
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
     # /entrypoint.sh, which itself execs into watchdog.sh, so watchdog.sh
-    # ends up as PID 1 and signal handling (restart/stop) is unaffected.
+    # ends up as PID 1 and signal handling (restart/stop) is unaffected --
+    # this holds for watchdog.sh specifically, NOT for retention.sh (see the
+    # caveat below).
     #
     # Calls /entrypoint.sh (#842, 2026-08-01) rather than /watchdog.sh
     # directly: that wrapper is what actually launches retention.sh as a
@@ -262,6 +264,15 @@ services:
     # for the full blast-radius-separation rationale and for why this
     # supervisor logic lives in the image itself (shared by every
     # deployment profile) rather than duplicated in this command override.
+    # Honest caveat: retention.sh runs as a *backgrounded* process, never
+    # PID 1, so `docker stop`/`restart` only ever deliver it SIGKILL at
+    # container teardown (Docker signals PID 1 only; PID 1 does not forward
+    # to background jobs here) -- there is no SIGTERM/graceful-shutdown path
+    # for retention.sh today. Worst case observed: an interrupted
+    # copytruncate mid-rotation leaves an uncompressed rotated backup file,
+    # which the next cycle's cap/cleanup logic corrects on its own -- not a
+    # data-loss or corruption risk, but worth stating plainly rather than
+    # implying full parity with watchdog.sh's own signal handling.
     # Still the same container as watchdog.sh for now -- see that file's
     # comment and issue #842 for the still-open question of whether this
     # should become its own compose service/sidecar with a more tightly
