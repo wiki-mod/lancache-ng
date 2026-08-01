@@ -482,10 +482,13 @@ RUN set -euo pipefail; \
 # default glibc toolchain or target in any way. `rustup target add` only
 # downloads and registers a second target's prebuilt std library alongside
 # the one every other Rust build in this image already uses by default
-# (`rustup target list` still reports the glibc host triple as `(default)`;
-# nothing here runs `rustup default` or passes `--target` anywhere else in
-# this Dockerfile) -- an ordinary `cargo build`/`cargo test` invocation with
-# no explicit `--target` flag is completely unaffected by this block, it only
+# (confirmed via `rustc -vV`'s own `host:` line, which stays the `-gnu`
+# triple; `rustup target list` itself has no `(default)` marker at all, only
+# an `(installed)` one, so this Dockerfile's own verification below checks
+# `rustc -vV` instead of relying on `rustup target list`'s text -- nothing
+# here runs `rustup default` or passes `--target` anywhere else in this
+# Dockerfile) -- an ordinary `cargo build`/`cargo test` invocation with no
+# explicit `--target` flag is completely unaffected by this block, it only
 # becomes available as an opt-in choice for a build that explicitly requests
 # musl.
 #
@@ -615,7 +618,7 @@ RUN set -euo pipefail; \
       *) echo "Unsupported architecture for musl target verification: $(dpkg --print-architecture)" >&2; exit 1 ;; \
     esac; \
     rustup target list --installed | grep -qx "${musl_target_check}"; \
-    rustup target list | grep -qF "(default)"
+    rustc -vV | grep -qE '^host: .*-gnu$'
 
 WORKDIR /workspace
 
