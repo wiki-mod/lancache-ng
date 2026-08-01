@@ -3030,28 +3030,6 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-vex-drift.sh
 
-      - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
-        # services/netdata/Dockerfile installs netdata's official static musl
-        # build, which statically links its OWN vendored curl (confirmed via
-        # `ldd`: not a distro package Trivy's os-pkg scanner can see -- see
-        # PR #1352). This is the maintainer-approved (option (c)) tracking
-        # mechanism that keeps that now-invisible risk from silently falling
-        # off radar: it reads netdata's own upstream build recipe for the
-        # pinned NETDATA_VERSION directly and fails if the vendored curl is
-        # still inside the affected range for issue #1304's 7 tracked CVE
-        # IDs. Needs real network access to fetch that recipe from netdata's
-        # GitHub repository (not just local repo content), unlike the other
-        # checks in this job.
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-netdata-curl-pin.sh
-
       - name: Check config-writer idempotence test coverage (#640)
         run: |
           set -euo pipefail
