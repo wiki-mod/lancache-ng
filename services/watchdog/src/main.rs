@@ -341,26 +341,11 @@ async fn main() {
             std::process::exit(1);
         }
 
-        // Deliberately NOT called here yet: maybe_purge()/
-        // maybe_prune_syslog()/maybe_rotate_fluent_bit_selflog() -- see
-        // lib.rs's module doc comment for the open scope question these
-        // depend on.
-        //
-        // STATUS (2026-08-01): watchdog.sh calls write_status() a SECOND
-        // time after its own equivalent purge/prune calls, specifically
-        // because those two passes can legitimately run for minutes against
-        // a large cache/syslog tree -- without that second write,
-        // status.json's mtime would go stale for the whole scan, and
-        // healthcheck.sh's freshness check (mtime must be within `3 *
-        // CHECK_INTERVAL`) would flap the container unhealthy even though
-        // watchdog is working exactly as intended. A single write per loop
-        // iteration is correct *today* only because this binary calls none
-        // of those long-running passes yet. Whoever ports any of them into
-        // this loop must also add a second `status::write_status(...)` call
-        // immediately after -- omitting it would reintroduce exactly the
-        // bug watchdog.sh's second write exists to prevent, surfacing as an
-        // intermittently-unhealthy watchdog container with no obvious cause
-        // (the purge/prune work itself would be running fine).
+        // maybe_purge()/maybe_prune_syslog()/maybe_rotate_fluent_bit_selflog()
+        // are intentionally never called here: those filesystem-retention
+        // passes run as their own dedicated `retention` Compose service (see
+        // lib.rs's module doc comment) -- not a scope question still open
+        // for this daemon to eventually absorb.
 
         tokio::time::sleep(settings.check_interval).await;
     }
