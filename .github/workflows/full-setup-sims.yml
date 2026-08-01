@@ -346,13 +346,63 @@ jobs:
           set -euo pipefail
           bash scripts/proxy-deep-wildcard-tls-simulation.sh
 
+  proxy-standard-mode-sni-routing-simulation:
+    # Real TLS-handshake test for entrypoint.sh's standard-mode (SNI
+    # passthrough) stream-target map generation loop over _UNIQUE_DOMAINS
+    # (issue #1297, folded into #1276) -- a different bug class and a
+    # different nginx context (the stream module's own :8443 passthrough
+    # listener, not the http block's cert-selection map the sibling
+    # proxy-deep-wildcard-tls-simulation job above validates). See
+    # scripts/proxy-standard-mode-sni-routing-simulation.sh's own header for
+    # the full fake-origin/Docker-embedded-DNS mechanism this needs and why
+    # it can't reuse either sibling script's approach. Chained after the
+    # existing proxy-deep-wildcard-tls-simulation job for the same
+    # AG-CI-017 BuildKit-content-store contention reasoning that job's own
+    # comment documents -- this job also builds its own throwaway proxy
+    # image via a locally-built Dockerfile, on the same runner pool.
+    name: Proxy standard-mode SNI routing simulation
+    needs: [compute-validation-network, proxy-deep-wildcard-tls-simulation]
+    if: >-
+      always() &&
+      inputs.should_run == 'true' &&
+      needs['compute-validation-network'].result != 'failure' &&
+      needs['compute-validation-network'].result != 'cancelled'
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Resolve build-tools image
+        # See ssl-mitm-cache-simulation's identical step above for why a
+        # same-PR build-tools change prefers the confirmed PR staging tag.
+        id: build-tools-image
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
+            echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
+          else
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+      - name: Run proxy standard-mode SNI routing simulation
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/proxy-standard-mode-sni-routing-simulation.sh
+
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
     # LANCACHE_IMAGE_TAG here is the direct fix for the inconsistency #715
     # calls out: the manual full-setup-validate.yml never passed its image_tag
     # through to this job, so it always tested "nightly" regardless of intent.
     name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, proxy-deep-wildcard-tls-simulation]
+    needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
     if: >-
       always() &&
       inputs.should_run == 'true' &&
