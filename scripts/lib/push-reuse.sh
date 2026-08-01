@@ -101,9 +101,9 @@
 # not just code review -- a passing test suite proves the logic is
 # internally consistent, not that GitHub Actions actually exercises the
 # reuse=true branch end to end on a live push. Current verification status
-# for either branch is tracked on issue #1095, not here, per this project's
-# convention of keeping durable rationale in source comments and dated
-# status/evidence in the issue/PR trail instead.
+# for either branch belongs in the PR/issue trail, not here, per this
+# project's convention of keeping durable rationale in source comments and
+# dated status/evidence out of them.
 push_reuse_decide() {
   local service_key="${1:?push_reuse_decide: service_key is required}"
   local channel_image="${2:?push_reuse_decide: channel_image is required}"
