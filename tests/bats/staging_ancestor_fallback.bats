@@ -254,6 +254,29 @@ STUB
     [ "$(wc -l < "$call_log")" -eq 4 ]
 }
 
+@test "saf_query_run_count: GH_TOKEN never appears in ghcr_retry's own retry/failure diagnostics" {
+    # Codex P2 finding: ghcr_retry logs its own wrapped command verbatim via
+    # \$* in its ::warning::/::error:: lines on every failed attempt (see
+    # scripts/lib/ghcr-retry.sh). An earlier version of _saf_github_api_get
+    # took the token as one of ITS OWN positional arguments, which meant that
+    # argument became part of \$* too -- the token would be echoed into the
+    # job log in plain text on every single retry, not just once, relying
+    # entirely on GitHub Actions' own best-effort exact-string log masking as
+    # the only protection (which does not help at all for a manually-supplied
+    # PAT, since neither real caller requires GH_TOKEN to be exactly
+    # secrets.GITHUB_TOKEN). Force every attempt to fail so ghcr_retry emits
+    # both its per-attempt ::warning:: lines and its final ::error:: line,
+    # and confirm none of that stderr output contains the token value at all
+    # -- not just that GitHub's masking would have hidden it.
+    export FAKE_CURL_FAIL_COUNT=99
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -ne 0 ]
+    [[ "$stderr" == *"::error::"* ]]
+    [[ "$stderr" != *"test-token"* ]]
+}
+
 @test "saf_query_run_count: a non-200 HTTP status is treated as a retryable failure, not a false zero" {
     # curl itself can succeed (exit 0) while the API returns a non-2xx
     # status (rate limit, auth rejection, transient 5xx) -- _saf_github_api_get
@@ -931,7 +954,7 @@ STUB
     # regression reintroducing the slow path fails this assertion in
     # seconds rather than hanging the suite for up to 10 minutes.
     start_epoch="$(date +%s)"
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 3 3 3 3 1 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
     end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${ancestor2_sha:0:7}" ]]
@@ -960,7 +983,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$real_change_sha" 0 0 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$real_change_sha" 0 0 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
     [[ "$output" != *"Substituting"* ]]
 }
@@ -982,7 +1005,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
 }
 
@@ -997,7 +1020,7 @@ STUB
 
     install_revision_stub_for "$base_sha"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 300 600 15 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 300 600 300 600 15 50 "$git_dir"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${base_sha:0:7}" ]]
     [[ "$output" != *"ancestor"* ]]
@@ -1036,7 +1059,78 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 10 10 2 2 1 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 10 10 2 2 2 2 1 50 "$git_dir"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${base_sha:0:7}" ]]
+}
+
+@test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
+    # Regression guard for the exact Codex P1 finding that split these two
+    # budgets apart (this file's own header, saf_resolve_untouched_backfill_source
+    # comment, documents the full reasoning): an earlier version of this
+    # orchestrator reused base_freshness_* as saf_find_built_ancestor's own
+    # extended-retry budget too, which meant ANY caller passing a generous
+    # base_freshness pair (scripts/ensure-pr-staging-images.sh's real 900/5400)
+    # would silently force that same generous extension onto the ancestor
+    # candidate's extended retry regardless of what ancestor_extended_freshness_*
+    # itself said -- exactly what let build-push.yml's 30-minute
+    # full-setup-validate job inherit an up-to-90-minute wait it cannot
+    # survive. Proves the fix by the opposite angle from that incident: base
+    # commit's own base_freshness is set generously (300/600), but
+    # ancestor_extended_freshness is 0/0 -- if the two were ever collapsed
+    # back together, the ancestor candidate below would resolve at ~3 real
+    # seconds, comfortably inside a 600s ceiling, and this call would
+    # succeed. With them genuinely independent, the extended retry gets only
+    # one immediate (0s) re-check -- too early to see the image -- so this
+    # must fail closed, and fast, not after actually waiting anywhere close
+    # to 3s.
+    setup_linear_fixture
+    install_run_exists_stub
+    # base_sha: confirmed zero push runs (activates the fast path, since its
+    # own paths -- docs/base.md -- are also ignorable). older_sha (its
+    # immediate first-parent ancestor): a run is confirmed to exist, so the
+    # walk proceeds to older_sha's own freshness check instead of walking
+    # past it.
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$base_sha") exit 1 ;;
+    "$older_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$active_stub"
+
+    start_epoch="$(date +%s)"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+now="\$(date +%s)"
+elapsed=\$((now - $start_epoch))
+if [ "\$suffix" = "${older_sha:0:7}" ] && (( elapsed >= 3 )); then
+    echo "$older_sha"
+else
+    exit 1
+fi
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 0 0 0 0 1 50 "$git_dir"
+    end_epoch="$(date +%s)"
+    [ "$status" -ne 0 ]
+    # Fails within ~2s, not anywhere near the 3s the image needs to appear --
+    # proves this was the 0/0 extended budget giving up immediately, not a
+    # coincidental failure after actually waiting most of the way there.
+    [ "$((end_epoch - start_epoch))" -lt 2 ]
 }

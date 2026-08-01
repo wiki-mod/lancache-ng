@@ -135,7 +135,7 @@ saf_base_commit_paths_are_ignorable() {
   return 1
 }
 
-# _saf_github_api_get <url> <body_file> <token>
+# _saf_github_api_get <url> <body_file>
 #
 # Internal helper: performs the actual HTTP GET and writes the response body
 # to <body_file>, returning 0 only for a real HTTP 200. Called via
@@ -145,12 +145,29 @@ saf_base_commit_paths_are_ignorable() {
 # itself fail), so wrapping the status-code check in this function is what
 # actually makes ghcr_retry's retry loop retry on a bad response, not just
 # on a dropped connection.
+#
+# Deliberately does NOT take the token as a positional argument (an earlier
+# version did): ghcr_retry logs its own failing command verbatim via `$*` in
+# its ::warning::/::error:: lines on every failed attempt (see
+# scripts/lib/ghcr-retry.sh lines around its retry-exhausted/backoff
+# messages) -- a token passed as one of this function's own arguments would
+# therefore be echoed into the job log in plain text on every retry, not just
+# once. GitHub Actions masks an exact match of `secrets.GITHUB_TOKEN`'s own
+# value in its own log viewer, but that masking is a best-effort safety net,
+# not something this script should rely on as its only protection: it does
+# not help at all when GH_TOKEN is a manually-supplied PAT (a real supported
+# case -- neither caller requires GH_TOKEN to be exactly
+# secrets.GITHUB_TOKEN), and a masking failure/partial-match on GitHub's side
+# is not this script's to gamble with. Reading `$GH_TOKEN` directly from the
+# environment here instead keeps it out of `"$@"`/`"$*"` entirely, so it can
+# never appear in ghcr_retry's own diagnostic output regardless of how many
+# attempts fail.
 _saf_github_api_get() {
-  local url="$1" body_file="$2" token="$3"
+  local url="$1" body_file="$2"
   local status
   status="$(curl -sS -o "$body_file" -w '%{http_code}' \
     -H "Accept: application/vnd.github+json" \
-    -H "Authorization: Bearer ${token}" \
+    -H "Authorization: Bearer ${GH_TOKEN:?_saf_github_api_get: GH_TOKEN is required}" \
     "$url" 2>/dev/null)" || return 1
   [[ "$status" == "200" ]]
 }
@@ -236,7 +253,7 @@ saf_query_run_count() {
   fi
   local body
   body="$(mktemp)"
-  if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body" "$GH_TOKEN"; then
+  if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
     rm -f "$body"
     return 1
   fi
@@ -366,7 +383,7 @@ saf_candidate_run_is_active() {
   for event in push workflow_dispatch schedule; do
     url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=${event}&per_page=20"
     body="$(mktemp)"
-    if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body" "$GH_TOKEN"; then
+    if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
       rm -f "$body"
       return 2
     fi
@@ -657,6 +674,7 @@ saf_find_built_ancestor() {
 # saf_resolve_untouched_backfill_source <repository> <service> <base_sha> \
 #     <base_freshness_timeout_seconds> <base_freshness_hard_ceiling_seconds> \
 #     <ancestor_freshness_timeout_seconds> <ancestor_freshness_hard_ceiling_seconds> \
+#     <ancestor_extended_freshness_timeout_seconds> <ancestor_extended_freshness_hard_ceiling_seconds> \
 #     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir]
 #
 # The single shared orchestrator both callers (scripts/ensure-pr-staging-images.sh
@@ -670,7 +688,7 @@ saf_find_built_ancestor() {
 # been fixed -- reimplementing this logic a second time anywhere is a defect
 # in itself, not just a maintenance inconvenience.
 #
-# TWO SEPARATE budget pairs on purpose, not one shared pair:
+# THREE SEPARATE budget pairs on purpose, not one shared pair:
 #   - <base_freshness_timeout_seconds>/<base_freshness_hard_ceiling_seconds>
 #     govern ONLY the wait against BASE_SHA's own image (the NORMAL PATH,
 #     step 2 below). This is the one wait in this whole mechanism that can
@@ -681,22 +699,44 @@ saf_find_built_ancestor() {
 #     gets for the identical reason, not a short ceiling tuned for "this
 #     should already exist or never will".
 #   - <ancestor_freshness_timeout_seconds>/<ancestor_freshness_hard_ceiling_seconds>
-#     govern ONLY saf_find_built_ancestor's per-candidate checks (both the
-#     fast-path and step-3 call sites below). An ancestor candidate is, by
-#     construction, a commit further back in history than BASE_SHA that
-#     saf_base_commit_has_confirmed_run already confirmed has a REAL recorded
-#     run -- if that run's image doesn't already exist by the time this
-#     mechanism looks, it never will (there is no "still building" case for a
-#     commit further in the past than one already checked), so a short ceiling
-#     here is a deliberate tuning choice, not a correctness gap.
-#   Collapsing these into one shared pair is a real failure mode, not a
-#   theoretical one: a short ceiling tuned for "an already-checked historical
-#   ancestor commit's image either exists now or never will" is far too short
-#   for BASE_SHA's own wait, where a confirmed push-triggered run can still
-#   legitimately be mid-build -- applying the short ceiling there would
-#   hard-fail this gate on a perfectly healthy, still-running build, which is
-#   strictly worse than the "unwinnable wait on a never-built base commit"
-#   bug this whole file exists to fix.
+#     govern ONLY saf_find_built_ancestor's per-candidate INITIAL freshness
+#     checks (both the fast-path and step-3 call sites below). An ancestor
+#     candidate is, by construction, a commit further back in history than
+#     BASE_SHA that saf_base_commit_has_confirmed_run already confirmed has a
+#     REAL recorded run -- if that run's image doesn't already exist by the
+#     time this mechanism first looks, it never will (there is no
+#     "still building" case for a commit further in the past than one already
+#     checked), so a short ceiling here is a deliberate tuning choice, not a
+#     correctness gap.
+#   - <ancestor_extended_freshness_timeout_seconds>/<ancestor_extended_freshness_hard_ceiling_seconds>
+#     govern ONLY the ONE-TIME extended retry saf_find_built_ancestor gives a
+#     candidate whose own build-push.yml run is positively confirmed still
+#     active (saf_candidate_run_is_active) after its initial short-budget
+#     check above already failed. Deliberately NOT the same parameter as
+#     base_freshness_* even though this project's own two real callers
+#     currently pass the identical VALUE for both (900/5400) for
+#     scripts/ensure-pr-staging-images.sh: a Codex review on this PR (thread
+#     on this file's own extended-retry call site) correctly identified that
+#     reusing base_freshness_* here made build-push.yml's "Ensure PR staging
+#     tags exist for full-setup services" step (inside the full-setup-validate
+#     job, timeout-minutes: 30) implicitly inherit a fresh, up-to-5400s
+#     (90-minute) wait it structurally cannot afford -- that job would simply
+#     be killed by its own GitHub Actions job timeout partway through the
+#     extension, wasting the runner's time on a wait that can never complete
+#     and never rescuing an image that appears more than roughly the job's
+#     remaining budget into the extension. Making this its own explicit
+#     parameter lets each of the two real callers size it honestly against
+#     its OWN job envelope instead of silently inheriting a value tuned for
+#     the other caller's very different (100-minute) budget -- see each real
+#     call site's own comment for the value it actually passes and why.
+#   Collapsing any of these three into a shared pair is a real failure mode,
+#   not a theoretical one: a short ceiling tuned for "an already-checked
+#   historical ancestor commit's image either exists now or never will" is far
+#   too short for BASE_SHA's own wait, where a confirmed push-triggered run
+#   can still legitimately be mid-build; and a budget generous enough for a
+#   100-minute-timeout caller's extended retry is not automatically safe for
+#   every OTHER caller sharing this same function, as the Codex finding above
+#   demonstrates concretely.
 #
 # Sequence:
 #   1. FAST PATH (reordering): before running the full bounded freshness
@@ -742,8 +782,9 @@ saf_resolve_untouched_backfill_source() {
   local repository="$1" service="$2" base_sha="$3"
   local base_freshness_timeout_seconds="$4" base_freshness_hard_ceiling_seconds="$5"
   local ancestor_freshness_timeout_seconds="$6" ancestor_freshness_hard_ceiling_seconds="$7"
-  local freshness_poll_interval_seconds="$8" ancestor_search_depth="$9"
-  local git_dir="${10:-.}"
+  local ancestor_extended_freshness_timeout_seconds="$8" ancestor_extended_freshness_hard_ceiling_seconds="$9"
+  local freshness_poll_interval_seconds="${10}" ancestor_search_depth="${11}"
+  local git_dir="${12:-.}"
   # See saf_find_built_ancestor's own comment for why this export is needed:
   # sif_wait_for_fresh_base_image (called directly below, and indirectly via
   # saf_find_built_ancestor) reads STAGING_FRESHNESS_GIT_DIR from the
@@ -784,7 +825,7 @@ saf_resolve_untouched_backfill_source() {
     fi
     if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
       "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
-      "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$git_dir")"; then
+      "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
       return 1
     fi
@@ -830,7 +871,7 @@ saf_resolve_untouched_backfill_source() {
   echo "::notice::$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
   if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
     "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
-    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$git_dir")"; then
+    "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
     return 1
   fi

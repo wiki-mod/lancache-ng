@@ -259,6 +259,26 @@ if (( ancestor_freshness_hard_ceiling_seconds < ancestor_freshness_timeout_secon
     ancestor_freshness_hard_ceiling_seconds=$ancestor_freshness_timeout_seconds
 fi
 
+# Separate budget for saf_find_built_ancestor's own ONE-TIME extended retry,
+# given only to a candidate whose own build-push.yml run is positively
+# confirmed still active (saf_candidate_run_is_active) after its initial
+# short-budget check above already failed -- see
+# scripts/lib/staging-ancestor-fallback.sh's saf_resolve_untouched_backfill_source
+# header for why this is now its own explicit parameter rather than reusing
+# base_freshness_*, even though this caller happens to pass the identical
+# 900/5400 value for both. That reuse is safe HERE specifically because this
+# job's own "ensure PR staging images" step (full-setup-deep-validate.yml) has
+# a 100-minute job timeout explicitly sized to clear exactly this ~90-minute
+# worst case with headroom (see that job's own timeout-minutes comment) --
+# unlike build-push.yml's own equivalent step, whose full-setup-validate job
+# has only a 30-minute timeout and therefore passes a much smaller value for
+# this same parameter (see that step's own comment for why).
+ancestor_extended_freshness_timeout_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
+ancestor_extended_freshness_hard_ceiling_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
+if (( ancestor_extended_freshness_hard_ceiling_seconds < ancestor_extended_freshness_timeout_seconds )); then
+    ancestor_extended_freshness_hard_ceiling_seconds=$ancestor_extended_freshness_timeout_seconds
+fi
+
 # How many of BASE_SHA's own ancestor commits (nearest-first, first-parent
 # only) scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor()
 # will examine before giving up. Bounded rather than unbounded on purpose -- a
@@ -451,6 +471,7 @@ for service in "${full_setup_services[@]}"; do
     if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" \
         "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" \
         "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" \
+        "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" \
         "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}")"; then
         exit 1
     fi
