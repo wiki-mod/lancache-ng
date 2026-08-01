@@ -75,15 +75,40 @@
 # process (keep the first directory rather than silently orphaning it and
 # starting a second, empty one).
 #
-# No explicit cleanup: this is a plain-file, best-effort, process-lifetime
-# optimization, not a resource whose leak would be unsafe -- a handful of
-# small leftover files under $TMPDIR is a negligible, self-limiting cost
-# (mktemp's own uniqueness means these never accumulate under one shared
-# name), and installing an EXIT trap here (a sourced library, not the
-# top-level script) risks silently overwriting a trap the actual caller
-# script has already set for its own purposes.
+# mktemp's own uniqueness means these never collide with a previous run's
+# directory, but on a long-lived self-hosted runner "unique" is exactly what
+# makes an ENTIRELY UNCLEANED directory a real, unbounded accumulation
+# problem rather than a self-limiting one: every process that ever sources
+# this file leaves its own never-reused directory behind forever, across
+# every run the runner ever does. This still must not install a bare
+# `trap ... EXIT` here, though (a sourced library, not the top-level script):
+# doing so unconditionally would silently DISCARD any EXIT trap the actual
+# caller script already set for its own purposes, since bash's `trap` simply
+# replaces whatever was previously registered for a given signal. Instead,
+# capture whatever EXIT trap (if any) is already active at the moment this
+# file is first sourced, and re-register a combined trap that runs this
+# cleanup FIRST and then falls through to that prior trap's own command
+# (a no-op `:` if none was set) -- composing with the caller's own cleanup
+# instead of clobbering it, however many EXIT traps get layered here in the
+# future.
 if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
   SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
+  if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]]; then
+    _saf_prior_exit_trap="$(trap -p EXIT)"
+    if [[ -n "$_saf_prior_exit_trap" ]]; then
+      # trap -p EXIT prints: trap -- '<command>' EXIT -- extract just
+      # <command> so it can be chained after this file's own cleanup below.
+      _saf_prior_exit_trap="${_saf_prior_exit_trap#trap -- \'}"
+      _saf_prior_exit_trap="${_saf_prior_exit_trap%\' EXIT}"
+    else
+      _saf_prior_exit_trap=":"
+    fi
+    # SAF_ANCESTOR_RUN_CACHE_DIR is intentionally expanded now (its value
+    # never changes after this point), not deferred to signal-time.
+    # shellcheck disable=SC2064
+    trap "rm -rf '$SAF_ANCESTOR_RUN_CACHE_DIR' 2>/dev/null || true; ${_saf_prior_exit_trap}" EXIT
+    unset _saf_prior_exit_trap
+  fi
 fi
 export SAF_ANCESTOR_RUN_CACHE_DIR
 
@@ -270,6 +295,20 @@ saf_base_commit_paths_are_ignorable() {
 # never appear in ghcr_retry's own diagnostic output regardless of how many
 # attempts fail.
 #
+# For the same reason, the Authorization header itself is never passed as a
+# literal `-H "Authorization: Bearer <token>"` argument either: curl's own
+# argv (the expanded header value included) is visible for the lifetime of
+# the curl process to any other process running as the same host user, e.g.
+# via /proc/<pid>/cmdline on Linux -- a real exposure on a shared,
+# long-lived self-hosted runner, not a hypothetical one, and one GitHub
+# Actions' own log masking cannot help with at all since it only ever
+# touches log output, never a live process's argv. curl (>= 7.55.0, and
+# specifically supported by the pinned build-tools image's own curl) accepts
+# `-H @<file>` to read header lines from a file instead: the header value
+# briefly exists in a mode-600 temp file under $TMPDIR, owned solely by this
+# process's own user, unlinked immediately after the single curl invocation
+# that reads it -- never in argv, and never outliving that one call.
+#
 # A 401 (invalid/expired token) or 404 (wrong endpoint/repository) is a
 # permanent, configuration-level failure -- no amount of retrying or
 # re-authenticating (ghcr_retry's own relogin step needs a registry
@@ -288,11 +327,19 @@ saf_base_commit_paths_are_ignorable() {
 # a few extra retries on a real permanent one.
 _saf_github_api_get() {
   local url="$1" body_file="$2"
-  local status
+  : "${GH_TOKEN:?_saf_github_api_get: GH_TOKEN is required}"
+  local status curl_status header_file
+  header_file="$(mktemp "${TMPDIR:-/tmp}/saf-gh-header.XXXXXX" 2>/dev/null)" || return 1
+  chmod 600 "$header_file" 2>/dev/null || true
+  printf 'Accept: application/vnd.github+json\nAuthorization: Bearer %s\n' "$GH_TOKEN" > "$header_file"
   status="$(curl -sS --connect-timeout 10 --max-time 30 -o "$body_file" -w '%{http_code}' \
-    -H "Accept: application/vnd.github+json" \
-    -H "Authorization: Bearer ${GH_TOKEN:?_saf_github_api_get: GH_TOKEN is required}" \
-    "$url" 2>/dev/null)" || return 1
+    -H "@${header_file}" \
+    "$url" 2>/dev/null)"
+  curl_status=$?
+  rm -f "$header_file"
+  if (( curl_status != 0 )); then
+    return 1
+  fi
   if [[ "$status" == "200" ]]; then
     return 0
   fi

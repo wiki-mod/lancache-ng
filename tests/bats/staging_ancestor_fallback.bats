@@ -91,6 +91,56 @@ setup() {
 }
 
 # ---------------------------------------------------------------------------
+# SAF_ANCESTOR_RUN_CACHE_DIR lifecycle: created once per process via mktemp -d
+# at source time, and -- since mktemp's own uniqueness means it is NEVER
+# reused by a later, independent process on a long-lived self-hosted runner --
+# must actually be removed again when that process exits, not left behind to
+# accumulate indefinitely across every CI run that ever sources this file.
+# ---------------------------------------------------------------------------
+
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: the process that creates it removes it again on its own exit" {
+    # A genuinely separate bash process is required here (not this test's
+    # own, which already inherited a cache dir from setup()'s own sourcing):
+    # env -u ensures the child creates and registers the trap for a BRAND
+    # NEW directory of its own, then this test checks from the outside, once
+    # the child has exited, that the directory it reported no longer exists.
+    reported_dir_file="$BATS_TEST_TMPDIR/reported_cache_dir.txt"
+    env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        printf '%s' \"\$SAF_ANCESTOR_RUN_CACHE_DIR\" > '$reported_dir_file'
+    "
+    reported_dir="$(cat "$reported_dir_file")"
+    [ -n "$reported_dir" ]
+    [ ! -e "$reported_dir" ]
+}
+
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: cleanup composes with a pre-existing EXIT trap instead of discarding it" {
+    # Sourcing this file must never silently replace an EXIT trap the
+    # caller script already installed for its own purposes -- verified by
+    # setting a distinct marker trap BEFORE sourcing (in the child process,
+    # so it does not disturb this test's own shell) and confirming that
+    # marker's own side effect (writing to a sentinel file) still happens
+    # once the child exits, in addition to the cache directory itself being
+    # removed.
+    reported_dir_file="$BATS_TEST_TMPDIR/reported_cache_dir.txt"
+    sentinel_file="$BATS_TEST_TMPDIR/prior_trap_ran.txt"
+    env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        trap 'echo ran > \"$sentinel_file\"' EXIT
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        printf '%s' \"\$SAF_ANCESTOR_RUN_CACHE_DIR\" > '$reported_dir_file'
+    "
+    reported_dir="$(cat "$reported_dir_file")"
+    [ -n "$reported_dir" ]
+    [ ! -e "$reported_dir" ]
+    [ -f "$sentinel_file" ]
+    [ "$(cat "$sentinel_file")" = "ran" ]
+}
+
+# ---------------------------------------------------------------------------
 # saf_paths_are_ignorable: pure, no git/network involved.
 # ---------------------------------------------------------------------------
 
@@ -300,6 +350,76 @@ STUB
     [ "$status" -ne 0 ]
     [[ "$stderr" == *"::error::"* ]]
     [[ "$stderr" != *"test-token"* ]]
+}
+
+@test "saf_query_run_count: the token never appears in curl's own invoked argv either, not just in ghcr_retry's diagnostics" {
+    # Even with the token kept out of ghcr_retry's own \$*-logged diagnostics
+    # (the test above), _saf_github_api_get previously still passed
+    # "-H" "Authorization: Bearer <token>" as a literal argument TO curl
+    # itself -- visible for curl's own process lifetime to any other process
+    # running as the same host user (e.g. via /proc/<pid>/cmdline on a
+    # shared self-hosted runner), regardless of what ghcr_retry logs.
+    # install_fake_curl_flaky's own call_log records curl's REAL argv on
+    # every invocation, so this proves the fix at the level that actually
+    # matters: the token must never appear there, only a "-H" "@<file>"
+    # reference to a header file passed by path.
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_RUN_COUNT=1
+    install_fake_curl_flaky
+    run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -eq 0 ]
+    [[ "$(cat "$call_log")" != *"test-token"* ]]
+    [[ "$(cat "$call_log")" != *"Authorization"* ]]
+    [[ "$(cat "$call_log")" == *"-H @"* ]]
+}
+
+@test "saf_query_run_count: the header file passed to curl via -H @<file> is removed after the call, never left behind" {
+    # The Authorization header is written to a short-lived, mode-600 temp
+    # file that curl reads via -H @<file> instead of taking the token as a
+    # literal argument. That file must not outlive the single curl
+    # invocation it was created for -- verified here by having the fake curl
+    # itself capture the header file's own path (the argument immediately
+    # following "-H", stripped of its leading "@") into a separate file this
+    # test can inspect AFTER saf_query_run_count has already returned, proving
+    # the real cleanup (not just curl's own view of the file while it ran).
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_RUN_COUNT=1
+    install_fake_curl_flaky
+    header_path_capture="$BATS_TEST_TMPDIR/header_path_seen.txt"
+    # Rewrite the fake curl to also record the header file's path (still
+    # honoring FAKE_CURL_FAIL_COUNT/FAKE_CURL_RUN_COUNT exactly as before).
+    cat > "$fake_bin_dir/curl" <<STUB
+#!/usr/bin/env bash
+echo "\$*" >> "$call_log"
+remaining=\$(cat "$fail_count_file")
+if [ "\$remaining" -gt 0 ]; then
+    remaining=\$((remaining - 1))
+    echo "\$remaining" > "$fail_count_file"
+    exit 1
+fi
+out_file=""
+url=""
+prev=""
+for arg in "\$@"; do
+    if [ "\$prev" = "-o" ]; then
+        out_file="\$arg"
+    fi
+    case "\$prev" in
+        -H) [ "\${arg#@}" != "\$arg" ] && echo "\${arg#@}" >> "$header_path_capture" ;;
+    esac
+    prev="\$arg"
+    url="\$arg"
+done
+count="${FAKE_CURL_RUN_COUNT:-0}"
+printf '{"total_count":%s,"workflow_runs":[]}' "\$count" > "\$out_file"
+printf '%s' "${FAKE_CURL_HTTP_STATUS:-200}"
+STUB
+    chmod +x "$fake_bin_dir/curl"
+    run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -eq 0 ]
+    [ -s "$header_path_capture" ]
+    header_file_path="$(cat "$header_path_capture")"
+    [ ! -e "$header_file_path" ]
 }
 
 @test "saf_query_run_count: a non-200 HTTP status is treated as a retryable failure, not a false zero" {
