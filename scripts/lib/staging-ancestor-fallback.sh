@@ -184,21 +184,43 @@ saf_base_commit_diff_paths() {
 # a hard requirement before any caller treats "zero runs" as safe to act on.
 #
 # Returns 0 if every changed path matches the ignore patterns (a genuine
-# deliberate-skip candidate). Returns 1 if at least one path does not (a real
-# change was present -- the confirmed-zero-runs reading must NOT be trusted;
-# callers must treat this the same as "a run exists", i.e. no fallback).
-# Returns 2 if the diff itself could not be computed (root commit, missing
-# object, or any other git failure) -- also NOT safe to unlock the fallback
-# on, for the same "can't prove it, don't act on it" reasoning
-# saf_base_commit_has_confirmed_run's own header documents for its own
-# inconclusive case.
+# deliberate-skip candidate) -- INCLUDING a commit that genuinely changed
+# nothing at all (e.g. a real `git commit --allow-empty`): such a commit has
+# no changed path that could possibly violate the ignore list, so it
+# vacuously qualifies, and by construction can never trigger build-push.yml's
+# path-filtered push workflow either, matching the "zero runs" reading
+# exactly. Returns 1 if at least one path does not (a real change was present
+# -- the confirmed-zero-runs reading must NOT be trusted; callers must treat
+# this the same as "a run exists", i.e. no fallback). Returns 2 if the diff
+# itself genuinely could not be computed (a root commit with no parent to
+# diff against, a missing object, or any other real `git diff-tree` failure)
+# -- also NOT safe to unlock the fallback on, for the same "can't prove it,
+# don't act on it" reasoning saf_base_commit_has_confirmed_run's own header
+# documents for its own inconclusive case.
+#
+# Distinguishing "genuinely zero changed paths" (safe, case 0 above) from "the
+# diff command itself failed" (unsafe, case 2 above) requires checking
+# saf_base_commit_diff_paths's own real exit status, NOT just whether its
+# stdout happens to be empty -- both a root commit (no `sha^1` to diff
+# against, a real git failure, empty stdout) and a genuine empty commit (a
+# valid, successful diff that simply found no differences, also empty
+# stdout) produce IDENTICAL empty output -- treating both as inconclusive
+# would wrongly treat an unambiguously safe, common case (any `--allow-empty`
+# commit, including ones this project's own tests construct routinely) the
+# same as a genuine git failure -- missing the fast path and forcing a full,
+# pointless freshness wait for an image that will never exist for a commit
+# that changed nothing.
 saf_base_commit_paths_are_ignorable() {
   local sha="${1:?saf_base_commit_paths_are_ignorable: sha is required}"
   local git_dir="${2:-.}"
-  local paths
+  local paths diff_status
   paths="$(saf_base_commit_diff_paths "$sha" "$git_dir")"
-  if [[ -z "$paths" ]]; then
+  diff_status=$?
+  if (( diff_status != 0 )); then
     return 2
+  fi
+  if [[ -z "$paths" ]]; then
+    return 0
   fi
   if saf_paths_are_ignorable "$paths"; then
     return 0

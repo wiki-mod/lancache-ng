@@ -169,6 +169,31 @@ setup_linear_fixture() {
     [ "$status" -eq 2 ]
 }
 
+@test "saf_base_commit_paths_are_ignorable: a genuinely empty commit (a real parent, zero changed paths) is ignorable, not inconclusive" {
+    # Distinguishes the two cases that both produce empty `git diff-tree`
+    # stdout: a root commit (no sha^1 to diff against -- diff-tree itself
+    # FAILS, exit 128, see the test above) versus a genuine `--allow-empty`
+    # commit with a real parent (diff-tree SUCCEEDS, exit 0, simply finds no
+    # differences). Only the exit status tells these apart; both look
+    # identical if you only look at whether stdout is empty. An empty commit
+    # changed nothing at all, so it vacuously matches the ignore list --
+    # there is no changed path to violate it -- and must be treated the same
+    # as any other confirmed-ignorable commit (status 0), not lumped in with
+    # a genuine git failure (status 2, which would incorrectly force the
+    # slow path and wait out the full freshness ceiling for an image that
+    # will never exist for a commit that changed nothing).
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m root
+    git -C "$git_dir" commit -q --allow-empty -m "genuinely empty"
+    empty_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run saf_base_commit_paths_are_ignorable "$empty_sha" "$git_dir"
+    [ "$status" -eq 0 ]
+}
+
 # ---------------------------------------------------------------------------
 # saf_query_run_count / saf_query_tag_publishing_run_count /
 # saf_base_commit_has_confirmed_run: retry + event scoping, using a fake
@@ -556,12 +581,10 @@ STUB
     git -C "$git_dir" config user.email test@example.com
     git -C "$git_dir" config user.name test
     local i
-    # Real docs/*.md-touching commits, not --allow-empty: the two skipped
-    # candidates nearest base_sha must be positively confirmed
-    # paths-ignorable (saf_find_built_ancestor's own "validate every skipped
-    # ancestor" safety check), which an empty diff can never satisfy
-    # (inconclusive, not confirmed-ignorable -- see
-    # saf_base_commit_paths_are_ignorable's own header).
+    # Real docs/*.md-touching commits, not --allow-empty: this fixture only
+    # needs the walk to reach the configured depth, which real docs-only
+    # commits prove regardless of how an empty commit would be classified
+    # (see the dedicated --allow-empty tests above for that case).
     mkdir -p "$git_dir/docs"
     for i in 1 2 3 4 5 6 7 8; do
         echo "commit-$i" > "$git_dir/docs/commit-$i.md"
@@ -751,6 +774,52 @@ STUB
     # to the right commit, not just "some" failure that happens to also
     # not mention grandparent.
     [[ "$output" == *"$real_change_parent_sha"* ]]
+}
+
+@test "saf_find_built_ancestor: a run-less candidate that is itself a genuinely empty commit is walked past, not blocked" {
+    # The positive counterpart to the test above: a run-less mid-walk
+    # candidate is only a walk-blocking failure when its OWN changed paths
+    # cannot be positively confirmed safe to skip. A genuinely empty commit
+    # (--allow-empty, a real parent, zero changed paths) has nothing that
+    # could be missing from a substituted older ancestor, so
+    # saf_base_commit_paths_are_ignorable now confirms it ignorable (status
+    # 0, not the pre-fix inconclusive status 2) and the walk must continue
+    # to the next real, run-bearing candidate instead of failing closed.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/docs"
+
+    echo "grandparent" > "$git_dir/docs/grandparent.md"
+    git -C "$git_dir" add docs/grandparent.md
+    git -C "$git_dir" commit -q -m grandparent
+    grandparent_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    git -C "$git_dir" commit -q --allow-empty -m "empty run-less parent"
+    empty_parent_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "base" > "$git_dir/docs/base.md"
+    git -C "$git_dir" add docs/base.md
+    git -C "$git_dir" commit -q -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$grandparent_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    install_revision_stub_for "$grandparent_sha"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$grandparent_sha" ]
 }
 
 @test "saf_find_built_ancestor: an inconclusive run-check for a candidate fails closed even if its image would otherwise pass freshness" {
