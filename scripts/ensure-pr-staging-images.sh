@@ -122,6 +122,12 @@
 # fix relies on actually discriminates the two cases. This left
 # "ensure-pr-staging-images" job FAILURE on PR #1355 for 15+ hours with no
 # possible resolution short of a maintainer manually re-pointing the tag.
+# (A docs-only commit genuinely never gets a PUSH-triggered build -- that
+# part is unconditional. Whether some OTHER trigger, e.g. a manual
+# workflow_dispatch, independently produces an image for that same commit
+# regardless is a separate question this file does not need to answer -- see
+# base_commit_has_confirmed_push_run()'s own header for why that possibility
+# doesn't weaken this fix.)
 #
 # The fix (base_commit_has_confirmed_push_run() / find_built_ancestor()
 # below): once the exact-BASE_SHA wait has genuinely failed, POSITIVELY
@@ -405,6 +411,29 @@ build_push_run_active() {
 # runner without `gh` silently unlock the ancestor-fallback path for a
 # commit that may have a real, broken build.
 #
+# IMPORTANT SCOPING LIMITATION (found live while validating this fix's own
+# PR, not a hypothetical): `event=push` is DELIBERATELY the only trigger
+# queried here, so a "1" ("confirmed zero push runs") does NOT mean "this
+# commit was never built at all" in the fully general sense -- a
+# `workflow_dispatch` (or any other non-push trigger) run for the exact same
+# commit can exist and can have produced a perfectly valid, correctly-labeled
+# image, entirely independent of whether a push-triggered run ever fired.
+# Confirmed live: this fix's own introducing PR (#1371) landed on base commit
+# `757750b2`, which itself has zero push-triggered `build-push.yml` runs (an
+# ordinary docs-only commit, same shape as PR #1355's base commit) -- yet a
+# `workflow_dispatch` run for that exact commit had already produced a valid
+# `sha-757750b` image for every service, so the untouched-service loop's
+# exact-BASE_SHA freshness wait (a few lines below this function) succeeded
+# directly and never even reached this function. This is precisely WHY this
+# function is only ever consulted after that exact-BASE_SHA wait has already
+# failed (see the call site below) -- it is not a standalone "was this commit
+# built" oracle, only a narrower "was a push-triggered build ever attempted"
+# signal used to decide whether the ancestor-fallback below is safe to
+# attempt. A "1" here can be a false negative for "built at all", but never a
+# false positive for "safe to fall back": if BASE_SHA's own image already
+# exists via any trigger, the exact-BASE_SHA wait above already succeeds and
+# this function is never called for it at all.
+#
 # Indirection so tests can stub this without a real `gh`/network call, same
 # convention as build_push_run_active() above.
 base_commit_has_confirmed_push_run() {
@@ -622,7 +651,7 @@ for service in "${full_setup_services[@]}"; do
         exit 1
     fi
 
-    echo "::notice::$BASE_SHA had zero push-triggered build-push.yml runs (confirmed via the GitHub Actions API) -- almost certainly a docs/governance-only commit skipped by build-push.yml's own push paths-ignore (issue #1095 Part 1), not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a real push-triggered run and a freshness-confirmed $service image to back-fill from instead."
+    echo "::notice::$BASE_SHA has no push-triggered build-push.yml run (confirmed via the GitHub Actions API), and its own $service image never became available -- likely a docs/governance-only commit skipped by build-push.yml's own push paths-ignore (issue #1095 Part 1), though a non-push-triggered run for this exact commit cannot be ruled out by this check alone (see base_commit_has_confirmed_push_run's own header for why that's fine here). Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a real push-triggered run and a freshness-confirmed $service image to back-fill from instead."
     if ! ancestor_sha="$(find_built_ancestor "$BASE_SHA" "$service")"; then
         echo "::error::No usable ancestor of $BASE_SHA was found within $ancestor_search_depth commits with both a push-triggered build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $BASE_SHA's own ancestor history."
         exit 1

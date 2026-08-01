@@ -579,7 +579,7 @@ STUB
     run ! grep -qF "sha-${older_sha:0:7}" "$backfill_log"
     printf '%s\n' "$script_output" | grep -q "Substituting nearest built ancestor"
     printf '%s\n' "$script_output" | grep -qF "$ancestor2_sha"
-    printf '%s\n' "$script_output" | grep -q "zero push-triggered build-push.yml runs"
+    printf '%s\n' "$script_output" | grep -q "no push-triggered build-push.yml run"
 }
 
 @test "#1095 ancestor fallback: bounded search depth stops before reaching a usable ancestor further back" {
