@@ -230,17 +230,24 @@ fi
 congestion_check_interval_seconds="${STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS:-60}"
 
 # #808: bounded wait for the back-fill source image itself to become fresh
-# enough (see scripts/lib/staging-image-freshness.sh for the mechanism). Same
-# 5400s hard ceiling default as the touched-image wait above -- backfilling
-# depends on the base commit's own build+scan+promote pipeline finishing, so
-# there is no reason to expect a different worst case. The normal budget is
-# shorter (900s/15min): in the common case the base commit's own sha-<short>
-# image is already fresh (its push-triggered build finished before this PR's
-# validation even started) and this check resolves on the first poll, so
-# 900s is purely the "start logging that we're still waiting" threshold, not
-# a tuned estimate of typical wait time.
-base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
-base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
+# enough (see scripts/lib/staging-image-freshness.sh for the mechanism).
+# Deliberately a MUCH shorter ceiling than the touched-image wait above: this
+# path is only reached for a base commit that already has a confirmed
+# push-triggered build-push.yml run (base_commit_has_confirmed_push_run()
+# gates entry to this wait), so the image is expected to already exist or
+# appear within a normal build's runtime, not to require the same
+# congestion-driven headroom as the touched-image wait. Keeping this ceiling
+# short also bounds the worst case across the untouched-service loop in
+# full-setup-deep-validate.yml's own job timeout, where a per-service wait
+# anywhere near the touched-image ceiling would starve later services in the
+# same loop. The normal budget is shorter still (900s/15min): in the common
+# case the base commit's own sha-<short> image is already fresh (its
+# push-triggered build finished before this PR's validation even started)
+# and this check resolves on the first poll, so 900s is purely the "start
+# logging that we're still waiting" threshold, not a tuned estimate of
+# typical wait time.
+base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-300}"
+base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-600}"
 if (( base_freshness_hard_ceiling_seconds < base_freshness_timeout_seconds )); then
     base_freshness_hard_ceiling_seconds=$base_freshness_timeout_seconds
 fi
