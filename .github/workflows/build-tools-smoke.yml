@@ -187,6 +187,18 @@ on:
       - "services/proxy/entrypoint.sh"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
+      # services/watchdog/retention.sh (#842, 2026-08-01): the three
+      # file-retention functions (maybe_purge/maybe_prune_syslog/
+      # maybe_rotate_fluent_bit_selflog) moved out of watchdog.sh into this
+      # standalone script, run as a separate OS process for blast-radius
+      # separation. Its own bats coverage (tests/bats/retention_*.bats,
+      # tests/bats/helpers/retention-helpers.sh) sources it directly via
+      # the same awk-extraction pattern watchdog.sh's own helper already
+      # used -- without this entry, a PR touching only retention.sh would
+      # not already match any other path above and so would never run
+      # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
+      # own existence-filtered dependency scan against the real repo tree.
+      - "services/watchdog/retention.sh"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       - "deploy/prod/docker-compose.yml"
@@ -255,6 +267,18 @@ on:
       - "services/proxy/entrypoint.sh"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
+      # services/watchdog/retention.sh (#842, 2026-08-01): the three
+      # file-retention functions (maybe_purge/maybe_prune_syslog/
+      # maybe_rotate_fluent_bit_selflog) moved out of watchdog.sh into this
+      # standalone script, run as a separate OS process for blast-radius
+      # separation. Its own bats coverage (tests/bats/retention_*.bats,
+      # tests/bats/helpers/retention-helpers.sh) sources it directly via
+      # the same awk-extraction pattern watchdog.sh's own helper already
+      # used -- without this entry, a PR touching only retention.sh would
+      # not already match any other path above and so would never run
+      # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
+      # own existence-filtered dependency scan against the real repo tree.
+      - "services/watchdog/retention.sh"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       - "deploy/prod/docker-compose.yml"

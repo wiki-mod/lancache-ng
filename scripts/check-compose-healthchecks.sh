@@ -84,9 +84,26 @@ fi
 # started" and "already exited". Matches this project's existing precedent
 # for the same container in docs/architecture-ng.md's logging matrix ("Not
 # applicable ... no persistent process").
+#
+# retention (deploy/prod, deploy/quickstart, deploy/full-setup; #842 Teil 2,
+# 2026-08-01): a deliberate choice, not an oversight -- this container's own
+# liveness was intentionally never folded into the health-check/restart
+# state machine (that separation from watchdog.sh is the whole point of
+# #842's process split: a bug in file-retention logic must not be able to
+# influence what the health-check reports or restarts). Inventing a
+# heartbeat-file-based liveness probe here would be new scope beyond what
+# this issue asked for. `restart: always` (`unless-stopped` in full-setup,
+# matching that profile's own convention) still recovers a crashed or
+# OOM-killed container the same way this project already accepts for other
+# unmonitored services (dhcp-probe above, netdata). A lightweight heartbeat
+# check is a reasonable future follow-up, tracked as such in PR #1360, not
+# built speculatively here.
 declare -A EXCLUDED_SERVICES=(
     ["deploy/prod/docker-compose.yml:dhcp-probe"]=1
     ["deploy/quickstart/docker-compose.yml:dhcp-probe"]=1
+    ["deploy/prod/docker-compose.yml:retention"]=1
+    ["deploy/quickstart/docker-compose.yml:retention"]=1
+    ["deploy/full-setup/docker-compose.yml:retention"]=1
 )
 
 if [[ -t 1 ]]; then

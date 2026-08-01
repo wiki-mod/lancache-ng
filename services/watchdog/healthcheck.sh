@@ -25,10 +25,15 @@ esac
 # 3x CHECK_INTERVAL, floored at 60s: generous enough that a single slow
 # cycle (e.g. three sequential --max-time-bounded curl calls) never causes a
 # false-positive unhealthy report, while still catching a genuinely stuck
-# main loop well before an operator would otherwise notice. watchdog.sh's
-# main loop also re-runs write_status() a second time after maybe_purge()/
-# maybe_prune_syslog() specifically so the once-daily long-running purge
-# scan doesn't age this file out on its own.
+# main loop well before an operator would otherwise notice. Before #842's
+# retention-engine extraction, watchdog.sh's own main loop also ran the
+# potentially minutes-long maybe_purge()/maybe_prune_syslog() scans inline
+# and had to re-run write_status() a second time afterward so this file's
+# mtime wouldn't age out during that scan. Since #842, those scans run in
+# retention.sh's own separate process and can no longer block this loop at
+# all -- the margin here is now pure safety margin for the curl calls
+# check_and_maybe_restart()/probe_docker_socket_proxy() make, not a purge
+# workaround.
 #
 # `10#` forces base-10 evaluation (found live, 2026-07-31, PR #1347's CI):
 # the digit-only guard above accepts ANY all-digits string, including one
