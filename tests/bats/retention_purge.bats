@@ -1,41 +1,52 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Coverage for services/watchdog/watchdog.sh's maybe_purge() (#872): before
-# this fix, a missing CACHE_DIR left the purge silently skipped with no log
-# line, yet the rate-limit stamp file was still written unconditionally --
-# the daily purge silently never ran again, believed to have run. `find`
-# errors were also swallowed via `2>/dev/null`, unlike the sibling
-# maybe_prune_syslog() (see watchdog_syslog_prune.bats), which logs them.
+# Coverage for services/watchdog/retention.sh's maybe_purge() (#872, moved
+# here from watchdog.sh by #842's blast-radius-separation extraction,
+# 2026-08-01 -- see that file's own header): before the original #872 fix, a
+# missing CACHE_DIR left the purge silently skipped with no log line, yet
+# the rate-limit stamp file was still written unconditionally -- the daily
+# purge silently never ran again, believed to have run. `find` errors were
+# also swallowed via `2>/dev/null`, unlike the sibling maybe_prune_syslog()
+# (see retention_syslog_prune.bats), which logs them.
 #
-# No dedicated test file existed for maybe_purge() before this PR (only a
-# passing mention in watchdog_syslog_prune.bats's header comment) -- this
-# closes that gap as well as proving the specific fixes.
+# No dedicated test file existed for maybe_purge() before #872 (only a
+# passing mention in the syslog-prune test file's header comment) -- that PR
+# closed the gap; this file's rename/relocation (#842) just follows the
+# function to its new home, unmodified in intent.
 #
-# Sources the real function via helpers/watchdog-helpers.sh; maybe_purge()
+# Sources the real function via helpers/retention-helpers.sh; maybe_purge()
 # is pure filesystem I/O (find/rm against a real directory tree, plus a
 # stamp file), so every test here runs it completely unmodified against a
-# real BATS_TEST_TMPDIR fixture, same approach as watchdog_syslog_prune.bats
+# real BATS_TEST_TMPDIR fixture, same approach as retention_syslog_prune.bats
 # uses for its sibling function.
 
 bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    helper_file="$BATS_TEST_TMPDIR/watchdog-helpers-extracted.sh"
-
-    # shellcheck source=tests/bats/helpers/watchdog-helpers.sh
-    source "$BATS_TEST_DIRNAME/helpers/watchdog-helpers.sh"
-    load_watchdog_functions "$repo_root" "$helper_file"
+    helper_file="$BATS_TEST_TMPDIR/retention-helpers-extracted.sh"
 
     cache_dir="$BATS_TEST_TMPDIR/cache"
     mkdir -p "$cache_dir"
 
     export CACHE_DIR="$cache_dir"
     export CACHE_VALID_DAYS=30
+    # #842 Teil 1 hardening: validate_retention_dir() only accepts a CACHE_DIR
+    # that resolves under this prefix -- every test fixture here lives under
+    # BATS_TEST_TMPDIR, not the real /var/cache production mount, so the
+    # allowed prefix must be widened to match for these tests specifically.
+    # See retention-helpers.sh's own comment for why this must be set before
+    # load_retention_functions() (it must be in place before any call to
+    # maybe_purge(), which validates fresh on every call).
+    export CACHE_DIR_ALLOWED_PREFIX="$BATS_TEST_TMPDIR"
     # Own stamp file per test, matching the project's per-test isolation
     # convention for rate-limited stamp files elsewhere in this suite.
     export PURGE_STAMP="$BATS_TEST_TMPDIR/purge.stamp"
+
+    # shellcheck source=tests/bats/helpers/retention-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/retention-helpers.sh"
+    load_retention_functions "$repo_root" "$helper_file"
 }
 
 make_cache_file() {
