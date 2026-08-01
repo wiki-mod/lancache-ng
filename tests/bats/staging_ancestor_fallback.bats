@@ -438,6 +438,11 @@ STUB
     run saf_candidate_run_is_active "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
     export PATH="$old_path"
     [ "$status" -eq 2 ]
+    # GH_TOKEN is set (default from setup()), so a 2 here can only come from
+    # the curl guard, not the token guard -- and no fake curl was installed
+    # in this test at all, so any stdout output would mean the guard was
+    # skipped and something further down actually ran.
+    [ -z "$output" ]
 }
 
 # ---------------------------------------------------------------------------
