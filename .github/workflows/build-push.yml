@@ -5000,7 +5000,7 @@ jobs:
     # They build every service image and routinely dominate PR runtime on
     # self-hosted runners; PRs still exercise Dockerfiles in the build job below.
     # The build job depends on this gate before it can push normal service
-    # images. UPDATED (Schritt 3, issue #1095): every service now also
+    # images. UPDATED (Step 3, issue #1095): every service now also
     # receives an additional exact pushed-digest scan in the build job,
     # because the multi-arch published image is produced there and can
     # differ from the throwaway image this job builds and scans below (a
@@ -5008,7 +5008,7 @@ jobs:
     # image config on every invocation, so the two builds' digests never
     # match even given byte-identical inputs -- see "Determine per-service
     # publish scan reuse" below and "Scan pushed service digest with Trivy"
-    # in build/build-arm64). This used to be build-tools-only; Schritt 3
+    # in build/build-arm64). This used to be build-tools-only; Step 3
     # generalized the same already-proven mechanism to the other 7 services
     # rather than inventing a new one.
     #
@@ -5213,7 +5213,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
-        # Schritt 3 (issue #1095): generalizes what used to be
+        # Step 3 (issue #1095): generalizes what used to be
         # build-tools-only ("Enable build-tools publish scan", issue #1290,
         # maintainer decision) to every matrix.service. No service
         # unconditionally builds a local throwaway image just to scan it on
@@ -5749,7 +5749,7 @@ jobs:
 
       # Companion to "Determine per-service publish scan reuse" above
       # (originally issue #1290, build-tools-only; generalized to every
-      # service by Schritt 3, issue #1095): when a service is unchanged this
+      # service by Step 3, issue #1095): when a service is unchanged this
       # run, no local image was built to scan, but the point of scanning at
       # all is to catch a newly disclosed CVE in the already-published
       # channel image -- skipping the scan entirely would defeat that, so
@@ -5861,7 +5861,7 @@ jobs:
         run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
 
   determine-push-reuse-scope:
-    # Schritt 4 (issue #1095): decides, once per push (not once per
+    # Step 4 (issue #1095): decides, once per push (not once per
     # build/build-arm64/per-arch matrix row), whether each allowlisted
     # product service can safely retag its already-published channel image
     # (nightly/latest) instead of paying for a real rebuild+rescan this run.
@@ -5888,7 +5888,7 @@ jobs:
     # "safe to reuse" -- issue #1095's own investigation (its "C-7" finding)
     # and issue #1290's corrected implementation converge on this same
     # three-part verification.
-    name: determine push reuse scope (Schritt 4)
+    name: determine push reuse scope (Step 4)
     needs: detect-changes
     # Branches only -- a release tag push has no meaningful "channel" to
     # reuse from (github.event.before is meaningless for the first push of a
@@ -5984,7 +5984,7 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # Schritt 4 allowlist (issue #1095): started narrow -- ntp only --
+          # Step 4 allowlist (issue #1095): started narrow -- ntp only --
           # to prove the mechanism end-to-end with a real push before
           # widening to the remaining services (per the original PR body's
           # proof sequence), rather than staging this as several separate
@@ -6050,7 +6050,7 @@ jobs:
               return
             fi
             if ! is_allowlisted "$matrix_service"; then
-              echo "::notice::$matrix_service: not yet in the Schritt 4 allowlist; building normally." >&2
+              echo "::notice::$matrix_service: not yet in the Step 4 allowlist; building normally." >&2
               printf 'false\n'
               return
             fi
@@ -6075,7 +6075,7 @@ jobs:
     # on self-hosted runners because the heavy Rust/image path depends on the
     # shared build-tools image, sccache/distcc acceleration, and registry
     # credentials. It still waits for lightweight validation, policy checks,
-    # and trusted-ref vulnerability scans before publishing. UPDATED (Schritt
+    # and trusted-ref vulnerability scans before publishing. UPDATED (Step
     # 3, issue #1095): for every service (originally build-tools only), it
     # also scans the exact pushed digest before attestation/promotion can
     # proceed -- see "Scan pushed service digest with Trivy" below.
@@ -6228,7 +6228,7 @@ jobs:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
-          # Schritt 4 (issue #1095): determine-push-reuse-scope's own `if:`
+          # Step 4 (issue #1095): determine-push-reuse-scope's own `if:`
           # only fires on `push` to a branch ref (see that job), so its
           # `result` is legitimately 'skipped' on pull_request/schedule/
           # workflow_dispatch -- checked explicitly below (fail-safe to a
@@ -6269,7 +6269,7 @@ jobs:
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # Schritt 4 (issue #1095): determine-push-reuse-scope already did
+            # Step 4 (issue #1095): determine-push-reuse-scope already did
             # the real verification (channel image revision label + git
             # ancestry + a real content diff -- see that job and
             # scripts/lib/push-reuse.sh) for whichever services are
@@ -6331,7 +6331,7 @@ jobs:
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
 
-      # Widened to also cover a Schritt 4 push-reuse-only path (should-build
+      # Widened to also cover a Step 4 push-reuse-only path (should-build
       # == 'false' but matrix.service is a push-reusable service on a push
       # event, not a pull_request skip): "Retag unchanged service image for
       # this commit" below needs a real builder the same way an actual
@@ -6359,7 +6359,7 @@ jobs:
         # GITHUB_TOKEN, even for a same-repo PR) -- excluded explicitly so
         # this step (and the push below) is skipped cleanly instead of
         # attempting a login/push that GitHub would reject with a 403.
-        # Also widened for a Schritt 4 push-reuse-only path, same reasoning
+        # Also widened for a Step 4 push-reuse-only path, same reasoning
         # as "Set up Docker Buildx" immediately above.
         if: >-
           ${{
@@ -6381,14 +6381,14 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Schritt 4 (issue #1095): generalized to whichever service this
+      # Step 4 (issue #1095): generalized to whichever service this
       # matrix row is currently building, including build-tools (issue
       # #1290) -- determine-push-reuse-scope already did the real
       # verification (channel image revision label + git ancestry + a real
       # content diff; see that job and scripts/lib/push-reuse.sh), so this
       # step only needs to resolve the same channel image's linux/amd64
       # child digest and retag it. No rebuild, no recompilation needed here.
-      # No separate Trivy scan needed here either: UPDATED (Schritt 3, issue
+      # No separate Trivy scan needed here either: UPDATED (Step 3, issue
       # #1095) -- container-scan's "Determine per-service publish scan
       # reuse" step reads this exact same determine-push-reuse-scope
       # decision for every service now (generalized from build-tools-only),
@@ -6417,7 +6417,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
           command -v jq >/dev/null 2>&1 || {
-            echo "::error::jq is required on this runner for the Schritt 4 retag-only path."
+            echo "::error::jq is required on this runner for the Step 4 retag-only path."
             exit 1
           }
 
@@ -6434,7 +6434,7 @@ jobs:
           fi
 
           source_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${amd64_digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Schritt 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from $channel_image) as $target instead of rebuilding."
+          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from $channel_image) as $target instead of rebuilding."
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --tag "$target" "$source_ref"
 
@@ -6803,7 +6803,7 @@ jobs:
       # persistent self-hosted runner pool that setup-buildx-action never
       # removes on its own. "Build and push" above is the only step in this
       # job that uses it for a real build; "Retag unchanged service image"
-      # above also uses it (for `imagetools create`, on a Schritt 4
+      # above also uses it (for `imagetools create`, on a Step 4
       # retag-only path) -- matches "Set up Docker Buildx"'s own widened
       # condition so a builder that step actually created always gets torn
       # down. "Rotate local Buildx cache" below only manipulates the local
@@ -6859,7 +6859,7 @@ jobs:
         # the same BoltDB cache file whenever this job runs its full 8-way
         # matrix concurrently (originally this was build-tools-only, so a
         # static `build-tools-pushed` prefix could not yet collide across
-        # services; Schritt 3, issue #1095, generalized this step to every
+        # services; Step 3, issue #1095, generalized this step to every
         # service, so the key must now include matrix.service too, matching
         # container-scan's own pre-build Trivy cache dir, which already did).
         # Mirrors that job's concurrency-group key exactly (sanitized
@@ -6930,7 +6930,7 @@ jobs:
           touch -- "$stamp"
 
       - name: Scan pushed service digest with Trivy
-        # Schritt 3 (issue #1095): generalized from build-tools-only to
+        # Step 3 (issue #1095): generalized from build-tools-only to
         # every service -- the exact pushed digest is scanned before
         # provenance and channel promotion for all 8 services now, closing
         # the provenance gap where the artifact Trivy scanned (container-scan's
@@ -7158,7 +7158,7 @@ jobs:
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # Mirrors build's own (the amd64 leg) identical branch here --
-            # see that job's comment for the full Schritt 4/#1095 rationale,
+            # see that job's comment for the full Step 4/#1095 rationale,
             # including why build-tools (issue #1290) is folded into this
             # same allowlisted case statement instead of keeping its own
             # separate hand-rolled copy of the same verification. Both legs
@@ -7207,7 +7207,7 @@ jobs:
           fi
           echo "should-build=$should_build" >> "$GITHUB_OUTPUT"
 
-      # Widened to also cover a Schritt 4 push-reuse-only path -- same
+      # Widened to also cover a Step 4 push-reuse-only path -- same
       # reasoning as build's own (the amd64 leg) identical widening.
       - name: Set up Docker Buildx
         # Issue #930: retried via .github/actions/buildx-setup-retry -- this
@@ -7229,7 +7229,7 @@ jobs:
 
       - name: Log in to GHCR
         # Same fork-safety and Dependabot-safety reasoning as build's own
-        # "Log in to GHCR" step. Also widened for a Schritt 4
+        # "Log in to GHCR" step. Also widened for a Step 4
         # push-reuse-only path, same reasoning as "Set up Docker Buildx"
         # immediately above.
         if: >-
@@ -7254,7 +7254,7 @@ jobs:
 
       # Mirrors build's own "Retag unchanged service image" step exactly,
       # just for the linux/arm64 leg -- see that step's comment for the full
-      # Schritt 4/#1095 rationale. Both legs run independently in parallel
+      # Step 4/#1095 rationale. Both legs run independently in parallel
       # jobs but resolve the same channel image and the same commit's short
       # SHA, so they always agree on which digest to retag.
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
@@ -7275,7 +7275,7 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
           command -v jq >/dev/null 2>&1 || {
-            echo "::error::jq is required on this runner for the Schritt 4 retag-only path."
+            echo "::error::jq is required on this runner for the Step 4 retag-only path."
             exit 1
           }
 
@@ -7292,7 +7292,7 @@ jobs:
           fi
 
           source_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${arm64_digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Schritt 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from $channel_image) as $target instead of rebuilding."
+          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from $channel_image) as $target instead of rebuilding."
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --tag "$target" "$source_ref"
 
@@ -7449,7 +7449,7 @@ jobs:
       # so unlike build's self-hosted equivalent this is a defensive no-op
       # today rather than an active leak, but kept for consistency and in
       # case this job is ever moved to a persistent runner. Widened the same
-      # way as build's own equivalent step to also cover a Schritt 4
+      # way as build's own equivalent step to also cover a Step 4
       # retag-only path.
       - name: Remove buildx builder
         if: >-
@@ -7465,7 +7465,7 @@ jobs:
 
       - name: Scan pushed service digest with Trivy
         # Same exact-pushed-digest scan build performs for its linux/amd64
-        # image, mirrored here for the linux/arm64 digest. Schritt 3 (issue
+        # image, mirrored here for the linux/arm64 digest. Step 3 (issue
         # #1095) generalized this from build-tools-only to every service; no
         # persistent Trivy cache here (unlike build's own equivalent step) --
         # this job runs on an ephemeral GitHub-hosted runner with nothing to
