@@ -103,6 +103,43 @@
 # confirmed live: PR #960's push produced 5 separate build-push runs for the
 # same head commit), and the newest one finishing quickly (or being
 # cancelled) must not hide an older one that is still genuinely building.
+#
+# Issue #1095 Part 1 follow-up (2026-08-01, PR #1355): the exact-BASE_SHA
+# freshness wait a few lines below (sif_wait_for_fresh_base_image against
+# $BASE_SHA itself) can be STRUCTURALLY unwinnable, not merely slow. #1095
+# Part 1 gave build-push.yml's `push` trigger its own `paths-ignore`
+# (**/*.md, docs/**) so a docs/governance-only commit landing on
+# master/current_dev never runs the build pipeline at all -- deliberately and
+# correctly, per that trigger's own header comment. But if THIS PR's base
+# commit happens to be exactly such a commit, its sha-<short> image will
+# NEVER exist, for any service, no matter how long this waits: the hard
+# ceiling below was always going to fire. Confirmed live: PR #1355's base
+# commit 234f54a8 is PR #1363's merge commit, a pure `docs(governance)`
+# change; `gh api repos/wiki-mod/lancache-ng/actions/workflows/build-push.yml/runs?head_sha=234f54a8acd13ea86a495e459af3306908f1a779&event=push`
+# returns zero workflow_runs (verified against the real GitHub API while
+# building this fix), while the same query against a real built commit
+# (433c3fd2, PR #1360) returns exactly one -- confirming the API shape this
+# fix relies on actually discriminates the two cases. This left
+# "ensure-pr-staging-images" job FAILURE on PR #1355 for 15+ hours with no
+# possible resolution short of a maintainer manually re-pointing the tag.
+#
+# The fix (base_commit_has_confirmed_push_run() / find_built_ancestor()
+# below): once the exact-BASE_SHA wait has genuinely failed, POSITIVELY
+# confirm (via the GitHub Actions API, not an assumption) that build-push.yml
+# never ran at all for BASE_SHA on a push event -- not "failed", not "still
+# running", genuinely zero runs -- before considering a fallback. If a run
+# DOES exist (any conclusion), this is a real build/CI problem and the
+# existing strict failure is preserved exactly as before; no ancestor
+# fallback is attempted. Only when zero runs are positively confirmed does
+# this walk BASE_SHA's own ancestor history (bounded depth) for the nearest
+# commit that both has a real push-triggered run AND a freshness-confirmed
+# per-commit image (reusing sif_wait_for_fresh_base_image, never skipping
+# that check), and substitutes THAT ancestor's per-commit tag for the
+# back-fill -- never the mutable nightly/latest channel (the #626
+# anti-pattern this whole file exists to avoid). An inconclusive run-check
+# (gh missing, API error) is deliberately NOT treated as "confirmed zero" --
+# proving absence is the only condition that unlocks this path, so any
+# uncertainty must fail the same strict way as today.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -202,6 +239,21 @@ if (( base_freshness_hard_ceiling_seconds < base_freshness_timeout_seconds )); t
     base_freshness_hard_ceiling_seconds=$base_freshness_timeout_seconds
 fi
 base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15}"
+
+# Issue #1095 Part 1 follow-up: how many of BASE_SHA's own ancestor commits
+# (nearest-first, via `git log --format=%H`) find_built_ancestor() below will
+# examine before giving up. Bounded rather than unbounded on purpose -- a
+# long, unbroken run of docs/governance-only commits is realistic in this
+# project's actual history (see this repo's own commit log around any
+# governance-doc-heavy period), and walking the entire project history
+# looking for a built commit would defeat the "fail closed within a
+# reasonable time" property every other wait in this file already has. 50 is
+# generous headroom over every real docs-commit-run observed in this
+# project's history so far (rarely more than 2-3 consecutive doc-only
+# commits) without being large enough to make a genuinely pathological case
+# (e.g. a long-dead branch) hang the job for an unreasonable number of GitHub
+# API calls.
+ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
 
 # The services deploy/full-setup/docker-compose.yml references, plus
 # build-tools (used by the client-simulation steps, not the compose file
@@ -312,6 +364,164 @@ build_push_run_active() {
     [[ "$any_active" == "true" ]]
 }
 
+# Issue #1095 Part 1 follow-up: base_commit_has_confirmed_push_run <sha>
+#
+# Answers "did build-push.yml's `push` trigger EVER fire for <sha>?", queried
+# by `event=push` specifically (never `pull_request`) -- this is asking about
+# the commit's own direct push to its branch (see full-setup-deep-validate.yml's
+# BASE_SHA comment: this is always github.event.pull_request.base.sha, a real
+# commit that landed via push, never a synthetic merge commit), which is a
+# different query surface from build_push_run_active() above (that one asks
+# about the CURRENT PR's pull_request-triggered run for its own head).
+# Verified against the real GitHub Actions API while building this fix:
+# `runs?head_sha=<full-40-char-sha>&event=push` returned exactly 1 run for
+# 433c3fd2 (a real built commit, PR #1360) and 0 runs for 234f54a8 (PR #1355's
+# base commit, a pure docs(governance) merge skipped by build-push.yml's own
+# push paths-ignore) -- confirming this query shape actually discriminates
+# the "never built" case from the "built" case, which is the one fact this
+# whole fallback mechanism depends on. The API requires the FULL 40-character
+# commit SHA for `head_sha=` (an abbreviated short SHA silently matches
+# nothing) -- every caller of this function must pass BASE_SHA or a full SHA
+# from `git log --format=%H`, never a truncated one.
+#
+# Returns 0 if at least one push-triggered run exists (regardless of its
+# conclusion -- success, failure, or still in progress all count: any of them
+# proves this was a real, attempted build, not an unbuildable commit).
+#
+# Returns 1 ONLY when the API POSITIVELY confirms zero runs (an empty
+# workflow_runs array). This is the sole condition under which a caller may
+# treat <sha> as "never going to build" and consider the ancestor-fallback
+# path below -- "positively confirms zero" must mean exactly that, not
+# "we couldn't tell."
+#
+# Returns 2 when the check itself could not be completed (gh missing, API
+# call failed, unexpected response). Deliberately NOT collapsed into "assume
+# zero runs": unlike build_push_run_active() above (whose fail-safe direction
+# is "assume not active", chosen so a broken probe can never make the
+# congestion extension hang forever), this function's entire purpose is
+# proving ABSENCE, and a failed probe proves nothing about that. Every
+# caller must treat 2 the same as 0 (preserve today's strict failure) --
+# collapsing 2 into "confirmed zero" would let a transient API hiccup or a
+# runner without `gh` silently unlock the ancestor-fallback path for a
+# commit that may have a real, broken build.
+#
+# Indirection so tests can stub this without a real `gh`/network call, same
+# convention as build_push_run_active() above.
+base_commit_has_confirmed_push_run() {
+    local sha="$1"
+    if [[ -n "${STAGING_BASE_BUILD_RUN_EXISTS_CMD:-}" ]]; then
+        "$STAGING_BASE_BUILD_RUN_EXISTS_CMD" "$sha"
+        return $?
+    fi
+    if ! command -v gh >/dev/null 2>&1; then
+        return 2
+    fi
+    local run_count
+    run_count="$(gh api "repos/${REPOSITORY}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=push&per_page=1" \
+        --jq '.workflow_runs | length' 2>/dev/null)" || return 2
+    if [[ "$run_count" =~ ^[0-9]+$ ]]; then
+        if (( run_count == 0 )); then
+            return 1
+        fi
+        return 0
+    fi
+    # Malformed/unexpected response shape -- can't positively conclude
+    # anything from it, so this is "inconclusive", not "confirmed zero".
+    return 2
+}
+
+# Issue #1095 Part 1 follow-up: find_built_ancestor <base_sha> <service>
+#
+# Only ever called after base_commit_has_confirmed_push_run has POSITIVELY
+# confirmed <base_sha> itself has zero push-triggered runs (see the call
+# site below) -- this function's job is to find the nearest usable
+# replacement, not to re-decide whether one is needed.
+#
+# Walks <base_sha>'s own ancestor history (nearest-first, via
+# `git log --format=%H`, honoring STAGING_FRESHNESS_GIT_DIR the same way
+# scripts/lib/staging-image-freshness.sh's sif_is_ancestor_or_equal already
+# does, so tests can point this at a disposable repo instead of the real
+# checkout), bounded to ancestor_search_depth commits. For each candidate,
+# ancestor-nearest-first:
+#   - Skip it (keep walking) if base_commit_has_confirmed_push_run positively
+#     confirms it ALSO has zero runs (very plausible: a run of consecutive
+#     docs/governance-only commits is realistic in this project's actual
+#     history, not a hypothetical edge case).
+#   - Otherwise (a run exists, or the check is merely inconclusive for this
+#     candidate) attempt the real proof: reuse
+#     sif_wait_for_fresh_base_image against THIS candidate's own commit and
+#     its own per-commit tag -- never skipping that check just because a run
+#     was found, for the same reason the original BASE_SHA path never skips
+#     it (a run existing doesn't by itself prove the resulting image is the
+#     one actually present in the registry, or that it wasn't itself a
+#     failed build).
+#
+# JUDGMENT CALL (flagged for maintainer review, matching this file's own
+# convention of calling these out explicitly rather than guessing silently --
+# see scripts/lib/staging-image-freshness.sh's own JUDGMENT CALL comment for
+# the precedent): if a candidate's freshness proof FAILS (the run existed,
+# but no confirmed-fresh image ever appeared within budget -- e.g. that
+# ancestor's own build genuinely failed), this function stops and reports
+# failure immediately; it does NOT keep walking further back past a
+# candidate that had a real, seemingly-broken build. Continuing past it would
+# mean potentially issuing many more bounded waits (each up to
+# base_freshness_hard_ceiling_seconds) stacked back to back across up to
+# ancestor_search_depth candidates -- a worst case far worse than the
+# structural problem this fix exists to solve, and it would also mean
+# silently reaching further and further back in history for a replacement
+# image, which sits uncomfortably close to the #626 stale-content anti-
+# pattern this whole file exists to avoid. A commit with a real, broken
+# build is a genuine CI problem worth surfacing on its own, not a reason to
+# keep hunting for an even older substitute.
+#
+# Echoes the confirmed-good ancestor's full commit SHA on stdout on success;
+# returns non-zero with no output if no usable ancestor is found within the
+# bounded depth.
+find_built_ancestor() {
+    local base_sha="$1" service="$2"
+    local git_dir="${STAGING_FRESHNESS_GIT_DIR:-.}"
+    local candidates
+    candidates="$(git -C "$git_dir" log --format=%H "$base_sha" 2>/dev/null | tail -n +2 | head -n "$ancestor_search_depth")" || return 1
+    if [[ -z "$candidates" ]]; then
+        return 1
+    fi
+
+    local candidate has_run ancestor_image
+    while IFS= read -r candidate; do
+        [[ -z "$candidate" ]] && continue
+
+        has_run=0
+        base_commit_has_confirmed_push_run "$candidate" || has_run=$?
+        if (( has_run == 1 )); then
+            # Positively confirmed zero runs for this ancestor too -- keep
+            # walking further back rather than wasting a freshness poll on a
+            # commit that provably has no image to find.
+            continue
+        fi
+
+        ancestor_image="ghcr.io/${REPOSITORY}/${service}:sha-${candidate:0:7}"
+        # Deliberately NOT redirecting stderr here (only stdout): the
+        # ::notice::/::warning::/::error:: diagnostic lines
+        # sif_wait_for_fresh_base_image writes to stderr must still reach the
+        # job log even though this function's own stdout is captured by its
+        # caller via `$(...)` -- mirrors the discipline
+        # scripts/lib/staging-image-freshness.sh's own header documents for
+        # exactly this reason.
+        if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
+            "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$base_freshness_poll_interval_seconds" >/dev/null; then
+            printf '%s\n' "$candidate"
+            return 0
+        fi
+
+        # Found a run-bearing candidate whose image never became confirmed-
+        # fresh -- per the JUDGMENT CALL above, stop here instead of walking
+        # further back.
+        return 1
+    done <<< "$candidates"
+
+    return 1
+}
+
 wait_for_touched_image() {
     local pr_image="$1" service="$2"
     local start_time=$SECONDS
@@ -375,13 +585,51 @@ for service in "${full_setup_services[@]}"; do
     # base commit's own push-triggered build may not have pushed this tag
     # yet) and still guards against a corrupted/mislabeled image reporting
     # the wrong revision.
-    if ! sif_wait_for_fresh_base_image "$base_image" "$BASE_SHA" "$service" \
+    if sif_wait_for_fresh_base_image "$base_image" "$BASE_SHA" "$service" \
         "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$base_freshness_poll_interval_seconds" >/dev/null; then
-        echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
+        echo "::notice::(re)pointing $PR_TAG at the PR base commit's own per-commit image ($base_image)."
+        backfill_from_base "$pr_image" "$base_image"
+        continue
+    fi
+
+    # Issue #1095 Part 1 follow-up (PR #1355): the exact-BASE_SHA wait above
+    # just failed. Before declaring hard failure, rule out the structurally-
+    # unwinnable case documented in this file's own header: BASE_SHA may be a
+    # docs/governance-only commit build-push.yml's `push` paths-ignore
+    # deliberately never builds, in which case base_image can NEVER appear no
+    # matter how long this waits. See base_commit_has_confirmed_push_run's
+    # own header for the full contract and its return-code semantics.
+    base_run_status=0
+    base_commit_has_confirmed_push_run "$BASE_SHA" || base_run_status=$?
+    if (( base_run_status == 0 )); then
+        # A push-triggered build-push.yml run DOES exist for BASE_SHA
+        # (whatever its conclusion) -- this is a real build/CI problem
+        # (failed, stuck, or still running past every bounded wait above),
+        # not an unbuildable commit. Do NOT fall back: preserve today's
+        # strict failure exactly as before falling back here would silently
+        # paper over a genuinely broken build with older, unrelated image
+        # content -- exactly the #626 anti-pattern this whole file exists to
+        # avoid.
+        echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above), AND a push-triggered build-push.yml run does exist for $BASE_SHA (so this is a real build problem, not an unbuildable commit -- no ancestor fallback applies here). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
+        exit 1
+    elif (( base_run_status == 2 )); then
+        # Could not positively confirm zero runs (gh missing, API error,
+        # malformed response). Proving absence is the ONLY condition that
+        # unlocks the ancestor fallback below, so an inconclusive check must
+        # be treated the same as "a run exists": fail closed rather than
+        # assume the fallback path is safe to use on an unproven guess.
+        echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough, and whether build-push.yml ever ran for $BASE_SHA on a push event could not be positively determined either (see above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race; failing closed here rather than assuming the ancestor-fallback path is safe."
         exit 1
     fi
-    echo "::notice::(re)pointing $PR_TAG at the PR base commit's own per-commit image ($base_image)."
-    backfill_from_base "$pr_image" "$base_image"
+
+    echo "::notice::$BASE_SHA had zero push-triggered build-push.yml runs (confirmed via the GitHub Actions API) -- almost certainly a docs/governance-only commit skipped by build-push.yml's own push paths-ignore (issue #1095 Part 1), not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a real push-triggered run and a freshness-confirmed $service image to back-fill from instead."
+    if ! ancestor_sha="$(find_built_ancestor "$BASE_SHA" "$service")"; then
+        echo "::error::No usable ancestor of $BASE_SHA was found within $ancestor_search_depth commits with both a push-triggered build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $BASE_SHA's own ancestor history."
+        exit 1
+    fi
+    ancestor_image="ghcr.io/${REPOSITORY}/${service}:sha-${ancestor_sha:0:7}"
+    echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $BASE_SHA ($service was never built for $BASE_SHA itself -- see the notice above). (re)pointing $PR_TAG at $ancestor_image, its own immutable per-commit tag -- never the mutable nightly/latest channel."
+    backfill_from_base "$pr_image" "$ancestor_image"
 done
 
 echo "All full-setup staging images are ready at tag $PR_TAG."
