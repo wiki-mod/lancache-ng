@@ -11,6 +11,7 @@ paths:
   - .github/workflows
   - services/dns/nats-subscriber/src
   - services/ui/src
+  - services/watchdog/src
 
 paths-ignore:
   - "**/target/**"

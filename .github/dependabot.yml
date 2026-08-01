@@ -61,13 +61,15 @@ updates:
       actions:
         patterns: ["*"]
 
-  # Rust (Cargo) -- both crates (Admin UI + DNS NATS subscriber) collapse into
-  # ONE grouped PR per target branch via the multi-`directories` form, instead
-  # of a separate PR per crate directory.
+  # Rust (Cargo) -- all three crates (Admin UI + DNS NATS subscriber +
+  # watchdog, added 2026-08 alongside services/watchdog/Cargo.toml, #1355)
+  # collapse into ONE grouped PR per target branch via the multi-`directories`
+  # form, instead of a separate PR per crate directory.
   - package-ecosystem: cargo
     directories:
       - /services/ui
       - /services/dns/nats-subscriber
+      - /services/watchdog
     target-branch: current_dev
     schedule:
       interval: weekly

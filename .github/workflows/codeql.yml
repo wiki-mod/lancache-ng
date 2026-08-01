@@ -109,17 +109,21 @@ jobs:
           # services/dns/nats-subscriber/ (the only Rust crate under
           # services/dns -- the rest of that directory is PowerDNS
           # config/entrypoint/lua, not analyzed by the rust matrix entry at
-          # all); ui is services/ui/ (a Rust crate at its root); workflow
-          # covers build-push.yml/build-tools.yml/.github/actions/*, which
-          # includes the two composite actions this workflow's rust matrix
-          # entry consumes (cargo-with-sccache-fallback,
+          # all); ui is services/ui/ (a Rust crate at its root); watchdog is
+          # services/watchdog/ (added 2026-08 alongside
+          # services/watchdog/Cargo.toml, #1355 -- also a whole-directory
+          # filter like ui, not split into a Rust-only sub-filter like dns,
+          # since the shell runtime and the Rust crate share one directory);
+          # workflow covers build-push.yml/build-tools.yml/.github/actions/*,
+          # which includes the two composite actions this workflow's rust
+          # matrix entry consumes (cargo-with-sccache-fallback,
           # configure-rust-sccache).
           rust_via_shared_classifier=false
           if [ "$force_all" = "true" ]; then
             rust_via_shared_classifier=true
           else
             classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/classify-image-impact.sh)"
-            if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|workflow)=true$'; then
+            if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|watchdog|workflow)=true$'; then
               rust_via_shared_classifier=true
             fi
           fi
@@ -260,6 +264,12 @@ jobs:
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/ui/Cargo.toml
+
+      - name: Build watchdog Rust crate for CodeQL
+        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        uses: ./.github/actions/cargo-with-sccache-fallback
+        with:
+          command: cargo build --locked --manifest-path services/watchdog/Cargo.toml
 
       - name: Perform CodeQL Analysis
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
