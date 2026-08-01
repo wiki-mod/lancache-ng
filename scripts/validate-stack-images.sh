@@ -338,7 +338,7 @@ require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service
   'container scans must use platform- and ref-specific Trivy cache directories (see #904 -- ref-parallel scans must never share a cache dir)'
 require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-pushed-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
-  'the pushed per-service digest scan must use a service- and ref-specific Trivy cache directory too (see #904; widened from build-tools-only to every service by Schritt 3, issue #1095)'
+  'the pushed per-service digest scan must use a service- and ref-specific Trivy cache directory too (see #904; widened from build-tools-only to every service by Step 3, issue #1095)'
 # #904 follow-through: a cache-dir key only needs to be as fine as its job's
 # own concurrency-group key, but must be at least that fine -- container-scan
 # and build's pushed-service-digest-scan step both suffix run_id onto the
@@ -347,7 +347,7 @@ require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-p
 # expressions a few checks up). An earlier revision of the #904 fix keyed the
 # cache dir on ref alone, which was still coarser than the concurrency-group
 # key for the dispatch/rerun case and left that race open; this guard exists
-# so that specific regression can't come back silently. Schritt 3 (issue
+# so that specific regression can't come back silently. Step 3 (issue
 # #1095) widened the pushed-digest cache dir from build-tools-only to every
 # service, so this guard was updated in lockstep to check for the
 # matrix.service-scoped key rather than the old hardcoded "build-tools-"
