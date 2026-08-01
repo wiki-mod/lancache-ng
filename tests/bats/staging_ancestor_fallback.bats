@@ -33,6 +33,23 @@
 #     zero runs alone does not prove a deliberate skip for a mid-walk
 #     candidate any more than it does for BASE_SHA itself -- fixed by
 #     applying the same paths-are-ignorable proof to every skipped candidate
+#   - the ancestor-candidate build-proof query accepting a pull_request-
+#     triggered run as evidence a candidate's own sha-<commit> tag was
+#     published -- a pull_request run's github.sha is a synthetic merge
+#     commit, not the candidate's own sha, so it never publishes that tag --
+#     fixed by scoping the query to push/workflow_dispatch/schedule only
+#   - depending on the `gh` CLI, which AG-CI-001/AG-CI-002 mean cannot be
+#     assumed present on the bare runner tier this code actually executes
+#     on -- fixed by talking to the GitHub REST API directly via curl +
+#     GH_TOKEN, matching this project's own established precedent for
+#     exactly this situation
+#
+# `run --separate-stderr` (Bats >= 1.5.0) is used for the curl-based query
+# tests below: ghcr_retry's own ::warning::/::error:: diagnostics land on
+# stderr, and a plain `run` would merge them into $output, making a bare
+# `[ "$output" = ... ]`/`[ -z "$output" ]` check against the function's own
+# stdout unreliable.
+bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -51,6 +68,10 @@ setup() {
     GHCR_RETRY_BACKOFF_SECONDS=0
     # shellcheck disable=SC2034 # read by ghcr_retry(), same cross-file reason.
     GHCR_RETRY_MAX_ATTEMPTS=4
+    # Default token for saf_query_run_count's real curl-based path (see the
+    # "gh CLI is not guaranteed present" fix) -- individual tests that need
+    # to prove the GH_TOKEN-unset behavior unset/restore this themselves.
+    export GH_TOKEN="test-token"
     sleep() { :; }
     export -f sleep
 }
@@ -135,44 +156,71 @@ setup_linear_fixture() {
 }
 
 # ---------------------------------------------------------------------------
-# saf_query_run_count / saf_base_commit_has_confirmed_run: retry + event
-# scoping, using a fake `gh` binary (not the STAGING_BASE_BUILD_RUN_EXISTS_CMD
-# stub hook -- these tests exercise the REAL query path, including retry).
-# ---------------------------------------------------------------------------
+# saf_query_run_count / saf_query_tag_publishing_run_count /
+# saf_base_commit_has_confirmed_run: retry + event scoping, using a fake
+# `curl` binary (not the STAGING_BASE_BUILD_RUN_EXISTS_CMD stub hook -- these
+# tests exercise the REAL curl-based query path, including retry). No real
+# `gh`/network dependency anywhere in this block, matching the fix: these
+# functions talk to the GitHub REST API directly via curl+GH_TOKEN, not the
+# `gh` CLI, since AG-CI-001/AG-CI-002 mean `gh` cannot be assumed present on
+# the bare `lancache-light` runner both real callers actually run on.
+# GH_TOKEN's own default (so the real curl path is actually exercised
+# without a live network) is set in setup() above.
 
-# Installs a fake `gh` that fails FAKE_GH_FAIL_COUNT times (transient
-# exit-1s, no output) before succeeding and echoing FAKE_GH_RUN_COUNT
-# directly on stdout -- saf_query_run_count's own real `gh api ... --jq
-# '.workflow_runs | length'` call expects a bare integer on stdout, so this
-# stub emulates that end result directly rather than a real JSON response +
-# a real jq filter pass.
-install_fake_gh_flaky() {
+# Installs a fake `curl` that fails FAKE_CURL_FAIL_COUNT times (transient,
+# simulating a network-level failure -- curl's own exit code nonzero, no `-o`
+# file written) before succeeding: writes a `{"total_count":N,...}` body to
+# whatever file follows `-o` in its own arguments (parsed generically, not
+# assumed to be a fixed positional arg, so this stays correct if
+# _saf_github_api_get's own argument order ever changes) and prints
+# FAKE_CURL_HTTP_STATUS (default 200) to stdout, matching curl's own
+# `-w '%{http_code}'` behavior. FAKE_CURL_RUN_COUNT_FOR_EVENT, if set,
+# overrides the count returned specifically when the request URL contains
+# `&event=<that value>` -- lets a single fake stand in for
+# saf_query_tag_publishing_run_count's three per-event-type sub-queries
+# returning different counts.
+install_fake_curl_flaky() {
     fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
     mkdir -p "$fake_bin_dir"
-    fail_count_file="$BATS_TEST_TMPDIR/gh_fail_count"
-    echo "${FAKE_GH_FAIL_COUNT:-0}" > "$fail_count_file"
-    call_log="$BATS_TEST_TMPDIR/gh_calls.log"
+    fail_count_file="$BATS_TEST_TMPDIR/curl_fail_count"
+    echo "${FAKE_CURL_FAIL_COUNT:-0}" > "$fail_count_file"
+    call_log="$BATS_TEST_TMPDIR/curl_calls.log"
     : > "$call_log"
-    cat > "$fake_bin_dir/gh" <<STUB
+    cat > "$fake_bin_dir/curl" <<STUB
 #!/usr/bin/env bash
-echo "call" >> "$call_log"
+echo "\$*" >> "$call_log"
 remaining=\$(cat "$fail_count_file")
 if [ "\$remaining" -gt 0 ]; then
     remaining=\$((remaining - 1))
     echo "\$remaining" > "$fail_count_file"
     exit 1
 fi
-echo "${FAKE_GH_RUN_COUNT:-0}"
+out_file=""
+url=""
+prev=""
+for arg in "\$@"; do
+    if [ "\$prev" = "-o" ]; then
+        out_file="\$arg"
+    fi
+    prev="\$arg"
+    url="\$arg"
+done
+count="${FAKE_CURL_RUN_COUNT:-0}"
+case "\$url" in
+    *"&event=${FAKE_CURL_RUN_COUNT_FOR_EVENT_NAME:-__none__}"*) count="${FAKE_CURL_RUN_COUNT_FOR_EVENT:-0}" ;;
+esac
+printf '{"total_count":%s,"workflow_runs":[]}' "\$count" > "\$out_file"
+printf '%s' "${FAKE_CURL_HTTP_STATUS:-200}"
 STUB
-    chmod +x "$fake_bin_dir/gh"
+    chmod +x "$fake_bin_dir/curl"
     export PATH="$fake_bin_dir:$PATH"
 }
 
-@test "saf_query_run_count: retries a transient gh failure and succeeds on a later attempt" {
-    export FAKE_GH_FAIL_COUNT=2
-    export FAKE_GH_RUN_COUNT=1
-    install_fake_gh_flaky
-    run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+@test "saf_query_run_count: retries a transient network failure and succeeds on a later attempt" {
+    export FAKE_CURL_FAIL_COUNT=2
+    export FAKE_CURL_RUN_COUNT=1
+    install_fake_curl_flaky
+    run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
     [ "$status" -eq 0 ]
     [ "$output" = "1" ]
     # 2 failures + 1 success = 3 calls, proving the retry actually happened,
@@ -180,11 +228,11 @@ STUB
     [ "$(wc -l < "$call_log")" -eq 3 ]
 }
 
-@test "saf_query_run_count: exhausts retries and fails closed (no output) on a persistent failure" {
-    export FAKE_GH_FAIL_COUNT=99
-    export FAKE_GH_RUN_COUNT=0
-    install_fake_gh_flaky
-    run saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+@test "saf_query_run_count: exhausts retries and fails closed (no output) on a persistent network failure" {
+    export FAKE_CURL_FAIL_COUNT=99
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
     [ "$status" -ne 0 ]
     [ -z "$output" ]
     # GHCR_RETRY_MAX_ATTEMPTS=4 (set in setup()) -- exactly 4 calls, not an
@@ -192,13 +240,79 @@ STUB
     [ "$(wc -l < "$call_log")" -eq 4 ]
 }
 
-@test "saf_base_commit_has_confirmed_run: a persistent gh failure is treated as inconclusive (2), not confirmed-zero" {
-    export FAKE_GH_FAIL_COUNT=99
-    export FAKE_GH_RUN_COUNT=0
-    install_fake_gh_flaky
+@test "saf_query_run_count: a non-200 HTTP status is treated as a retryable failure, not a false zero" {
+    # curl itself can succeed (exit 0) while the API returns a non-2xx
+    # status (rate limit, auth rejection, transient 5xx) -- _saf_github_api_get
+    # must treat that as a failure too (ghcr_retry only sees a nonzero exit
+    # as retryable), not silently report whatever total_count happens to be
+    # in an error response body.
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_HTTP_STATUS=403
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+    # Retried the full GHCR_RETRY_MAX_ATTEMPTS times -- a non-200 status is
+    # genuinely retried, not accepted on the first attempt.
+    [ "$(wc -l < "$call_log")" -eq 4 ]
+}
+
+@test "saf_base_commit_has_confirmed_run: a persistent failure is treated as inconclusive (2), not confirmed-zero" {
+    export FAKE_CURL_FAIL_COUNT=99
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
     unset STAGING_BASE_BUILD_RUN_EXISTS_CMD
     run saf_base_commit_has_confirmed_run "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
     [ "$status" -eq 2 ]
+}
+
+@test "saf_base_commit_has_confirmed_run: GH_TOKEN unset is treated as inconclusive (2), never as a real gh CLI check" {
+    unset GH_TOKEN
+    unset STAGING_BASE_BUILD_RUN_EXISTS_CMD
+    # No fake curl installed at all -- if the implementation still shelled
+    # out to a real `curl`/`gh` without GH_TOKEN, this would either hang on
+    # a real network call or hit whatever curl/gh happens to be on this
+    # test runner's real PATH. Failing fast and closed on the missing token
+    # is what proves it never gets that far.
+    run saf_base_commit_has_confirmed_run "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
+    [ "$status" -eq 2 ]
+    export GH_TOKEN="test-token"
+}
+
+@test "saf_query_tag_publishing_run_count: sums push/workflow_dispatch/schedule, never queries pull_request" {
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    run saf_query_tag_publishing_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead"
+    [ "$status" -eq 0 ]
+    [ "$output" = "0" ]
+    # Exactly 3 calls (push, workflow_dispatch, schedule) -- not 1 (a single
+    # unfiltered query) and not 4+ (accidentally also querying pull_request).
+    [ "$(wc -l < "$call_log")" -eq 3 ]
+    grep -qF "event=push" "$call_log"
+    grep -qF "event=workflow_dispatch" "$call_log"
+    grep -qF "event=schedule" "$call_log"
+    [[ "$(cat "$call_log")" != *"event=pull_request"* ]]
+}
+
+@test "saf_base_commit_has_confirmed_run: a pull_request-only run for a candidate does NOT count as a confirmed build" {
+    # The exact scenario the coordinator's finding describes: an ancestor
+    # candidate has a real recorded pull_request-triggered run (e.g. it was
+    # itself once a PR head commit), but zero push/workflow_dispatch/schedule
+    # runs -- since a pull_request run's github.sha is a synthetic merge
+    # commit, not this candidate's own sha, it never published this
+    # candidate's own sha-<short> tag. The ancestor-candidate check (event="")
+    # must report "confirmed zero" (1), not "a run exists" (0), so
+    # saf_find_built_ancestor correctly walks past this candidate instead of
+    # wasting a freshness poll on a tag that will never appear.
+    export FAKE_CURL_FAIL_COUNT=0
+    export FAKE_CURL_RUN_COUNT=0
+    install_fake_curl_flaky
+    unset STAGING_BASE_BUILD_RUN_EXISTS_CMD
+    run saf_base_commit_has_confirmed_run "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" ""
+    [ "$status" -eq 1 ]
+    [[ "$(cat "$call_log")" != *"event=pull_request"* ]]
 }
 
 # ---------------------------------------------------------------------------

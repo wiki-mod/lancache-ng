@@ -135,6 +135,26 @@ saf_base_commit_paths_are_ignorable() {
   return 1
 }
 
+# _saf_github_api_get <url> <body_file> <token>
+#
+# Internal helper: performs the actual HTTP GET and writes the response body
+# to <body_file>, returning 0 only for a real HTTP 200. Called via
+# ghcr_retry (see saf_query_run_count below) rather than passed bare curl
+# directly: curl's OWN exit code stays 0 for a non-2xx HTTP response (only a
+# network-level failure -- DNS, connection refused, timeout -- makes curl
+# itself fail), so wrapping the status-code check in this function is what
+# actually makes ghcr_retry's retry loop retry on a bad response, not just
+# on a dropped connection.
+_saf_github_api_get() {
+  local url="$1" body_file="$2" token="$3"
+  local status
+  status="$(curl -sS -o "$body_file" -w '%{http_code}' \
+    -H "Accept: application/vnd.github+json" \
+    -H "Authorization: Bearer ${token}" \
+    "$url" 2>/dev/null)" || return 1
+  [[ "$status" == "200" ]]
+}
+
 # saf_query_run_count <repository> <sha> <event-or-empty>
 #
 # Low-level GitHub Actions API query: echoes the number of build-push.yml
@@ -143,15 +163,37 @@ saf_base_commit_paths_are_ignorable() {
 # 40-character commit SHA -- the API silently matches nothing for an
 # abbreviated short SHA.
 #
+# Talks to the GitHub REST API directly via `curl` + `GH_TOKEN`, never the
+# `gh` CLI: AG-CI-001 requires assuming self-hosted runners do not provide
+# project validation tools, and both real callers of this file
+# (full-setup-deep-validate.yml's "ensure PR staging images" job,
+# build-push.yml's own "Ensure PR staging tags exist" step) run this code
+# directly on a bare `lancache-light` runner (AG-CI-002), not inside the
+# pinned build-tools image -- `gh` is not guaranteed present there, and
+# depending on it would make this whole file's ancestor-fallback mechanism
+# silently unreachable on the real fleet whenever it's absent (every query
+# would immediately report "inconclusive", which every caller must then
+# treat as "a run exists" -- see saf_base_commit_has_confirmed_run's own
+# header -- permanently blocking the exact fallback this file exists to
+# provide). `curl` matches this project's own established precedent for
+# exactly this situation (scripts/check-action-node-versions.sh's
+# fetch_external_action_yaml(), scripts/check-pr-tracking-metadata.sh's
+# project-board lookup -- both curl+GH_TOKEN specifically because `gh`
+# cannot be assumed present either). Response parsing uses a bare `grep` on
+# the `total_count` field, not `jq`/`python3`, for the same reason
+# scripts/lib/staging-image-freshness.sh's sif_image_revision() already
+# avoids jq -- neither is guaranteed present on this runner tier either (see
+# that function's own header for the confirmed AG-CI-001/AG-VAL-017
+# reasoning).
+#
 # Wrapped in scripts/lib/ghcr-retry.sh's ghcr_retry: this query's result is
-# load-bearing --
-# turning a transient API hiccup into a hard "confirmed zero runs" or a
-# false "a run exists" would either wrongly unlock or wrongly block the
-# ancestor fallback. Reusing ghcr_retry directly (rather than writing a
-# second near-identical backoff loop) is deliberate: this project's
-# established retry-wrapper policy (bounded attempts, fixed backoff,
-# ::warning::/::error:: logging) is exactly the right policy for any
-# transient-failure-prone external call, GHCR-specific or not, and
+# load-bearing -- turning a transient API hiccup into a hard "confirmed zero
+# runs" or a false "a run exists" would either wrongly unlock or wrongly
+# block the ancestor fallback. Reusing ghcr_retry directly (rather than
+# writing a second near-identical backoff loop) is deliberate: this
+# project's established retry-wrapper policy (bounded attempts, fixed
+# backoff, ::warning::/::error:: logging) is exactly the right policy for
+# any transient-failure-prone external call, GHCR-specific or not, and
 # scripts/lib/ghcr-retry.sh's own header already documents that AG-CI-013
 # requires reusing one documented wrapper rather than inventing a bespoke
 # retry per call site. The registry/username/password parameters are unused
@@ -163,25 +205,76 @@ saf_base_commit_paths_are_ignorable() {
 # empty.
 #
 # Returns non-zero with no output if the query fails even after retries
-# (network error, `gh` missing, non-2xx response, or a malformed response
-# body that isn't a plain integer).
+# (GH_TOKEN unset, network error, non-200 response after retries, or a
+# malformed response body with no parseable total_count).
 saf_query_run_count() {
   local repository="${1:?saf_query_run_count: repository is required}"
   local sha="${2:?saf_query_run_count: sha is required}"
   local event="${3-}"
-  if ! command -v gh >/dev/null 2>&1; then
+  if [[ -z "${GH_TOKEN:-}" ]]; then
     return 1
   fi
-  local url="repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&per_page=1"
+  local url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&per_page=1"
   if [[ -n "$event" ]]; then
     url="${url}&event=${event}"
   fi
+  local body
+  body="$(mktemp)"
+  if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body" "$GH_TOKEN"; then
+    rm -f "$body"
+    return 1
+  fi
   local run_count
-  run_count="$(ghcr_retry "n/a-not-a-real-registry" "" "" -- gh api "$url" --jq '.workflow_runs | length' 2>/dev/null)" || return 1
+  run_count="$(grep -o '"total_count"[[:space:]]*:[[:space:]]*[0-9]\+' "$body" | head -1 | grep -o '[0-9]\+$')"
+  rm -f "$body"
   if [[ ! "$run_count" =~ ^[0-9]+$ ]]; then
     return 1
   fi
   printf '%s\n' "$run_count"
+}
+
+# saf_query_tag_publishing_run_count <repository> <sha>
+#
+# Like saf_query_run_count, but counts only runs whose trigger event
+# actually publishes a per-commit sha-<sha> tag KEYED BY THIS EXACT COMMIT --
+# push, workflow_dispatch, and schedule all check out <sha> itself as
+# github.sha for that run (docker/metadata-action's `type=sha` tag in
+# build-push.yml's "Extract metadata" step is therefore sha-<sha>), but a
+# pull_request-triggered run's github.sha is the SYNTHETIC MERGE COMMIT for
+# that specific PR event (see build-push.yml's own "Compute PR staging tag"
+# step comment), a DIFFERENT value from <sha> even when <sha> is the exact
+# head_sha the Actions API reports for that run (head_sha for a
+# pull_request-triggered run is always the PR's real branch head -- see
+# #975's own note on this same field/event distinction -- but github.sha
+# inside that run is the merge commit, not head_sha). A pull_request run
+# recorded against <sha> therefore proves nothing about whether
+# ghcr.io/.../sha-<sha short> was ever published, and must not count as
+# proof an ancestor candidate was built.
+#
+# Issues one saf_query_run_count call per allowed event type (push,
+# workflow_dispatch, schedule) and sums the results, rather than one
+# unfiltered query filtered client-side by each run's own `event` field:
+# the Actions API's own `event=` filter already narrows server-side to
+# exactly the trigger types that matter, so this reuses saf_query_run_count
+# (and its curl/grep/retry machinery) unchanged three times instead of
+# parsing an array of per-run event strings out of an unfiltered response
+# with the same jq-free tooling constraint saf_query_run_count's own header
+# documents. Three queries per candidate is a deliberate, minor efficiency
+# trade against a much simpler and more robust implementation.
+#
+# Returns non-zero with no output if any of the three underlying queries
+# fails (this function has no way to distinguish "genuinely zero
+# tag-publishing runs" from "one of the three sub-queries failed", so a
+# failure anywhere must propagate as inconclusive, not as a partial count).
+saf_query_tag_publishing_run_count() {
+  local repository="${1:?saf_query_tag_publishing_run_count: repository is required}"
+  local sha="${2:?saf_query_tag_publishing_run_count: sha is required}"
+  local event total=0 count
+  for event in push workflow_dispatch schedule; do
+    count="$(saf_query_run_count "$repository" "$sha" "$event")" || return 1
+    total=$((total + count))
+  done
+  printf '%s\n' "$total"
 }
 
 # saf_base_commit_has_confirmed_run <repository> <sha> <event-or-empty>
@@ -193,12 +286,21 @@ saf_query_run_count() {
 #     PR base-commit decision (paired with saf_base_commit_paths_are_ignorable
 #     above -- see that function's header for why event=push alone is not
 #     sufercient proof of a deliberate skip on its own).
-#   - Passed "" (any event): asks about ANY recorded run at all, for the
-#     ancestor-candidate pre-filter in saf_find_built_ancestor below -- an
-#     ancestor commit with a valid image from a non-push trigger (e.g. a
-#     manual dispatch) is just as usable a back-fill source as one built by
-#     a push-triggered run, so candidates must not be skipped merely for
-#     lacking a push-specific run.
+#   - Passed "" (any TAG-PUBLISHING event): asks whether any run exists
+#     whose trigger type actually publishes a per-commit sha-<sha> tag KEYED
+#     BY <sha> ITSELF, for the ancestor-candidate pre-filter in
+#     saf_find_built_ancestor below. Backed by
+#     saf_query_tag_publishing_run_count (push, workflow_dispatch, schedule),
+#     NOT a bare unfiltered "any event at all" query -- see that function's
+#     own header for why a pull_request-triggered run must be excluded: its
+#     github.sha is a synthetic merge commit, not <sha>, so it can never
+#     have published the sha-<sha> tag this whole mechanism depends on,
+#     regardless of what the Actions API's head_sha field reports for that
+#     run. Treating a pull_request run as proof here would make the walk
+#     wait out the full freshness ceiling against a tag a pull_request run
+#     never produces, then give up (per saf_find_built_ancestor's own
+#     JUDGMENT CALL) instead of correctly skipping past this candidate to an
+#     older, genuinely push/dispatch/schedule-built ancestor.
 #
 # IMPORTANT SCOPING NOTE when called with "push": a "1" here means "no
 # push-triggered run", not "this commit was never built by any means" --
@@ -216,18 +318,17 @@ saf_query_run_count() {
 # Returns 0 if at least one matching run exists (regardless of conclusion --
 # success, failure, or still in progress all count as "a real attempt
 # happened"). Returns 1 ONLY when the query positively confirms zero
-# matching runs (an empty workflow_runs array) -- the sole condition under
-# which a caller may treat the commit as "no run of this kind was ever
-# attempted". Returns 2 when the query itself could not be completed (`gh`
-# missing, API error after retries, malformed response) -- deliberately NOT
-# collapsed into "confirmed zero": this function's whole purpose (when
-# checking the PR base commit specifically) is proving ABSENCE, and a failed
-# query proves nothing about that. Every caller must treat 2 the same as 0
-# for that specific decision -- collapsing 2 into "confirmed zero" would let
-# a transient failure silently unlock a fallback path that requires positive
-# proof.
+# matching runs -- the sole condition under which a caller may treat the
+# commit as "no run of this kind was ever attempted". Returns 2 when the
+# query itself could not be completed (GH_TOKEN unset, API error after
+# retries, malformed response) -- deliberately NOT collapsed into "confirmed
+# zero": this function's whole purpose (when checking the PR base commit
+# specifically) is proving ABSENCE, and a failed query proves nothing about
+# that. Every caller must treat 2 the same as 0 for that specific decision --
+# collapsing 2 into "confirmed zero" would let a transient failure silently
+# unlock a fallback path that requires positive proof.
 #
-# Indirection so tests can stub this without a real `gh`/network call.
+# Indirection so tests can stub this without a real network call.
 saf_base_commit_has_confirmed_run() {
   local repository="$1" sha="$2" event="${3-}"
   if [[ -n "${STAGING_BASE_BUILD_RUN_EXISTS_CMD:-}" ]]; then
@@ -235,7 +336,11 @@ saf_base_commit_has_confirmed_run() {
     return $?
   fi
   local run_count
-  run_count="$(saf_query_run_count "$repository" "$sha" "$event")" || return 2
+  if [[ -n "$event" ]]; then
+    run_count="$(saf_query_run_count "$repository" "$sha" "$event")" || return 2
+  else
+    run_count="$(saf_query_tag_publishing_run_count "$repository" "$sha")" || return 2
+  fi
   if (( run_count == 0 )); then
     return 1
   fi
@@ -267,7 +372,7 @@ saf_base_commit_has_confirmed_run() {
 # candidate.
 #
 # A candidate whose run-check itself is INCONCLUSIVE (saf_base_commit_has_confirmed_run
-# returns 2 -- gh unavailable, API error after retries, malformed response)
+# returns 2 -- GH_TOKEN unset, API error after retries, malformed response)
 # is likewise never treated as safe to act on: it fails closed immediately,
 # the same discipline BASE_SHA's own push-run check already applies. Falling
 # through to the freshness check for an unconfirmed candidate would accept
@@ -370,7 +475,7 @@ saf_find_built_ancestor() {
     fi
     if (( has_run == 2 )); then
       # Whether a run exists at all for this candidate could not be
-      # positively determined (gh unavailable, API error after retries, a
+      # positively determined (GH_TOKEN unset, API error after retries, a
       # malformed response) -- the same inconclusive outcome
       # saf_base_commit_has_confirmed_run's own header documents for
       # BASE_SHA's push-run check, and it must be handled with the same
