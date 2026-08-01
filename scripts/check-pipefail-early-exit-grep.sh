@@ -39,11 +39,12 @@
 # reported incident in any of those 41 locations, and risks introducing real
 # regressions into unrelated, currently-working scripts under mechanical
 # pattern-matching pressure. This is a genuine, not-yet-closed gap -- tracked
-# in issue #815's own PR #1374 discussion and as a named follow-up in
-# docs/release-validation-plan.md's Coverage Assessment section, not silently
-# dropped. Widening this script's scan_files back to the repo-wide set (see
-# git history on this file for the exact prior version) is the concrete next
-# step for that follow-up, once each finding has been triaged.
+# in issue #1377 (repo-wide review of the 41 findings) and as a named
+# follow-up in docs/release-validation-plan.md's Coverage Assessment section,
+# not silently dropped. Widening this script's scan_files back to the
+# repo-wide set (see git history on this file for the exact prior version) is
+# the concrete next step for that follow-up, once each finding in #1377 has
+# been triaged.
 #
 # WHAT THIS DOES NOT DO: this is a deliberately cheap, grep-based heuristic
 # (matching this project's existing check-build-tools-smoke-coverage.sh
