@@ -33,12 +33,20 @@
 # kept identical across all three migrated services rather than pinning a
 # separately-resolved digest for the same tag.
 #
-# `bash` is installed explicitly because watchdog.sh/healthcheck.sh both
-# declare `#!/bin/bash` and rely on real Bash-only syntax (`local -n`
-# namerefs in watchdog.sh's check_and_maybe_restart()/probe_docker_socket_proxy(),
-# `${var,,}` lowercasing in is_truthy()) that Alpine's default `/bin/sh`
-# (busybox ash) does not support -- see AG-REL-006. Verified available,
-# bash 5.3.9-r1, which is well past the 4.3 baseline `local -n` needs.
+# `bash` is installed explicitly because watchdog.sh/healthcheck.sh/
+# retention.sh all declare `#!/bin/bash` and rely on real Bash-only syntax
+# (`local -n` namerefs in watchdog.sh's
+# check_and_maybe_restart()/probe_docker_socket_proxy(), `${var,,}`
+# lowercasing in is_truthy(), `set -o pipefail` in all three) that Alpine's
+# default `/bin/sh` (busybox ash) does not support -- see AG-REL-006.
+# Verified available, bash 5.3.9-r1, which is well past the 4.3 baseline
+# `local -n` needs. retention.sh (#842, 2026-08-01: the three file-retention
+# functions extracted out of watchdog.sh into their own script/process for
+# blast-radius separation, see that file's own header) is a separate script
+# but runs in this same container/image for now -- see its header and this
+# project's issue #842 for the still-open question of whether it should
+# instead become its own compose service/sidecar with its own, more tightly
+# locked-down container.
 #
 # `findutils` (GNU find) is installed explicitly, and is the one real
 # GNU-vs-BusyBox behavioral gap found in this migration (checked for, not
@@ -48,22 +56,37 @@
 # mtime via `find ... -printf '%T@\t%p\n'`. Confirmed live on a real
 # alpine:3.24 container (2026-07-31) that BusyBox's own bundled `find`
 # applet does not support `-printf` at all ("find: unrecognized: -printf")
-# -- it is a GNU findutils extension, not a POSIX `find` action. The
-# `coreutils` package (suggested as the general fallback for a GNU-vs-BusyBox
-# gap) would NOT have fixed this: `find` ships in GNU findutils, not GNU
-# coreutils. Every other command these two scripts call (`date -u`, `stat -c`,
-# `du -sb`, `awk`'s `gsub`/`NR`, `df -P`, `sort -n`, `wc -l`, `mktemp`,
-# `cp --`/`rm --`/`basename --`) was verified live, side by side, to behave
-# identically between BusyBox's applets and GNU's -- notably `du -sb`
-# (byte-exact apparent size, checked against a file of a known exact byte
-# count) and `stat -c '%s'/'%Y'` (byte size / mtime-epoch format specifiers),
-# both of which this migration cannot silently get subtly wrong given
-# maybe_prune_syslog()'s and maybe_rotate_fluent_bit_selflog()'s disk-budget
-# math depends on them. Installing `findutils` swaps only `find`/`xargs` to
-# their GNU builds (confirmed: `apk info -a findutils` lists exactly
-# `cmd:find`/`cmd:xargs`, nothing else) -- a narrower, more targeted fix than
-# pulling in the full `coreutils` package for a gap that isn't actually a
-# coreutils gap.
+# -- it is a GNU findutils extension, not a POSIX `find` action. `coreutils`
+# (see below) would NOT have fixed this: `find` ships in GNU findutils, not
+# GNU coreutils. Every other command these two scripts call (`date -u`,
+# `stat -c`, `du -sb`, `awk`'s `gsub`/`NR`, `df -P`, `sort -n`, `wc -l`,
+# `mktemp`, `cp --`/`rm --`/`basename --`) was verified live, side by side,
+# to behave identically between BusyBox's applets and GNU's -- notably
+# `du -sb` (byte-exact apparent size, checked against a file of a known
+# exact byte count) and `stat -c '%s'/'%Y'` (byte size / mtime-epoch format
+# specifiers), both of which this migration cannot silently get subtly
+# wrong given maybe_prune_syslog()'s and maybe_rotate_fluent_bit_selflog()'s
+# disk-budget math depends on them. Installing `findutils` swaps only
+# `find`/`xargs` to their GNU builds (confirmed: `apk info -a findutils`
+# lists exactly `cmd:find`/`cmd:xargs`, nothing else).
+#
+# `coreutils` (#842 Teil 1 hardening, 2026-08-01) is installed for a second,
+# distinct GNU-vs-BusyBox gap found while building retention.sh's fail-closed
+# path validation (validate_retention_dir()): that function relies on
+# `realpath -m` to canonicalize an env-controlled directory path without
+# requiring it to already exist (a not-yet-created FLUENT_BIT_SELFLOG_DIR
+# mount is a normal state). Confirmed live on this exact image (2026-08-01)
+# that BusyBox's bundled `realpath` applet does not support the `-m` flag at
+# all, nor even a `--` end-of-options marker -- it treats every argument,
+# flags included, as a path to resolve, and exits nonzero the moment one of
+# them doesn't exist ("realpath: -m: No such file or directory"), which
+# would have made every call to validate_retention_dir() fail closed on
+# every path, including perfectly valid ones -- a functional regression, not
+# a security one, but one that would have silently disabled all three
+# retention functions in production. Installing `coreutils` replaces
+# `/usr/bin/realpath` with the GNU build, which supports `-m` correctly
+# (confirmed: `realpath -m -- /nonexistent/../foo` correctly resolves without
+# requiring the path to exist).
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng watchdog helper for runtime health checks and recovery hooks."
@@ -79,6 +102,8 @@ RUN apk upgrade --no-cache && \
     jq \
     ca-certificates \
     findutils \
+    coreutils \
+    util-linux \
     nano \
     lsof \
     ripgrep \
@@ -93,10 +118,60 @@ RUN apk upgrade --no-cache && \
 # syslog-ng's official image can't be given a custom Dockerfile, while this
 # project owns this Dockerfile directly, so a guaranteed build-time install
 # is simpler and doesn't depend on network egress at container start.
+#
+# util-linux (#842 Teil 2, 2026-08-01): provides `setpriv`, which
+# retention-entrypoint.sh uses to drop the `retention` sidecar container from
+# root to the unprivileged `lancache` user while carrying exactly one Linux
+# capability (CAP_DAC_OVERRIDE) across that privilege drop via its
+# `--ambient-caps` support -- see that file's own header for the full
+# empirical reasoning (a bare `cap_add` + non-root `user:` does NOT hand a
+# usable capability to a non-root process; confirmed via `/proc/self/status`
+# on a real runner). Alpine's BusyBox ships no equivalent tool. `shadow` is
+# NOT needed alongside it: BusyBox's own `addgroup`/`adduser` applets already
+# support every flag the `lancache` account creation below needs (`-g`, `-D`,
+# `-H`, `-G`, `-s`), confirmed directly against this exact base image.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 COPY watchdog.sh /watchdog.sh
 COPY healthcheck.sh /healthcheck.sh
-RUN chmod +x /watchdog.sh /healthcheck.sh
+COPY retention.sh /retention.sh
+COPY retention-entrypoint.sh /retention-entrypoint.sh
+RUN chmod +x /watchdog.sh /healthcheck.sh /retention.sh /retention-entrypoint.sh
 VOLUME ["/var/run/watchdog"]
+
+# `lancache` account (#842 Teil 2, 2026-08-01): fixed uid/gid 10001,
+# matching services/ui/Dockerfile's own existing account of the same name --
+# the maintainer's explicit instruction was to reuse this project-wide
+# convention rather than mint a new dedicated identity for this container.
+# Only the `retention` compose service actually runs as this user (via
+# retention-entrypoint.sh's root-to-lancache privilege drop, see that file);
+# the plain `watchdog` service still runs as root, unchanged -- Teil 2 of
+# #842 scoped the lockdown to retention.sh's own execution environment, not
+# watchdog.sh's, and extending it there is deliberately left as a follow-up,
+# not built speculatively here.
+#
+# /var/lib/lancache-retention-state (#842 Teil 2): retention.sh's own
+# PURGE_STAMP/SYSLOG_PRUNE_STAMP now live on their own dedicated volume,
+# separate from /var/run/watchdog's status.json (watchdog.sh's, read by the
+# Admin UI) -- the architecture decision from #842's own comment thread was
+# to stop sharing that volume between the health-check state and retention's
+# rate-limiting stamps, since they belong to genuinely different containers
+# now. Pre-chowning it here at build time is belt-and-suspenders: a fresh
+# named volume's first mount inherits an empty directory's ownership from the
+# image, but retention-entrypoint.sh ALSO re-chowns it at container start
+# (matching services/ui/docker-entrypoint.sh's identical reasoning) since a
+# bind-mount override or a volume that already existed from an older install
+# would not get this image-time ownership at all.
+RUN addgroup -g 10001 lancache && \
+    adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache && \
+    mkdir -p /var/lib/lancache-retention-state && \
+    chown lancache:lancache /var/lib/lancache-retention-state
+
+# Default ENTRYPOINT: plain watchdog.sh, unchanged from before #842 Teil 2
+# split retention out into its own sidecar container/service. The
+# `retention` compose service overrides this with `entrypoint:
+# ["/retention-entrypoint.sh"]` (see deploy/*/docker-compose.yml's own
+# `retention:` service block) -- both scripts ship in this one image so a
+# single build serves either role, chosen entirely by which compose service
+# invokes it.
 ENTRYPOINT ["/watchdog.sh"]

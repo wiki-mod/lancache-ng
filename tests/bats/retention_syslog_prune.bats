@@ -1,18 +1,18 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Coverage for services/watchdog/watchdog.sh's maybe_prune_syslog() (#633
-# retention engine): the storage-budget/age-based pruning of syslog-ng's
-# rotated/compressed output under SYSLOG_LOG_ROOT.
+# Coverage for services/watchdog/retention.sh's maybe_prune_syslog() (#633
+# retention engine, moved here from watchdog.sh by #842's blast-radius-
+# separation extraction, 2026-08-01 -- see that file's own header): the
+# storage-budget/age-based pruning of syslog-ng's rotated/compressed output
+# under SYSLOG_LOG_ROOT.
 #
-# Sources the real function via helpers/watchdog-helpers.sh's extraction
-# range (same range watchdog_idempotence.bats uses -- maybe_prune_syslog()
-# lives inside that range, right after maybe_purge(), so no helper change
-# was needed). This function is pure filesystem I/O (find/du/stat/rm against
-# a real directory tree) with no Docker/network boundary to stub, unlike
-# check_and_maybe_restart()'s get_health()/restart_container() -- every test
-# here runs the function completely unmodified against a real BATS_TEST_TMPDIR
-# fixture tree.
+# Sources the real function via helpers/retention-helpers.sh's extraction
+# range (maybe_prune_syslog() lives right after maybe_purge(), so no helper
+# change was needed beyond retargeting it at retention.sh). This function is
+# pure filesystem I/O (find/du/stat/rm against a real directory tree) with no
+# Docker/network boundary to stub -- every test here runs it completely
+# unmodified against a real BATS_TEST_TMPDIR fixture tree.
 #
 # The issue's explicit requirement is an exact priority ordering: age-based
 # deletion (retention-days floor) runs FIRST, then -- only if still over the
@@ -28,11 +28,7 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    helper_file="$BATS_TEST_TMPDIR/watchdog-helpers-extracted.sh"
-
-    # shellcheck source=tests/bats/helpers/watchdog-helpers.sh
-    source "$BATS_TEST_DIRNAME/helpers/watchdog-helpers.sh"
-    load_watchdog_functions "$repo_root" "$helper_file"
+    helper_file="$BATS_TEST_TMPDIR/retention-helpers-extracted.sh"
 
     log_root="$BATS_TEST_TMPDIR/syslog-root"
     mkdir -p "$log_root/hostA"
@@ -41,10 +37,18 @@ setup() {
     export SYSLOG_RETENTION_DAYS=30
     export SYSLOG_MAX_GB=10
     export SYSLOG_LOG_ROOT="$log_root"
+    # #842 Teil 1 hardening: validate_retention_dir() only accepts a
+    # SYSLOG_LOG_ROOT that resolves under this prefix -- see
+    # retention_purge.bats's identical comment on CACHE_DIR_ALLOWED_PREFIX.
+    export SYSLOG_LOG_ROOT_ALLOWED_PREFIX="$BATS_TEST_TMPDIR"
     # Own stamp file per test, matching PURGE_STAMP's per-test isolation
     # convention elsewhere in this suite -- a shared/real stamp path would
     # make the rate-limit leak state across tests.
     export SYSLOG_PRUNE_STAMP="$BATS_TEST_TMPDIR/syslog-prune.stamp"
+
+    # shellcheck source=tests/bats/helpers/retention-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/retention-helpers.sh"
+    load_retention_functions "$repo_root" "$helper_file"
 }
 
 # Creates a file of the given size (in whole megabytes) at $log_root/hostA/$1

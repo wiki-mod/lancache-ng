@@ -1,35 +1,32 @@
 #!/usr/bin/env bats
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Coverage for services/watchdog/watchdog.sh's maybe_rotate_fluent_bit_selflog()
-# (issue #1236): bounds disk usage of fluent-bit's own operational self-log
-# file (/data/fluent-bit.log on the syslog-data volume, written via the
-# `syslog` service's `-l`/`--log_file` CLI flag) even during a sustained
-# syslog-ng outage, when fluent-bit's own connection/flush retry logging
-# grows that file continuously (confirmed empirically on a real runner,
-# roughly one line/second at the project's 5s flush interval -- see the
-# issue for the full repro).
+# Coverage for services/watchdog/retention.sh's maybe_rotate_fluent_bit_selflog()
+# (issue #1236, moved here from watchdog.sh by #842's blast-radius-separation
+# extraction, 2026-08-01 -- see that file's own header): bounds disk usage of
+# fluent-bit's own operational self-log file (/data/fluent-bit.log on the
+# syslog-data volume, written via the `syslog` service's `-l`/`--log_file`
+# CLI flag) even during a sustained syslog-ng outage, when fluent-bit's own
+# connection/flush retry logging grows that file continuously (confirmed
+# empirically on a real runner, roughly one line/second at the project's 5s
+# flush interval -- see the issue for the full repro).
 #
-# Unlike maybe_prune_syslog() (tested in watchdog_syslog_prune.bats), this
+# Unlike maybe_prune_syslog() (tested in retention_syslog_prune.bats), this
 # function is NOT gated behind SYSLOG_ENABLED and is NOT rate-limited by a
-# daily stamp file -- see the function's own comment in watchdog.sh for why
+# daily stamp file -- see the function's own comment in retention.sh for why
 # neither fits here. Every test below calls it directly, with no stamp/env
 # gate to manage between invocations (besides the numeric knobs under test).
 #
-# Sources the real function via helpers/watchdog-helpers.sh's extraction
-# range, same as watchdog_syslog_prune.bats -- this function lives in the
-# same captured range (defined before the "Watchdog started." log line), so
-# no helper change was needed.
+# Sources the real function via helpers/retention-helpers.sh's extraction
+# range, same as retention_syslog_prune.bats -- this function lives in the
+# same captured range (defined before the "Retention daemon started." log
+# line), so no helper change was needed beyond retargeting it at retention.sh.
 
 bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    helper_file="$BATS_TEST_TMPDIR/watchdog-helpers-extracted.sh"
-
-    # shellcheck source=tests/bats/helpers/watchdog-helpers.sh
-    source "$BATS_TEST_DIRNAME/helpers/watchdog-helpers.sh"
-    load_watchdog_functions "$repo_root" "$helper_file"
+    helper_file="$BATS_TEST_TMPDIR/retention-helpers-extracted.sh"
 
     selflog_dir="$BATS_TEST_TMPDIR/syslog-data"
     mkdir -p "$selflog_dir"
@@ -38,6 +35,14 @@ setup() {
     export FLUENT_BIT_SELFLOG_DIR="$selflog_dir"
     export FLUENT_BIT_SELFLOG_MAX_MB=1
     export FLUENT_BIT_SELFLOG_MAX_ROTATIONS=5
+    # #842 Teil 1 hardening: validate_retention_dir() only accepts a
+    # FLUENT_BIT_SELFLOG_DIR that resolves under this prefix -- see
+    # retention_purge.bats's identical comment on CACHE_DIR_ALLOWED_PREFIX.
+    export FLUENT_BIT_SELFLOG_DIR_ALLOWED_PREFIX="$BATS_TEST_TMPDIR"
+
+    # shellcheck source=tests/bats/helpers/retention-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/retention-helpers.sh"
+    load_retention_functions "$repo_root" "$helper_file"
 }
 
 # Reads back a rotated backup's content regardless of whether it was
