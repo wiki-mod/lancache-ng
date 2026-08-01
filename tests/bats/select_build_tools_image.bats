@@ -10,7 +10,7 @@
 # (issue #842 PR #1360, 2026-08-01) this file's regression tests cover.
 
 setup() {
-    repo_root="$(cd "$BATS_TEST_DIRNAME/.." && pwd)"
+    repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     # shellcheck source=helpers/select-build-tools-image-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/select-build-tools-image-helpers.sh"
     load_select_build_tools_image_functions "$repo_root" "$BATS_TEST_TMPDIR/select-build-tools-image-functions.sh"
