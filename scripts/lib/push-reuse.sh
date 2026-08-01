@@ -1,14 +1,14 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Schritt 4 (issue #1095): per-service build/scan reuse-on-push decision for
+# Step 4 (issue #1095): per-service build/scan reuse-on-push decision for
 # `build-push.yml`'s `build`/`build-arm64` jobs. On a push to a branch ref,
 # an unchanged service should retag its already-published channel image
 # (nightly/latest) instead of paying for a real rebuild+rescan -- but ONLY
 # when that reuse is provably safe, not merely plausible.
 #
 # WHY a channel image, not the immediately-preceding push's own predecessor
-# commit: predecessor-`sha-<before>` reuse is what Schritt 4 originally
+# commit: predecessor-`sha-<before>` reuse is what Step 4 originally
 # stalled on (2026-07-23) -- `merge-manifests` has no cross-run lock and push
 # runs are deliberately un-throttled (#979/#987), so in a tight burst the
 # predecessor image is frequently not published yet, making that design's
@@ -44,7 +44,7 @@
 # missing, unreadable, ambiguous, or showing a real change fails closed to a
 # real rebuild. This mirrors the exact combination of primitives issue #1095
 # names as this design's own correctness requirement (see its "C-7" and
-# "Note on Schritt 4's actual implementation" sections) and issue #1290's
+# "Note on Step 4's actual implementation" sections) and issue #1290's
 # corrected implementation (in progress in parallel; both are expected to
 # converge on this same shape).
 #
