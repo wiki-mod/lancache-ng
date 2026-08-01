@@ -667,6 +667,26 @@ STUB
     # unbroken run of docs-only commits with no real build anywhere in
     # reach. Must fail closed with a clearly distinct message, not silently
     # succeed or loop forever.
+    #
+    # The SPECIFIC internal reason the walk stops here is
+    # saf_find_built_ancestor's own "validate every skipped ancestor" check
+    # (see scripts/lib/staging-ancestor-fallback.sh): older_sha (1 commit
+    # back) is walked past cleanly (its own docs/older.md-only diff is
+    # confirmed ignorable), but ancestor2_sha (2 commits back, this
+    # fixture's own root commit) has no parent to diff against at all, so
+    # its own paths-ignorable check is INCONCLUSIVE (status 2, not
+    # confirmed) rather than positively confirmed -- and an inconclusive
+    # result must fail closed here exactly as it does for BASE_SHA itself,
+    # not be treated as safe to walk past. This is a genuinely different
+    # internal stopping point than "search_depth was exhausted with no
+    # candidate anywhere having a run" (covered instead by the dedicated
+    # "bounded search depth" test above with search_depth=1, and by
+    # tests/bats/staging_ancestor_fallback.bats' own direct unit coverage of
+    # both saf_find_built_ancestor's skip-validation and the root-commit
+    # inconclusive case) -- both are real, distinct failure paths this test
+    # suite covers separately; this test's own assertions below only check
+    # the externally-visible fail-closed CONTRACT (a clear error, zero
+    # back-fills), which holds either way.
     run_exists_stub="$BATS_TEST_TMPDIR/run_exists_none.sh"
     cat > "$run_exists_stub" <<'STUB'
 #!/usr/bin/env bash
@@ -695,6 +715,9 @@ STUB
     run bash "$script"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "No usable ancestor"
+    # Confirms the specific internal path this comment describes actually
+    # fired (not just some other, differently-worded failure).
+    printf '%s\n' "$output" | grep -q "changed paths could not be positively confirmed"
     [ "$(wc -l < "$backfill_log")" -eq 0 ]
 }
 
