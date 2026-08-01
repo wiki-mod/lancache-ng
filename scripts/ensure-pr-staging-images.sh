@@ -266,13 +266,29 @@ fi
 # scripts/lib/staging-ancestor-fallback.sh's saf_resolve_untouched_backfill_source
 # header for why this is now its own explicit parameter rather than reusing
 # base_freshness_*, even though this caller happens to pass the identical
-# 900/5400 value for both. That reuse is safe HERE specifically because this
-# job's own "ensure PR staging images" step (full-setup-deep-validate.yml) has
-# a 100-minute job timeout explicitly sized to clear exactly this ~90-minute
-# worst case with headroom (see that job's own timeout-minutes comment) --
-# unlike build-push.yml's own equivalent step, whose full-setup-validate job
-# has only a 30-minute timeout and therefore passes a much smaller value for
-# this same parameter (see that step's own comment for why).
+# 900/5400 value for both.
+#
+# KNOWN GAP, deliberately left open for a maintainer decision rather than an
+# autonomous parameter change: passing 5400 here does NOT actually fit inside
+# this job's own 100-minute (6000s) timeout with headroom. The real worst
+# case for a single untouched service sums THREE waits, not just this one:
+# up to base_freshness_hard_ceiling_seconds
+# (5400s, step 2, BASE_SHA's own wait) + up to
+# ancestor_freshness_hard_ceiling_seconds (600s, step 3's initial per-candidate
+# check) + up to this extended retry (5400s) = 11400s -- and
+# saf_resolve_untouched_backfill_source() is called once per untouched
+# service, sequentially, in the loop below, so a second service hitting the
+# same worst case compounds it further. Even reducing this parameter to 0
+# only removes its own 5400s contribution: the fixed 5400 (step 2) + 600
+# (step 3's short ceiling, itself established elsewhere as non-negotiable)
+# already equals this job's entire 6000s budget, leaving zero headroom for
+# checkout/API/setup overhead and zero value from this extended-retry
+# feature for the very caller it exists to serve. Closing this gap needs an
+# architectural change (a shared, dynamically-tracked total budget across
+# steps 2+3, genuine per-service parallelism, or a reconsidered job scope/
+# timeout), not a one-line number change here -- see build-push.yml's own
+# equivalent step for the much smaller value it already passes for the
+# identical reason its own 30-minute job cannot afford this one at all.
 ancestor_extended_freshness_timeout_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
 ancestor_extended_freshness_hard_ceiling_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
 if (( ancestor_extended_freshness_hard_ceiling_seconds < ancestor_extended_freshness_timeout_seconds )); then

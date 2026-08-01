@@ -173,9 +173,25 @@ jobs:
     if: needs.plan.outputs.should_run == 'true' && needs.plan.outputs.pr_staging_available == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # 100 minutes: this job's own scripts/ensure-pr-staging-images.sh runs an
-    # internal ~90-minute poll loop waiting for build-push.yml's staging tags,
-    # so the job timeout must clear that poll budget with headroom, not just
-    # cover the wrapper's own overhead.
+    # internal poll loop waiting for build-push.yml's staging tags, so the job
+    # timeout must clear that poll budget with headroom, not just cover the
+    # wrapper's own overhead.
+    #
+    # KNOWN GAP, deliberately left open for a maintainer decision: 100 minutes
+    # (6000s) does NOT actually clear the real worst case with headroom. That
+    # worst case, per untouched service, sums THREE separate waits inside
+    # saf_resolve_untouched_backfill_source() (see
+    # scripts/ensure-pr-staging-images.sh's own ancestor_extended_freshness_*
+    # comment for the full derivation): up to 5400s waiting on the PR base
+    # commit's own image, up to 600s for the nearest built ancestor's initial
+    # freshness check, and up to a further 5400s if that ancestor's own build
+    # is confirmed still active -- 11400s for a single service, before
+    # checkout/API/setup overhead, and the script's own loop hits this
+    # sequentially per untouched service, so more than one service hitting
+    # the same worst case compounds it further. Closing this needs an
+    # architectural change (a shared, dynamically-tracked budget, genuine
+    # per-service parallelism, or a reconsidered timeout/scope for this job),
+    # not just a larger number here.
     timeout-minutes: 100
     permissions:
       contents: read
