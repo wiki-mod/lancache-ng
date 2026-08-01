@@ -98,8 +98,14 @@ from memory, from "someone said so in a PR comment once," or from assumption:
 8. **Who/what may update this record?** Only as a direct, atomic result of an actual
    completed validation run with real evidence attached — the same "real executed
    proof, not a static claim" principle `AG-CI-012` already established for
-   branch-trigger completeness (see the proposed `AG-VAL-028` rule, below, which
-   generalizes that principle to this record specifically). Never write a passing
+   branch-trigger completeness (see the proposed `AG-REL-011` rule, below, which
+   generalizes that principle to this record specifically — corrected 2026-08-01:
+   an earlier version of this note pointed at `AG-VAL-028`, a rule number this
+   document's own original PR proposed for this exact purpose but which was never
+   adopted under that number and was later independently reassigned to an unrelated
+   rule, the manual-review-CI-checkability recommendation; the live proposal
+   generalizing this specific principle is `AG-REL-011`, in PR #1368, itself still
+   open/Draft as of this correction). Never write a passing
    entry because a check "should" pass, because an earlier version of the code
    passed, or because a subagent reported success without the caller re-verifying the
    evidence per `AG-WF-021`. Update the specific layer(s) and specific
@@ -120,9 +126,23 @@ from memory, from "someone said so in a PR comment once," or from assumption:
    pipeline-correctness proof untouched while still requiring a fresh Stack pass for
    the subsystem it touched) — track them separately, gate release-readiness on both.
 10. **This mechanism is proposed as new `AGENTS.md` rules**, not yet adopted — see the
-    accompanying PR body for the exact proposed rule text (`AG-VAL-028`,
-    `AG-VAL-029`, `AG-CI-013`), submitted for maintainer review in the same spirit
-    `AG-WF-025` itself requires for a new rule proposal.
+    accompanying PR body for the exact proposed rule text. **Corrected 2026-08-01**:
+    this document's own introducing PR originally proposed the enforcing rule IDs
+    `AG-VAL-028`/`AG-VAL-029`/`AG-CI-013` for the two principles in this section (every
+    real incident needs a durable check; a release-readiness declaration must not
+    trust a self-invalidated `validation-state.json` record) — none were adopted
+    under those numbers, and all three were later independently reassigned to
+    unrelated rules (`AG-VAL-028` now covers periodic CI-checkability review of
+    manual-review-only rules; `AG-CI-013` now covers the retry-wrapper convention for
+    flaky registry/build operations), leaving both principles as unenforced prose for
+    over a week. The live, correctly-numbered proposal is **`AG-VAL-029`** (every
+    confirmed real bug/CI failure/infrastructure incident must produce a durable
+    check here, or a recorded reason in Coverage Assessment if genuinely
+    unautomatable) and **`AG-REL-011`** (a release-readiness declaration must not rely
+    on a `validation-state.json` record a `full_invalidation_trigger` has since
+    invalidated) — see PR #1368 for the exact rule text; that PR is **still open/Draft
+    as of 2026-08-01**, submitted for maintainer review in the same spirit `AG-WF-025`
+    itself requires for a new rule proposal, and is not yet merged into `AGENTS.md`.
 
 **Practical update recipe** once a validation run actually completes with real
 evidence:
@@ -209,6 +229,8 @@ as proof of it:**
 | **Runner-host cleanup script, versioned in-repo** (2026-07-25, `tools/runner-host/`) | The cleanup script actually reclaims disk (measure → clean → re-measure), reaps stale/orphaned build-tools containers across all self-hosted hosts, and is consistent (not host-local/ad-hoc) | `shellcheck tools/runner-host/*.sh` (must be clean); run the script for real on a self-hosted runner host via SSH, capture disk usage before/after, confirm the after-measurement shows real reclaimed space and that no `docker ps -a` entries for stopped/hung build-tools containers remain | Fail if the script only measures without a real reduction, or if it's missing from any host it's meant to run on |
 | **CVE-2026-34040 non-exploitability documentation** (2026-07-25, `.trivyignore.yaml`) | The accepted-risk justification is a verified technical claim (vulnerable code is daemon-only, absent from the vendored client binaries), not a deferred "revisit later" placeholder | `bash scripts/check-vex-drift.sh` (must report in-sync after the regenerated `vex.openvex.json`); read the `.trivyignore.yaml` entry's statement and confirm it names the specific reason (module split at moby v29, vulnerable code in `pkg/authorization`, daemon-only, absent from `docker-buildx`/`docker-compose` client binaries) rather than a vague "no fix available yet" | Fail if the ignorefile reverts to a vague justification, or if a real Trivy scan of the built images still flags this CVE as unaddressed without an equally specific replacement justification |
 | **New/renumbered governance rules — AG-CI-014, AG-CI-016/017 (post #1242 AG-CI-015 collision), AG-GH-008 correction, AG-WF-027** (2026-07-25) | `AGENTS.md` has no duplicate rule IDs, and the Rule Enforcement Matrix has a row for every rule | `grep -oE "\*\*\[AG-[A-Z]+-[0-9]+\]\*\*" AGENTS.md \| grep -oE "AG-[A-Z]+-[0-9]+" \| sort \| uniq -c` — every ID must appear exactly once as a rule definition (a second appearance elsewhere in prose as a `Rule-Ref:` cross-mention is fine; a second **definition** is not); cross-check each new/renumbered ID has a matching Rule Enforcement Matrix row | Fail on any duplicate rule-definition ID, or a rule missing its matrix row |
+| **CI script ecosystem — case-insensitive repo-name comparisons** (fixed, PR #1360, 2026-08-01 — no dedicated tracking issue; #842 is the unrelated watchdog-monitoring issue this PR's Part 1 also happened to ship alongside) | No script anywhere in `scripts/**`/`.github/**` (including inline workflow shell) compares a GitHub repository-identity value (`GITHUB_REPOSITORY`, `HEAD_REPO`/`head_repository`, `GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME`, `BASE_REPOSITORY`, or an equivalent) with a bare, case-sensitive `==`/`=`/`!=` — GitHub repository names are case-insensitive for identity, but the two context values feeding such a comparison are not guaranteed to agree on casing at every point in time (confirmed live during this repo's rename to `LanCache-NG`: `scripts/lib/validation-image-tag.sh`'s `vit_pr_staging_available()` and `scripts/select-build-tools-image.sh`'s fork-vs-same-repo trust check both misclassified a genuine same-repo PR as a fork PR under the old casing, one fail-closed in the safe direction and one merely wrong). Both known call sites are fixed (`${x,,}` lowercasing on both sides, per each file's own incident comment) with dedicated regression coverage: `tests/bats/validation_image_tag.bats` (2 new cases) and the new `tests/bats/select_build_tools_image.bats` (6 cases) | `bats tests/bats/validation_image_tag.bats tests/bats/select_build_tools_image.bats` (must pass, including the same-repo-different-casing case in each); as the ecosystem-wide guard against a *third* call site reintroducing this bug class elsewhere: `grep -rniE '"\$\{?[a-z_]*repo[a-z_]*\}?"[[:space:]]*(==\|!=\|=)[[:space:]]*"\$' scripts/ .github/` (deliberately no `--include` filter — a bare-`.sh` restriction would silently skip `build-push.yml`'s ~9000 lines of inline bash, the most likely place a third call site would appear). **Verified 2026-08-01, both directions**: run against the pre-fix commit (`git show 433c3fd2^:scripts/select-build-tools-image.sh \| grep -niE '...'`, same pattern) correctly flags the exact pre-fix lines (`"$head_repo" == "$repository"`, `"$head_repository" = "$base_repository"`); run against the current tree returns zero hits (both fixed call sites now use `${x,,}`, which the pattern's brace-then-bare-name shape correctly does not match) — a check that can't fail is not a check, and this one demonstrably can. No dedicated script exists for this today, so it remains a documented manual/grep-assisted check, not yet automated as its own CI job (a candidate for future consideration under `AG-VAL-028`'s periodic-reassessment recommendation, not yet acted on); every hit still needs a human glance to confirm it's a genuine repo-identity comparison and not an unrelated `repo`-substring false positive | Fail if either bats file fails, or if the grep turns up a new case-sensitive repository-identity comparison with no `,,` lowercasing |
+| **build-push.yml — pushed image commit-label matches the PR's actual current head** (open gap, no structural fix yet — incident 2026-08-01, PR #1354) | A `build`/`build-arm64` run reporting `success` genuinely built and pushed the commit it claims to, not an earlier, already-superseded commit from the same branch | Confirmed live: rapid, closely-spaced `gh pr update-branch` calls on PR #1354 left `build-push.yml` labeling the pushed `proxy` image with `org.opencontainers.image.revision=220c80f` (a superseded commit) while the run's own reported `head_sha` was already the newer `c4c0e6b6` — a real `docker inspect <image> --format '{{index .Config.Labels "org.opencontainers.image.revision"}}'` mismatch against `gh pr view --json headRefOid`, not merely a suspected race. The only remediation applied was an empty follow-up commit to force a clean, uncontested re-run (commit `2f737bcc`) — there is no code-level guard preventing recurrence, and no dedicated tracking issue exists yet (folded into the PR's own history only). Before trusting any `build`/`build-arm64` "success" as evidence for a specific commit — especially right after any rapid sequence of `gh pr update-branch`/force-push calls on the same PR — compare the pushed image's `org.opencontainers.image.revision` label against `gh pr view <n> --json headRefOid --jq .headRefOid` (or `git rev-parse HEAD` for a push event) for that exact SHA, not just a green check mark | Fail (and re-run) if the pushed image's revision label does not match the commit under test, regardless of the workflow run's own reported conclusion |
 
 ---
 
@@ -466,6 +488,45 @@ once it stops being new, without deleting the durable check itself:
   CONTRIBUTING.md updates (#1189/#1193/#1196) — manual doc-vs-code drift review per
   `AG-DOC-001`, no automated check exists yet.
 
+### Additions dated 2026-08-01 (real incidents since the 2026-07-24 survey above)
+
+Per `AG-VAL-029` (proposed, PR #1368 — see the Validation State Tracking section's
+item 10): every confirmed real bug/CI failure found since the survey above must
+leave a durable check here, not just a point fix. The following incidents surfaced
+between 2026-07-24 and 2026-08-01 and are now covered by the Standing checks table
+above (or explicitly recorded as a known, not-yet-fixed gap in Coverage Assessment
+below, per that same rule's "genuinely unautomatable case" carve-out):
+
+- **Repo-rename case-sensitivity bug** (PR #1360, fixed, no dedicated tracking
+  issue) — this
+  repository's rename to `LanCache-NG` exposed a case-sensitive bash `==`
+  comparison of GitHub repository-identity values in two places
+  (`scripts/lib/validation-image-tag.sh`'s `vit_pr_staging_available()`,
+  `scripts/select-build-tools-image.sh`'s fork-vs-same-repo trust check), each
+  misclassifying a genuine same-repo PR. Both fixed with `${x,,}` lowercasing and
+  dedicated bats regression coverage; see the new Standing check row above, which
+  also adds an ecosystem-wide grep guard against a third call site reintroducing
+  the same bug class elsewhere in `scripts/**`/`.github/**`.
+- **`build-push.yml` tag-commit race** (PR #1354, 2026-08-01, **not structurally
+  fixed** — see the new Standing check row above and Coverage Assessment below) —
+  rapid `gh pr update-branch` calls left a pushed image labeled with an earlier,
+  superseded commit than the workflow run's own reported head; remediated only by
+  forcing a fresh, uncontested re-run, not by a code-level guard.
+- **C-7 / container-scan vs. published-digest scan mismatch** (issue #1348,
+  consolidated into #1095, **known accepted limitation** — see Coverage Assessment
+  below) — `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
+  actually-pushed image are two independent `docker buildx build` invocations that
+  never produce matching digests, even for byte-identical inputs, because each
+  build stamps its own fresh `created` timestamp into the image config.
+- **`build-push.yml` self-modification trigger bug** (PR #1367 POC, **open, not yet
+  resolved** — see Coverage Assessment below) — a PR that itself modifies
+  `build-push.yml` may not reliably receive a `pull_request`-triggered run of the
+  new workflow content.
+- **Watchdog Rust-crate findings** (PR #1355, **open/unmerged as of 2026-08-01 —
+  pending, not yet a validated feature** — see Coverage Assessment below) —
+  `CACHE_DIR` legacy-variable precedence and `ping()` timeout/stall detection in the
+  new (not-yet-wired-in) `services/watchdog` Rust crate.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -529,6 +590,62 @@ explicit pass:**
   state.json`) is brand new as of this PR — it starts with every field `null` and has
   not yet been exercised by a real validation pass. The first real run against it is
   itself a gap until it happens.
+- **Watchdog Rust-crate findings** (PR #1355, **open, not merged, as of 2026-08-01**
+  — do not treat as covered): the new `services/watchdog` Rust crate's
+  `config::resolve_cache_dir()` (mirrors `watchdog.sh`'s `CACHE_DIR` vs. legacy
+  `CACHE_DIR_STANDARD`/`CACHE_DIR_SSL` precedence: `CACHE_DIR` wins outright, a
+  conflicting legacy pair with no `CACHE_DIR` fails closed, a single legacy var is
+  honored, default only when none are set) and `docker_client::ping()`'s
+  stricter-than-bash timeout/stall detection (actually consumes the `/_ping`
+  response body and requires it to equal exactly `OK`, catching a gateway that
+  stalls after headers, which the bash's status-code-only probe would report
+  healthy) both have real unit-test and live-binary coverage **in the PR itself**,
+  but the crate is not wired in anywhere — `services/watchdog/Dockerfile`'s
+  `ENTRYPOINT` still runs the bash script unchanged. Until this PR merges **and** a
+  follow-up actually switches the entrypoint, these findings describe an unused,
+  parallel implementation, not validated production behavior; re-check this PR's
+  merge status before adding a Standing check row for it.
+
+**Known, accepted limitations (not fixable without larger rework — recorded per
+`AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
+omitted):**
+
+- **C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
+  never share a digest** (issue #1348, consolidated into #1095, see
+  `build-push.yml`'s own comment at the `container-scan` job header, roughly lines
+  5003-5011) — both are independent `docker buildx build` invocations of the same
+  Dockerfile/commit; a fresh build stamps a new `created` timestamp into the image
+  config every time, so the two builds' digests never match even given
+  byte-identical inputs. **This is not currently a correctness/provenance gap**: the
+  "Scan pushed service digest with Trivy" step (`build-push.yml`'s `build` and
+  `build-arm64` jobs, per issue #1095 Step 3) already scans the exact digest that
+  gets pushed for all 8 services, not just `build-tools` as before — so the
+  security-relevant claim ("the scanned image is the shipped image") is verified
+  independently of `container-scan`'s throwaway build. What remains unfixed is a
+  **cost/redundancy** problem only: every changed service's Dockerfile gets built
+  twice per run (once to scan, once to push), tracked under the larger #1095
+  CI-pipeline rework, not expected to be resolved by a small, targeted fix.
+- **`build-push.yml` self-modification trigger bug** (open, unresolved as of
+  2026-08-01; maintainer's own POC is PR #1367, `Refs #1095`, `Refs #1356`) — a PR
+  that itself modifies `build-push.yml` does not reliably receive a real
+  `pull_request`-triggered run reflecting the new workflow content. **Root cause not
+  yet confirmed** — do not assume any particular mechanism (e.g. a GitHub Actions
+  merge-ref/base-branch-content nuance) without first reading PR #1367's own
+  findings; this entry records the observed symptom only. PR #1367 exists
+  specifically to test whether a **non-draft** PR (unlike four prior draft-PR
+  attempts) triggers a real run; PR #1356 (widening the Step 4 push-reuse
+  allowlist, itself a `build-push.yml` change) is one real, current example of a PR
+  potentially affected by this gap. Do not assume a `build-push.yml`-modifying PR's
+  own CI status is meaningful evidence until this is resolved — cross-check against
+  a separate, already-merged run of the same content if in doubt.
+- **`build-push.yml` tag-commit race** (PR #1354, 2026-08-01) — see the new Standing
+  check row above for the mechanism and the required cross-check. No code-level fix
+  exists; the only remediation applied so far was forcing a fresh, uncontested
+  re-run (an empty commit), which sidesteps the specific instance without closing
+  the underlying race (rapid `gh pr update-branch`/force-push calls against the
+  same PR can still resolve `github.sha`/the image tag to a superseded commit while
+  the workflow reports success for the newer one). No dedicated tracking issue
+  exists yet for the root cause itself.
 
 ---
 
