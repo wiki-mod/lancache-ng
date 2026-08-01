@@ -91,23 +91,57 @@
 # (a no-op `:` if none was set) -- composing with the caller's own cleanup
 # instead of clobbering it, however many EXIT traps get layered here in the
 # future.
+# Tracks the single, currently-outstanding curl header temp file (see
+# _saf_github_api_get below), if any, so the same EXIT trap installed for the
+# cache directory can also remove it if the process is killed (e.g. GitHub
+# Actions cancelling the job, or the job's own timeout-minutes firing) while
+# curl is still running -- verified empirically (bash 5.2, the version in the
+# pinned build-tools image) that bash's own EXIT trap DOES fire when the
+# process receives SIGTERM/SIGINT with no signal-specific trap of its own, so
+# a single EXIT trap is sufficient here without also needing to separately
+# trap TERM/INT/HUP (which would additionally risk altering this process's
+# own signal-termination semantics for the caller script as a whole, well
+# beyond what this cleanup needs). _saf_github_api_get sets this right after
+# creating its own header file and clears it again once that file is
+# removed, so at most one file is ever tracked at a time (each call is
+# synchronous, never concurrent with another within the same process).
+_SAF_CURRENT_CURL_HEADER_FILE=""
+
 if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
   SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
   if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]]; then
-    _saf_prior_exit_trap="$(trap -p EXIT)"
-    if [[ -n "$_saf_prior_exit_trap" ]]; then
-      # trap -p EXIT prints: trap -- '<command>' EXIT -- extract just
-      # <command> so it can be chained after this file's own cleanup below.
-      _saf_prior_exit_trap="${_saf_prior_exit_trap#trap -- \'}"
-      _saf_prior_exit_trap="${_saf_prior_exit_trap%\' EXIT}"
+    _saf_prior_exit_trap_line="$(trap -p EXIT)"
+    if [[ -n "$_saf_prior_exit_trap_line" ]]; then
+      # trap -p EXIT prints: trap -- '<command>' EXIT, where '<command>' is
+      # ALREADY a single, correctly bash-quoted word -- any single quote
+      # <command> itself contains is represented using bash's own '\''
+      # escaping convention. Naively slicing off just the outer quote
+      # CHARACTERS (as an earlier version of this fix did) leaves that
+      # internal '\'' escaping un-decoded, corrupting <command> the moment it
+      # contained an embedded quote (verified: a prior trap running
+      # `printf "%s" "it's ok"` would silently become `it'\''s ok` once
+      # re-embedded that way). Stripping the fixed "trap -- "/" EXIT" wrapper
+      # textually is still safe (neither ever appears as <command>'s own
+      # data, only at these fixed positions in trap -p's own output format),
+      # but recovering <command> itself needs bash's OWN quote-removal, not
+      # manual slicing -- done here via `eval`, defining a wrapper function
+      # whose body is a second, nested `eval` of the still-quoted word: the
+      # OUTER eval below performs bash's normal quote-removal once (handing
+      # the inner eval its properly recovered, unescaped <command> text as a
+      # single argument), and invoking that inner eval later re-parses and
+      # runs <command> exactly as it was originally registered.
+      _saf_prior_exit_trap_line="${_saf_prior_exit_trap_line% EXIT}"
+      _saf_prior_exit_trap_line="${_saf_prior_exit_trap_line#trap -- }"
+      eval "_saf_run_prior_exit_trap() { eval ${_saf_prior_exit_trap_line}; }"
     else
-      _saf_prior_exit_trap=":"
+      _saf_run_prior_exit_trap() { :; }
     fi
-    # SAF_ANCESTOR_RUN_CACHE_DIR is intentionally expanded now (its value
-    # never changes after this point), not deferred to signal-time.
-    # shellcheck disable=SC2064
-    trap "rm -rf '$SAF_ANCESTOR_RUN_CACHE_DIR' 2>/dev/null || true; ${_saf_prior_exit_trap}" EXIT
-    unset _saf_prior_exit_trap
+    _saf_cleanup_ancestor_run_cache_dir() {
+      [[ -n "$_SAF_CURRENT_CURL_HEADER_FILE" ]] && rm -f "$_SAF_CURRENT_CURL_HEADER_FILE" 2>/dev/null
+      rm -rf "$SAF_ANCESTOR_RUN_CACHE_DIR" 2>/dev/null || true
+    }
+    trap '_saf_cleanup_ancestor_run_cache_dir; _saf_run_prior_exit_trap' EXIT
+    unset _saf_prior_exit_trap_line
   fi
 fi
 export SAF_ANCESTOR_RUN_CACHE_DIR
@@ -307,7 +341,13 @@ saf_base_commit_paths_are_ignorable() {
 # `-H @<file>` to read header lines from a file instead: the header value
 # briefly exists in a mode-600 temp file under $TMPDIR, owned solely by this
 # process's own user, unlinked immediately after the single curl invocation
-# that reads it -- never in argv, and never outliving that one call.
+# that reads it -- never in argv, and never outliving that one call. Tracked
+# in _SAF_CURRENT_CURL_HEADER_FILE (see that variable's own declaration-site
+# comment) so the same process-wide EXIT trap that cleans up
+# SAF_ANCESTOR_RUN_CACHE_DIR also removes this file if the process is killed
+# (job cancellation, or the job's own timeout) while curl is still running --
+# the plain `rm -f` below only covers this function returning normally,
+# which a killed process never reaches.
 #
 # A 401 (invalid/expired token) or 404 (wrong endpoint/repository) is a
 # permanent, configuration-level failure -- no amount of retrying or
@@ -331,12 +371,14 @@ _saf_github_api_get() {
   local status curl_status header_file
   header_file="$(mktemp "${TMPDIR:-/tmp}/saf-gh-header.XXXXXX" 2>/dev/null)" || return 1
   chmod 600 "$header_file" 2>/dev/null || true
+  _SAF_CURRENT_CURL_HEADER_FILE="$header_file"
   printf 'Accept: application/vnd.github+json\nAuthorization: Bearer %s\n' "$GH_TOKEN" > "$header_file"
   status="$(curl -sS --connect-timeout 10 --max-time 30 -o "$body_file" -w '%{http_code}' \
     -H "@${header_file}" \
     "$url" 2>/dev/null)"
   curl_status=$?
   rm -f "$header_file"
+  _SAF_CURRENT_CURL_HEADER_FILE=""
   if (( curl_status != 0 )); then
     return 1
   fi

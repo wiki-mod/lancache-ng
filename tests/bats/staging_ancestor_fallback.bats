@@ -140,6 +140,37 @@ setup() {
     [ "$(cat "$sentinel_file")" = "ran" ]
 }
 
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: a pre-existing EXIT trap containing an embedded single quote survives chaining verbatim" {
+    # A naive fix would capture the prior trap via \`trap -p EXIT\` and slice
+    # off just the outer quote CHARACTERS textually -- that recovers the
+    # command's text but does NOT undo bash's own '\'' escaping for a single
+    # quote embedded in the original command, silently corrupting it the
+    # moment the prior trap's own command contains one (e.g. a real trap
+    # running \`printf "%s" "it's ok"\` would become \`it'\''s ok\` once
+    # re-embedded that way). The fix must instead let bash's own parser (via
+    # \`eval\`) recover the original command exactly, whatever quoting it
+    # itself contains. Proven here by making the sentinel file's own content
+    # be exactly the marker trap's output, byte for byte, when that marker
+    # trap's command itself contains a single quote.
+    reported_dir_file="$BATS_TEST_TMPDIR/reported_cache_dir.txt"
+    sentinel_file="$BATS_TEST_TMPDIR/prior_trap_output.txt"
+    env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        trap 'printf %s \"it'\''s ok\" > \"$sentinel_file\"' EXIT
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        printf '%s' \"\$SAF_ANCESTOR_RUN_CACHE_DIR\" > '$reported_dir_file'
+    "
+    reported_dir="$(cat "$reported_dir_file")"
+    [ -n "$reported_dir" ]
+    [ ! -e "$reported_dir" ]
+    [ -f "$sentinel_file" ]
+    # Must be EXACTLY "it's ok" -- not "it'\''s ok" (the escaped form a naive
+    # textual slice would have produced) and not truncated at the embedded
+    # quote (the failure mode of an even more naive extraction).
+    [ "$(cat "$sentinel_file")" = "it's ok" ]
+}
+
 # ---------------------------------------------------------------------------
 # saf_paths_are_ignorable: pure, no git/network involved.
 # ---------------------------------------------------------------------------
@@ -420,6 +451,39 @@ STUB
     [ -s "$header_path_capture" ]
     header_file_path="$(cat "$header_path_capture")"
     [ ! -e "$header_file_path" ]
+}
+
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: the outstanding curl header temp file is removed even if the process is killed mid-call" {
+    # GitHub Actions cancelling the job, or the job's own timeout-minutes
+    # firing, sends SIGTERM to the running process while curl may still be
+    # in flight -- _saf_github_api_get's own `rm -f` after the call can never
+    # run in that case, since the process never returns from curl at all.
+    # Mirrors exactly what _saf_github_api_get does right before curl runs
+    # (mktemp + chmod 600 + track the path in _SAF_CURRENT_CURL_HEADER_FILE),
+    # then self-signals SIGTERM at exactly that point to simulate the kill,
+    # relying on the same process-wide EXIT trap installed alongside
+    # SAF_ANCESTOR_RUN_CACHE_DIR's own cleanup (verified empirically, bash
+    # 5.2 -- the version in the pinned build-tools image -- that its EXIT
+    # trap fires on SIGTERM even with no explicit TERM trap of its own).
+    reported_header_file="$BATS_TEST_TMPDIR/reported_header_file.txt"
+    # `run` (not a bare invocation): the child deliberately terminates itself
+    # via SIGTERM, which is the exact scenario under test, not a test
+    # failure -- a bare invocation would let bats treat that nonzero exit
+    # (143 = 128+SIGTERM) as this test's own failure.
+    run env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        header_file=\"\$(mktemp)\"
+        chmod 600 \"\$header_file\"
+        _SAF_CURRENT_CURL_HEADER_FILE=\"\$header_file\"
+        printf '%s' \"\$header_file\" > '$reported_header_file'
+        kill -TERM \"\$\$\"
+    "
+    [ "$status" -eq 143 ]
+    header_file="$(cat "$reported_header_file")"
+    [ -n "$header_file" ]
+    [ ! -e "$header_file" ]
 }
 
 @test "saf_query_run_count: a non-200 HTTP status is treated as a retryable failure, not a false zero" {
