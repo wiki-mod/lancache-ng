@@ -261,6 +261,7 @@ services:
       - SETUID
       - SETGID
       - SETPCAP
+      - CHOWN
     read_only: true
     tmpfs:
       - /tmp

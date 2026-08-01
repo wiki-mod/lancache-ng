@@ -42,17 +42,23 @@
 # non-root UID actually use it unless it was raised into the AMBIENT set by
 # a privileged parent before the UID switch. That is exactly what `setpriv`
 # below does: start as root (so the container's `cap_add: [DAC_OVERRIDE,
-# SETUID, SETGID, SETPCAP]` capabilities are actually available to use),
-# raise ONLY DAC_OVERRIDE into the inheritable/ambient sets, narrow the
-# bounding set down to just that one capability (dropping SETUID/SETGID/
-# SETPCAP themselves back out -- they were only ever needed transiently to
-# perform this exact reuid/regid/bounding-set sequence, confirmed by
-# re-reading /proc/self/status after the switch: CapInh/CapPrm/CapEff/
-# CapBnd/CapAmb all show only DAC_OVERRIDE, nothing else survives), then
-# switch to uid/gid 10001 and exec retention.sh. The resulting process is
-# genuinely running as `lancache`/10001, with exactly one non-default
+# SETUID, SETGID, SETPCAP, CHOWN]` capabilities are actually available to
+# use), chown the paths this container itself must own (see below), raise
+# ONLY DAC_OVERRIDE into the inheritable/ambient sets, narrow the bounding
+# set down to just that one capability (dropping SETUID/SETGID/SETPCAP/CHOWN
+# themselves back out -- they were only ever needed transiently, for this
+# exact reuid/regid/bounding-set sequence and the chown step below,
+# confirmed by re-reading /proc/self/status after the switch: CapInh/CapPrm/
+# CapEff/CapBnd/CapAmb all show only DAC_OVERRIDE, nothing else survives),
+# then switch to uid/gid 10001 and exec retention.sh. The resulting process
+# is genuinely running as `lancache`/10001, with exactly one non-default
 # capability, not root, not "cap_drop: ALL with a user: line that quietly
-# doesn't do what it looks like it does."
+# doesn't do what it looks like it does." CHOWN itself was found the hard
+# way, not assumed up front: the first real end-to-end container run of this
+# script failed at the chown step below with "Operation not permitted" --
+# `cap_drop: ALL` removes CHOWN from root itself, not merely from the
+# eventual non-root user, so root needs it added back too, transiently, the
+# same as SETUID/SETGID/SETPCAP above.
 #
 # Read this alongside the compose service's own comment on why the REAL
 # containment boundary here is the mount set (which volumes are even

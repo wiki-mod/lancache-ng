@@ -359,6 +359,17 @@ services:
   #     and "can still do its job" at once (a capability added via
   #     `cap_add` does not reach a non-root process's effective set without
   #     this drop sequence -- confirmed the naive way first, then fixed).
+  #   - CHOWN: also needed only transiently, by retention-entrypoint.sh's own
+  #     root-phase `chown` of the retention-state/watchdog-logs paths before
+  #     the privilege drop (a fresh named volume or one that predates this
+  #     change may not already be owned by `lancache`) -- found the hard way
+  #     (not assumed): the first real end-to-end container run failed with
+  #     "chown: changing ownership ... Operation not permitted" without it,
+  #     since `cap_drop: ALL` removes CHOWN from root itself, not just from
+  #     the eventual non-root user. Stripped back out of the final process's
+  #     capability set by the same `--bounding-set=-all,+dac_override` call
+  #     that already removes SETUID/SETGID/SETPCAP -- retention.sh itself
+  #     never needs to change any file's ownership, only delete/truncate.
   #
   # CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks on
   # every path this container can see -- not a small residual detail, and
@@ -387,6 +398,7 @@ services:
       - SETUID
       - SETGID
       - SETPCAP
+      - CHOWN
     read_only: true
     tmpfs:
       # retention.sh's mktemp calls (scan/error scratch files ahead of every
