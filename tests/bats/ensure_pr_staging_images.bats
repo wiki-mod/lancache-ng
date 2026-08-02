@@ -14,20 +14,20 @@
 # STAGING_BUILD_RUN_STATUS_CMD (build_push_run_active()'s indirection) the
 # same way the tests above stub the registry probe, so the extend-past-
 # baseline / fail-fast-when-confirmed-dead / hard-ceiling behavior is
-# exercised without a real `gh` CLI, network access, or a real build-push
-# run. The default setup() below deliberately leaves BUILD_SHA unset, which
-# proves the pre-#895 tests still get the original fail-at-baseline
-# behavior unchanged (build_push_run_active() short-circuits on an empty
-# BUILD_SHA without needing `gh` to be installed at all).
+# exercised without network access or a real build-push run. The default
+# setup() below deliberately leaves BUILD_SHA unset, which proves the
+# pre-#895 tests still get the original fail-at-baseline behavior unchanged
+# (build_push_run_active() short-circuits on an empty BUILD_SHA before it
+# reaches any API call at all).
 #
 # #975 congestion-probe SHA-key coverage: the #895 tests above all stub
 # STAGING_BUILD_RUN_STATUS_CMD, which bypasses build_push_run_active()'s real
-# `gh api` query entirely -- exactly why the #975 bug (querying by BUILD_SHA,
-# the synthetic merge commit, instead of PR_HEAD_SHA, the PR's real branch
-# head that the Actions API's `head_sha` field actually means) shipped
-# untested. The tests further down instead leave STAGING_BUILD_RUN_STATUS_CMD
-# unset and put a fake `gh` executable on PATH, so the real query construction
-# is exercised and would fail against the pre-#975 implementation.
+# API query entirely -- exactly why the #975 bug (querying by BUILD_SHA, the
+# synthetic merge commit, instead of PR_HEAD_SHA, the PR's real branch head
+# that the Actions API's `head_sha` field actually means) shipped untested.
+# The tests further down instead leave STAGING_BUILD_RUN_STATUS_CMD unset and
+# put a fake `curl` on PATH, so the real query construction is exercised and
+# would fail against the pre-#975 implementation.
 #
 # #808 base-image freshness coverage: every real backfill now first calls
 # scripts/lib/staging-image-freshness.sh's sif_wait_for_fresh_base_image().
@@ -42,10 +42,11 @@
 #
 # #1254/#1255 (2026-07-25): the back-fill source itself is no longer the
 # mutable nightly/latest channel tag -- it is this PR's own base commit's
-# durable per-commit sha-<short> image (base_sha_short, derived from BASE_SHA
-# by the script itself). setup() below no longer sets BASE_CHANNEL_TAG (the
-# script no longer reads it at all); base_sha_short is computed here purely
-# for the tests' own assertions about which tag was backfilled from.
+# durable per-commit sha-<short> image, derived from BASE_SHA by
+# scripts/lib/staging-ancestor-fallback.sh's own resolver. setup() below no
+# longer sets BASE_CHANNEL_TAG (the script no longer reads it at all);
+# base_sha_short is computed here purely for the tests' own assertions about
+# which tag was backfilled from.
 #
 # Ancestor-fallback coverage (scripts/lib/staging-ancestor-fallback.sh):
 # setup()'s disposable repo now has THREE commits, not two -- ancestor2 (the
@@ -59,7 +60,7 @@
 # so every pre-existing test -- most of which never even reach this check,
 # since their default freshness stub already succeeds on BASE_SHA itself --
 # keeps today's strict fail-closed behavior deterministically and without any
-# real `gh`/network dependency, unless a test below explicitly overrides it
+# real network dependency, unless a test below explicitly overrides it
 # to exercise the new ancestor-fallback path.
 #
 # `run !` (used below, per SC2314's own recommendation, in place of a bare
@@ -154,7 +155,7 @@ STUB
     # run exists" (exit 0) for any sha, so
     # every pre-existing/unrelated test's untouched-service path keeps
     # today's strict fail-closed behavior deterministically -- with no real
-    # `gh`/network dependency -- unless a test below explicitly overrides
+    # network dependency -- unless a test below explicitly overrides
     # this to exercise the ancestor-fallback path itself.
     base_run_exists_stub="$BATS_TEST_TMPDIR/base_run_exists.sh"
     cat > "$base_run_exists_stub" <<'STUB'
@@ -375,52 +376,65 @@ STUB
     printf '%s\n' "$output" | grep -q "hard 1s ceiling"
 }
 
-# Fake `gh` used by the #975 tests below: emulates `gh api <url> --jq <expr>`
-# by logging the requested URL (so a test can assert exactly which SHA was
-# queried) and rendering a per-head_sha JSON fixture through the real `jq`
-# binary, the same way the real `gh api --jq` flag renders its response.
-# Returns an empty workflow_runs list for any head_sha with no fixture file,
-# mirroring what the real API returns for a SHA it has never seen.
-install_fake_gh() {
+# Fake `curl` for the #975 congestion-probe tests below. The probe reaches the
+# Actions "list workflow runs" endpoint through
+# scripts/lib/staging-ancestor-fallback.sh's saf_event_has_incomplete_run(),
+# which uses plain `curl` + `GH_TOKEN` and parses the body with `grep`,
+# because AG-CI-001/AG-CI-002 mean neither the `gh` CLI nor its bundled `jq`
+# can be assumed present on the bare `lancache-light` runner this script
+# actually runs on. This stub therefore emulates that exact call shape
+# (`-o <body_file> -w '%{http_code}'`, config supplied on stdin via `-K -`):
+# it logs the requested URL, so a test can assert precisely which SHA was
+# queried, and copies a per-head_sha JSON fixture into the requested body
+# file, printing the HTTP status on stdout the way a real
+# `-w '%{http_code}'` does. A head_sha with no fixture gets an empty
+# workflow_runs list, mirroring what the real API returns for a SHA it has
+# never seen.
+install_fake_runs_api() {
     fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
     mkdir -p "$fake_bin_dir"
     fake_gh_call_log="$BATS_TEST_TMPDIR/gh_calls.log"
     : > "$fake_gh_call_log"
     fake_gh_runs_dir="$BATS_TEST_TMPDIR/gh_runs_fixtures"
     mkdir -p "$fake_gh_runs_dir"
-    cat > "$fake_bin_dir/gh" <<'STUB'
+    cat > "$fake_bin_dir/curl" <<'STUB'
 #!/usr/bin/env bash
-set -euo pipefail
-if [[ "${1:-}" != "api" ]]; then
-    exit 1
-fi
-url="$2"
-shift 2
-jq_expr=""
-while [[ $# -gt 0 ]]; do
-    case "$1" in
-        --jq) jq_expr="$2"; shift 2 ;;
-        *) shift ;;
-    esac
+set -uo pipefail
+# Drain stdin so the caller's `-K -` here-string never blocks on a full pipe.
+cat >/dev/null 2>&1 || true
+out_file=""
+url=""
+prev=""
+for arg in "$@"; do
+    if [[ "$prev" == "-o" ]]; then
+        out_file="$arg"
+    fi
+    prev="$arg"
+    url="$arg"
 done
 printf '%s\n' "$url" >> "$GH_FAKE_CALL_LOG"
 head_sha="${url#*head_sha=}"
 head_sha="${head_sha%%&*}"
 fixture="$GH_FAKE_RUNS_DIR/$head_sha.json"
 if [[ -f "$fixture" ]]; then
-    jq -r "$jq_expr" "$fixture"
+    cat "$fixture" > "$out_file"
 else
-    printf '{"workflow_runs":[]}' | jq -r "$jq_expr"
+    printf '{"workflow_runs":[]}' > "$out_file"
 fi
+printf '200'
 STUB
-    chmod +x "$fake_bin_dir/gh"
+    chmod +x "$fake_bin_dir/curl"
     export PATH="$fake_bin_dir:$PATH"
     export GH_FAKE_CALL_LOG="$fake_gh_call_log"
     export GH_FAKE_RUNS_DIR="$fake_gh_runs_dir"
+    # saf_event_has_incomplete_run() fails closed with "inconclusive" when no
+    # token is set, before it ever reaches curl -- so the probe must have one
+    # for these tests to exercise the query itself at all.
+    export GH_TOKEN="test-token"
 }
 
 @test "#975: the congestion probe queries build-push runs by the PR's real head SHA, checking every returned run" {
-    install_fake_gh
+    install_fake_runs_api
     real_head_sha="realhead1234567890"
     merge_sha="mergecommit0987654321"
 
@@ -466,7 +480,7 @@ STUB
 }
 
 @test "#975: a head_sha with only completed runs is correctly reported as not active" {
-    install_fake_gh
+    install_fake_runs_api
     real_head_sha="realhead1234567890"
     cat > "$fake_gh_runs_dir/$real_head_sha.json" <<JSON
 {"workflow_runs":[{"status":"completed"},{"status":"completed"}]}
@@ -556,7 +570,7 @@ STUB
 # (ancestor2 -> older -> base), each commit touching a real docs/*.md file
 # so the paths-are-ignorable gate reads them as a genuine deliberate skip.
 
-@test "#1095 ancestor fallback: BASE_SHA never built, nearest ancestor 2 commits back (with a real run+image) is used" {
+@test "ancestor fallback: BASE_SHA never built, nearest ancestor 2 commits back (with a real run+image) is used" {
     # base_sha and older_sha (1 commit back) both report ZERO push runs;
     # ancestor2_sha (2 commits back) is the first one that DOES -- proves the
     # walk actually skips ahead past a run-less immediate parent instead of
@@ -619,7 +633,7 @@ STUB
     printf '%s\n' "$script_output" | grep -q "no push-triggered build-push.yml run"
 }
 
-@test "#1095 ancestor fallback: bounded search depth stops before reaching a usable ancestor further back" {
+@test "ancestor fallback: bounded search depth stops before reaching a usable ancestor further back" {
     # Same stubs as above (ancestor2, 2 commits back, has a real run+image),
     # but the search depth is clamped to 1 -- only older_sha (1 commit back,
     # confirmed zero runs) gets examined, proving the bound is real and
@@ -671,7 +685,7 @@ STUB
     [[ "$output" != *"Substituting nearest built ancestor"* ]]
 }
 
-@test "#1095 ancestor fallback: no ancestor anywhere has a usable run -> fails closed with a distinct error" {
+@test "ancestor fallback: no ancestor anywhere has a usable run -> fails closed with a distinct error" {
     # Every commit in the disposable repo (base, older, ancestor2 -- the
     # repo's own root commit) reports zero runs -- simulating a long
     # unbroken run of docs-only commits with no real build anywhere in
@@ -742,7 +756,7 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 0 ]
 }
 
-@test "#1095 ancestor fallback: BASE_SHA has a confirmed run -> no fallback, existing strict failure preserved" {
+@test "ancestor fallback: BASE_SHA has a confirmed run -> no fallback, existing strict failure preserved" {
     # A stub that logs its own argument and always reports "a run exists" --
     # proves the check is actually wired to BASE_SHA specifically (not merely
     # ignored, and not accidentally checked against the wrong sha, the exact
@@ -787,7 +801,7 @@ STUB
     grep -qxF "$base_sha" "$run_exists_log"
 }
 
-@test "#1095 ancestor fallback: BASE_SHA run-check is indeterminate (e.g. gh unavailable) -> fails closed same as a confirmed run" {
+@test "ancestor fallback: BASE_SHA run-check is indeterminate (e.g. the API query failed) -> fails closed same as a confirmed run" {
     # Proving absence is the ONLY condition allowed to unlock the fallback --
     # an inconclusive check (gh missing, API error) must fail exactly like a
     # confirmed run, never be treated as "confirmed zero".
@@ -820,7 +834,7 @@ STUB
     printf '%s\n' "$output" | grep -q "could not be positively determined"
 }
 
-@test "#1095 ancestor fallback: BASE_SHA changed a real (non-doc) path -> paths gate blocks the fallback even with zero push runs" {
+@test "ancestor fallback: BASE_SHA changed a real (non-doc) path -> paths gate blocks the fallback even with zero push runs" {
     # The single most important regression guard for this mechanism: a
     # confirmed-zero-push-runs reading alone is not proof of a deliberate
     # skip -- it only proves GitHub never created a run, not that BASE_SHA's

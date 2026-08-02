@@ -79,20 +79,75 @@
 # directory, but on a long-lived self-hosted runner "unique" is exactly what
 # makes an ENTIRELY UNCLEANED directory a real, unbounded accumulation
 # problem rather than a self-limiting one: every process that ever sources
-# this file leaves its own never-reused directory behind forever, across
-# every run the runner ever does. This still must not install a bare
-# `trap ... EXIT` here, though (a sourced library, not the top-level script):
-# doing so unconditionally would silently DISCARD any EXIT trap the actual
-# caller script already set for its own purposes, since bash's `trap` simply
-# replaces whatever was previously registered for a given signal. Instead,
-# capture whatever EXIT trap (if any) is already active at the moment this
-# file is first sourced, and re-register a combined trap that runs this
-# cleanup FIRST and then falls through to that prior trap's own command
-# (a no-op `:` if none was set) -- composing with the caller's own cleanup
-# instead of clobbering it, however many EXIT traps get layered here in the
-# future.
+# this file would otherwise leave its own never-reused directory behind
+# forever, across every run the runner ever does.
+#
+# TWO independent defences, because neither alone is sufficient:
+#
+#   1. The parent directory is `$RUNNER_TEMP` when GitHub Actions sets it
+#      (both real callers run as Actions steps, where it always is). Actions
+#      wipes `RUNNER_TEMP` itself between jobs, so anything under it is
+#      reclaimed even when this process never gets to run a single line of
+#      its own cleanup -- the SIGKILL case a trap fundamentally cannot cover,
+#      and exactly what a job-level `timeout-minutes` expiry does to a step
+#      that overruns it. `${TMPDIR:-/tmp}` remains the fallback for a plain
+#      local/bats invocation outside Actions.
+#   2. An EXIT trap for the ordinary path (normal exit, and -- verified on
+#      bash 5.2, the pinned build-tools image's version -- SIGINT/SIGTERM
+#      with no explicit handler of their own, where bash still runs the EXIT
+#      trap before dying).
+#
+# The trap must not be a bare `trap ... EXIT` (this is a sourced library, not
+# the top-level script): registering one unconditionally would silently
+# DISCARD any EXIT trap the caller had already set, since bash's `trap`
+# replaces whatever was previously registered for a signal. So whatever EXIT
+# trap is active at the moment this file is FIRST sourced is captured and
+# re-invoked from a combined trap.
+#
+# SCOPE OF THAT COMPOSITION, stated honestly rather than overclaimed: it
+# composes with a trap the caller registered BEFORE sourcing this file, and
+# nothing else. A caller that registers its own EXIT trap AFTER the `source`
+# line -- the more usual ordering, since scripts tend to source at the top
+# and set traps later -- still replaces this combined trap outright, and this
+# file has no way to detect or prevent that. Defence 1 above is what actually
+# holds in that case. No caller in this repository registers an EXIT trap at
+# all today (checked: scripts/ensure-pr-staging-images.sh, scripts/lib/
+# ghcr-retry.sh, scripts/lib/staging-image-freshness.sh, scripts/lib/
+# validation-image-tag.sh, and build-push.yml's own inline step), so the
+# composition path is currently unexercised in production; it exists so a
+# future caller that does set one before sourcing does not silently lose it.
+#
+# ORDER -- prior trap FIRST, cleanup SECOND -- is load-bearing, not cosmetic.
+# `$?` on entry to an EXIT trap is the script's own real exit status, and a
+# prior trap reading it (to log or propagate a genuine failure, a common CI
+# pattern) must see that value. Running the cleanup first would overwrite
+# `$?` with the cleanup's own successful `rm`, handing the prior trap a false
+# "0" for a real failure. Restoring it afterwards is not an option: the only
+# way to force `$?` back to a non-zero value is to run a command that fails,
+# and under the `set -e` BOTH real callers use, a failing command inside a
+# trap body aborts the trap immediately -- so the prior trap would not run at
+# all, which is strictly worse than running with a wrong `$?`. (Both of those
+# are real, reproduced behaviours on bash 5.2, not theory; the second one was
+# introduced by an earlier attempt at the first and is why this ordering is
+# now the mechanism instead of a save/restore dance.) Putting the prior trap
+# first gets the correct `$?` for free, with no failing command anywhere in
+# this trap's own body.
+#
+# Residual risk of that ordering, deliberately accepted and not papered over:
+# if the prior trap itself exits or dies under `set -e`, this cleanup never
+# runs. Neutralising that with `_saf_run_prior_exit_trap || :` would suppress
+# `set -e` inside the caller's own trap body, i.e. silently change the
+# caller's semantics to protect a temp directory -- the wrong trade. Defence
+# 1 covers that case too.
 if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
-  SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
+  # A failure here is deliberately non-fatal rather than fail-closed: the
+  # cache is a pure API-call optimisation, and every read/write site below is
+  # already guarded on this variable being non-empty. Losing it costs
+  # redundant GitHub API queries, never correctness -- so a `mktemp` failure
+  # (a full or read-only $TMPDIR) must not take down a CI job that would
+  # otherwise complete perfectly well without any caching at all. `2>/dev/null
+  # || true` keeps that true under the callers' `set -e`.
+  SAF_ANCESTOR_RUN_CACHE_DIR="$(mktemp -d "${RUNNER_TEMP:-${TMPDIR:-/tmp}}/saf-ancestor-run-cache.XXXXXX" 2>/dev/null || true)"
   if [[ -n "$SAF_ANCESTOR_RUN_CACHE_DIR" ]]; then
     _saf_prior_exit_trap_line="$(trap -p EXIT)"
     if [[ -n "$_saf_prior_exit_trap_line" ]]; then
@@ -104,16 +159,13 @@ if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
       # <command> the moment it contains an embedded quote (e.g. a prior trap
       # running `printf "%s" "it's ok"` would silently become `it'\''s ok`
       # once re-embedded that way). Stripping the fixed "trap -- "/" EXIT"
-      # wrapper textually is still safe (neither ever appears as
-      # <command>'s own data, only at these fixed positions in trap -p's own
-      # output format), but recovering <command> itself needs bash's OWN
-      # quote-removal, not manual slicing -- done here via `eval`, defining a
-      # wrapper function whose body is a second, nested `eval` of the still-
-      # quoted word: the OUTER eval below performs bash's normal quote-
-      # removal once (handing the inner eval its properly recovered,
-      # unescaped <command> text as a single argument), and invoking that
-      # inner eval later re-parses and runs <command> exactly as it was
-      # originally registered.
+      # wrapper textually is still safe (neither ever appears as <command>'s
+      # own data, only at these fixed positions in trap -p's own output
+      # format), but recovering <command> itself needs bash's OWN quote
+      # removal, not manual slicing. Hence `eval`: it defines a wrapper
+      # function whose stored body is `eval '<still-quoted word>'`, and
+      # invoking that wrapper later performs the quote removal and re-parses
+      # <command> exactly as originally registered.
       _saf_prior_exit_trap_line="${_saf_prior_exit_trap_line% EXIT}"
       _saf_prior_exit_trap_line="${_saf_prior_exit_trap_line#trap -- }"
       eval "_saf_run_prior_exit_trap() { eval ${_saf_prior_exit_trap_line}; }"
@@ -123,34 +175,29 @@ if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
     _saf_cleanup_ancestor_run_cache_dir() {
       rm -rf "$SAF_ANCESTOR_RUN_CACHE_DIR" 2>/dev/null || true
     }
-    # `$?` at the moment this trap fires is the SCRIPT's own real exit
-    # status (e.g. a genuine failure) -- but running ANY command changes
-    # `$?` to that command's own status, so `_saf_cleanup_ancestor_run_cache_dir`
-    # (whose own last command is effectively a successful `rm`/`true`)
-    # would silently overwrite it with 0 before the prior trap ever runs,
-    # were it not captured first. A prior trap that itself reads `$?` (e.g.
-    # to log or propagate the real exit status, a common CI pattern) would
-    # then see a false "success" for a genuine failure -- reproduced live:
-    # sourcing this file with a prior trap of `echo "status=$?"` already
-    # registered, then failing via a plain `false`, printed `status=0`, not
-    # `status=1`. Captured into `_saf_exit_status` as this trap's own FIRST
-    # action (before the cleanup call can touch `$?` at all), then
-    # `(exit "$_saf_exit_status")` -- a subshell whose own exit code becomes
-    # this trap's `$?` the instant it completes -- re-establishes that
-    # captured value immediately before `_saf_run_prior_exit_trap` runs, so
-    # any `$?` read as the very first thing inside the prior trap's own body
-    # sees the real, original status again.
-    #
-    # _saf_exit_status IS assigned, as this same trap string's own first
-    # statement; shellcheck's static analysis does not track an assignment
-    # made earlier within the same single-quoted trap argument as
-    # satisfying a later read within that same string.
-    # shellcheck disable=SC2154
-    trap '_saf_exit_status=$?; _saf_cleanup_ancestor_run_cache_dir; (exit "$_saf_exit_status"); _saf_run_prior_exit_trap' EXIT
+    trap '_saf_run_prior_exit_trap; _saf_cleanup_ancestor_run_cache_dir' EXIT
     unset _saf_prior_exit_trap_line
   fi
 fi
 export SAF_ANCESTOR_RUN_CACHE_DIR
+
+# _saf_mktemp_body_file
+#
+# Internal helper: allocates the scratch file the GitHub API helpers below
+# write a response body into. Placed INSIDE $SAF_ANCESTOR_RUN_CACHE_DIR
+# whenever that exists, so the single `rm -rf` in the EXIT trap above (and
+# `RUNNER_TEMP`'s own between-jobs wipe) reclaims every one of them together,
+# instead of each call site's own `rm -f` being the only thing standing
+# between a killed process and an orphaned file on a long-lived runner. Falls
+# back to a plain `mktemp` when the cache directory could not be created --
+# the same "the optimisation is optional, the query is not" posture as the
+# cache itself.
+_saf_mktemp_body_file() {
+  if [[ -n "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
+    mktemp "${SAF_ANCESTOR_RUN_CACHE_DIR}/body.XXXXXX" 2>/dev/null && return 0
+  fi
+  mktemp
+}
 
 # _saf_ancestor_run_cache_key_to_path <repository> <candidate>
 #
@@ -491,14 +538,29 @@ saf_query_run_count() {
     url="${url}&event=${event}"
   fi
   local body
-  body="$(mktemp)"
+  body="$(_saf_mktemp_body_file)"
   if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
     rm -f "$body"
     return 1
   fi
-  local run_count
-  run_count="$(grep -o '"total_count"[[:space:]]*:[[:space:]]*[0-9]\+' "$body" | head -1 | grep -o '[0-9]\+$')"
+  # Capture-first, then narrow the captured string -- deliberately NOT
+  # `grep ... "$body" | head -1 | grep ...`. An early-exiting consumer (`head`,
+  # `grep -q`/`-m`) piped from a still-writing producer can leave that producer
+  # killed by SIGPIPE, which `set -o pipefail` (both real callers set it) then
+  # reports as the whole pipeline's own failure -- exit 141 for a query that
+  # actually succeeded. That is the same failure class this file's own
+  # saf_find_built_ancestor header documents for `git log | head`, the same one
+  # scripts/check-pipefail-early-exit-grep.sh was added to guard after it took
+  # down a real CI job, and the same capture-first shape tools/build-tools/
+  # Dockerfile was fixed into. `grep -m1` against the file directly has no live
+  # producer process to signal, so the early exit is free here.
+  local total_count_match run_count
+  # `|| true`: a malformed/empty body makes grep exit 1, which must reach the
+  # explicit `run_count` validation below as a normal "no parseable count"
+  # answer rather than tripping a caller's `set -e` on the assignment itself.
+  total_count_match="$(grep -m1 -o '"total_count"[[:space:]]*:[[:space:]]*[0-9]\+' "$body" || true)"
   rm -f "$body"
+  run_count="${total_count_match##*[![:digit:]]}"
   if [[ ! "$run_count" =~ ^[0-9]+$ ]]; then
     return 1
   fi
@@ -615,23 +677,78 @@ saf_candidate_run_is_active() {
     "$STAGING_CANDIDATE_RUN_ACTIVE_CMD" "$sha"
     return $?
   fi
+  local event status
+  for event in push workflow_dispatch schedule; do
+    saf_event_has_incomplete_run "$repository" "$sha" "$event"
+    status=$?
+    if (( status != 1 )); then
+      # 0 (an incomplete run found) or 2 (inconclusive) are both final
+      # answers for this function -- only a positive "every run for this
+      # event type is completed, or there are none" is worth continuing to
+      # the next event type for.
+      return "$status"
+    fi
+  done
+  return 1
+}
+
+# saf_event_has_incomplete_run <repository> <sha> <event>
+#
+# The single low-level "is any build-push.yml run for <sha> triggered by
+# <event> still non-completed?" query, shared by saf_candidate_run_is_active
+# above (which asks it once per tag-publishing event type) and by
+# scripts/ensure-pr-staging-images.sh's build_push_run_active() congestion
+# probe (which asks it for `pull_request`). Those two used to be independent
+# implementations of the same question against the same endpoint -- one on
+# `curl`, one on the `gh` CLI -- which is exactly the duplication this file
+# exists to remove; a fix or a fail-closed correction in one would silently
+# not reach the other.
+#
+# Fetches up to 20 recent runs (matching the per_page=20 convention #975
+# established for the congestion probe) and inspects EVERY returned run's own
+# `status` field, not just the newest: a single push can produce more than one
+# recorded run for the same head_sha (`synchronize` and `labeled` firing close
+# together, confirmed live in #960), and the newest one completing or being
+# cancelled must not hide an older one that is still genuinely building.
+# Checks for the single terminal state (`completed`) rather than enumerating
+# non-terminal ones, since the API can report `pending` as well as
+# `queued`/`in_progress`.
+#
+# Returns 0 if at least one non-completed run exists, 1 if the query
+# positively confirms none does (including zero runs at all), and 2 if the
+# query could not be completed at all (GH_TOKEN unset, `curl` missing, API
+# error after retries). 2 is deliberately not collapsed into 0 or 1 -- each
+# caller decides which direction is safe for its own use.
+saf_event_has_incomplete_run() {
+  local repository="${1:?saf_event_has_incomplete_run: repository is required}"
+  local sha="${2:?saf_event_has_incomplete_run: sha is required}"
+  local event="${3:?saf_event_has_incomplete_run: event is required}"
+  # `curl` is capability-checked rather than assumed present, per AG-CI-001 --
+  # see saf_query_run_count's own header for why that applies to `curl` too
+  # and not just to the `gh` CLI this function replaced.
   if [[ -z "${GH_TOKEN:-}" ]] || ! command -v curl >/dev/null 2>&1; then
     return 2
   fi
-  local event url body
-  for event in push workflow_dispatch schedule; do
-    url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=${event}&per_page=20"
-    body="$(mktemp)"
-    if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
-      rm -f "$body"
-      return 2
-    fi
-    if grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$body" | grep -qv '"status"[[:space:]]*:[[:space:]]*"completed"'; then
-      rm -f "$body"
-      return 0
-    fi
+  local url body statuses
+  url="https://api.github.com/repos/${repository}/actions/workflows/build-push.yml/runs?head_sha=${sha}&event=${event}&per_page=20"
+  body="$(_saf_mktemp_body_file)"
+  if ! ghcr_retry "n/a-not-a-real-registry" "" "" -- _saf_github_api_get "$url" "$body"; then
     rm -f "$body"
-  done
+    return 2
+  fi
+  # Capture-first, then filter the captured string via a here-string --
+  # deliberately NOT `grep -o ... | grep -qv ...`. `grep -q` exits at its
+  # first match and closes the pipe, which can leave the still-scanning
+  # producer killed by SIGPIPE; under `set -o pipefail` (every real caller)
+  # that surfaces as a failed pipeline, so a genuinely incomplete run would be
+  # misread as "none" and the extended retry silently skipped. Same failure
+  # class, and same capture-first remedy, as saf_query_run_count above and
+  # scripts/check-pipefail-early-exit-grep.sh's own guard.
+  statuses="$(grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$body" || true)"
+  rm -f "$body"
+  if [[ -n "$statuses" ]] && grep -qv '"status"[[:space:]]*:[[:space:]]*"completed"' <<< "$statuses"; then
+    return 0
+  fi
   return 1
 }
 
@@ -807,11 +924,19 @@ saf_find_built_ancestor() {
   local git_dir="${10:-.}"
   # sif_wait_for_fresh_base_image (called below) delegates its own ancestry
   # check to sif_is_ancestor_or_equal, which reads STAGING_FRESHNESS_GIT_DIR
-  # from the environment rather than taking a git_dir argument -- exporting
-  # it here bridges this function's own explicit <git_dir> parameter through
-  # to that mechanism, so a caller of THIS function never needs to know
-  # about that env-var-based convention itself.
-  export STAGING_FRESHNESS_GIT_DIR="$git_dir"
+  # from the environment rather than taking a git_dir argument -- setting it
+  # here bridges this function's own explicit <git_dir> parameter through to
+  # that mechanism, so a caller of THIS function never needs to know about
+  # that env-var-based convention itself.
+  #
+  # `local -x`, not a bare `export`: still exported (so any subshell or child
+  # process started from here inherits it), but dynamically scoped to this
+  # function, so bash restores whatever the caller's own value was -- including
+  # "unset" -- the moment this function returns. A bare `export` would leave
+  # this function's <git_dir> permanently stamped on the caller's environment,
+  # silently redirecting any LATER, unrelated sif_* call (or any child process
+  # that reads it) at a directory it was never asked to use.
+  local -x STAGING_FRESHNESS_GIT_DIR="$git_dir"
 
   local candidates
   candidates="$(git -C "$git_dir" log --first-parent --max-count=$((search_depth + 1)) --format=%H "$base_sha" 2>/dev/null | tail -n +2)" || return 1
@@ -1116,11 +1241,13 @@ saf_resolve_untouched_backfill_source() {
   local ancestor_extended_freshness_timeout_seconds="$8" ancestor_extended_freshness_hard_ceiling_seconds="$9"
   local freshness_poll_interval_seconds="${10}" ancestor_search_depth="${11}"
   local git_dir="${12:-.}"
-  # See saf_find_built_ancestor's own comment for why this export is needed:
+  # See saf_find_built_ancestor's own comment for why this is set at all, and
+  # why it is `local -x` (exported, but restored to the caller's own value when
+  # this function returns) rather than a bare `export`:
   # sif_wait_for_fresh_base_image (called directly below, and indirectly via
   # saf_find_built_ancestor) reads STAGING_FRESHNESS_GIT_DIR from the
   # environment, not a parameter.
-  export STAGING_FRESHNESS_GIT_DIR="$git_dir"
+  local -x STAGING_FRESHNESS_GIT_DIR="$git_dir"
 
   local base_sha_short="${base_sha:0:7}"
   local base_image="ghcr.io/${repository}/${service}:sha-${base_sha_short}"

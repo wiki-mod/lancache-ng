@@ -176,7 +176,7 @@ workflow_changed="${WORKFLOW_CHANGED:-false}"
 build_sha="${BUILD_SHA:-}"
 # #975: the PR's real head branch commit (github.event.pull_request.head.sha
 # -- see full-setup-deep-validate.yml's own PR_HEAD_SHA comment), used for the
-# congestion probe's `gh api` query. Deliberately a separate variable from
+# congestion probe's run-status query. Deliberately a separate variable from
 # build_sha above: the Actions "list workflow runs" API's `head_sha` filter
 # for a pull_request-triggered run is always the PR's real branch head, never
 # the synthetic merge commit build_sha holds, so conflating the two (the
@@ -390,41 +390,49 @@ backfill_from_base() {
 # can report "pending", not only "queued"/"in_progress", so this
 # deliberately checks for the one terminal state rather than enumerating
 # non-terminal ones). Indirection so tests can stub the GitHub API call.
-# Intentionally fail-safe: if PR_HEAD_SHA is unset, `gh` isn't available, or
-# the API call fails for any reason, this returns non-zero (treated as "not
-# active") so the caller falls back to the original pre-#895
-# fail-at-baseline behavior instead of ever hanging on a broken probe.
+# Intentionally fail-safe: if PR_HEAD_SHA is unset or the API query cannot be
+# completed for any reason (no token, no `curl`, an error after retries), this
+# returns non-zero (treated as "not active") so the caller falls back to the
+# original pre-#895 fail-at-baseline behavior instead of ever hanging on a
+# broken probe.
 #
 # #975: queries by pr_head_sha (the PR's real branch head), NOT build_sha
 # (the synthetic merge commit) -- the Actions "list workflow runs" API's
 # `head_sha` field/filter for a pull_request-triggered run is always the real
 # branch head, so querying by the merge commit (the pre-#975 bug) matched
 # zero runs, always, making this probe permanently report "not active"
-# regardless of whether build-push was genuinely still running. Also checks
-# EVERY run the query returns (`any(...)`), not just the newest one: a single
-# push can produce more than one build-push run for the same head_sha (e.g.
-# `synchronize` and `labeled` firing close together), and the newest one
-# completing or being cancelled must not hide an older one still building.
+# regardless of whether build-push was genuinely still running.
+#
+# Delegates the actual query to scripts/lib/staging-ancestor-fallback.sh's
+# saf_event_has_incomplete_run() rather than issuing its own. That function
+# asks the identical question against the identical endpoint (including the
+# "check EVERY returned run, not just the newest" rule #975 established here
+# first), so keeping a second implementation alive here meant one shared
+# question with two bodies that could drift. It also removes this file's last
+# dependency on the `gh` CLI and its bundled `jq`: AG-CI-001 requires assuming
+# self-hosted runners do not provide project tooling, and this script runs
+# directly on a bare `lancache-light` runner (AG-CI-002), not inside the
+# pinned build-tools image -- so a missing `gh` silently downgraded this probe
+# to a permanent "not active" on exactly the runner tier it has to work on.
+# `saf_event_has_incomplete_run` uses `curl` + `GH_TOKEN` with an explicit
+# capability check instead, the same way every other API query in this
+# mechanism already does.
+#
+# Its tri-state answer is deliberately flattened to this function's existing
+# boolean contract: 0 stays "active", and BOTH 1 (positively confirmed: no
+# incomplete run) and 2 (inconclusive) become "not active", preserving the
+# fail-safe posture this probe already documented above -- an unprovable
+# answer must not let the caller extend its wait indefinitely.
 build_push_run_active() {
     if [[ -n "${STAGING_BUILD_RUN_STATUS_CMD:-}" ]]; then
         "$STAGING_BUILD_RUN_STATUS_CMD"
         return $?
     fi
-    if [[ -z "$pr_head_sha" ]] || ! command -v gh >/dev/null 2>&1; then
+    if [[ -z "$pr_head_sha" ]]; then
         return 1
     fi
-    local any_active
-    any_active="$(gh api "repos/${REPOSITORY}/actions/workflows/build-push.yml/runs?head_sha=${pr_head_sha}&event=pull_request&per_page=20" \
-        --jq 'any(.workflow_runs[]?; .status != "completed")' 2>/dev/null)" || return 1
-    [[ "$any_active" == "true" ]]
+    saf_event_has_incomplete_run "$REPOSITORY" "$pr_head_sha" "pull_request"
 }
-
-# base_commit_has_confirmed_push_run() and find_built_ancestor() used to
-# live here as this file's own private functions. They are now
-# saf_base_commit_has_confirmed_run()/saf_find_built_ancestor() in
-# scripts/lib/staging-ancestor-fallback.sh, sourced above, so build-push.yml's
-# own equivalent step can share the identical implementation instead of
-# carrying a second, independent copy of the same recovery logic.
 
 wait_for_touched_image() {
     local pr_image="$1" service="$2"

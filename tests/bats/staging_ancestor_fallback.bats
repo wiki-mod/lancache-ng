@@ -6,57 +6,44 @@
 # recovery path scripts/ensure-pr-staging-images.sh and build-push.yml's own
 # "Ensure PR staging tags exist for full-setup services" step both use.
 #
-# Covers several real bugs found during review, each with a dedicated
-# regression case:
-#   - a SIGPIPE bug (piping `git log` through `head -n N` under `pipefail`
-#     aborts the walk before it examines any real candidate once the real
-#     ancestor count exceeds the configured depth -- fixed by bounding at
-#     the `git log` source with `--max-count` instead)
-#   - `git log`'s default all-parents walk finding a built commit on a
-#     merge's side branch before reaching its first parent -- fixed with
-#     `--first-parent`
-#   - a confirmed-zero-push-runs reading alone is not proof of a deliberate
-#     skip (an outage could produce the same reading for a real change) --
-#     fixed by additionally requiring every changed path to match
-#     build-push.yml's own paths-ignore patterns
-#   - the decisive GitHub Actions API query having no retry -- fixed by
-#     wrapping it in the project's existing ghcr_retry policy
-#   - an ancestor candidate's own non-push-triggered run being skipped
-#     without a chance, asymmetric with how BASE_SHA's own image is checked
-#   - a single shared freshness budget applied to both BASE_SHA's own wait
-#     (which can legitimately be racing a real in-flight build) and the
-#     ancestor-candidate checks (which never can, since a candidate is
-#     already confirmed to be further back in history than BASE_SHA) --
-#     fixed by splitting into two independent budget pairs
-#   - a run-less ancestor candidate being skipped in favor of an older one
-#     without confirming THAT candidate's own changed paths are ignorable --
-#     zero runs alone does not prove a deliberate skip for a mid-walk
-#     candidate any more than it does for BASE_SHA itself -- fixed by
-#     applying the same paths-are-ignorable proof to every skipped candidate
-#   - the ancestor-candidate build-proof query accepting a pull_request-
-#     triggered run as evidence a candidate's own sha-<commit> tag was
-#     published -- a pull_request run's github.sha is a synthetic merge
-#     commit, not the candidate's own sha, so it never publishes that tag --
-#     fixed by scoping the query to push/workflow_dispatch/schedule only
-#   - depending on the `gh` CLI, which AG-CI-001/AG-CI-002 mean cannot be
-#     assumed present on the bare runner tier this code actually executes
-#     on -- fixed by talking to the GitHub REST API directly via curl +
-#     GH_TOKEN, matching this project's own established precedent for
-#     exactly this situation
-#   - `curl` itself also being assumed present without an explicit
-#     capability check -- AG-CI-001 does not carve out an exception for it
-#     just because it's a near-universal base-OS utility -- fixed by
-#     checking `command -v curl` explicitly, the same fail-closed pattern
-#     the old `gh`-based code already used
-#   - an ancestor candidate whose own build is still genuinely in progress
-#     (a real race: several commits merging in rapid succession does not
-#     mean each one's build finished before the next one's ancestor walk
-#     runs) getting only the short ancestor-candidate ceiling and never a
-#     chance to actually finish -- fixed by positively checking whether
-#     that candidate's own run is still active before giving up, and only
-#     then retrying once with the same long budget BASE_SHA's own
-#     possibly-in-progress build already gets (not a blind timeout bump --
+# Each of the properties below is load-bearing for this mechanism's
+# fail-closed guarantee, and each has a dedicated case here, so a future
+# refactor cannot quietly drop one:
+#   - the ancestor walk is bounded at the `git log` SOURCE (`--max-count`),
+#     never by piping into `head` -- an early-exiting consumer under
+#     `pipefail` can leave the producer killed by SIGPIPE and abort the walk
+#     before it examines a single real candidate
+#   - the walk is `--first-parent` only: this project does not squash-merge,
+#     so a default all-parents walk can surface a built commit that only ever
+#     existed on a merge's side branch, never on the target branch itself
+#   - a confirmed-zero-push-runs reading is NOT on its own proof of a
+#     deliberate skip (a CI outage produces the identical reading for a real
+#     change), so every changed path must additionally match
+#     build-push.yml's own paths-ignore patterns -- for BASE_SHA and for
+#     every mid-walk candidate the walk skips past
+#   - the decisive GitHub Actions API query runs under the project's shared
+#     ghcr_retry policy (AG-CI-013), never bare
+#   - an ancestor candidate's own non-push-triggered run still counts as
+#     build proof, symmetric with how BASE_SHA's own image is checked
+#   - the build-proof query counts only TAG-PUBLISHING trigger types
+#     (push/workflow_dispatch/schedule): a pull_request run's github.sha is a
+#     synthetic merge commit, so it never publishes the candidate's own
+#     sha-<commit> tag no matter what head_sha the API reports for it
+#   - BASE_SHA's own wait, the per-candidate initial check, and the
+#     one-time extended retry each get their OWN freshness budget -- only the
+#     first can legitimately race a real in-flight build
+#   - an ancestor candidate whose own build is positively confirmed still
+#     active gets exactly one extended-budget retry, and an inconclusive or
+#     confirmed-not-active answer gets none (not a blind timeout bump --
 #     AG-CI-013)
+#   - every GitHub API call goes through `curl` + `GH_TOKEN` with an explicit
+#     `command -v curl` capability check, never the `gh` CLI and never an
+#     assumed-present binary: AG-CI-001/AG-CI-002 mean neither can be taken
+#     for granted on the bare runner tier this code actually executes on
+#   - the token never reaches curl's argv, any file on disk, or ghcr_retry's
+#     own diagnostics
+#   - the cache directory's EXIT trap preserves both the caller's own
+#     pre-existing EXIT trap and the script's real exit status
 #
 # `run --separate-stderr` (Bats >= 1.5.0) is used for the curl-based query
 # tests below: ghcr_retry's own ::warning::/::error:: diagnostics land on
@@ -83,7 +70,7 @@ setup() {
     # shellcheck disable=SC2034 # read by ghcr_retry(), same cross-file reason.
     GHCR_RETRY_MAX_ATTEMPTS=4
     # Default token for saf_query_run_count's real curl-based path (see the
-    # "gh CLI is not guaranteed present" fix) -- individual tests that need
+    # AG-CI-001 curl-not-gh reasoning in that file's own header) -- tests that need
     # to prove the GH_TOKEN-unset behavior unset/restore this themselves.
     export GH_TOKEN="test-token"
     sleep() { :; }
@@ -171,23 +158,32 @@ setup() {
     [ "$(cat "$sentinel_file")" = "it's ok" ]
 }
 
-@test "SAF_ANCESTOR_RUN_CACHE_DIR: the script's real exit status is preserved for a prior trap that reads \$?, not clobbered by cleanup" {
-    # \`\$?\` at the moment this file's own combined EXIT trap fires is the
-    # SCRIPT's real exit status (e.g. a genuine failure) -- but running ANY
-    # command changes \$?  to that command's own status, so
-    # _saf_cleanup_ancestor_run_cache_dir's own successful \`rm\`/\`true\` would
-    # silently overwrite it with 0 before a prior trap that itself reads
-    # \$? (a common CI pattern: logging or propagating the real exit status)
-    # ever runs, if that status were not explicitly captured and restored
-    # first. Reproduced live before the fix: a prior trap of
-    # \`echo "status=\$?"\`, then a plain \`false\`, printed "status=0" -- a
-    # real CI failure silently reported as success to anything reading that
-    # prior trap's own output. Proven here the same way: the prior trap
-    # writes \$?'s own value to a sentinel file, and that value must be 1
-    # (false's own exit code), never 0.
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: under set -e, a failing script still runs its prior EXIT trap, with the real exit status" {
+    # Two distinct properties, both of which the combined EXIT trap has to
+    # hold at once, and both of which only break when the script FAILS:
+    #
+    #   1. The prior trap runs AT ALL. `set -euo pipefail` (which every real
+    #      caller of this library sets, and which this case therefore sets
+    #      too) aborts a trap body at its first failing command. Any attempt
+    #      to force `$?` back to a non-zero value inside the trap -- e.g. an
+    #      `(exit "$captured_status")` subshell -- IS such a failing command,
+    #      so it kills the trap before the prior trap is ever reached. The
+    #      prior trap's sentinel file then never gets written at all.
+    #   2. `$?` seen by the prior trap is the SCRIPT's own real exit status,
+    #      not some command inside the trap. Running the cache cleanup first
+    #      would overwrite it with that cleanup's own successful `rm`, so a
+    #      prior trap logging or propagating a genuine CI failure would report
+    #      a false "0".
+    #
+    # Both are satisfied only by invoking the prior trap FIRST and doing the
+    # cleanup after it, with no status-restoring command anywhere in between.
+    # Without `set -e` here this case cannot observe property 1 at all -- an
+    # earlier version of it passed against an implementation that silently
+    # skipped the prior trap on every real failure.
     reported_dir_file="$BATS_TEST_TMPDIR/reported_cache_dir.txt"
     sentinel_file="$BATS_TEST_TMPDIR/prior_trap_status.txt"
     run env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        set -euo pipefail
         trap 'echo \"\$?\" > \"$sentinel_file\"' EXIT
         source '$repo_root/scripts/lib/ghcr-retry.sh'
         source '$repo_root/scripts/lib/staging-image-freshness.sh'
@@ -198,9 +194,52 @@ setup() {
     [ "$status" -eq 1 ]
     reported_dir="$(cat "$reported_dir_file")"
     [ -n "$reported_dir" ]
-    [ ! -e "$reported_dir" ]
+    # Property 1: the prior trap ran even though the script failed.
     [ -f "$sentinel_file" ]
+    # Property 2: it saw the script's own real status, not the cleanup's.
     [ "$(cat "$sentinel_file")" = "1" ]
+    # ...and the cache directory is still gone afterwards.
+    [ ! -e "$reported_dir" ]
+}
+
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: an explicit non-zero exit under set -e also reaches the prior EXIT trap" {
+    # Same failure mode as the case above, reached the other way a real
+    # script fails: an explicit `exit <n>` rather than an errexit-triggering
+    # command. Both must leave the prior trap reachable and the script's own
+    # status intact.
+    sentinel_file="$BATS_TEST_TMPDIR/prior_trap_status_explicit.txt"
+    run env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        set -euo pipefail
+        trap 'echo \"\$?\" > \"$sentinel_file\"' EXIT
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        exit 7
+    "
+    [ "$status" -eq 7 ]
+    [ -f "$sentinel_file" ]
+    [ "$(cat "$sentinel_file")" = "7" ]
+}
+
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: the cache directory lives under RUNNER_TEMP when GitHub Actions provides one" {
+    # The EXIT trap cannot cover a SIGKILL -- which is exactly what a job-level
+    # timeout expiry eventually delivers -- so the directory's PARENT is the
+    # real backstop: GitHub Actions wipes RUNNER_TEMP itself between jobs, so
+    # anything under it is reclaimed even when this process never runs a line
+    # of its own cleanup. This asserts the placement, not the wipe (that half
+    # is the Actions runner's own behavior, not this repo's to test).
+    runner_temp="$BATS_TEST_TMPDIR/runner-temp"
+    mkdir -p "$runner_temp"
+    reported_dir_file="$BATS_TEST_TMPDIR/reported_cache_dir_runner_temp.txt"
+    RUNNER_TEMP="$runner_temp" env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        printf '%s' \"\$SAF_ANCESTOR_RUN_CACHE_DIR\" > '$reported_dir_file'
+    "
+    reported_dir="$(cat "$reported_dir_file")"
+    [ -n "$reported_dir" ]
+    [[ "$reported_dir" == "$runner_temp"/* ]]
 }
 
 # ---------------------------------------------------------------------------
@@ -312,7 +351,7 @@ setup_linear_fixture() {
 # saf_base_commit_has_confirmed_run: retry + event scoping, using a fake
 # `curl` binary (not the STAGING_BASE_BUILD_RUN_EXISTS_CMD stub hook -- these
 # tests exercise the REAL curl-based query path, including retry). No real
-# `gh`/network dependency anywhere in this block, matching the fix: these
+# network dependency anywhere in this block: these
 # functions talk to the GitHub REST API directly via curl+GH_TOKEN, not the
 # `gh` CLI, since AG-CI-001/AG-CI-002 mean `gh` cannot be assumed present on
 # the bare `lancache-light` runner both real callers actually run on.
@@ -595,7 +634,7 @@ STUB
     [ "$status" -eq 2 ]
 }
 
-@test "saf_base_commit_has_confirmed_run: GH_TOKEN unset is treated as inconclusive (2), never as a real gh CLI check" {
+@test "saf_base_commit_has_confirmed_run: GH_TOKEN unset is treated as inconclusive (2), never as a real API check" {
     unset GH_TOKEN
     unset STAGING_BASE_BUILD_RUN_EXISTS_CMD
     # No fake curl installed at all -- if the implementation still shelled
