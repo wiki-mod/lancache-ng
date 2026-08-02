@@ -849,8 +849,8 @@ async fn handle_dns_flush(
     // resolving from cache until its TTL naturally expires. The publisher
     // (services/ui/src/routes/domains.rs's flush_recursor_cache) now sends
     // the exact domain that changed; fall back to "." only for messages
-    // published before this fix, or from any other future publisher that
-    // doesn't include one.
+    // published by a publisher version that predates the `domain` field, or
+    // from any other future publisher that doesn't include one.
     let domain = match serde_json::from_slice::<FlushRequest>(&msg.payload) {
         Ok(req) => req.domain,
         Err(_) => ".".to_string(),

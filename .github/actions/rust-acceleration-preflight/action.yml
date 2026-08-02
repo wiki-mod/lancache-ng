@@ -269,9 +269,9 @@ runs:
                   # while "192.168.1.x" resolves fine), and distcc-pump
                   # re-derives and re-appends the ,cpp/,lzo suffix itself for
                   # whichever hosts it confirms alive. Feeding it the original
-                  # comma-suffixed spec here made every pump-candidate host
-                  # unresolvable, so DISTCC_POTENTIAL_HOSTS did not resolve to
-                  # usable remote hosts before this fix -- use the bare base
+                  # comma-suffixed spec here would make every pump-candidate
+                  # host unresolvable, so DISTCC_POTENTIAL_HOSTS would never
+                  # resolve to usable remote hosts -- use the bare base
                   # instead.
                   *,cpp*) distcc_pump_hosts="${distcc_pump_hosts:+$distcc_pump_hosts }$distcc_host_base" ;;
                   *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;;
