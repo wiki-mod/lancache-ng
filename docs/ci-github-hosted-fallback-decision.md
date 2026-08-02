@@ -51,11 +51,11 @@ per-class status instead of a single yes/no answer.
 | `line-endings` | cheap lint | `line-endings-hosted` (issue #601) |
 | `shellcheck` | cheap lint | `shellcheck-hosted` (PR #591) |
 | `pr-template-check` | cheap lint | `pr-template-check-hosted` (this change) |
-| `watchdog_test` | cheap lint | `watchdog_test-hosted` (this change) |
+| `watchdog_test` | hybrid: cheap lint (shell script) + Rust build/test (crate, 2026-08) | `watchdog_test-hosted` covers the shell-script half only -- see "Rust build/test class" below |
 | `pr-title-convention-check` | cheap lint | `pr-title-convention-check-hosted` (#850/AG-GH-018) |
 | `ci_scope_policy` | policy gate over Rust job results | none -- decided not feasible, see below |
 | `detect-changes`, `validate-compose`, `compute-validation-network`, `full-setup-validate` | build-tools image / full Docker Compose stack | none -- see "Other self-hosted-only jobs" below |
-| `dns_rust_quality`, `ui_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
+| `dns_rust_quality`, `ui_rust_quality`, `watchdog_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit`, `watchdog_cargo_audit` | Rust build/test/audit | none -- see "Rust build/test class" below |
 | `publish_coverage_badge` | downstream of `rust_coverage`, needs `contents: write` | none, same reasoning as its upstream job |
 | `container-scan`, `build`, `build-arm64`, `merge-manifests`, `promote`, `release` | image build/scan/publish | `build-arm64`'s arm64 lane already runs natively on GitHub-hosted `ubuntu-24.04-arm` (issue #592); `container-scan`+`build` (amd64 leg) + manifest merge now have an opt-in `workflow_dispatch` overflow path (`.github/workflows/build-push-hosted-fallback.yml`, issue #686); `promote`/`release` remain self-hosted-only -- see "Image build/push class" below |
 
@@ -89,9 +89,12 @@ either way.
 
 ## Rust build/test class: not infeasible, but not free
 
-`dns_rust_quality`, `ui_rust_quality`, `dns_test`, `ui_test`, `rust_coverage`,
-`dns_cargo_audit`, and `ui_cargo_audit` all run on `lancache-heavy` self-hosted
-runners and use the acceleration layer described in AGENTS.md's **AG-CI-003**
+`dns_rust_quality`, `ui_rust_quality`, `watchdog_rust_quality`, `dns_test`,
+`ui_test`, `watchdog_test` (its `cargo test` step only -- the shell-script
+syntax/executable-bit step already has a hosted fallback, `watchdog_test-hosted`),
+`rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit`, and `watchdog_cargo_audit`
+all run on `lancache-heavy` self-hosted runners and use the acceleration layer
+described in AGENTS.md's Rule-Ref: **AG-CI-003**
 ("Runner portability") and `docs/self-hosted-actions-runner.md`'s
 "Acceleration contract":
 
@@ -121,16 +124,18 @@ and CI-degraded-mode story today. A `dns_rust_quality-hosted` /
 **What makes it a real cost, not a mechanical `runs-on:` swap:**
 
 1. **Build time.** Full-fidelity, uncached `cargo build`/`cargo test`/
-   `cargo tarpaulin` for the `dns/nats-subscriber` and `ui` crates is
-   materially slower without sccache/distcc -- this is the same tradeoff
-   already accepted for `build-arm64`'s GitHub-hosted arm64 lane (see
-   `docs/self-hosted-actions-runner.md`'s "Native arm64 builds on
+   `cargo tarpaulin` for the `dns/nats-subscriber`, `ui`, and (2026-08)
+   `watchdog` crates is materially slower without sccache/distcc -- this is
+   the same tradeoff already accepted for `build-arm64`'s GitHub-hosted arm64
+   lane (see `docs/self-hosted-actions-runner.md`'s "Native arm64 builds on
    GitHub-hosted runners": "always builds as an uncached, optional-
    acceleration `cargo build --release` -- slower per build than the
-   accelerated amd64 lane"). Seven Rust jobs (quality + test + audit +
-   coverage, times two crates) running uncached in parallel as a fallback
-   would multiply GitHub Actions minutes usage for every PR, not just
-   during self-hosted outages, if run unconditionally like the lint
+   accelerated amd64 lane"). Ten Rust jobs (quality + test + audit, times
+   three crates, plus coverage for the original two crates only -- see
+   `rust_coverage`'s own job comment in the workflow file for why watchdog is
+   deliberately not in the coverage job yet) running uncached in parallel as
+   a fallback would multiply GitHub Actions minutes usage for every PR, not
+   just during self-hosted outages, if run unconditionally like the lint
    fallbacks are.
 2. **Fallback jobs in this project run unconditionally, in parallel with the
    self-hosted job, every time** (see `file-headers-hosted` and friends).
@@ -230,9 +235,9 @@ alongside this increment -- see that workflow's own header comment.
 
 | Class | Status | Fallback path |
 |---|---|---|
-| Cheap lint (file-headers, compose-healthchecks, line-endings, shellcheck, pr-template-check, watchdog_test) | done | Always-on parallel hosted job |
+| Cheap lint (file-headers, compose-healthchecks, line-endings, shellcheck, pr-template-check, watchdog_test's shell-script half) | done | Always-on parallel hosted job |
 | `ci_scope_policy` | decided: not feasible | None -- inherits Rust jobs' own unavailability |
-| Rust build/test/audit | acceptable-but-slow | Not implemented; needs opt-in scoping, not always-on. Follow-up issue tracks prototyping (#685). |
+| Rust build/test/audit (incl. watchdog_test's `cargo test` half, 2026-08) | acceptable-but-slow | Not implemented; needs opt-in scoping, not always-on. Follow-up issue tracks prototyping (#685). |
 | Image build/scan/merge (amd64/publish) | done (opt-in overflow) | `.github/workflows/build-push-hosted-fallback.yml`, `workflow_dispatch`-gated (issue #686) |
 | Image promote/release | not attempted | Channel-pointer/promote-lock machinery deferred; still self-hosted-only |
 | Image build (arm64) | already done | Native `ubuntu-24.04-arm` lane in `build-arm64` (issue #592) |
