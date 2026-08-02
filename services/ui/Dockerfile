@@ -505,18 +505,11 @@ LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-pla
 # both, byte-for-byte identical CVE ID sets. curl
 # specifically carries the same unfixed 7 HIGH CVE IDs either way
 # (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545 -- `libcurl4t64`
-# moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1, `nmap`/`nmap-common` moved
-# 7.95+dfsg-3 -> 7.98+dfsg-1~bpo13+1 at the time of that scan, both
-# confirmed via `dpkg -l` on the built image; every other installed package
-# here had no newer backports version, so stayed on plain trixie). Do not
-# re-assert either way without re-running that scan, since curl's CVE set
-# is a moving target (see issue #1304 for the full history and the proxy
-# image's matching result). `nmap` itself (along with `isc-dhcp-client`) was
-# removed from this image entirely by issue #1288 -- both were only ever
-# used by the now-retired dhcp-probe.sh, replaced by a native Rust DHCP
-# probe with no external tool dependency -- so the nmap-specific CVE
-# mention above is retained only as historical record of that earlier scan,
-# not a claim about this image's current package set.
+# moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1 at the time of that scan;
+# every other installed package here had no newer backports version, so
+# stayed on plain trixie). Do not re-assert either way without re-running
+# that scan, since curl's CVE set is a moving target (see issue #1304 for
+# the full history and the proxy image's matching result).
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive; \
     echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \

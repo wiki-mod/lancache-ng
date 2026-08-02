@@ -199,7 +199,7 @@ sif_is_ancestor_or_equal() {
   git -C "$git_dir" merge-base --is-ancestor "$base_sha" "$candidate_sha"
 }
 
-# sif_wait_for_fresh_base_image <base_image> <base_sha> <service_label> <normal_budget_seconds> <hard_ceiling_seconds> <poll_interval_seconds>
+# sif_wait_for_fresh_base_image <base_image> <base_sha> <service_label> <normal_budget_seconds> <hard_ceiling_seconds> <poll_interval_seconds> [allow_reverse_ancestry]
 #
 # Polls <base_image>'s org.opencontainers.image.revision label until it is at
 # or after <base_sha> (see sif_is_ancestor_or_equal), echoing the confirmed
@@ -214,6 +214,31 @@ sif_is_ancestor_or_equal() {
 # not-yet-fetched (status 3 from sif_is_ancestor_or_equal) is treated the
 # same as ordinary staleness here, not as a hard failure -- see that
 # function's own comment for why the two must not be conflated.
+#
+# <allow_reverse_ancestry> (optional, any non-empty value means "true";
+# default off -- unset/empty preserves the exact pre-existing behavior for
+# every caller that doesn't pass it): also accept the label predating
+# <base_sha> (base_sha being a DESCENDANT of the label's commit, the reverse
+# of the normal check), instead of only ever accepting base_sha being at or
+# before the label. This must stay opt-in, never the default, because it is
+# only safe when <base_image> is known to be an IMMUTABLE per-commit
+# `sha-<base_sha>` tag -- never a mutable channel tag (`dev`/`nightly`/
+# `latest`), which is exactly what this whole check exists to catch as
+# genuinely stale (#808). For a per-commit tag specifically, there are only
+# two ways it can exist at all: a real build-push.yml build AT that exact
+# commit (label == base_sha, the ordinary case), or build-push.yml's own
+# Schritt 4 "Retag unchanged service image" step (label == an ancestor of
+# base_sha) -- which only ever runs after determine-push-reuse-scope has
+# already positively verified content-equivalence between that ancestor and
+# base_sha for this exact service (scripts/lib/push-reuse.sh). There is no
+# third way a per-commit tag's label ends up predating its own tag name, so
+# accepting that combination is exactly as safe as accepting an exact match
+# -- it is not a weaker freshness bar, just recognizing a second legitimate
+# shape the proof can take. scripts/lib/staging-ancestor-fallback.sh's own
+# callers are the only ones that pass this (see that file), because they are
+# the only callers that always pass a per-commit tag; the shared #808/#895
+# touched-image mutable-channel-tag path this file's own header still
+# describes must never opt in.
 #
 # All human-readable progress/diagnostic output goes to stderr (`>&2`).
 # Only the confirmed-fresh commit SHA (on success) is written to stdout, so a
@@ -253,6 +278,7 @@ sif_wait_for_fresh_base_image() {
   local normal_budget_seconds="${4:?sif_wait_for_fresh_base_image: normal_budget_seconds is required}"
   local hard_ceiling_seconds="${5:?sif_wait_for_fresh_base_image: hard_ceiling_seconds is required}"
   local poll_interval_seconds="${6:?sif_wait_for_fresh_base_image: poll_interval_seconds is required}"
+  local allow_reverse_ancestry="${7:-}"
 
   local start_time=$SECONDS
   local hard_deadline=$((start_time + hard_ceiling_seconds))
@@ -269,6 +295,17 @@ sif_wait_for_fresh_base_image() {
         echo "::notice::$service_label base image ($base_image) was built from commit $revision, which is at or after base commit $base_sha (waited $((SECONDS - start_time))s). Safe to back-fill from." >&2
         printf '%s\n' "$revision"
         return 0
+      fi
+      if (( ancestor_status == 1 )) && [[ -n "$allow_reverse_ancestry" ]]; then
+        set +e
+        sif_is_ancestor_or_equal "$revision" "$base_sha"
+        local reverse_status=$?
+        set -e
+        if (( reverse_status == 0 )); then
+          echo "::notice::$service_label base image ($base_image) was built from commit $revision, which PREDATES base commit $base_sha -- but this is a per-commit tag, so the only way that combination exists is build-push.yml's Schritt 4 retag-unchanged-image path, which already verified $service_label is content-equivalent between $revision and $base_sha before writing this tag (waited $((SECONDS - start_time))s). Safe to back-fill from." >&2
+          printf '%s\n' "$revision"
+          return 0
+        fi
       fi
       if (( ancestor_status == 2 )); then
         echo "::error::$service_label base image ($base_image) freshness could not be determined due to a git-history/checkout problem (see the error above). Failing immediately -- this is a configuration bug, not staleness, and no amount of waiting fixes it." >&2
