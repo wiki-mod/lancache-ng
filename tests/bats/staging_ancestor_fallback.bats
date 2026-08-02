@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free unit + integration coverage for
@@ -953,7 +954,7 @@ STUB
     # while saf_find_built_ancestor's own confirmed-sha result is the last
     # line on stdout) -- check the LAST line specifically, not $output's
     # exact full text, which would also contain that diagnostic line.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 3 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 3 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$third_ancestor_sha" ]
 }
@@ -1015,7 +1016,7 @@ STUB
     # line (not $output's full text) is checked -- bats' `run` merges
     # stdout+stderr, and sif_wait_for_fresh_base_image's own ::notice::
     # diagnostics land on stderr ahead of the confirmed sha itself.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$merge_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$merge_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$t1_sha" ]
 }
@@ -1052,7 +1053,7 @@ STUB
 
     # See the SIGPIPE regression test's own comment above for why the LAST
     # line (not $output's full text) is checked.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$ancestor_sha" ]
 }
@@ -1078,8 +1079,15 @@ STUB
     git -C "$git_dir" commit -q -m grandparent
     grandparent_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
-    echo "real change" > "$git_dir/scripts/real-change.sh"
-    git -C "$git_dir" add scripts/real-change.sh
+    # Under services/proxy/ specifically (not a generic scripts/ change): both
+    # tests below resolve "proxy" as the service, and saf_find_built_ancestor
+    # now also checks saf_base_commit_service_untouched for each candidate --
+    # a generic scripts/ change would read as untouched-by-proxy and let the
+    # walk continue past this candidate instead of exercising the commit-wide
+    # paths-gate/direct-image-check behavior these tests actually target.
+    mkdir -p "$git_dir/services/proxy"
+    echo "real change" > "$git_dir/services/proxy/real-change.conf"
+    git -C "$git_dir" add services/proxy/real-change.conf
     git -C "$git_dir" commit -q -m "real change parent"
     real_change_parent_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
@@ -1101,7 +1109,7 @@ STUB
 
     install_revision_stub_for "$grandparent_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -ne 0 ]
     # Must NOT have substituted grandparent -- confirms this is a genuine
     # fail-closed stop, not a successful (wrong) resolution.
@@ -1137,8 +1145,15 @@ STUB
     git -C "$git_dir" commit -q -m grandparent
     grandparent_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
-    echo "real change" > "$git_dir/scripts/real-change.sh"
-    git -C "$git_dir" add scripts/real-change.sh
+    # Under services/proxy/ specifically (not a generic scripts/ change): both
+    # tests below resolve "proxy" as the service, and saf_find_built_ancestor
+    # now also checks saf_base_commit_service_untouched for each candidate --
+    # a generic scripts/ change would read as untouched-by-proxy and let the
+    # walk continue past this candidate instead of exercising the commit-wide
+    # paths-gate/direct-image-check behavior these tests actually target.
+    mkdir -p "$git_dir/services/proxy"
+    echo "real change" > "$git_dir/services/proxy/real-change.conf"
+    git -C "$git_dir" add services/proxy/real-change.conf
     git -C "$git_dir" commit -q -m "real change parent"
     real_change_parent_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
@@ -1162,7 +1177,7 @@ STUB
     # correctly labeled for real_change_parent_sha specifically.
     install_revision_stub_for "$real_change_parent_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$real_change_parent_sha" ]
 }
@@ -1207,7 +1222,7 @@ STUB
 
     install_revision_stub_for "$grandparent_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$grandparent_sha" ]
 }
@@ -1242,7 +1257,7 @@ STUB
 
     install_revision_stub_for "$ancestor_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -ne 0 ]
     # Fails via the new inconclusive-run-check branch specifically (its own
     # diagnostic legitimately names the candidate, unlike a successful
@@ -1296,7 +1311,7 @@ STUB
     # test for that reason -- proof the underlying mechanism, not just this
     # test's own plumbing, is what's being checked here).
     # First "service": a real query, exactly once.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "$(cat "$call_count_file")" -eq 1 ]
 
@@ -1305,7 +1320,7 @@ STUB
     # separate saf_find_built_ancestor call (a different service in the same
     # process, exactly like scripts/ensure-pr-staging-images.sh's own loop
     # over full_setup_services).
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" "dns_image" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "$(cat "$call_count_file")" -eq 1 ]
 }
@@ -1354,14 +1369,14 @@ STUB
     # in-memory version would have.
     # First call: inconclusive -> fails closed, per the existing JUDGMENT
     # CALL, and must NOT cache that inconclusive answer.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -ne 0 ]
     [ "$(cat "$call_count_file")" -eq 1 ]
 
     # Second call, same candidate: must genuinely re-query (call count
     # increases to 2, proving no stale inconclusive answer was cached) and
     # this time succeeds since the stub now reports a confirmed run.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "dns" "dns_image" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "$(cat "$call_count_file")" -eq 2 ]
 }
@@ -1406,7 +1421,7 @@ STUB
 
     install_revision_stub_for "$ancestor_sha"
 
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 0 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 0 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     # A trusted (but wrong) empty-file read would never have called the real
     # run-exists stub at all (call count stays 0); a correct cache-miss
@@ -1519,7 +1534,7 @@ STUB
 
     # freshness (short) = 0/0, extended = 10/10 -- image resolves at ~3s,
     # well past the short budget but comfortably inside the extended one.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 10 10 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 10 10 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$ancestor_sha" ]
 }
@@ -1572,7 +1587,7 @@ STUB
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
     start_test_epoch="$(date +%s)"
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 10 10 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 10 10 "$git_dir"
     end_test_epoch="$(date +%s)"
     [ "$status" -ne 0 ]
     # Must fail in well under the 10s extended ceiling -- proves no
@@ -1618,7 +1633,7 @@ STUB
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
     start_test_epoch="$(date +%s)"
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 10 10 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 10 10 "$git_dir"
     end_test_epoch="$(date +%s)"
     [ "$status" -ne 0 ]
     [ "$((end_test_epoch - start_test_epoch))" -lt 2 ]
@@ -1688,7 +1703,7 @@ STUB
 
     # short = 0/0 (one attempt, sees "stale"), extended = 0/0 (one more
     # attempt, sees "fresh") -- must still succeed via that second attempt.
-    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" 10 0 0 1 0 0 "$git_dir"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$ancestor_sha" ]
     # Exactly 2 real revision checks (short + extended), proving the
@@ -1696,6 +1711,138 @@ STUB
     # check's single attempt somehow being counted twice or the extended
     # attempt being skipped outright.
     [ "$(cat "$call_count_file")" -eq 2 ]
+}
+
+@test "saf_find_built_ancestor: a run-bearing candidate whose service was untouched by it is walked past instead of stopping (2026-08-02 finding)" {
+    # Live-confirmed 2026-08-02 (PR #1355, commit c7d42fe): a candidate can
+    # have a genuinely confirmed push-triggered run yet never get its own
+    # sha-<commit> tag for one specific service, because Step 4 (#1095)
+    # reused that service's content from an even earlier commit instead of
+    # rebuilding it. Without the service-scoped check, the JUDGMENT CALL
+    # treats "run exists, image never resolves" as a broken build and stops
+    # immediately, unable to reach a genuinely usable ancestor sitting right
+    # behind a legitimate Step 4 reuse. Fixture: nearest candidate (reused_sha) has a
+    # confirmed run but its own proxy image never resolves (revision stub
+    # only ever answers for built_sha); built_sha, one step further back,
+    # has both a confirmed run and a resolving image.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/services/proxy" "$git_dir/services/ui"
+
+    echo "proxy built here" > "$git_dir/services/proxy/nginx.conf"
+    git -C "$git_dir" add services/proxy/nginx.conf
+    git -C "$git_dir" commit -q -m "proxy change"
+    built_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "ui change" > "$git_dir/services/ui/main.rs"
+    git -C "$git_dir" add services/ui/main.rs
+    git -C "$git_dir" commit -q -m "ui-only change, proxy reused"
+    reused_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    inactive_stub="$BATS_TEST_TMPDIR/inactive.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inactive_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "${built_sha:0:7}") echo "$built_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$built_sha" ]
+    # Confirms reused_sha was genuinely walked PAST (not silently skipped
+    # without a trace, and not the candidate actually substituted).
+    [[ "$output" == *"$reused_sha"*"was not touched by it"* ]]
+}
+
+@test "saf_find_built_ancestor: a run-bearing candidate whose service WAS touched by it still stops instead of walking past (JUDGMENT CALL preserved)" {
+    # Same shape as the test above, but reused_sha's own commit genuinely
+    # touches services/proxy/ itself -- the service was NOT untouched, so
+    # the original JUDGMENT CALL must still apply: a real, seemingly-broken
+    # build for a service-affecting commit stops the walk rather than
+    # silently substituting an older ancestor.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/services/proxy"
+
+    echo "proxy built here" > "$git_dir/services/proxy/nginx.conf"
+    git -C "$git_dir" add services/proxy/nginx.conf
+    git -C "$git_dir" commit -q -m "proxy change (older)"
+    built_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "proxy changed again" > "$git_dir/services/proxy/nginx.conf"
+    git -C "$git_dir" add services/proxy/nginx.conf
+    git -C "$git_dir" commit -q -m "proxy change, seemingly broken build"
+    broken_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    inactive_stub="$BATS_TEST_TMPDIR/inactive.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inactive_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "${built_sha:0:7}") echo "$built_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 0 0 "$git_dir"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"$built_sha"* ]]
+    # The diagnostic must name broken_sha as the candidate that actually
+    # blocked the walk (proves the failure is attributed to the right
+    # commit, not just "some" failure that happens to also not mention
+    # built_sha).
+    [[ "$output" == *"$broken_sha"* ]]
 }
 
 # ---------------------------------------------------------------------------
