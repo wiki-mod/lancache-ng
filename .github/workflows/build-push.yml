@@ -1959,12 +1959,12 @@ jobs:
             || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
 
           # Issue #705: PXE boot-pointer opt-in surface. Same guard shape as
-          # #450 above -- a PR review (#765) found the quickstart Compose
-          # environment allowlist silently stopped before these three keys,
-          # leaving the opt-in feature unreachable there even when set in
-          # .env; this also checks explicit compose passthrough (not just
-          # env-file presence) so that specific class of regression is
-          # caught here instead of only by manual review next time.
+          # #450 above -- the quickstart Compose environment allowlist (#765)
+          # silently stopped before these three keys, leaving the opt-in
+          # feature unreachable there even when set in .env; this also checks
+          # explicit compose passthrough (not just env-file presence) so that
+          # specific class of regression is caught here mechanically instead
+          # of relying on manual review to notice it.
           dhcp_proxy_pxe_keys=(
             DHCP_PROXY_PXE_BOOT_SERVER
             DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
@@ -5129,7 +5129,7 @@ jobs:
         # into one dir), and appending `run_id` in exactly the same condition the group key
         # does (workflow_dispatch or a rerun). An earlier revision keyed only on sanitized
         # `ref_name` with no run_id -- strictly coarser than the group key, leaving exactly
-        # this race open for the dispatch/rerun case; caught in review before merge.
+        # this race open for the dispatch/rerun case.
         #
         # Folding the sanitized ref (and run_id where applicable) into the path makes each
         # concurrency-group instance own a directory no other instance can ever write to.
@@ -6329,8 +6329,8 @@ jobs:
         # exact pushed digest is scanned before provenance and channel promotion for all 8
         # services now, closing the provenance gap where the artifact Trivy scanned
         # (container-scan's own throwaway local build) was never the artifact actually
-        # published (this step's own image-ref was already resolved generically per
-        # matrix.service before this change -- only this `if:` was build-tools-only).
+        # published (this step's own image-ref is already resolved generically per
+        # matrix.service -- only this `if:` had been narrowed to build-tools-only).
         if: >-
           ${{
             github.event_name != 'pull_request' &&
