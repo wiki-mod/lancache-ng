@@ -1057,8 +1057,14 @@ saf_find_built_ancestor() {
         # exist does this remain a genuine, unbuilt real change that must
         # still fail closed.
         ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
+        # allow_reverse_ancestry=true: $ancestor_image is always an
+        # immutable per-commit sha-tag here (never a mutable channel tag),
+        # so a label that predates $candidate is exactly build-push.yml's
+        # own Schritt 4 retag-unchanged-image signature, already verified
+        # content-equivalent -- see sif_wait_for_fresh_base_image's own
+        # header for the full reasoning.
         if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
-          "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+          "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
           printf '%s\n' "$candidate"
           return 0
         fi
@@ -1094,8 +1100,10 @@ saf_find_built_ancestor() {
     # sif_wait_for_fresh_base_image writes to stderr must still reach the job
     # log even though this function's own stdout is captured by its caller
     # via `$(...)`.
+    # allow_reverse_ancestry=true: same immutable-per-commit-tag reasoning
+    # as the has_run==1 branch above.
     if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
-      "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+      "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
       printf '%s\n' "$candidate"
       return 0
     fi
@@ -1112,8 +1120,10 @@ saf_find_built_ancestor() {
     saf_candidate_run_is_active "$repository" "$candidate" || activity_status=$?
     if (( activity_status == 0 )); then
       echo "::warning::Ancestor candidate $candidate's own build-push.yml run for $service appears to still be active (not yet completed) -- extending the wait to ${extended_hard_ceiling_seconds}s (the same patience BASE_SHA's own possibly-in-progress build gets) before giving up on this candidate." >&2
+      # allow_reverse_ancestry=true: same immutable-per-commit-tag reasoning
+      # as the two checks above.
       if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
-        "$extended_timeout_seconds" "$extended_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+        "$extended_timeout_seconds" "$extended_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
         printf '%s\n' "$candidate"
         return 0
       fi

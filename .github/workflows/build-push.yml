@@ -3260,6 +3260,20 @@ jobs:
           # and because `imagetools create` is a cheap registry-side manifest write, not a
           # rebuild, so refreshing it costs nothing worth optimizing away.
           full_setup_services=(proxy dns watchdog ui build-tools)
+
+          # Shared wall-clock budget across every untouched service's backfill waits in
+          # this loop -- see the "Ensure PR staging tags exist" step's own call site below
+          # (right before saf_resolve_untouched_backfill_source) for the full reasoning.
+          total_backfill_budget_seconds="${STAGING_TOTAL_BACKFILL_BUDGET_SECONDS:-900}"
+          clamp_service_wait_budgets() {
+            local remaining=$((total_backfill_budget_seconds - SECONDS))
+            if (( remaining < 0 )); then remaining=0; fi
+            local alloc_short=$(( 300 < remaining ? 300 : remaining ))
+            remaining=$((remaining - alloc_short))
+            local alloc_base=$(( 900 < remaining ? 900 : remaining ))
+            printf '%s %s\n' "$alloc_base" "$alloc_short"
+          }
+
           for service in "${full_setup_services[@]}"; do
             pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
             should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
@@ -3291,38 +3305,38 @@ jobs:
             # budgets, not one shared pair, and keep them in sync by hand if those defaults ever
             # change, same as the rest of this step's touched-vs-untouched logic already must be.
             #
-            # The "0 0" pair (ancestor_extended_freshness_*) is DELIBERATELY not 900/5400 here,
-            # unlike that script's own call: this job (full-setup-validate) has timeout-minutes:
-            # 30 total, not the 100-minute budget full-setup-deep-validate.yml's "ensure PR
-            # staging images" job explicitly carries for this scenario. Reusing 900/5400 would
-            # let an ancestor candidate confirmed still building consume a fresh, up-to-90-minute
-            # wait this job cannot survive -- it would simply be killed by its own job timeout
-            # partway through, wasting runner time on a wait that can never complete and never
-            # rescuing an image landing more than a few minutes into it. This job's own real runs
-            # are 30-71s (see timeout-minutes: 30's own comment above), so no meaningfully-sized
-            # extended budget both fits its remaining time (shared across every untouched service
-            # this loop checks, on top of the checkout/buildx/login/channel-check steps already
-            # spent, with headroom still needed for the real compose stack start + smoke test)
-            # and usefully outlasts the short 300/600 budget already just tried. "0 0" degrades
-            # saf_find_built_ancestor's extended retry to a single immediate re-check (not a full
-            # extra poll cycle) for this caller only -- the same fail-fast behavior this step had
-            # before the activity-check mechanism existed -- while ensure-pr-staging-images.sh's
-            # own call keeps the full benefit, since its job was actually sized for it. Proven by
-            # "saf_find_built_ancestor: a 0/0 extended budget still performs one real re-check,
-            # not zero" in tests/bats/staging_ancestor_fallback.bats: 0/0 still gives one genuine
-            # freshness check, so an ancestor image that becomes fresh moments later is caught.
+            # Those are the CONFIGURED per-wait ceilings, not what actually gets passed below
+            # anymore. This job (full-setup-validate) has timeout-minutes: 30 (1800s) TOTAL --
+            # "Real runs: 30-71s" above describes the whole job's warm-cache case, cold-cache
+            # headroom for the compose-stack pull/start/smoke-test/teardown that still has to run
+            # AFTER this step, not this step's own budget -- while 900 (base) + 300 (ancestor
+            # short) alone already sum to 5700/6000s worst case for a SINGLE untouched service,
+            # more than 3x this job's entire timeout, before that compose work even starts. This
+            # used to be left as an unresolved "JUDGMENT CALL... open question for the
+            # maintainer" rather than fixed; it no longer is. total_backfill_budget_seconds below
+            # (default 900s = 15 minutes) reserves the rest of this 1800s job for
+            # checkout/buildx/login/channel-check (already spent by the time this step runs) and
+            # the compose stack work still to come, and clamp_service_wait_budgets shares
+            # whatever's left across every untouched service's waits combined -- mirroring
+            # scripts/ensure-pr-staging-images.sh's own fix for the identical problem in its own
+            # (100-minute) job; see that script's total_backfill_budget_seconds/
+            # clamp_service_wait_budgets comments for the full reasoning behind the allocation
+            # order (ancestor-short reserved first, then base, then extended) and the
+            # fail-closed-before-attempting behavior once the shared budget is exhausted.
             #
-            # JUDGMENT CALL (flagged for maintainer review, not guessed silently): the 300/600
-            # ancestor_freshness_* pair has the same "shared across every untouched service this
-            # loop checks" exposure in principle -- 5 untouched services each attempting up to
-            # 600s is itself more than this job's own timeout. Left at the shared value rather
-            # than a caller-specific one (unlike the extended-retry pair) because in the realistic
-            # case that ceiling guards a rare/broken state, not the expected cost: an ancestor
-            # candidate's image (from a commit further back than a confirmed-unbuilt BASE_SHA) has
-            # normally existed for a while by the time this step runs, so the check resolves in
-            # well under a second per service. Whether it should get a smaller caller-specific
-            # value here too is an open question for the maintainer.
-            if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" 900 5400 300 600 0 0 15 50 "$GITHUB_WORKSPACE")"; then
+            # Checked against the raw remaining total budget BEFORE clamping, not by
+            # checking whether the clamped per-wait ceilings came out to 0 -- see
+            # scripts/ensure-pr-staging-images.sh's own equivalent check comment for why
+            # those two are not the same thing.
+            if (( total_backfill_budget_seconds - SECONDS <= 0 )); then
+              echo "::error::No wall-clock budget remains (this job's total_backfill_budget_seconds=${total_backfill_budget_seconds}s is exhausted after ${SECONDS}s of earlier waits) to even attempt resolving $service's untouched-service backfill source. Refusing to start a wait this job's own 30-minute timeout would kill partway through anyway. If this repeats, either an earlier service is genuinely taking its full worst-case wait, or too many services are untouched at once for this job's own timeout-minutes; both need a maintainer look, not a bigger number here."
+              exit 1
+            fi
+            read -r clamped_base_ceiling clamped_short_ceiling < <(clamp_service_wait_budgets)
+            if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" \
+              "$(( 900 < clamped_base_ceiling ? 900 : clamped_base_ceiling ))" "$clamped_base_ceiling" \
+              "$(( 300 < clamped_short_ceiling ? 300 : clamped_short_ceiling ))" "$clamped_short_ceiling" \
+              0 0 15 50 "$GITHUB_WORKSPACE")"; then
               exit 1
             fi
             echo "::notice::(re)pointing $PR_TAG at $resolved_source."

@@ -556,6 +556,89 @@ STUB
     printf '%s\n' "$output" | grep -q "BASE_SHA"
 }
 
+@test "shared backfill budget: a zero total budget fails closed immediately, distinct from the #808 freshness error" {
+    # STAGING_TOTAL_BACKFILL_BUDGET_SECONDS=0 simulates this job having
+    # already spent its entire shared backfill allowance on earlier
+    # services/waits before this service's turn -- must fail fast with its
+    # own distinct message, not silently fall through to attempting (and
+    # then time-limited-failing) the normal freshness wait.
+    export STAGING_TOTAL_BACKFILL_BUDGET_SECONDS=0
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "No wall-clock budget remains"
+    # No service was actually attempted: the shared-budget gate fires before
+    # any backfill_from_base call.
+    [ "$(wc -l < "$backfill_log")" -eq 0 ]
+}
+
+@test "shared backfill budget: an ample total budget does not change the previously-existing successful back-fill behavior" {
+    # A large, explicit total budget (this test's own default from setup()
+    # would already cover it, but pinning it here makes the intent explicit)
+    # must not shrink or otherwise interfere with the normal, already-fresh
+    # case every pre-existing #808 test above relies on.
+    export STAGING_TOTAL_BACKFILL_BUDGET_SECONDS=5700
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$backfill_log")" -eq 8 ]
+}
+
+@test "retag-reuse: an ancestor CANDIDATE's per-commit image whose revision label predates the candidate itself is accepted (Schritt 4 signature)" {
+    # Simulates build-push.yml's own Schritt 4 retag-unchanged-image path
+    # landing on an ANCESTOR CANDIDATE (not BASE_SHA itself -- that call site
+    # deliberately stays strict, see the dedicated #808 stale test above):
+    # BASE_SHA itself is a docs-only skip (zero runs), older_sha (1 commit
+    # back) has a confirmed run, but older_sha's own per-commit tag
+    # (sha-<older_sha short>) reports a revision label of ancestor2_sha (an
+    # even earlier commit) because that image's content was retagged forward
+    # rather than rebuilt when older_sha itself was pushed. Before
+    # allow_reverse_ancestry, this was indistinguishable from a broken/
+    # mislabeled image and the ancestor walk would fail closed instead of
+    # substituting older_sha; it must now succeed.
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists_retag.sh"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$base_sha") exit 1 ;;
+    "$older_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    revision_map_stub="$BATS_TEST_TMPDIR/revision_map_retag.sh"
+    cat > "$revision_map_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "${older_sha:0:7}") echo "$ancestor2_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_map_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_map_stub"
+
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    script_output="$output"
+    [ "$(wc -l < "$backfill_log")" -eq 8 ]
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${older_sha:0:7}" "$backfill_log"
+    printf '%s\n' "$script_output" | grep -q "PREDATES base commit"
+    printf '%s\n' "$script_output" | grep -q "Schritt 4 retag-unchanged-image path"
+}
+
 # Integration coverage for the ancestor-fallback path
 # (scripts/lib/staging-ancestor-fallback.sh), exercised through the full
 # script rather than the library's own direct unit tests (see
