@@ -128,8 +128,9 @@ pub fn parse_u64_with_default(
 /// directly, which meant `CHECK_INTERVAL=00` and `CHECK_INTERVAL=0` would
 /// have produced an identical, misleading `CHECK_INTERVAL=0` log line --
 /// losing exactly the information an operator would need to find what they
-/// actually set. Caught in review before merging, not found by the unit
-/// tests (which only exercised the literal `"0"` case).
+/// actually set. A unit test covering only the literal `"0"` case would not
+/// catch this -- it needs a separate case for a leading-zero variant like
+/// `"00"`.
 fn floor_u64_raw(value: u64, floor: u64, raw: Option<&str>) -> (u64, Option<&str>) {
     if value < floor {
         (floor, Some(raw.filter(|s| !s.is_empty()).unwrap_or("0")))
@@ -481,10 +482,10 @@ mod tests {
     #[test]
     // An explicitly empty value (e.g. SSL_ENABLED= set but blank) must be
     // treated exactly like "unset," matching bash's `${VAR:-default}`
-    // (the colon form triggers on empty OR unset) -- before this fix,
-    // Some("") reached is_truthy("") directly, which returns false, so an
-    // empty SSL_ENABLED silently turned SSL mode off instead of falling
-    // back to its documented default (true).
+    // (the colon form triggers on empty OR unset). Guards against
+    // Some("") reaching is_truthy("") directly, which returns false, so an
+    // empty SSL_ENABLED would otherwise silently turn SSL mode off instead
+    // of falling back to its documented default (true).
     fn resolve_bool_treats_empty_value_as_unset() {
         assert!(resolve_bool(Some(""), true));
         assert!(!resolve_bool(Some(""), false));
@@ -555,9 +556,9 @@ mod tests {
     }
 
     #[test]
-    // Regression pin for a bug caught in review (not by the test above,
-    // which only exercised the literal "0" case): the floor warning must
-    // name the RAW operator-supplied value, not the post-parse integer --
+    // Distinct from the test above (which only exercises the literal "0"
+    // case): the floor warning must name the RAW operator-supplied value,
+    // not the post-parse integer --
     // "00" and "0" both parse to 0, but only the raw string tells an
     // operator which one they actually set, matching watchdog.sh's own
     // log lines (always interpolate the literal env var value).
@@ -667,11 +668,11 @@ mod tests {
     #[test]
     // An explicitly empty override (e.g. CONTAINER_PROXY= set but blank)
     // must resolve to the default, not be compared against it as a real
-    // rename attempt -- before this fix, Some("") reached the `!=
-    // DEFAULT_PROXY` mismatch check directly and failed it (an empty
-    // string is never equal to "lancache-proxy"), making an accidentally
-    // blank env value a fatal startup error instead of the no-op bash's
-    // `${CONTAINER_PROXY:-lancache-proxy}` would produce.
+    // rename attempt. Guards against Some("") reaching the `!=
+    // DEFAULT_PROXY` mismatch check directly and failing it (an empty
+    // string is never equal to "lancache-proxy"), which would make an
+    // accidentally blank env value a fatal startup error instead of the
+    // no-op bash's `${CONTAINER_PROXY:-lancache-proxy}` would produce.
     fn resolve_container_names_treats_empty_overrides_as_unset() {
         let names = resolve_container_names(Some(""), Some(""), Some(""), Some(""), true).unwrap();
         assert_eq!(names.proxy, "lancache-proxy");
