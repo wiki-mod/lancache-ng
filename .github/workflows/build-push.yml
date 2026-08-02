@@ -3035,6 +3035,13 @@ jobs:
     permissions:
       contents: read
       packages: write
+      # scripts/lib/staging-ancestor-fallback.sh's shared ancestor-fallback recovery path
+      # (sourced by the "Ensure PR staging tags exist for full-setup services" step below)
+      # reads build-push.yml's own past runs from
+      # `/repos/{repo}/actions/workflows/build-push.yml/runs` -- via plain `curl` +
+      # `GH_TOKEN`, never the `gh` CLI (AG-CI-001: `gh` must not be assumed present on a
+      # bare `lancache-light` runner), but the REST endpoint requires this scope either way.
+      actions: read
     # None of VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, or VALIDATION_UI_PORT
     # are set here from compute-validation-network's outputs (unlike
     # LANCACHE_IMAGE_REGISTRY/PREFIX/TAG below, which stay per-step since they don't
@@ -3199,6 +3206,13 @@ jobs:
           BUILD_TOOLS_TOUCHED: ${{ needs['detect-changes'].outputs.build_tools }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          # scripts/lib/staging-ancestor-fallback.sh's saf_base_commit_has_confirmed_run()
+          # reads it straight from the environment (never as an argv parameter,
+          # so it cannot leak into ghcr_retry's own diagnostics) to authenticate
+          # its `curl` query against the Actions REST API. Not the `gh` CLI --
+          # see that file's own saf_query_run_count() header for the AG-CI-001
+          # reasoning behind talking to the API directly.
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -3206,25 +3220,12 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/staging-image-freshness.sh
           source "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh"
+          # shellcheck source=scripts/lib/staging-ancestor-fallback.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/staging-ancestor-fallback.sh"
           # shellcheck source=scripts/lib/validation-image-tag.sh
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
-
-          # #1254/#1255 (2026-07-25): the #808 back-fill source below is now this PR's own base
-          # commit's durable per-commit sha-<short> image, not the mutable nightly/latest
-          # base-channel tag. Slice matches docker/metadata-action's
-          # `type=sha,prefix=sha-,format=short` convention (7 hex chars), the same slice the
-          # `promote` job's own short_sha computation already relies on. This is a deliberate
-          # correctness improvement, not just a rename: nightly is no longer republished on
-          # every current_dev push (it is now once-daily scheduled/dispatch-only -- see
-          # nightly-refresh.yml), so it could otherwise lag an untouched service's back-fill by
-          # up to a day. The base commit's own sha-* tag is always exactly the right commit by
-          # construction; #1254's feasibility investigation confirmed every non-PR push still
-          # publishes a fresh per-commit tag for every service, so this image reliably exists
-          # (or appears shortly after -- the bounded poll below still handles that race exactly
-          # as it did for the base channel before).
-          base_sha_short="${BASE_SHA:0:7}"
 
           # Calls vit_service_should_have_staging_tag directly instead of
           # reimplementing the same "workflow/CI-contract change forces
@@ -3245,6 +3246,19 @@ jobs:
             [build-tools]="$BUILD_TOOLS_TOUCHED"
           )
 
+          # Maps this step's own matrix-service names to
+          # scripts/classify-image-impact.sh's output keys, for
+          # saf_resolve_untouched_backfill_source's service-scoped check
+          # below -- see scripts/ensure-pr-staging-images.sh's own
+          # classify_key_map for the full reasoning.
+          declare -A classify_key_map=(
+            [proxy]="proxy"
+            [dns]="dns_image"
+            [watchdog]="watchdog"
+            [ui]="ui"
+            [build-tools]="build_tools"
+          )
+
           # The services deploy/full-setup/docker-compose.yml references, plus build-tools
           # (used by the client-simulation step further down, not by the compose file itself).
           # dhcp and dhcp-proxy are part of neither and are intentionally excluded.
@@ -3252,12 +3266,14 @@ jobs:
           # Decide touched-or-not FIRST, before looking at whether a pr_image already exists. A
           # prior run of this exact PR head (a manual re-run, or this job running twice for the
           # same commit) may already have back-filled an untouched service's tag from this PR's
-          # base commit image. That source is now pinned to one fixed commit (base_sha_short)
-          # rather than a moving channel, so re-pointing it every run is no longer about chasing
-          # a channel that "moved since" -- it is still done unconditionally anyway, both for
-          # defense-in-depth and because `imagetools create` is a cheap registry-side manifest
-          # write, not a rebuild, so refreshing it costs nothing worth optimizing away.
+          # base commit image. That source is pinned to one fixed commit (or its nearest built
+          # ancestor -- see scripts/lib/staging-ancestor-fallback.sh) rather than a moving
+          # channel, so re-pointing it every run is no longer about chasing a channel that
+          # "moved since" -- it is still done unconditionally anyway, both for defense-in-depth
+          # and because `imagetools create` is a cheap registry-side manifest write, not a
+          # rebuild, so refreshing it costs nothing worth optimizing away.
           full_setup_services=(proxy dns watchdog ui build-tools)
+
           for service in "${full_setup_services[@]}"; do
             pr_image="ghcr.io/${REPOSITORY}/${service}:${PR_TAG}"
             should_exist="$(service_should_have_staging_tag "$service" "${touched_map[$service]}")"
@@ -3276,26 +3292,28 @@ jobs:
               exit 1
             fi
 
-            base_image="ghcr.io/${REPOSITORY}/${service}:sha-${base_sha_short}"
-            echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $BASE_SHA before backfilling (#1254/#1255: no longer sourced from the mutable nightly/latest channel)..."
             # #808: never back-fill without first proving the source image was actually built
             # from base.sha or later -- see scripts/lib/staging-image-freshness.sh for the
-            # mechanism and the "validate full-setup image" job's own checkout step (fetch-depth:
-            # 0) for why full git history is available here. sif_wait_for_fresh_base_image's
-            # revision-ancestry check is still meaningful even though base_image is now pinned to
-            # base_sha_short by construction: it also doubles as the existence poll for the #808
-            # race (the base commit's own push-triggered build may not have pushed this tag yet),
-            # and it still guards against a corrupted/mislabeled image reporting the wrong
-            # revision. 900/5400/15 (normal budget / hard ceiling / poll interval, seconds)
-            # intentionally match scripts/ensure-pr-staging-images.sh's own defaults exactly --
-            # keep in sync by hand if those defaults ever change.
-            if ! sif_wait_for_fresh_base_image "$base_image" "$BASE_SHA" "$service" 900 5400 15 >/dev/null; then
-              echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
+            # mechanism, and scripts/lib/staging-ancestor-fallback.sh for the full resolution
+            # sequence (exact-BASE_SHA wait, then the ancestor fallback when that wait genuinely
+            # cannot succeed) this step now shares with scripts/ensure-pr-staging-images.sh
+            # instead of carrying an independent copy of the same logic. 900/1200 (BASE_SHA's own
+            # wait), 300/600 (ancestor-candidate checks) and the "50" search depth intentionally
+            # match that script's own BASE_FRESHNESS_POLL_*/ANCESTOR_FRESHNESS_POLL_*/
+            # STAGING_ANCESTOR_SEARCH_DEPTH defaults exactly (1200s: maintainer-directed
+            # reduction from the previous 5400s, 2026-08-02) -- see
+            # saf_resolve_untouched_backfill_source's own header for why these are separate
+            # budgets, not one shared pair, and keep them in sync by hand if those defaults ever
+            # change, same as the rest of this step's touched-vs-untouched logic already must be.
+            if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
+              900 1200 \
+              300 600 \
+              0 0 15 50 "$GITHUB_WORKSPACE")"; then
               exit 1
             fi
-            echo "::notice::(re)pointing $PR_TAG at the PR base commit's own per-commit image ($base_image)."
+            echo "::notice::(re)pointing $PR_TAG at $resolved_source."
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools create --prefer-index=false -t "$pr_image" "$base_image"
+              docker buildx imagetools create --prefer-index=false -t "$pr_image" "$resolved_source"
           done
 
       # This is the last step in the job that uses the builder set up above --
