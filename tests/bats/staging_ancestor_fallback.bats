@@ -1121,7 +1121,6 @@ STUB
     grandparent_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
     git -C "$git_dir" commit -q --allow-empty -m "empty run-less parent"
-    empty_parent_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
     echo "base" > "$git_dir/docs/base.md"
     git -C "$git_dir" add docs/base.md
