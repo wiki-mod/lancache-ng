@@ -4,9 +4,9 @@
 # Fixture tests for nats_secondary_override_active_for_install_dir() and
 # compose_file_args_for_install_dir(), the two helpers `setup.sh update` uses
 # to decide whether to keep passing deploy/prod/docker-compose.nats-
-# secondary.yml on every subsequent update. Before this fix, cmd_update's
-# `docker compose ... pull` / `... up -d` never passed that override at all,
-# so an operator who had enabled it manually (per the override file's own
+# secondary.yml on every subsequent update. Without this wiring, cmd_update's
+# `docker compose ... pull` / `... up -d` would never pass that override at
+# all, so an operator who had enabled it manually (per the override file's own
 # header comment) would silently lose the NATS host port publish on the next
 # `setup.sh update`, disconnecting remote secondary DNS nodes.
 #
@@ -106,11 +106,12 @@ setup() {
 }
 
 # Regression test for compose_file_args_for_install_dir auto-detecting a
-# docker-compose.override.yml: before this fix, the helper always passed -f
-# explicitly for the base file, which (per Compose's documented behavior)
-# disables Compose's own cwd auto-discovery/merge of a sibling override file
-# -- silently dropping any operator customization on every `setup.sh update`,
-# even when the NATS-secondary override was never involved.
+# docker-compose.override.yml: without this auto-detection, the helper would
+# always pass -f explicitly for the base file, which (per Compose's
+# documented behavior) disables Compose's own cwd auto-discovery/merge of a
+# sibling override file -- silently dropping any operator customization on
+# every `setup.sh update`, even when the NATS-secondary override was never
+# involved.
 @test "compose_file_args_for_install_dir auto-includes a docker-compose.override.yml sitting next to the base file" {
     printf 'IP_STANDARD=192.0.2.10\n' > "$env_file"
     : > "$install_dir/docker-compose.override.yml"

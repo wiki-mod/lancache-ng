@@ -684,10 +684,11 @@ mod tests {
     // Regression test for #859: the #758 fix above only guarantees every
     // host's newest *file* gets opened before collection stops -- it does
     // nothing to protect a quiet host's lines from the final merge step.
-    // Before this fix, `collected.sort_by(timestamp)` + truncate-to-`limit`
-    // was host-blind: hostQuiet's single old line here would be sorted
-    // ahead of every one of hostNoisy's 50 newer lines and truncated away
-    // entirely, even though hostQuiet's file was opened and read correctly.
+    // Without host-aware handling here, `collected.sort_by(timestamp)` +
+    // truncate-to-`limit` is host-blind: hostQuiet's single old line here
+    // would be sorted ahead of every one of hostNoisy's 50 newer lines and
+    // truncated away entirely, even though hostQuiet's file was opened and
+    // read correctly.
     #[test]
     fn parse_syslog_tail_does_not_starve_a_quiet_host_at_the_final_merge_step() {
         let root = temp_root("quiet-merge");

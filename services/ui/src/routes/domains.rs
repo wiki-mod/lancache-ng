@@ -781,7 +781,8 @@ fn is_valid_domain_label(label: &str) -> bool {
 // section below CUSTOM_DOMAINS_MARKER. A file with no marker at all (an
 // older mount predating this feature, or a bare test fixture) is treated as
 // entirely default -- there is no custom section to speak of yet, matching
-// how every existing entry behaved before this change.
+// the legacy behavior every entry defaulted to before the custom-section
+// marker existed.
 fn read_domain_entries(path: &str) -> Vec<DomainListEntry> {
     let Ok(file) = fs::File::open(path) else {
         return vec![];

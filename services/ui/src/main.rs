@@ -86,8 +86,8 @@ const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-regist
 // not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
 // exact-literal list previously missed deploy/quickstart/.env's distinct
 // YOUR_SECONDARY_REGISTRATION_TOKEN_HERE default, which manual quickstart deploys
-// that skip setup.sh ship untouched -- letting anyone who reads this public repo
-// register a secondary against it (flagged in review on PR #743). The first
+// that skip setup.sh ship untouched -- letting anyone who reads this public
+// repo register a secondary against it. The first
 // five checks mirror setup.sh's own secret_value_is_placeholder pattern set
 // case-for-case so both checks stay in sync; the trailing `<...>` check is an
 // addition beyond that set, added because README.md's own
