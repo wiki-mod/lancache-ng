@@ -340,6 +340,74 @@ saf_base_commit_paths_are_ignorable() {
   return 1
 }
 
+# saf_base_commit_service_untouched <sha> <classify_key> [git_dir]
+#
+# Narrower, SERVICE-SCOPED sibling to saf_base_commit_paths_are_ignorable's
+# commit-wide "is everything here docs/governance" question. A commit can
+# fail that broad check (a real, non-doc change is present) while still
+# never touching THIS specific service at all -- e.g. a commit that only
+# changes services/ui/ leaves proxy/dns/dhcp/etc. genuinely untouched, and
+# build/build-arm64's own per-service matrix condition (the same one
+# detect-changes computes) correctly skips them, exactly as it would for a
+# docs-only commit. Before this function existed, saf_resolve_untouched_backfill_source
+# only recognized the docs/governance case as safe to fall back on, so any
+# commit that touched at least one OTHER service (the common case -- most
+# commits touch 1-2 services, not all 8) made every OTHER untouched service
+# pay the full base_freshness wait for a tag that could never appear, then
+# hard-fail with "a push run exists, so this is a real build problem" --
+# the wrong verdict for a deliberately-skipped service build. Confirmed live
+# 2026-08-02: ui:sha-<commit> never gets created when Step 4 (#1095) reuses
+# ui for a push, for exactly this reason.
+#
+# Delegates to scripts/classify-image-impact.sh -- the same single-source-of-
+# truth per-service classifier detect-changes and promote's own version-bump
+# step already use -- fed via its CHANGED_FILES=<file> input mode with
+# saf_base_commit_diff_paths' own already-computed path list, rather than
+# re-deriving the diff a second time or hand-rolling a second copy of the
+# per-service path-prefix rules here (exactly the kind of drift-prone
+# duplication issue #1095 itself flags elsewhere in this pipeline).
+#
+# Returns 0 if classify-image-impact.sh confirms <classify_key> was NOT
+# touched by <sha> itself relative to its own first parent (safe to treat as
+# a deliberate, correct build-matrix skip for this service at this commit,
+# for any reason -- docs-only, a different-service-only change, or a Step 4
+# reuse). Returns 1 if <classify_key> WAS touched (a real service-affecting
+# change is present; the base_freshness wait's failure needs a maintainer
+# look, not a silent walk-past). Returns 2 if the diff itself could not be
+# computed (a root commit, a missing object, or a classify-image-impact.sh
+# failure) -- same "can't prove it, don't act on it" posture as
+# saf_base_commit_paths_are_ignorable's own case 2.
+saf_base_commit_service_untouched() {
+  local sha="${1:?saf_base_commit_service_untouched: sha is required}"
+  local classify_key="${2:?saf_base_commit_service_untouched: classify_key is required}"
+  local git_dir="${3:-.}"
+  local paths diff_status
+  paths="$(saf_base_commit_diff_paths "$sha" "$git_dir")"
+  diff_status=$?
+  if (( diff_status != 0 )); then
+    return 2
+  fi
+  if [[ -z "$paths" ]]; then
+    return 0
+  fi
+  local classify_script paths_file classify_output value
+  classify_script="$(dirname "${BASH_SOURCE[0]}")/../classify-image-impact.sh"
+  paths_file="$(mktemp)" || return 2
+  printf '%s\n' "$paths" > "$paths_file"
+  classify_output="$(CHANGED_FILES="$paths_file" bash "$classify_script" 2>/dev/null)"
+  local classify_status=$?
+  rm -f "$paths_file"
+  if (( classify_status != 0 )); then
+    return 2
+  fi
+  value="$(printf '%s\n' "$classify_output" | grep -m1 "^${classify_key}=" | cut -d= -f2)"
+  case "$value" in
+    false) return 0 ;;
+    true) return 1 ;;
+    *) return 2 ;;
+  esac
+}
+
 # _saf_github_api_get <url> <body_file>
 #
 # Internal helper: performs the actual HTTP GET and writes the response body
@@ -1138,7 +1206,7 @@ saf_find_built_ancestor() {
   return 1
 }
 
-# saf_resolve_untouched_backfill_source <repository> <service> <base_sha> \
+# saf_resolve_untouched_backfill_source <repository> <service> <classify_key> <base_sha> \
 #     <base_freshness_timeout_seconds> <base_freshness_hard_ceiling_seconds> \
 #     <ancestor_freshness_timeout_seconds> <ancestor_freshness_hard_ceiling_seconds> \
 #     <ancestor_extended_freshness_timeout_seconds> <ancestor_extended_freshness_hard_ceiling_seconds> \
@@ -1206,36 +1274,42 @@ saf_find_built_ancestor() {
 #
 # Sequence:
 #   1. FAST PATH (reordering): before running the full bounded freshness
-#      wait, check whether
-#      BASE_SHA can already be POSITIVELY confirmed as a deliberate skip --
-#      both that its changed paths all match the ignore-list
-#      (saf_base_commit_paths_are_ignorable) AND that no push-triggered run
-#      exists for it (saf_base_commit_has_confirmed_run, event=push). Only
-#      when BOTH are true does this skip the long wait: try one single,
-#      non-polling existence/freshness attempt against BASE_SHA's own image
-#      first (a non-push trigger may already have produced a valid image for
-#      this exact commit despite the confirmed absence of a push run -- see
-#      saf_base_commit_has_confirmed_run's own scoping note), and only if
-#      that also comes up empty, go straight to the ancestor walk. This
-#      turns a never-going-to-build base commit into a fast, seconds-scale
-#      failure/fallback instead of waiting out the full freshness ceiling
-#      first for no reason.
-#   2. NORMAL PATH: whenever the fast path's preconditions are not BOTH
-#      confirmed (a run exists, the run-check is inconclusive, the paths
-#      check is inconclusive, or not every path matches the ignore-list),
-#      run the full bounded sif_wait_for_fresh_base_image wait exactly as
-#      before. This is the conservative default: it is what actually
-#      protects the #626/#808 fail-closed property for a real, in-flight, or
-#      broken build, and for a paths-check that could not positively rule
-#      out a genuine service change riding along with the docs change.
+#      wait, check whether BASE_SHA can already be POSITIVELY confirmed as a
+#      deliberate skip for THIS service, via either of two independent
+#      routes:
+#        a. SERVICE-SCOPED (saf_base_commit_service_untouched): <classify_key>
+#           itself was not touched by BASE_SHA's own diff against its first
+#           parent -- sufficient on its own, no run-status check needed,
+#           since a service build/build-arm64's own per-service matrix
+#           condition would skip it here regardless of whether some OTHER
+#           service's build for the same push is still in flight.
+#        b. COMMIT-WIDE (the original check): every path BASE_SHA changed
+#           matches the ignore-list (saf_base_commit_paths_are_ignorable) AND
+#           no push-triggered run exists for it at all
+#           (saf_base_commit_has_confirmed_run, event=push).
+#      When either route positively confirms a deliberate skip, this skips
+#      the long wait: try one single, non-polling existence/freshness
+#      attempt against BASE_SHA's own image first (a non-push trigger, or a
+#      push that built OTHER services, may already have produced a valid
+#      image for this exact commit -- see saf_base_commit_has_confirmed_run's
+#      own scoping note), and only if that also comes up empty, go straight
+#      to the ancestor walk. This turns a never-going-to-build-THIS-SERVICE
+#      base commit into a fast, seconds-scale failure/fallback instead of
+#      waiting out the full freshness ceiling first for no reason.
+#   2. NORMAL PATH: whenever neither route above positively confirms a
+#      deliberate skip, run the full bounded sif_wait_for_fresh_base_image
+#      wait exactly as before. This is the conservative default: it is what
+#      actually protects the #626/#808 fail-closed property for a real,
+#      in-flight, or broken build, and for a paths-check that could not
+#      positively rule out a genuine service change riding along with the
+#      docs change.
 #   3. POST-WAIT DECISION: if the normal wait fails, re-derive (independently
 #      of whatever the fast path found, so a fast-path bug can only cost
-#      time, never safety) whether BASE_SHA has a confirmed push run and
-#      whether its paths are confirmed ignorable. Only when a push run is
-#      positively confirmed ABSENT and the paths are positively confirmed
-#      ignorable does this proceed to the ancestor walk; any other outcome
-#      (a run exists, either check is inconclusive, or a real path was
-#      found) preserves today's strict failure with no fallback attempted.
+#      time, never safety) the same two routes. Only when at least one
+#      positively confirms a deliberate skip does this proceed to the
+#      ancestor walk; any other outcome (both inconclusive, or a real
+#      service-affecting change confirmed present) preserves today's strict
+#      failure with no fallback attempted.
 #
 # Echoes the resolved source image ref (e.g.
 # ghcr.io/org/repo/service:sha-abc1234) on stdout on success -- this may be
@@ -1245,12 +1319,12 @@ saf_find_built_ancestor() {
 # anything and must treat this as a hard failure for the service, exactly as
 # before this mechanism existed).
 saf_resolve_untouched_backfill_source() {
-  local repository="$1" service="$2" base_sha="$3"
-  local base_freshness_timeout_seconds="$4" base_freshness_hard_ceiling_seconds="$5"
-  local ancestor_freshness_timeout_seconds="$6" ancestor_freshness_hard_ceiling_seconds="$7"
-  local ancestor_extended_freshness_timeout_seconds="$8" ancestor_extended_freshness_hard_ceiling_seconds="$9"
-  local freshness_poll_interval_seconds="${10}" ancestor_search_depth="${11}"
-  local git_dir="${12:-.}"
+  local repository="$1" service="$2" classify_key="$3" base_sha="$4"
+  local base_freshness_timeout_seconds="$5" base_freshness_hard_ceiling_seconds="$6"
+  local ancestor_freshness_timeout_seconds="$7" ancestor_freshness_hard_ceiling_seconds="$8"
+  local ancestor_extended_freshness_timeout_seconds="$9" ancestor_extended_freshness_hard_ceiling_seconds="${10}"
+  local freshness_poll_interval_seconds="${11}" ancestor_search_depth="${12}"
+  local git_dir="${13:-.}"
   # See saf_find_built_ancestor's own comment for why this is set at all, and
   # why it is `local -x` (exported, but restored to the caller's own value when
   # this function returns) rather than a bare `export`:
@@ -1263,23 +1337,32 @@ saf_resolve_untouched_backfill_source() {
   local base_image="ghcr.io/${repository}/${service}:sha-${base_sha_short}"
   local ancestor_sha
 
-  # Step 1: fast-path pre-check (see this function's own header). Both
-  # conditions must be independently confirmed before skipping the long
-  # wait; a failure or inconclusive result on EITHER falls through to the
-  # normal (slow, but always-safe) path below unchanged.
+  # Step 1: fast-path pre-check (see this function's own header). Either
+  # route (service-scoped or commit-wide) independently confirming a
+  # deliberate skip is enough to skip the long wait; only when NEITHER does
+  # this fall through to the normal (slow, but always-safe) path below.
   local fast_path_confirmed_zero=false
-  local pre_paths_status=0
-  saf_base_commit_paths_are_ignorable "$base_sha" "$git_dir" || pre_paths_status=$?
-  if (( pre_paths_status == 0 )); then
-    local pre_run_status=0
-    saf_base_commit_has_confirmed_run "$repository" "$base_sha" "push" || pre_run_status=$?
-    if (( pre_run_status == 1 )); then
-      fast_path_confirmed_zero=true
+  local fast_path_reason=""
+  local pre_service_untouched_status=0
+  saf_base_commit_service_untouched "$base_sha" "$classify_key" "$git_dir" || pre_service_untouched_status=$?
+  if (( pre_service_untouched_status == 0 )); then
+    fast_path_confirmed_zero=true
+    fast_path_reason="$service ($classify_key) was not touched by $base_sha itself"
+  else
+    local pre_paths_status=0
+    saf_base_commit_paths_are_ignorable "$base_sha" "$git_dir" || pre_paths_status=$?
+    if (( pre_paths_status == 0 )); then
+      local pre_run_status=0
+      saf_base_commit_has_confirmed_run "$repository" "$base_sha" "push" || pre_run_status=$?
+      if (( pre_run_status == 1 )); then
+        fast_path_confirmed_zero=true
+        fast_path_reason="$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore"
+      fi
     fi
   fi
 
   if [[ "$fast_path_confirmed_zero" == true ]]; then
-    echo "::notice::$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore -- skipping the long freshness wait for $service and checking directly for a usable image instead." >&2
+    echo "::notice::$fast_path_reason -- skipping the long freshness wait for $service and checking directly for a usable image instead." >&2
     # Single non-polling attempt (0/0 budget): a non-push trigger may
     # already have produced a valid image for this exact commit despite the
     # confirmed absence of a push run (see saf_base_commit_has_confirmed_run's
@@ -1314,29 +1397,40 @@ saf_resolve_untouched_backfill_source() {
     return 0
   fi
 
-  # Step 3: post-wait decision -- re-derive both statuses independently of
-  # the fast-path pre-check above (a stale/incorrect fast-path result must
-  # never be able to unlock the fallback; only a fresh, positive
-  # confirmation right here does).
-  local post_run_status=0
-  saf_base_commit_has_confirmed_run "$repository" "$base_sha" "push" || post_run_status=$?
-  if (( post_run_status == 0 )); then
-    echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above), AND a push-triggered build-push.yml run does exist for $base_sha (so this is a real build problem, not an unbuildable commit -- no ancestor fallback applies here). Silently validating a stale base-channel image here is exactly the #626/#808 bug this mechanism must not reintroduce." >&2
-    return 1
-  fi
-  if (( post_run_status == 2 )); then
-    echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough, and whether build-push.yml ever ran for $base_sha on a push event could not be positively determined either (see above). Failing closed rather than assuming the ancestor-fallback path is safe." >&2
-    return 1
+  # Step 3: post-wait decision -- re-derive independently of the fast-path
+  # pre-check above (a stale/incorrect fast-path result must never be able
+  # to unlock the fallback; only a fresh, positive confirmation right here
+  # does). Same two independent routes as Step 1's fast path; the
+  # service-scoped route is checked first and, if it confirms $service was
+  # not touched by $base_sha, skips the run/paths checks entirely (they
+  # exist to answer the same question a different, less direct way).
+  local post_reason=""
+  local post_service_untouched_status=0
+  saf_base_commit_service_untouched "$base_sha" "$classify_key" "$git_dir" || post_service_untouched_status=$?
+  if (( post_service_untouched_status == 0 )); then
+    post_reason="$service ($classify_key) was not touched by $base_sha itself"
+  else
+    local post_run_status=0
+    saf_base_commit_has_confirmed_run "$repository" "$base_sha" "push" || post_run_status=$?
+    if (( post_run_status == 0 )); then
+      echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above), AND a push-triggered build-push.yml run does exist for $base_sha (so this is a real build problem, not an unbuildable commit -- no ancestor fallback applies here). Silently validating a stale base-channel image here is exactly the #626/#808 bug this mechanism must not reintroduce." >&2
+      return 1
+    fi
+    if (( post_run_status == 2 )); then
+      echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough, and whether build-push.yml ever ran for $base_sha on a push event could not be positively determined either (see above). Failing closed rather than assuming the ancestor-fallback path is safe." >&2
+      return 1
+    fi
+
+    local post_paths_status=0
+    saf_base_commit_paths_are_ignorable "$base_sha" "$git_dir" || post_paths_status=$?
+    if (( post_paths_status != 0 )); then
+      echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough, and its changed paths could not be positively confirmed to all match build-push.yml's own push paths-ignore list either (see this file's own header for why that distinction matters). Failing closed rather than assuming the ancestor-fallback path is safe -- a real, non-doc change riding along with this commit must not be silently skipped." >&2
+      return 1
+    fi
+    post_reason="$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore"
   fi
 
-  local post_paths_status=0
-  saf_base_commit_paths_are_ignorable "$base_sha" "$git_dir" || post_paths_status=$?
-  if (( post_paths_status != 0 )); then
-    echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough, and its changed paths could not be positively confirmed to all match build-push.yml's own push paths-ignore list either (see this file's own header for why that distinction matters). Failing closed rather than assuming the ancestor-fallback path is safe -- a real, non-doc change riding along with this commit must not be silently skipped." >&2
-    return 1
-  fi
-
-  echo "::notice::$base_sha has no push-triggered build-push.yml run, and every path it changed matches build-push.yml's own push paths-ignore -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
+  echo "::notice::$post_reason -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
   if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
     "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
     "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then

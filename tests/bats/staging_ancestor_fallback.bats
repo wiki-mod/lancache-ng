@@ -297,8 +297,16 @@ setup_linear_fixture() {
     git -C "$git_dir" commit -q -m base
     base_sha="$(git -C "$git_dir" rev-parse HEAD)"
 
-    echo "real change" > "$git_dir/scripts/real-change.sh"
-    git -C "$git_dir" add scripts/real-change.sh
+    # Under services/proxy/ specifically (not a generic scripts/ change): the
+    # saf_resolve_untouched_backfill_source tests below resolve for the
+    # "proxy" service, and must see this as a real, proxy-AFFECTING change
+    # (classify-image-impact.sh's own proxy=true rule), not just "not
+    # docs/*.md" -- a generic scripts/ change would be untouched from
+    # proxy's own service-scoped perspective and wrongly fast-path instead
+    # of exercising the commit-wide fallback path these tests target.
+    mkdir -p "$git_dir/services/proxy"
+    echo "real change" > "$git_dir/services/proxy/real-change.conf"
+    git -C "$git_dir" add services/proxy/real-change.conf
     git -C "$git_dir" commit -q -m "real change"
     real_change_sha="$(git -C "$git_dir" rev-parse HEAD)"
 }
@@ -344,6 +352,65 @@ setup_linear_fixture() {
 
     run saf_base_commit_paths_are_ignorable "$empty_sha" "$git_dir"
     [ "$status" -eq 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# saf_base_commit_service_untouched: service-scoped sibling to
+# saf_base_commit_paths_are_ignorable -- a real, non-doc commit can still
+# leave one specific service untouched (2026-08-02 finding, live-confirmed
+# via #1355/b46d81e and ui:sha-c7d42fe never being created after a Step 4
+# reuse).
+
+@test "saf_base_commit_service_untouched: a commit touching only a different service leaves the target service untouched" {
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/services/ui"
+    git -C "$git_dir" commit -q --allow-empty -m root
+    echo "ui change" > "$git_dir/services/ui/main.rs"
+    git -C "$git_dir" add services/ui/main.rs
+    git -C "$git_dir" commit -q -m "ui-only change"
+    ui_only_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    # A real, non-doc change -- confirmed NOT ignorable at the commit-wide
+    # level -- yet proxy specifically was never touched by it.
+    run saf_base_commit_paths_are_ignorable "$ui_only_sha" "$git_dir"
+    [ "$status" -eq 1 ]
+
+    run saf_base_commit_service_untouched "$ui_only_sha" "proxy" "$git_dir"
+    [ "$status" -eq 0 ]
+
+    run saf_base_commit_service_untouched "$ui_only_sha" "ui" "$git_dir"
+    [ "$status" -eq 1 ]
+}
+
+@test "saf_base_commit_service_untouched: a commit touching the target service's own path is confirmed touched" {
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/services/proxy"
+    git -C "$git_dir" commit -q --allow-empty -m root
+    echo "proxy change" > "$git_dir/services/proxy/nginx.conf"
+    git -C "$git_dir" add services/proxy/nginx.conf
+    git -C "$git_dir" commit -q -m "proxy change"
+    proxy_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run saf_base_commit_service_untouched "$proxy_sha" "proxy" "$git_dir"
+    [ "$status" -eq 1 ]
+}
+
+@test "saf_base_commit_service_untouched: a docs-only commit leaves every service untouched, same verdict as the commit-wide check" {
+    setup_linear_fixture
+    run saf_base_commit_service_untouched "$base_sha" "proxy" "$git_dir"
+    [ "$status" -eq 0 ]
+}
+
+@test "saf_base_commit_service_untouched: a root commit (no parent) is inconclusive, not falsely untouched" {
+    setup_linear_fixture
+    run saf_base_commit_service_untouched "$ancestor2_sha" "proxy" "$git_dir"
+    [ "$status" -eq 2 ]
 }
 
 # ---------------------------------------------------------------------------
@@ -1379,10 +1446,21 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
+    # Deliberately an UNRECOGNIZED classify_key ("nonexistent-service", not a
+    # real scripts/classify-image-impact.sh output key): forces
+    # saf_base_commit_service_untouched to be inconclusive (status 2) on
+    # every call regardless of what base_sha actually touched, so this test
+    # still exercises the paths_are_ignorable + has_confirmed_run route this
+    # regression guard targets. A real classify_key would make
+    # saf_base_commit_service_untouched succeed FIRST for base_sha's
+    # genuinely docs-only diff (every real service is untouched by a doc
+    # change), short-circuiting before either has_confirmed_run call below is
+    # ever reached.
+    #
     # base_sha has a confirmed push run every time it's asked (per the stub
     # above) -- the pre-check sees it, and (since the normal-path wait then
     # fails, per the empty revision stub) the post-check re-derives it too.
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "nonexistent-service" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
     # Exactly 2 calls: the pre-check and the post-check, both genuinely
     # executed -- not 1, which would mean the second silently reused the
@@ -1660,13 +1738,73 @@ STUB
     # regression reintroducing the slow path fails this assertion in
     # seconds rather than hanging the suite for up to 10 minutes.
     start_epoch="$(date +%s)"
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
     end_epoch="$(date +%s)"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${ancestor2_sha:0:7}" ]]
     # The fast path (reordering) means this must resolve in well under the
     # 3s ceiling above -- proves the long wait was genuinely skipped, not
     # merely fast because the test stubs are instant.
+    [ "$((end_epoch - start_epoch))" -lt 2 ]
+}
+
+@test "saf_resolve_untouched_backfill_source: fast path also fires for a real, non-doc commit that only touches a DIFFERENT service" {
+    # 2026-08-02 finding: a commit that touches only ui (a real, non-doc
+    # change -- saf_base_commit_paths_are_ignorable would say "not
+    # ignorable") must still fast-path when resolving PROXY specifically,
+    # since proxy's own build-matrix row was never going to run for this
+    # commit regardless. Before saf_base_commit_service_untouched existed,
+    # this fell through to the slow path and then hard-failed with "a push
+    # run exists, so this is a real build problem" -- the wrong verdict.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/docs" "$git_dir/services/ui"
+
+    echo "ancestor2" > "$git_dir/docs/ancestor2.md"
+    git -C "$git_dir" add docs/ancestor2.md
+    git -C "$git_dir" commit -q -m ancestor2
+    ancestor2_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "ui change" > "$git_dir/services/ui/main.rs"
+    git -C "$git_dir" add services/ui/main.rs
+    git -C "$git_dir" commit -q -m "ui-only change"
+    ui_only_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    install_run_exists_stub
+    printf '%s\tany\n' "$ancestor2_sha" >> "$runs_file"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$ui_only_sha") exit 0 ;;
+    "$ancestor2_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "${ancestor2_sha:0:7}") echo "$ancestor2_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    # A push run DOES exist for ui_only_sha (unlike the docs-only fast-path
+    # test above) -- proving this route does not depend on "no run at all",
+    # only on proxy specifically being untouched.
+    start_epoch="$(date +%s)"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$ui_only_sha" 3 3 3 3 3 3 1 50 "$git_dir"
+    end_epoch="$(date +%s)"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"sha-${ancestor2_sha:0:7}" ]]
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
@@ -1689,7 +1827,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$real_change_sha" 0 0 0 0 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$real_change_sha" 0 0 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
     [[ "$output" != *"Substituting"* ]]
 }
@@ -1711,7 +1849,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
     [ "$status" -ne 0 ]
 }
 
@@ -1726,7 +1864,7 @@ STUB
 
     install_revision_stub_for "$base_sha"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 300 600 300 600 15 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 300 600 300 600 300 600 15 50 "$git_dir"
     [ "$status" -eq 0 ]
     [[ "$output" == *"sha-${base_sha:0:7}" ]]
     [[ "$output" != *"ancestor"* ]]
@@ -1742,6 +1880,15 @@ STUB
     # two budgets were ever collapsed back into one shared pair, a
     # still-building base commit would hard-fail this gate at the short
     # ceiling well before its image has any chance to appear.
+    #
+    # Uses real_change_sha (a real services/proxy/ change), not base_sha (a
+    # docs-only commit) -- proxy IS confirmed touched by real_change_sha, so
+    # saf_base_commit_service_untouched correctly does NOT fast-path here,
+    # exercising the long-budget wait this test targets. A docs-only base
+    # commit would fast-path immediately regardless of any "in-flight run"
+    # stub, since proxy's own build-matrix row structurally never runs for
+    # it either way -- that is now saf_base_commit_service_untouched's job to
+    # recognize, covered by its own dedicated tests above.
     cat > "$run_exists_stub" <<'STUB'
 #!/usr/bin/env bash
 exit 0
@@ -1757,7 +1904,7 @@ elapsed=\$((now - $start_epoch))
 # Resolves only once 4 real seconds have elapsed: longer than the short
 # ancestor ceiling (2s) below, well inside the long base ceiling (10s).
 if (( elapsed >= 4 )); then
-    echo "$base_sha"
+    echo "$real_change_sha"
 else
     exit 1
 fi
@@ -1765,9 +1912,9 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 10 10 2 2 2 2 1 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$real_change_sha" 10 10 2 2 2 2 1 50 "$git_dir"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"sha-${base_sha:0:7}" ]]
+    [[ "$output" == *"sha-${real_change_sha:0:7}" ]]
 }
 
 @test "saf_resolve_untouched_backfill_source: ancestor_extended_freshness_* is independent of base_freshness_* -- a generous base budget never leaks into the ancestor's extended retry" {
@@ -1831,7 +1978,7 @@ STUB
     chmod +x "$revision_stub"
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 300 600 0 0 0 0 1 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 300 600 0 0 0 0 1 50 "$git_dir"
     end_epoch="$(date +%s)"
     [ "$status" -ne 0 ]
     # Fails within ~2s, not anywhere near the 3s the image needs to appear --
@@ -1901,7 +2048,7 @@ STUB
     export STAGING_IMAGE_REVISION_CMD="$revision_stub"
 
     export PATH="$empty_path_dir"
-    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 0 0 0 0 0 0 0 50 "$git_dir"
     export PATH="$old_path"
 
     [ "$status" -ne 0 ]

@@ -187,26 +187,21 @@ build_sha="${BUILD_SHA:-}"
 pr_head_sha="${PR_HEAD_SHA:-}"
 
 # Bounded wait for build-push to finish pushing this PR's touched-service
-# staging tags. build/build-arm64 run on the scarce lancache-heavy tier
-# (Rust compile + multi-arch image builds) and merge-manifests after them, so
-# they can legitimately take many minutes; this is the "normal" budget past
-# which we start asking whether build-push's own run is still active rather
-# than failing outright (see #895 note above). Overridable for tests.
+# staging tags. build/build-arm64 run on the scarce lancache-heavy tier, so
+# they can legitimately take many minutes; past this budget we start asking
+# whether build-push's own run is still active rather than failing outright
+# (see #895 note above). Overridable for tests.
 poll_timeout_seconds="${STAGING_POLL_TIMEOUT_SECONDS:-1500}"
 poll_interval_seconds="${STAGING_POLL_INTERVAL_SECONDS:-15}"
 
-# #895: absolute hard ceiling, independent of what the congestion probe
-# reports. Even a build-push run that genuinely never stops (a hung job, a
-# runner that died without ever marking its run failed) must not be allowed
-# to hold this runner forever -- this is what keeps the fix "bounded and
-# reasoned about" rather than an unbounded wait. 5400s/90min is chosen as
-# generous headroom over the confirmed real-world worst case so far (#895's
-# incident: ~34min actual end-to-end build-push time against the old 25min
-# budget), not an arbitrary large number picked to make failures rarer.
-poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-5400}"
-# A misconfigured ceiling below the normal budget would make the extension
-# logic self-contradicting (deadline already past hard ceiling on entry), so
-# clamp it up rather than silently produce a negative wait window.
+# #895: absolute hard ceiling, independent of the congestion probe -- even a
+# genuinely hung build-push run must not hold this runner forever. 1200s:
+# maintainer-directed cut from 5400s (2026-08-02); the real fix for how often
+# this ceiling gets hit is #1378's Step 4 reuse mechanism cutting unnecessary
+# rebuilds, not a bigger number here.
+poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-1200}"
+# Clamp up so a misconfigured ceiling below the timeout can't produce a
+# negative wait window.
 if (( poll_hard_ceiling_seconds < poll_timeout_seconds )); then
     poll_hard_ceiling_seconds=$poll_timeout_seconds
 fi
@@ -217,120 +212,44 @@ fi
 congestion_check_interval_seconds="${STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS:-60}"
 
 # #808: bounded wait for the back-fill source image itself to become fresh
-# enough (see scripts/lib/staging-image-freshness.sh for the mechanism). This
-# governs ONLY the wait against BASE_SHA's own image
-# (saf_resolve_untouched_backfill_source's "normal path", step 2) -- NOT the
-# separate, much shorter ancestor-candidate budget below. This wait can
-# genuinely be racing a real, still-building push run: it is reached whenever
-# a confirmed push-triggered build-push.yml run for BASE_SHA exists (or its
-# status could not be positively ruled out), which is exactly the case where
-# the image may simply not have finished pushing yet, the same congestion
-# scenario wait_for_touched_image() above already gets headroom for. A short
-# ceiling here would hard-fail this gate on a perfectly healthy,
-# still-running build, which is strictly worse than the never-built-base-
-# commit problem this whole mechanism exists to fix. 5400s/90min matches the
-# touched-image hard ceiling above (same worst-case build-push runtime, since
-# this is fundamentally the same pipeline building the same commit); 900s/
-# 15min is, as before, purely the "start logging that we're still waiting"
-# threshold for the common case where the image is already fresh and this
-# resolves on the first poll.
+# enough (see scripts/lib/staging-image-freshness.sh). Governs ONLY BASE_SHA's
+# own image wait (step 2), not the shorter ancestor-candidate budget below.
+# Can genuinely race a real still-building push run, so gets the same
+# congestion headroom as wait_for_touched_image() above -- a short ceiling
+# here would hard-fail on a healthy running build, worse than the
+# never-built-base problem this mechanism exists to fix. 1200s: maintainer-
+# directed cut from 5400s (2026-08-02), matching the ceiling above; 900s is
+# just the "start logging" threshold for the common already-fresh case.
 base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
-base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
+base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-1200}"
 if (( base_freshness_hard_ceiling_seconds < base_freshness_timeout_seconds )); then
     base_freshness_hard_ceiling_seconds=$base_freshness_timeout_seconds
 fi
 base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15}"
 
-# Separate, deliberately SHORT budget for saf_find_built_ancestor's own
-# per-candidate freshness checks (used only once BASE_SHA's own wait above
-# has failed AND both fail-closed gates confirm a genuine deliberate skip, or
-# via the fast-path pre-check). An ancestor candidate is, by construction,
-# already confirmed (via saf_base_commit_has_confirmed_run) to have a REAL
-# recorded build-push.yml run further back in history than BASE_SHA -- if its
-# image doesn't already exist by the time this mechanism looks, it never
-# will, since there is no "still building" scenario for a commit further in
-# the past than one already checked. A long, congestion-scale ceiling here
-# would only slow down every ancestor-fallback case for no correctness
-# benefit, and would multiply badly across up to ancestor_search_depth
-# candidates if an early one's run somehow never produced an image.
+# Deliberately SHORT budget for saf_find_built_ancestor's own per-candidate
+# checks (used once BASE_SHA's own wait fails, or via the fast-path
+# pre-check). An ancestor candidate already has a confirmed real build
+# further back in history -- if its image isn't there yet, it never will be
+# (no "still building" case for an older commit). A long ceiling here would
+# only slow every fallback case for no benefit, multiplied across
+# ancestor_search_depth candidates.
 ancestor_freshness_timeout_seconds="${ANCESTOR_FRESHNESS_POLL_TIMEOUT_SECONDS:-300}"
 ancestor_freshness_hard_ceiling_seconds="${ANCESTOR_FRESHNESS_POLL_HARD_CEILING_SECONDS:-600}"
 if (( ancestor_freshness_hard_ceiling_seconds < ancestor_freshness_timeout_seconds )); then
     ancestor_freshness_hard_ceiling_seconds=$ancestor_freshness_timeout_seconds
 fi
 
-# Separate budget for saf_find_built_ancestor's own ONE-TIME extended retry,
-# given only to a candidate whose own build-push.yml run is positively
-# confirmed still active (saf_candidate_run_is_active) after its initial
-# short-budget check above already failed -- see
-# scripts/lib/staging-ancestor-fallback.sh's saf_resolve_untouched_backfill_source
-# header for why this is now its own explicit parameter rather than reusing
-# base_freshness_*, even though this caller happens to pass the identical
-# 900/5400 value for both.
-#
-# These are the CONFIGURED per-wait ceilings -- the maximum any single wait
-# is allowed, if the whole job's own budget can afford it. They are NOT what
-# actually gets passed to saf_resolve_untouched_backfill_source below anymore
-# (see total_backfill_budget_seconds and clamp_service_wait_budgets() further
-# down): passing these fixed values unclamped would let a single untouched
-# service's worst case (5400s + 600s + 5400s = 11400s) alone exceed this
-# job's entire 6000s (100-minute) timeout, and the loop below calls
-# saf_resolve_untouched_backfill_source once per untouched service, so more
-# than one service hitting that worst case would compound it further -- this
-# was flagged for a long time as a "KNOWN GAP... left open for a maintainer
-# decision" without ever actually being fixed; that is no longer true as of
-# the shared-budget tracking below.
+# Separate budget for saf_find_built_ancestor's own one-time extended retry,
+# given only when a candidate's build-push.yml run is confirmed still active
+# after its short check above failed -- own explicit parameter rather than
+# reusing base_freshness_*, even though the defaults match. 1200s:
+# maintainer-directed cut from 5400s (2026-08-02), same as above.
 ancestor_extended_freshness_timeout_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
-ancestor_extended_freshness_hard_ceiling_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
+ancestor_extended_freshness_hard_ceiling_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS:-1200}"
 if (( ancestor_extended_freshness_hard_ceiling_seconds < ancestor_extended_freshness_timeout_seconds )); then
     ancestor_extended_freshness_hard_ceiling_seconds=$ancestor_extended_freshness_timeout_seconds
 fi
-
-# Total wall-clock budget (from THIS script's own start, i.e. $SECONDS==0)
-# available for ALL untouched-service backfill resolution combined -- the
-# fix for the compounding problem described above. Defaults to this script's
-# real caller job's 100-minute (6000s) timeout-minutes (full-setup-deep-
-# validate.yml's ensure-pr-staging-images job) minus 300s reserved for that
-# job's own pre-script overhead (checkout, Docker Buildx setup, GHCR login --
-# all fast in practice, but this is the only step in the job, so there is no
-# later step's overhead to also reserve for). Keep this in sync by hand with
-# that job's timeout-minutes if it ever changes, the same way this script's
-# other budget defaults already have to stay in sync with build-push.yml's
-# equivalent step (see ancestor_extended_freshness_hard_ceiling_seconds's own
-# comment above).
-total_backfill_budget_seconds="${STAGING_TOTAL_BACKFILL_BUDGET_SECONDS:-5700}"
-
-# clamp_service_wait_budgets: reads $SECONDS (this script's own elapsed
-# time, which already reflects whatever wait_for_touched_image() spent on
-# earlier services in the same loop, so the budget genuinely shrinks across
-# the loop, not just within one service's own three waits) and prints three
-# space-separated, budget-clamped ceiling values -- base, ancestor-short,
-# ancestor-extended -- that never sum to more than what's actually left of
-# total_backfill_budget_seconds. Priority order, since these three waits are
-# not equally likely or equally cheap: the ancestor-short check (step 3's
-# initial per-candidate probe) is reserved FIRST and in full whenever
-# possible, because it is cheap (600s configured) and, per this file's own
-# established framing elsewhere, "non-negotiable" for the ancestor-walk to
-# behave correctly at all; the base check (step 2, BASE_SHA's own image --
-# the common, usually-fast-resolving case) gets whatever is left up to its
-# own configured ceiling next; the extended retry (step 3's rare
-# still-building case) gets only what remains after both, since it is both
-# the least commonly needed and the one this budget problem was originally
-# about. A remaining budget of 0 (or less) prints "0 0 0" -- the caller must
-# treat that as "do not even attempt this service's resolution," not as "try
-# with a zero-second wait" (see the loop below).
-clamp_service_wait_budgets() {
-    local remaining=$((total_backfill_budget_seconds - SECONDS))
-    if (( remaining < 0 )); then
-        remaining=0
-    fi
-    local alloc_short=$(( ancestor_freshness_hard_ceiling_seconds < remaining ? ancestor_freshness_hard_ceiling_seconds : remaining ))
-    remaining=$((remaining - alloc_short))
-    local alloc_base=$(( base_freshness_hard_ceiling_seconds < remaining ? base_freshness_hard_ceiling_seconds : remaining ))
-    remaining=$((remaining - alloc_base))
-    local alloc_extended=$(( ancestor_extended_freshness_hard_ceiling_seconds < remaining ? ancestor_extended_freshness_hard_ceiling_seconds : remaining ))
-    printf '%s %s %s\n' "$alloc_base" "$alloc_short" "$alloc_extended"
-}
 
 # How many of BASE_SHA's own ancestor commits (nearest-first, first-parent
 # only) scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor()
@@ -391,6 +310,23 @@ declare -A touched_map=(
     [dhcp]="${DHCP_TOUCHED:-false}"
     [dhcp-proxy]="${DHCP_PROXY_TOUCHED:-false}"
     [ntp]="${NTP_TOUCHED:-false}"
+)
+
+# Maps this file's own matrix-service names to scripts/classify-image-impact.sh's
+# output keys, for saf_resolve_untouched_backfill_source's service-scoped
+# check below -- the two naming schemes differ for 3 of 8 services (dns vs
+# dns_image, dhcp-proxy vs dhcp_proxy, build-tools vs build_tools), same
+# mapping build-push.yml's own decide_one() call sites already hand-pass
+# per service (see that job's "determine push reuse scope" step).
+declare -A classify_key_map=(
+    [proxy]="proxy"
+    [dns]="dns_image"
+    [watchdog]="watchdog"
+    [ui]="ui"
+    [build-tools]="build_tools"
+    [dhcp]="dhcp"
+    [dhcp-proxy]="dhcp_proxy"
+    [ntp]="ntp"
 )
 
 # Indirection so tests can stub the registry probe without a real daemon.
@@ -529,28 +465,10 @@ for service in "${full_setup_services[@]}"; do
     # for why, and scripts/lib/staging-ancestor-fallback.sh for the full
     # resolution sequence (exact-BASE_SHA wait, then the ancestor fallback
     # when that wait genuinely cannot succeed).
-    #
-    # Budgets are computed FRESH per service (this reads live $SECONDS),
-    # not once before the loop -- see clamp_service_wait_budgets's own
-    # comment for why, and total_backfill_budget_seconds's comment for the
-    # whole-job problem this closes.
-    #
-    # Checked BEFORE clamping, against the raw remaining total budget --
-    # NOT by checking whether the clamped per-wait ceilings all came out to
-    # 0, which would also be true whenever a caller (e.g. this file's own
-    # bats tests) legitimately configures one of the three *_hard_ceiling_
-    # seconds values as 0 on purpose. Those two situations must not be
-    # conflated: a deliberately-zero configured ceiling is not "budget
-    # exhausted."
-    if (( total_backfill_budget_seconds - SECONDS <= 0 )); then
-        echo "::error::No wall-clock budget remains (this job's total_backfill_budget_seconds=${total_backfill_budget_seconds}s is exhausted after ${SECONDS}s of earlier waits) to even attempt resolving $service's untouched-service backfill source. Refusing to start a wait that this job's own timeout would kill partway through anyway -- that would waste runner time and produce a confusing job-cancelled result instead of this clear one. If this repeats, either an earlier service is genuinely taking its full worst-case wait (a real, if rare, congestion case -- see #895), or too many services are untouched at once for this job's own timeout-minutes; both need a maintainer look, not a bigger number here."
-        exit 1
-    fi
-    read -r clamped_base_ceiling clamped_short_ceiling clamped_extended_ceiling < <(clamp_service_wait_budgets)
-    if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "$BASE_SHA" \
-        "$(( base_freshness_timeout_seconds < clamped_base_ceiling ? base_freshness_timeout_seconds : clamped_base_ceiling ))" "$clamped_base_ceiling" \
-        "$(( ancestor_freshness_timeout_seconds < clamped_short_ceiling ? ancestor_freshness_timeout_seconds : clamped_short_ceiling ))" "$clamped_short_ceiling" \
-        "$(( ancestor_extended_freshness_timeout_seconds < clamped_extended_ceiling ? ancestor_extended_freshness_timeout_seconds : clamped_extended_ceiling ))" "$clamped_extended_ceiling" \
+    if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
+        "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" \
+        "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" \
+        "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" \
         "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}")"; then
         exit 1
     fi

@@ -508,13 +508,19 @@ JSON
 
 @test "#808: an untouched service is NOT back-filled from a base-channel image that is stale relative to BASE_SHA" {
     # Overrides setup()'s default "always fresh" revision stub with one that
-    # always reports older_sha -- a real commit that predates BASE_SHA
-    # (base_sha) in the disposable repo's own history. Proves the freshness
-    # gate actually blocks the back-fill end-to-end, not just in isolation.
+    # never resolves anything -- proves the freshness gate blocks the
+    # back-fill end-to-end when nothing can be verified, not just in
+    # isolation. (A stub that always echoed a real, older-but-genuinely-built
+    # ancestor commit would now be legitimately accepted by the
+    # ancestor-fallback walk instead of refused -- that IS this mechanism's
+    # own intended behavior once saf_base_commit_service_untouched confirms
+    # proxy specifically was untouched by base_sha, so this test is scoped to
+    # the case where NOTHING resolves, not merely "resolves to something
+    # older".)
     stale_stub="$BATS_TEST_TMPDIR/stale_revision.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-echo "$older_sha"
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
@@ -524,7 +530,7 @@ STUB
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     run bash "$script"
     [ "$status" -ne 0 ]
-    printf '%s\n' "$output" | grep -q "#808"
+    printf '%s\n' "$output" | grep -q "Refusing to back-fill"
     # No service was actually back-filled: the freshness gate blocked all of
     # them before backfill_from_base ever ran (fail-fast on the first one).
     [ "$(wc -l < "$backfill_log")" -eq 0 ]
@@ -554,39 +560,6 @@ STUB
     run bash "$script"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "BASE_SHA"
-}
-
-@test "shared backfill budget: a zero total budget fails closed immediately, distinct from the #808 freshness error" {
-    # STAGING_TOTAL_BACKFILL_BUDGET_SECONDS=0 simulates this job having
-    # already spent its entire shared backfill allowance on earlier
-    # services/waits before this service's turn -- must fail fast with its
-    # own distinct message, not silently fall through to attempting (and
-    # then time-limited-failing) the normal freshness wait.
-    export STAGING_TOTAL_BACKFILL_BUDGET_SECONDS=0
-    export EXISTING_IMAGES=""
-    export WORKFLOW_CHANGED="false"
-    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
-    run bash "$script"
-    [ "$status" -ne 0 ]
-    printf '%s\n' "$output" | grep -q "No wall-clock budget remains"
-    # No service was actually attempted: the shared-budget gate fires before
-    # any backfill_from_base call.
-    [ "$(wc -l < "$backfill_log")" -eq 0 ]
-}
-
-@test "shared backfill budget: an ample total budget does not change the previously-existing successful back-fill behavior" {
-    # A large, explicit total budget (this test's own default from setup()
-    # would already cover it, but pinning it here makes the intent explicit)
-    # must not shrink or otherwise interfere with the normal, already-fresh
-    # case every pre-existing #808 test above relies on.
-    export STAGING_TOTAL_BACKFILL_BUDGET_SECONDS=5700
-    export EXISTING_IMAGES=""
-    export WORKFLOW_CHANGED="false"
-    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
-    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
-    run bash "$script"
-    [ "$status" -eq 0 ]
-    [ "$(wc -l < "$backfill_log")" -eq 8 ]
 }
 
 @test "retag-reuse: an ancestor CANDIDATE's per-commit image whose revision label predates the candidate itself is accepted (Schritt 4 signature)" {
@@ -713,7 +686,12 @@ STUB
     run ! grep -qF "sha-${older_sha:0:7}" "$backfill_log"
     printf '%s\n' "$script_output" | grep -q "Substituting nearest built ancestor"
     printf '%s\n' "$script_output" | grep -qF "$ancestor2_sha"
-    printf '%s\n' "$script_output" | grep -q "no push-triggered build-push.yml run"
+    # base_sha is docs-only, so saf_base_commit_service_untouched confirms
+    # every service (including proxy) untouched by it directly -- this fires
+    # before, and independent of, the commit-wide "no push-triggered run"
+    # route, hence the "was not touched by ... itself" wording rather than
+    # that route's own message.
+    printf '%s\n' "$script_output" | grep -q "was not touched by $base_sha itself"
 }
 
 @test "ancestor fallback: bounded search depth stops before reaching a usable ancestor further back" {
@@ -840,6 +818,19 @@ STUB
 }
 
 @test "ancestor fallback: BASE_SHA has a confirmed run -> no fallback, existing strict failure preserved" {
+    # A real services/proxy/ change (not setup()'s docs-only base_sha):
+    # proxy IS confirmed touched by this commit, so
+    # saf_base_commit_service_untouched correctly falls through to the
+    # commit-wide run-status check this test targets, instead of
+    # short-circuiting via the service-scoped route (which a docs-only
+    # BASE_SHA would always do here regardless of "a run exists").
+    mkdir -p "$git_dir/services/proxy"
+    echo "proxy change" > "$git_dir/services/proxy/real-change.conf"
+    git -C "$git_dir" add services/proxy/real-change.conf
+    git -C "$git_dir" commit -q -m "proxy change"
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+    export BASE_SHA="$base_sha"
+
     # A stub that logs its own argument and always reports "a run exists" --
     # proves the check is actually wired to BASE_SHA specifically (not merely
     # ignored, and not accidentally checked against the wrong sha, the exact
@@ -927,10 +918,15 @@ STUB
     # misidentify that outage as a deliberate skip and back-fill an
     # untouched service from a stale ancestor -- silently validating
     # content that omits the real base change. Adds one more commit on top
-    # of setup()'s docs-only chain that touches a real script file, and
-    # points BASE_SHA at it instead of the default fixture's base_sha.
-    echo "real change" > "$git_dir/scripts_real_change.sh"
-    git -C "$git_dir" add scripts_real_change.sh
+    # of setup()'s docs-only chain that touches a real proxy-affecting path
+    # (not a generic top-level script -- classify-image-impact.sh would
+    # class that as untouched-by-proxy, which would let
+    # saf_base_commit_service_untouched short-circuit past the very paths
+    # gate this test targets), and points BASE_SHA at it instead of the
+    # default fixture's base_sha.
+    mkdir -p "$git_dir/services/proxy"
+    echo "real change" > "$git_dir/services/proxy/real-change.conf"
+    git -C "$git_dir" add services/proxy/real-change.conf
     git -C "$git_dir" commit -q -m "real change"
     real_change_sha="$(git -C "$git_dir" rev-parse HEAD)"
     export BASE_SHA="$real_change_sha"

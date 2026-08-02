@@ -172,27 +172,16 @@ jobs:
     needs: plan
     if: needs.plan.outputs.should_run == 'true' && needs.plan.outputs.pr_staging_available == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # 100 minutes: this job's own scripts/ensure-pr-staging-images.sh runs an
-    # internal poll loop waiting for build-push.yml's staging tags, so the job
-    # timeout must clear that poll budget with headroom, not just cover the
-    # wrapper's own overhead.
+    # 100 minutes: covers scripts/ensure-pr-staging-images.sh's internal poll
+    # loop, not just the wrapper's own overhead.
     #
-    # The three per-service waits inside saf_resolve_untouched_backfill_source()
-    # (up to 5400s for BASE_SHA's own image, up to 600s for an ancestor
-    # candidate's initial check, up to a further 5400s for that candidate's
-    # extended retry -- 11400s worst case for a SINGLE untouched service, and
-    # the script's loop hits this sequentially per untouched service) used to
-    # be able to exceed this 100-minute (6000s) timeout on their own, before
-    # even accounting for more than one untouched service in the same PR.
-    # Fixed: scripts/ensure-pr-staging-images.sh now tracks one shared,
-    # dynamically-shrinking wall-clock budget (total_backfill_budget_seconds,
-    # default 5700s -- this timeout minus a fixed reservation for this job's
-    # own pre-script overhead) across every untouched service's three waits
-    # combined, clamping each wait's ceiling to what is actually still left
-    # rather than always requesting each wait's full configured maximum; see
-    # that script's own total_backfill_budget_seconds/
-    # clamp_service_wait_budgets comments for the exact allocation order and
-    # the fail-closed behavior once the shared budget is exhausted.
+    # Per-service worst case (1200s base + 600s ancestor-short + 1200s
+    # ancestor-extended = 3000s) fits well inside this timeout for one
+    # untouched service; 2+ untouched services hitting worst case
+    # simultaneously can still exceed it (reduced from the previous
+    # 5400/600/5400 = 11400s worst case, 2026-08-02 maintainer-directed cut --
+    # no shared-budget/clamping mechanism added back after removing the prior,
+    # unauthorized one).
     timeout-minutes: 100
     permissions:
       contents: read
