@@ -45,6 +45,24 @@
 GHCR_RETRY_MAX_ATTEMPTS="${GHCR_RETRY_MAX_ATTEMPTS:-4}"
 GHCR_RETRY_BACKOFF_SECONDS="${GHCR_RETRY_BACKOFF_SECONDS:-30}"
 
+# Reserved exit code a wrapped command can use to tell ghcr_retry "this is a
+# permanent failure, do not retry" -- distinct from every other nonzero exit,
+# which is still treated as retryable exactly as before. Opt-in and
+# backward-compatible: no call site wrapped by ghcr_retry before this
+# constant existed ever emitted this specific code, so every existing
+# caller's behavior is completely unchanged; only a caller that deliberately
+# exits with this code (e.g. after classifying an HTTP 401/404 as a
+# configuration/auth error rather than a transient one) gets the early exit.
+# Exists because ghcr_retry's own retry loop cannot distinguish "worth
+# retrying" (a dropped connection, a 5xx, a stalled transfer) from "retrying
+# cannot possibly help" (an invalid token, a wrong endpoint) on its own --
+# it only ever sees a bare exit code, so the wrapped command itself has to
+# be the one making that judgment call and signaling it through the exit
+# code. 99 is chosen to stay clear of common shell/tool exit codes (1-2 for
+# generic failure, 126-165 reserved by the shell itself for
+# not-executable/signal-related exits).
+GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE="${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
+
 # ghcr_relogin <registry> <username> <password>
 #
 # Fresh re-authentication via `docker login --password-stdin`, not a nested
@@ -75,6 +93,15 @@ ghcr_relogin() {
 # attempt except the last, sleeps $GHCR_RETRY_BACKOFF_SECONDS, then -- if
 # both <username> and <password> are non-empty -- calls ghcr_relogin before
 # retrying. Returns the final attempt's exit status.
+#
+# Exception: if <command> exits with $GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE
+# (see that variable's own comment above), this returns immediately with
+# that same code -- no further attempts, no backoff sleep, no re-login. A
+# permanent failure (an invalid token, a genuinely wrong endpoint) cannot be
+# fixed by retrying or by a fresh login, so spending the full retry budget on
+# one anyway only wastes wall-clock time a caller's own job timeout may not
+# have to spare, especially when the same query repeats across many loop
+# iterations (e.g. once per untouched service).
 #
 # <registry> is always required, but <username>/<password> may each be an
 # empty string: a caller with no credentials in scope (e.g.
@@ -127,6 +154,10 @@ ghcr_retry() {
     fi
     if (( status == 0 )); then
       return 0
+    fi
+    if (( status == GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE )); then
+      echo "::error::GHCR operation failed with a permanent (non-retryable) error (exit ${status}): $*" >&2
+      return "$status"
     fi
     if (( attempt >= GHCR_RETRY_MAX_ATTEMPTS )); then
       echo "::error::GHCR operation failed after ${GHCR_RETRY_MAX_ATTEMPTS} attempts (exit ${status}): $*" >&2
