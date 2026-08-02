@@ -94,7 +94,7 @@ either way.
 syntax/executable-bit step already has a hosted fallback, `watchdog_test-hosted`),
 `rust_coverage`, `dns_cargo_audit`, `ui_cargo_audit`, and `watchdog_cargo_audit`
 all run on `lancache-heavy` self-hosted runners and use the acceleration layer
-described in AGENTS.md's **AG-CI-003**
+described in AGENTS.md's Rule-Ref: **AG-CI-003**
 ("Runner portability") and `docs/self-hosted-actions-runner.md`'s
 "Acceleration contract":
 

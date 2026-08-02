@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
@@ -170,7 +171,7 @@ jobs:
   # SCOPE (#1095, extended 2026-08 to watchdog): the push-event outputs
   # currently gate dns_test/ui_test/watchdog_test/dns_cargo_audit/
   # ui_cargo_audit/watchdog_cargo_audit -- work that already ran and passed on
-  # the PR that produced the push (AG-WF-004 forbids direct master pushes), so
+  # the PR that produced the push (Rule-Ref: AG-WF-004 forbids direct master pushes), so
   # skipping it on a push that did not touch the relevant crate reuses that
   # known-good result. build/build-arm64/container-scan still run the FULL
   # per-service set on push: their should-build/should-scan gates keep their
