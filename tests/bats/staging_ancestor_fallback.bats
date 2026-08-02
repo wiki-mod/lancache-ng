@@ -1776,6 +1776,9 @@ STUB
     run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 0 0 "$git_dir"
     [ "$status" -eq 0 ]
     [ "${lines[-1]}" = "$built_sha" ]
+    # Confirms reused_sha was genuinely walked PAST (not silently skipped
+    # without a trace, and not the candidate actually substituted).
+    [[ "$output" == *"$reused_sha"*"was not touched by it"* ]]
 }
 
 @test "saf_find_built_ancestor: a run-bearing candidate whose service WAS touched by it still stops instead of walking past (JUDGMENT CALL preserved)" {
@@ -1835,6 +1838,11 @@ STUB
     run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 0 0 1 0 0 "$git_dir"
     [ "$status" -ne 0 ]
     [[ "$output" != *"$built_sha"* ]]
+    # The diagnostic must name broken_sha as the candidate that actually
+    # blocked the walk (proves the failure is attributed to the right
+    # commit, not just "some" failure that happens to also not mention
+    # built_sha).
+    [[ "$output" == *"$broken_sha"* ]]
 }
 
 # ---------------------------------------------------------------------------

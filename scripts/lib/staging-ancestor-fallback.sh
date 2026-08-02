@@ -1230,8 +1230,10 @@ saf_find_built_ancestor() {
     local candidate_run_service_untouched_status=0
     saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_run_service_untouched_status=$?
     if (( candidate_run_service_untouched_status == 0 )); then
+      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it -- its image never existing is expected (Step 4 reuse or an unrelated change), not a broken build. Continuing to the next candidate." >&2
       continue
     fi
+    echo "::error::Ancestor candidate $candidate has a confirmed build-push.yml run and $classify_key's own service was touched by it (or that check was inconclusive, status $candidate_run_service_untouched_status), but its $service image never became confirmed-fresh. Stopping here instead of walking further back -- this needs a maintainer look at $candidate's own build-push.yml run." >&2
     return 1
   done <<< "$candidates"
 
