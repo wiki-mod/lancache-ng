@@ -16,14 +16,19 @@
 #
 # This is deliberately narrower than AG-CODE-003's full text (which also
 # covers bare "fixed for #123"/task-ID references): a real audit against
-# this repository's own tracked files (2026-08-02) found ten genuine
+# this repository's own tracked files (2026-08-02) found eighteen genuine
 # instances of exactly this review-chronology sub-pattern still present
-# across nine files (.github/actions/rust-acceleration-preflight/action.yml,
-# .github/workflows/build-push.yml x3, .github/workflows/gc-pr-staging-
-# images.yml x2, scripts/dns-zone-rollback-simulation.sh, services/dns/
-# nats-subscriber/src/main.rs, services/ui/src/main.rs, services/ui/src/
-# routes/dhcp.rs, services/ui/src/routes/domains.rs, services/ui/src/
-# syslog_client.rs) -- fixed alongside adding this guard so it starts clean.
+# across fourteen files (.github/actions/rust-acceleration-preflight/
+# action.yml, .github/workflows/build-push.yml x3, .github/workflows/
+# gc-pr-staging-images.yml x2, scripts/dns-zone-rollback-simulation.sh,
+# services/dns/nats-subscriber/src/main.rs, services/ui/src/main.rs,
+# services/ui/src/routes/dhcp.rs, services/ui/src/routes/domains.rs,
+# services/ui/src/syslog_client.rs, and five tests/bats/*.bats files
+# [proxy_cert_generation.bats, retention_fluent_bit_selflog.bats,
+# setup_nats_secondary_override.bats x2, setup_secondary_docker_compose.bats,
+# watchdog_config_validation.bats] that an earlier, narrower manual grep pass
+# -- scoped only to *.rs/*.sh/*.yml/*.yaml/*.conf/*.template -- had missed
+# entirely) -- fixed alongside adding this guard so it starts clean.
 # Stable historical references to a specific past issue/PR number cited as
 # durable WHY-grounding for a technical claim (e.g. "confirmed live while
 # building issue #400's integration test") are NOT what this script targets
