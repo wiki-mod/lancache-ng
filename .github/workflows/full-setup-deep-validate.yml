@@ -172,21 +172,30 @@ jobs:
     needs: plan
     if: needs.plan.outputs.should_run == 'true' && needs.plan.outputs.pr_staging_available == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # 100 minutes: this job's own scripts/ensure-pr-staging-images.sh runs an
-    # internal ~90-minute poll loop waiting for build-push.yml's staging tags,
-    # so the job timeout must clear that poll budget with headroom, not just
-    # cover the wrapper's own overhead.
+    # 100 minutes: covers scripts/ensure-pr-staging-images.sh's internal poll
+    # loop, not just the wrapper's own overhead.
+    #
+    # Per-service worst case (1200s base + 600s ancestor-short + 1200s
+    # ancestor-extended = 3000s) fits well inside this timeout for one
+    # untouched service; 2+ untouched services hitting worst case
+    # simultaneously can still exceed it (reduced from the previous
+    # 5400/600/5400 = 11400s worst case, 2026-08-02 maintainer-directed cut --
+    # no shared-budget/clamping mechanism added back after removing the prior,
+    # unauthorized one).
     timeout-minutes: 100
     permissions:
       contents: read
       packages: write
       # #895: scripts/ensure-pr-staging-images.sh's congestion probe reads
-      # build-push.yml's own run status for this commit via `gh api
-      # repos/{repo}/actions/workflows/build-push.yml/runs` once the normal
+      # build-push.yml's own run status for this commit from
+      # `/repos/{repo}/actions/workflows/build-push.yml/runs` once the normal
       # poll budget is exceeded, to tell a still-building run apart from a
-      # confirmed-finished one. Reading workflow run status needs this scope
-      # explicitly since the job already narrows permissions below the
-      # repository default.
+      # confirmed-finished one; the same script's untouched-service
+      # ancestor fallback reads that endpoint too. Both go through plain
+      # `curl` + `GH_TOKEN`, never the `gh` CLI (AG-CI-001: `gh` must not be
+      # assumed present on a bare `lancache-light` runner), but the REST
+      # endpoint requires this scope either way, since the job already
+      # narrows permissions below the repository default.
       actions: read
     steps:
       # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so
@@ -244,7 +253,7 @@ jobs:
           # merge commit build-push.yml built and tagged (see this workflow's
           # own BUILD_SHA comment in the "plan" job) -- kept here purely for
           # the congestion probe's log/error text (it names the exact commit
-          # PR_TAG's suffix is keyed on), NOT for the `gh api` query itself
+          # PR_TAG's suffix is keyed on), NOT for the run-status query itself
           # anymore -- see PR_HEAD_SHA below and #975.
           BUILD_SHA: ${{ github.sha }}
           # #975: the PR's real head branch commit, NOT the synthetic merge
@@ -259,9 +268,12 @@ jobs:
           # very same push was still healthily building. The congestion probe
           # now queries by this value instead.
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          # #895: authenticates the congestion probe's `gh api` call (list
-          # workflow runs). Same default token already used for the GHCR
-          # login above, scoped down to actions:read/contents:read/
+          # #895: authenticates the congestion probe's list-workflow-runs
+          # query, and the ancestor fallback's own queries against the same
+          # endpoint. Read straight from the environment by the `curl` call
+          # (never passed as an argv parameter, so it cannot leak into
+          # ghcr_retry's own diagnostics). Same default token already used for
+          # the GHCR login above, scoped down to actions:read/contents:read/
           # packages:write by this job's `permissions:` block.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # #822: lets backfill_from_base's real imagetools create (the exact

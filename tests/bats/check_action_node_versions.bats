@@ -226,6 +226,10 @@ jobs:
       - uses: someorg/rate-limited-action@eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee # v1
 EOF
     mock_curl_response "someorg/rate-limited-action" "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee" "" "action.yml" 403 ""
+    # Single attempt, no backoff: this test asserts the eventual-give-up
+    # warning path, not the retry loop itself (see the dedicated retry test
+    # below) -- keep it fast and independent of the real retry count/timing.
+    export GHCR_RETRY_MAX_ATTEMPTS=1
 
     run "$script" "$fixture_root"
     [ "$status" -eq 0 ]
@@ -238,6 +242,107 @@ EOF
     # empty status every time. Asserting the real status code here would
     # have caught that.
     [[ "$output" == *"HTTP 403"* ]]
+}
+
+@test "retries a transient rate-limit/infra response and recovers on a later attempt" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: someorg/flaky-then-ok-action@ffffffffffffffffffffffffffffffffffffffff # v1
+EOF
+    # A call-counting mock curl: first call for this exact URL returns 403,
+    # every call after that returns 200 with a real action.yml body -- proves
+    # the retry loop actually re-issues the request (not just re-reads a
+    # static fixture) and recovers instead of giving up on the first
+    # transient failure, per AG-CI-013.
+    cat > "$mock_bin_dir/curl" <<'MOCKCURL'
+#!/usr/bin/env bash
+set -euo pipefail
+out_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-o" ]; then
+        out_file="${args[$((i + 1))]}"
+    fi
+done
+url="${args[-1]}"
+key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
+counter_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/$key"
+count=0
+[ -f "$counter_file" ] && count=$(cat "$counter_file")
+count=$((count + 1))
+printf '%s' "$count" > "$counter_file"
+if [ "$count" -eq 1 ]; then
+    printf '' > "$out_file"
+    printf '403'
+else
+    printf 'runs:\n  using: node24\n' > "$out_file"
+    printf '200'
+fi
+MOCKCURL
+    chmod +x "$mock_bin_dir/curl"
+    mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
+    export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
+    export GHCR_RETRY_MAX_ATTEMPTS=3
+    export GHCR_RETRY_BACKOFF_SECONDS=0
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"infrastructure hiccup"* ]]
+    [[ "$output" != *"Could not find action.yml or action.yaml"* ]]
+}
+
+@test "does not retry a permanent 401/400/422 response, even with retries available" {
+    write_workflow <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - uses: someorg/bad-token-action@1111111111111111111111111111111111111111 # v1
+EOF
+    # A call-counting mock curl always returning 401: proves the permanent-
+    # failure classification stops ghcr_retry immediately (GHCR_RETRY_MAX_ATTEMPTS
+    # set well above 1) instead of burning the whole retry budget on a token
+    # that will never suddenly start working -- the actual regression this
+    # AGENTS.md (AG-CI-013) finding was about.
+    cat > "$mock_bin_dir/curl" <<'MOCKCURL'
+#!/usr/bin/env bash
+set -euo pipefail
+out_file=""
+args=("$@")
+for ((i = 0; i < ${#args[@]}; i++)); do
+    if [ "${args[$i]}" = "-o" ]; then
+        out_file="${args[$((i + 1))]}"
+    fi
+done
+url="${args[-1]}"
+key=$(printf '%s' "$url" | sed -E 's#^https://api\.github\.com/repos/##' | tr '/?&=' '____')
+counter_file="${MOCK_CURL_CALL_COUNTS:?MOCK_CURL_CALL_COUNTS not set}/$key"
+count=0
+[ -f "$counter_file" ] && count=$(cat "$counter_file")
+count=$((count + 1))
+printf '%s' "$count" > "$counter_file"
+printf '' > "$out_file"
+printf '401'
+MOCKCURL
+    chmod +x "$mock_bin_dir/curl"
+    mkdir -p "$BATS_TEST_TMPDIR/mock-curl-call-counts"
+    export MOCK_CURL_CALL_COUNTS="$BATS_TEST_TMPDIR/mock-curl-call-counts"
+    export GHCR_RETRY_MAX_ATTEMPTS=5
+    export GHCR_RETRY_BACKOFF_SECONDS=0
+
+    run "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"infrastructure hiccup"* ]]
+    [[ "$output" == *"HTTP 401"* ]]
+
+    local_key="someorg_bad-token-action_contents_action.yml_ref_1111111111111111111111111111111111111111"
+    call_count=$(cat "$BATS_TEST_TMPDIR/mock-curl-call-counts/$local_key")
+    [ "$call_count" -eq 1 ]
 }
 
 @test "fails when a local composite action is referenced but has no action.yml/action.yaml" {
