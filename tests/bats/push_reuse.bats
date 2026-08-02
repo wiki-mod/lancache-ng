@@ -2,7 +2,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free coverage for scripts/lib/push-reuse.sh's push_reuse_decide
-# (Schritt 4, issue #1095): the per-service "is it safe to retag the channel
+# (Step 4, issue #1095): the per-service "is it safe to retag the channel
 # image instead of rebuilding" decision. Mirrors
 # tests/bats/staging_image_freshness.bats's stubbing conventions: sif_image_revision
 # is stubbed via STAGING_IMAGE_REVISION_CMD, sif_is_ancestor_or_equal runs
