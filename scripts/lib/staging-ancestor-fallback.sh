@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared recovery path for the untouched-service back-fill's PR base commit
@@ -890,7 +891,7 @@ saf_base_commit_has_confirmed_run() {
   return 0
 }
 
-# saf_find_built_ancestor <repository> <base_sha> <service> <search_depth> \
+# saf_find_built_ancestor <repository> <base_sha> <service> <classify_key> <search_depth> \
 #     <freshness_timeout_seconds> <freshness_hard_ceiling_seconds> \
 #     <freshness_poll_interval_seconds> \
 #     <extended_timeout_seconds> <extended_hard_ceiling_seconds> [git_dir]
@@ -923,12 +924,14 @@ saf_base_commit_has_confirmed_run() {
 # older one: exactly the same "zero runs alone does not prove a deliberate
 # skip" reasoning saf_base_commit_paths_are_ignorable's own header documents
 # for <base_sha> applies to every candidate walked here too. Before walking
-# past a run-less candidate, this positively confirms that candidate's own
-# changed paths also all match the ignore list; if that check is anything
-# other than a positive confirmation (a real non-doc path, or an
-# inconclusive diff), this stops and fails rather than silently substituting
-# an older ancestor that could omit a real, unbuilt change at that
-# candidate.
+# past a run-less candidate, this positively confirms EITHER that
+# <classify_key>'s own service was untouched by that candidate's own diff
+# (saf_base_commit_service_untouched -- the same service-scoped route
+# saf_resolve_untouched_backfill_source's own BASE_SHA decision uses) OR that
+# every path it changed matches the commit-wide ignore list
+# (saf_base_commit_paths_are_ignorable); if NEITHER is a positive
+# confirmation, this stops and fails rather than silently substituting an
+# older ancestor that could omit a real, unbuilt change at that candidate.
 #
 # A candidate whose run-check itself is INCONCLUSIVE (saf_base_commit_has_confirmed_run
 # returns 2 -- GH_TOKEN unset, API error after retries, malformed response)
@@ -946,7 +949,7 @@ saf_base_commit_has_confirmed_run() {
 # built commit that only ever existed on a side/feature branch before
 # reaching the actual previous target-branch state (<base_sha>^1). That
 # side-branch commit's image does not represent "the target branch
-# immediately before this commit" and can omit real target-branch changes --
+# immediately before <base_sha>" and can omit real target-branch changes --
 # exactly the kind of stale-content risk this whole mechanism exists to
 # avoid. `--first-parent` walks only the same first-parent chain
 # saf_base_commit_diff_paths already uses, so "nearest built ancestor" and
@@ -969,27 +972,33 @@ saf_base_commit_has_confirmed_run() {
 # convention for calling these out explicitly -- see
 # scripts/lib/staging-image-freshness.sh's own JUDGMENT CALL comment): if a
 # run-bearing candidate's freshness proof still fails even after the one
-# activity-confirmed extended retry above, this function stops and reports
-# failure immediately; it does NOT keep walking further back. Stacking many
-# bounded waits (each up to <extended_hard_ceiling_seconds>) across up to
-# <search_depth> candidates would be a worse failure mode than the
-# structural problem this mechanism exists to solve, and reaching further
-# and further back in history for a substitute risks the same stale-content
-# class of bug this file exists to avoid. A commit with a real, seemingly-
-# broken build (confirmed not active, or its activity inconclusive) is a
-# genuine CI problem worth surfacing on its own, not a reason to keep
-# hunting for an even older substitute.
+# activity-confirmed extended retry above, this function normally stops and
+# reports failure immediately rather than walking further back -- UNLESS
+# <classify_key>'s own service is confirmed untouched by that candidate's own
+# diff (saf_base_commit_service_untouched), in which case the run existing
+# says nothing about whether <service> was ever built there (Step 4 / #1095
+# reuse, confirmed live 2026-08-02, never creates a fresh per-commit tag for
+# a reused service), and this continues to the next candidate instead.
+# Stacking many bounded waits (each up to <extended_hard_ceiling_seconds>)
+# across up to <search_depth> candidates would still be a worse failure mode
+# than the structural problem this mechanism exists to solve, and reaching
+# further and further back in history for a substitute still risks the same
+# stale-content class of bug this file exists to avoid -- so a candidate
+# whose service WAS actually touched (or whose service-scoped check is
+# inconclusive) still stops here: a real, seemingly-broken build for a
+# service-affecting commit is a genuine CI problem worth surfacing on its
+# own, not a reason to keep hunting for an even older substitute.
 #
 # Echoes the confirmed-good ancestor's full commit SHA on stdout on success;
 # returns non-zero with no output if no usable ancestor is found within the
 # bounded depth. All human-readable diagnostic output goes to stderr, same
 # discipline as sif_wait_for_fresh_base_image.
 saf_find_built_ancestor() {
-  local repository="$1" base_sha="$2" service="$3" search_depth="$4"
-  local freshness_timeout_seconds="$5" freshness_hard_ceiling_seconds="$6"
-  local freshness_poll_interval_seconds="$7"
-  local extended_timeout_seconds="$8" extended_hard_ceiling_seconds="$9"
-  local git_dir="${10:-.}"
+  local repository="$1" base_sha="$2" service="$3" classify_key="$4" search_depth="$5"
+  local freshness_timeout_seconds="$6" freshness_hard_ceiling_seconds="$7"
+  local freshness_poll_interval_seconds="$8"
+  local extended_timeout_seconds="$9" extended_hard_ceiling_seconds="${10}"
+  local git_dir="${11:-.}"
   # sif_wait_for_fresh_base_image (called below) delegates its own ancestry
   # check to sif_is_ancestor_or_equal, which reads STAGING_FRESHNESS_GIT_DIR
   # from the environment rather than taking a git_dir argument -- setting it
@@ -1096,48 +1105,54 @@ saf_find_built_ancestor() {
       # older, built ancestor would back-fill content that omits that real
       # change -- the exact #626/#808 class of bug this whole mechanism must
       # not reintroduce. So before skipping this candidate and continuing
-      # further back, positively confirm ITS OWN changed paths also all
-      # match the ignore list; only then is walking past it actually safe.
-      candidate_paths_status=0
-      saf_base_commit_paths_are_ignorable "$candidate" "$git_dir" || candidate_paths_status=$?
-      if (( candidate_paths_status != 0 )); then
-        # Before failing closed: "zero recorded runs" is only ever a PROXY
-        # for "never built", and that proxy has a real blind spot GitHub
-        # Actions itself creates -- workflow run history has a finite
-        # retention window (project-configurable, commonly 90 days), while
-        # this project's own durable per-commit `sha-<short>` image tags
-        # (docs/release-versioning.md) are not subject to that retention at
-        # all. A candidate built long enough ago that its run record has
-        # since expired would report "zero runs" here even though it
-        # genuinely WAS built and its image still exists -- and since a real
-        # (non-doc) candidate almost always fails the paths check above,
-        # this combination would make the whole ancestor-fallback mechanism
-        # silently and permanently unusable past that retention window for
-        # any repository/branch old enough to have candidates that predate
-        # it. The image's own existence and correct per-commit labeling
-        # (sif_wait_for_fresh_base_image, exactly the same check the
-        # has_run==0 branch below already performs, same short budget) is
-        # STRONGER, retention-independent proof of a genuine build than the
-        # run-query's answer -- if it succeeds, a real build unambiguously
-        # did happen here regardless of what the (possibly expired) run
-        # record says, so this candidate is exactly as safe to use as the
-        # has_run==0 case already is. Only when the image ALSO does not
-        # exist does this remain a genuine, unbuilt real change that must
-        # still fail closed.
-        ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
-        # allow_reverse_ancestry=true: $ancestor_image is always an
-        # immutable per-commit sha-tag here (never a mutable channel tag),
-        # so a label that predates $candidate is exactly build-push.yml's
-        # own Schritt 4 retag-unchanged-image signature, already verified
-        # content-equivalent -- see sif_wait_for_fresh_base_image's own
-        # header for the full reasoning.
-        if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
-          "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
-          printf '%s\n' "$candidate"
-          return 0
+      # further back, positively confirm EITHER that <classify_key>'s own
+      # service was untouched by this candidate's own diff (cheaper, checked
+      # first) OR that its changed paths also all match the commit-wide
+      # ignore list; only then is walking past it actually safe.
+      candidate_service_untouched_status=0
+      saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_service_untouched_status=$?
+      if (( candidate_service_untouched_status != 0 )); then
+        candidate_paths_status=0
+        saf_base_commit_paths_are_ignorable "$candidate" "$git_dir" || candidate_paths_status=$?
+        if (( candidate_paths_status != 0 )); then
+          # Before failing closed: "zero recorded runs" is only ever a PROXY
+          # for "never built", and that proxy has a real blind spot GitHub
+          # Actions itself creates -- workflow run history has a finite
+          # retention window (project-configurable, commonly 90 days), while
+          # this project's own durable per-commit `sha-<short>` image tags
+          # (docs/release-versioning.md) are not subject to that retention at
+          # all. A candidate built long enough ago that its run record has
+          # since expired would report "zero runs" here even though it
+          # genuinely WAS built and its image still exists -- and since a real
+          # (non-doc, service-affecting) candidate almost always fails both
+          # checks above, this combination would make the whole
+          # ancestor-fallback mechanism silently and permanently unusable past
+          # that retention window for any repository/branch old enough to
+          # have candidates that predate it. The image's own existence and
+          # correct per-commit labeling (sif_wait_for_fresh_base_image,
+          # exactly the same check the has_run==0 branch below already
+          # performs, same short budget) is STRONGER, retention-independent
+          # proof of a genuine build than the run-query's answer -- if it
+          # succeeds, a real build unambiguously did happen here regardless of
+          # what the (possibly expired) run record says, so this candidate is
+          # exactly as safe to use as the has_run==0 case already is. Only
+          # when the image ALSO does not exist does this remain a genuine,
+          # unbuilt real change that must still fail closed.
+          ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
+          # allow_reverse_ancestry=true: $ancestor_image is always an
+          # immutable per-commit sha-tag here (never a mutable channel tag),
+          # so a label that predates $candidate is exactly build-push.yml's
+          # own Schritt 4 retag-unchanged-image signature, already verified
+          # content-equivalent -- see sif_wait_for_fresh_base_image's own
+          # header for the full reasoning.
+          if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" \
+            "$freshness_timeout_seconds" "$freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+          echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but neither $classify_key's own service-scoped diff nor its changed paths overall could be positively confirmed as untouched/ignorable (service status $candidate_service_untouched_status, paths status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either), and its own per-commit image could not be confirmed to exist either (checked directly, independent of run history, precisely because run retention can expire while the image itself does not). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
+          return 1
         fi
-        echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but its changed paths could not be positively confirmed to all match build-push.yml's own paths-ignore list (status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either), and its own per-commit image could not be confirmed to exist either (checked directly, independent of run history, precisely because run retention can expire while the image itself does not). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
-        return 1
       fi
       continue
     fi
@@ -1198,8 +1213,27 @@ saf_find_built_ancestor() {
     fi
 
     # Found a run-bearing candidate whose image never became confirmed-fresh
-    # -- even after the activity-confirmed extended retry, if one applied --
-    # per the JUDGMENT CALL above, stop here instead of walking further back.
+    # -- even after the activity-confirmed extended retry, if one applied.
+    # Before applying the JUDGMENT CALL above (stop, do not walk further):
+    # this run existing at all says nothing about whether it actually built
+    # <service> specifically -- a real push that only changed OTHER services
+    # is exactly this project's Step 4 (#1095) reuse behavior, confirmed live
+    # 2026-08-02 (a Step 4 reuse push never creates a fresh sha-<commit> tag
+    # for the reused service). If <classify_key>'s own service was untouched
+    # by THIS candidate's own diff, its image never existing is that same
+    # expected, safe-to-walk-past shape, not a broken build -- continue to
+    # the next candidate instead of stopping. Only when the service WAS
+    # actually touched (or the check is inconclusive) does the original
+    # JUDGMENT CALL still apply: a real, seemingly-broken build for a
+    # service-affecting commit is a genuine CI problem worth surfacing on its
+    # own, not a reason to keep hunting for an even older substitute.
+    local candidate_run_service_untouched_status=0
+    saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_run_service_untouched_status=$?
+    if (( candidate_run_service_untouched_status == 0 )); then
+      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it -- its image never existing is expected (Step 4 reuse or an unrelated change), not a broken build. Continuing to the next candidate." >&2
+      continue
+    fi
+    echo "::error::Ancestor candidate $candidate has a confirmed build-push.yml run and $classify_key's own service was touched by it (or that check was inconclusive, status $candidate_run_service_untouched_status), but its $service image never became confirmed-fresh. Stopping here instead of walking further back -- this needs a maintainer look at $candidate's own build-push.yml run." >&2
     return 1
   done <<< "$candidates"
 
@@ -1374,7 +1408,7 @@ saf_resolve_untouched_backfill_source() {
       printf '%s\n' "$base_image"
       return 0
     fi
-    if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
+    if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$classify_key" "$ancestor_search_depth" \
       "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
       "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
@@ -1431,7 +1465,7 @@ saf_resolve_untouched_backfill_source() {
   fi
 
   echo "::notice::$post_reason -- not a broken build. Searching up to $ancestor_search_depth ancestor commits for the nearest one with both a recorded build-push.yml run and a freshness-confirmed $service image to back-fill from instead." >&2
-  if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$ancestor_search_depth" \
+  if ! ancestor_sha="$(saf_find_built_ancestor "$repository" "$base_sha" "$service" "$classify_key" "$ancestor_search_depth" \
     "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" \
     "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" "$git_dir")"; then
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2

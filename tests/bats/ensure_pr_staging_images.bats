@@ -813,7 +813,7 @@ STUB
     printf '%s\n' "$output" | grep -q "No usable ancestor"
     # Confirms the specific internal path this comment describes actually
     # fired (not just some other, differently-worded failure).
-    printf '%s\n' "$output" | grep -q "changed paths could not be positively confirmed"
+    printf '%s\n' "$output" | grep -q "service-scoped diff nor its changed paths"
     [ "$(wc -l < "$backfill_log")" -eq 0 ]
 }
 
