@@ -42,10 +42,12 @@
 //! full-stack validation), not because of the file-retention passes above.
 //!
 //! Also deliberately unchanged from today: no live startup-grace-period
-//! timer. `check_and_maybe_restart()` in the bash never treated a `starting`
-//! Docker health status specially beyond leaving both the failure counter
-//! and the health string alone (see [`health::HealthReading`]'s doc
-//! comment) -- that omission-by-inaction *is* today's only grace period.
+//! timer. `check_and_maybe_restart()` in the bash always publishes the raw
+//! reading into the caller's health string, `starting` included -- the
+//! *only* thing it (and this crate's [`health::FailureCounter`]) skips for
+//! `starting` is touching the failure counter, neither incrementing nor
+//! resetting it (see [`health::HealthReading`]'s doc comment) -- that
+//! counter omission-by-inaction *is* today's only grace period.
 //! [`config::MonitoredService`] carries a `grace_period` field for a future
 //! real timer, but it is unused today (see that struct's own doc comment).
 

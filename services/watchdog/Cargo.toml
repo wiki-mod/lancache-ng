@@ -64,9 +64,12 @@ tokio = { version = "1", features = ["full"] }
 # STALE_AFTER staleness check reads this file's mtime, not this field, but
 # the field is still operator-visible in the dashboard). No other crate in
 # this repository formats dates yet, so this is a new, deliberate addition,
-# not a reuse -- chosen over `chrono` for a smaller dependency footprint (no
-# proc-macro, no pulled-in timezone database) since only UTC, fixed-format
-# rendering is needed here, never timezone conversion or parsing.
+# not a reuse -- chosen over `chrono` for a smaller dependency footprint
+# (no pulled-in timezone database; the "macros" feature below does still
+# pull in the small time-macros proc-macro crate for the compile-time
+# `format_description!` used by both timestamp call sites) since only UTC,
+# fixed-format rendering is needed here, never timezone conversion or
+# parsing.
 time = { version = "0.3", features = ["formatting", "macros"] }
 
 # Deliberate release-profile tuning, matching services/ui's and
