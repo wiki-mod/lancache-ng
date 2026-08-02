@@ -157,11 +157,40 @@ RUN --mount=type=secret,id=sccache_redis_url \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build
 
-FROM mirror.gcr.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
 
+# trixie-backports is the standard package source for this image (maintainer
+# decision, 2026-07-30, mirrored from services/proxy/Dockerfile) -- not scoped
+# to any single package: `Package: *` at Pin-Priority 500 (tied with the
+# regular trixie archive) applies project-wide to every Debian-based image, so
+# ordinary version-comparison rules pick whichever archive has the newer
+# version for ANY package this stage installs. `apt-get dist-upgrade` then
+# `apt-get full-upgrade` are both run deliberately (a maintainer decision to
+# keep both explicit, even though modern apt treats `full-upgrade` as the same
+# operation `dist-upgrade` performs) so any package backports has already
+# patched gets picked up on every rebuild, not only whatever prompted the
+# original policy decision.
+#
+# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
+# APT's `a=`/release-Archive selector matches the Release file's `Suite:`
+# field, and trixie-backports' own Release file declares
+# `Suite: stable-backports` / `Codename: trixie-backports` -- the two are not
+# interchangeable. Using `a=trixie-backports` silently never matches anything
+# (apt-cache policy still shows backports at its Debian-default priority 100),
+# so every "backports-sourced" package would silently stay on the plain-trixie
+# version despite the pin file being present -- this was caught for real on
+# services/proxy/Dockerfile by building the image and checking the installed
+# package version rather than trusting the Dockerfile comment; see that file's
+# own history for the incident.
+#
 # Debian package triggers try to start services during image builds; the entrypoint starts PDNS instead.
+# The stub is restored to the real invoke-rc.d (not just left in place) once this
+# layer's installs finish, via a trap so it runs even if apt-get itself fails --
+# so a future RUN layer, or anything inspecting this image, still finds the real
+# invoke-rc.d rather than a permanent no-op stub that outlives the one install it
+# was needed for.
 RUN set -eu; \
     export DEBIAN_FRONTEND=noninteractive; \
     cleanup_invoke_rc_d() { \
@@ -172,7 +201,9 @@ RUN set -eu; \
     if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
     printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
     chmod +x /usr/sbin/invoke-rc.d; \
-    apt-get update && apt-get install -y --no-install-recommends \
+    echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list; \
+    printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports; \
+    apt-get update && apt-get dist-upgrade -y && apt-get full-upgrade -y && apt-get install -y --no-install-recommends \
     pdns-recursor \
     pdns-server \
     pdns-backend-sqlite3 \
@@ -184,6 +215,7 @@ RUN set -eu; \
     nano \
     lsof \
     ripgrep \
+    curl \
     && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
     && locale-gen \
     && rm -rf /var/lib/apt/lists/*
@@ -191,6 +223,14 @@ RUN set -eu; \
 ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # nano/lsof/ripgrep: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.
+# curl: unlike Kea's Control Agent (reachable from the host directly via
+# network_mode: host), nats-subscriber's zone-rollback listener (port 8083,
+# see rollback_listener.rs) is only `expose`d to the Compose network, never
+# published to the host -- so `setup.sh reset-to-last-known-good-config
+# dns`/`pdns` reaches it via `docker compose exec` into THIS container
+# rather than calling it directly from the host. dhcp/proxy/ui/watchdog
+# already carry curl for comparable internal/operational HTTP calls; this
+# is the same justification, not a new pattern.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 

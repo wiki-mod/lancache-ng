@@ -69,11 +69,7 @@ pub struct ProbeResult {
 /// is exactly `10/8`, `172.16/12`, and `192.168/16`.
 pub fn parse_private_ipv4(s: &str) -> Option<Ipv4Addr> {
     let addr: Ipv4Addr = s.trim().parse().ok()?;
-    if addr.is_private() {
-        Some(addr)
-    } else {
-        None
-    }
+    if addr.is_private() { Some(addr) } else { None }
 }
 
 /// Builds a standard DNS query message for the `lan.` SOA record with the given
@@ -321,14 +317,14 @@ mod tests {
         m.extend_from_slice(&1u16.to_be_bytes()); // ANCOUNT
         m.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
         m.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-                                                  // Question: lan. SOA IN
+        // Question: lan. SOA IN
         m.extend_from_slice(&[0x03, b'l', b'a', b'n', 0x00, 0x00, 0x06, 0x00, 0x01]);
         // Answer: name = compression pointer to offset 12 (the question name).
         m.extend_from_slice(&[0xC0, 0x0C]);
         m.extend_from_slice(&QTYPE_SOA.to_be_bytes()); // TYPE SOA
         m.extend_from_slice(&QCLASS_IN.to_be_bytes()); // CLASS IN
         m.extend_from_slice(&3600u32.to_be_bytes()); // TTL
-                                                     // RDATA: mname=ns.lan. rname=hostmaster.lan. serial refresh retry expire minimum
+        // RDATA: mname=ns.lan. rname=hostmaster.lan. serial refresh retry expire minimum
         let mut rdata = Vec::new();
         rdata.extend_from_slice(&[0x02, b'n', b's', 0xC0, 0x0C]); // ns + ptr to lan.
         rdata.extend_from_slice(&[0x0A]);

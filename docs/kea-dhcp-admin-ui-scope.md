@@ -63,7 +63,7 @@ Routes are registered in `services/ui/src/main.rs`; handlers live in
 | Per-subnet DHCP options | `POST /dhcp/subnet/option/{add,remove}` | `add_subnet_option` / `remove_subnet_option`; option code parsed by `parse_custom_dhcp_option_code` — **numeric codes 1–254 only today** (see §2, open issue #1085) |
 | Static reservations (MAC → IP) | `POST /dhcp/static/{add,remove}` | `add_reservation` / `remove_reservation` |
 | Release an active lease | `POST /dhcp/lease/release` | `release_lease` → Kea `lease4-del`; **does not remove the DDNS-created A/PTR records** (open issue #1083, see §3) |
-| DHCP conflict pre-check ("DHCP-Precheck") | `POST /api/dhcp/check` | `check_dhcp_conflict` — probes for a foreign DHCP server before activation; CSRF-exempt GET-style probe (#947/#978) |
+| DHCP conflict pre-check ("DHCP-Precheck") | `POST /api/dhcp/check` | `check_dhcp_conflict` — probes for a foreign DHCP server before activation; converted from a CSRF-exempt `GET` to `POST` with an explicit `verify_csrf_header` check by #978 (was CSRF-exempt only before that fix; see `docs/capability-inventory/SoT-ui-routes.md` for the full history) |
 | Kea config snapshot rollback | `POST /dhcp/snapshot/rollback` | `rollback_kea_snapshot` (#614) |
 
 ### 1c. Not settings — read-only status surfaces

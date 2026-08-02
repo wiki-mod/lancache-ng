@@ -47,22 +47,35 @@ until *all three* background jobs exit -- if exactly one daemon dies, PID 1
 never exits and Docker's restart policy never fires (tracked as bug-hunt
 finding #1, already in `docs/bug-hunt/dhcp.md`, not repeated in full here).
 
-**Dockerfile**: built `FROM debian:trixie-slim`, installs
-`kea-dhcp4-server`, `kea-ctrl-agent`, `kea-dhcp-ddns-server`, `kea-admin`,
-plus `nmap`, `gettext` (`envsubst`), `openssl`, `curl`, `jq`, `iptables`.
-`nmap` is present in this image for exactly one caller: `setup.sh`'s
+**Dockerfile**: at the time this section was audited (`origin/v0.2.0`), built
+`FROM debian:trixie-slim`, installing `kea-dhcp4-server`, `kea-ctrl-agent`,
+`kea-dhcp-ddns-server`, `kea-admin`, plus `nmap`, `gettext` (`envsubst`),
+`openssl`, `curl`, `jq`, `iptables`. **Stale as of issue #815's Kea-stage
+migration**: on `current_dev`, the base image is now
+`mirror.gcr.io/library/alpine:3.24` and the package names are `kea-dhcp4`,
+`kea-ctrl-agent`, `kea-dhcp-ddns`, `kea-admin`, plus the separately-packaged
+`kea-hook-lease-cmds` (Alpine splits every Kea hook into its own package,
+unlike Debian which bundles `libdhcp_lease_cmds.so` into `kea-dhcp4-server`
+directly), `bash`, `gettext-envsubst`, `nmap`, `openssl`, `curl`, `jq`,
+`iptables` -- see §12's #815 entry. The rest of this section's behavioral
+description (entrypoint logic, trap/wait behavior, nmap passthrough) is
+unaffected by the base-image swap and remains accurate. `nmap` is present in
+this image for exactly one caller: `setup.sh`'s
 `run_kea_dhcp_activation_preflight()` (see §7), which runs
 `docker compose ... run --rm --no-deps dhcp nmap --script
 broadcast-dhcp-discover ...` -- this is caught by `entrypoint.sh`'s very
 first `case "${1:-}" in nmap|/usr/bin/nmap|/bin/nmap) exec "$@" ;; esac`
 (lines 175-179), which bypasses the entire Kea startup sequence and execs
 `nmap` directly. This is a **separate** rogue-DHCP-server discovery
-mechanism from the Admin UI's own `GET /api/dhcp/check` (`dhcp.rs`'s
-`run_dhcp_probe`), which runs `nmap` inside the **`ui`** image's own
-`dhcp-probe` container instead (`services/ui/dhcp-probe.sh`, which also
-installs `nmap` -- `services/ui/Dockerfile` line 461) -- same underlying
-technique, two independent trigger points (one-time pre-activation setup
-gate vs. on-demand Admin UI page action), not shared code.
+mechanism from the Admin UI's own `POST /api/dhcp/check`
+(`dhcp.rs`'s `check_dhcp_conflict`/`check_dhcp_probe`), which runs inside
+the **`ui`** image's own `dhcp-probe` container instead -- since #1288/#1336,
+that container runs a from-scratch native Rust DHCPv4 client
+(`services/ui/src/dhcp_probe_native.rs`), not `nmap`; the former
+`services/ui/dhcp-probe.sh` (`nmap --script broadcast-dhcp-discover`) was
+deleted as part of that rewrite. Two independent trigger points (one-time
+pre-activation setup gate here vs. on-demand Admin UI page action there),
+not shared code, and no longer the same underlying technique either.
 
 `EXPOSE 67/udp 8000`. `chmod +x /entrypoint.sh` at build time -- this
 combined with `ENTRYPOINT ["/entrypoint.sh"]` is why the executable bit
@@ -87,11 +100,11 @@ copies in `services/dns/entrypoint.sh` and
   Deliberately narrower than `setup.sh`'s own separate
   `secret_value_is_placeholder()` in two ways (documented, not
   reconciled -- maintainer's Option B decision on #967): does not recognize
-  the legacy `lancache-*-secret` template shape (because
-  `deploy/dev/docker-compose.yml`/`deploy/dev/.env` ship a real, working
-  dev secret in exactly that shape, e.g. the dev `KEA_CTRL_TOKEN` value
-  below) or a bare infix `change-me`/`change_me` without a
-  `CHANGE_ME`/`changeme` **prefix**.
+  the legacy `lancache-*-secret` template shape (because the now-retired
+  `deploy/dev/docker-compose.yml`/`deploy/dev/.env`, v0.3.0 #766, shipped a
+  real, working dev secret in exactly that shape, e.g. the former dev
+  `KEA_CTRL_TOKEN` value below -- kept as a regression case) or a bare infix
+  `change-me`/`change_me` without a `CHANGE_ME`/`changeme` **prefix**.
 - **`resolve_shared_secret(name, current_value_or_empty, gen_func)`** -- if
   a non-empty configured value is passed, uses it verbatim (never persisted
   to the shared volume -- every container already reads the same `.env`).
@@ -127,10 +140,12 @@ copies in `services/dns/entrypoint.sh` and
   `docs/threat-model.md` T12), has no safe degraded mode for DDNS and
   always requires a real key.
 - **Real config values, not placeholders, by design**:
-  `deploy/dev/.env`'s `KEA_CTRL_TOKEN=lancache-dev-kea-control-token-change-me`
-  is a genuine working dev secret (the `-change-me` **infix**, not a
+  the now-retired `deploy/dev/.env`'s (v0.3.0, #766)
+  `KEA_CTRL_TOKEN=lancache-dev-kea-control-token-change-me` was a genuine
+  working dev secret (the `-change-me` **infix**, not a
   `CHANGE_ME`/`changeme` prefix, is exactly the shape `secret_is_placeholder`
-  is documented to deliberately not match) -- `deploy/prod/.env` and
+  is documented to deliberately not match, kept as a regression case) --
+  `deploy/prod/.env` and
   `deploy/quickstart/.env` both ship the literal
   `KEA_CTRL_TOKEN=CHANGE_ME_KEA_CTRL_TOKEN`, which *does* match (prefix
   `change_me`) and is expected to be regenerated/operator-replaced.
@@ -353,14 +368,16 @@ High-Availability hook command.
   known-good snapshot (§9), reusing the same `config-test → config-set →
   config-write` chain, membership-checked against `list_snapshot_ids`
   (path-traversal guard).
-- `GET /api/dhcp/check` -- on-demand rogue-DHCP-server discovery (§1's `ui`
-  image path, distinct from `setup.sh`'s). Since PR #978, this route is
-  explicitly CSRF-exempted-as-a-`GET` **but validated as actually mutating
-  state** (starts/stops the `dhcp-probe` container) -- `dhcp.html` fires it
-  automatically via `DOMContentLoaded`, so simply loading the `/dhcp` page
-  triggers a real container restart + broadcast nmap scan on every page
-  view (already flagged in the sibling `ui-core`/`ui-routes` bug-hunt
-  passes, not repeated in full here).
+- `POST /api/dhcp/check` -- on-demand rogue-DHCP-server discovery (§1's `ui`
+  image path, distinct from `setup.sh`'s). Since PR #978, this is a POST
+  route with header-only CSRF protection (`verify_csrf_header`), matching
+  its real side effect (starts/stops the `dhcp-probe` container). `dhcp.html`
+  only registers its `DOMContentLoaded` auto-run inside the
+  `{% if dhcp_has_kea %}` block, so this fires on page load only when Kea is
+  already the active DHCP mode -- an on-demand/post-activation status probe,
+  not a pre-activation guard; `update_dhcp_mode` itself proceeds straight to
+  `reconcile_dhcp_mode` without ever calling it, so switching into Kea mode
+  can complete without this check running at all.
 - `POST /dhcp/mode`, `/dhcp/proxy` -- whole-stack DHCP mode switch
   (`disabled`/`kea`/`dnsmasq-proxy`) and dnsmasq-proxy field configuration
   (out of this Kea-scoped inventory's depth).
@@ -453,6 +470,12 @@ mocked unit coverage (already tracked as issue #837, open, v0.3.0).
   never filed as its own issue until this pass.
 - **#159** (protect Kea Control Agent from LAN exposure) -- CLOSED; the
   iptables chain (§3) is present and self-healing.
+- **#815** (Evaluate migrating DNS/DHCP services to Alpine base images) --
+  **OPEN**; this service's Dockerfile was migrated to
+  `mirror.gcr.io/library/alpine:3.24` (Kea 3.0.3 LTS) as the second stage
+  of this issue's own staged (dnsmasq-first) migration -- see §1's updated
+  note. `services/dns` (PowerDNS) remains on Debian, issue stays open for
+  that stage.
 
 ## 13. Summary
 

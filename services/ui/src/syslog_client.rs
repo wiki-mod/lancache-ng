@@ -532,8 +532,8 @@ mod tests {
     }
 
     fn write_gz(dir: &Path, host: &str, name: &str, content: &str) {
-        use flate2::write::GzEncoder;
         use flate2::Compression;
+        use flate2::write::GzEncoder;
         let host_dir = dir.join(host);
         fs::create_dir_all(&host_dir).expect("create host dir");
         let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
@@ -684,10 +684,11 @@ mod tests {
     // Regression test for #859: the #758 fix above only guarantees every
     // host's newest *file* gets opened before collection stops -- it does
     // nothing to protect a quiet host's lines from the final merge step.
-    // Before this fix, `collected.sort_by(timestamp)` + truncate-to-`limit`
-    // was host-blind: hostQuiet's single old line here would be sorted
-    // ahead of every one of hostNoisy's 50 newer lines and truncated away
-    // entirely, even though hostQuiet's file was opened and read correctly.
+    // Without host-aware handling here, `collected.sort_by(timestamp)` +
+    // truncate-to-`limit` is host-blind: hostQuiet's single old line here
+    // would be sorted ahead of every one of hostNoisy's 50 newer lines and
+    // truncated away entirely, even though hostQuiet's file was opened and
+    // read correctly.
     #[test]
     fn parse_syslog_tail_does_not_starve_a_quiet_host_at_the_final_merge_step() {
         let root = temp_root("quiet-merge");
@@ -849,9 +850,11 @@ mod tests {
 
         let entries = parse_syslog_tail(root.to_str().unwrap(), Some("hostA"), 10);
         assert_eq!(entries.len(), 3);
-        assert!(entries
-            .iter()
-            .any(|e| e.message == "not a syslog line at all"));
+        assert!(
+            entries
+                .iter()
+                .any(|e| e.message == "not a syslog line at all")
+        );
         assert!(entries.iter().any(|e| e.message == "good line"));
         assert!(entries.iter().any(|e| e.message == "another good line"));
 

@@ -74,8 +74,17 @@
 # repos' Contents API works fine too at this repo's current scale).
 set -euo pipefail
 
+# Own script directory, independent of $repo_root below: $repo_root can be
+# overridden to a throwaway fixture tree by tests/bats/check_action_node_versions.bats,
+# which never has its own scripts/lib/ghcr-retry.sh -- this file's location
+# on disk never moves just because the tree it's asked to *scan* does.
+script_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$repo_root"
+
+# shellcheck source=scripts/lib/ghcr-retry.sh
+source "$script_lib_dir/ghcr-retry.sh"
 
 workflow_dir=.github/workflows
 actions_dir=.github/actions
@@ -197,42 +206,132 @@ gh_token="${GH_TOKEN:-${GITHUB_TOKEN:-}}"
 # the warning printed an empty status every time). Encoding everything into
 # the one stdout stream this function already returns avoids that trap
 # entirely.
+# Bounded retry for the transient case only, via this project's shared
+# scripts/lib/ghcr-retry.sh wrapper (AG-CI-013: flaky external CI operations
+# need a documented retry matching the established pattern, not a bare
+# single attempt or a bespoke one-off loop). This repo pins ~15 distinct
+# external action refs, several referenced from multiple workflow files
+# (e.g. `aquasecurity/trivy-action` from build-push.yml, build-tools.yml,
+# and build-push-hosted-fallback.yml combined); every service/build job in a
+# single CI run invokes this whole script independently, so the same hot
+# ref can get requested by several parallel jobs within moments of each
+# other. Confirmed live (2026-08-01): this exact ref hit a 403 in ~82% of a
+# 20-run sample, every other pinned ref resolving cleanly in the same runs
+# -- consistent with GitHub's secondary/abuse rate limiter tripping on one
+# heavily-concurrent-requested resource, not a general token-quota
+# exhaustion (which would hit refs more evenly).
+#
+# Retrying a genuinely permanent failure (an invalid token, a malformed
+# request) wastes the whole backoff budget on an outcome retrying can never
+# change -- ghcr_retry's GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE exists
+# exactly for this (see scripts/lib/ghcr-retry.sh), so
+# _fetch_action_yaml_attempt below classifies each non-200/404 status into
+# permanent (stop immediately) or transient (keep retrying) before handing
+# off to ghcr_retry, mirroring scripts/lib/staging-ancestor-fallback.sh's
+# own identical 401-is-permanent/everything-else-retryable classification
+# for the same GitHub REST API. 404 (definitive not-found) and 200
+# (success) still resolve on the first attempt with no retry at all, since
+# neither benefits from one.
 fetch_external_action_yaml() {
   local owner="$1" repo="$2" subpath="$3" ref="$4"
-  local file body status auth=()
-  if [ -n "$gh_token" ]; then
-    auth=(-H "Authorization: Bearer ${gh_token}")
-  fi
+  local file result last_line
   for file in action.yml action.yaml; do
-    body="$(mktemp)"
-    status=$(curl -sS -o "$body" -w '%{http_code}' \
-      -H "Accept: application/vnd.github.raw+json" \
-      "${auth[@]}" \
-      "https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}" 2>/dev/null) || status="000"
-    case "$status" in
-      200)
-        printf 'OK\n'
-        cat "$body"
-        rm -f "$body"
-        return 0
-        ;;
-      404)
-        rm -f "$body"
-        continue
-        ;;
-      *)
-        printf 'INFRA:%s\n' "$status"
-        rm -f "$body"
-        return 0
-        ;;
-    esac
+    result="$(ghcr_retry "n/a-not-a-real-registry" "" "" -- \
+      _fetch_action_yaml_attempt "$owner" "$repo" "$subpath" "$ref" "$file")" || true
+    # ghcr_retry passes through the wrapped command's stdout on EVERY attempt,
+    # not only the last one, so $result can be several attempts' output
+    # stacked back to back (e.g. "INFRA:403\nOK\n<body>" after one failed try
+    # then a recovered one). A bare "OK" line only ever appears as the first
+    # line of a genuinely successful attempt's own output -- extracting from
+    # that exact line to the end recovers the real answer regardless of how
+    # much earlier-attempt noise precedes it.
+    if printf '%s\n' "$result" | grep -qx 'OK'; then
+      printf '%s\n' "$result" | sed -n '/^OK$/,$p'
+      return 0
+    fi
+    last_line="$(printf '%s\n' "$result" | tail -1)"
+    if [ "$last_line" = "NOTFOUND" ]; then
+      continue
+    fi
+    # Any other outcome (a transient failure that exhausted every retry, or
+    # an immediate permanent-failure classification) matches the pre-existing
+    # behavior: give up right here rather than also trying the second
+    # filename -- a definitive non-404 failure on the first file says
+    # nothing useful about whether the second file would differ.
+    printf '%s\n' "$(printf '%s\n' "$result" | grep -oE 'INFRA:[0-9]{3}' | tail -1)"
+    return 0
   done
   printf 'NOTFOUND\n'
   return 0
 }
 
+# _fetch_action_yaml_attempt <owner> <repo> <subpath> <ref> <file>
+# One HTTP attempt against the Contents API. Prints to stdout:
+#   OK\n<body>     -- 200, resolved; <body> is the file content
+#   NOTFOUND       -- 404; returns 0 so ghcr_retry stops immediately (a
+#                     definitive terminal state, not a failure to retry)
+#   INFRA:<status> -- diagnostic for any other status; the return code (a
+#                     plain 1, or GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE)
+#                     tells ghcr_retry whether to keep retrying or give up
+#                     now. 401 (invalid/expired token) and 400/422
+#                     (malformed request -- GitHub will never accept it
+#                     as-is) are permanent, configuration-level failures;
+#                     every other non-200/404 status (403/429 -- ambiguous
+#                     between a real permission problem and the secondary
+#                     rate limiter confirmed live above, 5xx, or a
+#                     malformed/empty response) stays retryable --
+#                     misclassifying a genuinely transient error as
+#                     permanent (giving up too early) is worse here than a
+#                     few extra retries on a real permanent one.
+_fetch_action_yaml_attempt() {
+  local owner="$1" repo="$2" subpath="$3" ref="$4" file="$5"
+  local body status auth=()
+  if [ -n "$gh_token" ]; then
+    auth=(-H "Authorization: Bearer ${gh_token}")
+  fi
+  body="$(mktemp)"
+  status=$(curl -sS -o "$body" -w '%{http_code}' \
+    -H "Accept: application/vnd.github.raw+json" \
+    "${auth[@]}" \
+    "https://api.github.com/repos/${owner}/${repo}/contents/${subpath:+${subpath}/}${file}?ref=${ref}" 2>/dev/null) || status="000"
+  case "$status" in
+    200)
+      printf 'OK\n'
+      cat "$body"
+      rm -f "$body"
+      return 0
+      ;;
+    404)
+      rm -f "$body"
+      printf 'NOTFOUND\n'
+      return 0
+      ;;
+    400|401|422)
+      rm -f "$body"
+      printf 'INFRA:%s\n' "$status"
+      return "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+      ;;
+    *)
+      rm -f "$body"
+      printf 'INFRA:%s\n' "$status"
+      return 1
+      ;;
+  esac
+}
+
 for value in "${uses_values[@]}"; do
   if [[ "$value" == ./* ]]; then
+    # A job-level reusable-workflow reference (`uses: ./.github/workflows/<wf>.yml`)
+    # is NOT a composite action: it points at a workflow FILE, not a directory
+    # holding an action.yml, and has no runs.using/Node runtime to check. Those
+    # workflow files are already scanned directly (they are in workflow_files
+    # above), so their own pinned actions are still covered -- skip the reference
+    # itself here rather than misreading it as a local action with a missing
+    # action.yml. Matched on the .yml/.yaml suffix, which a composite action's
+    # directory reference never has.
+    if [[ "$value" == *.yml || "$value" == *.yaml ]]; then
+      continue
+    fi
     # --- Local composite action (read action.yml/action.yaml off disk) ----
     local_dir="${value#./}"
     resolved=""

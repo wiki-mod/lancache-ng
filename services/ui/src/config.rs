@@ -33,19 +33,26 @@ pub enum HstsMode {
     Never,
 }
 
-// Which DHCP service, if any, this deployment runs -- mutually exclusive
-// with each other since both `Kea` and `DnsmasqProxy` bind DHCP port 67/udp.
-// `Disabled`: no DHCP here, the existing LAN router/DHCP server is
-// untouched. `Kea`: full DHCP server (isc-kea), this deployment owns
-// leases/reservations for the LAN. `DnsmasqProxy`: a proxy-DHCP relay that
-// runs *alongside* an existing DHCP server and only answers PXE/network-boot
-// clients -- it does not lease addresses or reliably replace DNS options for
-// ordinary clients (see docs/dhcp-modes.md).
+// Which DHCP service, if any, this deployment runs -- all mutually exclusive
+// since Kea, DnsmasqProxy, and DnsmasqRelay each bind DHCP port 67/udp (a
+// relay listens on 67 to receive client broadcasts). `Disabled`: no DHCP
+// here, the existing LAN router/DHCP server is untouched. `Kea`: full DHCP
+// server (isc-kea), this deployment owns leases/reservations for the LAN.
+// `DnsmasqProxy`: a proxy-DHCP helper that runs *alongside* an existing DHCP
+// server and only answers PXE/network-boot clients -- it does not lease
+// addresses or reliably replace DNS options for ordinary clients.
+// `DnsmasqRelay` (issue #844): a real DHCP relay that forwards every client's
+// DHCP request to an upstream DHCP server (which owns the whole lease) --
+// distinct from DnsmasqProxy and never combined with it. Both dnsmasq modes
+// run in the same `dhcp-proxy` container, which renders one config or the
+// other from DHCP_MODE (see services/dhcp-proxy/entrypoint.sh and
+// docs/dhcp-modes.md).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum DhcpMode {
     Disabled,
     Kea,
     DnsmasqProxy,
+    DnsmasqRelay,
 }
 
 impl DhcpMode {
@@ -54,11 +61,26 @@ impl DhcpMode {
             Self::Disabled => "disabled",
             Self::Kea => "kea",
             Self::DnsmasqProxy => "dnsmasq-proxy",
+            Self::DnsmasqRelay => "dnsmasq-relay",
         }
     }
 
     pub fn is_kea(self) -> bool {
         matches!(self, Self::Kea)
+    }
+
+    // True for either dnsmasq-backed mode (proxy or relay). Both run in the
+    // same `dhcp-proxy` container and share its config/UI surface, so callers
+    // that gate "is the dnsmasq DHCP container this deployment's DHCP" use
+    // this rather than testing the two variants separately.
+    pub fn is_dnsmasq(self) -> bool {
+        matches!(self, Self::DnsmasqProxy | Self::DnsmasqRelay)
+    }
+
+    // True only for the relay sub-mode (issue #844) -- used to render the
+    // relay-specific Admin UI panel and settings.
+    pub fn is_dnsmasq_relay(self) -> bool {
+        matches!(self, Self::DnsmasqRelay)
     }
 }
 
@@ -95,6 +117,7 @@ pub struct Config {
     pub dhcp_ntp_servers: String,
     pub dhcp_proxy_subnet_start: String,
     pub dhcp_upstream_dhcp_ip: String,
+    pub dhcp_relay_local_addr: String,
     pub dhcp_proxy_interface: String,
     pub dhcp_proxy_router: String,
     pub dhcp_proxy_domain: String,
@@ -182,6 +205,16 @@ pub struct Config {
     // authorization requests for secondaries and needs no other permissions.
     pub nats_callout_user: String,
     pub nats_callout_password: Option<String>,
+    // Issue #681: the sole member of a new NATS `SYS` account (see
+    // services/nats/nats.conf's `accounts {}` block) -- used ONLY by
+    // nats_kick.rs to look up (CONNZ) and force-disconnect
+    // ($SYS.REQ.SERVER.*.KICK) a removed/rotated secondary's live connection.
+    // Every other NATS role in this struct lives in the implicit default
+    // account ($G), which nats-server does not permit to reach the
+    // $SYS.REQ.SERVER.* system-services API at all -- confirmed against a
+    // real nats-server 2.14.3 (see nats_kick.rs's module docs).
+    pub nats_sys_user: String,
+    pub nats_sys_password: Option<String>,
     // Where the auth-callout issuer NKey seed is persisted (generated on
     // first run, mirrors ui_session_secret's file-based persistence). This
     // keypair signs every per-secondary user JWT the callout responder
@@ -195,6 +228,21 @@ pub struct Config {
     // have no persistent /data volume to read a generated one back from --
     // not intended for dev/prod, which use the file-based path instead.
     pub nats_issuer_seed: Option<String>,
+    // Where the auth-callout responder's static X25519 (curve) NKey seed is
+    // persisted (issue #682). Distinct keypair from nats_issuer_seed_path's
+    // Ed25519 signing identity: this one is used to decrypt (xkey "open") the
+    // nats-server-sealed `AuthorizationRequest` payload and re-encrypt (xkey
+    // "seal") the response, per the NATS auth-callout xkey spec -- see
+    // nats_auth_callout.rs's module docs for the full mechanism. Mirrors
+    // nats_issuer_seed_path's generate-on-first-run + 0600 persistence
+    // exactly. Ignored if nats_xkey_seed is set.
+    pub nats_xkey_seed_path: String,
+    // Optional literal seed value, taking precedence over nats_xkey_seed_path
+    // when set -- same rationale as nats_issuer_seed: deterministic
+    // deployments (e.g. deploy/full-setup's validation harness) with no
+    // persistent /data volume need a fixed, pre-known xkey baked into the
+    // auth_callout fragment ahead of time.
+    pub nats_xkey_seed: Option<String>,
     pub secondary_registration_token: String,
     pub lancache_image_registry: String,
     pub lancache_image_prefix: String,
@@ -241,6 +289,26 @@ pub struct Config {
     pub syslog_log_root: String,
     pub syslog_max_gb: u32,
     pub syslog_retention_days: u32,
+    // LanCache-NG-NTP (chrony) settings. Mirrors the dhcp_mode/dhcp_* shape
+    // above: an env-loaded default, overridable at runtime via the Admin
+    // UI's own ui_settings_file persistence (see effective_ntp_enabled()/
+    // effective_ntp_upstream_servers()/effective_ntp_auto_dhcp() further
+    // down). ntp_auto_dhcp is deliberately a separate field from
+    // ntp_enabled: requirement 4 of the issue this was built for is explicit
+    // that "auto-set this as the DHCP NTP server" must be its own opt-in
+    // toggle, never an automatic side effect of enabling the NTP container
+    // itself.
+    pub ntp_enabled: bool,
+    pub ntp_upstream_servers: String,
+    pub ntp_auto_dhcp: bool,
+    // Issue #870: path to watchdog.sh's STATUS_FILE, shared read-only via the
+    // `watchdog-status` named volume (see deploy/*/docker-compose.yml's `ui:`
+    // service). Defaults to the same path watchdog.sh itself defaults
+    // STATUS_FILE to, so a dev/prod/quickstart install that never overrides
+    // either variable still lines up without extra configuration. Read-only
+    // by design: the Admin UI is never a writer of this file, only watchdog
+    // is (see watchdog_status.rs's module doc comment).
+    pub watchdog_status_file: String,
 }
 
 // Redacts every secret-bearing field (tokens, passwords, API keys) so a stray
@@ -270,6 +338,7 @@ impl fmt::Debug for Config {
             .field("dhcp_ntp_servers", &self.dhcp_ntp_servers)
             .field("dhcp_proxy_subnet_start", &self.dhcp_proxy_subnet_start)
             .field("dhcp_upstream_dhcp_ip", &self.dhcp_upstream_dhcp_ip)
+            .field("dhcp_relay_local_addr", &self.dhcp_relay_local_addr)
             .field("dhcp_proxy_interface", &self.dhcp_proxy_interface)
             .field("dhcp_proxy_router", &self.dhcp_proxy_router)
             .field("dhcp_proxy_domain", &self.dhcp_proxy_domain)
@@ -332,10 +401,20 @@ impl fmt::Debug for Config {
                     .as_ref()
                     .map(|_| "***REDACTED***"),
             )
+            .field("nats_sys_user", &self.nats_sys_user)
+            .field(
+                "nats_sys_password",
+                &self.nats_sys_password.as_ref().map(|_| "***REDACTED***"),
+            )
             .field("nats_issuer_seed_path", &self.nats_issuer_seed_path)
             .field(
                 "nats_issuer_seed",
                 &self.nats_issuer_seed.as_ref().map(|_| "***REDACTED***"),
+            )
+            .field("nats_xkey_seed_path", &self.nats_xkey_seed_path)
+            .field(
+                "nats_xkey_seed",
+                &self.nats_xkey_seed.as_ref().map(|_| "***REDACTED***"),
             )
             .field("secondary_registration_token", &"***REDACTED***")
             .field("lancache_image_registry", &self.lancache_image_registry)
@@ -352,6 +431,10 @@ impl fmt::Debug for Config {
             .field("syslog_log_root", &self.syslog_log_root)
             .field("syslog_max_gb", &self.syslog_max_gb)
             .field("syslog_retention_days", &self.syslog_retention_days)
+            .field("ntp_enabled", &self.ntp_enabled)
+            .field("ntp_upstream_servers", &self.ntp_upstream_servers)
+            .field("ntp_auto_dhcp", &self.ntp_auto_dhcp)
+            .field("watchdog_status_file", &self.watchdog_status_file)
             .finish()
     }
 }
@@ -506,6 +589,14 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_upstream_dhcp_ip.clone())
     }
 
+    // The DHCP-relay-mode local address (issue #844): this relay's own IP on
+    // the client-facing network, forwarded as giaddr to UPSTREAM_DHCP_IP. Same
+    // env-default-then-UI-override resolution as every other dhcp-proxy field.
+    pub fn effective_dhcp_relay_local_addr(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "DHCP_RELAY_LOCAL_ADDR")
+            .unwrap_or_else(|| self.dhcp_relay_local_addr.clone())
+    }
+
     // Issue #450: additional optional dnsmasq relay/proxy fields. All of
     // these ride the supplemental ProxyDHCP/PXE exchange, same as
     // DHCP_DNS_PRIMARY/SECONDARY above -- see docs/dhcp-modes.md and
@@ -542,6 +633,27 @@ impl Config {
             .unwrap_or_else(|| self.dhcp_proxy_custom_options.clone())
     }
 
+    pub fn effective_ntp_enabled(&self) -> bool {
+        read_ui_override(&self.ui_settings_file, "NTP_ENABLED")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(self.ntp_enabled)
+    }
+
+    pub fn effective_ntp_upstream_servers(&self) -> String {
+        read_ui_override(&self.ui_settings_file, "NTP_UPSTREAM_SERVERS")
+            .unwrap_or_else(|| self.ntp_upstream_servers.clone())
+    }
+
+    // Separate from effective_ntp_enabled by design (requirement 4): whether
+    // this container is enabled at all, and whether it should be pushed into
+    // Kea's ntp-servers option, are two independent toggles that both
+    // routes/ntp.rs and routes/dhcp.rs's reconcile hook must check.
+    pub fn effective_ntp_auto_dhcp(&self) -> bool {
+        read_ui_override(&self.ui_settings_file, "NTP_AUTO_DHCP")
+            .map(|value| value.trim() == "1")
+            .unwrap_or(self.ntp_auto_dhcp)
+    }
+
     // Release channel / scheduled-update settings (#819). Unlike DHCP mode,
     // neither of these two values takes effect inside this container at all
     // -- both are consumed entirely on the host by setup.sh's
@@ -556,6 +668,27 @@ impl Config {
     pub fn effective_lancache_image_channel_override(&self) -> String {
         read_ui_override(&self.ui_settings_file, "LANCACHE_IMAGE_CHANNEL")
             .unwrap_or_else(|| self.lancache_image_channel.clone())
+    }
+
+    // Cache resize (issue #1069 part 3): same "consumed entirely on the
+    // host" model as the release-channel override immediately above --
+    // setup.sh's cmd_converge_reconcile reads this CACHE_MAX_GB override off
+    // the same ui_settings_file and, if it differs from .env's current
+    // value, writes both CACHE_MAX_SIZE (nginx's real max_size) and
+    // CACHE_MAX_GB there, then the pre-existing `docker compose up -d`
+    // convergence step recreates the proxy container so nginx's entrypoint
+    // re-renders its config with the new max_size. This container's own
+    // CACHE_MAX_GB env var (`self.cache_max_gb`) reflects what is actually
+    // running RIGHT NOW; this override reflects a resize the operator has
+    // requested but that has not necessarily reached the running proxy yet
+    // (up to ~5 minutes, the same convergence-tick latency #819 already
+    // accepts) -- routes/dashboard.rs uses the difference between the two to
+    // show a "resize pending" notice rather than silently overwriting the
+    // real, currently-enforced value.
+    pub fn effective_cache_max_gb(&self) -> f64 {
+        read_ui_override(&self.ui_settings_file, "CACHE_MAX_GB")
+            .and_then(|value| value.trim().parse::<f64>().ok())
+            .unwrap_or(self.cache_max_gb)
     }
 
     pub fn effective_auto_update_enabled(&self) -> bool {
@@ -587,6 +720,13 @@ impl Config {
         let upstream_dhcp_ip = self.effective_dhcp_upstream_dhcp_ip();
         if !upstream_dhcp_ip.trim().is_empty() {
             lines.push(format!("UPSTREAM_DHCP_IP={}", upstream_dhcp_ip.trim()));
+        }
+        let dhcp_relay_local_addr = self.effective_dhcp_relay_local_addr();
+        if !dhcp_relay_local_addr.trim().is_empty() {
+            lines.push(format!(
+                "DHCP_RELAY_LOCAL_ADDR={}",
+                dhcp_relay_local_addr.trim()
+            ));
         }
         let dhcp_ntp_servers = self.effective_dhcp_ntp_servers();
         if !dhcp_ntp_servers.trim().is_empty() {
@@ -650,6 +790,7 @@ impl Config {
         let dhcp_ntp_servers = env_str("DHCP_NTP_SERVERS", "");
         let dhcp_proxy_subnet_start = env_str("DHCP_SUBNET_START", "");
         let dhcp_upstream_dhcp_ip = env_str("UPSTREAM_DHCP_IP", "");
+        let dhcp_relay_local_addr = env_str("DHCP_RELAY_LOCAL_ADDR", "");
         let dhcp_proxy_interface = env_str("DHCP_PROXY_INTERFACE", "");
         let dhcp_proxy_router = env_str("DHCP_PROXY_ROUTER", "");
         let dhcp_proxy_domain = env_str("DHCP_PROXY_DOMAIN", "");
@@ -687,6 +828,7 @@ impl Config {
             dhcp_ntp_servers,
             dhcp_proxy_subnet_start,
             dhcp_upstream_dhcp_ip,
+            dhcp_relay_local_addr,
             dhcp_proxy_interface,
             dhcp_proxy_router,
             dhcp_proxy_domain,
@@ -739,11 +881,15 @@ impl Config {
             nats_dns_replica_password: env_opt("NATS_DNS_REPLICA_PASSWORD"),
             nats_callout_user: env_str("NATS_CALLOUT_USER", ""),
             nats_callout_password: env_opt("NATS_CALLOUT_PASSWORD"),
+            nats_sys_user: env_str("NATS_SYS_USER", ""),
+            nats_sys_password: env_opt("NATS_SYS_PASSWORD"),
             nats_issuer_seed_path: env_str(
                 "NATS_ISSUER_SEED_PATH",
                 "/data/lancache-nats-issuer.seed",
             ),
             nats_issuer_seed: env_opt("NATS_ISSUER_SEED"),
+            nats_xkey_seed_path: env_str("NATS_XKEY_SEED_PATH", "/data/lancache-nats-xkey.seed"),
+            nats_xkey_seed: env_opt("NATS_XKEY_SEED"),
             secondary_registration_token: env_str("SECONDARY_REGISTRATION_TOKEN", ""),
             // Kept as separate fields so the UI can display the running
             // release/channel without reconstructing image references from
@@ -781,6 +927,18 @@ impl Config {
             syslog_log_root: env_str("SYSLOG_LOG_ROOT", "/var/log/lancache-syslog-ng"),
             syslog_max_gb: env_u32_clamped_with_max("SYSLOG_MAX_GB", 10, SYSLOG_MAX_GB_CEILING),
             syslog_retention_days: env_u32_clamped("SYSLOG_RETENTION_DAYS", 30),
+            ntp_enabled: env_bool("NTP_ENABLED", false),
+            // Matches services/ntp/entrypoint.sh's own curated default
+            // exactly, so the Admin UI's NTP page shows the real running
+            // default rather than an empty field on a fresh install.
+            ntp_upstream_servers: env_str(
+                "NTP_UPSTREAM_SERVERS",
+                "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com",
+            ),
+            ntp_auto_dhcp: env_bool("NTP_AUTO_DHCP", false),
+            // Matches services/watchdog/watchdog.sh's own STATUS_FILE default
+            // exactly (see its `STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"`).
+            watchdog_status_file: env_str("WATCHDOG_STATUS_FILE", "/var/run/watchdog/status.json"),
         })
     }
 }
@@ -975,6 +1133,7 @@ fn parse_dhcp_mode(raw: &str, legacy_enabled: bool) -> DhcpMode {
     match raw.trim().to_ascii_lowercase().as_str() {
         "kea" => DhcpMode::Kea,
         "dnsmasq-proxy" => DhcpMode::DnsmasqProxy,
+        "dnsmasq-relay" => DhcpMode::DnsmasqRelay,
         "disabled" => DhcpMode::Disabled,
         "" if legacy_enabled => DhcpMode::Kea,
         _ => DhcpMode::Disabled,
@@ -1070,19 +1229,29 @@ mod tests {
     fn hsts_mode_parser_accepts_documented_values() {
         let key = "LANCACHE_TEST_UI_HSTS_MODE_DOCUMENTED";
 
-        env::set_var(key, "auto");
+        unsafe {
+            env::set_var(key, "auto");
+        }
         assert_eq!(env_hsts_mode(key, HstsMode::Never), HstsMode::Auto);
 
-        env::set_var(key, "always");
+        unsafe {
+            env::set_var(key, "always");
+        }
         assert_eq!(env_hsts_mode(key, HstsMode::Never), HstsMode::Always);
 
-        env::set_var(key, "never");
+        unsafe {
+            env::set_var(key, "never");
+        }
         assert_eq!(env_hsts_mode(key, HstsMode::Always), HstsMode::Never);
 
-        env::set_var(key, "unexpected");
+        unsafe {
+            env::set_var(key, "unexpected");
+        }
         assert_eq!(env_hsts_mode(key, HstsMode::Always), HstsMode::Always);
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
     }
 
     // Pins env_bool's alias handling for the UI_SECURITY_HEADERS toggle: both
@@ -1093,19 +1262,29 @@ mod tests {
     fn security_header_toggle_parser_accepts_documented_values() {
         let key = "LANCACHE_TEST_UI_SECURITY_HEADERS_DOCUMENTED";
 
-        env::set_var(key, "true");
+        unsafe {
+            env::set_var(key, "true");
+        }
         assert!(env_bool(key, false));
 
-        env::set_var(key, "off");
+        unsafe {
+            env::set_var(key, "off");
+        }
         assert!(!env_bool(key, true));
 
-        env::set_var(key, "no");
+        unsafe {
+            env::set_var(key, "no");
+        }
         assert!(!env_bool(key, true));
 
-        env::set_var(key, "invalid");
+        unsafe {
+            env::set_var(key, "invalid");
+        }
         assert!(env_bool(key, true));
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
     }
 
     // Broad smoke test for the whole proxy/cache default surface when nothing
@@ -1130,7 +1309,9 @@ mod tests {
             "STANDARD_CACHE_MAX_GB",
             "SSL_CACHE_MAX_GB",
         ] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
         }
 
         let cfg = Config::from_env().unwrap();
@@ -1153,12 +1334,16 @@ mod tests {
     fn cache_dir_is_read_directly_with_no_legacy_split_key_fallback() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::set_var("CACHE_DIR", "/cache/shared");
+        unsafe {
+            env::set_var("CACHE_DIR", "/cache/shared");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_dir, "/cache/shared");
 
-        env::remove_var("CACHE_DIR");
+        unsafe {
+            env::remove_var("CACHE_DIR");
+        }
     }
 
     // Old installs that never set the newer explicit
@@ -1170,17 +1355,27 @@ mod tests {
     fn legacy_proxy_service_env_still_drives_runtime_fallbacks() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::set_var("PROXY_SERVICE", "legacy-proxy");
-        env::remove_var("PROXY_STANDARD_URL");
-        env::remove_var("PROXY_SSL_URL");
-        env::remove_var("PROXY_SSL_SERVICE");
+        unsafe {
+            env::set_var("PROXY_SERVICE", "legacy-proxy");
+        }
+        unsafe {
+            env::remove_var("PROXY_STANDARD_URL");
+        }
+        unsafe {
+            env::remove_var("PROXY_SSL_URL");
+        }
+        unsafe {
+            env::remove_var("PROXY_SSL_SERVICE");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.proxy_standard_url, "http://legacy-proxy");
         assert_eq!(cfg.proxy_ssl_url, "http://legacy-proxy");
         assert_eq!(cfg.proxy_ssl_service, "legacy-proxy");
 
-        env::remove_var("PROXY_SERVICE");
+        unsafe {
+            env::remove_var("PROXY_SERVICE");
+        }
     }
 
     // ssl_enabled defaults to true when unset, and both the "0" and "false"
@@ -1191,13 +1386,19 @@ mod tests {
     fn ssl_enabled_accepts_disabled_env_values() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::set_var("SSL_ENABLED", "0");
+        unsafe {
+            env::set_var("SSL_ENABLED", "0");
+        }
         assert!(!Config::from_env().unwrap().ssl_enabled);
 
-        env::set_var("SSL_ENABLED", "false");
+        unsafe {
+            env::set_var("SSL_ENABLED", "false");
+        }
         assert!(!Config::from_env().unwrap().ssl_enabled);
 
-        env::remove_var("SSL_ENABLED");
+        unsafe {
+            env::remove_var("SSL_ENABLED");
+        }
         assert!(Config::from_env().unwrap().ssl_enabled);
     }
 
@@ -1210,16 +1411,28 @@ mod tests {
     fn cache_max_gb_wins_over_legacy_values() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::set_var("STANDARD_CACHE_MAX_GB", "77");
-        env::set_var("SSL_CACHE_MAX_GB", "88");
-        env::set_var("CACHE_MAX_GB", "42.5");
+        unsafe {
+            env::set_var("STANDARD_CACHE_MAX_GB", "77");
+        }
+        unsafe {
+            env::set_var("SSL_CACHE_MAX_GB", "88");
+        }
+        unsafe {
+            env::set_var("CACHE_MAX_GB", "42.5");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_max_gb, 42.5);
 
-        env::remove_var("CACHE_MAX_GB");
-        env::remove_var("STANDARD_CACHE_MAX_GB");
-        env::remove_var("SSL_CACHE_MAX_GB");
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("STANDARD_CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("SSL_CACHE_MAX_GB");
+        }
     }
 
     // For pre-canonical-key installs, matching STANDARD_CACHE_MAX_GB and
@@ -1231,15 +1444,25 @@ mod tests {
     fn matching_legacy_cache_limits_can_drive_shared_fallback() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::remove_var("CACHE_MAX_GB");
-        env::set_var("STANDARD_CACHE_MAX_GB", "88");
-        env::set_var("SSL_CACHE_MAX_GB", "88");
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+        }
+        unsafe {
+            env::set_var("STANDARD_CACHE_MAX_GB", "88");
+        }
+        unsafe {
+            env::set_var("SSL_CACHE_MAX_GB", "88");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_max_gb, 88.0);
 
-        env::remove_var("STANDARD_CACHE_MAX_GB");
-        env::remove_var("SSL_CACHE_MAX_GB");
+        unsafe {
+            env::remove_var("STANDARD_CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("SSL_CACHE_MAX_GB");
+        }
     }
 
     // Locks the documented 50 GB default that applies when no cache-size env
@@ -1250,12 +1473,56 @@ mod tests {
     fn shared_cache_limit_default_is_50_gb() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::remove_var("CACHE_MAX_GB");
-        env::remove_var("STANDARD_CACHE_MAX_GB");
-        env::remove_var("SSL_CACHE_MAX_GB");
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("STANDARD_CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("SSL_CACHE_MAX_GB");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.cache_max_gb, 50.0);
+    }
+
+    // effective_cache_max_gb() (issue #1069 part 3) must fall back to the
+    // container's own startup CACHE_MAX_GB when no Admin-UI resize override
+    // has ever been written, and must prefer the override once one exists --
+    // same two-layer precedence as effective_dhcp_mode()/
+    // effective_lancache_image_channel_override() above.
+    #[test]
+    fn effective_cache_max_gb_falls_back_to_raw_env_then_prefers_override() {
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-cache-resize-{}.env",
+            std::process::id()
+        ));
+
+        unsafe {
+            env::set_var("UI_SETTINGS_FILE", &settings_path);
+            env::set_var("CACHE_MAX_GB", "50");
+        }
+        let _ = fs::remove_file(&settings_path);
+
+        let cfg = Config::from_env().unwrap();
+        assert_eq!(cfg.cache_max_gb, 50.0);
+        // No override file yet: effective must equal the raw running value.
+        assert_eq!(cfg.effective_cache_max_gb(), 50.0);
+
+        fs::write(&settings_path, "CACHE_MAX_GB=75\n").unwrap();
+        // The raw value is unchanged (it reflects the process env captured
+        // at startup, not a live re-read) -- only the effective getter must
+        // pick up the pending resize.
+        assert_eq!(cfg.cache_max_gb, 50.0);
+        assert_eq!(cfg.effective_cache_max_gb(), 75.0);
+
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+            env::remove_var("UI_SETTINGS_FILE");
+        }
+        let _ = fs::remove_file(&settings_path);
     }
 
     // Guards the deliberate fail-closed design: when the two legacy
@@ -1266,14 +1533,24 @@ mod tests {
     fn mismatched_legacy_cache_limits_fail_closed() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::remove_var("CACHE_MAX_GB");
-        env::set_var("STANDARD_CACHE_MAX_GB", "88");
-        env::set_var("SSL_CACHE_MAX_GB", "99");
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+        }
+        unsafe {
+            env::set_var("STANDARD_CACHE_MAX_GB", "88");
+        }
+        unsafe {
+            env::set_var("SSL_CACHE_MAX_GB", "99");
+        }
 
         let result = std::panic::catch_unwind(Config::from_env);
 
-        env::remove_var("STANDARD_CACHE_MAX_GB");
-        env::remove_var("SSL_CACHE_MAX_GB");
+        unsafe {
+            env::remove_var("STANDARD_CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("SSL_CACHE_MAX_GB");
+        }
 
         assert!(result.is_err());
     }
@@ -1287,27 +1564,35 @@ mod tests {
     fn ui_session_ttl_defaults_when_unset_and_rejects_invalid_values() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::remove_var("UI_SESSION_TTL_SECONDS");
+        unsafe {
+            env::remove_var("UI_SESSION_TTL_SECONDS");
+        }
         assert_eq!(
             Config::from_env().unwrap().ui_session_ttl_seconds,
             DEFAULT_UI_SESSION_TTL_SECONDS
         );
 
-        env::set_var("UI_SESSION_TTL_SECONDS", "3600s");
+        unsafe {
+            env::set_var("UI_SESSION_TTL_SECONDS", "3600s");
+        }
         let err = Config::from_env().unwrap_err();
         assert_eq!(
             err,
             "UI_SESSION_TTL_SECONDS must be an unsigned integer number of seconds, got \"3600s\""
         );
 
-        env::set_var("UI_SESSION_TTL_SECONDS", "abc");
+        unsafe {
+            env::set_var("UI_SESSION_TTL_SECONDS", "abc");
+        }
         let err = Config::from_env().unwrap_err();
         assert_eq!(
             err,
             "UI_SESSION_TTL_SECONDS must be an unsigned integer number of seconds, got \"abc\""
         );
 
-        env::remove_var("UI_SESSION_TTL_SECONDS");
+        unsafe {
+            env::remove_var("UI_SESSION_TTL_SECONDS");
+        }
     }
 
     // Locks the precedence between an explicit LANCACHE_IMAGE_CHANNEL and the
@@ -1319,35 +1604,61 @@ mod tests {
     fn lancache_image_tag_defaults_to_latest_and_accepts_release_tag() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::remove_var("LANCACHE_IMAGE_REGISTRY");
-        env::remove_var("LANCACHE_IMAGE_PREFIX");
-        env::remove_var("LANCACHE_IMAGE_CHANNEL");
-        env::remove_var("LANCACHE_IMAGE_TAG");
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        }
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_PREFIX");
+        }
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        }
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_TAG");
+        }
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_registry, "ghcr.io");
         assert_eq!(cfg.lancache_image_prefix, "wiki-mod/lancache-ng");
         assert_eq!(cfg.lancache_image_channel, "latest");
         assert_eq!(cfg.lancache_image_tag, "latest");
 
-        env::set_var("LANCACHE_IMAGE_TAG", "sha-deadbeef");
+        unsafe {
+            env::set_var("LANCACHE_IMAGE_TAG", "sha-deadbeef");
+        }
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_channel, "pinned");
         assert_eq!(cfg.lancache_image_tag, "sha-deadbeef");
 
-        env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
-        env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
-        env::set_var("LANCACHE_IMAGE_TAG", "v1.2.3");
+        unsafe {
+            env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        }
+        unsafe {
+            env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        }
+        unsafe {
+            env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
+        }
+        unsafe {
+            env::set_var("LANCACHE_IMAGE_TAG", "v1.2.3");
+        }
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.lancache_image_registry, "registry.example.test:5000");
         assert_eq!(cfg.lancache_image_prefix, "mirror/lancache-ng");
         assert_eq!(cfg.lancache_image_channel, "nightly");
         assert_eq!(cfg.lancache_image_tag, "v1.2.3");
 
-        env::remove_var("LANCACHE_IMAGE_REGISTRY");
-        env::remove_var("LANCACHE_IMAGE_PREFIX");
-        env::remove_var("LANCACHE_IMAGE_CHANNEL");
-        env::remove_var("LANCACHE_IMAGE_TAG");
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        }
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_PREFIX");
+        }
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        }
+        unsafe {
+            env::remove_var("LANCACHE_IMAGE_TAG");
+        }
     }
 
     // An explicit DHCP_MODE must always win over the legacy DHCP_ENABLED
@@ -1360,32 +1671,54 @@ mod tests {
     fn dhcp_mode_prefers_explicit_config_when_present() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::set_var("DHCP_MODE", "dnsmasq-proxy");
-        env::remove_var("DHCP_ENABLED");
+        unsafe {
+            env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        }
+        unsafe {
+            env::remove_var("DHCP_ENABLED");
+        }
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::DnsmasqProxy
         ));
 
-        env::set_var("DHCP_MODE", "kea");
+        // Issue #844: the relay mode is a distinct DHCP_MODE value, parsed as
+        // its own variant (not coerced to proxy or disabled).
+        unsafe {
+            env::set_var("DHCP_MODE", "dnsmasq-relay");
+        }
+        assert!(matches!(
+            Config::from_env().unwrap().dhcp_mode,
+            DhcpMode::DnsmasqRelay
+        ));
+
+        unsafe {
+            env::set_var("DHCP_MODE", "kea");
+        }
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::Kea
         ));
 
-        env::set_var("DHCP_MODE", "disabled");
+        unsafe {
+            env::set_var("DHCP_MODE", "disabled");
+        }
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::Disabled
         ));
 
-        env::set_var("DHCP_MODE", "invalid");
+        unsafe {
+            env::set_var("DHCP_MODE", "invalid");
+        }
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::Disabled
         ));
 
-        env::remove_var("DHCP_MODE");
+        unsafe {
+            env::remove_var("DHCP_MODE");
+        }
     }
 
     // Locks the pre-split legacy interpretation for installs that never set
@@ -1396,20 +1729,28 @@ mod tests {
     fn dhcp_mode_defaults_from_legacy_enabled_flag() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::set_var("DHCP_ENABLED", "1");
-        env::remove_var("DHCP_MODE");
+        unsafe {
+            env::set_var("DHCP_ENABLED", "1");
+        }
+        unsafe {
+            env::remove_var("DHCP_MODE");
+        }
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::Kea
         ));
 
-        env::set_var("DHCP_ENABLED", "0");
+        unsafe {
+            env::set_var("DHCP_ENABLED", "0");
+        }
         assert!(matches!(
             Config::from_env().unwrap().dhcp_mode,
             DhcpMode::Disabled
         ));
 
-        env::remove_var("DHCP_ENABLED");
+        unsafe {
+            env::remove_var("DHCP_ENABLED");
+        }
     }
 
     // dhcp_api_url must stay independent of dhcp_mode: changing the mode via
@@ -1422,17 +1763,31 @@ mod tests {
         let settings_path =
             std::env::temp_dir().join(format!("lancache-ui-settings-{}.env", std::process::id()));
 
-        env::set_var("UI_SETTINGS_FILE", &settings_path);
-        env::set_var("DHCP_MODE", "dnsmasq-proxy");
-        env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        unsafe {
+            env::set_var("UI_SETTINGS_FILE", &settings_path);
+        }
+        unsafe {
+            env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        }
+        unsafe {
+            env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        }
         assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
-        env::set_var("DHCP_MODE", "disabled");
-        env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        unsafe {
+            env::set_var("DHCP_MODE", "disabled");
+        }
+        unsafe {
+            env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        }
         assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
-        env::set_var("DHCP_MODE", "kea");
-        env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        unsafe {
+            env::set_var("DHCP_MODE", "kea");
+        }
+        unsafe {
+            env::set_var("DHCP_API_URL", "http://dhcp:8000");
+        }
         assert_eq!(Config::from_env().unwrap().dhcp_api_url, "http://dhcp:8000");
 
         fs::write(&settings_path, "DHCP_MODE=dnsmasq-proxy\n").unwrap();
@@ -1440,9 +1795,15 @@ mod tests {
         assert!(matches!(cfg.effective_dhcp_mode(), DhcpMode::DnsmasqProxy));
         assert_eq!(cfg.dhcp_api_url, "http://dhcp:8000");
 
-        env::remove_var("DHCP_MODE");
-        env::remove_var("DHCP_API_URL");
-        env::remove_var("UI_SETTINGS_FILE");
+        unsafe {
+            env::remove_var("DHCP_MODE");
+        }
+        unsafe {
+            env::remove_var("DHCP_API_URL");
+        }
+        unsafe {
+            env::remove_var("UI_SETTINGS_FILE");
+        }
         let _ = fs::remove_file(settings_path);
     }
 
@@ -1455,20 +1816,32 @@ mod tests {
     fn kea_config_snapshot_settings_load_from_env_with_documented_defaults() {
         let _guard = env_test_lock().lock().unwrap();
 
-        env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
-        env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+        unsafe {
+            env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
+        }
+        unsafe {
+            env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+        }
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.kea_config_snapshot_dir, "/var/lib/kea/config-snapshots");
         assert_eq!(cfg.kea_keep_known_good_configs, 3);
 
-        env::set_var("KEA_CONFIG_SNAPSHOT_DIR", "/custom/kea-snapshots");
-        env::set_var("KEEP_KNOWN_GOOD_CONFIGS", "5");
+        unsafe {
+            env::set_var("KEA_CONFIG_SNAPSHOT_DIR", "/custom/kea-snapshots");
+        }
+        unsafe {
+            env::set_var("KEEP_KNOWN_GOOD_CONFIGS", "5");
+        }
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.kea_config_snapshot_dir, "/custom/kea-snapshots");
         assert_eq!(cfg.kea_keep_known_good_configs, 5);
 
-        env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
-        env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+        unsafe {
+            env::remove_var("KEA_CONFIG_SNAPSHOT_DIR");
+        }
+        unsafe {
+            env::remove_var("KEEP_KNOWN_GOOD_CONFIGS");
+        }
     }
 
     // Confirms both the default values and env overrides for all four syslog
@@ -1489,7 +1862,9 @@ mod tests {
             "SYSLOG_MAX_GB",
             "SYSLOG_RETENTION_DAYS",
         ] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
         }
         let cfg = Config::from_env().unwrap();
         assert!(!cfg.syslog_enabled);
@@ -1497,10 +1872,18 @@ mod tests {
         assert_eq!(cfg.syslog_max_gb, 10);
         assert_eq!(cfg.syslog_retention_days, 30);
 
-        env::set_var("SYSLOG_ENABLED", "true");
-        env::set_var("SYSLOG_LOG_ROOT", "/custom/syslog-root");
-        env::set_var("SYSLOG_MAX_GB", "25");
-        env::set_var("SYSLOG_RETENTION_DAYS", "7");
+        unsafe {
+            env::set_var("SYSLOG_ENABLED", "true");
+        }
+        unsafe {
+            env::set_var("SYSLOG_LOG_ROOT", "/custom/syslog-root");
+        }
+        unsafe {
+            env::set_var("SYSLOG_MAX_GB", "25");
+        }
+        unsafe {
+            env::set_var("SYSLOG_RETENTION_DAYS", "7");
+        }
         let cfg = Config::from_env().unwrap();
         assert!(cfg.syslog_enabled);
         assert_eq!(cfg.syslog_log_root, "/custom/syslog-root");
@@ -1513,7 +1896,52 @@ mod tests {
             "SYSLOG_MAX_GB",
             "SYSLOG_RETENTION_DAYS",
         ] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+    }
+
+    // Confirms LanCache-NG-NTP's three settings load with the documented
+    // defaults (matching services/ntp/entrypoint.sh's own curated upstream
+    // list exactly, so the Admin UI never shows a different default than
+    // what the container actually renders on a fresh install) and that env
+    // overrides take effect.
+    #[test]
+    fn ntp_settings_load_from_env_with_documented_defaults() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        for key in ["NTP_ENABLED", "NTP_UPSTREAM_SERVERS", "NTP_AUTO_DHCP"] {
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+        let cfg = Config::from_env().unwrap();
+        assert!(!cfg.ntp_enabled);
+        assert_eq!(
+            cfg.ntp_upstream_servers,
+            "0.debian.pool.ntp.org 1.debian.pool.ntp.org 2.debian.pool.ntp.org 3.debian.pool.ntp.org time.cloudflare.com"
+        );
+        assert!(!cfg.ntp_auto_dhcp);
+
+        unsafe {
+            env::set_var("NTP_ENABLED", "true");
+        }
+        unsafe {
+            env::set_var("NTP_UPSTREAM_SERVERS", "192.0.2.1 192.0.2.2");
+        }
+        unsafe {
+            env::set_var("NTP_AUTO_DHCP", "1");
+        }
+        let cfg = Config::from_env().unwrap();
+        assert!(cfg.ntp_enabled);
+        assert_eq!(cfg.ntp_upstream_servers, "192.0.2.1 192.0.2.2");
+        assert!(cfg.ntp_auto_dhcp);
+
+        for key in ["NTP_ENABLED", "NTP_UPSTREAM_SERVERS", "NTP_AUTO_DHCP"] {
+            unsafe {
+                env::remove_var(key);
+            }
         }
     }
 
@@ -1534,7 +1962,9 @@ mod tests {
         for value in [
             "1", "true", "TRUE", "True", "yes", "YES", "Yes", "on", "ON", "On", " true ", "\ton\t",
         ] {
-            env::set_var(key, value);
+            unsafe {
+                env::set_var(key, value);
+            }
             assert!(
                 env_bool(key, false),
                 "expected SYSLOG_ENABLED={value:?} to be truthy"
@@ -1556,14 +1986,18 @@ mod tests {
             "truex",
             "yesplease",
         ] {
-            env::set_var(key, value);
+            unsafe {
+                env::set_var(key, value);
+            }
             assert!(
                 !env_bool(key, false),
                 "expected SYSLOG_ENABLED={value:?} to be falsy"
             );
         }
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
     }
 
     // A literal "0" parses fine as a u32 but is semantically wrong for a
@@ -1576,11 +2010,15 @@ mod tests {
         let _guard = env_test_lock().lock().unwrap();
         let key = "LANCACHE_TEST_UI_KEEP_KNOWN_GOOD_CONFIGS_CLAMP";
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
         assert_eq!(env_u32_clamped(key, 3), 3);
 
         for invalid in ["0", "", "abc", "-1"] {
-            env::set_var(key, invalid);
+            unsafe {
+                env::set_var(key, invalid);
+            }
             assert_eq!(
                 env_u32_clamped(key, 3),
                 3,
@@ -1588,10 +2026,14 @@ mod tests {
             );
         }
 
-        env::set_var(key, "7");
+        unsafe {
+            env::set_var(key, "7");
+        }
         assert_eq!(env_u32_clamped(key, 3), 7);
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
     }
 
     // Parity test for SYSLOG_MAX_GB's ceiling against watchdog.sh's own
@@ -1608,7 +2050,9 @@ mod tests {
         // In-range for u32 but above watchdog.sh's ceiling: env_u32_clamped
         // alone (no max) would have returned this value unclamped, while
         // watchdog.sh's own guard already capped its budget at the ceiling.
-        env::set_var(key, "2000000");
+        unsafe {
+            env::set_var(key, "2000000");
+        }
         assert_eq!(
             env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING),
             SYSLOG_MAX_GB_CEILING
@@ -1619,7 +2063,9 @@ mod tests {
         // overflow at this magnitude and clamps to the same ceiling instead
         // of falling back to its own default -- this must match, not fall
         // back to `default` the way env_u32_clamped alone would.
-        env::set_var(key, "9999999999");
+        unsafe {
+            env::set_var(key, "9999999999");
+        }
         assert_eq!(
             env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING),
             SYSLOG_MAX_GB_CEILING
@@ -1627,14 +2073,20 @@ mod tests {
 
         // A literal 0 still falls back to `default`, same floor as
         // env_u32_clamped.
-        env::set_var(key, "0");
+        unsafe {
+            env::set_var(key, "0");
+        }
         assert_eq!(env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING), 10);
 
         // An in-range, under-ceiling value passes through unchanged.
-        env::set_var(key, "25");
+        unsafe {
+            env::set_var(key, "25");
+        }
         assert_eq!(env_u32_clamped_with_max(key, 10, SYSLOG_MAX_GB_CEILING), 25);
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
     }
 
     // A "0" value for UI_LOGS_MAX_ENTRIES must fall back to the default
@@ -1646,11 +2098,15 @@ mod tests {
         let _guard = env_test_lock().lock().unwrap();
         let key = "LANCACHE_TEST_UI_LOGS_MAX_ENTRIES_CLAMP";
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
         assert_eq!(env_usize_clamped(key, 200), 200);
 
         for invalid in ["0", "", "abc", "-1"] {
-            env::set_var(key, invalid);
+            unsafe {
+                env::set_var(key, invalid);
+            }
             assert_eq!(
                 env_usize_clamped(key, 200),
                 200,
@@ -1658,10 +2114,14 @@ mod tests {
             );
         }
 
-        env::set_var(key, "500");
+        unsafe {
+            env::set_var(key, "500");
+        }
         assert_eq!(env_usize_clamped(key, 200), 500);
 
-        env::remove_var(key);
+        unsafe {
+            env::remove_var(key);
+        }
     }
 
     // Verifies the optional dnsmasq relay/proxy fields follow the same
@@ -1681,14 +2141,28 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_file(&settings_path);
-        env::set_var("UI_SETTINGS_FILE", &settings_path);
+        unsafe {
+            env::set_var("UI_SETTINGS_FILE", &settings_path);
+        }
 
-        env::set_var("DHCP_PROXY_INTERFACE", "eth0");
-        env::set_var("DHCP_PROXY_ROUTER", "10.0.0.1");
-        env::set_var("DHCP_PROXY_DOMAIN", "lan.local");
-        env::set_var("DHCP_PROXY_BOOT_FILENAME", "pxelinux.0");
-        env::set_var("DHCP_PROXY_BOOT_SERVER", "10.0.0.5");
-        env::set_var("DHCP_PROXY_CUSTOM_OPTIONS", "60:PXEClient");
+        unsafe {
+            env::set_var("DHCP_PROXY_INTERFACE", "eth0");
+        }
+        unsafe {
+            env::set_var("DHCP_PROXY_ROUTER", "10.0.0.1");
+        }
+        unsafe {
+            env::set_var("DHCP_PROXY_DOMAIN", "lan.local");
+        }
+        unsafe {
+            env::set_var("DHCP_PROXY_BOOT_FILENAME", "pxelinux.0");
+        }
+        unsafe {
+            env::set_var("DHCP_PROXY_BOOT_SERVER", "10.0.0.5");
+        }
+        unsafe {
+            env::set_var("DHCP_PROXY_CUSTOM_OPTIONS", "60:PXEClient");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(cfg.dhcp_proxy_interface, "eth0");
@@ -1724,7 +2198,64 @@ mod tests {
             "DHCP_PROXY_CUSTOM_OPTIONS",
             "UI_SETTINGS_FILE",
         ] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
+        }
+        let _ = fs::remove_file(&settings_path);
+    }
+
+    // Same env-then-UI-override precedence as dhcp_proxy_optional_fields_
+    // load_from_env_and_ui_override_wins above, for LanCache-NG-NTP's three
+    // settings -- these are what routes/ntp.rs's update_ntp_settings and
+    // routes/dhcp.rs's persist_ntp_settings/apply_ntp_lan_ip_to_all_subnets/
+    // restore_default_ntp_on_all_subnets all read through.
+    #[test]
+    fn ntp_settings_load_from_env_and_ui_override_wins() {
+        let _guard = env_test_lock().lock().unwrap();
+        let settings_path = std::env::temp_dir().join(format!(
+            "lancache-ui-settings-ntp-{}.env",
+            std::process::id()
+        ));
+        let _ = fs::remove_file(&settings_path);
+        unsafe {
+            env::set_var("UI_SETTINGS_FILE", &settings_path);
+        }
+
+        unsafe {
+            env::set_var("NTP_ENABLED", "false");
+        }
+        unsafe {
+            env::set_var("NTP_UPSTREAM_SERVERS", "192.0.2.1");
+        }
+        unsafe {
+            env::set_var("NTP_AUTO_DHCP", "false");
+        }
+
+        let cfg = Config::from_env().unwrap();
+        assert!(!cfg.effective_ntp_enabled());
+        assert_eq!(cfg.effective_ntp_upstream_servers(), "192.0.2.1");
+        assert!(!cfg.effective_ntp_auto_dhcp());
+
+        fs::write(
+            &settings_path,
+            "NTP_ENABLED=1\nNTP_UPSTREAM_SERVERS=192.0.2.9 192.0.2.10\nNTP_AUTO_DHCP=1\n",
+        )
+        .unwrap();
+        let cfg = Config::from_env().unwrap();
+        assert!(cfg.effective_ntp_enabled());
+        assert_eq!(cfg.effective_ntp_upstream_servers(), "192.0.2.9 192.0.2.10");
+        assert!(cfg.effective_ntp_auto_dhcp());
+
+        for key in [
+            "NTP_ENABLED",
+            "NTP_UPSTREAM_SERVERS",
+            "NTP_AUTO_DHCP",
+            "UI_SETTINGS_FILE",
+        ] {
+            unsafe {
+                env::remove_var(key);
+            }
         }
         let _ = fs::remove_file(&settings_path);
     }
@@ -1745,7 +2276,9 @@ mod tests {
             "DHCP_PROXY_BOOT_SERVER",
             "DHCP_PROXY_CUSTOM_OPTIONS",
         ] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
         }
 
         let cfg = Config::from_env().unwrap();
@@ -1770,8 +2303,12 @@ mod tests {
             std::process::id()
         ));
         let _ = fs::remove_file(&settings_path);
-        env::set_var("UI_SETTINGS_FILE", &settings_path);
-        env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        unsafe {
+            env::set_var("UI_SETTINGS_FILE", &settings_path);
+        }
+        unsafe {
+            env::set_var("DHCP_MODE", "dnsmasq-proxy");
+        }
         for key in [
             "DHCP_PROXY_INTERFACE",
             "DHCP_PROXY_ROUTER",
@@ -1780,7 +2317,9 @@ mod tests {
             "DHCP_PROXY_BOOT_SERVER",
             "DHCP_PROXY_CUSTOM_OPTIONS",
         ] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
         }
 
         let cfg = Config::from_env().unwrap();
@@ -1801,8 +2340,12 @@ mod tests {
             );
         }
 
-        env::remove_var("DHCP_MODE");
-        env::remove_var("UI_SETTINGS_FILE");
+        unsafe {
+            env::remove_var("DHCP_MODE");
+        }
+        unsafe {
+            env::remove_var("UI_SETTINGS_FILE");
+        }
         let _ = fs::remove_file(&settings_path);
     }
 
@@ -1858,7 +2401,9 @@ mod tests {
     fn advertised_nats_url_is_none_when_neither_override_is_configured() {
         let _guard = env_test_lock().lock().unwrap();
         for key in ["NATS_URL", "NATS_BIND_IP", "NATS_ADVERTISE_URL"] {
-            env::remove_var(key);
+            unsafe {
+                env::remove_var(key);
+            }
         }
 
         let cfg = Config::from_env().unwrap();
@@ -1872,7 +2417,9 @@ mod tests {
              reports as unreachable from every real remote secondary"
         );
 
-        env::remove_var("NATS_URL");
+        unsafe {
+            env::remove_var("NATS_URL");
+        }
     }
 
     // Confirms the second-highest-precedence branch: reusing NATS_BIND_IP
@@ -1881,8 +2428,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_derives_from_nats_bind_ip_when_no_explicit_override() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "192.168.1.5");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "192.168.1.5");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -1893,7 +2444,9 @@ mod tests {
              advertised URL from it needs no separate configuration step"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // Confirms the documented precedence order itself: with both set at
@@ -1901,8 +2454,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_explicit_override_wins_over_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::set_var("NATS_BIND_IP", "192.168.1.5");
-        env::set_var("NATS_ADVERTISE_URL", "tls://nats.vpn.example:4333");
+        unsafe {
+            env::set_var("NATS_BIND_IP", "192.168.1.5");
+        }
+        unsafe {
+            env::set_var("NATS_ADVERTISE_URL", "tls://nats.vpn.example:4333");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -1913,8 +2470,12 @@ mod tests {
              port, a tls:// scheme, or a VPN hostname"
         );
 
-        env::remove_var("NATS_BIND_IP");
-        env::remove_var("NATS_ADVERTISE_URL");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
     }
 
     // Confirms an operator who sets NATS_BIND_IP/NATS_ADVERTISE_URL to
@@ -1924,8 +2485,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_treats_whitespace_only_overrides_as_unset() {
         let _guard = env_test_lock().lock().unwrap();
-        env::set_var("NATS_BIND_IP", "   ");
-        env::set_var("NATS_ADVERTISE_URL", "   ");
+        unsafe {
+            env::set_var("NATS_BIND_IP", "   ");
+        }
+        unsafe {
+            env::set_var("NATS_ADVERTISE_URL", "   ");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -1938,8 +2503,12 @@ mod tests {
              not a false-positive Some"
         );
 
-        env::remove_var("NATS_BIND_IP");
-        env::remove_var("NATS_ADVERTISE_URL");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
     }
 
     // An IPv6 NATS_BIND_IP literal must be bracketed in the derived URL --
@@ -1950,8 +2519,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_brackets_ipv6_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "2001:db8::5");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "2001:db8::5");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -1962,7 +2535,9 @@ mod tests {
              NATS URL"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // The happy-path counterpart to the bracketed-wildcard-rejection test
@@ -1973,8 +2548,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_brackets_bracketed_ipv6_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "[2001:db8::5]");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "[2001:db8::5]");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -1985,7 +2564,9 @@ mod tests {
              as an opaque hostname"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // An explicit NATS_ADVERTISE_URL is never IP-parsed or reformatted --
@@ -1995,8 +2576,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_leaves_explicit_override_untouched_for_ipv6() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_BIND_IP");
-        env::set_var("NATS_ADVERTISE_URL", "nats://[2001:db8::5]:4333");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
+        unsafe {
+            env::set_var("NATS_ADVERTISE_URL", "nats://[2001:db8::5]:4333");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2006,7 +2591,9 @@ mod tests {
              configured, never reparsed/reformatted"
         );
 
-        env::remove_var("NATS_ADVERTISE_URL");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
     }
 
     // A wildcard NATS_BIND_IP (0.0.0.0) is a valid *listen* address --
@@ -2020,8 +2607,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_rejects_ipv4_wildcard_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "0.0.0.0");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "0.0.0.0");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2031,7 +2622,9 @@ mod tests {
              secondary could dial -- it must not be advertised"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // Same as the IPv4 case above, for the IPv6 wildcard/unspecified
@@ -2039,8 +2632,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_rejects_ipv6_wildcard_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "::");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "::");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2050,7 +2647,9 @@ mod tests {
              remote secondary could dial -- it must not be advertised"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // A NATS_BIND_IP that is a hostname (not an IP literal at all) must be
@@ -2062,8 +2661,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_rejects_hostname_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "nats.vpn.example");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "nats.vpn.example");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2075,7 +2678,9 @@ mod tests {
              explicit NATS_ADVERTISE_URL instead"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // Docker Compose documents the square-bracketed IPv6 wildcard form
@@ -2089,8 +2694,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_rejects_bracketed_ipv6_wildcard_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "[::]");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "[::]");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2101,7 +2710,9 @@ mod tests {
              treated as an opaque hostname"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // A remote secondary cannot dial loopback on the primary -- accepting
@@ -2111,8 +2722,12 @@ mod tests {
     #[test]
     fn advertised_nats_url_rejects_ipv4_loopback_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "127.0.0.1");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "127.0.0.1");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2122,15 +2737,21 @@ mod tests {
              -- it must not be advertised, the same as a wildcard bind"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 
     // Same as the IPv4 loopback case above, for `::1`.
     #[test]
     fn advertised_nats_url_rejects_ipv6_loopback_nats_bind_ip() {
         let _guard = env_test_lock().lock().unwrap();
-        env::remove_var("NATS_ADVERTISE_URL");
-        env::set_var("NATS_BIND_IP", "::1");
+        unsafe {
+            env::remove_var("NATS_ADVERTISE_URL");
+        }
+        unsafe {
+            env::set_var("NATS_BIND_IP", "::1");
+        }
 
         let cfg = Config::from_env().unwrap();
         assert_eq!(
@@ -2140,6 +2761,8 @@ mod tests {
              must not be advertised, the same as a wildcard bind"
         );
 
-        env::remove_var("NATS_BIND_IP");
+        unsafe {
+            env::remove_var("NATS_BIND_IP");
+        }
     }
 }

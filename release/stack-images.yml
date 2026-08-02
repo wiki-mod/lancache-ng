@@ -6,14 +6,19 @@
 # and the image retention policy. Consumed by the release/promotion CI
 # workflow and validated by scripts/validate-stack-images.sh.
 #
-# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23): master publishes
-# `latest`; current_dev (the permanent active-development branch) publishes
-# `nightly` continuously from its own tip; archived vY.X.Z release branches
-# take deliberate backports but publish no live channel at all. The `dev`
-# channel that used to be published from a vX.Y.Z branch is retired -- see
-# docs/release-versioning.md's "Retired: the dev channel" note for the full
-# history and setup.sh's validate_lancache_image_channel for the operator-
-# facing hard cut (mirrors the earlier edge -> nightly rename precedent).
+# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23; current_dev's own
+# nightly publishing model changed again in #1254/#1255, 2026-07-25): master
+# publishes `latest` continuously from its own tip; current_dev (the
+# permanent active-development branch) publishes `nightly` once a day
+# (01:00 UTC) plus on-demand, gated on a full green build+scan -- NOT
+# continuously on every push anymore, see docs/release-versioning.md's
+# "Branch/channel model" section and nightly-refresh.yml; archived vY.X.Z
+# release branches take deliberate backports but publish no live channel at
+# all. The `dev` channel that used to be published from a vX.Y.Z branch is
+# retired -- see docs/release-versioning.md's "Retired: the dev channel" note
+# for the full history and setup.sh's validate_lancache_image_channel for the
+# operator-facing hard cut (mirrors the earlier edge -> nightly rename
+# precedent).
 schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io
@@ -34,7 +39,7 @@ channels:
   nightly:
     tag: nightly
     mutable: true
-    description: Tested pre-stable integration channel built continuously from current_dev.
+    description: Tested pre-stable integration channel, built from current_dev's tip once daily plus on-demand (not continuously on every push).
   release_candidate:
     tag: vX.Y.Z-rc.N
     mutable: false
@@ -92,6 +97,14 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
+  - name: ntp
+    image: ghcr.io/wiki-mod/lancache-ng/ntp
+    source: services/ntp/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    compose:
+      - deploy/prod/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
     source: services/ui/Dockerfile
@@ -132,35 +145,30 @@ external:
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: nats
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: fluent-bit
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: syslog-ng
     image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
-      - deploy/dev/docker-compose.yml
   - name: busybox
     image: busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
     policy: digest-pinned

@@ -1,0 +1,32 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# dnsmasq DHCP-relay-mode config template, rendered by entrypoint.sh via
+# envsubst when DHCP_MODE=dnsmasq-relay (issue #844). This is a DISTINCT mode
+# from the ProxyDHCP config in dnsmasq.conf.template: a relay does not answer
+# DHCP itself and injects no options -- it forwards each client's DHCP
+# request to a real upstream DHCP server (UPSTREAM_DHCP_IP) and relays the
+# reply back, so the upstream server owns the entire lease and every option.
+#
+# `dhcp-relay=<local-addr>,<server>` (confirmed against `dnsmasq --help` on the
+# shipped dnsmasq 2.91: "Relay DHCP requests to a remote server"): <local-addr>
+# is this relay's own address on the client-facing network (dnsmasq stamps it
+# into the relayed packet's giaddr, which the upstream server uses to pick the
+# pool), and <server> is the upstream DHCP server. Both are required; an empty
+# value renders an invalid `dhcp-relay=,...`/`dhcp-relay=...,` line that
+# `dnsmasq --test` rejects, so the entrypoint's known-good-snapshot rollback
+# path handles a misconfiguration the same fail-closed way ProxyDHCP mode does.
+#
+# port=0 disables dnsmasq's DNS entirely (this service never serves DNS in
+# either mode); no-resolv/no-poll keep it from touching the host resolver.
+# Deliberately NO dhcp-range, dhcp-option-pxe, or pxe-service lines here --
+# those are ProxyDHCP concepts and would make no sense (and dnsmasq would
+# reject some of them) alongside dhcp-relay.
+port=0
+no-resolv
+no-poll
+dhcp-relay=${DHCP_RELAY_LOCAL_ADDR},${UPSTREAM_DHCP_IP}
+log-dhcp
+no-daemon
+# Central logging pipeline (#633): same single-destination file logging as the
+# ProxyDHCP template -- see dnsmasq.conf.template's log-facility comment for
+# why `docker logs` stops showing DHCP transaction lines in exchange.
+log-facility=/var/log/lancache-dhcp-proxy/dnsmasq.log

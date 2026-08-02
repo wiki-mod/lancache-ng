@@ -1,0 +1,77 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# LanCache-NG-NTP image: chrony (chronyd) disciplining its own clock against
+# a curated set of public NTP servers and serving that time to LAN clients
+# on UDP/123. No Rust builder stage is needed here (unlike services/dns/ or
+# services/ui/) -- this image is a plain package install plus a shell
+# entrypoint, the same shape as services/dhcp/Dockerfile and (since its own
+# Alpine migration, issue #815) services/dhcp-proxy/Dockerfile.
+#
+# Alpine base (issue #815 Part B, staged Alpine migration for
+# proxy/ntp/watchdog/ui -- ntp picked first as this evaluation's lowest-risk
+# of the four: a plain C daemon with no Rust builder stage and no
+# musl-compiled-binary question at all, unlike services/ui's Rust runtime or
+# services/dns's still-open nats-subscriber retarget). Confirmed live on
+# alpine:3.24 (2026-07-31): installs `chrony-nts` (4.8-r7), NOT the plain
+# `chrony` package -- Alpine deliberately splits chrony into a default build
+# with no NTS/SHA/AES support at all (no libgnutls/libnettle dependency) and
+# this separate `chrony-nts` variant, same upstream version, that pulls in
+# libgnutls/libnettle for NTS. services/ntp/chrony.conf does not configure
+# NTS today, so both packages would work unchanged right now, but installing
+# `chrony-nts` keeps a future NTS-hardening effort from being silently
+# foreclosed by having picked the wrong package name during this migration.
+# `/etc/chrony/`, `conf.d/`, and `sources.d/` match this project's existing
+# expectations exactly (verified live) -- no path translation needed.
+# `bash` is installed explicitly because entrypoint.sh uses real Bash-only
+# syntax (`${var// /}` parameter substitution) that Alpine's default
+# `/bin/sh` (busybox ash) does not support -- see AG-REL-006. `gettext-base`
+# -> `gettext-envsubst`: Alpine splits envsubst out of the base gettext
+# package, matching the same finding already made for the other three
+# already-migrated/being-migrated services in this project.
+
+FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+
+LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
+
+# `apk upgrade --no-cache` (before the package install, same layer) upgrades
+# packages already baked into the alpine:3.24 base layer itself -- `apk add
+# --no-cache` only fetches a fresh index for the packages it is asked to
+# install, it does not touch already-installed packages. See
+# services/dhcp-proxy/Dockerfile's matching comment for the fuller
+# rationale and live verification of this behavior.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache \
+    bash \
+    chrony-nts \
+    gettext-envsubst \
+    curl
+
+COPY chrony.conf /etc/chrony/chrony.conf.template
+COPY entrypoint.sh /entrypoint.sh
+
+# This entrypoint execs chronyd as root (no explicit `-u`/privilege drop of
+# our own): CAP_SYS_TIME is needed to actually step/slew the container
+# HOST's real system clock (containers share one kernel clock -- there is
+# no per-container clock namespace), and Docker's default capability
+# bounding set excludes CAP_SYS_TIME regardless of any file capability the
+# package may set on the binary. The compose files grant `cap_add:
+# [SYS_TIME]` on top of that (see their comments for the host-wide-clock
+# operational tradeoff this implies). Unchanged by the Alpine migration --
+# confirmed live on both bases identically: chronyd's own compiled-in
+# `+PRIVDROP` support makes it drop privileges to the packaged `chrony`
+# system user/group on its own once it no longer needs root (Alpine's
+# chrony-nts pulls this user/group in via its chrony-common dependency; its
+# numeric uid/gid, 100/101, is identical to Debian's own `_chrony` user,
+# confirmed live -- so a pre-existing volume's ownership carries over
+# cleanly across this migration). Because that drop happens after this
+# entrypoint's own `mkdir -p` below (which runs as root), `/var/log/chrony`
+# and `/var/lib/chrony` can end up root-owned and unwritable by the
+# dropped-privilege chronyd -- entrypoint.sh's own chown call fixes this up
+# at container start; see its comment for the real, reproducible bug this
+# validation pass found (present identically pre-migration on Debian too).
+RUN chmod +x /entrypoint.sh \
+    && mkdir -p /var/lib/chrony /var/log/chrony
+
+EXPOSE 123/udp
+
+ENTRYPOINT ["/entrypoint.sh"]

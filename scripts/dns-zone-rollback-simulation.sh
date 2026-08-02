@@ -384,9 +384,9 @@ if [[ "$changed_names" != *"$test_fqdn"* ]]; then
 fi
 # Assert the response's OWN flush signal, not just that the flush happened
 # to work (verify_record_resolves below proves that separately via a real
-# dig). Before this fix, this identity's NATS publish permission on
-# lancache.dns.flush was silently denied, and this field is the only thing
-# that would have exposed that from the response itself; `flush_ok` and
+# dig). A silently denied NATS publish permission on lancache.dns.flush for
+# this identity would otherwise go unnoticed -- this field is the only thing
+# that would expose that from the response itself; `flush_ok` and
 # `flush_failed_names` are the pure-function-tested fields in
 # rollback_listener.rs::rollback_response_body, so this line is what proves
 # the loop-that-publishes actually wires into the response that reports it,

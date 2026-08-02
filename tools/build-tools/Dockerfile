@@ -26,11 +26,27 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 # HIGH-severity CVE (GHSA-hrxh-6v49-42gf, gRPC-Go xDS RBAC and HTTP/2
 # vulnerabilities) fixed in 1.82.1 -- confirmed via Trivy scanning this image
 # (CI run 29926535995 on PR #1070; tracked as issue #1080, the third
-# confirmed instance of this CVE class per CLAUDE.md's AG-KD-003). Same
+# confirmed instance of this CVE class per AGENTS.md's AG-KD-003). Same
 # reasoning as the containerd override above: neither project has cut a
 # release that resolves this on its own yet, so `go get` the fixed version
 # directly before building.
 ARG GRPC_GO_VERSION=1.82.1
+# docker-buildx v0.35.0 (go.mod: v0.37.0) and docker-compose v5.2.0 / the
+# Docker CLI v29.6.1 (both: v0.38.0, checked when auditing all three
+# source-built Go tools with a go.mod/vendor.mod for this same CVE class,
+# not just the one CI happened to flag) pin golang.org/x/text at versions
+# carrying CVE-2026-56852 (a norm.Iter infinite loop on malformed input),
+# HIGH severity, fixed in v0.39.0 -- confirmed via Trivy scanning this image
+# (the fourth confirmed instance of this CVE class per AGENTS.md's
+# AG-KD-003). actionlint has no golang.org/x/text dependency at
+# all (checked directly), so it needs no override. Same reasoning as the
+# containerd/grpc overrides above: neither upstream project has cut a
+# release that resolves this on its own yet, so `go get` the fixed version
+# directly before building. Pinned to v0.40.0 (the actual latest tag as of
+# this fix, one past the v0.39.0 minimum fix version) rather than the bare
+# minimum, since there is no indication of a regression between the two and
+# staying on latest needs no extra reasoning to re-justify later.
+ARG GOLANG_X_TEXT_VERSION=0.40.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -98,6 +114,7 @@ RUN set -euo pipefail; \
     ( cd "$buildx_src" \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
@@ -108,6 +125,7 @@ RUN set -euo pipefail; \
     ( cd "$docker_cli_src" \
       && ln -s vendor.mod go.mod && ln -s vendor.sum go.sum \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go mod vendor \
       && rm go.mod go.sum \
       && VERSION="${DOCKER_CLI_VERSION}" sh ./scripts/build/binary ); \
@@ -118,6 +136,7 @@ RUN set -euo pipefail; \
     git clone --depth 1 --branch "v${DOCKER_COMPOSE_VERSION}" https://github.com/docker/compose.git "$compose_src"; \
     ( cd "$compose_src" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
+      && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
       && go build -ldflags "-X github.com/docker/compose/v5/internal.Version=${DOCKER_COMPOSE_VERSION}" -o /out/docker-compose ./cmd ); \
     rm -rf "$compose_src"; \
     /out/docker-compose version
@@ -146,6 +165,77 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin" \
     CARGO_INSTALL_ROOT="/usr/local" \
     RUST_BACKTRACE=1
+
+# trixie-backports is the standard package source for every Debian-based image in
+# this project (maintainer decision, 2026-07-30; see services/proxy/Dockerfile,
+# the template this block is copied from) -- not a curl-only or package-scoped
+# exception: `Package: *` at Pin-Priority 500 (tied with the regular trixie
+# archive) applies project-wide, so ordinary version-comparison rules pick
+# whichever archive/pocket has the newer version for ANY package this stage ever
+# installs, not a hand-picked subset. `apt-get dist-upgrade` then `apt-get
+# full-upgrade` are both run deliberately (a maintainer decision to keep both
+# explicit, even though modern apt treats `full-upgrade` as the same operation
+# `dist-upgrade` performs) so any package a newer archive/pocket has already
+# patched gets picked up on every rebuild, not only whatever this Dockerfile's own
+# `apt-get install` lists happen to name.
+#
+# Real bug this addresses (partially -- see the honest caveat below, do not
+# overclaim): a real Trivy scan of this image (arm64 build, PR #1306's CI run,
+# 2026-07-30T14:41Z) found libexpat1/libexpat1-dev HIGH findings --
+# CVE-2025-59375, CVE-2026-25210, CVE-2026-45186, CVE-2026-56131,
+# CVE-2026-56408 -- on the plain `rust:latest` base image's own pre-installed
+# libexpat 2.7.1-2 (confirmed via `docker run --rm rust:latest dpkg -l | grep
+# expat` on lancache-240: libexpat was never named in this Dockerfile's own
+# install lists at all -- it arrived as a transitive dependency already baked
+# into the upstream base image, which is exactly why a plain `apt-get install`
+# with no upgrade step, as this stage previously had, never touched it).
+#
+# This RUN step does upgrade libexpat1/libexpat1-dev to 2.8.2-1~deb13u1
+# (confirmed on lancache-240, 2026-07-30: both a fresh unmodified-Dockerfile
+# build and this modified one resolve to 2.8.2-1~deb13u1 after `apt-get
+# dist-upgrade`/`full-upgrade`, from Debian-Security/`trixie-security`, already
+# a default source in the base image -- trixie-backports itself has no newer
+# candidate for this specific package, so the project-wide backports pin isn't
+# what supplies this particular fix, though it is still added unconditionally
+# per the maintainer decision above, and is what will pick up a genuinely
+# backports-only fix the next time one is needed).
+#
+# HONEST CAVEAT, do not re-simplify this to "fixed": PR #1306's CI run showed
+# these 5 CVE IDs as `Status: fixed` / `FixedVersion: 2.8.2-1~deb13u1` at
+# 2026-07-30T14:41Z. A real, twice-repeated Trivy scan against this exact
+# rebuilt image on lancache-240, using a freshly downloaded vulnerability DB at
+# 2026-07-30T15:19Z (roughly 40 minutes later), instead shows all 5 IDs as
+# `Status: affected` / `FixedVersion: None` against the very same installed
+# version, 2.8.2-1~deb13u1 -- i.e. the Debian Security Tracker data Trivy
+# consumes was revised, in the time between those two scans, from "fixed in
+# this version" to "still open, no fix in any pocket." This means: the version
+# bump this RUN step performs is real and still worth having (it is a strictly
+# newer, more current package either way), but it does NOT make these 5 CVE
+# IDs disappear from a Trivy scan as of the more recent tracker data -- do not
+# claim otherwise without re-running the same before/after scan this comment
+# is based on. This is the exact same class of mistake already made and
+# corrected once in services/proxy/Dockerfile's curl-CVE comment (a claimed
+# fix that was never re-verified against a fresh scan) -- residual risk and
+# the resulting maintainer decision are tracked in issue #1314 (mirroring
+# #1304's structure for curl), not asserted as resolved here.
+#
+# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
+# APT's `a=`/release-Archive selector matches the Release file's `Suite:` field,
+# and trixie-backports' own Release file declares `Suite: stable-backports` /
+# `Codename: trixie-backports` -- the two are not interchangeable. This exact
+# mistake was made and caught once already in services/proxy/Dockerfile: a first
+# version of that pin used `a=trixie-backports` and silently matched nothing
+# (apt-cache policy still showed backports at its Debian-default priority 100),
+# so every "backports-sourced" package silently stayed on its vulnerable
+# plain-trixie version despite the pin file being present -- caught only by
+# building the image for real and checking an installed package version rather
+# than trusting the Dockerfile comment. Do not repeat that here.
+RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
+    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
+    && apt-get update \
+    && apt-get dist-upgrade -y \
+    && apt-get full-upgrade -y \
+    && rm -rf /var/lib/apt/lists/*
 
 RUN set -euo pipefail; \
     apt-get update; \
@@ -244,41 +334,51 @@ RUN docker --version; \
     docker buildx version
 
 # isc-dhcp-client (dhclient) is needed by
-# scripts/dhcp-kea-lease-flow-simulation.sh (issue #448) to perform a real
+# scripts/dhcp-kea-lease-flow-simulation.sh (issue #448) and
+# scripts/syslog-forwarding-simulation.sh to perform a real
 # Discover/Offer/Request/Ack exchange against a Kea container on an isolated
-# Docker bridge network, then read the resulting lease file's options. This
-# is the same client binary services/ui/dhcp-probe.sh already uses for its
-# own (separate, host-interface) dry-run check -- reusing it here keeps the
-# project to one DHCP client implementation instead of two.
+# Docker bridge network, then read the resulting lease file's options.
+# STATUS (updated by issue #1288): the Admin UI's own dhcp-probe container
+# used to rely on this exact same binary for a separate, host-interface dry
+# run (services/ui/dhcp-probe.sh) -- that usage was replaced by a native
+# Rust DHCP client (services/ui/src/dhcp_probe_native.rs) with no dhclient
+# dependency at all, so `isc-dhcp-client` is kept in THIS image solely for
+# the two CI simulation scripts named above, which test Kea's own server
+# behavior in an isolated test network and are a genuinely separate concern
+# from the Admin UI's probe feature.
 #
-# python3-scapy + tcpdump are needed by
-# scripts/dhcp-proxy-pxe-simulation.sh (issue #705) to craft a synthetic
-# PXE client's DHCPDISCOVER (option 60=PXEClient, option 93=client-system-
+# tcpdump is needed by scripts/dhcp-proxy-pxe-simulation.sh (issue #705) to
+# reliably capture dnsmasq's real DHCPOFFER reply to the synthetic PXE
+# client's DHCPDISCOVER (option 60=PXEClient, option 93=client-system-
 # architecture) -- something no ordinary DHCP client like dhclient can be
-# made to send -- and to reliably capture dnsmasq's real DHCPOFFER reply.
-# Capture goes through tcpdump writing to a pcap file rather than scapy's
-# own live-sniff path (srp1/sniff): confirmed directly during this issue's
-# investigation that scapy's live sniff missed real, verified-via-tcpdump
-# replies from this exact dnsmasq build inside a Docker bridge network,
-# for reasons not fully diagnosed (dnsmasq's replies here carry a
-# deliberately unusual UDP checksum, flagged "bad" by tcpdump itself,
-# which is one plausible cause). Reading the same reply back from a
-# tcpdump-written pcap file with scapy's offline rdpcap() is a separate,
-# already-written-to-disk code path unaffected by that live-capture gap,
-# and was confirmed reliable against the same real replies.
+# made to send. The synthetic client itself is the Rust binary
+# tools/pxe-client-probe (built from source by that script using this
+# image's own Rust toolchain), which crafts and raw-sends the frame; capture
+# goes through tcpdump writing to a pcap file rather than any live in-process
+# sniff. Confirmed directly during this issue's investigation that an
+# in-process live sniff missed real, verified-via-tcpdump replies from this
+# exact dnsmasq build inside a Docker bridge network, for reasons not fully
+# diagnosed (dnsmasq's replies here carry a deliberately unusual UDP
+# checksum, flagged "bad" by tcpdump itself, which is one plausible cause).
+# Reading the same reply back from a tcpdump-written pcap file is a separate,
+# already-written-to-disk code path unaffected by that live-capture gap, and
+# was confirmed reliable against the same real replies. (python3 below is NOT
+# for this script -- it is required by distcc-pump; the former python3-scapy
+# dependency was removed when the probe was rewritten from Python to Rust.)
 #
 # APT_CACHE_BUST (issue #1147): BuildKit's local/gha layer cache has no
 # wall-clock expiry of its own, only cache-key (instruction text) expiry --
 # once this RUN's resolved command text has been built once, every later
 # build with the identical text reuses that same cached layer forever,
-# including its `apt-get upgrade -y` below, regardless of how much time has
-# passed or how many new Debian security fixes (e.g. #1147's bind9-libs/
-# bind9-dnsutils/bind9-host CVEs) have shipped to trixie-security since.
+# including its `apt-get dist-upgrade -y`/`apt-get full-upgrade -y` below,
+# regardless of how much time has passed or how many new Debian security
+# fixes (e.g. #1147's bind9-libs/bind9-dnsutils/bind9-host CVEs) have shipped
+# to trixie-security (or, since 2026-07-30, trixie-backports) since.
 # Referencing the ARG here (CI passes a value that changes once per ISO
 # week; see the workflows that build this image) makes this RUN's own cache
 # key change on that same weekly cadence, forcing `apt-get update`/`apt-get
-# upgrade -y` to actually re-run against the then-current archive instead of
-# silently replaying a stale layer.
+# dist-upgrade -y`/`apt-get full-upgrade -y` to actually re-run against the
+# then-current archive instead of silently replaying a stale layer.
 #
 # Declared here, immediately before the one RUN step that uses it -- NOT up
 # with the image's other ARGs near the top of this stage -- because of a
@@ -320,13 +420,19 @@ RUN set -euo pipefail; \
       openssl \
       procps \
       python3 \
-      python3-scapy \
       rsync \
       tcpdump; \
     # Base and tool packages can receive security fixes after the upstream
     # rust:latest image was published. Apply Debian upgrades before patching
     # distcc-pump so package updates cannot overwrite the warning fix below.
-    apt-get upgrade -y; \
+    # dist-upgrade + full-upgrade (not plain `upgrade`), matching the
+    # project-wide backports-pin RUN step above -- a maintainer decision to
+    # keep both explicit even though modern apt treats `full-upgrade` as the
+    # same operation `dist-upgrade` performs, so this weekly APT_CACHE_BUST
+    # re-run keeps picking up newly available fixes from either the regular
+    # archive or trixie-backports, not just packages this RUN happens to name.
+    apt-get dist-upgrade -y; \
+    apt-get full-upgrade -y; \
     # linux-libc-dev is pulled in by the toolchain layer and can lag behind the
     # base image even after a generic upgrade; force the current security-fixed
     # package so Trivy does not fail the build-tools image on stale headers.
@@ -353,6 +459,86 @@ RUN set -euo pipefail; \
     python3 -Werror::SyntaxWarning -m compileall -q /usr/lib/python3/dist-packages/include_server; \
     rm -rf /var/lib/apt/lists/*
 
+# musl cross-compilation target (issue #815): #815's services/ui OS-evaluation
+# research proved live, on this same unmodified build-tools image
+# (2026-07-31, runner lancache-240), that `apt-get install musl-tools
+# musl-dev` (Debian trixie's own repo, 1.2.5-3.1~deb13u1) plus `rustup target
+# add x86_64-unknown-linux-musl` builds services/ui's real crate --
+# `rusqlite` with bundled sqlite3, `zstd`'s C library, and `reqwest`'s rustls
+# backend on aws-lc-rs/aws-lc-sys all included, none of which is a
+# hypothetical toy dependency -- into a working static-pie binary with no
+# dynamic library dependencies. This RUN step makes that proven toolchain a
+# permanent, additive part of the shared image so every consumer that wants
+# to cross-compile to musl can do so without repeating the ad hoc apt-get/
+# rustup steps #815's research already validated once. #815 explicitly
+# recommends adding this once for both of its known consumers rather than
+# duplicating the toolchain setup per-crate: services/ui (this PR's own
+# network-verification build) and services/dns's nats-subscriber crate (its
+# own musl retargeting is a separate, not-in-scope-here migration -- see that
+# crate's own follow-up -- but must not be precluded by this image lacking
+# the toolchain).
+#
+# Deliberately additive only: this does not touch the image's existing
+# default glibc toolchain or target in any way. `rustup target add` only
+# downloads and registers a second target's prebuilt std library alongside
+# the one every other Rust build in this image already uses by default
+# (confirmed via `rustc -vV`'s own `host:` line, which stays the `-gnu`
+# triple; `rustup target list` itself has no `(default)` marker at all, only
+# an `(installed)` one, so this Dockerfile's own verification below checks
+# `rustc -vV` instead of relying on `rustup target list`'s text -- nothing
+# here runs `rustup default` or passes `--target` anywhere else in this
+# Dockerfile) -- an ordinary `cargo build`/`cargo test` invocation with no
+# explicit `--target` flag is completely unaffected by this block, it only
+# becomes available as an opt-in choice for a build that explicitly requests
+# musl.
+#
+# Native-arch target only, mirroring the cargo-audit/cargo-tarpaulin
+# architecture `case` block earlier in this stage: this image is built
+# separately for linux/amd64 and linux/arm64 (AG-CI-010), and each build gets
+# the musl target matching its own host architecture
+# (x86_64-unknown-linux-musl on amd64, aarch64-unknown-linux-musl on arm64)
+# rather than a cross target that would additionally need a cross-linker this
+# image does not otherwise carry. A future consumer that specifically needs
+# to cross-compile to the *other* architecture's musl target from this image
+# would need to add that cross-linker explicitly first -- it is not silently
+# assumed to already work here.
+RUN set -euo pipefail; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) musl_target="x86_64-unknown-linux-musl" ;; \
+      arm64) musl_target="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends \
+      musl-dev \
+      musl-tools; \
+    rustup target add "${musl_target}"; \
+    rm -rf /var/lib/apt/lists/*
+
+# This RUN's own tail below adds two musl-related checks (musl-gcc present,
+# the native-arch musl target registered, glibc still the default host
+# triple) alongside its existing required_tools verification. Both checks
+# were first written as `<producer> | grep -q...` and failed a real build on
+# lancache-240 with exit code 141 (SIGPIPE), not a logic error, and a real
+# CI run on this PR reproduced the identical failure: `grep -q` exits as
+# soon as it finds its first match, closing its end of the pipe early --
+# since the producer (`rustc -vV`, `rustup target list --installed`) is
+# still writing further lines at that moment (`host:` is not the last line
+# of `rustc -vV`'s output), it receives SIGPIPE, and bash's `pipefail`
+# reports that as the pipeline's exit status even though `grep` itself
+# matched successfully. This is the same "early-exiting consumer piped from
+# a still-writing producer under pipefail" failure shape as PR #1371's
+# `find_built_ancestor()` (`git log | tail | head -n 50`), just a different
+# consumer command -- fixed here by capturing each producer's full output
+# into a shell variable first (a command substitution runs the producer to
+# completion before the variable is even assigned, so there is no live pipe
+# for an early exit to break) and grepping the variable via a here-string,
+# rather than merely dropping `-q` from a live pipe (which also would have
+# worked here, but leaves the same footgun available for the next person to
+# reintroduce `-q` without knowing why that regresses). This Dockerfile's
+# earlier distcc-pump-parser checks sidestep the whole class differently,
+# by grepping a file (`grep -F ... "$file" >/dev/null`) rather than a live
+# process's stdout, which never has a producer to send SIGPIPE to.
 RUN set -euo pipefail; \
     required_tools=( \
       bash \
@@ -404,6 +590,7 @@ RUN set -euo pipefail; \
       make \
       mkdir \
       mktemp \
+      musl-gcc \
       mv \
       openssl \
       printf \
@@ -434,11 +621,6 @@ RUN set -euo pipefail; \
     sccache --version; \
     cargo audit --version; \
     cargo tarpaulin --version; \
-    # python3-scapy has no standalone binary worth checking via command -v
-    # (Debian's package does ship a `scapy` console script, but
-    # scripts/dhcp-proxy-pxe-simulation.sh only ever needs the importable
-    # module) -- verify the actual thing that script depends on instead.
-    python3 -c 'import scapy.all'; \
     actionlint --version; \
     bats --version; \
     shellspec --version; \
@@ -452,7 +634,17 @@ RUN set -euo pipefail; \
       *:/usr/local/cargo/bin:*) ;; \
       *) echo "/usr/local/cargo/bin is missing from PATH" >&2; exit 1 ;; \
     esac; \
-    bash -lc 'set -euo pipefail; cargo --version; rustc --version; rustfmt --version; cargo clippy --version'
+    bash -lc 'set -euo pipefail; cargo --version; rustc --version; rustfmt --version; cargo clippy --version'; \
+    musl-gcc --version; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) musl_target_check="x86_64-unknown-linux-musl" ;; \
+      arm64) musl_target_check="aarch64-unknown-linux-musl" ;; \
+      *) echo "Unsupported architecture for musl target verification: $(dpkg --print-architecture)" >&2; exit 1 ;; \
+    esac; \
+    installed_targets="$(rustup target list --installed)"; \
+    grep -qx "${musl_target_check}" <<<"${installed_targets}"; \
+    rustc_host_line="$(rustc -vV)"; \
+    grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
 
 WORKDIR /workspace
 

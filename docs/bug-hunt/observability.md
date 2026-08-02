@@ -29,15 +29,29 @@ branch based on `origin/v0.2.0`), not the maintainer's main checkout.
 > dropped `?filter=` in syslog mode) is only PARTIALLY FIXED by the same
 > PR #865: the `host=None` half is fixed, but the `?filter=` half was not
 > independently re-verified this pass (see finding #9's own status update
-> below) — do not read #9 as fully closed. All other findings (#1-#3, #6-#8,
+> below) — do not read #9 as fully closed. All other findings (#6-#8,
 > #11-#20) remain accurate; no other merged commit in that range touches
 > this component's code paths.
+>
+> **Second update (2026-07-24):** #1 and #2 are now FIXED, and #3 is
+> PARTIALLY FIXED, by PR #1165 — see each finding's own status update above
+> for exactly what changed and, for #3, what remains open.
 
 ---
 
 ## Findings
 
-### 1. Docs claim a per-service "traffic light bar" in the Admin UI that does not exist anywhere in the code
+### 1. Docs claim a per-service "traffic light bar" in the Admin UI that does not exist anywhere in the code — FIXED by PR #1165 (2026-07-24)
+
+> **Status update:** `services/ui/src/watchdog_status.rs` (new) now reads
+> `status.json` and `templates/dashboard.html` renders a real "Service
+> health" card, one indicator per service actually present in the file plus
+> a cache-disk usage indicator, refreshed live every 10s via a new
+> `GET /api/watchdog-status` endpoint. `docs/architecture-ng.md`'s three
+> affected spots were updated to match. Live-verified on a real dev stack:
+> stopping `lancache-dns-ssl` flipped its indicator from green to red within
+> one watchdog cycle, and it recovered to green once the container was
+> restarted and became healthy again.
 
 `docs/architecture-ng.md` states, in two places:
 - Line ~153 (Watchdog section): "**Status:** displayed as traffic light bar in Admin UI (green/yellow/red per service)"
@@ -59,7 +73,17 @@ Admin UI reads it (see Finding 2). This is a genuine, currently-shipping
 documentation-vs-code drift (AG-DOC-001 territory), not a misreading — the
 feature the docs describe for the current release simply isn't there.
 
-### 2. `watchdog.sh`'s `write_status()`/`STATUS_FILE`/`watchdog-status` volume content is never rendered to an operator
+### 2. `watchdog.sh`'s `write_status()`/`STATUS_FILE`/`watchdog-status` volume content is never rendered to an operator — FIXED by PR #1165 (2026-07-24)
+
+> **Status update:** the `watchdog-status` volume is now also mounted
+> read-only into the `ui` container in `dev`/`prod`/`quickstart`, and was
+> added to `deploy/full-setup/docker-compose.yml` (it did not exist there
+> before, so the CI validation stack previously could not have exercised
+> this even if the Admin UI read the file). `services/ui/src/
+> watchdog_status.rs` reads and classifies the content
+> (Fresh/Stale/Unavailable, using the file's mtime so a crashed watchdog's
+> stale content can never be mistaken for current). See finding #1's status
+> update for the render side.
 
 `write_status()` runs every `CHECK_INTERVAL` (default 30s) and writes a JSON
 file (per-service health color, failure counts, disk pct/color) to
@@ -93,7 +117,15 @@ computed on a 30s cycle and then never read by anything. This is a real,
 verified monitoring-visibility gap, not dead code in the strict sense and not
 a security defect by itself.
 
-### 3. Threat model's T9 mitigation ("Disk-usage warnings/alarms via the watchdog and Netdata") is not actually operator-visible today
+### 3. Threat model's T9 mitigation ("Disk-usage warnings/alarms via the watchdog and Netdata") is not actually operator-visible today — PARTIALLY FIXED by PR #1165 (2026-07-24)
+
+> **Status update:** the watchdog half of this finding is fixed — the
+> dashboard's "Service health" card now renders the real cache-disk
+> yellow/red color computed by `disk_info()`, and `docs/threat-model.md`'s
+> T9 mitigation bullet was reworded to say so precisely. The Netdata half is
+> **not** fixed by this PR and remains exactly as described below: no
+> notification integration, no Admin UI surface, port 19999 still never
+> published. Do not read this finding as fully closed.
 
 `docs/threat-model.md` line ~376 lists this as an existing mitigation for
 T9 (cache-exhaustion/request-flood DoS). Both halves are true in isolation

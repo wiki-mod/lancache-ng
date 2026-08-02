@@ -1,20 +1,20 @@
 #!/bin/bash
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# #808: shared "is this base-channel image actually fresh enough to validate
-# an untouched service against" check. scripts/ensure-pr-staging-images.sh
+# #808: shared "is this back-fill source image actually fresh enough to
+# validate an untouched service against" check. scripts/ensure-pr-staging-images.sh
 # (full-setup-deep-validate.yml) and build-push.yml's own "Ensure PR staging
 # tags exist for full-setup services" step both back-fill any full-setup
-# service a PR did NOT touch by re-pointing that PR's staging tag at whatever
-# the base channel (dev/nightly/latest) resolves to AT THE MOMENT THE JOB RUNS --
-# with no check that the base branch's own post-merge build for the exact
-# base commit has actually finished. Confirmed live (#808): PRs #911/#914 each
-# backfilled `dns` from a `dev` tag that was still ~41 minutes stale relative
-# to their own `base.sha`, because another PR's build+scan+promote pipeline
-# for a newer base-branch commit was still in flight when the backfill ran.
+# service a PR did NOT touch by re-pointing that PR's staging tag at a source
+# image, with no check (originally) that the source's own post-merge build
+# for the exact base commit had actually finished. Confirmed live (#808): PRs
+# #911/#914 each backfilled `dns` from a `dev` channel tag that was still ~41
+# minutes stale relative to their own `base.sha`, because another PR's
+# build+scan+promote pipeline for a newer base-branch commit was still in
+# flight when the backfill ran.
 #
 # The fix: read the `org.opencontainers.image.revision` OCI label off the
-# base-channel image (set by docker/metadata-action's default label set in
+# source image (set by docker/metadata-action's default label set in
 # build-push.yml's "Extract metadata" step -- see that step; the custom
 # `labels:` input there only overrides `.description`, so the default
 # `.revision=<github.sha>` label is untouched) and confirm, via real git
@@ -22,8 +22,21 @@
 # `base.sha`. Labels live in the image config blob, which `docker buildx
 # imagetools create` (used by both `promote` and this back-fill) copies
 # byte-for-byte when moving a tag -- retagging never rewrites them, so the
-# label on a `dev`/`nightly`/`latest` tag always reflects the real commit that
-# channel image's underlying build actually compiled.
+# label always reflects the real commit the image's underlying build actually
+# compiled.
+#
+# CALL-SITE HISTORY: originally (#808) both real callers passed a mutable
+# channel tag (`dev`/`nightly`/`latest`) as `base_image`, so this ancestry
+# check answered a genuine ">= base.sha" question against a moving target.
+# Since #1254/#1255 (2026-07-25, nightly decoupled from current_dev push),
+# both callers instead pass the PR base commit's own durable per-commit
+# `sha-<short>` image -- the check now normally resolves to an exact equality
+# rather than a real ">"; it is kept rather than simplified to a bare
+# existence probe because it still doubles as the bounded poll for the #808
+# race (that base-commit image may not have been pushed yet) and still
+# guards against a corrupted/mislabeled image reporting the wrong revision.
+# This function itself is agnostic to which kind of tag `base_image` is --
+# only its callers' choice of tag changed.
 #
 # Pure-ish functions (one intentional side effect: sif_image_revision shells
 # out to the registry). Sourced directly by scripts/ensure-pr-staging-images.sh
@@ -186,7 +199,7 @@ sif_is_ancestor_or_equal() {
   git -C "$git_dir" merge-base --is-ancestor "$base_sha" "$candidate_sha"
 }
 
-# sif_wait_for_fresh_base_image <base_image> <base_sha> <service_label> <normal_budget_seconds> <hard_ceiling_seconds> <poll_interval_seconds>
+# sif_wait_for_fresh_base_image <base_image> <base_sha> <service_label> <normal_budget_seconds> <hard_ceiling_seconds> <poll_interval_seconds> [allow_reverse_ancestry]
 #
 # Polls <base_image>'s org.opencontainers.image.revision label until it is at
 # or after <base_sha> (see sif_is_ancestor_or_equal), echoing the confirmed
@@ -201,6 +214,31 @@ sif_is_ancestor_or_equal() {
 # not-yet-fetched (status 3 from sif_is_ancestor_or_equal) is treated the
 # same as ordinary staleness here, not as a hard failure -- see that
 # function's own comment for why the two must not be conflated.
+#
+# <allow_reverse_ancestry> (optional, any non-empty value means "true";
+# default off -- unset/empty preserves the exact pre-existing behavior for
+# every caller that doesn't pass it): also accept the label predating
+# <base_sha> (base_sha being a DESCENDANT of the label's commit, the reverse
+# of the normal check), instead of only ever accepting base_sha being at or
+# before the label. This must stay opt-in, never the default, because it is
+# only safe when <base_image> is known to be an IMMUTABLE per-commit
+# `sha-<base_sha>` tag -- never a mutable channel tag (`dev`/`nightly`/
+# `latest`), which is exactly what this whole check exists to catch as
+# genuinely stale (#808). For a per-commit tag specifically, there are only
+# two ways it can exist at all: a real build-push.yml build AT that exact
+# commit (label == base_sha, the ordinary case), or build-push.yml's own
+# Schritt 4 "Retag unchanged service image" step (label == an ancestor of
+# base_sha) -- which only ever runs after determine-push-reuse-scope has
+# already positively verified content-equivalence between that ancestor and
+# base_sha for this exact service (scripts/lib/push-reuse.sh). There is no
+# third way a per-commit tag's label ends up predating its own tag name, so
+# accepting that combination is exactly as safe as accepting an exact match
+# -- it is not a weaker freshness bar, just recognizing a second legitimate
+# shape the proof can take. scripts/lib/staging-ancestor-fallback.sh's own
+# callers are the only ones that pass this (see that file), because they are
+# the only callers that always pass a per-commit tag; the shared #808/#895
+# touched-image mutable-channel-tag path this file's own header still
+# describes must never opt in.
 #
 # All human-readable progress/diagnostic output goes to stderr (`>&2`).
 # Only the confirmed-fresh commit SHA (on success) is written to stdout, so a
@@ -240,6 +278,7 @@ sif_wait_for_fresh_base_image() {
   local normal_budget_seconds="${4:?sif_wait_for_fresh_base_image: normal_budget_seconds is required}"
   local hard_ceiling_seconds="${5:?sif_wait_for_fresh_base_image: hard_ceiling_seconds is required}"
   local poll_interval_seconds="${6:?sif_wait_for_fresh_base_image: poll_interval_seconds is required}"
+  local allow_reverse_ancestry="${7:-}"
 
   local start_time=$SECONDS
   local hard_deadline=$((start_time + hard_ceiling_seconds))
@@ -256,6 +295,17 @@ sif_wait_for_fresh_base_image() {
         echo "::notice::$service_label base image ($base_image) was built from commit $revision, which is at or after base commit $base_sha (waited $((SECONDS - start_time))s). Safe to back-fill from." >&2
         printf '%s\n' "$revision"
         return 0
+      fi
+      if (( ancestor_status == 1 )) && [[ -n "$allow_reverse_ancestry" ]]; then
+        set +e
+        sif_is_ancestor_or_equal "$revision" "$base_sha"
+        local reverse_status=$?
+        set -e
+        if (( reverse_status == 0 )); then
+          echo "::notice::$service_label base image ($base_image) was built from commit $revision, which PREDATES base commit $base_sha -- but this is a per-commit tag, so the only way that combination exists is build-push.yml's Schritt 4 retag-unchanged-image path, which already verified $service_label is content-equivalent between $revision and $base_sha before writing this tag (waited $((SECONDS - start_time))s). Safe to back-fill from." >&2
+          printf '%s\n' "$revision"
+          return 0
+        fi
       fi
       if (( ancestor_status == 2 )); then
         echo "::error::$service_label base image ($base_image) freshness could not be determined due to a git-history/checkout problem (see the error above). Failing immediately -- this is a configuration bug, not staleness, and no amount of waiting fixes it." >&2

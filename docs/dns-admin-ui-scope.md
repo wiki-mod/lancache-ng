@@ -11,9 +11,11 @@ in one place — this document is that surface.
 
 This is a **scoping document, not an implementation plan**. Nothing in the
 "planned but unbuilt" sections below is committed to v0.2.0; per issue #645's
-own framing, v0.2.0 is trending toward feature freeze, so most of that list is
-candidate v0.3.0 scope until a maintainer decision says otherwise. Where this
-document says "planned but unbuilt," treat the referenced code (or its
+own framing, v0.2.0 completed its feature freeze and stabilization pass
+(#986, closed) and is now an archived release branch that only takes
+deliberate backports (see docs/release-versioning.md), so most of that list
+is candidate v0.3.0 scope until a maintainer decision says otherwise. Where
+this document says "planned but unbuilt," treat the referenced code (or its
 absence) as intentional, not as something to "clean up."
 
 Related: #415/#616 (known-good config snapshots, implemented), #628 (PowerDNS
@@ -110,7 +112,7 @@ reverse zones exist and are created, but have no Admin UI record-management
 route at all today, and — unlike `lan.` — neither is actually populated by
 DDNS by default today either. `services/dhcp/kea-dhcp-ddns.conf`'s
 `forward-ddns` sends lease host-record updates to `${DHCP_DOMAIN}`, which
-defaults to `lan` (`config/dev/dhcp.env`, `config/prod/dhcp.env`), so Kea's
+defaults to `lan` (`config/prod/dhcp.env`), so Kea's
 forward DDNS records land in the already-UI-managed `lan.` zone, not
 `local.lan.` — `local.lan.` is TSIG-enabled for updates
 (`configure_ddns_tsig()` grants it the same as every other zone in

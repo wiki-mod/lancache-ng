@@ -220,13 +220,18 @@ bind DHCP :67/udp).
 - Auth/session: `UI_AUTH_USER`, `UI_AUTH_PASSWORD`, `ALLOW_INSECURE_UI`,
   `UI_SESSION_TTL_SECONDS` (rejects non-numeric *and* >1 year),
   `UI_SECURITY_HEADERS`, `UI_HSTS_MODE`.
-- NATS (4 static roles, each username+password): `NATS_URL`,
+- NATS (5 static roles, each username+password): `NATS_URL`,
   `NATS_UI_USER`/`PASSWORD`, `NATS_DNS_WRITER_USER`/`PASSWORD`,
   `NATS_DNS_REPLICA_USER`/`PASSWORD` (renamed from `nats_dns_reader_*` under
   #583 — a fixed static credential is fine here because there's always
   exactly one co-located dns-ssl instance, unlike external secondaries),
   `NATS_CALLOUT_USER`/`PASSWORD` (the auth-callout responder's own bypass
-  identity), `NATS_ISSUER_SEED_PATH`, `NATS_ISSUER_SEED` (literal override),
+  identity), `NATS_SYS_USER`/`PASSWORD` (issue #681 — the sole member of a
+  new NATS `SYS` account; used only by `nats_kick.rs` to look up (CONNZ) and
+  force-disconnect ($SYS.REQ.SERVER.*.KICK) a removed/rotated secondary's
+  live connection, since that system-services API is unreachable to every
+  other role above, all of which stay in the implicit default account `$G`),
+  `NATS_ISSUER_SEED_PATH`, `NATS_ISSUER_SEED` (literal override),
   `NATS_CONF_PATH`, `NATS_AUTH_CALLOUT_PATH` (must match the nats
   entrypoint's `include` target — issue #811), `NATS_SERVICE`,
   `NATS_LOG_FILE`, `NATS_BIND_IP` (mirrors the Compose port `HOST` field this

@@ -22,7 +22,10 @@ export LANG=C LC_ALL=C
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-}")" && pwd)"
 QUICKSTART_COMPOSE="$SCRIPT_DIR/deploy/quickstart/docker-compose.yml"
 DOCKER_SOCKET_PROXY_SCRIPT="$SCRIPT_DIR/scripts/docker-socket-proxy.sh"
-DHCP_PROBE_SCRIPT="$SCRIPT_DIR/services/ui/dhcp-probe.sh"
+# dhcp-probe.sh (formerly copied the same way as the two scripts below) was
+# retired by issue #1288 -- the dhcp-probe container now runs the ui
+# image's own `lancache-ui --dhcp-probe` native CLI mode, so there is no
+# longer a separate script to track a source path for.
 # Shared-secret bootstrap helper (#858): the quickstart nats service sources this
 # to resolve the NATS_*_PASSWORD handshake secrets from the shared-secrets volume.
 # Copied flat into $install_dir/scripts/ like the two scripts above, so the
@@ -47,12 +50,61 @@ print_error(){ printf "  ${RED}✗${RESET} %s\n" "$*" >&2; }
 die()        { print_error "$*"; exit 1; }
 
 REPLY=""
+# Issue #1176: set by the `list-prompts` subcommand (never by an operator
+# directly) to redirect every ask()/confirm() call in the install wizard into
+# introspection mode instead of its normal interactive behavior -- see
+# wizard_introspect_record_prompt's own comment for what that mode does and
+# why it exists as one shared helper rather than a second, hand-duplicated
+# copy of the wizard's prompt text.
+WIZARD_INTROSPECT_MODE=0
+# fd 9 is reserved for `list-prompts`' optional answers file (opened once via
+# `exec 9<...` where the subcommand is dispatched); unset/empty means no
+# answers file was given, so every prompt just resolves to its own default,
+# same as an operator hitting Enter on every prompt.
+WIZARD_INTROSPECT_ANSWERS_FD=""
+
+# Issue #1176: the ONE place that knows how to turn an ask()/confirm() call
+# into an introspection-mode result, shared by both functions below so
+# `setup.sh list-prompts` walks the exact same call sites, in the exact same
+# order, as a real interactive install -- it cannot re-implement or copy the
+# wizard's branch logic anywhere, only observe it, which is what actually
+# closes the blind spot named in issue #1176 (a new prompt on a conditional
+# branch a simulation script's answers actually reach previously had no
+# single source of truth checking it; now the simulation scripts derive their
+# expected prompt sequence from this function's own output instead of
+# hand-encoding it).
+#
+# Output format: "PROMPT\t<prompt text>\t<default>\n" on stdout -- deliberately
+# plain and grep/cut-friendly (no JSON/YAML dependency, matching this
+# project's shell-first tooling convention) and matches the exact text ask()
+# would otherwise print interactively (prompt, then " [default]: "), so a
+# consumer can reconstruct the real rendered prompt without duplicating
+# ask()'s own formatting logic a second time.
+#
+# Resolving REPLY: pulls the next line from the answers-file fd if one was
+# given, otherwise (or once that file is exhausted) falls back to the
+# prompt's own default -- the same fallback ask() already applies for a blank
+# interactive Enter keypress, so an answers file only needs to name the
+# prompts where the operator would deliberately deviate from the default.
+wizard_introspect_record_prompt() {
+    local prompt="$1" default="$2" line=""
+    printf 'PROMPT\t%s\t%s\n' "$prompt" "$default"
+    if [[ -n "$WIZARD_INTROSPECT_ANSWERS_FD" ]]; then
+        IFS= read -r line <&"$WIZARD_INTROSPECT_ANSWERS_FD" || line=""
+    fi
+    REPLY="${line:-$default}"
+}
+
 # Reads from /dev/tty explicitly, not stdin: this script is commonly run via
 # `curl ... | bash`, which occupies stdin with the script body itself. Without
 # this, every prompt would silently read leftover script text instead of
 # waiting for the user.
 ask() {
     local prompt="$1" default="${2:-}"
+    if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+        wizard_introspect_record_prompt "$prompt" "$default"
+        return
+    fi
     printf "  ${BOLD}%s${RESET} [%s]: " "$prompt" "$default"
     read -r REPLY < /dev/tty
     REPLY="${REPLY:-$default}"
@@ -89,95 +141,6 @@ is_positive_integer() {
 # True if the value is non-empty and starts with /, i.e. a filesystem absolute path.
 is_absolute_path() {
     [[ -n "${1:-}" && "$1" == /* ]]
-}
-
-# True for an nginx-style time value (e.g. "365d", "1h30m", "600") as accepted
-# by directives like proxy_cache_path's inactive= parameter. nginx's own time
-# grammar is a run of <number><unit> pairs (ms, s, m, h, d, w, M, y); a bare
-# number with no suffix means seconds. This mirrors that grammar closely
-# enough to catch a typo before it reaches envsubst/nginx config generation,
-# without needing nginx itself available at setup time to validate it.
-is_valid_nginx_time_value() {
-    [[ "${1:-}" =~ ^([0-9]+(ms|[smhdwMy])?)+$ ]]
-}
-
-# Walks up from $1 to the nearest existing ancestor directory. Used for disk
-# free-space checks against CACHE_DIR: at the point the cache-size prompt
-# runs, CACHE_DIR itself does not exist yet (it is only created later via
-# `mkdir -p "$CACHE_DIR"`, near the end of the install flow), so `df` would
-# otherwise fail with "No such file or directory" on the path as typed.
-nearest_existing_ancestor_dir() {
-    local path="$1"
-    while [[ ! -d "$path" ]]; do
-        path="$(dirname "$path")"
-    done
-    printf '%s\n' "$path"
-}
-
-# Free space, in whole MiB, on the filesystem that would back directory $1
-# once created (see nearest_existing_ancestor_dir above). Uses `df -Pk`
-# (POSIX output format, 1024-byte blocks) rather than plain `df`, since
-# plain df's column layout wraps onto a second line for long device/mount
-# source strings (e.g. some overlay mounts), which would otherwise shift
-# the field this awk expression reads.
-available_space_mib_at() {
-    local dir avail_kib
-    dir="$(nearest_existing_ancestor_dir "$1")"
-    # `|| true` keeps a failing `df` (permission issue, exotic filesystem)
-    # from tripping `set -e`/`pipefail` before the explicit die() below can
-    # produce a clear message -- the same guard-then-validate pattern used
-    # elsewhere in this script (e.g. detect_secondary_listen_ip's route lookup).
-    avail_kib=$(df -Pk "$dir" 2>/dev/null | awk 'NR==2 {print $4}' || true)
-    [[ "$avail_kib" =~ ^[0-9]+$ ]] \
-        || die "Could not determine free disk space at $dir (df failed or returned unexpected output)."
-    echo $(( avail_kib / 1024 ))
-}
-
-# Maintainer-directed safety buffer (issue #1069): reserve more headroom for a
-# larger requested cache. nginx's cache manager sweeps periodically rather
-# than enforcing max_size instantaneously (manager_sleep/manager_threshold on
-# proxy_cache_path), so actual disk usage can transiently overshoot max_size
-# by roughly one sweep's worth of writes before cleanup catches up -- and a
-# larger declared cache means more concurrent downloads can land in that
-# window before the manager gets to them.
-cache_size_buffer_mib() {
-    local cache_gb="$1"
-    if (( cache_gb > 6 )); then
-        echo 2048
-    elif (( cache_gb > 4 )); then
-        echo 1024
-    else
-        echo 512
-    fi
-}
-
-# True if requesting cache_gb GiB still leaves cache_size_buffer_mib's
-# required buffer free on a filesystem with avail_mib MiB currently free.
-cache_size_fits_available_mib() {
-    local cache_gb="$1" avail_mib="$2" buffer_mib
-    buffer_mib=$(cache_size_buffer_mib "$cache_gb")
-    (( avail_mib - buffer_mib >= cache_gb * 1024 ))
-}
-
-# Largest whole-GiB cache size that currently passes
-# cache_size_fits_available_mib, for the rejection message. Scans downward
-# from the free-space ceiling rather than solving the step-function buffer
-# bands in closed form: the buffer only grows as the requested size grows, so
-# the scan is short (bounded by the disk's own size in GiB) and this stays
-# obviously correct instead of clever. Prints 0 and returns failure if even a
-# 1 GiB cache would not leave a buffer.
-largest_valid_cache_gb() {
-    local avail_mib="$1" candidate
-    candidate=$(( avail_mib / 1024 ))
-    while (( candidate >= 1 )); do
-        if cache_size_fits_available_mib "$candidate" "$avail_mib"; then
-            echo "$candidate"
-            return 0
-        fi
-        candidate=$(( candidate - 1 ))
-    done
-    echo 0
-    return 1
 }
 
 # Proxy-DHCP (dnsmasq) needs a subnet *base* address, not an arbitrary host IP,
@@ -350,11 +313,14 @@ is_valid_cidr() {
     return 0
 }
 
-# Enumerates the only three DHCP_MODE values setup.sh understands: DHCP off,
-# our own Kea server, or dnsmasq acting as a proxy-DHCP helper for PXE.
+# Enumerates the only DHCP_MODE values setup.sh understands: DHCP off, our own
+# Kea server, dnsmasq acting as a proxy-DHCP helper for PXE, or dnsmasq acting
+# as a real DHCP relay to an upstream server (issue #844). Both dnsmasq modes
+# run in the same `dhcp-proxy` container/profile; DHCP_MODE is what tells them
+# apart.
 is_valid_dhcp_mode() {
     case "$1" in
-        disabled|kea|dnsmasq-proxy) return 0 ;;
+        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
         *) return 1 ;;
     esac
 }
@@ -383,10 +349,10 @@ validate_ui_session_ttl_seconds() {
 }
 
 # Centralize runtime profile calculation so install and update cannot drift:
-# SSL, Kea DHCP, and dnsmasq proxy mode are represented once in COMPOSE_PROFILES
-# while unrelated profiles are preserved.
+# SSL, Kea DHCP, dnsmasq proxy mode, and LanCache-NG-NTP are represented once
+# in COMPOSE_PROFILES while unrelated profiles are preserved.
 compose_profiles_for_runtime() {
-    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}"
+    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}"
     local profile result="" trimmed
 
     IFS=',' read -r -a profiles <<< "$existing"
@@ -394,7 +360,7 @@ compose_profiles_for_runtime() {
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
         case "$trimmed" in
-            ""|ssl|dhcp-kea|dhcp-proxy) continue ;;
+            ""|ssl|dhcp-kea|dhcp-proxy|ntp) continue ;;
         esac
         case ",$result," in
             *",$trimmed,"*) ;;
@@ -414,11 +380,21 @@ compose_profiles_for_runtime() {
             [[ -n "$result" ]] && result+=","
             result+="dhcp-kea"
             ;;
-        dnsmasq-proxy)
+        dnsmasq-proxy|dnsmasq-relay)
+            # Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in
+            # the same `dhcp-proxy` compose service, so they map to the same
+            # profile; the container reads DHCP_MODE to render the matching
+            # config. The strip loop above already removes `dhcp-proxy` from
+            # `existing`, so mutual exclusion with dhcp-kea still holds.
             [[ -n "$result" ]] && result+=","
             result+="dhcp-proxy"
             ;;
     esac
+
+    if [[ "$ntp_enabled" = "1" ]]; then
+        [[ -n "$result" ]] && result+=","
+        result+="ntp"
+    fi
 
     printf '%s\n' "$result"
 }
@@ -447,8 +423,18 @@ run_kea_dhcp_activation_preflight() {
     # fail its own execution on every single run, unconditionally forcing
     # the "could not be executed" confirmation path below regardless of
     # whether a real conflict existed. Letting nmap auto-select the
-    # interface (no -e at all) matches the already-proven working
-    # invocation in services/ui/dhcp-probe.sh.
+    # interface (no -e at all) is the already-proven working invocation.
+    #
+    # This is a SEPARATE nmap usage from the Admin UI's own dhcp-probe
+    # container: it runs nmap directly inside the `dhcp` (Kea) service
+    # image (services/dhcp/Dockerfile), not the `ui` image. Issue #1288
+    # replaced the `ui` image's former dhcp-probe.sh (nmap + dhclient) with
+    # a native Rust DHCP probe, but deliberately did not touch this
+    # `dhcp`-image nmap call -- out of that issue's stated scope (see its
+    # own "current architecture" section, which only describes
+    # services/ui) and flagged explicitly rather than silently left as
+    # unfinished parity. `services/dhcp/Dockerfile` still installs nmap for
+    # exactly this call site.
     if ! output=$(docker compose --env-file "$env_file" -f "$QUICKSTART_COMPOSE" --profile dhcp-kea run --rm --no-deps dhcp \
         nmap --script broadcast-dhcp-discover --script-args broadcast-dhcp-discover.timeout=5 2>&1); then
         print_warn "DHCP discovery preflight could not be executed inside the Kea image."
@@ -458,10 +444,9 @@ run_kea_dhcp_activation_preflight() {
         return 0
     fi
 
-    # Matches services/ui/dhcp-probe.sh's already-proven parsing: anchor at
-    # the start of the line (after stripping nmap's leading |/_ prefixes and
-    # whitespace) instead of a bare substring match, and take the first
-    # match rather than assuming there is exactly one.
+    # Anchors at the start of the line (after stripping nmap's leading |/_
+    # prefixes and whitespace) instead of a bare substring match, and takes
+    # the first match rather than assuming there is exactly one.
     server_identifier="$(printf '%s\n' "$output" | sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' | sed -n '1p')"
 
     if [[ -n "$server_identifier" ]]; then
@@ -925,6 +910,57 @@ install_docker() {
     else
         die "No supported package manager found. Please install Docker and the Docker Compose plugin manually, then rerun setup.sh."
     fi
+}
+
+# Shared prerequisite-install flow: curl, Docker engine, a running Docker
+# daemon, and the Docker Compose v2 plugin. Used by the interactive `install`
+# flow below and by the standalone `install-requirements-primary`/
+# `install-requirements-secondary` commands (#1068 item 20) so an operator
+# who only needs the Docker prerequisites -- e.g. a fresh secondary host,
+# where `cmd_secondary` itself only checks for these tools and dies with
+# "docker is not installed" rather than installing them -- can provision
+# exactly that, standalone, without walking through the full interactive
+# installer. Both commands currently call this identical logic: a secondary
+# node needs the same Docker engine + Compose v2 plugin as a primary, nothing
+# less. Kept as two distinct command names anyway (rather than one shared
+# "install-requirements") so the operator-facing entry points stay
+# self-describing and can diverge later without a breaking rename if a
+# primary- or secondary-only requirement is ever added.
+ensure_stack_requirements_installed() {
+    [[ "$(id -u)" = "0" ]] \
+        || die "This command must be run as root (sudo ./setup.sh install-requirements-primary or install-requirements-secondary)."
+
+    if ! command -v curl >/dev/null 2>&1; then
+        install_curl
+    fi
+
+    if ! command -v docker >/dev/null 2>&1; then
+        install_docker
+        print_ok "Docker installed"
+    fi
+
+    if ! docker info >/dev/null 2>&1; then
+        print_warn "Docker daemon not running — starting now..."
+        systemctl enable --now docker \
+            || die "Failed to start Docker daemon."
+    fi
+
+    if ! docker compose version >/dev/null 2>&1; then
+        install_docker_compose
+    fi
+
+    docker compose version >/dev/null 2>&1 \
+        || die "Docker Compose plugin still missing after installing Docker requirements."
+}
+
+cmd_install_requirements_primary() {
+    ensure_stack_requirements_installed
+    print_ok "Primary node requirements installed (curl, Docker, Docker Compose v2). Run ./setup.sh install next."
+}
+
+cmd_install_requirements_secondary() {
+    ensure_stack_requirements_installed
+    print_ok "Secondary node requirements installed (curl, Docker, Docker Compose v2). Run ./setup.sh secondary --primary <url> --token <token> --name <name> --proxy-ip <ip> next."
 }
 
 # Approximates Docker Compose's own .env value semantics for a value read back
@@ -1548,28 +1584,21 @@ compose_file_args_for_install_dir() {
 # on both first install and every update, so copied installs always run the
 # current container wiring). See the inline comment for the #538 workaround
 # that force-removes a stale auto-vivified directory before reinstalling
-# dhcp-probe.sh/docker-socket-proxy.sh.
+# docker-socket-proxy.sh.
+#
+# dhcp-probe.sh is no longer one of these copied assets (issue #1288): the
+# dhcp-probe container now runs the same lancache-ui image's own
+# `--dhcp-probe` CLI mode (a native Rust DHCP probe, see
+# services/ui/src/dhcp_probe_native.rs) instead of a bind-mounted external
+# script, so there is nothing left to install/copy for it -- the compose
+# file's dhcp-probe service no longer declares a `volumes:` entry at all.
 install_quickstart_compose_assets() {
-    local install_dir="$1" socket_proxy_target dhcp_probe_target helper_target
+    local install_dir="$1" socket_proxy_target helper_target
 
     socket_proxy_target="$install_dir/scripts/docker-socket-proxy.sh"
-    dhcp_probe_target="$install_dir/scripts/dhcp-probe.sh"
     helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
     mkdir -p "$install_dir/scripts"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
-    # A prior install that hit the missing-copy bug (#538) left Docker's own
-    # auto-vivified bind-mount source behind as an empty directory. GNU
-    # install(1) treats an existing directory target as "copy into", not
-    # "replace" — leaving it in place would install to dhcp-probe.sh/dhcp-probe.sh
-    # and still leave the actual mount source as a directory.
-    if [[ -d "$dhcp_probe_target" ]]; then
-        rm -rf "$dhcp_probe_target"
-    fi
-    if [[ "$(realpath -m "$DHCP_PROBE_SCRIPT")" != "$(realpath -m "$dhcp_probe_target")" ]]; then
-        install -m 0755 "$DHCP_PROBE_SCRIPT" "$dhcp_probe_target"
-    else
-        chmod 0755 "$dhcp_probe_target"
-    fi
     if [[ -d "$socket_proxy_target" ]]; then
         rm -rf "$socket_proxy_target"
     fi
@@ -1898,6 +1927,20 @@ assert_resolved_image_tag_platform_supported() {
 
     printf '%s\n' "$discovered_platforms" | grep -Eq "^${platform}(/.*)?$" \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
+}
+
+# True if a real systemd instance is actually managing this host as PID 1, not
+# merely if the `systemctl` binary happens to be present. A present binary
+# with no real init process behind it (e.g. inside a plain Docker container,
+# or certain LXC/chroot environments) still fails every systemctl call
+# ("Failed to connect to system scope bus... Host is down"), so `command -v
+# systemctl` alone is not sufficient to gate an unconditional systemctl call.
+# /run/systemd/system is the standard, side-effect-free way to check for a
+# real running systemd instance (the same check systemd's own tooling and
+# many other init-detection scripts use) without attempting a bus call that
+# could itself fail and abort the caller under set -e.
+systemd_available() {
+    command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
 }
 
 # True if systemctl is present AND the given unit file is known to it. Used to
@@ -2354,8 +2397,9 @@ resolve_lancache_stack_channel_tag() {
 ${RED}✗${RESET} Cannot resolve the 'stable' release channel (published as the 'latest' pointer image).
 
 This project is currently in active development (pre-1.0). While images are published
-to the 'nightly' testing channel continuously from current_dev, a formal stable release
-with a published 'latest'/'stable' channel tag has not yet been created.
+to the 'nightly' testing channel from current_dev (built once daily plus on-demand,
+gated on a full green build+scan), a formal stable release with a published
+'latest'/'stable' channel tag has not yet been created.
 
 To proceed, choose one of these options:
 
@@ -2507,6 +2551,7 @@ migrate_env_for_update() {
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
+    local ntp_data_default ntp_data_dir ntp_enabled
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
@@ -2668,6 +2713,15 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_RANGE_START "" "$env_file"
     append_env_key_if_missing DHCP_RANGE_END "" "$env_file"
 
+    # LanCache-NG-NTP can stay disabled too; same "keys must exist" reasoning
+    # as DHCP_ENABLED/KEA_DATA_DIR above. No legacy path to migrate from (this
+    # is a new service), so ntp_data_dir is just the plain default rather than
+    # going through legacy_dir_or_default.
+    append_env_key_if_missing NTP_ENABLED "0" "$env_file"
+    ntp_data_default="$state_dir/ntp"
+    ntp_data_dir="$ntp_data_default"
+    set_optional_env_path_override_if_needed NTP_DATA_DIR "$ntp_data_dir" "$ntp_data_default" "$env_file"
+
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
@@ -2702,6 +2756,10 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
+    # forwarded as giaddr). Required in dnsmasq-relay mode, ignored otherwise.
+    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "" "$env_file"
+    dhcp_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$env_file")
     # Issue #450: additional optional dnsmasq relay/proxy fields. Unlike the
     # four values above, none of these are required in dnsmasq-proxy mode --
     # an empty value just means entrypoint.sh renders no directive for it.
@@ -2754,6 +2812,16 @@ migrate_env_for_update() {
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             ;;
+        dnsmasq-relay)
+            # Issue #844: relay mode forwards to an upstream server and injects
+            # nothing of its own, so the only two required values are this
+            # relay's client-facing address (giaddr source) and the upstream
+            # server -- NOT the ProxyDHCP subnet/DNS fields.
+            is_valid_ipv4 "$dhcp_relay_local_addr" \
+                || die "DHCP_MODE=dnsmasq-relay requires DHCP_RELAY_LOCAL_ADDR (this relay's own IPv4 on the client network) in $env_file. Set it, then rerun setup.sh update."
+            is_valid_ipv4 "$upstream_dhcp_ip" \
+                || die "DHCP_MODE=dnsmasq-relay requires the upstream DHCP server IPv4 in UPSTREAM_DHCP_IP in $env_file. Set it, then rerun setup.sh update."
+            ;;
         *)
             is_valid_ipv4 "$dhcp_subnet_start" || dhcp_subnet_start=""
             is_valid_ipv4 "$dhcp_dns_primary" || dhcp_dns_primary="$ip_standard"
@@ -2766,6 +2834,7 @@ migrate_env_for_update() {
     set_env_key DHCP_DNS_PRIMARY "$dhcp_dns_primary" "$env_file"
     set_env_key DHCP_DNS_SECONDARY "$dhcp_dns_secondary" "$env_file"
     set_env_key UPSTREAM_DHCP_IP "$upstream_dhcp_ip" "$env_file"
+    set_env_key DHCP_RELAY_LOCAL_ADDR "$dhcp_relay_local_addr" "$env_file"
     set_env_key DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" "$env_file"
     set_env_key DHCP_PROXY_ROUTER "$dhcp_proxy_router" "$env_file"
     set_env_key DHCP_NTP_SERVERS "$dhcp_ntp_servers" "$env_file"
@@ -2786,11 +2855,17 @@ migrate_env_for_update() {
     ensure_secret_env_key NATS_DNS_REPLICA_PASSWORD "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_CALLOUT_USER "lancache-nats-callout" "$env_file"
     ensure_secret_env_key NATS_CALLOUT_PASSWORD "$env_file" hex32
+    # Issue #681: system-account identity so an already-installed primary
+    # converges to the new active-disconnect capability on its next update,
+    # the same as any other mandatory NATS static role above.
+    set_env_key_if_empty_or_missing NATS_SYS_USER "lancache-nats-sys" "$env_file"
+    ensure_secret_env_key NATS_SYS_PASSWORD "$env_file" hex32
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
+    ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
     set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode")" \
+        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled")" \
         "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real
@@ -2867,7 +2942,7 @@ install_missing_tools() {
 backup_manifest() {
     local install_dir="$1" mode="$2"
     local env_file cache_env_file
-    local cache_dir cache_std cache_ssl kea_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
+    local cache_dir cache_std cache_ssl kea_dir ntp_dir nats_conf_dir nats_data_dir pdns_filter_state_dir pdns_ssl_dir pdns_standard_dir state_dir
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     cache_env_file="$install_dir/.env"
     state_dir=$(get_env_var LANCACHE_STATE_DIR "$env_file")
@@ -2876,6 +2951,7 @@ backup_manifest() {
     cache_std=$(get_env_var CACHE_DIR_STANDARD "$env_file")
     cache_ssl=$(get_env_var CACHE_DIR_SSL "$env_file")
     kea_dir=$(get_env_var KEA_DATA_DIR "$env_file")
+    ntp_dir=$(get_env_var NTP_DATA_DIR "$env_file")
     nats_conf_dir=$(get_env_var NATS_CONF_DIR "$env_file")
     nats_data_dir=$(get_env_var NATS_DATA_DIR "$env_file")
     pdns_filter_state_dir=$(get_env_var PDNS_FILTER_STATE_DIR "$env_file")
@@ -2884,6 +2960,7 @@ backup_manifest() {
     cache_std="${cache_std:-$state_dir/cache}"
     cache_ssl="${cache_ssl:-$cache_std}"
     kea_dir="${kea_dir:-$state_dir/kea}"
+    ntp_dir="${ntp_dir:-$state_dir/ntp}"
     nats_conf_dir="${nats_conf_dir:-$state_dir/nats-conf}"
     nats_data_dir="${nats_data_dir:-$state_dir/nats}"
     pdns_filter_state_dir="${pdns_filter_state_dir:-$state_dir/pdns-filter-state}"
@@ -2906,6 +2983,7 @@ backup_manifest() {
     [[ -d "$(legacy_state_path nats)" ]] && printf '%s\n' "$(legacy_state_path nats)"
     [[ -d "$(legacy_state_path nats-conf)" ]] && printf '%s\n' "$(legacy_state_path nats-conf)"
     [[ -n "${kea_dir:-}" && -d "$kea_dir" ]] && printf '%s\n' "$kea_dir"
+    [[ -n "${ntp_dir:-}" && -d "$ntp_dir" ]] && printf '%s\n' "$ntp_dir"
     if [[ "$mode" = "full" ]]; then
         [[ -n "${cache_dir:-}" && -d "$cache_dir" ]] && printf '%s\n' "$cache_dir"
         [[ -n "${cache_std:-}" && -d "$cache_std" ]] && printf '%s\n' "$cache_std"
@@ -2922,6 +3000,22 @@ path_is_inside() {
     child=$(realpath -m "$child")
     parent=$(realpath -m "$parent")
     [[ "$child" = "$parent" || "$child" = "$parent"/* ]]
+}
+
+# Shared "no stack at this path" failure (#1068 item 22), used by every
+# command that operates on an existing install directory defaulting to
+# /opt/lancache-ng (backup, restore, update/auto-update, debug,
+# create-logs-for-issue, reset-to-last-known-good-config, update-ip). A
+# secondary DNS node's stack lives in its own --name-derived directory under
+# wherever cmd_secondary was run (see cmd_secondary's own secondary_dir
+# handling), never /opt/lancache-ng -- so any of these commands, run bare on
+# a fresh secondary host, hits this by default. The previous plain "Run
+# ./setup.sh first." read as if only a primary install were possible, which
+# is actively misleading for that case; point at both real fixes instead of
+# guessing which one applies.
+die_no_stack_found() {
+    local install_dir="$1"
+    die "No stack found in ${install_dir}. If this is a fresh primary install, run ./setup.sh (or ./setup.sh install). If this is a secondary DNS node, run this command from its own directory instead (the one named after --name when it was registered via ./setup.sh secondary), or pass that directory explicitly, e.g.: ./setup.sh <command> /path/to/that-directory"
 }
 
 # Compose helpers are deliberately no-ops when the stack is unavailable so
@@ -2988,8 +3082,8 @@ validate_compose_config() {
 # Compose itself resolves this, in priority order, from: the
 # COMPOSE_PROJECT_NAME environment variable, a COMPOSE_PROJECT_NAME entry in
 # the env file, the top-level `name:` key in docker-compose.yml, and finally
-# the containing directory's basename. All three of this repo's compose files
-# (deploy/quickstart, deploy/dev, deploy/prod) pin `name: lancache-ng`, so the
+# the containing directory's basename. Both of this repo's compose files
+# (deploy/quickstart, deploy/prod) pin `name: lancache-ng`, so the
 # yaml fallback is what actually resolves today for every install — but
 # honoring an operator override first keeps this correct if that ever
 # changes. Reads the yaml directly (rather than shelling out to `docker
@@ -3102,7 +3196,7 @@ restore_compose_volumes() {
 }
 
 # The compose project name ("lancache-ng") is fixed across every compose file
-# in this repo (deploy/quickstart, deploy/dev, deploy/prod), not derived from
+# in this repo (deploy/quickstart, deploy/prod), not derived from
 # install_dir. Two installs on the same Docker host therefore resolve to the
 # SAME named Docker volumes regardless of install directory. `cmd_restore`'s
 # own --help documents remapping a restore to a different [install-dir] as
@@ -3161,7 +3255,7 @@ cmd_backup() {
     install_dir=$(realpath -m "$install_dir")
     backup_root=$(realpath -m "$backup_root")
     [[ -f "$install_dir/docker-compose.yml" && -f "$(runtime_env_file_for_install_dir "$install_dir")" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     install_missing_tools tar rsync
 
     local stamp dest archive rel path old_umask stack_stopped=0 stack_was_running=0 backup_paused_convergence=0
@@ -3513,6 +3607,18 @@ Commands:
   install              Run the guided first-time setup. This is also the
                        default when no command is given, so this remains safe
                        for curl | bash installation.
+  install-requirements-primary
+                       Install only the Docker prerequisites (curl, Docker
+                       engine, Docker Compose v2) for a primary node, without
+                       running the rest of the interactive installer.
+  install-requirements-secondary
+                       Install only the Docker prerequisites for a secondary
+                       DNS node, without running ./setup.sh secondary.
+  list-prompts [answers-file]
+                       Introspection mode: reports the exact ordered prompt
+                       sequence the install wizard would ask for a given set
+                       of answers, without touching the filesystem, network,
+                       or Docker. See './setup.sh list-prompts --help'.
   update [install-dir] Update an existing stack. Default dir: /opt/lancache-ng
   update-ip [install-dir]
                        Change the configured standard and SSL listener IPs.
@@ -3527,6 +3633,8 @@ Commands:
   reset-to-last-known-good-config <service> [install-dir] [snapshot-id]
                        CLI fallback for rolling a service back to a known-good
                        config when the Admin UI itself is unreachable.
+                       Supported: kea, dns/pdns (dns/pdns also takes a <zone>
+                       argument -- run with --help for the full shape).
   help, --help         Show this compact command list.
 
 Compatibility aliases:
@@ -3559,6 +3667,52 @@ default. Set LANCACHE_SETUP_GIT_REF to a branch, tag, or commit-ish (e.g.
 LANCACHE_SETUP_GIT_REF=v0.2.0) to bootstrap from that ref instead -- useful
 for validating a pre-release branch the same documented one-liner way that
 LANCACHE_IMAGE_CHANNEL already selects a specific image channel (#814).
+EOF
+            ;;
+        install-requirements-primary)
+            cat <<EOF
+Usage: ./setup.sh install-requirements-primary
+
+Installs only the Docker prerequisites (curl, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin) for a primary node, then stops --
+does not run the rest of the interactive installer. Useful for provisioning a
+host's requirements ahead of time, or standalone, separately from the guided
+setup. Must be run as root. Follow with ./setup.sh install.
+EOF
+            ;;
+        install-requirements-secondary)
+            cat <<EOF
+Usage: ./setup.sh install-requirements-secondary
+
+Installs only the Docker prerequisites (curl, Docker engine, a running Docker
+daemon, and the Docker Compose v2 plugin) for a secondary DNS node, then
+stops. ./setup.sh secondary itself only checks for these tools and fails with
+"docker is not installed" if they are missing -- this command lets an
+operator install exactly what a secondary needs, standalone, before running
+./setup.sh secondary. Must be run as root.
+EOF
+            ;;
+        list-prompts)
+            cat <<EOF
+Usage: ./setup.sh list-prompts [answers-file]
+
+Introspection mode for issue #1176: walks the install wizard's real,
+current branch logic (the exact same code ./setup.sh install runs) and
+prints the ordered prompt sequence it would ask, one per line, as
+"PROMPT<TAB>text<TAB>default". Never touches the filesystem, network, or
+Docker -- no root required.
+
+[answers-file] is optional: a plain text file with one reply per line, in
+the order prompts are expected to be asked. A blank line (or running out of
+lines) falls back to that prompt's own default, the same as an operator
+pressing Enter. Omitting the file entirely walks the all-defaults path.
+
+Intended consumer: scripts/setup-cli-simulation.sh and
+scripts/syslog-forwarding-simulation.sh derive their expect-driven prompt
+sequences from this command's output instead of hand-encoding them, so a new
+prompt on any branch those scripts' answers actually reach cannot silently
+drift out of sync (see scripts/check-setup-prompt-drift.sh for the
+complementary static drift guard, which stays in place as a second net).
 EOF
             ;;
         update)
@@ -3667,6 +3821,7 @@ EOF
         reset-to-last-known-good-config)
             cat <<EOF
 Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id] [--yes]
+       ./setup.sh reset-to-last-known-good-config dns|pdns [install-dir] <zone> [snapshot-id] [--yes]
 
 CLI fallback for when the Admin UI itself is unreachable but a service's own
 control surface still is (issue #763). Automates the exact by-hand recovery
@@ -3678,12 +3833,21 @@ API, the same sequence the Admin UI's own per-service rollback pages already
 run when they ARE reachable.
 
 Supported services:
-  kea, dhcp   Rolls back Kea's DHCP config via its Control Agent API
-              (config-test -> config-set -> config-write), reading snapshots
-              from the shared kea-data volume.
-
-Not yet supported: dns/pdns zone-record rollback (depends on issue #628's
-PowerDNS rollback listener).
+  kea, dhcp          Rolls back Kea's DHCP config via its Control Agent API
+                     (config-test -> config-set -> config-write), reading
+                     snapshots from the shared kea-data volume.
+  dns, pdns          Rolls back a PowerDNS zone's record data via
+                     nats-subscriber's rollback listener (list snapshots ->
+                     diff -> PATCH -> check-zone -> flush -> re-publish),
+                     reached by execing curl inside the target container
+                     (its port is Compose-internal only, never published to
+                     the host). Defaults to the dns-standard container,
+                     matching the Admin UI's own current single-primary
+                     scope; dns-standard/dns-ssl select one explicitly.
+                     Unlike Kea, PowerDNS tracks snapshots per zone (lan.,
+                     local.lan., and the private reverse zones), so a <zone>
+                     argument is required -- omit it to list which zones
+                     currently have snapshots instead of guessing one.
 
 --yes, -y     Skip the interactive confirmation prompt (e.g. for scripted use).
               Applying a snapshot always takes effect immediately either way.
@@ -3975,7 +4139,7 @@ apply_stack_update_ordered() {
 perform_stack_update_flow() {
     local install_dir="$1"
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
     # Installed up front, before anything is mutated, so the post-update
     # verify_stack_functional_health gate below actually runs its DNS/HTTP
@@ -4086,7 +4250,7 @@ cmd_auto_update() {
 
     install_dir=$(realpath -m "$install_dir")
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
 
     # Re-checked here, not just trusted from whatever gated the systemd timer
@@ -4156,6 +4320,43 @@ lancache_ui_channel_override_is_valid() {
     esac
 }
 
+# Validates a CACHE_MAX_GB override pulled from the Admin UI's settings
+# volume (services/ui/src/routes/cache.rs's resize_cache, issue #1069 part
+# 3: the Admin UI cache-resize capability). Must be a positive whole number
+# of GiB, same shape setup.sh's own "Cache size in GiB" prompt accepts.
+# Deliberately does NOT re-run a disk-space/safety-buffer check here: the
+# Admin UI already validated the requested size against real free space at
+# its own read-only view of CACHE_DIR (the same proxy-cache volume) before
+# ever writing this override, so re-deriving that check on the host would
+# just duplicate logic that has to be kept in sync in two languages for no
+# real additional safety -- the actual gap this leaves is a real disk-usage
+# change in the window between the Admin UI's validation and this
+# convergence tick picking it up (currently up to ~5 minutes), which is a
+# documented, accepted limitation (see docs/architecture-ng.md's Cache
+# Retention & Cleanup section), not something silently unguarded.
+# The `10#` base prefix mirrors the existing "Cache size in GiB" prompt's own
+# leading-zero handling further down in this script: without it, a
+# settings-file value like "008" would be parsed as octal by `(( ))` and abort
+# on an invalid digit (8/9) rather than being treated as decimal 8.
+lancache_ui_cache_max_gb_override_is_valid() {
+    [[ "$1" =~ ^[0-9]+$ ]] || return 1
+    (( 10#$1 > 0 ))
+}
+
+# Same validation shape as lancache_ui_channel_override_is_valid above, for
+# the DHCP_MODE key persist_ui_settings (routes/dhcp.rs) writes to the same
+# ui-settings volume. Matches exactly the four values
+# parse_dhcp_mode_input in routes/dhcp.rs accepts -- anything else (empty,
+# a future value this script doesn't know yet) is left as a silent no-op
+# tick rather than folded in, for the same "must never die() inside a
+# systemd service tick" reason documented above.
+lancache_ui_dhcp_mode_override_is_valid() {
+    case "$1" in
+        disabled|kea|dnsmasq-proxy|dnsmasq-relay) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
 # Reads a single KEY=value line out of the ui-data volume's
 # lancache-ui-settings.env, or prints nothing if the volume doesn't exist yet
 # (a fresh install before the UI container has ever started), Docker itself
@@ -4198,6 +4399,8 @@ reconcile_auto_update_timer_state() {
 cmd_converge_reconcile() {
     local install_dir="${1:-/opt/lancache-ng}" env_file
     local ui_channel ui_auto_update current_channel current_auto_update
+    local ui_cache_max_gb current_cache_max_gb
+    local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
 
     install_dir=$(realpath -m "$install_dir")
     # A converge tick can fire before the very first install completes (the
@@ -4229,10 +4432,82 @@ cmd_converge_reconcile() {
         fi
     fi
 
+    # Issue #1068 item 6: DHCP_MODE is the one Admin-UI-editable setting among
+    # these that also has a real Compose-profile side effect (the `dhcp`/
+    # `dhcp-proxy` services are profile-gated -- see docker-compose.yml).
+    # Without this fold, switching DHCP mode in the Admin UI updated only the
+    # ui-settings volume; .env's COMPOSE_PROFILES (and therefore what
+    # `docker compose up` actually creates) never learned about the change,
+    # so a mode an operator had never used before could never be started --
+    # the Admin UI's own docker-socket-proxy access has no container-create
+    # capability (routes/dhcp.rs's reconcile_dhcp_mode can only start/stop an
+    # ALREADY-EXISTING container). Folding it here, the same way the channel/
+    # auto-update keys already are above, means: once an operator has saved a
+    # new DHCP mode in the UI (which itself may still require one manual
+    # `docker compose --profile ... up -d ...` the very first time that mode
+    # is ever used, per routes/dhcp.rs's start_service_error guidance), this
+    # tick keeps .env's COMPOSE_PROFILES converged with it from then on, so
+    # the container survives a future `setup.sh update` / host reboot /
+    # `docker compose up` instead of silently falling out of the active
+    # profile set again.
+    ui_dhcp_mode=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "DHCP_MODE")
+    if [[ -n "$ui_dhcp_mode" ]] && lancache_ui_dhcp_mode_override_is_valid "$ui_dhcp_mode"; then
+        current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
+        if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
+            current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
+            current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+            new_compose_profiles=$(compose_profiles_for_runtime \
+                "$current_compose_profiles" "$current_ssl_enabled" "$ui_dhcp_mode")
+            set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
+            set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
+            print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
+        fi
+    fi
+
     # Reconciles the timer against .env's CURRENT value regardless of whether
     # the block above just changed it or it was already correct -- covers a
     # direct manual .env edit too, not only the Admin UI path.
     reconcile_auto_update_timer_state "$env_file"
+
+    # Cache resize (issue #1069 part 3): bridges the Admin UI's dashboard
+    # resize control (services/ui/src/routes/cache.rs) onto the host, the
+    # same way the LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED block above
+    # bridges #819's release-channel control. CACHE_MAX_SIZE (nginx's real
+    # `proxy_cache_path ... max_size=`) and CACHE_MAX_GB (the Admin UI's own
+    # display/percentage-bar value) are written together so the two never
+    # drift apart -- see config/{dev,prod}/proxy.env and this env file's own
+    # CACHE_MAX_SIZE/CACHE_MAX_GB pair for why both exist.
+    #
+    # Scope boundary: this writes the quickstart/setup.sh-managed runtime
+    # .env, which deploy/quickstart/docker-compose.yml's proxy service reads
+    # CACHE_MAX_SIZE from directly (`environment: - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}`).
+    # A manual deploy/prod checkout's proxy service instead reads
+    # config/prod/proxy.env via `env_file:`, a file this convergence tick
+    # never touches -- but this block still writes .env's CACHE_MAX_GB/
+    # CACHE_MAX_SIZE unconditionally (it does not check which compose style
+    # is in use), and deploy/prod's ui service DOES read CACHE_MAX_GB from
+    # .env. That means an Admin UI resize on a deploy/prod install is worse
+    # than an inert no-op: the dashboard's own "pending" banner clears and
+    # its usage bar starts showing the new target size once `docker compose
+    # up -d` recreates the ui container, while the real proxy container
+    # keeps enforcing the untouched old CACHE_MAX_SIZE from
+    # config/prod/proxy.env -- a misleading display of a resize that never
+    # actually reached nginx. deploy/prod is the manual/self-hosted-repo
+    # path, not the setup.sh-managed default this convergence mechanism was
+    # built for; see docs/architecture-ng.md for the same caveat stated
+    # operator-facing. Not fixed here (would mean writing
+    # config/prod/proxy.env from this tick too, a separate, deploy/prod-
+    # specific change out of scope for this PR).
+    ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB")
+    if [[ -n "$ui_cache_max_gb" ]] && lancache_ui_cache_max_gb_override_is_valid "$ui_cache_max_gb"; then
+        ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))
+        current_cache_max_gb=$(get_env_var CACHE_MAX_GB "$env_file")
+        if [[ "$ui_cache_max_gb" != "$current_cache_max_gb" ]]; then
+            set_env_key CACHE_MAX_SIZE "${ui_cache_max_gb}g" "$env_file"
+            set_env_key CACHE_MAX_GB "$ui_cache_max_gb" "$env_file"
+            print_ok "Cache size updated from Admin UI: ${current_cache_max_gb:-<unset>} GB -> ${ui_cache_max_gb} GB"
+        fi
+    fi
 }
 
 # ── debug subcommand ──────────────────────────────────────────────────────────
@@ -4242,7 +4517,7 @@ cmd_debug() {
     local install_dir="${1:-/opt/lancache-ng}"
     local env_file
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     cd "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
@@ -4338,6 +4613,7 @@ logbundle_secret_env_keys() {
         NATS_DNS_WRITER_PASSWORD \
         NATS_DNS_REPLICA_PASSWORD \
         NATS_CALLOUT_PASSWORD \
+        NATS_SYS_PASSWORD \
         SECONDARY_REGISTRATION_TOKEN \
         UI_AUTH_PASSWORD
 }
@@ -4514,7 +4790,7 @@ cmd_create_logs_for_issue() {
     install_dir=$(realpath -m "$install_dir")
     dest_root=$(realpath -m "$dest_root")
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     install_missing_tools tar
 
     local env_file cache_env_file state_dir
@@ -4614,12 +4890,12 @@ cmd_create_logs_for_issue() {
         logbundle_named_volume_listing "$install_dir" "$env_file" pdns-config-snapshots-ssl config-snapshots \
             "$dest/known-good-snapshots/dns-ssl.txt"
     fi
-    # Kea's config-snapshots directory is a plain host bind mount in
-    # prod/quickstart (KEA_DATA_DIR) but a real named Docker volume in dev
-    # (see deploy/dev/docker-compose.yml's top-level kea-data: entry vs.
-    # prod/quickstart's ${KEA_DATA_DIR:-...}/kea bind path) — try the host
-    # path first and only fall back to the named-volume approach if it does
-    # not exist, so this works correctly for both.
+    # Kea's config-snapshots directory is a plain host bind mount in both
+    # remaining deploy profiles (prod/quickstart, KEA_DATA_DIR). The
+    # now-retired deploy/dev stack (v0.3.0, #766) used a real named Docker
+    # volume for the same path instead -- try the host path first and only
+    # fall back to the named-volume approach if it does not exist, so this
+    # keeps working for any pre-v0.3.0 dev-stack install still around.
     local kea_dir; kea_dir=$(get_env_var KEA_DATA_DIR "$env_file"); kea_dir="${kea_dir:-$state_dir/kea}"
     if [[ -d "$kea_dir" ]]; then
         logbundle_host_path_listing "$kea_dir/config-snapshots" "$dest/known-good-snapshots/kea.txt"
@@ -4673,7 +4949,7 @@ EOF
 # automates exactly that sequence into one invocation, rather than inventing a
 # new mechanism.
 cmd_reset_to_last_known_good_config() {
-    local service="" install_dir="/opt/lancache-ng" snapshot_id="" assume_yes=0
+    local service="" install_dir="/opt/lancache-ng" snapshot_id="" zone="" assume_yes=0
     local -a positional=()
     while [[ $# -gt 0 ]]; do
         case "$1" in
@@ -4683,26 +4959,57 @@ cmd_reset_to_last_known_good_config() {
     done
     service="${positional[0]:-}"
     [[ -n "${positional[1]:-}" ]] && install_dir="${positional[1]}"
-    snapshot_id="${positional[2]:-}"
+    # Normalizes a relative [install-dir] to absolute, matching cmd_update_ip's
+    # identical `realpath -m` call: reset_dns_to_last_known_good_config's
+    # dns_rollback_exec runs `cd "$install_dir" && docker compose --env-file
+    # "$env_file" ...` (needed so `docker compose exec` resolves the right
+    # project/container -- see that function's own doc comment), and
+    # env_file is itself computed as "$install_dir/.env" -- if install_dir
+    # were left relative, that cd would re-resolve env_file a second time
+    # relative to the NEW cwd, silently doubling the path (e.g.
+    # "a/b/a/b/.env"). Confirmed empirically while validating this command
+    # against a real stack with a relative install-dir argument.
+    install_dir=$(realpath -m "$install_dir")
+
+    # PowerDNS's zone/record snapshots are inherently per-zone (lan.,
+    # local.lan., and 20 private reverse zones -- see zone_snapshots.rs's
+    # ROLLBACK_ZONES), unlike Kea's single dhcp4.json: positional[2] means
+    # "zone" for dns/pdns targets and "snapshot-id" for kea, and dns/pdns
+    # additionally consumes positional[3] as its own snapshot-id.
+    case "$service" in
+        dns|pdns|dns-standard|dns-ssl)
+            zone="${positional[2]:-}"
+            snapshot_id="${positional[3]:-}"
+            ;;
+        *)
+            snapshot_id="${positional[2]:-}"
+            ;;
+    esac
 
     case "$service" in
         kea|dhcp)
             reset_kea_to_last_known_good_config "$install_dir" "$snapshot_id" "$assume_yes"
             ;;
-        dns|pdns|dns-standard|dns-ssl)
-            # #628/PR #788 (PowerDNS zone/record snapshot + rollback listener)
-            # was still in review, not yet merged, when this command was
-            # added -- automating its manual-recovery sequence here would mean
-            # guessing at an API surface still subject to change. Fails
-            # closed with a clear pointer instead of silently no-op-ing or
-            # shipping against a moving target.
-            die "reset-to-last-known-good-config for '$service' is not implemented yet: it depends on the PowerDNS zone/record rollback listener tracked in issue #628. Once that lands, this command will call it the same way the 'kea' target already calls Kea's Control Agent API. Until then, see docs/known-good-config-snapshots.md's \"Manual recovery\" section."
+        dns|pdns)
+            # Scoped to dns-standard by default, matching services/ui/src/
+            # routes/dns_snapshots.rs's own current single-primary scope
+            # decision (see that file's module doc comment) -- not a new
+            # scope choice invented here.
+            reset_dns_to_last_known_good_config "dns-standard" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
+            ;;
+        dns-standard|dns-ssl)
+            # The rollback listener (services/dns/nats-subscriber/src/
+            # rollback_listener.rs) runs identically in both containers with
+            # independent snapshot histories (separate pdns-config-snapshots-
+            # {standard,ssl} volumes) -- accepting an explicit target here is
+            # a direct use of that existing mechanism, not new scope.
+            reset_dns_to_last_known_good_config "$service" "$install_dir" "$zone" "$snapshot_id" "$assume_yes"
             ;;
         "")
-            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Usage: ./setup.sh reset-to-last-known-good-config <service> [install-dir] [snapshot-id]\nSupported services: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
         *)
-            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea. Run './setup.sh reset-to-last-known-good-config --help' for details."
+            die "Unknown service '$service' for reset-to-last-known-good-config. Supported: kea, dns. Run './setup.sh reset-to-last-known-good-config --help' for details."
             ;;
     esac
 }
@@ -4792,7 +5099,7 @@ reset_kea_to_last_known_good_config() {
     local sid config_json
 
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
 
     env_file=$(runtime_env_file_for_install_dir "$install_dir")
     [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
@@ -4873,6 +5180,252 @@ reset_kea_to_last_known_good_config() {
     print_warn "This CLI fallback does not itself record a fresh known-good snapshot of the restored state (services/ui/src/routes/dhcp.rs's rollback_kea_snapshot does, when reached via the Admin UI) -- the next config change made through the Admin UI will."
 }
 
+# Normalizes a zone name to the canonical, dot-terminated form the rollback
+# listener's ROLLBACK_ZONES/snapshot directories use (mirrors
+# services/dns/nats-subscriber/src/zone_snapshots.rs's canonical_zone exactly)
+# so an operator can type "lan" instead of "lan." without the listener
+# rejecting it as an unmanaged zone.
+canonical_dns_zone() {
+    local zone="$1"
+    if [[ "$zone" == *. ]]; then
+        printf '%s\n' "$zone"
+    else
+        printf '%s.\n' "$zone"
+    fi
+}
+
+# Extracts every zone key from a GET /snapshots response body that currently
+# holds at least one snapshot (a non-empty array) -- used when no zone was
+# given, so the operator can see which zones actually have something to roll
+# back to before picking one. The response lists every zone in
+# zone_snapshots::ROLLBACK_ZONES unconditionally (even ones with zero
+# snapshots, as an empty array: `[]`), so this filters for `[{` (an array
+# whose first element is an object) rather than listing every key -- printing
+# all ~22 zones every time would bury the ones that actually matter.
+list_dns_zones_with_snapshots() {
+    local body="$1"
+    # `|| true`: an empty result (every zone's array is empty) is a valid,
+    # expected outcome here, not a failure -- grep's own "no match" exit
+    # status (1) would otherwise become this function's exit status too,
+    # since it is the last command in the pipeline, wrongly signaling
+    # failure to a caller that only checked $? rather than the actual
+    # (empty but valid) output.
+    printf '%s' "$body" | grep -oP '"[a-zA-Z0-9.-]+"\s*:\s*\[\{' | grep -oP '^"\K[^"]+' || true
+}
+
+# Extracts "<id> <created_unix>" lines for one zone from a GET /snapshots
+# response body, newest first (matching list_snapshots_handler's own
+# ordering) -- one line per snapshot, so callers can mapfile straight into an
+# array without a JSON library. No jq dependency (see kea_ctrl_post's
+# identical reasoning): the response is never pretty-printed and neither an
+# id nor a created_unix value can ever contain a literal ']', so capturing
+# non-greedily up to the first ']' is a safe boundary for this specific,
+# known-flat shape -- not a general JSON parser.
+dns_zone_snapshot_entries() {
+    local body="$1" zone="$2" zone_escaped zone_array
+    zone_escaped="${zone//./\\.}"
+    zone_array=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]" | head -1)
+    [[ -n "$zone_array" ]] || return 0
+    paste -d' ' \
+        <(printf '%s' "$zone_array" | grep -oP '"id"\s*:\s*"\K[0-9]+') \
+        <(printf '%s' "$zone_array" | grep -oP '"created_unix"\s*:\s*\K[0-9]+')
+}
+
+# Issues one PowerDNS zone-rollback-listener request (GET /snapshots or
+# POST /rollback) by execing curl INSIDE the target dns-standard/dns-ssl
+# container, rather than calling it directly from this host: unlike Kea's
+# Control Agent (reachable from the host via network_mode: host, see
+# reset_kea_to_last_known_good_config above), nats-subscriber's rollback
+# listener (port 8083, services/dns/nats-subscriber/src/rollback_listener.rs)
+# is deliberately only `expose`d to the Compose network, never published to
+# the host -- so there is no host-reachable address for this command to call
+# directly. `docker compose exec` runs the curl call from inside the exact
+# same container the listener binds 127.0.0.1:8083 in, sidestepping the need
+# to discover the Compose network name or publish a new host port.
+#
+# The X-API-Key value is resolved INSIDE the exec'd shell, not read from this
+# host's .env and passed in as an argument: the #858 shared-secrets
+# first-writer-wins bootstrap (services/dns/entrypoint.sh) means a fresh
+# install's .env-configured PDNS_API_KEY can legitimately be blank/placeholder,
+# with the real effective key only ever resolved into the running
+# entrypoint.sh process's own environment -- which a brand-new `docker exec`
+# process does NOT inherit (it only sees the container's create-time
+# Config.Env, i.e. whatever .env held when `docker compose up` last ran) --
+# or written out to the shared-secrets volume this same container already
+# mounts at /var/lib/lancache-secrets. Reproducing entrypoint.sh's own
+# placeholder-then-shared-file resolution order here (mirroring
+# scripts/lib/shared-secret-bootstrap.sh's resolve_shared_secret contract) is
+# what keeps this working in that case instead of silently sending an
+# empty/stale key and misreporting a real 401 as "wrong install".
+dns_rollback_exec() {
+    local install_dir="$1" env_file="$2" container="$3" method="$4" path="$5" body="${6:-}"
+    local project stdout_val err_file rc exec_err http_status response_body
+
+    project=$(compose_project_name "$install_dir" "$env_file")
+    err_file=$(mktemp)
+
+    stdout_val=$(cd "$install_dir" && docker compose --env-file "$env_file" -p "$project" \
+        -f "$install_dir/docker-compose.yml" exec -T "$container" sh -c '
+            key="$PDNS_API_KEY"
+            case "$key" in
+                ""|CHANGE_ME*|changeme*|change_me*|YOUR_*|*_HERE) key="" ;;
+            esac
+            if [ -z "$key" ] && [ -s /var/lib/lancache-secrets/pdns-api-key ]; then
+                key=$(tr -d "\n" < /var/lib/lancache-secrets/pdns-api-key)
+            fi
+            if [ -z "$key" ]; then
+                echo "DNS_ROLLBACK_EXEC_NO_API_KEY"
+                exit 9
+            fi
+            m="$1"; p="$2"; b="$3"
+            if [ "$m" = "POST" ]; then
+                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" -X POST \
+                    -H "X-API-Key: $key" -H "Content-Type: application/json" -d "$b" \
+                    "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+            else
+                status=$(curl -sS -o /tmp/.dns-rollback-resp -w "%{http_code}" \
+                    -H "X-API-Key: $key" "http://127.0.0.1:8083$p") || { echo "DNS_ROLLBACK_EXEC_CURL_FAILED"; exit 8; }
+            fi
+            printf "%s\n" "$status"
+            cat /tmp/.dns-rollback-resp
+            rm -f /tmp/.dns-rollback-resp
+        ' sh "$method" "$path" "$body" 2>"$err_file")
+    rc=$?
+    exec_err=$(cat "$err_file" 2>/dev/null || true)
+    rm -f "$err_file"
+
+    if [[ $rc -ne 0 ]]; then
+        case "$stdout_val" in
+            *DNS_ROLLBACK_EXEC_NO_API_KEY*)
+                die "PDNS_API_KEY could not be resolved inside the $container container (no usable value in its environment and nothing on the shared-secrets volume yet). Is the stack fully started?"
+                ;;
+            *DNS_ROLLBACK_EXEC_CURL_FAILED*)
+                die "Failed to reach the rollback listener inside $container (curl could not connect to 127.0.0.1:8083). Is nats-subscriber running there?"
+                ;;
+            *)
+                die "docker compose exec into $container failed (exit $rc): ${exec_err:-$stdout_val}"
+                ;;
+        esac
+    fi
+
+    http_status="${stdout_val%%$'\n'*}"
+    response_body="${stdout_val#*$'\n'}"
+    [[ "$http_status" =~ ^[0-9]{3}$ ]] \
+        || die "Unexpected response from $container's rollback listener: $stdout_val"
+    if [[ ! "$http_status" =~ ^2 ]]; then
+        die "$container's rollback listener rejected the request with HTTP ${http_status}. Response: ${response_body}"
+    fi
+    printf '%s\n' "$response_body"
+}
+
+# Automates docs/known-good-config-snapshots.md's PowerDNS zone/record
+# manual-recovery sequence (that doc's "Manual recovery" section: "The
+# PowerDNS zone/record adapter... has no equivalent manual-CLI fallback
+# documented here yet" -- this is that fallback): list this install's
+# known-good zone snapshots for the requested zone from nats-subscriber's
+# rollback listener, apply the requested one -- or, if none was given, the
+# newest after an explicit confirmation -- via that listener's real
+# diff/PATCH/check-zone/flush/republish chain
+# (services/dns/nats-subscriber/src/rollback_listener.rs), the exact same
+# listener services/ui/src/routes/dns_snapshots.rs already forwards to when
+# the Admin UI IS reachable.
+#
+# Unlike Kea (one dhcp4.json, one snapshot history), PowerDNS tracks
+# snapshots per zone (zone_snapshots::ROLLBACK_ZONES: lan., local.lan., and
+# 20 private reverse zones) -- so a zone must be selected before a snapshot
+# id means anything. A missing zone lists which zones currently have
+# snapshots and stops there rather than guessing one (unlike the
+# snapshot-id-defaults-to-newest behavior below, which is safe precisely
+# because it stays within one already-explicit zone).
+reset_dns_to_last_known_good_config() {
+    local container="$1" install_dir="$2" zone="$3" snapshot_id="$4" assume_yes="${5:-0}"
+    local env_file snapshots_body zone_canon rollback_body resp
+    local -a zone_names=()
+    local -a entries=()
+    local idx n entry eid ecreated found zn
+    local applied zone_check_passed flush_ok republished changed_names flush_failed
+
+    [[ -f "$install_dir/docker-compose.yml" ]] \
+        || die "No stack found in $install_dir. Run ./setup.sh first."
+
+    env_file=$(runtime_env_file_for_install_dir "$install_dir")
+    [[ -f "$env_file" ]] || die "No .env found for $install_dir (expected $env_file)."
+
+    snapshots_body=$(dns_rollback_exec "$install_dir" "$env_file" "$container" GET /snapshots)
+
+    if [[ -z "$zone" ]]; then
+        mapfile -t zone_names < <(list_dns_zones_with_snapshots "$snapshots_body")
+        print_step "Zones with known-good snapshots on $container"
+        if [[ ${#zone_names[@]} -eq 0 ]]; then
+            print_warn "No zone currently has any known-good snapshot on $container."
+        else
+            for zn in "${zone_names[@]}"; do
+                printf '  %s\n' "$zn"
+            done
+        fi
+        die "A zone is required for the dns/pdns target (PowerDNS tracks snapshots per zone, unlike Kea's single config file). Usage: ./setup.sh reset-to-last-known-good-config dns [install-dir] <zone> [snapshot-id] [--yes]"
+    fi
+
+    zone_canon=$(canonical_dns_zone "$zone")
+
+    mapfile -t entries < <(dns_zone_snapshot_entries "$snapshots_body" "$zone_canon")
+    [[ ${#entries[@]} -gt 0 ]] \
+        || die "No known-good snapshots found for zone $zone_canon on $container."
+
+    print_step "Known-good $zone_canon zone snapshots on $container (oldest first)"
+    n=${#entries[@]}
+    for (( idx = n - 1; idx >= 0; idx-- )); do
+        eid="${entries[$idx]%% *}"
+        ecreated="${entries[$idx]#* }"
+        printf '  %s  (%s UTC)\n' "$eid" "$(date -u -d "@${ecreated}" '+%Y-%m-%d %H:%M:%S' 2>/dev/null || echo unknown)"
+    done
+
+    if [[ -z "$snapshot_id" ]]; then
+        snapshot_id="${entries[0]%% *}"
+        print_warn "No snapshot id given; defaulting to the newest: $snapshot_id"
+    fi
+
+    found=0
+    for entry in "${entries[@]}"; do
+        eid="${entry%% *}"
+        [[ "$eid" = "$snapshot_id" ]] && { found=1; break; }
+    done
+    [[ "$found" -eq 1 ]] \
+        || die "Snapshot '$snapshot_id' not found for zone $zone_canon on $container."
+
+    if [[ "$assume_yes" != "1" ]]; then
+        confirm "Roll $container's zone $zone_canon back to snapshot $snapshot_id now? This applies immediately. [y/N]" "N" \
+            || die "Cancelled."
+    fi
+
+    rollback_body="{\"zone\":\"${zone_canon}\",\"snapshot_id\":\"${snapshot_id}\"}"
+    print_step "Applying snapshot $snapshot_id for zone $zone_canon (rollback listener PATCH)"
+    resp=$(dns_rollback_exec "$install_dir" "$env_file" "$container" POST /rollback "$rollback_body")
+
+    applied=$(printf '%s' "$resp" | grep -oP '"applied"\s*:\s*\K(true|false)' || true)
+    zone_check_passed=$(printf '%s' "$resp" | grep -oP '"zone_check_passed"\s*:\s*\K(true|false)' || true)
+    flush_ok=$(printf '%s' "$resp" | grep -oP '"flush_ok"\s*:\s*\K(true|false)' || true)
+    republished=$(printf '%s' "$resp" | grep -oP '"republished_to_nats"\s*:\s*\K(true|false)' || true)
+    changed_names=$(printf '%s' "$resp" | grep -oP '"changed_names"\s*:\s*\[[^]]*\]' || true)
+    flush_failed=$(printf '%s' "$resp" | grep -oP '"flush_failed_names"\s*:\s*\[[^]]*\]' || true)
+
+    [[ "$applied" = "true" ]] \
+        || die "Rollback listener did not report applied=true: $resp"
+
+    print_ok "Zone $zone_canon on $container rolled back to known-good snapshot $snapshot_id."
+    [[ -n "$changed_names" ]] && print_ok "Changed rrsets: ${changed_names}"
+    if [[ "$zone_check_passed" != "true" ]]; then
+        print_warn "Post-rollback pdnsutil check-zone reported a problem for $zone_canon -- the rollback was already applied and is NOT automatically reverted. Inspect the zone manually."
+    fi
+    if [[ "$flush_ok" != "true" ]]; then
+        print_warn "One or more recursor cache-flush publishes failed after rollback (${flush_failed:-see response}) -- affected clients may see stale answers until TTL expiry."
+    fi
+    if [[ "$zone_canon" = "lan." && "$republished" = "true" ]]; then
+        print_ok "Restored lan. records were re-published to NATS so secondary DNS nodes converge."
+    fi
+    print_ok "A fresh known-good snapshot of the restored state was recorded automatically (same as an Admin-UI-driven rollback)."
+}
+
 # ── update-ip subcommand ───────────────────────────────────────────────────────
 # update-ip is the reconfiguration path for an existing install. It changes
 # only listener/DNS IP references and restarts that install's compose stack.
@@ -4893,7 +5446,7 @@ cmd_update_ip() {
     [[ "$(id -u)" = "0" ]] \
         || die "This script must be run as root (sudo ./setup.sh update-ip [install-dir])."
     [[ -f "$install_dir/docker-compose.yml" ]] \
-        || die "No stack found in $install_dir. Run ./setup.sh first."
+        || die_no_stack_found "$install_dir"
     assert_prebuilt_image_platform_supported
 
     print_step "Reading current configuration"
@@ -5474,6 +6027,41 @@ case "${1:-install}" in
             exit 0
         fi
         ;;
+    list-prompts)
+        # Issue #1176: introspection mode. Deliberately does NOT `exit 0` here
+        # -- it falls through to the exact same top-level wizard code the
+        # `install|""` case above falls through to (see the "Main setup"
+        # header comment below), so `list-prompts` walks the real, current
+        # branch logic instead of a second, hand-duplicated copy of it. The
+        # wizard itself checks WIZARD_INTROSPECT_MODE at every real
+        # filesystem/network/Docker mutation point and skips them; see those
+        # checks' own comments for the specific list.
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help list-prompts
+            exit 0
+        fi
+        WIZARD_INTROSPECT_MODE=1
+        if [[ -n "${2:-}" ]]; then
+            [[ -f "$2" ]] || die "Answers file not found: $2"
+            # Fixed fd 9: this subcommand never nests or re-execs itself, so
+            # there is no risk of a second `list-prompts` invocation in the
+            # same process colliding on this fd.
+            exec 9<"$2"
+            WIZARD_INTROSPECT_ANSWERS_FD=9
+        fi
+        ;;
+    install-requirements-primary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install-requirements-primary
+            exit 0
+        fi
+        cmd_install_requirements_primary; exit 0 ;;
+    install-requirements-secondary)
+        if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
+            print_command_help install-requirements-secondary
+            exit 0
+        fi
+        cmd_install_requirements_secondary; exit 0 ;;
     update)
         if [[ "${2:-}" = "--help" || "${2:-}" = "help" ]]; then
             print_command_help update
@@ -5561,62 +6149,49 @@ printf "  After: ./setup.sh update  |  ./setup.sh debug  |  ./setup.sh update-ip
 printf "  Help:  ./setup.sh --help (use './setup.sh <command> --help' for details)\n"
 
 # ── 1. Prerequisites ──────────────────────────────────────────────────────────
-print_step "Checking prerequisites"
+# Issue #1176: introspection mode needs none of this -- no root, no Docker, no
+# git clone -- it only walks the wizard's prompt/branch logic below. Skipping
+# it here (rather than making list-prompts require root/Docker/a real repo
+# checkout just like a real install) is what lets it run cheaply and
+# repeatedly in CI/bats fixtures.
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    print_step "Checking prerequisites"
 
-[[ "$(id -u)" = "0" ]] \
-    || die "This script must be run as root (sudo ./setup.sh)."
+    [[ "$(id -u)" = "0" ]] \
+        || die "This script must be run as root (sudo ./setup.sh)."
 
-assert_prebuilt_image_platform_supported
+    assert_prebuilt_image_platform_supported
 
-if ! command -v curl >/dev/null 2>&1; then
-    install_curl
-fi
+    ensure_stack_requirements_installed
 
-if ! command -v docker >/dev/null 2>&1; then
-    install_docker
-    print_ok "Docker installed"
-fi
-
-if ! docker info >/dev/null 2>&1; then
-    print_warn "Docker daemon not running — starting now..."
-    systemctl enable --now docker \
-        || die "Failed to start Docker daemon."
-fi
-
-if ! docker compose version >/dev/null 2>&1; then
-    install_docker_compose
-fi
-
-docker compose version >/dev/null 2>&1 \
-    || die "Docker Compose plugin still missing after installing Docker requirements."
-
-if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
-    print_warn "No local repo found — cloning to /opt/lancache-ng..."
-    if ! command -v git >/dev/null 2>&1; then
-        install_git
-    fi
-    setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
-    if [[ -d "/opt/lancache-ng/.git" ]]; then
-        if [[ -n "$setup_bootstrap_ref" ]]; then
-            print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
-            sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
-        else
-            print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
-            sync_repo_to_default_branch /opt/lancache-ng
+    if [[ ! -f "$QUICKSTART_COMPOSE" ]]; then
+        print_warn "No local repo found — cloning to /opt/lancache-ng..."
+        if ! command -v git >/dev/null 2>&1; then
+            install_git
         fi
-    elif [[ -n "$setup_bootstrap_ref" ]]; then
-        git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
-            || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
-    else
-        git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
-            || die "Clone failed."
+        setup_bootstrap_ref=$(resolve_setup_bootstrap_ref)
+        if [[ -d "/opt/lancache-ng/.git" ]]; then
+            if [[ -n "$setup_bootstrap_ref" ]]; then
+                print_warn "Existing checkout found at /opt/lancache-ng — syncing to LANCACHE_SETUP_GIT_REF=${setup_bootstrap_ref}..."
+                sync_repo_to_ref /opt/lancache-ng "$setup_bootstrap_ref"
+            else
+                print_warn "Existing checkout found at /opt/lancache-ng — syncing to the remote default branch..."
+                sync_repo_to_default_branch /opt/lancache-ng
+            fi
+        elif [[ -n "$setup_bootstrap_ref" ]]; then
+            git clone --branch "$setup_bootstrap_ref" https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+                || die "Clone failed for LANCACHE_SETUP_GIT_REF='${setup_bootstrap_ref}'. Check that it names a real branch or tag on origin."
+        else
+            git clone https://github.com/wiki-mod/lancache-ng.git /opt/lancache-ng \
+                || die "Clone failed."
+        fi
+        chmod +x /opt/lancache-ng/setup.sh
+        exec /opt/lancache-ng/setup.sh "$@"
     fi
-    chmod +x /opt/lancache-ng/setup.sh
-    exec /opt/lancache-ng/setup.sh "$@"
-fi
 
-print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
-print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
+    print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
+    print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
+fi
 
 # ── 2. Network IPs ────────────────────────────────────────────────────────────
 print_step "Network configuration"
@@ -5660,9 +6235,15 @@ if [[ "${REPLY,,}" = "y" ]]; then
         print_warn "$IP_SSL not yet assigned to an interface"
         ask "Add now? (ip addr add $IP_SSL/24 dev ${detected_iface:-eth0}) [y/N]" "N"
         if [[ "${REPLY,,}" = "y" ]]; then
-            ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
-                && print_ok "$IP_SSL added (not persistent)" \
-                || print_warn "Adding failed — please add manually"
+            if [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+                # Issue #1176: introspection mode never mutates real host
+                # network state, even if a supplied answers file says "y" here.
+                print_ok "$IP_SSL would be added (skipped: introspection mode)"
+            else
+                ip addr add "$IP_SSL/24" dev "${detected_iface:-eth0}" \
+                    && print_ok "$IP_SSL added (not persistent)" \
+                    || print_warn "Adding failed — please add manually"
+            fi
         fi
         printf "\n"
         print_warn "For persistent configuration after reboot:"
@@ -5686,9 +6267,11 @@ if [[ -f "$INSTALL_DIR/docker-compose.yml" ]]; then
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
-mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
-install_quickstart_compose_assets "$INSTALL_DIR"
-print_ok "quickstart compose assets copied to $INSTALL_DIR"
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+    mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/certs"
+    install_quickstart_compose_assets "$INSTALL_DIR"
+    print_ok "quickstart compose assets copied to $INSTALL_DIR"
+fi
 
 # ── 4. Cache configuration ───────────────────────────────────────────────────
 print_step "Cache configuration"
@@ -5700,36 +6283,11 @@ while true; do
     print_error "Please enter an absolute path (e.g. $INSTALL_DIR/cache)."
 done
 
-# Checked against the nearest existing ancestor of CACHE_DIR (see
-# nearest_existing_ancestor_dir) since CACHE_DIR itself is only created later
-# via `mkdir -p`. Computed once, before the loop: the operator's answer to
-# this prompt cannot change which filesystem CACHE_DIR lives on.
-cache_dir_avail_mib=$(available_space_mib_at "$CACHE_DIR")
-
 while true; do
     ask "Cache size in GiB" "50"
     cache_gb="$REPLY"
-    if ! is_positive_integer "$cache_gb"; then
-        print_error "Please enter a positive integer (e.g. 50)."
-        continue
-    fi
-    # Canonicalize away any leading zero (e.g. "008") before this value is
-    # used in bash arithmetic below: without the 10# base prefix, an
-    # unnormalized leading-zero string is parsed as octal by `((...))`, and
-    # digits 8/9 in that string would abort the script with a bash
-    # arithmetic error rather than a clean validation message.
-    cache_gb=$(( 10#$cache_gb ))
-    cache_size_fits_available_mib "$cache_gb" "$cache_dir_avail_mib" && break
-    # Issue #1069: reject a cache size that would not leave a safety buffer on
-    # the real disk backing CACHE_DIR, instead of silently writing a
-    # CACHE_MAX_SIZE the disk cannot possibly satisfy. Buffer scales with the
-    # requested size -- see cache_size_buffer_mib.
-    largest_valid_gb=$(largest_valid_cache_gb "$cache_dir_avail_mib" || true)
-    if (( largest_valid_gb >= 1 )); then
-        print_error "$cache_gb GiB would not leave a safety buffer at $CACHE_DIR (only $(( cache_dir_avail_mib / 1024 )) GiB free there). The largest value that currently passes is ${largest_valid_gb} GiB."
-    else
-        print_error "Not enough free space at $CACHE_DIR for any cache size with a safety buffer (only $(( cache_dir_avail_mib / 1024 )) GiB free there). Free up disk space or choose a different cache directory."
-    fi
+    [[ "$cache_gb" =~ ^[0-9]+$ ]] && (( cache_gb > 0 )) && break
+    print_error "Please enter a positive integer (e.g. 50)."
 done
 
 while true; do
@@ -5737,13 +6295,6 @@ while true; do
     CACHE_MEM_MB="$REPLY"
     is_positive_integer "$CACHE_MEM_MB" && break
     print_error "Please enter a positive integer (e.g. 512)."
-done
-
-while true; do
-    ask "Cache entry max age (inactive; e.g. 365d, 30d, 12h)" "365d"
-    cache_inactive="$REPLY"
-    is_valid_nginx_time_value "$cache_inactive" && break
-    print_error "Please enter an nginx-style time value (e.g. 365d, 30d, 12h)."
 done
 
 # ── 5. Release channel ────────────────────────────────────────────────────────
@@ -5768,13 +6319,17 @@ if [[ -n "${LANCACHE_IMAGE_CHANNEL:-}" ]]; then
     validate_lancache_image_channel "$LANCACHE_IMAGE_CHANNEL"
     print_ok "Using the channel already set via LANCACHE_IMAGE_CHANNEL=${LANCACHE_IMAGE_CHANNEL}."
 else
-    printf "  stable — the channel promoted after the full release validation gate.\n"
-    printf "           Recommended for most installs. This is what './setup.sh update'\n"
-    printf "           tracks by default, and what most operators should stay on.\n"
     printf "  nightly — the most recently built channel from active development.\n"
-    printf "            Refreshes continuously from current_dev, may be less tested\n"
-    printf "            than stable. Opt in only if you specifically want the newest\n"
-    printf "            changes and accept the extra risk.\n\n"
+    printf "            Refreshes continuously from current_dev. Currently the\n"
+    printf "            practical default: this project is pre-1.0 and has not cut\n"
+    printf "            a stable release yet (see below), so this is what most new\n"
+    printf "            installs should pick.\n"
+    printf "  stable — the channel promoted after the full release validation gate,\n"
+    printf "           once a stable release exists. NOT YET AVAILABLE: no stable\n"
+    printf "           release has been cut for this project yet, so choosing it now\n"
+    printf "           will fail during image pull with an explanation of how to\n"
+    printf "           proceed instead. Once a stable release ships, this becomes the\n"
+    printf "           recommended default again.\n\n"
 
     # Writes the plain LANCACHE_IMAGE_CHANNEL shell variable that
     # resolve_lancache_image_channel already checks first (see its precedence
@@ -5782,17 +6337,27 @@ else
     # "stable" and "latest" resolve to the identical published stack pointer
     # (see resolve_lancache_stack_channel_tag) -- "stable" is only the
     # friendlier, self-explanatory name this prompt writes for new installs.
+    #
+    # Default answer and recommendation deliberately flipped from "stable" to
+    # "nightly" (#1068 field-testing finding): pre-1.0, accepting the prior
+    # default silently walked a new operator straight into a "manifest
+    # unknown" dead end (resolve_lancache_stack_channel_tag's own die()
+    # message already explains this gracefully if reached, so "stable" stays
+    # a valid, non-rejected answer here for the operator who explicitly wants
+    # it or is running this after a real stable release exists -- only the
+    # picker's own default/recommendation changes, not what inputs it
+    # accepts).
     while true; do
-        ask "Release channel [stable/nightly]" "stable"
+        ask "Release channel [nightly/stable]" "nightly"
         case "${REPLY,,}" in
-            stable)
-                LANCACHE_IMAGE_CHANNEL="stable"
-                print_ok "Using the stable channel (recommended)."
-                break
-                ;;
             nightly)
                 LANCACHE_IMAGE_CHANNEL="nightly"
-                print_warn "Using the nightly channel — more recent, less tested than stable."
+                print_ok "Using the nightly channel (recommended pre-1.0)."
+                break
+                ;;
+            stable)
+                LANCACHE_IMAGE_CHANNEL="stable"
+                print_warn "Using the stable channel -- this will fail during image pull unless a stable release already exists."
                 break
                 ;;
             # "edge" was the old name of the nightly channel (renamed in v0.3.0,
@@ -5847,10 +6412,11 @@ print_step "DHCP mode"
 
 printf "  Kea (full mode): route and DNS options via Admin-UI\n"
 printf "  dnsmasq-proxy: experimental proxy-DHCP helper; it does not reliably replace DNS options from a normal router DHCP server\n"
+printf "  dnsmasq-relay: forward DHCP to an upstream server on another segment (relay only; injects nothing of its own)\n"
 printf "  disabled: keep router DHCP and do nothing in LanCache\n\n"
 
 while true; do
-    ask "DHCP mode (disabled, kea, dnsmasq-proxy)" "disabled"
+    ask "DHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)" "disabled"
     DHCP_MODE="${REPLY,,}"
     if is_valid_dhcp_mode "$DHCP_MODE"; then
         break
@@ -5868,6 +6434,8 @@ DHCP_SUBNET_START=""
 DHCP_DNS_PRIMARY="$IP_STANDARD"
 DHCP_DNS_SECONDARY="${IP_SSL:-$IP_STANDARD}"
 UPSTREAM_DHCP_IP="$DHCP_GATEWAY"
+# Issue #844: relay-mode local address, empty unless dnsmasq-relay is chosen.
+DHCP_RELAY_LOCAL_ADDR=""
 # Issue #450: additional optional dnsmasq relay/proxy fields, all left empty
 # unless the operator opts in below.
 DHCP_PROXY_INTERFACE=""
@@ -6037,11 +6605,58 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     fi
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
+elif [[ "$DHCP_MODE" = "dnsmasq-relay" ]]; then
+    # Issue #844: real DHCP relay. Only two values matter -- this relay's own
+    # client-facing address (forwarded as giaddr) and the upstream server it
+    # relays to. No subnet/DNS/PXE prompts: a relay injects nothing of its own.
+    print_warn "dnsmasq-relay forwards every client's DHCP request to an upstream DHCP server on another segment."
+    print_warn "The upstream server owns the whole lease and every option; LanCache injects nothing of its own here."
+
+    while true; do
+        ask "This relay's own IP on the client-facing network (giaddr)" ""
+        DHCP_RELAY_LOCAL_ADDR="$REPLY"
+        is_valid_ipv4 "$DHCP_RELAY_LOCAL_ADDR" && break
+        print_error "Invalid IPv4 address: $DHCP_RELAY_LOCAL_ADDR"
+    done
+
+    while true; do
+        ask "Upstream DHCP server IP" "$DHCP_GATEWAY"
+        UPSTREAM_DHCP_IP="$REPLY"
+        is_valid_ipv4 "$UPSTREAM_DHCP_IP" && break
+        print_error "Invalid IPv4 address: $UPSTREAM_DHCP_IP"
+    done
+
+    print_ok "DHCP relay mode enabled — relaying ${DHCP_RELAY_LOCAL_ADDR} -> upstream ${UPSTREAM_DHCP_IP}"
 else
     print_ok "DHCP skipped — existing router DHCP remains active"
 fi
 
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE")"
+# ── 7b. LanCache-NG-NTP ───────────────────────────────────────────────────────
+# Kept minimal and non-interactive by design: the container's own upstream
+# server list and the DHCP auto-populate toggle are Admin-UI-configured
+# settings (requirement 2 of the issue this service was built for), not
+# install-wizard prompts -- this section only decides whether the container
+# is created at all (NTP_ENABLED / the `ntp` Compose profile), matching how
+# little SSL_ENABLED asks up front for its own similarly toggle-shaped
+# feature above.
+print_step "LanCache-NG-NTP"
+
+printf "  A small, self-contained NTP server, disciplined against public NTP\n"
+printf "  servers, that serves time to LAN clients on UDP/123. Enable/disable and\n"
+printf "  upstream server list are then configured from the Admin UI.\n"
+printf "  Default: disabled.\n\n"
+
+ask "Enable LanCache-NG-NTP? [y/N]" "N"
+NTP_ENABLED=0
+NTP_DATA_DIR="$INSTALL_DIR/ntp"
+if [[ "${REPLY,,}" = "y" ]]; then
+    NTP_ENABLED=1
+    print_ok "LanCache-NG-NTP enabled — configure upstream servers and the DHCP auto-populate toggle from the Admin UI's NTP page"
+else
+    print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
+fi
+
+COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED")"
 
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
@@ -6063,6 +6678,14 @@ if [[ "${REPLY,,}" = "y" ]]; then
         && env_key_has_usable_secret UI_AUTH_PASSWORD "$INSTALL_DIR/.env"; then
         UI_AUTH_PASSWORD=$(get_env_var UI_AUTH_PASSWORD "$INSTALL_DIR/.env")
         print_ok "Existing Admin-UI password preserved"
+    elif [[ "$WIZARD_INTROSPECT_MODE" = "1" ]]; then
+        # Issue #1176: introspection mode must not fabricate and print a real
+        # random secret on every run -- it never gets written anywhere, and
+        # doing so would also make list-prompts' own output non-deterministic
+        # across repeat runs with identical answers (AG-OP-006/007), even
+        # though the actual PROMPT sequence itself is unaffected either way.
+        UI_AUTH_PASSWORD=""
+        print_ok "Admin-UI password would be generated (skipped: introspection mode)"
     else
         UI_AUTH_PASSWORD=$(generate_secret_value UI_AUTH_PASSWORD alnum20)
         printf "\n"
@@ -6093,6 +6716,19 @@ if [[ -f "$env_file" ]]; then
     [[ "${REPLY,,}" = "y" ]] || die "Cancelled."
 fi
 
+# Issue #1176: from here through the end of "Installing systemd watchdog"
+# below is every remaining real mutation the install performs (secret
+# generation, the actual .env write, cache/Kea/NTP directory creation,
+# systemd unit files, `systemctl daemon-reload`) -- none of it can run in
+# introspection mode, which must leave the host completely untouched. No
+# prompt is asked anywhere in this span (confirmed by
+# scripts/check-setup-prompt-drift.sh's own wizard-region scan, which would
+# fail closed on a stray ask()/confirm() call site inside a newly
+# unbalanced block here), so skipping it wholesale changes no prompt
+# ordering -- control falls straight through to the unconditional
+# "Start now?" prompt after "Installing systemd watchdog" either way.
+if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
+
 # Generate or preserve secrets. Empty values and known placeholders are regenerated.
 LANCACHE_IMAGE_REGISTRY=$(resolve_lancache_image_registry "$env_file")
 LANCACHE_IMAGE_PREFIX=$(resolve_lancache_image_prefix "$env_file")
@@ -6120,6 +6756,12 @@ NATS_DNS_REPLICA_PASSWORD=$(get_or_generate_secret NATS_DNS_REPLICA_PASSWORD "$e
 NATS_CALLOUT_USER=$(get_env_var NATS_CALLOUT_USER "$env_file")
 NATS_CALLOUT_USER="${NATS_CALLOUT_USER:-lancache-nats-callout}"
 NATS_CALLOUT_PASSWORD=$(get_or_generate_secret NATS_CALLOUT_PASSWORD "$env_file" hex32)
+# Issue #681: system-account identity, used only by the Admin UI's kicker
+# connection (nats_kick.rs) to look up and force-disconnect a removed/rotated
+# secondary's live connection.
+NATS_SYS_USER=$(get_env_var NATS_SYS_USER "$env_file")
+NATS_SYS_USER="${NATS_SYS_USER:-lancache-nats-sys}"
+NATS_SYS_PASSWORD=$(get_or_generate_secret NATS_SYS_PASSWORD "$env_file" hex32)
 SECONDARY_REGISTRATION_TOKEN=$(get_or_generate_secret SECONDARY_REGISTRATION_TOKEN "$env_file" hex32)
 UI_SESSION_TTL_SECONDS=$(get_env_var UI_SESSION_TTL_SECONDS "$env_file")
 UI_SESSION_TTL_SECONDS="${UI_SESSION_TTL_SECONDS:-$DEFAULT_UI_SESSION_TTL_SECONDS}"
@@ -6135,7 +6777,7 @@ validate_env_values_for_initial_write \
     "CACHE_SLICE_SIZE=8m" \
     "CACHE_VALID_HIT=365d" \
     "CACHE_VALID_ANY=1m" \
-    "CACHE_INACTIVE=${cache_inactive}" \
+    "CACHE_INACTIVE=365d" \
     "NGINX_UPSTREAM_RESOLVER=8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]" \
     "PROXY_SECURITY_MODE=lazy" \
     "PROXY_ALLOWED_CLIENT_CIDRS=" \
@@ -6155,6 +6797,7 @@ validate_env_values_for_initial_write \
     "DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}" \
     "DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}" \
     "UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}" \
+    "DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}" \
     "DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE}" \
     "DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER}" \
     "DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS}" \
@@ -6162,6 +6805,8 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
     "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
+    "NTP_ENABLED=${NTP_ENABLED}" \
+    "NTP_DATA_DIR=${NTP_DATA_DIR}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -6173,6 +6818,8 @@ validate_env_values_for_initial_write \
     "NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}" \
     "NATS_CALLOUT_USER=${NATS_CALLOUT_USER}" \
     "NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}" \
+    "NATS_SYS_USER=${NATS_SYS_USER}" \
+    "NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}" \
     "SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}" \
     "UI_SESSION_TTL_SECONDS=${UI_SESSION_TTL_SECONDS}" \
     "COMPOSE_PROFILES=${COMPOSE_PROFILES}" \
@@ -6201,7 +6848,7 @@ CACHE_MEM_MB=${CACHE_MEM_MB}
 CACHE_SLICE_SIZE=8m
 CACHE_VALID_HIT=365d
 CACHE_VALID_ANY=1m
-CACHE_INACTIVE=${cache_inactive}
+CACHE_INACTIVE=365d
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
 # Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
@@ -6245,6 +6892,9 @@ DHCP_SUBNET_START=${DHCP_SUBNET_START}
 DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY}
 DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY}
 UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP}
+# Issue #844: DHCP-relay-mode local address (giaddr source). Empty unless
+# DHCP_MODE=dnsmasq-relay; see docs/dhcp-modes.md.
+DHCP_RELAY_LOCAL_ADDR=${DHCP_RELAY_LOCAL_ADDR}
 
 # Issue #450: additional optional dnsmasq relay/proxy options, all empty by
 # default. Delivered only via the supplemental ProxyDHCP/PXE exchange to
@@ -6256,6 +6906,13 @@ DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}
 DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
 DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
 DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
+
+# ── LanCache-NG-NTP ────────────────────────────────────────────────────────────
+# Enable/disable, upstream server list, and the DHCP auto-populate toggle are
+# configured from the Admin UI's NTP page; this only controls whether the
+# container is created at all (see the \`ntp\` Compose profile).
+NTP_ENABLED=${NTP_ENABLED}
+NTP_DATA_DIR=${NTP_DATA_DIR}
 
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
@@ -6284,6 +6941,11 @@ NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD}
 # registered secondaries (generated, do not change)
 NATS_CALLOUT_USER=${NATS_CALLOUT_USER}
 NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD}
+# System-account identity (generated, do not change). Used only by the Admin
+# UI's kicker connection (nats_kick.rs) to look up and force-disconnect a
+# removed/rotated secondary's live NATS connection (issue #681).
+NATS_SYS_USER=${NATS_SYS_USER}
+NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 # Token for setup.sh secondary — anyone who knows this can register a secondary
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
@@ -6319,6 +6981,10 @@ if [[ "$DHCP_ENABLED" = "1" && -n "$KEA_DATA_DIR" ]]; then
     mkdir -p "$KEA_DATA_DIR"
     print_ok "Kea data:       $KEA_DATA_DIR"
 fi
+if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
+    mkdir -p "$NTP_DATA_DIR"
+    print_ok "NTP data:       $NTP_DATA_DIR"
+fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
 # The systemd service owns boot startup; the timer is a convergence guard that
@@ -6326,7 +6992,7 @@ fi
 print_step "Installing systemd watchdog"
 
 SYSTEMD_AVAILABLE=0
-if ! command -v systemctl >/dev/null 2>&1; then
+if ! systemd_available; then
     print_warn "systemd not found — watchdog will not be installed"
     print_warn "Start stack manually after reboot: cd $INSTALL_DIR && docker compose up -d"
 else
@@ -6435,6 +7101,8 @@ EOF
     print_ok "systemd units installed; they will be enabled after image pull succeeds"
 fi
 
+fi # WIZARD_INTROSPECT_MODE guard opened before "Writing .env" above
+
 # ── 12. Summary and confirmation ──────────────────────────────────────────────
 printf "\n"
 printf "${BOLD}┌──────────────────────────────────────────────┐${RESET}\n"
@@ -6450,7 +7118,6 @@ printf "  %-26s %s\n"    "Install directory:"       "$INSTALL_DIR"
 printf "  %-26s %s\n"    "Cache:"                   "$CACHE_DIR"
 printf "  %-26s %s GiB\n" "Cache size:"              "$cache_gb"
 printf "  %-26s %s MB\n"  "Cache RAM:"               "$CACHE_MEM_MB"
-printf "  %-26s %s\n"    "Cache entry max age:"     "$cache_inactive"
 printf "  %-26s %s\n"    "DHCP mode:"               "$DHCP_MODE"
 if [[ "$DHCP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "DHCP server:"             "$DHCP_SUBNET (Pool: $DHCP_RANGE_START–$DHCP_RANGE_END)"
@@ -6464,6 +7131,11 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
+fi
+if [[ "$NTP_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"
+else
+    printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
 fi
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"
@@ -6482,7 +7154,11 @@ fi
 printf "${BOLD}└──────────────────────────────────────────────┘${RESET}\n\n"
 
 ask "Start now? [Y/n]" "Y"
-[[ "${REPLY,,}" != "n" ]] \
+# Issue #1176: this is the last prompt list-prompts needs -- reusing the
+# existing "start later" exit path here (rather than adding a second exit
+# point) also guarantees introspection never reaches the real pull/systemctl/
+# docker-compose-up mutations below, regardless of what an answers file said.
+[[ "$WIZARD_INTROSPECT_MODE" != "1" && "${REPLY,,}" != "n" ]] \
     || { printf "\n  Start later with: cd %s && docker compose up -d\n\n" "$INSTALL_DIR"; exit 0; }
 
 # ── 13. Starting stack ───────────────────────────────────────────────────────

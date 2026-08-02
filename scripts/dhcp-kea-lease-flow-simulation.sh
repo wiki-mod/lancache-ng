@@ -2,10 +2,12 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DHCP behavior test for our own Kea service (issue #448) -- distinct
-# from services/ui/dhcp-probe.sh's existing #377 conflict-discovery check.
-# dhcp-probe.sh answers "does any DHCP server answer on the LAN segment,
-# and does a host-interface dry-run also succeed" and is intentionally left
-# unchanged by this script. This script answers a different question: does
+# from the Admin UI's own dhcp-probe container's #377 conflict-discovery
+# check (services/ui/src/dhcp_probe_native.rs as of issue #1288, formerly
+# services/ui/dhcp-probe.sh's nmap+dhclient invocations before that
+# rewrite). That check answers "does any DHCP server answer on the LAN
+# segment, and does a client dry-run also succeed" and is intentionally
+# left unchanged by this script. This script answers a different question: does
 # OUR Kea service, when driven by a completely real DHCP client, actually
 # complete Discover/Offer/Request/Ack and hand out the address range,
 # router, DNS, NTP, and lease-time options the operator configured?
@@ -21,9 +23,12 @@
 #     a stretch reading of it.
 #   - The client's own veth/eth0 is left exactly as Docker's IPAM
 #     configured it: dhclient runs with `-sf /bin/true` (a no-op "apply
-#     the lease" script), the same technique services/ui/dhcp-probe.sh
-#     already relies on -- a real lease is negotiated over the wire, but
-#     nothing ever calls `ip addr add`/`ip route` to actually apply it.
+#     the lease" script) -- this script deliberately still uses real
+#     `dhclient` here (a controlled, isolated-network CI test of Kea's own
+#     server behavior, not a rewrite target of issue #1288, which only
+#     replaced the Admin UI's own dhcp-probe container) -- a real lease is
+#     negotiated over the wire, but nothing ever calls `ip addr add`/
+#     `ip route` to actually apply it.
 #   - Docker's own container-address allocation is confined to a small
 #     sub-range (see --ip-range below) that never overlaps the Kea pool,
 #     so there is no possibility of the test's own plumbing colliding with
@@ -270,8 +275,8 @@ docker build -q -t "$image_tag" services/dhcp >/dev/null
 # outright with "Pool overlaps". This adopts the exact same host-local
 # flock-plus-retry primitives full-setup-deep-validate.yml's stack-starting
 # jobs use (scripts/lib/reserve-validation-subnet.sh), on a dedicated
-# 172.31.0.0/16 range (unused by deploy/dev's 172.28.0.0/16 and
-# full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
+# 172.31.0.0/16 range (unused by the now-retired deploy/dev's 172.28.0.0/16,
+# v0.3.0 #766, and full-setup-validate's 172.30.0.0/16) and its OWN lock namespace
 # (/tmp/lancache-validation-locks-dhcp-kea) so this pool's octet contention
 # never unnecessarily serializes against the unrelated 172.30 pool.
 #

@@ -179,9 +179,11 @@ teardown() {
 # _sign_cert produces the wildcard certs the SSL-mode proxy presents during
 # MITM interception (see services/proxy/entrypoint.sh and the "How SSL
 # Interception Works" section of CLAUDE.md). A client's TLS stack will only
-# accept the impersonated cert if its CN/SAN and issuing CA are exactly
-# right, so these tests check that output structure directly against real
-# openssl output rather than just asserting `_sign_cert` returned success.
+# accept the impersonated cert if its SAN and issuing CA are exactly right
+# (CN is a fixed placeholder the client never validates against, per RFC
+# 6125 -- see "certificate has correct CN" below), so these tests check that
+# output structure directly against real openssl output rather than just
+# asserting `_sign_cert` returned success.
 # ────────────────────────────────────────────────────────────────────────────
 
 @test "certificate generation creates signed cert for test domain" {
@@ -206,11 +208,19 @@ teardown() {
 
     _sign_cert "$domain" "$key" "$crt" "$san"
 
-    # CN must be the exact domain being impersonated -- a client's TLS stack
-    # checks this alongside SAN, so a wrong CN would be a real (if unlikely
-    # to be the only) way for the interception to visibly fail.
+    # CN is a fixed, short placeholder ("lancache-ng"), never the real
+    # hostname (see _sign_cert's own comment in entrypoint.sh): OpenSSL's
+    # default CN policy caps commonName at 64 bytes, well under the
+    # 253-byte domains cdn-domains.txt can otherwise contain, so deriving
+    # CN from the domain would break certificate issuance for any
+    # long-enough hostname. TLS clients validate against subjectAltName, not
+    # CN (RFC 6125 / CA/Browser Forum baseline) -- the real hostname must
+    # still land in SAN, checked separately below.
     cn=$(openssl x509 -noout -subject -in "$crt" | grep -oP 'CN=\K[^,/]*')
-    [ "$cn" = "$domain" ]
+    [ "$cn" = "lancache-ng" ]
+
+    san_output=$(openssl x509 -noout -ext subjectAltName -in "$crt")
+    echo "$san_output" | grep -q "DNS:${domain}"
 }
 
 @test "certificate is signed by test CA" {
@@ -379,31 +389,66 @@ teardown() {
     run _sign_cert "$domain" "$key" "$crt" "$san"
     [ "$status" -eq 0 ]
 
-    # Verify CN
+    # CN stays the fixed placeholder regardless of label count -- see
+    # "certificate has correct CN" above for why CN is never domain-derived.
+    # The real, many-label hostname must still land in SAN.
     cn=$(openssl x509 -noout -subject -in "$crt" | grep -oP 'CN=\K[^,/]*')
-    [ "$cn" = "$domain" ]
+    [ "$cn" = "lancache-ng" ]
+
+    san_output=$(openssl x509 -noout -ext subjectAltName -in "$crt")
+    echo "$san_output" | grep -q "DNS:${domain}"
 }
 
-@test "certificate generation fails gracefully with invalid CN" {
-    # openssl's -subj parser is permissive about hostname-shaped content —
-    # underscores, even embedded characters, don't make it fail (verified
-    # directly: `openssl req -subj "/CN=invalid_domain_with_underscores"`
-    # exits 0). The X.509 CN field does have a hard length limit enforced by
-    # OpenSSL itself (ASN.1 string length, max 64 bytes), so a CN past that
-    # limit is a real, reproducible failure to exercise _sign_cert's error
-    # path against (verified directly: exits 1 with "string too long:
-    # maxsize=64").
+@test "certificate generation succeeds for an over-length CN-shaped argument" {
+    # _sign_cert no longer derives CN directly from this argument, so an
+    # over-length value here doesn't hit OpenSSL's 64-byte CN limit
+    # (ASN1_mbstring_ncopy's "string too long: maxsize=64") the way it once
+    # would have. CN is now a fixed, short placeholder ("lancache-ng")
+    # regardless of this argument's length or shape; the real hostname
+    # belongs only in the SAN extension passed via $4 (not exercised here,
+    # since this test's whole point is the CSR step in isolation), which has
+    # no such length limit. This asserts the CSR step no longer fails for
+    # the exact input shape that used to break it -- see
+    # tests/bats/proxy_sign_cert.bats for the dedicated deep-wildcard/
+    # exact-host regression coverage of this same fix against domains long
+    # enough to also hit Linux's NAME_MAX limit.
     local invalid_cn
     invalid_cn="$(printf 'a%.0s' {1..300})"
     local key="$test_cert_dir/test.key"
     local crt="$test_cert_dir/test.crt"
 
-    # _sign_cert will attempt generation but openssl should fail due to invalid CSR
-    # The function should handle cleanup
     run _sign_cert "$invalid_cn" "$key" "$crt"
 
-    # Function should return error status
+    [ "$status" -eq 0 ]
+    [ -f "$key" ]
+    [ -f "$crt" ]
+
+    cn=$(openssl x509 -noout -subject -in "$crt" | grep -oP 'CN=\K[^,/]*')
+    [ "$cn" = "lancache-ng" ]
+}
+
+# The test above removed this file's only remaining coverage of _sign_cert's
+# *first* `openssl req` (CSR-generation) failure branch and its
+# `rm -f "$BATS_TEST_TMPDIR/lancache-cert.csr"` cleanup on that path --
+# "signing failure cleans up the orphaned private key, not just the CSR" and
+# "signing failure removes a partially-written crt output file" below both
+# force the *second* (`openssl x509 -req` sign) step to fail instead, which
+# never reaches this branch. Force the CSR step itself to fail (a directory
+# can never be openssl's -keyout target, mirroring how the sign-step tests
+# below use a directory for their own forced-failure target) so this
+# coverage isn't lost just because CN-length can no longer trigger it.
+@test "CSR-generation failure returns an error and leaves no orphaned CSR or crt" {
+    local key_as_dir="$test_cert_dir/keydir"
+    local crt="$test_cert_dir/test.crt"
+    mkdir -p "$key_as_dir"
+
+    run _sign_cert "csr-fail.example.com" "$key_as_dir" "$crt" "subjectAltName=DNS:csr-fail.example.com"
+
     [ "$status" -ne 0 ]
+    [ ! -f "/tmp/lancache-cert.csr" ]
+    [ ! -f "$crt" ]
+
+    rmdir "$key_as_dir"
 }
 
 # _sign_cert writes its intermediate CSR to a single hardcoded path,
@@ -412,8 +457,11 @@ teardown() {
 # failure path. This test's name says "on generation failure" but exercises
 # the success path (a real deployment signs many domains back-to-back, so
 # a leftover CSR after a *successful* sign is just as real a leak as one
-# left behind by a failure); the invalid-CN test above covers the failure
-# path for the same cleanup behavior.
+# left behind by a failure); "signing failure cleans up the orphaned private
+# key, not just the CSR" and "signing failure removes a partially-written crt
+# output file" below cover the failure path for the same cleanup behavior
+# (the over-length-CN test above no longer fails at all, by design -- see its
+# own comment -- so it can no longer serve as the failure-path example).
 @test "CSR cleanup prevents orphaned files on generation failure" {
     local domain="cleanup-test.example.com"
     local key="$test_cert_dir/${domain}.key"
@@ -430,7 +478,7 @@ teardown() {
 # Regression tests for #655
 #
 # Two latent bugs, both originally flagged in the PR #172/#173 reviews and
-# re-verified still present on v0.2.0 before this fix:
+# re-verified still present on v0.2.0:
 #   1. _default_cert_needs_regen's IP SAN check used an unanchored substring
 #      match, so a migrated IP_SSL could still "match" a longer stale IP.
 #   2. _sign_cert only removed the CSR temp file on a failed sign, leaving
@@ -473,11 +521,13 @@ teardown() {
     local crt="$test_cert_dir/${domain}.crt"
     printf 'partial garbage from an interrupted write' > "$crt"
 
-    # An invalid CN (over OpenSSL's 64-byte ASN.1 string limit, per the
-    # "generation fails gracefully" test above) fails at the CSR step, not
-    # the sign step, so it can't exercise this path. Instead, force the sign
-    # step itself to fail by pointing -CA at a CA file that doesn't exist,
-    # which openssl x509 rejects only once it actually attempts to sign.
+    # An over-length CN-shaped argument used to fail at the CSR step before
+    # ever reaching the sign step (see "certificate generation succeeds for
+    # an over-length CN-shaped argument" above for why that's no longer true
+    # now that CN is a fixed placeholder), so it can't exercise this path.
+    # Instead, force the sign step itself to fail by pointing -CA at a CA
+    # file that doesn't exist, which openssl x509 rejects only once it
+    # actually attempts to sign.
     CA_DIR="$BATS_TEST_TMPDIR/missing-ca-dir"
     run _sign_cert "$domain" "$key" "$crt" "subjectAltName=DNS:${domain}"
 
@@ -536,4 +586,32 @@ teardown() {
     IP_SSL="192.168.1.1"
     run _default_cert_needs_regen
     [ "$status" -eq 0 ]
+}
+
+# _bounded_cert_name must be defined unconditionally, before the
+# `if [ "${SSL_ENABLED}" = "1" ]` block -- entrypoint.sh's unconditional
+# map-generation section (see "2. Generate request-time access policy maps")
+# calls it for every _EXTRA_WILDCARD_BASES/_EXTRA_EXACT_HOSTS entry
+# regardless of SSL_ENABLED, since those maps exist even when SSL mode is
+# off. A real regression shipped exactly this: _bounded_cert_name was
+# defined only inside the SSL_ENABLED=1 branch, so any SSL_ENABLED=0 install
+# with a deep cdn-domains.txt entry hit "_bounded_cert_name: command not
+# found" and a blank map value, failing nginx -t at startup -- confirmed
+# live against a real built proxy image and the real cdn-domains.txt.
+# Exercising that end-to-end (SSL_ENABLED=0, a real container, real
+# nginx -t) isn't practical from this bats suite (no Docker/nginx here), so
+# this instead asserts the cheap, deterministic invariant that actually
+# prevents the regression: the function's definition must appear before the
+# SSL_ENABLED conditional in the source, not verify runtime behavior a unit
+# test can't reach.
+@test "_bounded_cert_name is defined before the SSL_ENABLED conditional block" {
+    local entrypoint="$repo_root/services/proxy/entrypoint.sh"
+    local def_line ssl_if_line
+
+    def_line="$(grep -n '^_bounded_cert_name() {' "$entrypoint" | head -1 | cut -d: -f1)"
+    ssl_if_line="$(grep -n 'if \[ "\${SSL_ENABLED}" = "1" \]; then' "$entrypoint" | head -1 | cut -d: -f1)"
+
+    [ -n "$def_line" ]
+    [ -n "$ssl_if_line" ]
+    [ "$def_line" -lt "$ssl_if_line" ]
 }

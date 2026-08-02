@@ -18,20 +18,22 @@ mod docker_client;
 mod kea_snapshots;
 mod nats_auth_callout;
 mod nats_config;
+mod nats_kick;
 mod nginx_client;
 mod reverse_dns;
 mod routes;
 mod session;
 mod syslog_client;
+mod watchdog_status;
 
 use anyhow::Result;
 use axum::{
-    body::{to_bytes, Body},
+    Router,
+    body::{Body, to_bytes},
     extract::Request,
     http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Router,
 };
 use base64::Engine as _;
 use bollard::Docker;
@@ -65,6 +67,13 @@ pub struct AppState {
     // matching private seed never leaves the loaded `KeyPair` the callout
     // responder task holds.
     pub nats_issuer_public_key: String,
+    // The auth-callout responder's own static X25519 (curve) public NKey,
+    // rendered into nats.conf's `auth_callout { xkey: ... }` field (issue
+    // #682: see nats_auth_callout.rs's xkey module docs). The matching
+    // private seed never leaves the loaded `XKey` the callout responder task
+    // holds -- a deliberately separate keypair from nats_issuer_public_key's
+    // Ed25519 signing identity above.
+    pub nats_callout_xkey_public_key: String,
 }
 
 const CSRF_HEADER_NAME: &str = "X-CSRF-Token";
@@ -77,8 +86,8 @@ const SECONDARY_REGISTRATION_TOKEN_FILE: &str = "/data/lancache-secondary-regist
 // not just deploy/prod/.env's CHANGE_ME_SECONDARY_REGISTRATION_TOKEN default. An
 // exact-literal list previously missed deploy/quickstart/.env's distinct
 // YOUR_SECONDARY_REGISTRATION_TOKEN_HERE default, which manual quickstart deploys
-// that skip setup.sh ship untouched -- letting anyone who reads this public repo
-// register a secondary against it (flagged in review on PR #743). The first
+// that skip setup.sh ship untouched -- letting anyone who reads this public
+// repo register a secondary against it. The first
 // five checks mirror setup.sh's own secret_value_is_placeholder pattern set
 // case-for-case so both checks stay in sync; the trailing `<...>` check is an
 // addition beyond that set, added because README.md's own
@@ -168,7 +177,8 @@ fn load_or_create_session_secret() -> Result<[u8; 32]> {
 // manual path ("Or manually: Edit .env ... docker compose up -d") ships either
 // an empty default (deploy/quickstart compose's `${SECONDARY_REGISTRATION_TOKEN:-}`)
 // or a public placeholder (deploy/quickstart/.env's YOUR_..._HERE,
-// deploy/prod/.env's CHANGE_ME_*, deploy/dev compose's lancache-reg-dev-secret).
+// deploy/prod/.env's CHANGE_ME_*, or the now-retired deploy/dev compose's
+// lancache-reg-dev-secret, v0.3.0 #766).
 // Those all previously boot-looped the UI. Generating the same kind of secret
 // setup.sh would -- persisted next to the other /data secrets so it never
 // rotates across restarts (a rotating token would break an already-registered
@@ -774,6 +784,27 @@ fn init_tracing() {
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    // Alternate CLI mode (issue #1288): this same binary/image is also the
+    // `dhcp-probe` container's entrypoint (see deploy/*/docker-compose.yml,
+    // `["/usr/local/bin/lancache-ui", "--dhcp-probe"]`), replacing the
+    // former separate `dhcp-probe.sh` script. Intercepted before any of the
+    // real Admin UI server's config/tracing/AppState setup below because
+    // the dhcp-probe container deliberately runs with none of the Admin
+    // UI's own environment configured (no `environment:`/`env_file:` entry
+    // at all on that compose service) -- this mode must not depend on any
+    // of it. Runs the (blocking, socket-only) probe on its own thread via
+    // spawn_blocking rather than blocking this async runtime's worker
+    // thread directly, then exits 0 unconditionally: see
+    // dhcp_probe_native::run_probe's own comment on why every outcome,
+    // including an internal failure, must still exit 0 (issues
+    // #1155/#1156's one-shot update-health-gate contract).
+    if std::env::args().nth(1).as_deref() == Some("--dhcp-probe") {
+        tokio::task::spawn_blocking(lancache_ui::dhcp_probe_native::run_cli_and_print)
+            .await
+            .ok();
+        return Ok(());
+    }
+
     init_tracing();
 
     let mut cfg = match config::Config::from_env() {
@@ -868,6 +899,29 @@ async fn main() -> Result<()> {
     };
     let nats_issuer_public_key = issuer_keypair.public_key();
 
+    // Same rationale and load-or-create shape as issuer_keypair immediately
+    // above, just for the separate xkey encryption keypair (issue #682).
+    // NATS_XKEY_SEED (a literal seed value) takes precedence over the
+    // file-based path when set, mirroring nats_issuer_seed exactly -- see
+    // config.rs's nats_xkey_seed docs.
+    let xkey = match &cfg.nats_xkey_seed {
+        Some(seed) => match nkeys::XKey::from_seed(seed) {
+            Ok(kp) => kp,
+            Err(e) => {
+                tracing::error!("NATS_XKEY_SEED is not a valid NKey seed: {e}");
+                std::process::exit(1);
+            }
+        },
+        None => match nats_auth_callout::load_or_create_xkey(&cfg.nats_xkey_seed_path) {
+            Ok(kp) => kp,
+            Err(message) => {
+                tracing::error!("{message}");
+                std::process::exit(1);
+            }
+        },
+    };
+    let nats_callout_xkey_public_key = xkey.public_key();
+
     let db = {
         // This SQLite DB stores Admin-UI-local secondary registration metadata.
         // Runtime DNS/DHCP/proxy state stays in PowerDNS, Kea, NATS, and Docker.
@@ -900,6 +954,7 @@ async fn main() -> Result<()> {
         ui_session_secret,
         ui_session_ttl,
         nats_issuer_public_key,
+        nats_callout_xkey_public_key,
     });
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up
@@ -917,6 +972,7 @@ async fn main() -> Result<()> {
     tokio::spawn(nats_auth_callout::run_auth_callout(
         Arc::clone(&state),
         Arc::new(issuer_keypair),
+        Arc::new(xkey),
     ));
 
     // Routes that are always public (protected by their own token).
@@ -945,6 +1001,7 @@ async fn main() -> Result<()> {
         .route("/dhcp/mode", post(routes::dhcp::update_dhcp_mode))
         .route("/dhcp/ddns", post(routes::dhcp::update_dhcp_ddns))
         .route("/dhcp/proxy", post(routes::dhcp::update_dhcp_proxy))
+        .route("/dhcp/relay", post(routes::dhcp::update_dhcp_relay))
         .route("/dhcp/subnet/add", post(routes::dhcp::add_subnet))
         .route("/dhcp/subnet/update", post(routes::dhcp::update_subnet))
         .route("/dhcp/subnet/remove", post(routes::dhcp::remove_subnet))
@@ -972,6 +1029,8 @@ async fn main() -> Result<()> {
         // check_dhcp_conflict's own comment for the header-based CSRF check
         // that pairs with this route now being a mutating method.
         .route("/api/dhcp/check", post(routes::dhcp::check_dhcp_conflict))
+        .route("/ntp", get(routes::ntp::ntp_page))
+        .route("/ntp/settings", post(routes::ntp::update_ntp_settings))
         .route("/domains", get(routes::domains::domains_page))
         .route("/domains/dns/add", post(routes::domains::add_dns))
         .route("/domains/dns/remove", post(routes::domains::remove_dns))
@@ -1001,7 +1060,12 @@ async fn main() -> Result<()> {
         .route("/logs", get(routes::logs::logs_page))
         .route("/setup", get(routes::setup::setup_page))
         .route("/setup/update", post(routes::setup::update_stack_settings))
+        .route("/cache/resize", post(routes::cache::resize_cache))
         .route("/api/metrics", get(routes::dashboard::metrics_api))
+        .route(
+            "/api/watchdog-status",
+            get(routes::dashboard::watchdog_status_api),
+        )
         .route("/api/netdata/{*path}", get(routes::netdata_proxy::proxy))
         .route("/static/admin.css", get(admin_css))
         .route("/static/chart.umd.min.js", get(chart_js))
@@ -1288,10 +1352,12 @@ mod tests {
             );
         }
         // A real generated secret (openssl rand -hex 32 shape) must pass.
-        assert!(validate_secondary_registration_token(
-            "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
-        )
-        .is_ok());
+        assert!(
+            validate_secondary_registration_token(
+                "8f14e45fceea167a5a36dedd4bea2543f5a5d5a2b3f3b8c1e7d6c5b4a3f2e1d"
+            )
+            .is_ok()
+        );
     }
 
     // Cross-language parity coverage for secret/token placeholder detection
@@ -1470,10 +1536,18 @@ mod tests {
     fn lancache_image_template_functions_render_runtime_config() {
         let _guard = config::env_test_lock().lock().unwrap();
 
-        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
-        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
-        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        }
 
         let cfg = config::Config::from_env().unwrap();
         let mut templates = Tera::default();
@@ -1493,10 +1567,18 @@ mod tests {
             "registry.example.test:5000/mirror/lancache-ng:v0.2.0-test [nightly]"
         );
 
-        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
-        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
-        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
-        std::env::remove_var("LANCACHE_IMAGE_TAG");
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_TAG");
+        }
     }
 
     // Regression test for #848: load_templates() parses the *real* on-disk
@@ -1509,14 +1591,24 @@ mod tests {
     fn logs_html_renders_syslog_host_filter_dropdown_with_selection() {
         let _guard = config::env_test_lock().lock().unwrap();
 
-        std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
-        std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
-        std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
-        std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
-        std::env::set_var(
-            "TEMPLATE_DIR",
-            format!("{}/src/templates", env!("CARGO_MANIFEST_DIR")),
-        );
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_REGISTRY", "registry.example.test:5000");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_PREFIX", "mirror/lancache-ng");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_CHANNEL", "nightly");
+        }
+        unsafe {
+            std::env::set_var("LANCACHE_IMAGE_TAG", "v0.2.0-test");
+        }
+        unsafe {
+            std::env::set_var(
+                "TEMPLATE_DIR",
+                format!("{}/src/templates", env!("CARGO_MANIFEST_DIR")),
+            );
+        }
 
         let cfg = config::Config::from_env().unwrap();
         let templates = load_templates(&cfg);
@@ -1542,11 +1634,21 @@ mod tests {
             "expected the non-selected dns-ssl <option> to be present without `selected`, got:\n{rendered}"
         );
 
-        std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
-        std::env::remove_var("LANCACHE_IMAGE_PREFIX");
-        std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
-        std::env::remove_var("LANCACHE_IMAGE_TAG");
-        std::env::remove_var("TEMPLATE_DIR");
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_REGISTRY");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_PREFIX");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_CHANNEL");
+        }
+        unsafe {
+            std::env::remove_var("LANCACHE_IMAGE_TAG");
+        }
+        unsafe {
+            std::env::remove_var("TEMPLATE_DIR");
+        }
     }
 
     // This crate has two similarly-named CSRF header helpers: main.rs's own
@@ -1631,6 +1733,7 @@ mod tests {
             ui_session_secret: secret,
             ui_session_ttl: ttl,
             nats_issuer_public_key: String::new(),
+            nats_callout_xkey_public_key: String::new(),
         })
     }
 

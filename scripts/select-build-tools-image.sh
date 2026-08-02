@@ -19,6 +19,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/build-tools-channel.sh
 source "$script_dir/lib/build-tools-channel.sh"
+# shellcheck source=scripts/lib/docker-buildx-retry.sh
+source "$script_dir/lib/docker-buildx-retry.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -136,12 +138,6 @@ smoke_test_image() {
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
     expect -v >/dev/null
-
-    # python3-scapy has no standalone binary worth checking via command -v
-    # (see tools/build-tools/Dockerfile'\''s own verification step for the
-    # same caveat) -- verify the importable module scripts/dhcp-proxy-pxe-
-    # simulation.sh actually depends on instead.
-    python3 -c "import scapy.all"
   '
 }
 
@@ -163,11 +159,41 @@ published_image_reference() {
 # Dockerfile as part of this project's trusted CI infrastructure — a real supply-chain risk.
 # Same-repo PRs and pushes are trusted because they went through this project's own
 # contributor approval and branch-protection rules.
+#
+# Comparison is case-INSENSITIVE (issue #842 PR #1360, 2026-08-01, same bug
+# class as scripts/lib/validation-image-tag.sh's vit_pr_staging_available() --
+# see that file's identical comment for the full incident): GitHub repository
+# names are case-insensitive for identity, but the two context values feeding
+# this comparison are not guaranteed to agree on casing at every point in
+# time, confirmed live during this repository's rename to `LanCache-NG`. A
+# bare `=` here would misclassify a genuine same-repo PR as a fork PR, which
+# for THIS specific check fails closed in the safe direction (no fallback
+# build, not an unwanted one) -- but it's still the wrong answer for a
+# trusted same-repo PR, and lowercasing both sides is strictly more correct,
+# never less secure: it cannot make an actual fork PR compare equal, since
+# two distinct repositories can never differ only in casing.
+#
+# Extracted into its own function purely for testability: this whole script
+# has real side effects from its very first sourced line (docker pulls,
+# GHCR logins, buildx calls), so it cannot be exercised end-to-end by a fast
+# bats test the way scripts/lib/validation-image-tag.sh's pure helpers can.
+# This one decision -- the security-relevant trust boundary this comment
+# block documents -- is worth being able to test in isolation regardless;
+# tests/bats/select_build_tools_image.bats sources just this function
+# (same awk-extraction technique tests/bats/helpers/retention-helpers.sh
+# already uses for services/watchdog/retention.sh) without executing the
+# rest of this script's network/Docker calls.
+select_build_tools_trusted_fallback_allowed() {
+  local event_name="$1" head_repository="$2" base_repository="$3"
+  if [[ "$event_name" = "pull_request" ]]; then
+    [[ -n "$head_repository" && "${head_repository,,}" = "${base_repository,,}" ]]
+  else
+    return 0
+  fi
+}
+
 trusted_fallback_allowed=false
-if [[ "$event_name" = "pull_request" ]]; then
-  [[ -n "$head_repository" && "$head_repository" = "$base_repository" ]] \
-    && trusted_fallback_allowed=true
-else
+if select_build_tools_trusted_fallback_allowed "$event_name" "$head_repository" "$base_repository"; then
   trusted_fallback_allowed=true
 fi
 
@@ -196,7 +222,11 @@ fi
 # instead of a fallback build.
 if [[ "$event_name" != "pull_request" ]]; then
   printf '::notice::Building a branch-local build-tools validation image for a trusted ref.\n' >&2
-  docker build --pull -t "$fallback_image" "$build_tools_context" >&2
+  # Wrapped (2026-07-29) after tracing current_dev's own `coverage (Rust)`
+  # job failure to this exact unwrapped call: the golang:latest-toolchain-
+  # internal panic documented in scripts/lib/docker-buildx-retry.sh actually
+  # surfaced here, in this script's branch-local build-tools fallback build.
+  docker_buildx_retry -- docker build --pull -t "$fallback_image" "$build_tools_context" >&2
   smoke_test_image "$fallback_image"
   printf '%s\n' "$fallback_image"
   exit 0
@@ -225,6 +255,6 @@ if [[ "$trusted_fallback_allowed" != "true" ]]; then
 fi
 
 printf '::notice::Building a branch-local build-tools validation image.\n' >&2
-docker build --pull -t "$fallback_image" "$build_tools_context" >&2
+docker_buildx_retry -- docker build --pull -t "$fallback_image" "$build_tools_context" >&2
 smoke_test_image "$fallback_image"
 printf '%s\n' "$fallback_image"

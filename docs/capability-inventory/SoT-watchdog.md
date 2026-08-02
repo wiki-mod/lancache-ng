@@ -165,7 +165,7 @@ consumed by the Admin UI.** Grepping the entire `services/ui/src/` tree for
 `status.json`, `STATUS_FILE`, or `watchdog-status` (the named Docker
 volume backing `/var/run/watchdog`) returns zero matches. The
 `watchdog-status` volume is mounted only into the `watchdog` container
-itself in all three compose files (`deploy/dev`, `deploy/prod`,
+itself in both compose files (`deploy/prod`,
 `deploy/quickstart`) -- never into `ui`. The Admin UI's actual dashboard
 health/status (`services/ui/src/routes/dashboard.rs`) instead queries
 nginx's own `stub_status` module directly via

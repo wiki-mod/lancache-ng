@@ -9,13 +9,17 @@
 # an operator typing "yes" or "1" saw the feature as enabled in the Admin UI
 # while watchdog silently never enforced retention.
 #
-# This file tests is_truthy() directly, in isolation from
-# maybe_prune_syslog()'s rate-limiting/filesystem behavior (covered
-# separately in watchdog_syslog_prune.bats). The input tables here are
-# deliberately the same values services/ui/src/config.rs's
-# `syslog_enabled_truthy_parsing_matches_watchdog_contract` test exercises
-# against env_bool() -- proving both components agree on the same set of
-# inputs is the whole point of this test suite.
+# This file tests watchdog.sh's own is_truthy() copy directly (used there
+# for SSL_ENABLED normalization), in isolation from any filesystem-retention
+# behavior -- since #842 (2026-08-01), the SYSLOG_ENABLED gate this
+# function's rationale originally references lives in
+# services/watchdog/retention.sh instead (see retention_truthy_parsing.bats
+# for the equivalent coverage of that file's own, deliberately duplicated
+# copy, and retention_syslog_prune.bats for maybe_prune_syslog() itself).
+# The input tables here are deliberately the same values
+# services/ui/src/config.rs's `syslog_enabled_truthy_parsing_matches_watchdog_contract`
+# test exercises against env_bool() -- proving both components agree on the
+# same set of inputs is the whole point of this test suite.
 
 bats_require_minimum_version 1.5.0
 

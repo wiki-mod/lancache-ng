@@ -10,8 +10,8 @@ Scope examined (all against `origin/v0.2.0`):
 - `services/dhcp-proxy/Dockerfile`, `.dockerignore`
 - `services/dhcp-proxy/dnsmasq.conf.template`
 - `services/dhcp-proxy/entrypoint.sh` (675 lines)
-- `config/dev/dhcp-proxy.env`, `config/prod/dhcp-proxy.env`
-- `deploy/dev/docker-compose.yml`, `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
+- `config/prod/dhcp-proxy.env`
+- `deploy/prod/docker-compose.yml` (dhcp-proxy service block + cross-references in `ui`/`dhcp` services)
 - `scripts/dhcp-proxy-pxe-simulation.sh` (389 lines)
 - `tests/bats/dhcp_proxy_known_good_snapshot.bats`, `tests/bats/dhcp_proxy_optional_directives.bats` + their helpers
 - `docs/dhcp-modes.md`
@@ -25,9 +25,15 @@ Scope examined (all against `origin/v0.2.0`):
 DHCP relay in the RFC 1542/BOOTP-relay sense despite "relay" appearing in its
 own comments and `docs/dhcp-modes.md`'s mode name. It runs alongside an
 existing DHCP server that keeps owning real leases; dnsmasq only answers the
-supplemental PXE/ProxyDHCP exchange. It is one of three DHCP modes
-(`disabled` / `kea` / `dnsmasq-proxy`), mutually exclusive with
-`services/dhcp` (Kea) — both bind UDP/67.
+supplemental PXE/ProxyDHCP exchange. It is one of four DHCP modes
+(`disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay`), mutually exclusive
+with `services/dhcp` (Kea) — both bind UDP/67. **Update (#844):** this same
+`dhcp-proxy` container also serves the new `dnsmasq-relay` mode (a real DHCP
+relay to `UPSTREAM_DHCP_IP`, giaddr = `DHCP_RELAY_LOCAL_ADDR`); the entrypoint
+reads `DHCP_MODE` and renders `dnsmasq-relay.conf.template` instead of the
+ProxyDHCP `dnsmasq.conf.template`. In relay mode `UPSTREAM_DHCP_IP` stops being
+documentation-only (see the caveat below) and becomes the real forwarding
+target.
 
 **Naming caveat (own finding, not previously flagged anywhere in code/docs):**
 `UPSTREAM_DHCP_IP` is **documentation-only** — confirmed by entrypoint.sh's
@@ -210,7 +216,7 @@ resolved unilaterally in this audit.
 | #647 | spec: define full dnsmasq relay/proxy DHCP Admin UI feature scope | **OPEN** | Predates PXE boot-pointer vars; does not cover the §6 gap |
 | #840 | DHCP (Kea + dnsmasq-proxy): umbrella for scattered feature/bug/research work | **OPEN** | References #646/#647/#770/#815; does not reference the deep-validate coverage gap (§5.2) or the UI PXE-vars gap (§6) |
 | #716 | governance: no rule requires a new service to be added to full-stack CI validation | **OPEN** | General governance gap; cites dhcp-proxy's original 2026-06-22 omission as evidence, but is not itself the tracking issue for promoting the PXE simulation into the automatic gate |
-| #815 | Evaluate migrating DNS/DHCP services to Alpine base images | **OPEN** | Would affect `services/dhcp-proxy/Dockerfile`'s `mirror.gcr.io/library/debian:trixie-slim` base + `dnsmasq`/`gettext` packages |
+| #815 | Evaluate migrating DNS/DHCP services to Alpine base images | **OPEN** | `services/dhcp-proxy/Dockerfile` migrated to `mirror.gcr.io/library/alpine:3.24` (dnsmasq-first, per this issue's own staged recommendation); `services/dhcp` (Kea) and `services/dns` (PowerDNS) remain on Debian, issue stays open for those |
 
 ## 8. Recommended follow-ups (not filed — for maintainer decision)
 
