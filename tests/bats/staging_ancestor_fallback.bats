@@ -569,7 +569,12 @@ STUB
     install_fake_curl_flaky
     run --separate-stderr saf_query_run_count "wiki-mod/lancache-ng" "deadbeef0123456789deadbeef0123456789dead" "push"
     [ "$status" -ne 0 ]
+    # shellcheck disable=SC2154 # $stderr is populated by Bats itself via
+    # `run --separate-stderr` (Bats >= 1.5.0, required above); the Bats
+    # dialect support recognizes $status/$output/$lines but not this newer
+    # variable, so it misreports it as never assigned.
     [[ "$stderr" == *"::error::"* ]]
+    # shellcheck disable=SC2154 # same $stderr, see above
     [[ "$stderr" != *"test-token"* ]]
 }
 
@@ -675,6 +680,10 @@ STUB
     [ "$status" -ne 0 ]
     [ -z "$output" ]
     [ "$(wc -l < "$call_log")" -eq 1 ]
+    # shellcheck disable=SC2154 # $stderr is populated by Bats itself via
+    # `run --separate-stderr` (Bats >= 1.5.0, required above); the Bats
+    # dialect support recognizes $status/$output/$lines but not this newer
+    # variable, so it misreports it as never assigned.
     [[ "$stderr" == *"permanent (non-retryable) error"* ]]
 }
 
@@ -690,6 +699,10 @@ STUB
     [ "$status" -ne 0 ]
     [ -z "$output" ]
     [ "$(wc -l < "$call_log")" -eq 1 ]
+    # shellcheck disable=SC2154 # $stderr is populated by Bats itself via
+    # `run --separate-stderr` (Bats >= 1.5.0, required above); the Bats
+    # dialect support recognizes $status/$output/$lines but not this newer
+    # variable, so it misreports it as never assigned.
     [[ "$stderr" == *"permanent (non-retryable) error"* ]]
 }
 
