@@ -171,6 +171,38 @@ setup() {
     [ "$(cat "$sentinel_file")" = "it's ok" ]
 }
 
+@test "SAF_ANCESTOR_RUN_CACHE_DIR: the script's real exit status is preserved for a prior trap that reads \$?, not clobbered by cleanup" {
+    # \`\$?\` at the moment this file's own combined EXIT trap fires is the
+    # SCRIPT's real exit status (e.g. a genuine failure) -- but running ANY
+    # command changes \$?  to that command's own status, so
+    # _saf_cleanup_ancestor_run_cache_dir's own successful \`rm\`/\`true\` would
+    # silently overwrite it with 0 before a prior trap that itself reads
+    # \$? (a common CI pattern: logging or propagating the real exit status)
+    # ever runs, if that status were not explicitly captured and restored
+    # first. Reproduced live before the fix: a prior trap of
+    # \`echo "status=\$?"\`, then a plain \`false\`, printed "status=0" -- a
+    # real CI failure silently reported as success to anything reading that
+    # prior trap's own output. Proven here the same way: the prior trap
+    # writes \$?'s own value to a sentinel file, and that value must be 1
+    # (false's own exit code), never 0.
+    reported_dir_file="$BATS_TEST_TMPDIR/reported_cache_dir.txt"
+    sentinel_file="$BATS_TEST_TMPDIR/prior_trap_status.txt"
+    run env -u SAF_ANCESTOR_RUN_CACHE_DIR bash -c "
+        trap 'echo \"\$?\" > \"$sentinel_file\"' EXIT
+        source '$repo_root/scripts/lib/ghcr-retry.sh'
+        source '$repo_root/scripts/lib/staging-image-freshness.sh'
+        source '$repo_root/scripts/lib/staging-ancestor-fallback.sh'
+        printf '%s' \"\$SAF_ANCESTOR_RUN_CACHE_DIR\" > '$reported_dir_file'
+        false
+    "
+    [ "$status" -eq 1 ]
+    reported_dir="$(cat "$reported_dir_file")"
+    [ -n "$reported_dir" ]
+    [ ! -e "$reported_dir" ]
+    [ -f "$sentinel_file" ]
+    [ "$(cat "$sentinel_file")" = "1" ]
+}
+
 # ---------------------------------------------------------------------------
 # saf_paths_are_ignorable: pure, no git/network involved.
 # ---------------------------------------------------------------------------

@@ -123,7 +123,30 @@ if [[ -z "${SAF_ANCESTOR_RUN_CACHE_DIR:-}" ]]; then
     _saf_cleanup_ancestor_run_cache_dir() {
       rm -rf "$SAF_ANCESTOR_RUN_CACHE_DIR" 2>/dev/null || true
     }
-    trap '_saf_cleanup_ancestor_run_cache_dir; _saf_run_prior_exit_trap' EXIT
+    # `$?` at the moment this trap fires is the SCRIPT's own real exit
+    # status (e.g. a genuine failure) -- but running ANY command changes
+    # `$?` to that command's own status, so `_saf_cleanup_ancestor_run_cache_dir`
+    # (whose own last command is effectively a successful `rm`/`true`)
+    # would silently overwrite it with 0 before the prior trap ever runs,
+    # were it not captured first. A prior trap that itself reads `$?` (e.g.
+    # to log or propagate the real exit status, a common CI pattern) would
+    # then see a false "success" for a genuine failure -- reproduced live:
+    # sourcing this file with a prior trap of `echo "status=$?"` already
+    # registered, then failing via a plain `false`, printed `status=0`, not
+    # `status=1`. Captured into `_saf_exit_status` as this trap's own FIRST
+    # action (before the cleanup call can touch `$?` at all), then
+    # `(exit "$_saf_exit_status")` -- a subshell whose own exit code becomes
+    # this trap's `$?` the instant it completes -- re-establishes that
+    # captured value immediately before `_saf_run_prior_exit_trap` runs, so
+    # any `$?` read as the very first thing inside the prior trap's own body
+    # sees the real, original status again.
+    #
+    # _saf_exit_status IS assigned, as this same trap string's own first
+    # statement; shellcheck's static analysis does not track an assignment
+    # made earlier within the same single-quoted trap argument as
+    # satisfying a later read within that same string.
+    # shellcheck disable=SC2154
+    trap '_saf_exit_status=$?; _saf_cleanup_ancestor_run_cache_dir; (exit "$_saf_exit_status"); _saf_run_prior_exit_trap' EXIT
     unset _saf_prior_exit_trap_line
   fi
 fi
