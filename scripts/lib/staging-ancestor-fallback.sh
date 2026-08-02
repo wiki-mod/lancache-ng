@@ -949,7 +949,7 @@ saf_base_commit_has_confirmed_run() {
 # built commit that only ever existed on a side/feature branch before
 # reaching the actual previous target-branch state (<base_sha>^1). That
 # side-branch commit's image does not represent "the target branch
-# immediately before this commit" and can omit real target-branch changes --
+# immediately before <base_sha>" and can omit real target-branch changes --
 # exactly the kind of stale-content risk this whole mechanism exists to
 # avoid. `--first-parent` walks only the same first-parent chain
 # saf_base_commit_diff_paths already uses, so "nearest built ancestor" and

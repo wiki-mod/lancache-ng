@@ -1718,10 +1718,10 @@ STUB
     # have a genuinely confirmed push-triggered run yet never get its own
     # sha-<commit> tag for one specific service, because Step 4 (#1095)
     # reused that service's content from an even earlier commit instead of
-    # rebuilding it. Before this fix, the JUDGMENT CALL treated "run exists,
-    # image never resolves" as a broken build and stopped immediately,
-    # unable to reach a genuinely usable ancestor sitting right behind a
-    # legitimate Step 4 reuse. Fixture: nearest candidate (reused_sha) has a
+    # rebuilding it. Without the service-scoped check, the JUDGMENT CALL
+    # treats "run exists, image never resolves" as a broken build and stops
+    # immediately, unable to reach a genuinely usable ancestor sitting right
+    # behind a legitimate Step 4 reuse. Fixture: nearest candidate (reused_sha) has a
     # confirmed run but its own proxy image never resolves (revision stub
     # only ever answers for built_sha); built_sha, one step further back,
     # has both a confirmed run and a resolving image.
