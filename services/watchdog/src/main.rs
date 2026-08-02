@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Binary entry point for the Rust rewrite of watchdog.sh's health-check/

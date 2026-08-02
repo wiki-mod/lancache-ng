@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! `status.json` production: watchdog.sh's `write_status()`/`disk_info()`,

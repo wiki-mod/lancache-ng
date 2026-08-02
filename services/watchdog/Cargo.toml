@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Manifest for the lancache-watchdog health-monitor/auto-restart daemon,
 # a Rust rewrite of services/watchdog/watchdog.sh (still the active
@@ -40,7 +41,7 @@ path = "src/main.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# rustls, never openssl-sys (AG-REL-003) -- rust:slim/the eventual runtime
+# rustls, never openssl-sys (Rule-Ref: AG-REL-003) -- rust:slim/the eventual runtime
 # base has no OpenSSL headers. Matches services/dns/nats-subscriber's
 # reqwest version/feature shape (a small binary with a narrow HTTP surface,
 # same category as this crate) rather than services/ui's heavier axum-server
@@ -54,7 +55,7 @@ serde_json = "1"
 # who points DOCKER_PROXY_URL at an HTTPS socket proxy secured by a private
 # CA they installed into the image would have that curl call succeed today,
 # and this crate's reqwest client reject it, if left on plain webpki roots.
-# "-native-roots" is still 100% rustls (no openssl-sys, AG-REL-003 intact),
+# "-native-roots" is still 100% rustls (no openssl-sys, Rule-Ref: AG-REL-003 intact),
 # it only changes which root store rustls consults.
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["full"] }
