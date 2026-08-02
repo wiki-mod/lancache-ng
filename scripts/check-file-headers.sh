@@ -1,10 +1,12 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Scans git-tracked files for the required repository header (see AGENTS.md's
-# "File Headers" section). By default scans the whole repository; pass file
-# paths as arguments to scan only those (used by CI to check just a PR's
-# diff, and by developers to check a file before committing it).
+# "File Headers" section) and, separately, for the SPDX-License-Identifier
+# line (AG-HDR-008). By default scans the whole repository; pass file paths
+# as arguments to scan only those (used by CI to check just a PR's diff, and
+# by developers to check a file before committing it).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -12,6 +14,7 @@ repo_root=$(cd "$script_dir/.." && pwd)
 cd "$repo_root"
 
 HEADER_TEXT='lancache-ng (https://github.com/wiki-mod/lancache-ng)'
+SPDX_TEXT='SPDX-License-Identifier: AGPL-3.0-or-later'
 HEADER_SCAN_LINES=20
 
 # Mirrors AGENTS.md's "File Headers" exclusion list exactly — update both
@@ -63,11 +66,16 @@ else
 fi
 
 missing=()
+missing_spdx=()
 for path in "${files[@]}"; do
     [ -f "$path" ] || continue
     is_excluded "$path" && continue
-    if ! head -n "$HEADER_SCAN_LINES" "$path" | grep -qF "$HEADER_TEXT"; then
+    scanned="$(head -n "$HEADER_SCAN_LINES" "$path")"
+    if ! grep -qF "$HEADER_TEXT" <<<"$scanned"; then
         missing+=("$path")
+    fi
+    if ! grep -qF "$SPDX_TEXT" <<<"$scanned"; then
+        missing_spdx+=("$path")
     fi
 done
 
@@ -75,6 +83,21 @@ if [ "${#missing[@]}" -gt 0 ]; then
     echo "Missing the required repository header (AGENTS.md 'File Headers'):" >&2
     printf '  %s\n' "${missing[@]}" >&2
     exit 1
+fi
+
+# AG-HDR-008 (decided 2026-08-02): every in-scope file should carry the SPDX
+# line too, added incrementally ("touch a file, verify the line is there, add
+# it if not" -- not a one-shot repo-wide backfill). Reported but NOT yet
+# enforced (no exit 1) here: as of this check's own introduction, this line
+# exists in only a handful of files, so failing on it in whole-repo scan mode
+# (how build-push.yml's own file-headers job invokes this script today, no
+# path arguments) would immediately block every PR on pre-existing files it
+# never touched. Flip this to a hard failure only once the repo-wide backfill
+# is tracked and materially underway -- see AG-HDR-008's own text for the
+# same two-step rollout AG-HDR-009 already used for the header line itself.
+if [ "${#missing_spdx[@]}" -gt 0 ]; then
+    echo "Missing the SPDX-License-Identifier line (AGENTS.md AG-HDR-008) -- not yet enforced, backfill in progress:" >&2
+    printf '  %s\n' "${missing_spdx[@]}" >&2
 fi
 
 echo "All checked files carry the required repository header (or are exempt)."
