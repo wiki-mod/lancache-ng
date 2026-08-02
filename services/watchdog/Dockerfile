@@ -6,13 +6,31 @@
 # (maintainer decision, 2026-07-25) said watchdog.sh will eventually be
 # rewritten as a real Rust service, and migrating the CURRENT bash image
 # seemed like immediately-obsoleted work. Revisited and approved anyway
-# (maintainer decision, 2026-07-31): #842's rewrite has not started -- only
-# the decision is recorded, no implementation -- and has no scheduled
-# timeline, while this migration is trivial (no builder stage, no compiled
-# binary, a plain apt->apk package-name swap) and brings real value
-# (smaller image, smaller package-count attack surface) on its own, entirely
-# independent of whatever base-image decision the eventual Rust rewrite
-# makes for itself. All seven packages this Dockerfile previously installed
+# (maintainer decision, 2026-07-31): at the time, #842's rewrite had not
+# started -- only the decision was recorded, no implementation -- and had
+# no scheduled timeline, while this migration was trivial (no builder
+# stage, no compiled binary, a plain apt->apk package-name swap) and
+# brought real value (smaller image, smaller package-count attack surface)
+# on its own, entirely independent of whatever base-image decision the
+# eventual Rust rewrite makes for itself.
+#
+# STATUS (2026-08-01): the health-check/restart core's Rust rewrite now
+# exists as a scaffold (services/watchdog/Cargo.toml + src/), covering that
+# core (see that crate's own src/lib.rs module doc comment for exactly
+# what is and isn't ported yet). It is NOT wired into this Dockerfile --
+# `ENTRYPOINT` below still runs the bash `watchdog.sh`, and this image
+# still builds nothing from the Rust crate. The three filesystem-retention
+# passes (maybe_purge/maybe_prune_syslog/maybe_rotate_fluent_bit_selflog)
+# are NOT a prerequisite for this ENTRYPOINT swap: they already run
+# independently of it, extracted into their own retention.sh and now their
+# own dedicated `retention` Compose service/container (see below and
+# deploy/*/docker-compose.yml's `retention:` service block), not inside
+# whatever process this Dockerfile's health-monitor `ENTRYPOINT` runs.
+# Whether/when this Dockerfile switches that health-monitor `ENTRYPOINT` to
+# a compiled Rust binary remains an open, not-yet-made maintainer decision
+# for other reasons (this crate's own remaining scope, and full-stack
+# validation), independent of whatever base-image choice this file makes
+# for itself. All seven packages this Dockerfile previously installed
 # on `debian:13-slim` were confirmed present on Alpine 3.24 during #815's own
 # research (curl 8.21.0-r0, jq 1.8.1-r0, ca-certificates 20260611-r0, nano
 # 9.1-r0, lsof 4.99.6-r0, ripgrep 15.1.0-r0, zstd 1.5.7-r2) -- no
@@ -28,13 +46,17 @@
 # lowercasing in is_truthy(), `set -o pipefail` in all three) that Alpine's
 # default `/bin/sh` (busybox ash) does not support -- see AG-REL-006.
 # Verified available, bash 5.3.9-r1, which is well past the 4.3 baseline
-# `local -n` needs. retention.sh (#842, 2026-08-01: the three file-retention
-# functions extracted out of watchdog.sh into their own script/process for
+# `local -n` needs. retention.sh (the three file-retention functions
+# extracted out of watchdog.sh into their own script/process for
 # blast-radius separation, see that file's own header) is a separate script
-# but runs in this same container/image for now -- see its header and this
-# project's issue #842 for the still-open question of whether it should
-# instead become its own compose service/sidecar with its own, more tightly
-# locked-down container.
+# that ships in this same built image, but does not run inside the plain
+# `watchdog` container -- it now runs as its own dedicated `retention`
+# Compose service/container (see deploy/*/docker-compose.yml's `retention:`
+# service block and retention-entrypoint.sh), with its own tighter,
+# non-root/capability-scoped lockdown. Both scripts still ship in this one
+# image (see this Dockerfile's own `ENTRYPOINT` comment further below) so a
+# single build serves either role, chosen entirely by which Compose service
+# invokes it.
 #
 # `findutils` (GNU find) is installed explicitly, and is the one real
 # GNU-vs-BusyBox behavioral gap found in this migration (checked for, not

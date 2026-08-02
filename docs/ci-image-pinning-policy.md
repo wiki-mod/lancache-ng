@@ -106,7 +106,9 @@ as the pull source for their runtime bases (Debian for most services;
 Alpine base as the first two stages of issue #815's staged Alpine migration,
 and `services/watchdog/Dockerfile` separately migrated to the same Alpine base
 (issue #815's own watchdog carve-out, revisited and approved 2026-07-31,
-independent of #842's still-unstarted Rust rewrite)
+independent of #842's Rust rewrite -- a scaffold now exists for that rewrite,
+see `services/watchdog/Cargo.toml`, but it is not yet built or used as this
+container's entrypoint, so this base-image decision stays unaffected either way)
 -- `services/dns/Dockerfile` remains on Debian, that stage still open),
 including `services/ui/Dockerfile`. This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
@@ -126,7 +128,7 @@ undocumented per-Dockerfile fallback logic.
 - `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
 - `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
 - `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's still-unstarted Rust rewrite)
+- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
 
 **Status**: ✅ All runtime base images are pinned.
 
@@ -135,12 +137,12 @@ undocumented per-Dockerfile fallback logic.
 - `services/dns/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder`
   - ARG default (line 6): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
   - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s **AG-CI-008** for the codified rule.
+  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s Rule-Ref: AG-CI-008 for the codified rule.
 
 - `services/ui/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS builder`
   - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
   - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s **AG-CI-008**.
+  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s Rule-Ref: AG-CI-008.
 
 ### Workflow Build-Tools References
 
@@ -165,7 +167,7 @@ matters for a manual `docker build` invocation without `--build-arg`; every
 real CI build always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>`
 explicitly and never falls back to it, so pinning the default would only add
 a manually-maintained value that goes stale with no real build path
-depending on it. This decision is codified as `AGENTS.md`'s **AG-CI-008**.
+depending on it. This decision is codified as `AGENTS.md`'s Rule-Ref: AG-CI-008.
 
 ### Intentional Mutable Fallbacks (Documented)
 
