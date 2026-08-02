@@ -3299,8 +3299,11 @@ jobs:
       packages: write
       # scripts/lib/staging-ancestor-fallback.sh's shared ancestor-fallback
       # recovery path (sourced by the "Ensure PR staging tags exist for
-      # full-setup services" step below) needs this to query build-push.yml's
-      # own past runs via `gh api .../actions/workflows/build-push.yml/runs`.
+      # full-setup services" step below) reads build-push.yml's own past runs
+      # from `/repos/{repo}/actions/workflows/build-push.yml/runs` -- via plain
+      # `curl` + `GH_TOKEN`, never the `gh` CLI (AG-CI-001: `gh` must not be
+      # assumed present on a bare `lancache-light` runner), but the REST
+      # endpoint requires this scope either way.
       actions: read
     # None of VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, or
     # VALIDATION_UI_PORT are set here from compute-validation-network's
@@ -3493,7 +3496,11 @@ jobs:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
           # scripts/lib/staging-ancestor-fallback.sh's saf_base_commit_has_confirmed_run()
-          # needs this to query build-push.yml's own past runs via `gh api`.
+          # reads it straight from the environment (never as an argv parameter,
+          # so it cannot leak into ghcr_retry's own diagnostics) to authenticate
+          # its `curl` query against the Actions REST API. Not the `gh` CLI --
+          # see that file's own saf_query_run_count() header for the AG-CI-001
+          # reasoning behind talking to the API directly.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail

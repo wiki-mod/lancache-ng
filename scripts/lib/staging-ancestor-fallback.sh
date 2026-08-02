@@ -643,7 +643,7 @@ saf_candidate_run_is_active() {
 #   - Passed "push": asks specifically about a push-triggered run, for the
 #     PR base-commit decision (paired with saf_base_commit_paths_are_ignorable
 #     above -- see that function's header for why event=push alone is not
-#     sufercient proof of a deliberate skip on its own).
+#     sufficient proof of a deliberate skip on its own).
 #   - Passed "" (any TAG-PUBLISHING event): asks whether any run exists
 #     whose trigger type actually publishes a per-commit sha-<sha> tag KEYED
 #     BY <sha> ITSELF, for the ancestor-candidate pre-filter in
