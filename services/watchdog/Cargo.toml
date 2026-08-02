@@ -1,6 +1,8 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Manifest for the lancache-watchdog health-monitor/auto-restart daemon,
-# a Rust rewrite of the former services/watchdog/watchdog.sh.
+# a Rust rewrite of services/watchdog/watchdog.sh (still the active
+# container entrypoint -- see below).
 #
 # Scope note (2026-07-31/08-01): this crate currently ports only
 # watchdog.sh's health-check/restart state machine (proxy/dns-standard/
@@ -39,13 +41,23 @@ path = "src/main.rs"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# rustls, never openssl-sys (AG-REL-003) -- rust:slim/the eventual runtime
+# rustls, never openssl-sys (Rule-Ref: AG-REL-003) -- rust:slim/the eventual runtime
 # base has no OpenSSL headers. Matches services/dns/nats-subscriber's
 # reqwest version/feature shape (a small binary with a narrow HTTP surface,
 # same category as this crate) rather than services/ui's heavier axum-server
 # dependency profile, which this crate has no use for (watchdog has no HTTP
 # server of its own, only an HTTP *client* to docker-socket-proxy).
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+#
+# "rustls-tls-native-roots", not plain "rustls-tls": the latter trusts only
+# rustls' own bundled webpki-roots (public CAs), never the container's own
+# installed trust store. The existing bash implementation's `curl` calls
+# trust whatever CA store the container image has installed -- an operator
+# who points DOCKER_PROXY_URL at an HTTPS socket proxy secured by a private
+# CA they installed into the image would have that curl call succeed today,
+# and this crate's reqwest client reject it, if left on plain webpki roots.
+# "-native-roots" is still 100% rustls (no openssl-sys, Rule-Ref: AG-REL-003 intact),
+# it only changes which root store rustls consults.
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls-native-roots"] }
 tokio = { version = "1", features = ["full"] }
 # Only pulled in for one purpose: rendering the same UTC RFC3339-ish
 # timestamp shape watchdog.sh's `date -u +%Y-%m-%dT%H:%M:%SZ` produces for
@@ -53,9 +65,12 @@ tokio = { version = "1", features = ["full"] }
 # STALE_AFTER staleness check reads this file's mtime, not this field, but
 # the field is still operator-visible in the dashboard). No other crate in
 # this repository formats dates yet, so this is a new, deliberate addition,
-# not a reuse -- chosen over `chrono` for a smaller dependency footprint (no
-# proc-macro, no pulled-in timezone database) since only UTC, fixed-format
-# rendering is needed here, never timezone conversion or parsing.
+# not a reuse -- chosen over `chrono` for a smaller dependency footprint
+# (no pulled-in timezone database; the "macros" feature below does still
+# pull in the small time-macros proc-macro crate for the compile-time
+# `format_description!` used by both timestamp call sites) since only UTC,
+# fixed-format rendering is needed here, never timezone conversion or
+# parsing.
 time = { version = "0.3", features = ["formatting", "macros"] }
 
 # Deliberate release-profile tuning, matching services/ui's and

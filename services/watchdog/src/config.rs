@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Environment parsing and validation, mirroring watchdog.sh's own startup
@@ -74,7 +75,7 @@ pub fn resolve_bool(raw: Option<&str>, default: bool) -> bool {
 /// whole daemon today rather than falling back to a sane default. That
 /// crash is an accidental bug, not a documented behavior worth preserving
 /// -- applying the file's own already-established clamp idiom uniformly is
-/// a deliberate, narrow hardening (AG-WF-011: same failure class, same
+/// a deliberate, narrow hardening (Rule-Ref: AG-WF-011: same failure class, same
 /// fix), not a new invented behavior shape. `CURL_MAX_TIME`/
 /// `CURL_MAX_TIME_RESTART` deliberately do NOT go through this digit-only
 /// integer guard -- curl (and the bash's own verbatim `curl --max-time`

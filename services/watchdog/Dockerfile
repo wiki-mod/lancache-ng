@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Runtime health-check and recovery service for lancache-ng containers.
 #
@@ -44,7 +45,7 @@
 # (`local -n` namerefs in watchdog.sh's
 # check_and_maybe_restart()/probe_docker_socket_proxy(), `${var,,}`
 # lowercasing in is_truthy(), `set -o pipefail` in all three) that Alpine's
-# default `/bin/sh` (busybox ash) does not support -- see AG-REL-006.
+# default `/bin/sh` (busybox ash) does not support -- see Rule-Ref: AG-REL-006.
 # Verified available, bash 5.3.9-r1, which is well past the 4.3 baseline
 # `local -n` needs. retention.sh (the three file-retention functions
 # extracted out of watchdog.sh into their own script/process for
