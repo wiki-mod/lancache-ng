@@ -159,7 +159,13 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview\\b[^a-zA-Z.]{0,20}\\b${DISCOVERY_VERBS}\
 # self-reference to whichever change introduced the comment.
 REVIEW_CHRONOLOGY_PATTERN+="|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
 
-if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+# Checks for ".git" directly under target_root itself, not "somewhere in an
+# enclosing directory" (which `git rev-parse --is-inside-work-tree` would
+# also report true for): a bats fixture tree created under a temp directory
+# that happens to be nested inside this very repository's own working copy
+# must still be treated as a plain, non-git fixture, not accidentally fall
+# through to `git ls-files` on the OUTER real repository.
+if [ -e "$target_root/.git" ]; then
     mapfile -t files < <(git ls-files)
 else
     mapfile -t files < <(find . -type f -print | sed 's#^\./##')
