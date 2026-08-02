@@ -195,8 +195,8 @@ find_rotated_backups() {
 
 # FLUENT_BIT_SELFLOG_MAX_MB=0 passes a digit-only check unchanged (it is
 # all-digits); without a minimum-value floor this would set the budget to 0
-# bytes and rotate on every single cycle regardless of actual size, the
-# exact same class of bug #757's SYSLOG_MAX_GB=0 review caught for
+# bytes and rotate on every single cycle regardless of actual size -- the
+# same SYSLOG_MAX_GB=0 zero-budget bug class issue #757 fixed for
 # maybe_prune_syslog() (see watchdog_syslog_prune.bats's matching test).
 @test "maybe_rotate_fluent_bit_selflog clamps FLUENT_BIT_SELFLOG_MAX_MB=0 to the default instead of using a zero budget" {
     printf 'small\n' > "$selflog_file"

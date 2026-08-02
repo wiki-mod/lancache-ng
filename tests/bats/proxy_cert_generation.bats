@@ -478,7 +478,7 @@ teardown() {
 # Regression tests for #655
 #
 # Two latent bugs, both originally flagged in the PR #172/#173 reviews and
-# re-verified still present on v0.2.0 before this fix:
+# re-verified still present on v0.2.0:
 #   1. _default_cert_needs_regen's IP SAN check used an unanchored substring
 #      match, so a migrated IP_SSL could still "match" a longer stale IP.
 #   2. _sign_cert only removed the CSR temp file on a failed sign, leaving

@@ -97,8 +97,8 @@ extract_cmd_secondary_heredoc() {
 @test "cmd_secondary gives an actionable message for the issue #866 HTTP 503 refusal" {
     # Issue #866: register_secondary now refuses (HTTP 503) when the primary
     # has neither NATS_BIND_IP nor NATS_ADVERTISE_URL configured, instead of
-    # silently handing out an unreachable NATS URL. Before this fix,
-    # cmd_secondary's only non-2xx handling was one generic
+    # silently handing out an unreachable NATS URL. Without this dedicated
+    # 503 branch, cmd_secondary's only non-2xx handling would be one generic
     # "verify the registration token, secondary name, and primary server
     # logs" message -- accurate for a bad token/name (4xx), but actively
     # misleading for this 503 case, which is a primary-side configuration
