@@ -98,8 +98,8 @@ setup() {
     done
 }
 
-# End-to-end: before this fix, only the exact literal "1" enabled SSL
-# monitoring. Reload the helper with each Admin-UI-truthy spelling and
+# End-to-end: without normalization, only the exact literal "1" would enable
+# SSL monitoring. Reload the helper with each Admin-UI-truthy spelling and
 # confirm the normalized SSL_ENABLED/C_DNS_SSL actually flow through to
 # write_status()'s DNS-SSL block, not just that is_truthy() itself returns
 # true in isolation.

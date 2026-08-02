@@ -7152,11 +7152,10 @@ mod tests {
         );
     }
 
-    // Same regression, but for an existing subnet that already (incorrectly,
-    // from before this fix) has the key set at subnet scope -- apply_subnet_value
-    // must actively strip it, not just avoid adding a new one, so an
-    // operator's next edit through the Admin UI self-heals instead of
-    // staying permanently broken.
+    // Same regression, but for an existing subnet that already (incorrectly)
+    // has the key set at subnet scope -- apply_subnet_value must actively
+    // strip it, not just avoid adding a new one, so an operator's next edit
+    // through the Admin UI self-heals instead of staying permanently broken.
     #[test]
     fn apply_subnet_value_strips_pre_existing_host_reservation_identifiers_at_subnet_scope() {
         let mut subnet = json!({
