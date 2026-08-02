@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI workflow that runs CodeQL static analysis (GitHub Actions and Rust languages)
 # on pushes, pull requests, and a daily schedule, uploading SARIF results as security alerts.
@@ -53,8 +54,8 @@ jobs:
     # (labels/milestone/project), coverage (Rust), validate full-setup image
     # -- CodeQL is absent from that list), so skipping the rust matrix entry
     # outright (rather than the self-skip-internally pattern a *required*
-    # check would need, per AG-CI-012's "paths-ignore permanently blocks a
-    # required check" trap) cannot strand a PR in a perpetually-pending state.
+    # check would need, per Rule-Ref: AG-CI-012's "paths-ignore permanently
+    # blocks a required check" trap) cannot strand a PR in a perpetually-pending state.
     name: detect changed paths (CodeQL rust relevance)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
