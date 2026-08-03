@@ -5528,6 +5528,27 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx-amd64.outputs.name || steps.buildx-arm64.outputs.name }}" || true
 
+      - name: Self-heal Trivy's own default cache directory ownership
+        # Real incident (2026-08-03): trivy-action's own default cache dir
+        # (~/.cache/trivy, NOT the "Prepare local Trivy cache" dir below --
+        # that one is fully managed by this workflow) was found owned by
+        # root:root on a self-hosted runner, causing "permission denied"
+        # opening trivy.db and failing container-scan for that matrix row.
+        # Host-level ownership/setgid was fixed directly on all runner hosts
+        # (2026-08-03), but that alone does not survive the directory itself
+        # being wiped and recreated from scratch by some future root-run
+        # process, which would not inherit the setgid bit from a directory
+        # that no longer exists. This step makes the job itself self-healing
+        # regardless of host history: tolerant of the directory not existing
+        # yet (first-ever run on a host), safe to run every time.
+        run: |
+          set -euo pipefail
+          trivy_home_cache="${HOME}/.cache/trivy"
+          if [ -d "$trivy_home_cache" ]; then
+            sudo chown -R "$(id -u):$(id -g)" "$trivy_home_cache"
+            find "$trivy_home_cache" -type d -exec chmod g+s {} +
+          fi
+
       - name: Prepare local Trivy cache
         # Trivy's cache backend (BoltDB) only allows one process to hold a given cache
         # directory open at a time. This directory used to be keyed only by service+platform,
