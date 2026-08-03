@@ -248,7 +248,7 @@ jobs:
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
         # (or on schedule/dispatch where detect-changes is skipped).
         if: matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true'
-        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -276,7 +276,7 @@ jobs:
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
         # Rust is not relevant, so init and analyze stay paired.
         if: matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true'
-        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           category: "/language:${{ matrix.language }}"
           # Persist the interpreted SARIF locally so the extraction-quality step can read
