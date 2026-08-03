@@ -8553,9 +8553,18 @@ jobs:
                 $notes
               end
               ')"
+            # draft:false and target_commitish are forced here, not just body:
+            # a pre-existing release object for this tag (e.g. one release-drafter
+            # auto-created as a draft before this job ever ran, potentially
+            # target_commitish-ing a dev branch tip rather than this tag's own
+            # commit) must still end up published and pointed at the right
+            # commit once this job confirms the tag's images are good -- unlike
+            # prerelease above, there is no legitimate "maintainer deliberately
+            # left it draft/mistargeted" case to protect against here.
             jq -n \
               --arg body "$updated_body" \
-              '{body:$body}' \
+              --arg target_commitish "$COMMIT_SHA" \
+              '{body:$body, draft:false, target_commitish:$target_commitish}' \
               > "$response_file.patch"
             curl -fsS -X PATCH \
               -H "$auth_header" \
