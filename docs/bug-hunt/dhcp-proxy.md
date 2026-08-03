@@ -371,6 +371,15 @@ from "slipped through review" just by reading the code.
 Severity: info (process/governance finding, not a runtime bug; the technical
 rationale for using Python here is well-argued regardless of approval status).
 
+> **Resolution (2026-07-24, issue #1158):** confirmed as a real governance gap
+> — the exception was not approved during PR #765's review; the maintainer
+> caught it directly over a week after merge. The probe was rewritten as the
+> Rust crate `tools/pxe-client-probe/` and the `python3-scapy` tooling removed,
+> closing the gap. `tcpdump` remains (the Rust probe still captures replies with
+> it) and `python3` remains (required by `distcc-pump`, unrelated to this
+> script). This resolution note is a forward pointer only; the finding text
+> above is preserved as the original `origin/v0.2.0` snapshot observation.
+
 ---
 
 ## 12. `release/stack-images.yml`'s `compose:` list for `dhcp-proxy` (and `dhcp`)

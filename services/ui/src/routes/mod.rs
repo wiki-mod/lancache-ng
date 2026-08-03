@@ -5,12 +5,14 @@
 //! insertion/verification against the per-session token carried in request
 //! headers by the `basic_auth` middleware.
 
+pub mod cache;
 pub mod dashboard;
 pub mod dhcp;
 pub mod dns_snapshots;
 pub mod domains;
 pub mod logs;
 pub mod netdata_proxy;
+pub mod ntp;
 pub mod secondaries;
 pub mod setup;
 pub mod stats;
@@ -78,6 +80,7 @@ pub fn verify_csrf_header(headers: &axum::http::HeaderMap) -> Result<(), axum::h
 mod tests {
     use super::*;
 
+    // Dev-mode error pages must reveal the actual error text and template name so developers can diagnose template failures locally.
     #[test]
     fn render_error_returns_full_details_in_dev_mode() {
         let mut tera = Tera::default();
@@ -92,6 +95,7 @@ mod tests {
         assert!(response.contains("undefined_var"));
     }
 
+    // Prod-mode error pages must hide all implementation details so template errors never leak to end users — this guards against accidental exposure.
     #[test]
     fn render_error_returns_generic_message_in_prod_mode() {
         let mut tera = Tera::default();
@@ -108,6 +112,7 @@ mod tests {
         assert!(!response.contains("test.html"));
     }
 
+    // Successful template renders must produce identical output in both dev and prod modes — dev_mode only affects error handling.
     #[test]
     fn render_success_ignores_dev_mode() {
         let mut tera = Tera::default();
@@ -124,6 +129,7 @@ mod tests {
         assert!(html_dev.0.contains("<h1>Hello World</h1>"));
     }
 
+    // CSRF helpers must enforce that the session header token matches the client-provided token via constant-time comparison to prevent token-guessing attacks.
     #[test]
     fn csrf_token_helpers_use_the_session_header() {
         let empty_headers = HeaderMap::new();

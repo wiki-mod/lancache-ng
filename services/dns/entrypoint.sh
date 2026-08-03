@@ -74,10 +74,13 @@ lancache_gen_base64_32() {
 # confirmed via tests/fixtures/placeholder-detection-cases.txt and
 # tests/bats/placeholder_detection_parity.bats:
 #   - This function does NOT recognize the legacy "lancache-*-secret"
-#     template-default shape. This omission IS deliberate:
-#     deploy/dev/docker-compose.yml and deploy/dev/.env ship real, working dev
-#     secrets in exactly that shape (e.g. lancache-nats-ui-dev-secret) that
-#     this read path must accept as configured, not regenerate.
+#     template-default shape. This omission IS deliberate: the now-retired
+#     deploy/dev/docker-compose.yml and deploy/dev/.env (v0.3.0, #766)
+#     shipped real, working dev secrets in exactly that shape (e.g.
+#     lancache-nats-ui-dev-secret) that this read path had to accept as
+#     configured, not regenerate. Kept as a regression pin (see the test
+#     fixtures below) so that shape is never misclassified if an operator's
+#     own secret happens to match it.
 #   - This function does NOT recognize a bare "change-me"/"change_me" infix
 #     without a CHANGE_ME/changeme prefix, unlike setup.sh/Rust. Pre-existing,
 #     not reconciled here (#967 Option B keeps the three pattern sets
@@ -627,7 +630,7 @@ _is_valid_domain() {
     # Must not be empty after normalization
     [ -n "$domain" ] || return 1
 
-    # Must be <= 253 chars total
+    # Must be <= 253 chars total (RFC 1035 domain name length limit)
     [ ${#domain} -le 253 ] || return 1
 
     # Check for trailing dot (RFC 1035 allows it, but we reject it like the Rust validator does)
@@ -738,6 +741,26 @@ render_template_atomic() {
         echo "[lancache-dns] FATAL: failed to replace $target_name"
         exit 1
     fi
+}
+
+# _dns_enter_rescue_mode <component>
+# Enters rescue mode for a crashed/crashing PowerDNS component (component is
+# "recursor" or "auth") when all known-good snapshots have been exhausted or
+# do not exist. Logs a clear, greppable rescue-mode banner and keeps the
+# container alive with `exec sleep infinity` so an operator can use
+# `docker exec` to investigate and fix the underlying cause. Does NOT start
+# any DNS daemons, satisfying the hard constraint that rescue mode must never
+# silently serve broken state to real clients. Deliberately defined outside
+# the "BEGIN/END known-good-snapshot library" block above: it is DNS-specific
+# (not shared with the proxy/dhcp-proxy adapters' embedded copies of that
+# generic contract), and living inside the block would make
+# tests/bats/known_good_snapshots_sync.bats fail by diverging this file's
+# embedded copy from the canonical scripts/lib/known-good-snapshots.sh and
+# the other two adapters' copies.
+_dns_enter_rescue_mode() {
+    local component="$1"
+    echo "[lancache-dns][rescue-mode] No known-good ${component} config available; refusing to start. Container will stay running for 'docker exec' access -- fix the underlying cause (cdn-domains.txt / env var / template) and restart. See docs/known-good-config-snapshots.md." >&2
+    exec sleep infinity
 }
 
 # _dns_recursor_validate_snapshot_or_rollback <recursor_conf_file>
@@ -895,7 +918,7 @@ if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
 fi
 render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$LOG_QUERIES"
-_dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || exit 1
+_dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
@@ -925,7 +948,7 @@ fi
 # -- if this rolls back to a known-good snapshot, every subsequent
 # pdnsutil/zone-creation call must see that rolled-back config, not the
 # rejected candidate.
-_dns_auth_validate_snapshot_or_rollback "$PDNS_AUTH_CONF_FILE" || exit 1
+_dns_auth_validate_snapshot_or_rollback "$PDNS_AUTH_CONF_FILE" || _dns_enter_rescue_mode "auth"
 
 # ── 5. Migrate Legacy AAAA Filter Marker ─────────────────────────────────────
 # The AAAA filter marker moved from this container's own data volume
@@ -980,6 +1003,8 @@ fi
 {
     echo "\$ORIGIN rpz."
     echo "\$TTL 60"
+    # SOA fields after the serial, in standard RFC 1035 order:
+    # refresh=3600s (1h) retry=900s (15m) expire=604800s (7d) minimum-ttl=60s (1m)
     echo "@ SOA localhost. admin.rpz. $SERIAL 3600 900 604800 60"
     echo "@ NS localhost."
     echo ""

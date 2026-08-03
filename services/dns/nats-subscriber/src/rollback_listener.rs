@@ -31,16 +31,16 @@
 use crate::{nats_publish, zone_snapshots};
 use async_nats::jetstream;
 use axum::{
+    Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
-    Json, Router,
 };
 use futures::future::join_all;
 use reqwest::Client;
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -284,7 +284,7 @@ async fn rollback_handler(
                 StatusCode::BAD_REQUEST,
                 Json(json!({"error": format!("invalid request body: {e}")})),
             )
-                .into_response()
+                .into_response();
         }
     };
 
@@ -307,7 +307,7 @@ async fn rollback_handler(
                 StatusCode::INTERNAL_SERVER_ERROR,
                 Json(json!({"error": format!("failed to list known-good snapshots: {e}")})),
             )
-                .into_response()
+                .into_response();
         }
     };
     if !known_ids.iter().any(|id| id == &body.snapshot_id) {
@@ -368,7 +368,7 @@ async fn rollback_handler(
                 StatusCode::BAD_GATEWAY,
                 Json(json!({"error": format!("failed to decode current zone state: {e}")})),
             )
-                .into_response()
+                .into_response();
         }
     };
     let current_rrsets = current_json
@@ -402,7 +402,7 @@ async fn rollback_handler(
                     StatusCode::INTERNAL_SERVER_ERROR,
                     Json(json!({"error": format!("failed to serialize rollback patch: {e}")})),
                 )
-                    .into_response()
+                    .into_response();
             }
         };
         let patch_result = state
@@ -590,13 +590,14 @@ async fn rollback_handler(
     // snapshot being rolled back to could already equal the most recently
     // recorded one (e.g. rolling back to undo unrelated DDNS drift that
     // happened to leave the zone matching an already-captured point).
-    if patch_len > 0 && !zone_snapshots::matches_latest_snapshot(&root, &snapshot_data) {
-        if let Err(e) = zone_snapshots::create_snapshot(&root, state.keep_n, &snapshot_data) {
-            zone_snapshots::kgs_log(
-                "FATAL",
-                &format!("failed to record post-rollback known-good snapshot for zone {zone}: {e}"),
-            );
-        }
+    if patch_len > 0
+        && !zone_snapshots::matches_latest_snapshot(&root, &snapshot_data)
+        && let Err(e) = zone_snapshots::create_snapshot(&root, state.keep_n, &snapshot_data)
+    {
+        zone_snapshots::kgs_log(
+            "FATAL",
+            &format!("failed to record post-rollback known-good snapshot for zone {zone}: {e}"),
+        );
     }
 
     (
@@ -665,6 +666,8 @@ mod tests {
     use super::*;
     use axum::http::HeaderValue;
 
+    // Constant-time comparison must never short-circuit on mismatch, preventing
+    // timing-side-channel attacks that could allow guessing the API key byte-by-byte.
     #[test]
     fn constant_time_eq_matches_equal_strings_and_rejects_mismatches() {
         assert!(constant_time_eq("secret-key", "secret-key"));
@@ -674,6 +677,8 @@ mod tests {
         assert!(constant_time_eq("", ""));
     }
 
+    // API key validation must reject partial/wrong headers and missing headers,
+    // preventing unauthorized access to this control-plane rollback endpoint.
     #[test]
     fn check_api_key_requires_exact_header_match() {
         let mut headers = HeaderMap::new();
@@ -685,6 +690,8 @@ mod tests {
         assert!(!check_api_key(&empty_headers, "correct-key"));
     }
 
+    // The request struct must parse the exact JSON format the Admin UI sends,
+    // ensuring the serialization contract between the UI and this rollback handler is stable.
     #[test]
     fn rollback_request_deserializes_from_the_json_body_the_admin_ui_sends() {
         let body = r#"{"zone": "lan.", "snapshot_id": "00000000001234567890"}"#;
@@ -693,6 +700,8 @@ mod tests {
         assert_eq!(req.snapshot_id, "00000000001234567890");
     }
 
+    // Missing snapshot_id must fail deserialization, preventing incomplete requests
+    // from reaching the handler where they'd cause confusing errors downstream.
     #[test]
     fn rollback_request_rejects_a_body_missing_snapshot_id() {
         let body = r#"{"zone": "lan."}"#;
@@ -716,6 +725,8 @@ mod tests {
         assert_eq!(body["republished_to_nats"], json!(false));
     }
 
+    // Cache-flush failures must be reported separately from the PATCH success,
+    // preventing callers from misinterpreting a partial failure as complete success.
     #[test]
     fn rollback_response_surfaces_flush_failure_instead_of_silently_claiming_success() {
         let changed = vec!["steamcontent.com".to_string(), "akamai.net".to_string()];
@@ -729,6 +740,8 @@ mod tests {
         assert_eq!(body["flush_failed_names"], json!(flush_failed));
     }
 
+    // Complete flush failure (all names) must be reported as flush_ok: false
+    // so callers can distinguish between partial and total cache-flush failures.
     #[test]
     fn rollback_response_flush_ok_is_false_when_every_name_fails() {
         let changed = vec!["steamcontent.com".to_string()];

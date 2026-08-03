@@ -55,6 +55,29 @@ setup() {
     [ "$output" = "false" ]
 }
 
+@test "pr-staging: same-repo PR is still eligible when head/repository disagree only in casing" {
+    # Regression test for issue #842 PR #1360 (2026-08-01): this repository's
+    # own rename to LanCache-NG produced exactly this real mismatch --
+    # HEAD_REPO (from github.event.pull_request.head.repo.full_name) resolved
+    # to "wiki-mod/LanCache-NG" while REPOSITORY (from github.repository)
+    # still resolved to "wiki-mod/lancache-ng" in the same job. Before the
+    # `${x,,}` fix, this exact input combination returned "false", silently
+    # misclassifying a genuine same-repo, non-Dependabot PR as a fork PR and
+    # disabling its own staging tag entirely -- confirmed by temporarily
+    # reverting the fix locally and re-running this test, which then failed
+    # with output "false" instead of "true".
+    run vit_pr_staging_available "pull_request" "someuser" "wiki-mod/LanCache-NG" "wiki-mod/lancache-ng"
+    [ "$output" = "true" ]
+}
+
+@test "pr-staging: casing mismatch does not launder an actual fork PR into eligibility" {
+    # Negative control for the fix above: lowercasing both sides must not
+    # make two genuinely different repositories compare equal -- only the
+    # exact-same-repo-different-casing case should flip from false to true.
+    run vit_pr_staging_available "pull_request" "someuser" "fork/LanCache-NG" "wiki-mod/lancache-ng"
+    [ "$output" = "false" ]
+}
+
 @test "pr-staging: non-PR events are never eligible" {
     run vit_pr_staging_available "workflow_dispatch" "someuser" "" "wiki-mod/lancache-ng"
     [ "$output" = "false" ]

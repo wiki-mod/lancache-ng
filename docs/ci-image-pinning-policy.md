@@ -78,20 +78,20 @@ Alternatively, some projects publish digest-based references; check the action's
 All GitHub Actions in the current set of workflows are already pinned to SHA digests with version comments. Examples:
 
 - `.github/workflows/build-push.yml`:
-  - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
-  - `dtolnay/rust-toolchain@fa04a1451ff1842e2626ccb99004d0195b455a88 # stable` ✅ Pinned by commit SHA
+  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
+  - `dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable` ✅ Pinned by commit SHA
   - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
 
 - `.github/workflows/build-tools.yml`:
-  - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
+  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
   - `docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0` ✅ Pinned by commit SHA
 
 - `.github/workflows/codeql.yml`:
-  - `actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0` ✅ Pinned by commit SHA
-  - `github/codeql-action/init@54f647b7e1bb85c95cddabcd46b0c578ec92bc1a # v4` ✅ Pinned by commit SHA
+  - `actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1` ✅ Pinned by commit SHA
+  - `github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3` ✅ Pinned by commit SHA
 
 - `.github/workflows/first-interaction.yml`:
-  - `actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0` ✅ Pinned by commit SHA
+  - `actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0` ✅ Pinned by commit SHA
   - `actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0` ✅ Pinned by commit SHA
 
 **Status**: ✅ All GitHub Actions are already pinned.
@@ -101,10 +101,20 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 digests:
 
 The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
-for Debian runtime bases, including `services/ui/Dockerfile`. This is a
+as the pull source for their runtime bases (Debian for most services;
+`services/dhcp-proxy/Dockerfile` and `services/dhcp/Dockerfile` moved to an
+Alpine base as the first two stages of issue #815's staged Alpine migration,
+and `services/watchdog/Dockerfile` separately migrated to the same Alpine base
+(issue #815's own watchdog carve-out, revisited and approved 2026-07-31,
+independent of #842's Rust rewrite -- a scaffold now exists for that rewrite,
+see `services/watchdog/Cargo.toml`, but it is not yet built or used as this
+container's entrypoint, so this base-image decision stays unaffected either way)
+-- `services/dns/Dockerfile` remains on Debian, that stage still open),
+including `services/ui/Dockerfile`. This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
 the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
-configured pull source for these public Docker Hub bases. If Google evicts a
+configured pull source for these public Docker Hub bases, whichever
+distribution a given service's base image happens to be. If Google evicts a
 cached digest and a build can no longer pull it, the build must fail closed and
 the base reference must be refreshed in a reviewed PR; Dockerfiles must not
 carry a second fallback `FROM` path because Dockerfile syntax cannot express a
@@ -115,10 +125,10 @@ undocumented per-Dockerfile fallback logic.
 
 - `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
 - `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
+- `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
+- `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
 - `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
+- `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
 
 **Status**: ✅ All runtime base images are pinned.
 
@@ -127,12 +137,12 @@ undocumented per-Dockerfile fallback logic.
 - `services/dns/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder`
   - ARG default (line 6): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
   - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s **AG-CI-008** for the codified rule.
+  - **Rationale**: This is a documented, overridable ARG default that only matters for a manual `docker build` invocation without `--build-arg`. Every real CI build (workflow jobs, release jobs) always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>` explicitly and never falls back to this default. Issue #508 proposed actually pinning this default to a resolved digest and was closed as already-resolved-by-design: pinning/updating the default for "consistency" would introduce a permanently-stale, manually-maintained digest without fixing anything a real build path depends on. See `AGENTS.md`'s Rule-Ref: AG-CI-008 for the codified rule.
 
 - `services/ui/Dockerfile` (builder stage): `FROM ${BUILD_TOOLS_IMAGE} AS builder`
   - ARG default (line 12): `ARG BUILD_TOOLS_IMAGE=ghcr.io/wiki-mod/lancache-ng/build-tools:latest`
   - **Status**: ⚠️ ARG default is mutable (`:latest`) — intentional fallback, permanently
-  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s **AG-CI-008**.
+  - **Rationale**: Same as `services/dns/Dockerfile` above — issue #508 closed as already-resolved-by-design; see `AGENTS.md`'s Rule-Ref: AG-CI-008.
 
 ### Workflow Build-Tools References
 
@@ -157,7 +167,7 @@ matters for a manual `docker build` invocation without `--build-arg`; every
 real CI build always passes `--build-arg BUILD_TOOLS_IMAGE=<pinned-digest>`
 explicitly and never falls back to it, so pinning the default would only add
 a manually-maintained value that goes stale with no real build path
-depending on it. This decision is codified as `AGENTS.md`'s **AG-CI-008**.
+depending on it. This decision is codified as `AGENTS.md`'s Rule-Ref: AG-CI-008.
 
 ### Intentional Mutable Fallbacks (Documented)
 
@@ -233,3 +243,7 @@ This policy formalizes the requirement stated in `CONTRIBUTING.md` section "Qual
 And reinforces:
 
 > release-capable paths must not depend on mutable `build-tools:latest`
+
+## Note: `workflow_dispatch` always does a full rebuild
+
+The per-push "skip rebuild when nothing relevant changed, retag and scan the existing published image instead" reuse mechanism (`determine push reuse scope`, #1095 Steps 2/4) only evaluates on `push` events -- and even in the reuse case, the resolved channel image still gets a real security scan; nothing here skips scanning. A manual `workflow_dispatch` run of `build-push.yml` (e.g. to force-advance a channel) always performs a full build for every service regardless of whether anything changed -- confirmed live 2026-08-01 (run 30686435421: `determine push reuse scope` reported `skipped`, every `build`/`container-scan` job ran a real, non-trivial-duration build). Do not use a `workflow_dispatch` run as evidence for or against the push-triggered reuse path; it exercises a different, always-rebuild code path entirely.

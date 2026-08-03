@@ -236,3 +236,43 @@ STUB
     printf '%s\n' "$output" | grep -q "never became fresh enough"
     printf '%s\n' "$output" | grep -q "recovery fetch"
 }
+
+@test "sif_wait_for_fresh_base_image: without allow_reverse_ancestry, a label predating base_sha still fails closed at the ceiling (default behavior unchanged)" {
+    # c1 predates c2 -- the retag-reuse scenario -- but the 7th parameter is
+    # omitted here, so this must behave exactly like it did before that
+    # parameter existed: a mutable-channel-tag caller (the only kind that
+    # existed before this parameter was added) must never silently start
+    # accepting reverse ancestry just because this feature now exists.
+    revision_stub "$c1"
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:nightly" "$c2" "dns" 1 2 1
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "never became fresh enough"
+}
+
+@test "sif_wait_for_fresh_base_image: allow_reverse_ancestry=true accepts a label that predates base_sha (the Schritt 4 retag signature)" {
+    # c1 predates c2: simulates a per-commit sha-<c2> tag whose label still
+    # reads c1 because build-push.yml's Schritt 4 retagged an unchanged
+    # image forward instead of rebuilding. Must resolve immediately, not
+    # wait out the ceiling.
+    revision_stub "$c1"
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:sha-abc1234" "$c2" "dns" 1 2 1 true
+    [ "$status" -eq 0 ]
+    printf '%s\n' "$output" | grep -q "PREDATES base commit"
+    printf '%s\n' "$output" | grep -q "Safe to back-fill from"
+}
+
+@test "sif_wait_for_fresh_base_image: allow_reverse_ancestry=true still fails closed when the label is on a diverged, unrelated commit" {
+    # A label that is NEITHER an ancestor nor a descendant of base_sha (a
+    # genuinely diverged/unrelated commit, not a legitimate retag) must
+    # still fail closed even with the flag on -- reverse ancestry only
+    # covers "predates", never "unrelated".
+    git -C "$git_dir" checkout -q "$c1"
+    git -C "$git_dir" commit -q --allow-empty -m diverged
+    diverged="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" checkout -q "$c3"
+
+    revision_stub "$diverged"
+    run sif_wait_for_fresh_base_image "ghcr.io/x/dns:sha-abc1234" "$c2" "dns" 1 2 1 true
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "never became fresh enough"
+}

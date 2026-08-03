@@ -19,9 +19,14 @@
 # here would silently mangle this comment on every render.
 # Per `dnsmasq --help`, that flag is "[u]se these DHCP relays as full
 # proxies" (RFC 5107 serverid-override) -- it only does anything when paired
-# with `--dhcp-relay=`, which this service never configures. It was a no-op,
-# not a functioning link to the upstream server, so it has been removed
-# rather than carried forward into the option surface added by issue #450.
+# with the relay directive, which this ProxyDHCP config never sets. It was a
+# no-op here, not a functioning link to the upstream server, so it was
+# removed rather than carried forward into the option surface added by issue
+# #450. A REAL relay to UPSTREAM_DHCP_IP now exists, but as its own distinct
+# DHCP mode (issue #844): DHCP_MODE=dnsmasq-relay renders the separate
+# dnsmasq-relay.conf.template instead of this file (see entrypoint.sh's render
+# branch), so relay forwarding and ProxyDHCP option-injection are never mixed
+# in one config.
 #
 # Additional optional directives (router/NTP/domain via dhcp-option-pxe,
 # dhcp-boot, interface, and custom safe options) are appended by

@@ -31,7 +31,7 @@ ARCHITECTURE_DOC=docs/architecture-ng.md
 # own Compose-file sweep. deploy/full-setup additionally never runs the
 # `logging` profile at all today, so it has no fluent-bit/syslog-ng services
 # to check in the first place.
-COMPOSE_FILES=(deploy/dev/docker-compose.yml deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml)
+COMPOSE_FILES=(deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml)
 
 failures=0
 

@@ -3,7 +3,8 @@
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# See CLAUDE.md's "Dev vs Prod Split" for the differences from deploy/dev.
+# This is the only deployment profile -- see CLAUDE.md's "No Separate Dev
+# Environment" for why there is no parallel deploy/dev stack.
 
 name: lancache-ng
 
@@ -218,6 +219,22 @@ services:
       - ../../scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
+    healthcheck:
+      # Real HTTP probe against the Docker API's own /_ping endpoint (#1169),
+      # not just a bare TCP connect -- proves the HAProxy frontend generated
+      # by lancache-docker-socket-proxy.sh is actually forwarding to the real
+      # Docker socket backend, not just that something is listening on 2375.
+      # /_ping is explicitly allowlisted by that script's own `safe_ping` ACL
+      # (see scripts/docker-socket-proxy.sh), so this exercises the same path
+      # watchdog itself depends on. Uses wget (BusyBox): verified empirically
+      # against this exact pinned image (tecnativa/docker-socket-proxy, Alpine
+      # base) that wget is present but curl is not -- same reasoning as nats'
+      # healthcheck below.
+      test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
     restart: always
     logging:
       driver: json-file
@@ -235,8 +252,20 @@ services:
     # keeps working unchanged while fluent-bit also gets a file to tail.
     # Process substitution (`> >(...)`) requires bash, not the image's
     # default entrypoint form; `exec` still replaces this shell with
-    # watchdog.sh itself, so it stays PID 1 and signal handling (restart/
-    # stop) is unaffected.
+    # /watchdog.sh directly, which becomes PID 1, so signal handling
+    # (restart/stop) is unaffected.
+    #
+    # Calls /watchdog.sh directly again (#842 Teil 2, 2026-08-01): the
+    # earlier /entrypoint.sh wrapper that also launched retention.sh as a
+    # backgrounded process inside THIS container is gone -- retention.sh now
+    # runs as its own dedicated `retention` compose service below, with its
+    # own cap_drop/read_only/non-root lockdown that would make no sense
+    # applied to this container too (watchdog.sh still needs to reach
+    # docker-socket-proxy and write status.json). See that service's own
+    # comment block for the full container-hardening rationale, and
+    # retention.sh's own header for why the two were split into separate
+    # processes in the first place (blast-radius separation between
+    # destructive file-retention and health monitoring).
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
@@ -244,32 +273,16 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # Syslog retention engine (#633): SYSLOG_ENABLED defaults to "false" so
-    # watchdog does not touch this path at all on installs that never opt
-    # into the `logging` profile. Unlike every other consumer of this
-    # path (fluent-bit's syslog-ng destination reads/writes it as the
-    # owner; a future Admin UI reader would mount it `:ro`), watchdog needs
-    # read-write access here since maybe_prune_syslog() deletes files. Same
-    # bind-mount source as the syslog-ng service (SYSLOG_NG_LOG_DIR) so an
-    # operator-overridden host path is honored consistently by both.
-    environment:
-      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
-      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
-      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      # SYSLOG_LOG_ROOT is intentionally NOT wired here (#757 review):
-      # watchdog.sh defaults it to /var/log/lancache-syslog-ng, matching the
-      # mount target below. That target is a fixed in-container path shared
-      # with the syslog-ng service's own hard-coded destination -- an
-      # operator setting SYSLOG_LOG_ROOT here would only change where
-      # watchdog *looks*, not where the mount or syslog-ng actually write,
-      # so it would silently break pruning (log_root wouldn't exist) instead
-      # of doing anything useful. The var stays script-internal / test-only.
     volumes:
-      # Watchdog sees the same cache tree as nginx so disk alerts and purge
-      # decisions match the real proxy cache, not a stale split-cache path.
-      - proxy-cache:/var/cache/lancache
+      # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
+      # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
+      # card) -- the destructive maybe_purge() that used to need read-write
+      # access here moved to the `retention` service below when it became
+      # its own container. Confirmed watchdog.sh has no other write path
+      # left against this mount before narrowing it (grep for CACHE_DIR
+      # turns up exactly one read, `df`, plus the log line reporting it).
+      - proxy-cache:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
-      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
       - watchdog-logs:/var/log/lancache-watchdog
     healthcheck:
       # Freshness-based (mtime), not just existence -- see
@@ -286,6 +299,152 @@ services:
     networks:
       - default
       - docker-api
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Retention (file-retention daemon, #842 Teil 2) ────────────────────────
+  # Dedicated sidecar for services/watchdog/retention.sh (cache-age purge,
+  # syslog-ng storage-budget retention, fluent-bit self-log rotation) --
+  # split into its own compose service, separate from `watchdog` above, on
+  # the maintainer's explicit architecture decision (issue #842 comment
+  # thread, 2026-08-01): a bug or compromise in this destructive
+  # find/rm-driven logic must be contained by real container-level
+  # boundaries (capabilities, filesystem, mounts), not merely by running in
+  # a different OS process inside the same container (Teil 1's own
+  # process-split, still true and still valuable, but not a Docker-level
+  # containment boundary by itself).
+  #
+  # `cap_drop: [ALL]` then adding back only what's proven necessary (not
+  # assumed):
+  #   - DAC_OVERRIDE: retention.sh deletes files it does not own, in
+  #     directories it does not control the permissions of -- confirmed live
+  #     on a real runner: nginx creates proxy-cache entries as
+  #     `www-data:www-data`, mode 0700/0600 (no group/other bits at all,
+  #     hardcoded by nginx itself -- confirmed even a process umask set
+  #     before nginx starts has zero effect on this); syslog-ng's own output
+  #     tree is root-owned, `dir-perm(0750)` (already `chgrp`'d to this same
+  #     gid 10001 for the Admin UI's READ-ONLY access, but group has no
+  #     WRITE bit, so that existing sharing does not extend to deletion);
+  #     fluent-bit's self-log is root-owned by that pinned image's own
+  #     default (`Config.User: "0"`, confirmed via `docker inspect`), a
+  #     third-party image whose Dockerfile this project does not control.
+  #     No single UID/GID choice satisfies all three (verified: matching
+  #     nginx's own www-data UID would solve only the cache path; the other
+  #     two are blocked by a different owner/permission scheme each,
+  #     regardless of which identity retention runs as) -- DAC_OVERRIDE is
+  #     the one mechanism that uniformly covers all three without touching
+  #     proxy/syslog-ng/fluent-bit's own configuration or images. (An
+  #     alternative -- unifying every service's UID and adjusting
+  #     syslog-ng's dir-perm plus fluent-bit's own compose `user:` to avoid
+  #     needing any capability at all -- was seriously evaluated and
+  #     rejected for this PR: it is not more secure (Docker's real isolation
+  #     boundary is the mount namespace, not matching UID numbers across
+  #     independently-isolated containers), but it touches three other
+  #     services' configuration, including a confirmed real side effect on
+  #     the Admin UI's nginx-log-reading path via the `adm` group, none of
+  #     which belongs in a PR scoped to retention.sh's own execution
+  #     environment. Worth its own future discussion, not built here.)
+  #   - SETUID, SETGID, SETPCAP: needed ONLY transiently, for
+  #     retention-entrypoint.sh's own root-to-`lancache`(10001) privilege
+  #     drop via `setpriv` -- confirmed empirically (`/proc/self/status`
+  #     before/after) that the final long-running retention.sh process
+  #     retains NONE of these three; only DAC_OVERRIDE survives in its
+  #     Effective/Permitted/Bounding/Ambient capability sets. See
+  #     retention-entrypoint.sh's own header for the full mechanism and why
+  #     a bare `user: "10001:10001"` here could not deliver both "non-root"
+  #     and "can still do its job" at once (a capability added via
+  #     `cap_add` does not reach a non-root process's effective set without
+  #     this drop sequence -- confirmed the naive way first, then fixed).
+  #   - CHOWN: also needed only transiently, by retention-entrypoint.sh's own
+  #     root-phase `chown` of the retention-state/watchdog-logs paths before
+  #     the privilege drop (a fresh named volume or one that predates this
+  #     change may not already be owned by `lancache`) -- found the hard way
+  #     (not assumed): the first real end-to-end container run failed with
+  #     "chown: changing ownership ... Operation not permitted" without it,
+  #     since `cap_drop: ALL` removes CHOWN from root itself, not just from
+  #     the eventual non-root user. Stripped back out of the final process's
+  #     capability set by the same `--bounding-set=-all,+dac_override` call
+  #     that already removes SETUID/SETGID/SETPCAP -- retention.sh itself
+  #     never needs to change any file's ownership, only delete/truncate.
+  #
+  # CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks on
+  # every path this container can see -- not a small residual detail, and
+  # not oversold as one here. What actually bounds this container's blast
+  # radius is the mount set below (only the four paths retention.sh's own
+  # three functions and stamp file genuinely need, nothing else, no Docker
+  # socket, no other service's volumes) plus `read_only: true` (the
+  # capability bypasses permission CHECKS on paths the mount namespace
+  # already exposes; it does not expose any additional path, and does not
+  # defeat the read-only root filesystem itself). `network_mode: none`
+  # since retention.sh never makes or accepts a network connection (date,
+  # find, du, stat, rm, cp, zstd, mktemp, realpath only) -- verified this
+  # container still starts and completes a full purge/prune/rotate cycle
+  # with networking removed entirely, so this is real containment, not a
+  # theoretical one; note this replaces `networks:`, which is mutually
+  # exclusive with `network_mode`.
+  retention:
+    container_name: lancache-retention
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
+    entrypoint: ["/retention-entrypoint.sh"]
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_OVERRIDE
+      - SETUID
+      - SETGID
+      - SETPCAP
+      - CHOWN
+    read_only: true
+    tmpfs:
+      # retention.sh's mktemp calls (scan/error scratch files ahead of every
+      # find/rm pass) need a writable /tmp -- the rest of the root
+      # filesystem stays read-only.
+      - /tmp
+    env_file:
+      - ../../config/prod/watchdog.env
+    # Same rationale as watchdog's own identical block before this split --
+    # see git history for that comment; unchanged here since retention.sh is
+    # the process that actually acts on every one of these variables now.
+    environment:
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
+      - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
+      - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
+    volumes:
+      # The three targets retention.sh's own three functions act on --
+      # exactly the mounts this container has, nothing else (no Docker
+      # socket, no other service's own volumes). Read-write, unlike
+      # watchdog's now-:ro mount above, since deletion is this container's
+      # entire job.
+      - proxy-cache:/var/cache/lancache
+      - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
+      - syslog-data:/var/lib/lancache-syslog-data
+      # Own log file (retention.log), shared volume with watchdog.log --
+      # purely observability data, not part of the destructive-operation
+      # surface, so sharing this one volume with the watchdog container is
+      # fine (fluent-bit already expects both files at this same path).
+      - watchdog-logs:/var/log/lancache-watchdog
+      # Dedicated state volume (#842 Teil 2 architecture decision): holds
+      # ONLY PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately separate from
+      # watchdog-status (watchdog.sh's status.json, read by the Admin UI) --
+      # the two containers no longer share any state now that they don't
+      # share a process either.
+      - retention-state:/var/lib/lancache-retention-state
+    # No healthcheck (deliberate, not an oversight): this container's own
+    # liveness was never part of the health-check/restart state machine --
+    # that separation is the whole point of Teil 1's process split -- and
+    # inventing a heartbeat-file-based check here would be new scope beyond
+    # what this issue asked for. `restart: always` still recovers a crashed
+    # or OOM-killed container the same way every other unmonitored service
+    # in this file already relies on (e.g. dhcp-probe, netdata have none
+    # either). A lightweight heartbeat check is a reasonable future
+    # follow-up, not built speculatively here.
     restart: always
     logging:
       driver: json-file
@@ -393,6 +552,88 @@ services:
       - NET_ADMIN
     profiles:
       - dhcp-proxy
+    healthcheck:
+      # dnsmasq has no REST/control-socket API the way Kea does, and this
+      # config disables DNS entirely (port=0 in dnsmasq.conf.template), so a
+      # dig-based query/response probe (like dns-standard/dns-ssl below) is
+      # not possible here -- and actively synthesizing a real DHCPDISCOVER
+      # every interval would inject genuine broadcast traffic onto the LAN,
+      # which a healthcheck must not do as a side effect. This is therefore
+      # liveness + config-integrity, not a functional DHCP probe (same class
+      # of honest limitation as fluent-bit's `-V` check below): the
+      # entrypoint execs dnsmasq directly (no wrapper shell), so PID 1 being
+      # "dnsmasq" proves the real daemon is still running rather than having
+      # crashed out from under a lingering shell, and re-running
+      # `dnsmasq --test` against the exact on-disk config proves it has not
+      # been corrupted since the daemon last (successfully) loaded it.
+      # Verified live: `dnsmasq --test` only parses the file, it does not
+      # bind sockets, so it never conflicts with the already-running daemon.
+      test: ["CMD-SHELL", "[ \"$$(cat /proc/1/comm 2>/dev/null)\" = dnsmasq ] && dnsmasq --test -C /etc/dnsmasq.conf >/dev/null 2>&1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: always
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── LanCache-NG-NTP (chrony) ──────────────────────────────────────────────
+  # Disciplines its own clock against public NTP servers and serves LAN
+  # clients on UDP/123. Opt-in like dhcp/dhcp-proxy above: created only when
+  # the `ntp` Compose profile is active (see setup.sh's
+  # compose_profiles_for_runtime), and enabled/disabled at runtime by the
+  # Admin UI starting/stopping this predeclared container.
+  ntp:
+    container_name: lancache-ntp
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
+    profiles:
+      - ntp
+    env_file:
+      - ../../config/prod/ntp.env
+    volumes:
+      - ui-data:/data:ro
+      - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:/var/lib/chrony
+      # Central logging pipeline (#633): chronyd's `log` directive (see
+      # chrony.conf) writes here in addition to the process's own stdout.
+      # A plain Docker-managed volume, not a LANCACHE_STATE_DIR bind mount --
+      # rotated log output, not operational state, matching dhcp-logs/
+      # dhcp-proxy-logs/ui-logs below (see docs/backup-restore.md).
+      - ntp-logs:/var/log/chrony
+    ports:
+      # No dedicated LAN IP (unlike dns-standard/dns-ssl): NTP is plain
+      # unicast UDP, not a broadcast protocol like DHCP, so Docker's normal
+      # port-publish DNAT already preserves the real client source IP for
+      # genuine LAN traffic without needing network_mode: host. Bound to all
+      # interfaces, matching how `dhcp`'s port 67/udp is published above.
+      - "123:123/udp"
+    cap_add:
+      # chronyd needs to step/slew the container HOST's real system clock to
+      # genuinely discipline time (containers share one kernel clock; there
+      # is no per-container clock namespace). Docker's default capability
+      # set excludes CAP_SYS_TIME, so this must be granted explicitly. This
+      # is inherent to running any real NTP server in Docker, not specific
+      # to this project -- see services/ntp/Dockerfile's matching comment.
+      - SYS_TIME
+    healthcheck:
+      # Real query/response probe (#1169, matching AG-VAL-018's spirit for
+      # DNS): `chronyc tracking` is a genuine round-trip over chronyd's own
+      # command socket, not a bare port-listen check, so a hung/crashed
+      # daemon (socket refuses/times out) is distinguished from a live one.
+      # Deliberately does NOT require "Leap status: Normal"/a synced
+      # stratum -- a daemon that is alive but has not yet reached (or has
+      # temporarily lost) its upstream servers is a legitimate, non-crashed
+      # state during start_period or a transient network blip, and must not
+      # flap this healthcheck unhealthy for that reason alone. Verified live:
+      # a freshly started, not-yet-synchronised chronyd still returns a
+      # "Reference ID" line immediately.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -402,16 +643,21 @@ services:
 
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
-  # DHCP servers" feature. Reuses the UI image (already has nmap and dhclient
-  # installed). The Admin UI stops then starts this container on demand and
-  # reads its output — it never creates or removes it — so the narrowed
-  # docker-socket-proxy only needs to permit start/restart, the same capability
-  # class already used for the NATS and proxy-ssl reload flows, not generic
-  # container creation.
+  # DHCP servers" feature. Reuses the UI image, running the same lancache-ui
+  # binary in an alternate CLI mode (`--dhcp-probe`, see
+  # services/ui/src/dhcp_probe_native.rs) instead of the former separate
+  # dhcp-probe.sh script -- issue #1288 replaced that script's nmap/dhclient
+  # dependency (both EOL, dropped from current Alpine) with a native DHCPv4
+  # client speaking the wire protocol directly, so this image no longer
+  # installs either tool. The Admin UI stops then starts this container on
+  # demand and reads its output — it never creates or removes it — so the
+  # narrowed docker-socket-proxy only needs to permit start/restart, the same
+  # capability class already used for the NATS and proxy-ssl reload flows,
+  # not generic container creation.
   dhcp-probe:
     container_name: lancache-dhcp-probe
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
-    entrypoint: ["/usr/local/bin/dhcp-probe.sh"]
+    entrypoint: ["/usr/local/bin/lancache-ui", "--dhcp-probe"]
     network_mode: host
     restart: "no"
 
@@ -482,6 +728,20 @@ services:
         if ! NATS_CALLOUT_PASSWORD="$$(resolve_shared_secret nats-callout-password "$$NATS_CALLOUT_PASSWORD" lancache_gen_hex32)"; then
           echo "[lancache-nats] FATAL: NATS_CALLOUT_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
           echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_CALLOUT_PASSWORD to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        # Issue #681: the Admin UI's system-account identity, used ONLY to look
+        # up (CONNZ) and force-disconnect ($$SYS.REQ.SERVER.<id>.KICK) a removed/
+        # rotated secondary's live connection. Every other static role above
+        # lives in the implicit default account ($$G); this one is deliberately
+        # the sole member of a new `SYS` account (see the `accounts {}` block
+        # below), because nats-server only exposes the $$SYS.REQ.SERVER.*
+        # system-services API to system-account clients -- confirmed against a
+        # real nats-server 2.14.3 (see nats_kick.rs's module docs).
+        if secret_is_placeholder "$$NATS_SYS_PASSWORD"; then NATS_SYS_PASSWORD=""; fi
+        if ! NATS_SYS_PASSWORD="$$(resolve_shared_secret nats-sys-password "$$NATS_SYS_PASSWORD" lancache_gen_hex32)"; then
+          echo "[lancache-nats] FATAL: NATS_SYS_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
+          echo "[lancache-nats] Mount the shared-secrets volume, or set NATS_SYS_PASSWORD to a real value (openssl rand -hex 32)." >&2
           exit 1
         fi
         mkdir -p /etc/nats
@@ -625,6 +885,25 @@ services:
           # included auth_callout goes fully live -- also verified against 2.14.3.
           include "auth_callout.conf"
         }
+        # Issue #681: a minimal system account, additive alongside the flat
+        # `authorization {}` block above -- confirmed against a real
+        # nats-server 2.14.3 that the two coexist with no effect on where the
+        # four static roles/callout-authenticated secondaries live (still the
+        # implicit default account, $$G) or on JetStream's LANCACHE_DNS stream
+        # (still owned by $$G, unaffected). This is the ONLY account this
+        # process is a member of, and it carries no application subject
+        # permissions of its own -- it exists solely so the Admin UI can reach
+        # the $$SYS.REQ.SERVER.* system-services API (CONNZ to look up a
+        # secondary's live connection ID, KICK to force-disconnect it), which
+        # nats-server does not expose to $$G clients at all.
+        accounts {
+          SYS: {
+            users: [
+              { user: "__NATS_SYS_USER__", password: "__NATS_SYS_PASSWORD__" }
+            ]
+          }
+        }
+        system_account: SYS
         EOF
         sed \
           -e "s|__NATS_UI_USER__|$$(escape_sed "$$NATS_UI_USER")|g" \
@@ -635,6 +914,8 @@ services:
           -e "s|__NATS_DNS_REPLICA_PASSWORD__|$$(escape_sed "$$NATS_DNS_REPLICA_PASSWORD")|g" \
           -e "s|__NATS_CALLOUT_USER__|$$(escape_sed "$$NATS_CALLOUT_USER")|g" \
           -e "s|__NATS_CALLOUT_PASSWORD__|$$(escape_sed "$$NATS_CALLOUT_PASSWORD")|g" \
+          -e "s|__NATS_SYS_USER__|$$(escape_sed "$$NATS_SYS_USER")|g" \
+          -e "s|__NATS_SYS_PASSWORD__|$$(escape_sed "$$NATS_SYS_PASSWORD")|g" \
           /tmp/nats.conf.template > "$$tmp_nats_conf"
         chown 10001:10001 "$$tmp_nats_conf"
         mv "$$tmp_nats_conf" /etc/nats/nats.conf
@@ -679,6 +960,10 @@ services:
       # against the static user this entrypoint writes above (issue #811 / #583).
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
+      # Issue #681: system-account identity (see the entrypoint's `accounts {}`
+      # comment above). MUST match the ui service's NATS_SYS_USER/PASSWORD.
+      - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
+      - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
     expose:
       - "4222"
       - "8222"
@@ -723,6 +1008,46 @@ services:
       - "5"
       - -b
       - /data/flb-storage
+      # Self-log (issue #864): fluent-bit's own operational log (startup,
+      # tail-input errors, forwarding failures) was previously visible only
+      # via `docker logs` on this container -- nothing surfaced a fluent-bit
+      # crash-loop or misconfiguration once the `logging` profile started
+      # silently swallowing it into this stack. `-l`/`--log_file` (confirmed
+      # against the pinned image via `docker run ... fluent-bit --help`,
+      # per AG-VAL-023 -- not assumed) redirects ALL of fluent-bit's own
+      # stdout logging into this file instead of `docker logs`; the tail
+      # input near the end of this command (tag=fluent-bit.selflog)
+      # re-ingests exactly that file and forwards it to syslog-ng, the same
+      # single-destination trade-off already documented for dnsmasq/
+      # nats-server in the logging matrix (`docker logs` goes quiet). Healthy
+      # steady state produces a fixed, small number of startup lines with no
+      # growth (confirmed empirically -- fluent-bit's default Log_Level,
+      # info, does not log per-line tail-read activity, only startup/error/
+      # state-change events).
+      #
+      # FIXED (#1236): while syslog-ng is unreachable, fluent-bit logs its
+      # own connection/flush retries at roughly one line per second (real
+      # measured rate, 5s flush interval), and since this file is itself
+      # tailed by the self-log input above, those retry lines feed back into
+      # the same output that is already failing, compounding the growth for
+      # as long as the outage lasts -- a real outage-driven amplification,
+      # not merely theoretical. Neither syslog-ng's own size-based rotation
+      # (`SYSLOG_MAX_FILE_MB`) nor watchdog's `maybe_prune_syslog`
+      # (`SYSLOG_MAX_GB`/`SYSLOG_RETENTION_DAYS`) bound this file: both
+      # operate on syslog-ng's own output tree (`logs-syslog-ng`), not on
+      # this container's own `/data` (`syslog-data`) volume. Fixed by a
+      # third watchdog function, `maybe_rotate_fluent_bit_selflog()`
+      # (`FLUENT_BIT_SELFLOG_MAX_MB`/`FLUENT_BIT_SELFLOG_MAX_ROTATIONS`, see
+      # the `watchdog` service below and watchdog.sh's own comment for the
+      # full mechanism and why it deliberately has no `SYSLOG_ENABLED`
+      # gate): fluent-bit's own `--help` documents no native rotation option
+      # for `-l` at all (confirmed against the pinned image, AG-VAL-023), so
+      # watchdog copies this file aside (preserving its content -- nothing
+      # an operator needs during the outage is dropped) and truncates it in
+      # place once it exceeds budget, checked every watchdog cycle rather
+      # than the daily rate limit `maybe_prune_syslog()` uses.
+      - -l
+      - /data/fluent-bit.log
       - -i
       - tail
       - -p
@@ -1225,6 +1550,48 @@ services:
       - syslog_appname_key=ident
       - -p
       - syslog_message_key=log
+      # fluent-bit's own self-log (issue #864, see the -l flag's comment
+      # above): syslog-only, same "remaining logging-matrix services"
+      # pattern as dhcp/dhcp-proxy/ui/watchdog/nats/netdata above (no local
+      # plain-text copy).
+      - -i
+      - tail
+      - -p
+      - read_from_head=on
+      - -p
+      - path=/data/fluent-bit.log
+      - -p
+      - tag=fluent-bit.selflog
+      - -p
+      - db=/data/flb-selflog-syslog.db
+      - -p
+      - skip_long_lines=on
+      - -F
+      - record_modifier
+      - -m
+      - fluent-bit.selflog
+      - -p
+      - record=host lancache-syslog
+      - -p
+      - record=ident fluent-bit
+      - -o
+      - syslog
+      - -m
+      - fluent-bit.selflog
+      - -p
+      - host=syslog-ng
+      - -p
+      - port=601
+      - -p
+      - mode=tcp
+      - -p
+      - syslog_format=rfc5424
+      - -p
+      - syslog_hostname_key=host
+      - -p
+      - syslog_appname_key=ident
+      - -p
+      - syslog_message_key=log
     volumes:
       - proxy-logs:/var/log/nginx:ro
       - logs:/var/log/lancache
@@ -1394,6 +1761,14 @@ services:
       # SYSLOG_ENABLED=true to actually show anything on /logs or the
       # dashboard.
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
+      # Issue #870: read-only reader for watchdog's status.json (per-service
+      # health + cache-disk usage color, rendered as the dashboard's
+      # "Service health" card). watchdog is the sole writer of this named
+      # volume (see its own service block above); a missing mount here would
+      # make watchdog_status::read_status() see the file as simply absent,
+      # not fail, so this is required for the health card to show real data
+      # instead of its "unavailable" fallback state.
+      - watchdog-status:/var/run/watchdog:ro
     ports:
       - "127.0.0.1:8080:8080"
     environment:
@@ -1464,6 +1839,11 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
+      # Issue #681: lets nats_kick.rs connect as the NATS system account to look
+      # up (CONNZ) and force-disconnect (KICK) a removed/rotated secondary's
+      # live connection. MUST match the nats service's NATS_SYS_USER/PASSWORD.
+      - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
+      - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       # Central syslog store reader (#633 PR4): same 4 vars/defaults as the
       # watchdog retention engine (PR3/#757), so the UI's "enabled" toggle
@@ -1556,6 +1936,29 @@ services:
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - netdata-logs:/var/log/netdata
+      # web_log collector (go.d.plugin) wiring: netdata's built-in web_log
+      # module reads the proxy's plain-text access-log copy (fluent-bit's
+      # `file=nginx-proxy.log` output into the `logs` volume, see the
+      # `syslog` service above) to expose live per-request nginx analytics
+      # (per-status-code counters, response time, etc.) that the system
+      # metrics collectors above don't otherwise surface. This mirrors the
+      # wiring the now-retired deploy/dev profile used to have (the only
+      # profile where this collector was ever fully working); prod has a
+      # real repo checkout at build/deploy time (see the cdn-domains.txt
+      # bind-mount on the proxy/dns services above), so the job config can
+      # be bind-mounted directly rather than generated inline.
+      - logs:/var/log/lancache:ro
+      - ../../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
+    healthcheck:
+      # Real HTTP probe against netdata's own REST API (#1169), matching the
+      # check deploy/full-setup/docker-compose.yml's validation stack already
+      # uses for the same pinned image -- proves the daemon is actually
+      # serving its API, not just that the process exists or a port is open.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19999/api/v1/info >/dev/null 2>&1 || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
     restart: always
     logging:
       driver: json-file
@@ -1596,6 +1999,10 @@ volumes:
   pdns-config-snapshots-standard:
   pdns-config-snapshots-ssl:
   watchdog-status:
+  # #842 Teil 2: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately
+  # separate from watchdog-status above -- see the `retention:` service's own
+  # comment for the architecture decision behind this split.
+  retention-state:
   netdataconfig:
   netdatalib:
   netdatacache:
@@ -1620,3 +2027,7 @@ volumes:
   watchdog-logs:
   nats-logs:
   netdata-logs:
+  # LanCache-NG-NTP (chrony) log output. Not yet wired into the `syslog`
+  # (fluent-bit) central logging pipeline (#633) -- a known, deliberately
+  # deferred follow-up (see docs/architecture-ng.md's logging matrix).
+  ntp-logs:

@@ -12,7 +12,7 @@ load_dhcp_kea_functions() {
         # Each function is captured from its definition to the closing brace at column 0.
         awk '
             # Match function definitions that we want to extract
-            /^(is_ipv4|is_ipv4_csv|resolve_ntp_server|resolve_ntp_csv|build_ntp_option|render_kea_config|render_kea_dhcp4_config)\(\)/ {
+            /^(is_ipv4|is_ipv4_csv|resolve_ntp_server|resolve_ntp_csv|build_ntp_option|render_kea_config|render_kea_dhcp4_config|build_ntp_migration_map|migrate_dhcp4_config)\(\)/ {
                 capture = 1
             }
 

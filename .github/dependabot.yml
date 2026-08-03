@@ -1,14 +1,40 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Dependabot configuration for automated dependency updates (GitHub Actions, Rust, Docker)
 #
-# Every ecosystem is duplicated once per target-branch. Dependabot's own
+# `current_dev` is the only target-branch below. Dependabot's own
 # target-branch key accepts exactly one branch per update entry -- there is
 # no way to list multiple branches for a single block -- and defaults to the
-# repo's default branch (master) when omitted. All real feature/dependency
-# work currently lands on the long-lived v0.2.0 branch, not master (which
-# only receives occasional direct housekeeping commits), so relying on the
-# implicit default silently left v0.2.0 with zero automated dependency
-# scanning. master keeps its own entries too rather than losing coverage.
+# repo's default branch (master) when omitted, so an explicit entry is still
+# required (found and fixed per #709's audit of hardcoded v0.2.0 branch-name
+# references: `v0.2.0` was the active branch when this file was first
+# written, but it is now frozen and `current_dev` took over that role --
+# relying on the implicit master default would silently leave the actual
+# active branch with zero automated dependency scanning).
+#
+# `master` deliberately has NO entries here anymore (removed 2026-07-31).
+# It used to keep its own parallel entries "rather than losing coverage
+# there", but that created two independent PR chains (one per branch) for
+# every dependency bump, each mergeable on its own -- and in practice they
+# drifted: PR #1232 (the v0.3.0 release promotion) hit 51 real merge
+# conflicts against master, the large majority of which turned out to be
+# master-only Dependabot PRs merged without ever porting the equivalent
+# current_dev-side PR. `master` only receives new content via the release
+# promotion from `current_dev` (see docs/release-versioning.md) -- scanning
+# it separately worked against that model instead of with it. Dependency
+# updates now flow the same way every other change does: land on
+# `current_dev`, then ship to `master` at the next release.
+#
+# `v0.2.0` deliberately has NO entries here either: its branch protection sets
+# `lock_branch: true` -- nothing can ever be merged into it regardless of
+# update type, so scanning it only produced PRs that had to be closed
+# unmerged. Re-adding a `target-branch: v0.2.0` block would not restore
+# coverage for Dependabot's *security* updates either way: GitHub applies
+# `target-branch` only to regular version-update PRs, not to
+# security-update PRs, which always target the repository's default branch
+# regardless of this file's contents. SECURITY.md also only supports the
+# latest stable release, not archived point releases -- if `v0.2.0` needs a
+# fix, that goes through a new release or a manual backport, not this file.
 #
 # BURST-FAN-OUT CONTROL (see issue #1065): each ecosystem is deliberately kept
 # to ONE grouped update per target-branch so a weekly run opens ~3 PRs per
@@ -29,39 +55,23 @@ updates:
   # GitHub Actions -- one grouped PR per target branch (single directory: /).
   - package-ecosystem: github-actions
     directory: /
-    target-branch: master
-    schedule:
-      interval: weekly
-    groups:
-      actions:
-        patterns: ["*"]
-  - package-ecosystem: github-actions
-    directory: /
-    target-branch: v0.2.0
+    target-branch: current_dev
     schedule:
       interval: weekly
     groups:
       actions:
         patterns: ["*"]
 
-  # Rust (Cargo) -- both crates (Admin UI + DNS NATS subscriber) collapse into
-  # ONE grouped PR per target branch via the multi-`directories` form, instead
-  # of a separate PR per crate directory.
+  # Rust (Cargo) -- all three crates (Admin UI + DNS NATS subscriber +
+  # watchdog, added 2026-08 alongside services/watchdog/Cargo.toml, #1355)
+  # collapse into ONE grouped PR per target branch via the multi-`directories`
+  # form, instead of a separate PR per crate directory.
   - package-ecosystem: cargo
     directories:
       - /services/ui
       - /services/dns/nats-subscriber
-    target-branch: master
-    schedule:
-      interval: weekly
-    groups:
-      rust-deps:
-        patterns: ["*"]
-  - package-ecosystem: cargo
-    directories:
-      - /services/ui
-      - /services/dns/nats-subscriber
-    target-branch: v0.2.0
+      - /services/watchdog
+    target-branch: current_dev
     schedule:
       interval: weekly
     groups:
@@ -80,21 +90,7 @@ updates:
       - /services/dhcp
       - /services/dhcp-proxy
       - /services/ui
-    target-branch: master
-    schedule:
-      interval: weekly
-    groups:
-      docker-base-images:
-        patterns: ["*"]
-  - package-ecosystem: docker
-    directories:
-      - /services/proxy
-      - /services/dns
-      - /services/watchdog
-      - /services/dhcp
-      - /services/dhcp-proxy
-      - /services/ui
-    target-branch: v0.2.0
+    target-branch: current_dev
     schedule:
       interval: weekly
     groups:

@@ -16,11 +16,12 @@
 #      (or the registry is unreachable), and silently validating stale
 #      base-channel content behind a PR-looking tag is exactly #626's bug.
 #   2. For every service this PR did NOT touch, (re)point pr-<N>-sha-<short>
-#      at whatever the base channel resolves to RIGHT NOW via a cheap
-#      registry-side `imagetools create` (never a rebuild) -- the correct
-#      image to validate an untouched service against, refreshed every run so
-#      a base channel that moved since a prior re-run can't leave a stale
-#      alias. Mirrors build-push.yml's "Ensure PR staging tags exist" step.
+#      at this PR's own base commit's durable per-commit sha-<short> image
+#      (#1254/#1255 -- see the #808 note below for why this is no longer a
+#      mutable channel tag) via a cheap registry-side `imagetools create`
+#      (never a rebuild) -- the correct image to validate an untouched
+#      service against, refreshed every run for defense-in-depth. Mirrors
+#      build-push.yml's "Ensure PR staging tags exist" step.
 #
 # Doing our own back-fill (rather than relying on build-push's own validate
 # job to have done it) keeps this workflow self-sufficient: it is correct
@@ -38,13 +39,26 @@
 # merged" if the timing was unlucky (confirmed live: PRs #911/#914 each
 # validated a `dns` image ~41 minutes stale relative to their own base.sha).
 # Before backfilling, scripts/lib/staging-image-freshness.sh's
-# sif_wait_for_fresh_base_image() now confirms the base-channel image's own
-# org.opencontainers.image.revision label is at or after this PR's
+# sif_wait_for_fresh_base_image() now confirms the back-fill source image's
+# own org.opencontainers.image.revision label is at or after this PR's
 # `base.sha`, polling (bounded) if it isn't yet, and failing closed --
 # mirroring step 1's existing fail-closed guard for touched services -- if it
 # never catches up. See that file's own header for the full mechanism and the
 # documented judgment call on why this wait is shaped differently from
 # wait_for_touched_image()'s congestion probe below.
+#
+# #1254/#1255 (2026-07-25): the back-fill source itself changed from the
+# mutable nightly/latest base-channel tag to this PR's own base commit's
+# durable per-commit sha-<short> image. nightly is
+# no longer republished on every current_dev push (it is now a once-daily
+# scheduled/dispatch-only green-gated channel -- see nightly-refresh.yml), so
+# it could otherwise lag an untouched service's back-fill behind this PR's
+# real base by up to a day; the base commit's own sha-* tag is always exactly
+# the right commit by construction. sif_wait_for_fresh_base_image() is kept
+# as-is (not simplified to a bare existence check): it still doubles as the
+# bounded poll for the #808 race (the base commit's own push-triggered build
+# may not have pushed this tag yet) and still guards against a corrupted or
+# mislabeled image reporting the wrong revision -- both real, not redundant.
 #
 # #895: a fixed poll timeout does not "scale with runner congestion" -- under
 # heavy concurrent load on the self-hosted fleet, build-push's own pipeline
@@ -89,6 +103,37 @@
 # confirmed live: PR #960's push produced 5 separate build-push runs for the
 # same head commit), and the newest one finishing quickly (or being
 # cancelled) must not hide an older one that is still genuinely building.
+#
+# The exact-BASE_SHA freshness wait a few lines below
+# (sif_wait_for_fresh_base_image against $BASE_SHA itself) can be
+# STRUCTURALLY unwinnable, not merely slow: build-push.yml's `push` trigger
+# has its own `paths-ignore` (**/*.md, docs/**) so a docs/governance-only
+# commit landing on master/current_dev never runs the build pipeline at all
+# -- deliberately and correctly, per that trigger's own header comment. If
+# this PR's base commit happens to be exactly such a commit, its
+# sha-<short> image will never exist via a push-triggered build, for any
+# service, no matter how long this waits: the hard ceiling below was always
+# going to fire, with no possible resolution short of a maintainer manually
+# re-pointing a registry tag by hand.
+#
+# scripts/lib/staging-ancestor-fallback.sh's saf_resolve_untouched_backfill_source()
+# is the fix: once BASE_SHA's own image is confirmed unavailable, positively
+# confirm (via the GitHub Actions API, not an assumption) that build-push.yml
+# never ran a push-triggered build for BASE_SHA at all -- not "failed", not
+# "still running", genuinely zero runs -- AND that every path BASE_SHA
+# changed matches build-push.yml's own paths-ignore list, before considering
+# a fallback. Either check failing (a run exists, either check is
+# inconclusive, or a real non-doc path was found) preserves the existing
+# strict failure exactly as before; no ancestor fallback is attempted. Only
+# when both are positively confirmed does this walk BASE_SHA's own ancestor
+# history (bounded depth, first-parent only) for the nearest commit that
+# both has a recorded build and a freshness-confirmed per-commit image
+# (reusing sif_wait_for_fresh_base_image, never skipping that check), and
+# substitutes THAT ancestor's per-commit tag for the back-fill -- never the
+# mutable nightly/latest channel (the #626 anti-pattern this whole file
+# exists to avoid). See scripts/lib/staging-ancestor-fallback.sh's own header
+# for the full mechanism, shared identically by build-push.yml's own
+# "Ensure PR staging tags exist for full-setup services" step.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -98,10 +143,11 @@ source "$script_dir/lib/validation-image-tag.sh"
 source "$script_dir/lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/staging-image-freshness.sh
 source "$script_dir/lib/staging-image-freshness.sh"
+# shellcheck source=scripts/lib/staging-ancestor-fallback.sh
+source "$script_dir/lib/staging-ancestor-fallback.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
 : "${PR_TAG:?PR_TAG (pr-<N>-sha-<short>) is required}"
-: "${BASE_CHANNEL_TAG:?BASE_CHANNEL_TAG is required}"
 # #808: the PR's own base commit (github.event.pull_request.base.sha) --
 # required unconditionally (unlike BUILD_SHA below, which only feeds a
 # best-effort probe): every real caller of this script only ever runs on a
@@ -109,6 +155,12 @@ source "$script_dir/lib/staging-image-freshness.sh"
 # images` job `if:`), where this is always present, and the freshness check
 # below has no meaningful fallback if it's missing -- backfilling an
 # untouched service without it would silently regress to the pre-#808 bug.
+# #1254/#1255: also the sole source for the back-fill image's own tag now --
+# no separate BASE_CHANNEL_TAG input is read anymore. The 7-hex-char short
+# form (matching docker/metadata-action's `type=sha,prefix=sha-,format=short`
+# convention every service's real sha-* tag uses) is computed directly inside
+# scripts/lib/staging-ancestor-fallback.sh's saf_resolve_untouched_backfill_source(),
+# not duplicated here.
 : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
 workflow_changed="${WORKFLOW_CHANGED:-false}"
@@ -124,7 +176,7 @@ workflow_changed="${WORKFLOW_CHANGED:-false}"
 build_sha="${BUILD_SHA:-}"
 # #975: the PR's real head branch commit (github.event.pull_request.head.sha
 # -- see full-setup-deep-validate.yml's own PR_HEAD_SHA comment), used for the
-# congestion probe's `gh api` query. Deliberately a separate variable from
+# congestion probe's run-status query. Deliberately a separate variable from
 # build_sha above: the Actions "list workflow runs" API's `head_sha` filter
 # for a pull_request-triggered run is always the PR's real branch head, never
 # the synthetic merge commit build_sha holds, so conflating the two (the
@@ -135,26 +187,21 @@ build_sha="${BUILD_SHA:-}"
 pr_head_sha="${PR_HEAD_SHA:-}"
 
 # Bounded wait for build-push to finish pushing this PR's touched-service
-# staging tags. build/build-arm64 run on the scarce lancache-heavy tier
-# (Rust compile + multi-arch image builds) and merge-manifests after them, so
-# they can legitimately take many minutes; this is the "normal" budget past
-# which we start asking whether build-push's own run is still active rather
-# than failing outright (see #895 note above). Overridable for tests.
+# staging tags. build/build-arm64 run on the scarce lancache-heavy tier, so
+# they can legitimately take many minutes; past this budget we start asking
+# whether build-push's own run is still active rather than failing outright
+# (see #895 note above). Overridable for tests.
 poll_timeout_seconds="${STAGING_POLL_TIMEOUT_SECONDS:-1500}"
 poll_interval_seconds="${STAGING_POLL_INTERVAL_SECONDS:-15}"
 
-# #895: absolute hard ceiling, independent of what the congestion probe
-# reports. Even a build-push run that genuinely never stops (a hung job, a
-# runner that died without ever marking its run failed) must not be allowed
-# to hold this runner forever -- this is what keeps the fix "bounded and
-# reasoned about" rather than an unbounded wait. 5400s/90min is chosen as
-# generous headroom over the confirmed real-world worst case so far (#895's
-# incident: ~34min actual end-to-end build-push time against the old 25min
-# budget), not an arbitrary large number picked to make failures rarer.
-poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-5400}"
-# A misconfigured ceiling below the normal budget would make the extension
-# logic self-contradicting (deadline already past hard ceiling on entry), so
-# clamp it up rather than silently produce a negative wait window.
+# #895: absolute hard ceiling, independent of the congestion probe -- even a
+# genuinely hung build-push run must not hold this runner forever. 1200s:
+# maintainer-directed cut from 5400s (2026-08-02); the real fix for how often
+# this ceiling gets hit is #1378's Step 4 reuse mechanism cutting unnecessary
+# rebuilds, not a bigger number here.
+poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-1200}"
+# Clamp up so a misconfigured ceiling below the timeout can't produce a
+# negative wait window.
 if (( poll_hard_ceiling_seconds < poll_timeout_seconds )); then
     poll_hard_ceiling_seconds=$poll_timeout_seconds
 fi
@@ -164,30 +211,95 @@ fi
 # poll_interval_seconds tick.
 congestion_check_interval_seconds="${STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS:-60}"
 
-# #808: bounded wait for the base channel itself to become fresh enough (see
-# scripts/lib/staging-image-freshness.sh for the mechanism). Same 5400s hard
-# ceiling default as the touched-image wait above -- backfilling depends on
-# that same base-branch build+scan+promote pipeline finishing, so there is no
-# reason to expect a different worst case. The normal budget is shorter
-# (900s/15min): in the common case the base channel is already fresh (no
-# other PR merged recently) and this check resolves on the first poll, so
-# 900s is purely the "start logging that we're still waiting" threshold, not
-# a tuned estimate of typical wait time.
+# #808: bounded wait for the back-fill source image itself to become fresh
+# enough (see scripts/lib/staging-image-freshness.sh). Governs ONLY BASE_SHA's
+# own image wait (step 2), not the shorter ancestor-candidate budget below.
+# Can genuinely race a real still-building push run, so gets the same
+# congestion headroom as wait_for_touched_image() above -- a short ceiling
+# here would hard-fail on a healthy running build, worse than the
+# never-built-base problem this mechanism exists to fix. 1200s: maintainer-
+# directed cut from 5400s (2026-08-02), matching the ceiling above; 900s is
+# just the "start logging" threshold for the common already-fresh case.
 base_freshness_timeout_seconds="${BASE_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
-base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-5400}"
+base_freshness_hard_ceiling_seconds="${BASE_FRESHNESS_POLL_HARD_CEILING_SECONDS:-1200}"
 if (( base_freshness_hard_ceiling_seconds < base_freshness_timeout_seconds )); then
     base_freshness_hard_ceiling_seconds=$base_freshness_timeout_seconds
 fi
 base_freshness_poll_interval_seconds="${BASE_FRESHNESS_POLL_INTERVAL_SECONDS:-15}"
 
+# Deliberately SHORT budget for saf_find_built_ancestor's own per-candidate
+# checks (used once BASE_SHA's own wait fails, or via the fast-path
+# pre-check). An ancestor candidate already has a confirmed real build
+# further back in history -- if its image isn't there yet, it never will be
+# (no "still building" case for an older commit). A long ceiling here would
+# only slow every fallback case for no benefit, multiplied across
+# ancestor_search_depth candidates.
+ancestor_freshness_timeout_seconds="${ANCESTOR_FRESHNESS_POLL_TIMEOUT_SECONDS:-300}"
+ancestor_freshness_hard_ceiling_seconds="${ANCESTOR_FRESHNESS_POLL_HARD_CEILING_SECONDS:-600}"
+if (( ancestor_freshness_hard_ceiling_seconds < ancestor_freshness_timeout_seconds )); then
+    ancestor_freshness_hard_ceiling_seconds=$ancestor_freshness_timeout_seconds
+fi
+
+# Separate budget for saf_find_built_ancestor's own one-time extended retry,
+# given only when a candidate's build-push.yml run is confirmed still active
+# after its short check above failed -- own explicit parameter rather than
+# reusing base_freshness_*, even though the defaults match. 1200s:
+# maintainer-directed cut from 5400s (2026-08-02), same as above.
+ancestor_extended_freshness_timeout_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_TIMEOUT_SECONDS:-900}"
+ancestor_extended_freshness_hard_ceiling_seconds="${ANCESTOR_EXTENDED_FRESHNESS_POLL_HARD_CEILING_SECONDS:-1200}"
+if (( ancestor_extended_freshness_hard_ceiling_seconds < ancestor_extended_freshness_timeout_seconds )); then
+    ancestor_extended_freshness_hard_ceiling_seconds=$ancestor_extended_freshness_timeout_seconds
+fi
+
+# How many of BASE_SHA's own ancestor commits (nearest-first, first-parent
+# only) scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor()
+# will examine before giving up. Bounded rather than unbounded on purpose -- a
+# long, unbroken run of docs/governance-only commits is realistic in this
+# project's actual history (see this repo's own commit log around any
+# governance-doc-heavy period), and walking the entire project history
+# looking for a built commit would defeat the "fail closed within a
+# reasonable time" property every other wait in this file already has. 50 is
+# generous headroom over every real docs-commit-run observed in this
+# project's history so far (rarely more than 2-3 consecutive doc-only
+# commits) without being large enough to make a genuinely pathological case
+# (e.g. a long-dead branch) hang the job for an unreasonable number of GitHub
+# API calls.
+ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
+
 # The services deploy/full-setup/docker-compose.yml references, plus
 # build-tools (used by the client-simulation steps, not the compose file
-# itself). dhcp and dhcp-proxy are intentionally NOT here: they are not part
-# of the full-setup compose project. dhcp gets its real coverage from the
-# from-source dhcp-kea-lease-flow simulation; dhcp-proxy has no deep job yet
-# (tracked in #705) and so still has no coverage here -- calling it out
-# rather than pretending the compose-service list covers it.
-full_setup_services=(proxy dns watchdog ui build-tools)
+# itself), plus dhcp and dhcp-proxy (#1296): neither is part of the
+# full-setup COMPOSE PROJECT (deploy/full-setup/docker-compose.yml has
+# neither service), but both are pulled directly by
+# scripts/syslog-forwarding-simulation.sh's Triggers 7/8 (real DHCP lease
+# flows over deploy/quickstart/docker-compose.yml, added by #864) -- this
+# script's job is "ensure every staging image any deep-validation job in
+# this workflow needs," not "ensure exactly what full-setup's own compose
+# file needs," so both belong here despite the name. Confirmed live
+# (2026-07-30, issue #1296): PRs #1277/#1294/#1301, none of which touched
+# dhcp/dhcp-proxy, still failed "Syslog forwarding + Admin UI visibility
+# simulation" with `Error manifest unknown` for both images, because this
+# list never ensured (or base-channel-backfilled) either tag. dhcp
+# additionally still gets its own from-source coverage via the separate
+# dhcp-kea-lease-flow-simulation.sh job; that job is unaffected by this
+# change.
+#
+# ntp (#1296, 2026-07-30, completing the 3-of-3 this issue originally asked
+# for): now included too. scripts/syslog-forwarding-simulation.sh starts it
+# (via --profile ntp, the same explicit-profile pattern already used for
+# dhcp-kea/dhcp-proxy above) and verifies its real Docker HEALTHCHECK
+# (chronyd's chronyc-tracking probe) the same way it verifies every other
+# service's healthcheck -- a genuine consumer, not a name added to this list
+# with nothing exercising it. ntp's own log-forwarding-to-Admin-UI path is a
+# SEPARATE, already-documented, deliberately-deferred gap
+# (docs/architecture-ng.md's logging matrix: "ntp | Not yet wired"), so
+# unlike every other service in that script's trigger list, ntp is proven via
+# real container start + healthcheck, not a marker-in-/logs assertion --
+# fabricating that proof would misrepresent a log path that does not exist
+# yet. This is the same "add it here too the day one does" reasoning this
+# comment previously applied to dhcp/dhcp-proxy, now exercised for ntp
+# instead of left as a standing exclusion.
+full_setup_services=(proxy dns watchdog ui build-tools dhcp dhcp-proxy ntp)
 
 declare -A touched_map=(
     [proxy]="${PROXY_TOUCHED:-false}"
@@ -195,6 +307,26 @@ declare -A touched_map=(
     [watchdog]="${WATCHDOG_TOUCHED:-false}"
     [ui]="${UI_TOUCHED:-false}"
     [build-tools]="${BUILD_TOOLS_TOUCHED:-false}"
+    [dhcp]="${DHCP_TOUCHED:-false}"
+    [dhcp-proxy]="${DHCP_PROXY_TOUCHED:-false}"
+    [ntp]="${NTP_TOUCHED:-false}"
+)
+
+# Maps this file's own matrix-service names to scripts/classify-image-impact.sh's
+# output keys, for saf_resolve_untouched_backfill_source's service-scoped
+# check below -- the two naming schemes differ for 3 of 8 services (dns vs
+# dns_image, dhcp-proxy vs dhcp_proxy, build-tools vs build_tools), same
+# mapping build-push.yml's own decide_one() call sites already hand-pass
+# per service (see that job's "determine push reuse scope" step).
+declare -A classify_key_map=(
+    [proxy]="proxy"
+    [dns]="dns_image"
+    [watchdog]="watchdog"
+    [ui]="ui"
+    [build-tools]="build_tools"
+    [dhcp]="dhcp"
+    [dhcp-proxy]="dhcp_proxy"
+    [ntp]="ntp"
 )
 
 # Indirection so tests can stub the registry probe without a real daemon.
@@ -231,33 +363,48 @@ backfill_from_base() {
 # can report "pending", not only "queued"/"in_progress", so this
 # deliberately checks for the one terminal state rather than enumerating
 # non-terminal ones). Indirection so tests can stub the GitHub API call.
-# Intentionally fail-safe: if PR_HEAD_SHA is unset, `gh` isn't available, or
-# the API call fails for any reason, this returns non-zero (treated as "not
-# active") so the caller falls back to the original pre-#895
-# fail-at-baseline behavior instead of ever hanging on a broken probe.
+# Intentionally fail-safe: if PR_HEAD_SHA is unset or the API query cannot be
+# completed for any reason (no token, no `curl`, an error after retries), this
+# returns non-zero (treated as "not active") so the caller falls back to the
+# original pre-#895 fail-at-baseline behavior instead of ever hanging on a
+# broken probe.
 #
 # #975: queries by pr_head_sha (the PR's real branch head), NOT build_sha
 # (the synthetic merge commit) -- the Actions "list workflow runs" API's
 # `head_sha` field/filter for a pull_request-triggered run is always the real
 # branch head, so querying by the merge commit (the pre-#975 bug) matched
 # zero runs, always, making this probe permanently report "not active"
-# regardless of whether build-push was genuinely still running. Also checks
-# EVERY run the query returns (`any(...)`), not just the newest one: a single
-# push can produce more than one build-push run for the same head_sha (e.g.
-# `synchronize` and `labeled` firing close together), and the newest one
-# completing or being cancelled must not hide an older one still building.
+# regardless of whether build-push was genuinely still running.
+#
+# Delegates the actual query to scripts/lib/staging-ancestor-fallback.sh's
+# saf_event_has_incomplete_run() rather than issuing its own. That function
+# asks the identical question against the identical endpoint (including the
+# "check EVERY returned run, not just the newest" rule #975 established here
+# first), so keeping a second implementation alive here meant one shared
+# question with two bodies that could drift. It also removes this file's last
+# dependency on the `gh` CLI and its bundled `jq`: AG-CI-001 requires assuming
+# self-hosted runners do not provide project tooling, and this script runs
+# directly on a bare `lancache-light` runner (AG-CI-002), not inside the
+# pinned build-tools image -- so a missing `gh` silently downgraded this probe
+# to a permanent "not active" on exactly the runner tier it has to work on.
+# `saf_event_has_incomplete_run` uses `curl` + `GH_TOKEN` with an explicit
+# capability check instead, the same way every other API query in this
+# mechanism already does.
+#
+# Its tri-state answer is deliberately flattened to this function's existing
+# boolean contract: 0 stays "active", and BOTH 1 (positively confirmed: no
+# incomplete run) and 2 (inconclusive) become "not active", preserving the
+# fail-safe posture this probe already documented above -- an unprovable
+# answer must not let the caller extend its wait indefinitely.
 build_push_run_active() {
     if [[ -n "${STAGING_BUILD_RUN_STATUS_CMD:-}" ]]; then
         "$STAGING_BUILD_RUN_STATUS_CMD"
         return $?
     fi
-    if [[ -z "$pr_head_sha" ]] || ! command -v gh >/dev/null 2>&1; then
+    if [[ -z "$pr_head_sha" ]]; then
         return 1
     fi
-    local any_active
-    any_active="$(gh api "repos/${REPOSITORY}/actions/workflows/build-push.yml/runs?head_sha=${pr_head_sha}&event=pull_request&per_page=20" \
-        --jq 'any(.workflow_runs[]?; .status != "completed")' 2>/dev/null)" || return 1
-    [[ "$any_active" == "true" ]]
+    saf_event_has_incomplete_run "$REPOSITORY" "$pr_head_sha" "pull_request"
 }
 
 wait_for_touched_image() {
@@ -309,22 +456,24 @@ for service in "${full_setup_services[@]}"; do
         if wait_for_touched_image "$pr_image" "$service"; then
             continue
         fi
-        echo "::error::$service's PR staging tag ($pr_image) never appeared even though this PR touched it (or a workflow/CI-contract file changed) -- waited past the normal ${poll_timeout_seconds}s budget (and, if build-push's own run was still active, up to the ${poll_hard_ceiling_seconds}s hard ceiling; see the notice/warning lines above for which applied). Refusing to fall back to base-channel content for a touched service -- that would silently revalidate the stale image #626 exists to stop testing, behind a tag name that looks PR-specific. Check whether build-push actually built and pushed $service for this commit."
+        echo "::error::$service's PR staging tag ($pr_image) never appeared even though this PR touched it (or a workflow/CI-contract file changed) -- waited past the normal ${poll_timeout_seconds}s budget (and, if build-push's own run was still active, up to the ${poll_hard_ceiling_seconds}s hard ceiling; see the notice/warning lines above for which applied). Refusing to fall back to the PR base commit's content for a touched service -- that would silently revalidate the stale image #626 exists to stop testing, behind a tag name that looks PR-specific. Check whether build-push actually built and pushed $service for this commit."
         exit 1
     fi
 
-    base_image="ghcr.io/${REPOSITORY}/${service}:${BASE_CHANNEL_TAG}"
-    echo "::notice::$service is untouched by this PR; verifying $BASE_CHANNEL_TAG ($base_image) was built from a commit at or after this PR's base commit ($BASE_SHA) before backfilling..."
-    # #808: never back-fill from a base-channel image without first proving
-    # it was actually built from base.sha or later -- see this script's own
-    # #808 header note and scripts/lib/staging-image-freshness.sh for why.
-    if ! sif_wait_for_fresh_base_image "$base_image" "$BASE_SHA" "$service" \
-        "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$base_freshness_poll_interval_seconds" >/dev/null; then
-        echo "::error::Refusing to back-fill $service's PR staging tag from $base_image -- its base commit could not be confirmed fresh enough (see the error above). This is the #808 fix: silently validating a stale base-channel image is exactly the bug that let PRs #911/#914 chase a phantom regression that was actually a CI plumbing race."
+    # #808: never back-fill without first proving the source image was
+    # actually built from base.sha or later -- see scripts/lib/staging-image-freshness.sh
+    # for why, and scripts/lib/staging-ancestor-fallback.sh for the full
+    # resolution sequence (exact-BASE_SHA wait, then the ancestor fallback
+    # when that wait genuinely cannot succeed).
+    if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
+        "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" \
+        "$ancestor_freshness_timeout_seconds" "$ancestor_freshness_hard_ceiling_seconds" \
+        "$ancestor_extended_freshness_timeout_seconds" "$ancestor_extended_freshness_hard_ceiling_seconds" \
+        "$base_freshness_poll_interval_seconds" "$ancestor_search_depth" "${STAGING_FRESHNESS_GIT_DIR:-.}")"; then
         exit 1
     fi
-    echo "::notice::(re)pointing $PR_TAG at the current $BASE_CHANNEL_TAG channel ($base_image)."
-    backfill_from_base "$pr_image" "$base_image"
+    echo "::notice::(re)pointing $PR_TAG at $resolved_source."
+    backfill_from_base "$pr_image" "$resolved_source"
 done
 
 echo "All full-setup staging images are ready at tag $PR_TAG."

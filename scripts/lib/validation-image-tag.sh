@@ -54,9 +54,24 @@ vit_base_channel_tag() {
 # (confirmed in GitHub's own docs for Dependabot), so no PR staging tag ever
 # exists for them and the suite must fall back to the base channel -- exactly
 # the pre-#626 behaviour. Echoes "true" or "false".
+#
+# head_repo/repository comparison is case-INSENSITIVE (issue #842 PR #1360,
+# 2026-08-01): GitHub repository names are themselves case-insensitive for
+# identity purposes, but `github.event.pull_request.head.repo.full_name` and
+# `github.repository` are not guaranteed to agree on casing at every point in
+# time -- confirmed live during this repository's own rename to
+# `LanCache-NG`: one context still resolved to the old `wiki-mod/lancache-ng`
+# casing while the other had already picked up `wiki-mod/LanCache-NG`. A bare
+# `==` comparison treated that as two different repositories, misclassifying
+# a genuine same-repo, non-Dependabot PR as if it were a fork PR -- silently
+# disabling this PR's own staging tag and falling back to the base channel
+# image instead (which does not contain that PR's own changes yet). `${x,,}`
+# lowercases both sides before comparing, matching this project's own
+# existing convention for case-insensitive comparisons (e.g. is_truthy()'s
+# identical `${v,,}` use in services/watchdog/watchdog.sh/retention.sh).
 vit_pr_staging_available() {
     local event_name="$1" actor="$2" head_repo="$3" repository="$4"
-    if [[ "$event_name" == "pull_request" && "$actor" != "dependabot[bot]" && "$head_repo" == "$repository" ]]; then
+    if [[ "$event_name" == "pull_request" && "$actor" != "dependabot[bot]" && "${head_repo,,}" == "${repository,,}" ]]; then
         printf 'true\n'
     else
         printf 'false\n'

@@ -1,0 +1,201 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# GitHub's built-in "Closes #N"/"Fixes #N" issue auto-close only fires when a
+# pull request merges into the repository's DEFAULT branch (currently
+# master). This project's active development happens on `current_dev` (see
+# #825), so that native mechanism never fires for the PRs that actually
+# resolve issues day to day, leaving them open forever unless someone closes
+# them by hand. See #1137 for the full background and the manual pattern
+# this workflow mechanizes (already used by hand dozens of times).
+#
+# This workflow:
+#   1. Fires only when a PR merges into `current_dev` (never master/vX.Y.Z --
+#      GitHub's native mechanism already covers those; this must not
+#      duplicate or interfere with it).
+#   2. Parses the PR body for `Closes #N` / `Fixes #N` (and the rest of
+#      GitHub's own accepted keyword set), case-insensitive, same-repo only.
+#   3. For each referenced issue: posts a comment containing the PR's own
+#      body verbatim (mechanical relay, not an AI-generated summary), then
+#      closes the issue.
+#   4. Also exposes a `workflow_dispatch` test mode that runs the exact same
+#      parsing/comment-building logic in dry-run against a real, already-
+#      merged PR number, without posting or closing anything -- this is how
+#      the logic is validated without spamming a real issue with a
+#      duplicate comment (see the PR that introduced this workflow for the
+#      dry-run transcript proving the parsing path against real data).
+#
+# A bad or stale issue reference (issue doesn't exist, is already closed, or
+# the number actually belongs to a pull request) is logged as a warning and
+# skipped -- it must never fail the whole job just because one of several
+# referenced issues among many is no longer valid.
+name: current_dev Auto-Close Linked Issues
+
+on:
+  # pull_request_target (not pull_request), matching this repo's other
+  # issue/PR-writing workflows (first-interaction.yml, labeler.yml): it runs
+  # with the base repo's token/permissions and, for a `closed` event, always
+  # evaluates the workflow file already merged into the base branch, which
+  # is what we want here. This job never checks out PR code and only reads
+  # `github.event.pull_request` fields already present in the trigger
+  # payload, so pull_request_target's usual fork-code risk does not apply.
+  pull_request_target:
+    types: [closed]
+    branches: [current_dev]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: >-
+          Already-merged current_dev PR number to replay in dry-run mode
+          (no comments are posted, no issues are closed or modified).
+        required: true
+        type: number
+
+permissions:
+  issues: write
+  pull-requests: read
+
+jobs:
+  auto-close:
+    name: Relay PR body and close linked issues
+    runs-on: ubuntu-latest
+    # `branches: [current_dev]` above already restricts the pull_request
+    # trigger to PRs targeting current_dev, but `types: [closed]` still
+    # fires for PRs that were closed WITHOUT merging -- guard on
+    # `merged == true` too so a closed-unmerged PR never triggers this.
+    # workflow_dispatch always runs (it is dry-run only, see the script).
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      github.event.pull_request.merged == true
+    steps:
+      - name: Parse PR body and relay/close linked issues
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          script: |
+            const owner = context.repo.owner;
+            const repo = context.repo.repo;
+            const isDryRun = context.eventName === 'workflow_dispatch';
+
+            // Step 1: Resolve the PR to process -- the real event payload
+            // already carries everything for the pull_request trigger, but
+            // workflow_dispatch only gives us a bare number and must fetch
+            // the rest for real.
+            let pr;
+            if (isDryRun) {
+              // workflow_dispatch inputs arrive as strings on
+              // `context.payload.inputs`, even when the input is declared
+              // `type: number` in the workflow file -- convert explicitly.
+              const prNumber = Number(context.payload.inputs?.pr_number);
+              if (!prNumber || Number.isNaN(prNumber)) {
+                core.setFailed('workflow_dispatch requires a numeric pr_number input.');
+                return;
+              }
+              try {
+                const { data } = await github.rest.pulls.get({ owner, repo, pull_number: prNumber });
+                pr = data;
+              } catch (err) {
+                core.setFailed(`Could not fetch PR #${prNumber}: ${err.message}`);
+                return;
+              }
+              core.info(`[dry-run] Replaying PR #${pr.number} ("${pr.title}"), merged=${pr.merged}, base=${pr.base?.ref}`);
+              if (!pr.merged || pr.base?.ref !== 'current_dev') {
+                core.warning(`[dry-run] PR #${pr.number} was not actually merged into current_dev (merged=${pr.merged}, base=${pr.base?.ref}) -- continuing anyway since this is a logic-only replay, but a real run would never have been triggered for it.`);
+              }
+            } else {
+              pr = context.payload.pull_request;
+            }
+
+            const prNumber = pr.number;
+            const prUrl = pr.html_url;
+            const prBody = pr.body || '';
+            const mergedAt = pr.merged_at || 'unknown time';
+            const mergeSha = pr.merge_commit_sha || 'unknown commit';
+
+            // Step 2: Parse the PR body for closing keywords. Matches
+            // GitHub's own accepted keyword set (close/closes/closed,
+            // fix/fixes/fixed, resolve/resolves/resolved), case-insensitive,
+            // an optional colon, then a same-repo `#123` reference. `Refs
+            // #N` is intentionally NOT matched -- those are non-closing
+            // references the PR author left open on purpose (see #1137).
+            const keywordPattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
+            const issueNumbers = new Set();
+            let match;
+            while ((match = keywordPattern.exec(prBody)) !== null) {
+              issueNumbers.add(Number(match[1]));
+            }
+
+            if (issueNumbers.size === 0) {
+              core.info(`No closing-keyword issue references found in PR #${prNumber}'s body. Nothing to do.`);
+              return;
+            }
+            core.info(`Found ${issueNumbers.size} closing-keyword reference(s) in PR #${prNumber}: ${[...issueNumbers].join(', ')}`);
+
+            const commentBody = [
+              '## Closed via merge to `current_dev` (not the default branch -- see #1137)',
+              '',
+              `**Auto-close notice:** This comment and this issue's closure were generated automatically by the \`current-dev-auto-close\` GitHub Actions workflow, not by a human or an interactive session. GitHub's built-in "Closes #N"/"Fixes #N" auto-close only fires for merges into the default branch (\`master\`); this workflow mirrors that behavior for \`current_dev\`, the project's actual active development branch (see #1137). The content below is PR #${prNumber}'s own description, relayed verbatim -- it is not an AI-generated summary.`,
+              '',
+              `Resolved by PR #${prNumber}: ${prUrl} (merged ${mergedAt}, commit \`${mergeSha}\`). Full PR body below.`,
+              '',
+              '---',
+              '',
+              prBody,
+            ].join('\n');
+
+            // Step 3: Resolve each referenced number and act on it
+            // independently -- one bad reference (missing issue, already
+            // closed, or actually a PR number) must not abort the others.
+            for (const issueNumber of issueNumbers) {
+              try {
+                let issue;
+                try {
+                  const { data } = await github.rest.issues.get({ owner, repo, issue_number: issueNumber });
+                  issue = data;
+                } catch (err) {
+                  if (err.status === 404) {
+                    core.warning(`Skipping #${issueNumber}: no such issue/PR exists in ${owner}/${repo}.`);
+                    continue;
+                  }
+                  throw err;
+                }
+
+                // The Issues API returns pull requests too (a PR is a
+                // superset of an issue in GitHub's data model); a
+                // `pull_request` key present means the referenced number is
+                // actually a PR, not an issue, and must be skipped.
+                if (issue.pull_request) {
+                  core.warning(`Skipping #${issueNumber}: it is a pull request, not an issue.`);
+                  continue;
+                }
+
+                if (issue.state === 'closed') {
+                  core.warning(`Skipping #${issueNumber}: already closed.`);
+                  continue;
+                }
+
+                if (isDryRun) {
+                  core.info(`[dry-run] Would comment on #${issueNumber} ("${issue.title}") and close it. Comment body:\n${commentBody}\n---`);
+                  continue;
+                }
+
+                await github.rest.issues.createComment({
+                  owner,
+                  repo,
+                  issue_number: issueNumber,
+                  body: commentBody,
+                });
+                await github.rest.issues.update({
+                  owner,
+                  repo,
+                  issue_number: issueNumber,
+                  state: 'closed',
+                  state_reason: 'completed',
+                });
+                core.info(`Closed #${issueNumber} with a relayed comment from PR #${prNumber}.`);
+              } catch (err) {
+                // A single unexpected failure (rate limit, permissions,
+                // transient API error) for one issue number must not stop
+                // the loop from processing the remaining references.
+                core.warning(`Failed to process #${issueNumber}: ${err.message}`);
+              }
+            }

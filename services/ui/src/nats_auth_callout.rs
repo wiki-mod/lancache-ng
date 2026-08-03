@@ -75,28 +75,61 @@
 //! `scripts/nats-secondary-auth-callout-simulation.sh` against the real
 //! Admin UI binary and a real nats-server container.
 //!
+//! ## xkey request/response encryption (issue #682)
+//! Implemented: this responder holds its own static X25519 (curve) NKey
+//! (`load_or_create_xkey`, distinct from the Ed25519 issuer keypair above),
+//! whose public half is rendered into the generated `auth_callout { xkey:
+//! ... }` config field (see `secondaries::render_nats_auth_callout`). When
+//! that field is set, nats-server generates a fresh one-time-use X25519
+//! keypair per connection attempt, seals the `AuthorizationRequest` to our
+//! static public key, and carries its own ephemeral public key in plaintext
+//! on a `Nats-Server-Xkey` message header (see that constant's doc comment
+//! for why this is not a value we invented). `decrypt_request_if_sealed`
+//! opens the request with our static private key + that ephemeral public
+//! key; `seal_response_if_needed` seals the response back to the same
+//! ephemeral public key, which nats-server discards after this one request/
+//! reply cycle (or its timeout) -- the one-time-use property is what
+//! prevents replaying a captured response into a different connection
+//! attempt. This closes the specific gap #682 was filed for: the presented
+//! secondary password inside `connect_opts.pass` is no longer cleartext on
+//! the wire between nats-server and this responder, even to something that
+//! manages to subscribe to `$SYS.REQ.USER.AUTH` (previously the only
+//! protection was the subject-level permission restricting who may
+//! subscribe there at all -- see #621's review).
+//!
+//! Detection is header-presence-based, not a local config flag: a request
+//! with no `Nats-Server-Xkey` header is handled as plain JWT bytes exactly
+//! as before, so this responder works unchanged against a not-yet-updated
+//! nats.conf (no coordinated two-sided flag flip required) and there is no
+//! separate on/off switch to misconfigure.
+//!
+//! Explicitly out of scope for #682, and NOT what this encrypts: the
+//! secondary's own `CONNECT` to nats-server (where `connect_opts.pass`
+//! originates) is a completely different network leg from the auth-callout
+//! request/response this module answers. xkey only encrypts the latter --
+//! nats-server's own internal request to this responder about the
+//! connection attempt -- not the former. Confidentiality on the secondary's
+//! own CONNECT leg is TLS's job (`nats://` vs `tls://` in
+//! `deploy/*/docker-compose.yml`'s NATS_URL), unrelated to this mechanism and
+//! not addressed by it.
+//!
 //! ## Deferred hardening (documented, not silently dropped)
-//! - `xkey` request/response encryption (NATS auth-callout's optional
-//!   curve25519 sealed-box layer) is not implemented. The request/response
-//!   round trip stays entirely inside `$SYS.REQ.USER.AUTH`, which only the
-//!   callout account's own bypass user can subscribe to, so this is a
-//!   defense-in-depth gap rather than an open door — but it is a gap.
 //! - The incoming `AuthorizationRequest`'s own signature (issued by
 //!   nats-server) is not verified against the server's identity. Spoofing it
 //!   would require first compromising the callout account's bypass
 //!   credential, at which point the attacker already controls this service.
 //!
-//! Both are reasonable follow-up hardening, not required for the core
+//! This is reasonable follow-up hardening, not required for the core
 //! per-secondary-identity/revocation property this module delivers.
 
 use crate::AppState;
-use argon2::password_hash::{
-    rand_core::OsRng, PasswordHash, PasswordHasher, PasswordVerifier, SaltString,
-};
 use argon2::Argon2;
+use argon2::password_hash::{
+    PasswordHash, PasswordHasher, PasswordVerifier, SaltString, rand_core::OsRng,
+};
 use base64::Engine as _;
-use nkeys::KeyPair;
-use serde_json::{json, Value};
+use nkeys::{KeyPair, XKey};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha512_256};
 use std::fs::OpenOptions;
 use std::io::Write;
@@ -106,6 +139,16 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const REQUEST_AUTH_SUBJECT: &str = "$SYS.REQ.USER.AUTH";
+/// Header nats-server attaches to an auth-callout request when the
+/// `auth_callout { xkey: ... }` config field is set (issue #682): carries, in
+/// plaintext, the public half of a one-time-use X25519 keypair nats-server
+/// generates fresh for this connection attempt. The request payload itself is
+/// then sealed (nkeys' `xkv1` curve25519 box format) to *our* static xkey
+/// public key -- so this header is what lets us `open()` it, and what we then
+/// `seal()` the response back to. Matches the literal header name nats-server
+/// itself uses (`NatsServerXKeyHeader` in the Go implementation); this is not
+/// a name we invented.
+const NATS_SERVER_XKEY_HEADER: &str = "Nats-Server-Xkey";
 /// NATS's implicit default account. No `accounts {}` block is configured
 /// (see module docs), so this is the only account that exists, and every
 /// issued user JWT's `aud` claim must name it exactly -- nats-server rejects
@@ -208,6 +251,44 @@ pub fn load_or_create_issuer_keypair(path: &str) -> Result<KeyPair, String> {
             Ok(kp)
         }
         Err(err) => Err(format!("failed to read issuer seed file at {path}: {err}")),
+    }
+}
+
+/// Loads the persisted auth-callout responder's static X25519 (curve) NKey
+/// seed, generating and persisting a new one on first run (issue #682).
+/// Byte-for-byte the same create_new + 0600 pattern as
+/// `load_or_create_issuer_keypair`, just producing an `XKey` (curve25519
+/// encryption keypair) instead of a `KeyPair` (Ed25519 signing keypair) --
+/// these are deliberately two separate keys with two separate files even
+/// though both are "NKeys" in the general nkeys-crate sense, because they
+/// serve unrelated purposes (signing user JWTs vs. decrypting/encrypting the
+/// auth-callout request/response envelope) and there is no reason to couple
+/// their rotation lifecycles.
+pub fn load_or_create_xkey(path: &str) -> Result<XKey, String> {
+    match std::fs::read_to_string(path) {
+        Ok(contents) => {
+            let seed = contents.trim();
+            XKey::from_seed(seed).map_err(|e| format!("Xkey seed at {path} is invalid: {e}"))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            let kp = XKey::new();
+            let seed = kp
+                .seed()
+                .map_err(|e| format!("failed to encode newly generated xkey seed: {e}"))?;
+            let mut open_options = OpenOptions::new();
+            open_options.create_new(true).write(true);
+            #[cfg(unix)]
+            open_options.mode(0o600);
+            let mut file = open_options
+                .open(path)
+                .map_err(|e| format!("failed to create xkey seed file at {path}: {e}"))?;
+            file.write_all(seed.as_bytes())
+                .map_err(|e| format!("failed to write xkey seed file at {path}: {e}"))?;
+            file.sync_all()
+                .map_err(|e| format!("failed to sync xkey seed file at {path}: {e}"))?;
+            Ok(kp)
+        }
+        Err(err) => Err(format!("failed to read xkey seed file at {path}: {err}")),
     }
 }
 
@@ -350,12 +431,64 @@ fn build_response(
     encode_nats_jwt(response_claims, issuer)
 }
 
+/// Decrypts an incoming auth-callout request payload if it was xkey-sealed,
+/// returning the plaintext JWT bytes plus (when sealed) the ephemeral,
+/// public-key-only `XKey` the response must be sealed back to. Pulled out of
+/// `run_auth_callout` as a pure function so this decision -- and the
+/// resulting request-plaintext -- is directly unit-testable without a live
+/// NATS connection (mirrors `authorize_secondary_with_conn`'s split from
+/// `authorize_secondary` for the same reason).
+///
+/// Backward/forward compatible by construction: the presence of the
+/// `Nats-Server-Xkey` header (see its doc comment) is what signals a sealed
+/// payload, not a local config flag. If nats-server was not configured with
+/// an `auth_callout { xkey: ... }` value, no header is sent, the payload is
+/// the plain JWT string it always was, and this returns it unchanged with no
+/// ephemeral key -- so this responder works identically against a
+/// not-yet-upgraded nats.conf and requires no coordinated flag flip.
+fn decrypt_request_if_sealed(
+    our_xkey: &XKey,
+    headers: Option<&async_nats::HeaderMap>,
+    payload: &[u8],
+) -> Result<(Vec<u8>, Option<XKey>), String> {
+    let Some(ephemeral_public_key) = headers.and_then(|h| h.get(NATS_SERVER_XKEY_HEADER)) else {
+        return Ok((payload.to_vec(), None));
+    };
+    let sender = XKey::from_public_key(ephemeral_public_key.as_str())
+        .map_err(|e| format!("invalid {NATS_SERVER_XKEY_HEADER} header value: {e}"))?;
+    let plaintext = our_xkey
+        .open(payload, &sender)
+        .map_err(|e| format!("failed to open xkey-sealed auth-callout request: {e}"))?;
+    Ok((plaintext, Some(sender)))
+}
+
+/// Seals the outgoing response back to the server's ephemeral xkey when the
+/// request came in sealed (see `decrypt_request_if_sealed`), otherwise
+/// returns the plain JWT bytes unchanged. nats-server holds the matching
+/// ephemeral private half only for the lifetime of this one connection
+/// attempt (thrown away once a response arrives or the attempt times out),
+/// which is what makes the encryption immune to replay across connections --
+/// this function has no part in that property, it only has to seal to
+/// whichever ephemeral public key this specific request carried.
+fn seal_response_if_needed(
+    our_xkey: &XKey,
+    ephemeral_sender: Option<&XKey>,
+    response_jwt: &str,
+) -> Result<Vec<u8>, String> {
+    match ephemeral_sender {
+        Some(sender) => our_xkey
+            .seal(response_jwt.as_bytes(), sender)
+            .map_err(|e| format!("failed to xkey-seal auth-callout response: {e}")),
+        None => Ok(response_jwt.as_bytes().to_vec()),
+    }
+}
+
 /// Runs the auth-callout responder loop: connects as the callout account's
 /// static bypass user, subscribes to `$SYS.REQ.USER.AUTH`, and answers every
 /// request until the connection drops (at which point `main.rs`'s caller is
 /// expected to have this run inside a supervised task that reconnects — see
 /// `connect_nats_with_retry` for the established retry pattern this mirrors).
-pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>) {
+pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>, xkey: Arc<XKey>) {
     use futures_util::StreamExt;
 
     let mut delay = std::time::Duration::from_secs(1);
@@ -412,7 +545,15 @@ pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>) {
                 tracing::warn!("auth-callout: request with no reply subject, ignoring");
                 continue;
             };
-            let text = String::from_utf8_lossy(&msg.payload).to_string();
+            let (plaintext, ephemeral_sender) =
+                match decrypt_request_if_sealed(&xkey, msg.headers.as_ref(), &msg.payload) {
+                    Ok(v) => v,
+                    Err(err) => {
+                        tracing::warn!("auth-callout: {err}");
+                        continue;
+                    }
+                };
+            let text = String::from_utf8_lossy(&plaintext).to_string();
             let request_payload = match decode_jwt_payload(&text) {
                 Ok(v) => v,
                 Err(err) => {
@@ -446,7 +587,16 @@ pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>) {
                     }
                 };
 
-            if let Err(err) = client.publish(reply, response.into()).await {
+            let response_payload =
+                match seal_response_if_needed(&xkey, ephemeral_sender.as_ref(), &response) {
+                    Ok(bytes) => bytes,
+                    Err(err) => {
+                        tracing::error!("auth-callout: {err}");
+                        continue;
+                    }
+                };
+
+            if let Err(err) = client.publish(reply, response_payload.into()).await {
                 tracing::error!("auth-callout: failed to publish response: {err}");
             }
         }
@@ -799,5 +949,151 @@ mod tests {
         assert_eq!(first.public_key(), second.public_key());
 
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // Mirrors load_or_create_issuer_keypair_persists_and_reloads_same_identity
+    // above for the separate xkey seed file (#682) -- same persistence
+    // contract, different key type (X25519 curve key, not Ed25519).
+    #[test]
+    fn load_or_create_xkey_persists_and_reloads_same_identity() {
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-ng-xkey-test-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("xkey.seed");
+        let path_str = path.to_str().unwrap();
+
+        let first = load_or_create_xkey(path_str).expect("first load creates an xkey");
+        let second = load_or_create_xkey(path_str).expect("second load reuses the file");
+        assert_eq!(first.public_key(), second.public_key());
+
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // A request with no Nats-Server-Xkey header (nats-server has no `xkey:`
+    // configured, or this is an older/plain deployment) must be handled
+    // exactly as before xkey support existed: passed through as plaintext
+    // with no ephemeral sender key, so the responder never hard-requires
+    // encryption -- this is what makes the feature safe to enable
+    // unilaterally on the Admin UI side without a coordinated nats.conf flip.
+    #[test]
+    fn decrypt_request_if_sealed_passes_through_plaintext_when_no_xkey_header() {
+        let our_xkey = XKey::new();
+        let payload = b"not-encrypted-jwt-bytes";
+
+        let (plaintext, sender) =
+            decrypt_request_if_sealed(&our_xkey, None, payload).expect("no header is not an error");
+
+        assert_eq!(plaintext, payload);
+        assert!(
+            sender.is_none(),
+            "no ephemeral sender key means the response must not be sealed either"
+        );
+    }
+
+    // Full round trip simulating nats-server's real xkey behavior end to end
+    // without a live server: a "server" ephemeral keypair seals a request to
+    // our static public key and advertises its own public half via the exact
+    // header name/mechanism nats-server uses; decrypt_request_if_sealed must
+    // recover the original plaintext and hand back a sender key usable for
+    // the reply. This is the property a live nats-server 2.14.3 additionally
+    // proves by actually accepting our sealed response (see
+    // scripts/nats-secondary-auth-callout-simulation.sh) -- this unit test
+    // only proves our own seal/open pairing is internally consistent, not
+    // real-server interop.
+    #[test]
+    fn decrypt_request_if_sealed_opens_a_real_sealed_request_via_the_header() {
+        let our_xkey = XKey::new();
+        let server_ephemeral = XKey::new();
+        let plaintext_request = b"{\"nats\":{\"user_nkey\":\"U123\"}}";
+
+        let our_public_only = XKey::from_public_key(&our_xkey.public_key()).unwrap();
+        let sealed = server_ephemeral
+            .seal(plaintext_request, &our_public_only)
+            .expect("server-side seal succeeds");
+
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(
+            NATS_SERVER_XKEY_HEADER,
+            server_ephemeral.public_key().as_str(),
+        );
+
+        let (opened, sender) = decrypt_request_if_sealed(&our_xkey, Some(&headers), &sealed)
+            .expect("a validly sealed request with the header must open");
+
+        assert_eq!(opened, plaintext_request);
+        assert_eq!(
+            sender
+                .expect("a sealed request must yield an ephemeral sender key")
+                .public_key(),
+            server_ephemeral.public_key(),
+            "the recovered sender key must match the server's advertised ephemeral public key"
+        );
+    }
+
+    // A tampered/garbage payload under a present xkey header must fail
+    // closed (an Err, not a panic or a silently-wrong plaintext) -- open()
+    // authenticates the ciphertext (nacl box / Poly1305), so corruption is
+    // detected, not silently accepted.
+    #[test]
+    fn decrypt_request_if_sealed_rejects_a_tampered_payload() {
+        let our_xkey = XKey::new();
+        let server_ephemeral = XKey::new();
+        let our_public_only = XKey::from_public_key(&our_xkey.public_key()).unwrap();
+        let mut sealed = server_ephemeral
+            .seal(b"original request", &our_public_only)
+            .unwrap();
+        // Flip a byte inside the ciphertext (past the "xkv1" version prefix +
+        // 24-byte nonce), simulating an on-the-wire tamper attempt.
+        let tamper_index = sealed.len() - 1;
+        sealed[tamper_index] ^= 0xFF;
+
+        let mut headers = async_nats::HeaderMap::new();
+        headers.insert(
+            NATS_SERVER_XKEY_HEADER,
+            server_ephemeral.public_key().as_str(),
+        );
+
+        assert!(
+            decrypt_request_if_sealed(&our_xkey, Some(&headers), &sealed).is_err(),
+            "a tampered ciphertext must fail to open, not silently decrypt to garbage"
+        );
+    }
+
+    // seal_response_if_needed's two branches: plaintext passthrough when the
+    // request wasn't sealed (mirrors decrypt_request_if_sealed's own
+    // passthrough), and a real seal/open round trip when it was -- proving
+    // the response encryption direction independently of the request
+    // decryption direction tested above.
+    #[test]
+    fn seal_response_if_needed_passes_through_plaintext_without_ephemeral_sender() {
+        let our_xkey = XKey::new();
+        let sealed = seal_response_if_needed(&our_xkey, None, "plain-response-jwt").unwrap();
+        assert_eq!(sealed, b"plain-response-jwt");
+    }
+
+    #[test]
+    fn seal_response_if_needed_seals_to_the_ephemeral_sender_and_server_can_open_it() {
+        let our_xkey = XKey::new();
+        let server_ephemeral = XKey::new();
+        // Only the public half is available to us in the real flow (it comes
+        // from a message header, see decrypt_request_if_sealed), so mirror
+        // that here rather than passing the full server_ephemeral keypair in.
+        let server_public_only = XKey::from_public_key(&server_ephemeral.public_key()).unwrap();
+
+        let sealed =
+            seal_response_if_needed(&our_xkey, Some(&server_public_only), "response-jwt-payload")
+                .expect("sealing to a known-good public key must succeed");
+
+        let our_public_only = XKey::from_public_key(&our_xkey.public_key()).unwrap();
+        let opened = server_ephemeral
+            .open(&sealed, &our_public_only)
+            .expect("the real nats-server side must be able to open what we sealed");
+        assert_eq!(opened, b"response-jwt-payload");
     }
 }

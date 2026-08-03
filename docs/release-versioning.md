@@ -39,7 +39,7 @@ must stay consistent with that file.
 | Channel | Meaning | Mutability | Intended use |
 | --- | --- | --- | --- |
 | `sha-<commit>` | Immutable build identity for a source commit | Immutable | Debugging, rollback, provenance, and promotion source |
-| `nightly` | Tested pre-stable integration channel built continuously from `current_dev` (renamed from `edge` in v0.3.0, #1056; re-pointed from `master` to `current_dev` in v0.3.0, #825/#1141) | Mutable | Operators who explicitly opt into pre-stable builds |
+| `nightly` | Tested pre-stable integration channel, built from `current_dev`'s tip once a day (01:00 UTC) plus on-demand, gated on a full green build+scan (renamed from `edge` in v0.3.0, #1056; re-pointed from `master` to `current_dev` in v0.3.0, #825/#1141; changed from "republished on every current_dev push" to this once-daily/on-demand model in #1254/#1255, 2026-07-25) | Mutable | Operators who explicitly opt into pre-stable builds |
 | `vX.Y.Z-rc.N` | Release candidate | Immutable | Pre-release validation; GitHub release must be marked prerelease |
 | `vX.Y.Z` | Stable release | Immutable | Production release pinning |
 | `latest` | Latest stable release, published continuously from `master` | Mutable | Default stable install path |
@@ -49,14 +49,50 @@ must stay consistent with that file.
 current_dev = nightly, vY.X.Z = archived release, ganz simpel")**: `master`
 publishes `latest` continuously after the required checks pass -- this is its
 sole, permanent role, not an exception that needs a separate justification
-each time. `current_dev` (the permanent active-development branch, decoupled
-from any version number) publishes `nightly` continuously from its own tip,
-taking over the role `master` used to have here before this decision.
-`vY.X.Z` branches (e.g. `v0.2.0`) are archived release freezes: they still
-take deliberate backports, exactly as before, but publish no live channel at
-all -- nothing tracks them as a rolling install target. Stable release tags
-(`vX.Y.Z`) publish the matching immutable tag and move `latest` (and, being
-the same pointer, `stable`) to the same digest.
+each time. `vY.X.Z` branches (e.g. `v0.2.0`) are archived release freezes:
+they still take deliberate backports, exactly as before, but publish no live
+channel at all -- nothing tracks them as a rolling install target. Stable
+release tags (`vX.Y.Z`) publish the matching immutable tag and move `latest`
+(and, being the same pointer, `stable`) to the same digest.
+
+**`current_dev` -> `nightly` publishing model changed (#1254/#1255, decided
+2026-07-25 -- "nightly should be a real once-a-day build, like Firefox
+Nightly, not republished on every push")**: originally (#825/#1141),
+`current_dev` published `nightly` continuously from its own tip on every
+push, taking over the role `master` used to have here before that decision.
+In practice this meant `nightly` moved dozens of times a day, which defeated
+the point of a distinct "tested" channel separate from the raw commit stream
+and gave operators no meaningfully different guarantee than tracking
+`current_dev` directly. The corrected model: a plain `current_dev` push no
+longer moves the `nightly` channel tag at all -- it still builds, scans, and
+publishes that commit's durable per-service `sha-<commit>` tags exactly as
+before (unaffected by this change). `nightly` is instead refreshed exactly
+once a day, by `.github/workflows/nightly-refresh.yml`'s `schedule` trigger
+(`0 1 * * *`, i.e. 01:00 UTC == 02:00 CET in winter / 03:00 CEST in summer --
+GitHub Actions cron has no timezone concept and always fires in UTC, so this
+one-hour seasonal drift is deliberately accepted, matching the drift
+`build-push.yml`'s own daily `latest` schedule already accepts for the same
+reason), plus on-demand via that same workflow's `workflow_dispatch` trigger
+or via `build-push.yml`'s own pre-existing `channel: nightly`
+`workflow_dispatch` input dispatched directly against `current_dev`.
+Either path runs build-push.yml's full pipeline (build, test, scan, then
+`promote`) against `current_dev`'s tip, so `nightly` remains green-gated and
+fail-closed by construction: `promote` only runs `needs: merge-manifests`
+after the build/scan jobs succeed, so a broken `current_dev` tip simply never
+reaches `promote` and `nightly` holds its last good state instead of being
+force-moved onto a red commit. One known gap: GitHub's `schedule:` trigger
+only ever fires from a workflow file as it exists on the repository's default
+branch (`master`), so the daily cron does not actually start firing until
+`nightly-refresh.yml` itself has been merged to `master` -- until then (and
+whenever it lags `current_dev` afterward), `nightly` refreshes only via
+manual dispatch. Per AG-CI-019 (AGENTS.md), this gap is not treated as a
+long-term accepted tradeoff: it must reach `master` via its own dedicated
+sync PR in reasonably short order, the same way `build-push.yml`'s own daily
+`latest` schedule shares this identical GitHub limitation and the same
+sync obligation. This change does not affect
+#808's untouched-service PR backfill correctness guarantee: that mechanism no
+longer depends on `nightly` staying continuously fresh at all -- see the
+Promotion section below.
 
 The `nightly` channel was named `edge` before v0.3.0 (#1056). The rename is a
 deliberate breaking change with no alias: an install still carrying
@@ -84,13 +120,32 @@ control, so this cut affects only operators who set
 secondary-node registration flow.
 
 `setup.sh`'s interactive install flow offers exactly two operator-facing
-channel names: `stable` (default) and `nightly`, each with an inline explanation
-of what it means. `stable` is not a new GHCR tag -- `resolve_lancache_stack_channel_tag`
-maps it onto the existing `latest` pointer before pulling, so introducing it
-required no change to the promotion/release pipeline. `pinned` remains a
-valid `LANCACHE_IMAGE_CHANNEL` value (env var / `.env`, or the secondary-node
-registration flow) but is not offered by the interactive picker -- it is a
-request for one specific immutable tag, not a moving channel choice.
+channel names: `nightly` (default pre-1.0) and `stable`, each with an inline
+explanation of what it means. `stable` is not a new GHCR tag --
+`resolve_lancache_stack_channel_tag` maps it onto the existing `latest`
+pointer before pulling, so introducing it required no change to the
+promotion/release pipeline. `pinned` remains a valid `LANCACHE_IMAGE_CHANNEL`
+value (env var / `.env`, or the secondary-node registration flow) but is not
+offered by the interactive picker -- it is a request for one specific
+immutable tag, not a moving channel choice.
+
+**Pre-1.0 default (#1068)**: the picker's default answer and its
+"recommended" label were originally on `stable`, matching the plan when this
+channel was introduced (#819) for a project that would soon cut a stable
+release. In practice pre-1.0 has lasted long enough that this silently
+walked a new operator's default "just press enter" choice into a
+`docker pull` failure (`stack:latest` does not exist yet, since it is the
+same underlying pointer `stable` maps to). The default and recommendation
+were changed to `nightly` for as long as this project has no stable release;
+`stable` remains a fully valid, non-removed answer -- choosing it explicitly
+pre-1.0 still hits `resolve_lancache_stack_channel_tag`'s own clear
+explanation rather than a raw Docker error, and it automatically becomes the
+right default again once a real `vX.Y.Z` stable release exists and moves
+`latest`. The Admin UI's own channel selector (`services/ui/src/routes/setup.rs`
+/ `setup.html`) was checked separately and needs no equivalent change: it only
+ever displays and edits an *existing* install's already-resolved channel
+value, so it has no "default a new choice" moment the way the CLI installer
+does.
 
 ## Promotion
 
@@ -114,6 +169,29 @@ The promotion flow is:
 
 If one required image is missing, the channel must not be promoted.
 
+**Step 4, for `nightly` specifically, no longer fires on every `current_dev`
+push (#1254/#1255)** -- see the "Branch/channel model" section above for the
+full corrected model (once-daily scheduled + on-demand, still gated on steps
+1-3 passing).
+
+**PR validation's own untouched-service back-fill no longer depends on
+`nightly` (#1254/#1255)**: a PR's full-setup validation back-fills any
+full-setup service the PR itself did not touch so the suite still tests a
+complete, coherent stack. Before #1254/#1255 this back-filled from the
+`nightly`/`latest` base-channel tag (guarded by #808's "confirm the channel
+image was actually built at or after this PR's base commit" ancestry check,
+since a channel tag can lag). Now that `nightly` is no longer continuously
+fresh, that channel tag is no longer a reliable "at or after PR base"
+source, so the back-fill instead sources directly from the PR base commit's
+own durable `sha-<base_sha_short>` per-commit image -- exactly the right
+commit by construction, made possible because every non-PR push already
+publishes a fresh per-commit tag for every service (see `build-push.yml`'s
+"Ensure PR staging tags exist for full-setup services" step and
+`scripts/ensure-pr-staging-images.sh`). #808's bounded-wait/ancestry-check
+mechanism (`scripts/lib/staging-image-freshness.sh`) is unchanged and still
+used: it doubles as the poll for the base commit's own push-triggered build
+finishing, and still guards against a corrupted or mislabeled image.
+
 ## Setup And Update Selection
 
 `LANCACHE_IMAGE_CHANNEL` is the operator-facing selector for mutable stack
@@ -125,11 +203,13 @@ the install contract.
 
 Default behavior:
 
-- fresh stable installs use `LANCACHE_IMAGE_CHANNEL=stable` (written by
-  `setup.sh`'s interactive picker); `LANCACHE_IMAGE_CHANNEL=latest` remains
-  valid and resolves identically for existing installs and manual overrides
-- nightly installs must explicitly set `LANCACHE_IMAGE_CHANNEL=nightly`, or choose
-  `nightly` at `setup.sh`'s interactive channel prompt
+- fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0
+  (written by `setup.sh`'s interactive picker's default answer -- see the
+  "Pre-1.0 default" note above); an operator can still explicitly choose
+  `stable` at the same prompt, or set `LANCACHE_IMAGE_CHANNEL=stable`/`latest`
+  directly, once a stable release exists
+- `LANCACHE_IMAGE_CHANNEL=latest` remains valid and resolves identically to
+  `stable` for existing installs and manual overrides
 - release archives use their matching `vX.Y.Z` or `vX.Y.Z-rc.N` tag
 - `setup.sh update` preserves the selected channel and refreshes the resolved
   `LANCACHE_IMAGE_TAG`

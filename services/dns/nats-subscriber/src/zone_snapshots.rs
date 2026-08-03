@@ -477,10 +477,10 @@ pub fn changed_names(patch: &Value) -> Vec<String> {
     let mut names = Vec::new();
     if let Some(rrsets) = patch.get("rrsets").and_then(Value::as_array) {
         for rrset in rrsets {
-            if let Some(name) = rrset.get("name").and_then(Value::as_str) {
-                if seen.insert(name.to_string()) {
-                    names.push(name.to_string());
-                }
+            if let Some(name) = rrset.get("name").and_then(Value::as_str)
+                && seen.insert(name.to_string())
+            {
+                names.push(name.to_string());
             }
         }
     }
@@ -537,6 +537,9 @@ mod tests {
         assert_eq!(ROLLBACK_ZONES, &expected);
     }
 
+    // Gate controlling which zones can be snapshotted/rolled back must enforce
+    // scope decision: reject rpz (fully reproducible from cdn-domains.txt) and
+    // other non-managed zones.
     #[test]
     fn rollback_zone_gate_accepts_managed_zones_and_rejects_rpz_and_unknowns() {
         assert!(is_rollback_zone("lan."));
@@ -551,6 +554,8 @@ mod tests {
         assert!(!is_rollback_zone("lan"));
     }
 
+    // Zone names must normalize to canonical dot-terminated form so snapshot
+    // lookups and rollback gates work regardless of input format.
     #[test]
     fn canonical_zone_adds_trailing_dot_only_when_missing() {
         assert_eq!(canonical_zone("lan"), "lan.");
@@ -558,6 +563,8 @@ mod tests {
         assert_eq!(canonical_zone("local.lan"), "local.lan.");
     }
 
+    // PowerDNS API zone identifiers omit trailing dots in URL paths, confirmed
+    // by existing reconciler calls; stripping must be consistent.
     #[test]
     fn zone_api_id_strips_trailing_dot_matching_existing_working_calls() {
         assert_eq!(zone_api_id("lan."), "lan");
@@ -576,6 +583,8 @@ mod tests {
         assert!(b >= a);
     }
 
+    // Snapshot IDs encode nanosecond timestamps; recovery must produce plausible
+    // Unix seconds for Admin UI display and reject invalid input gracefully.
     #[test]
     fn snapshot_created_unix_recovers_a_plausible_epoch_second() {
         let id = new_snapshot_id();
@@ -588,12 +597,16 @@ mod tests {
         assert_eq!(snapshot_created_unix("not-a-number"), None);
     }
 
+    // Missing snapshot root must return empty list, not error — a zone on first
+    // run has no snapshots yet, not a missing-directory fault.
     #[test]
     fn list_snapshot_ids_is_empty_for_a_missing_root() {
         let root = temp_dir("missing");
         assert_eq!(list_snapshot_ids(&root).unwrap(), Vec::<String>::new());
     }
 
+    // End-to-end snapshot lifecycle smoke test: create -> list -> read must
+    // round-trip with payloads unchanged.
     #[test]
     fn create_read_and_list_round_trip() {
         let root = temp_dir("roundtrip");
@@ -635,6 +648,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // Misconfigured KEEP_KNOWN_GOOD_CONFIGS=0 must clamp to documented default
+    // (3), never silently disable retention.
     #[test]
     fn prune_clamps_a_zero_keep_n_to_the_documented_default() {
         let root = temp_dir("clamp");
@@ -654,6 +669,9 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // In-progress staging entries (.staging.*) and finalized directories missing
+    // zone.json must be excluded from snapshot list — they would cause errors if
+    // exposed.
     #[test]
     fn list_snapshot_ids_skips_staging_and_incomplete_directories() {
         let root = temp_dir("skip");
@@ -668,6 +686,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // Reading a non-existent snapshot must fail gracefully with an error, never
+    // panic or silently return garbage.
     #[test]
     fn read_snapshot_reports_an_error_for_an_unknown_id() {
         let root = temp_dir("unknown");
@@ -693,6 +713,8 @@ mod tests {
         assert_eq!(arr[0]["type"], "A");
     }
 
+    // PowerDNS returns records in arbitrary order; canonicalization (sort by
+    // name/type, records by content) makes order-agnostic equality checks possible.
     #[test]
     fn canonicalize_rrsets_makes_reordered_content_compare_equal() {
         let a = json!([
@@ -713,6 +735,9 @@ mod tests {
         assert_eq!(canonicalize_rrsets(&a), canonicalize_rrsets(&b));
     }
 
+    // Snapshot trigger must not create redundant snapshots when reconciler
+    // republishes unchanged records in different order — matching must be
+    // order-agnostic.
     #[test]
     fn matches_latest_snapshot_true_when_content_identical_ignoring_order() {
         let root = temp_dir("matches-true");
@@ -730,6 +755,8 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
     }
 
+    // When zone content genuinely changes, snapshot must not match — false
+    // negative would skip capturing a new known-good state.
     #[test]
     fn matches_latest_snapshot_false_when_content_differs() {
         let root = temp_dir("matches-false");
@@ -765,6 +792,8 @@ mod tests {
         assert!(!matches_latest_snapshot(&root, &candidate));
     }
 
+    // Rollback patch must REPLACE records present in snapshot but changed/absent
+    // live, and DELETE records added after snapshot was taken.
     #[test]
     fn build_rollback_patch_replaces_snapshot_entries_and_deletes_extra_current_ones() {
         // Snapshot (target state): a.lan. A 10.0.0.1
@@ -811,6 +840,9 @@ mod tests {
         assert_eq!(patch["rrsets"].as_array().unwrap().len(), 0);
     }
 
+    // Edge case: when zone is emptied after snapshot, rollback must restore all
+    // snapshot rrsets via REPLACE with no spurious DELETEs (nothing extra to
+    // clean).
     #[test]
     fn build_rollback_patch_handles_snapshot_restoring_a_fully_deleted_zone() {
         // Current is empty (everything was deleted since the snapshot);
@@ -827,6 +859,8 @@ mod tests {
         assert_eq!(rrsets[0]["changetype"], "REPLACE");
     }
 
+    // Patch analysis for recursor cache flush must list every (name, type)
+    // touched by REPLACE or DELETE exactly once, no duplicates.
     #[test]
     fn changed_names_deduplicates_and_covers_both_replace_and_delete() {
         let patch = json!({
@@ -841,6 +875,8 @@ mod tests {
         assert_eq!(names, vec!["a.lan.".to_string(), "b.lan.".to_string()]);
     }
 
+    // Snapshot directory structure must nest under .../zones/<zone>, distinct
+    // from existing recursor/ and auth/ siblings under the same parent.
     #[test]
     fn zone_snapshot_root_nests_under_zones_subdirectory() {
         let base = PathBuf::from("/var/lib/lancache-dns/config-snapshots");

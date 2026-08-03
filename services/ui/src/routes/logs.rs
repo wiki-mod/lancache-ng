@@ -8,7 +8,7 @@
 //! the more complete view and the direct-nginx-read path is left untouched
 //! for installs that never opt in.
 
-use crate::{nginx_client, syslog_client, AppState};
+use crate::{AppState, nginx_client, syslog_client};
 use axum::extract::{Query, State};
 use axum::response::Html;
 use serde::Deserialize;

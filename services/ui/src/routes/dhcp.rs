@@ -8,14 +8,31 @@
 //! Docker socket proxy, so DHCP conflict discovery runs through a predeclared
 //! one-shot helper container that can only be started, waited on, and logged.
 
-use crate::{docker_client, kea_snapshots, AppState};
+use crate::{AppState, docker_client, kea_snapshots};
 use anyhow::Context as AnyhowContext;
+// Reservation/normalize_mac/parse_reservation_entry now live in the
+// lancache_ui library crate (see services/ui/src/kea_response_parse.rs) so
+// fuzz/'s cargo-fuzz harness can link parse_reservation_entry directly --
+// this module uses the exact same items, not a redefinition of them.
+use axum::Json;
 use axum::extract::{Form, State};
 use axum::http::HeaderMap;
 use axum::http::StatusCode;
 use axum::response::{Html, IntoResponse, Redirect, Response};
-use axum::Json;
 use bollard::container::LogOutput;
+use lancache_ui::kea_response_parse::{Reservation, normalize_mac, parse_reservation_entry};
+// Native DHCP probe (issue #1288): dhcp-probe's container now runs
+// `lancache-ui --dhcp-probe` (see dhcp_probe_native.rs) instead of the
+// former dhcp-probe.sh's nmap/dhclient invocations, and prints a single
+// JSON-encoded NativeProbeReport line instead of text markers -- these are
+// the exact same types on both sides of that process boundary, so
+// parse_dhcp_probe_report below only ever deserializes, never re-parses
+// free text.
+use lancache_ui::dhcp_probe_native::{
+    ClientOutcome as NativeClientOutcome, ConflictOutcome as NativeConflictOutcome,
+    DHCP_PROBE_RESULT_MARKER, DHCP_PROBE_START_MARKER, LeaseInfo as NativeLeaseInfo,
+    ProbeReport as NativeProbeReport,
+};
 // The DHCP probe path deliberately uses only start/stop/wait/logs operations
 // because Docker exec and generic container creation are banned from the UI's
 // Docker API surface for security reasons.
@@ -25,7 +42,7 @@ use bollard::query_parameters::{
 };
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use std::collections::BTreeMap;
 use std::fs;
 use std::future::Future;
@@ -145,21 +162,22 @@ fn html_escape(s: &str) -> String {
 // frontend can discriminate on one flat "status" string instead of
 // interpreting a nested Rust-shaped enum. Conflict and client are separate
 // enums (not one shared status type) because they come from two independent
-// checks the probe container runs (a network DHCP-conflict scan and a
-// dhclient dry-run) that can disagree with each other.
+// checks (a network DHCP-conflict scan and a client dry-run) that can
+// disagree with each other -- see dhcp_probe_native's module doc comment
+// for why, as of issue #1288, both actually come from a single native
+// broadcast DHCPDISCOVER round rather than two separate tool invocations.
 #[derive(Debug, Serialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpConflictCheckStatus {
     // `output` stays the bare Server Identifier IP for backward compatibility
     // with the existing `data.conflict.output` usage in dhcp.html. `details`
-    // is additive: the extra identifying fields nmap's
-    // broadcast-dhcp-discover script reports for the same offer (Router,
-    // DNS, lease time, ...), so the Admin UI can show an operator the same
-    // "who is this other server" context that was previously only visible
-    // by reading the raw probe container logs. Populated by
-    // extract_dhcp_offer_details; empty (never absent, so the frontend
-    // never has to null-check the field itself) when the full nmap text
-    // had none of the known labels.
+    // is additive: the extra identifying fields the native probe decoded
+    // from the same DHCPOFFER (Router, DNS, lease time, ...), so the Admin
+    // UI can show an operator the same "who is this other server" context
+    // that was previously only visible by reading the raw probe container
+    // logs. Populated by native_lease_details; empty (never absent, so the
+    // frontend never has to null-check the field itself) when the offer had
+    // none of the known fields set.
     Found {
         output: String,
         details: Vec<DhcpProbeDetail>,
@@ -170,7 +188,7 @@ enum DhcpConflictCheckStatus {
     },
 }
 
-// One nmap broadcast-dhcp-discover field (e.g. `label: "Router", value:
+// One DHCPOFFER/DHCPACK field (e.g. `label: "Router", value:
 // "192.168.1.1"`), serialized as-is for the Admin UI's details list. Kept as
 // a plain label/value pair rather than named struct fields per known label,
 // since the set of fields present varies per DHCP server and the frontend
@@ -185,19 +203,15 @@ struct DhcpProbeDetail {
 #[serde(tag = "status", rename_all = "snake_case")]
 enum DhcpClientCheckStatus {
     // `details` is additive, same rationale as DhcpConflictCheckStatus::Found's
-    // own `details` field above: dhclient's own -v transcript (`output`) only
-    // ever shows the DHCPDISCOVER/OFFER/REQUEST/ACK/bound protocol exchange,
-    // never the negotiated lease's actual fields (router, DNS, lease time,
-    // ...) -- those come from a separate source (the dhclient leases file,
-    // see extract_dhcp_lease_details) and are populated here so a SUCCESSFUL
-    // dry-run is as informative as a found-conflict result already is, not
-    // just a bare "it worked". Always present (never absent) so the frontend
-    // never has to null-check the field; empty when the leases file had none
-    // of the known fields. `Failed` intentionally has no `details`: a failed
-    // dry-run never receives a DHCPACK, so dhclient never writes a lease
-    // block at all -- there is no partial lease data to extract in that case
-    // (confirmed against a real failed run), unlike a conflict scan's
-    // `Found`, which always has full DHCPOFFER data available.
+    // own `details` field above: populated from the same DHCPACK the native
+    // probe's REQUEST/ACK exchange received, so a SUCCESSFUL dry-run is as
+    // informative as a found-conflict result already is, not just a bare
+    // "it worked". Always present (never absent) so the frontend never has
+    // to null-check the field; empty when the ACK had none of the known
+    // fields set. `Failed` intentionally has no `details`: a failed dry-run
+    // never receives a DHCPACK at all -- there is no partial lease data to
+    // extract in that case, unlike a conflict scan's `Found`, which always
+    // has full DHCPOFFER data available.
     Passed {
         output: String,
         details: Vec<DhcpProbeDetail>,
@@ -220,7 +234,7 @@ impl DhcpCheckReport {
     // Match arm order IS the priority order, most severe first: a found
     // conflict always wins regardless of the client check's own result
     // (a rogue DHCP server on the LAN matters even if this host's own
-    // dhclient dry-run happened to pass), and either check being
+    // client dry-run happened to pass), and either check being
     // "unavailable" (the probe container itself failed) outranks a merely
     // "failed" client check, since an operator can't trust a failed result
     // they can't distinguish from "never actually ran".
@@ -272,13 +286,8 @@ pub struct Lease {
     pub expires: String,
 }
 
-#[derive(Serialize, Deserialize, Debug, Clone)]
-pub struct Reservation {
-    pub subnet_id: u32,
-    pub ip: String,
-    pub mac: String,
-    pub hostname: String,
-}
+// Reservation is now defined in the lancache_ui library crate (see the
+// `use lancache_ui::kea_response_parse::...` import above).
 
 // ─── Form Structs ───
 //
@@ -432,6 +441,18 @@ pub struct UpdateDhcpProxyForm {
     pub dhcp_proxy_custom_options: String,
 }
 
+// Issue #844: the DHCP-relay-mode settings form. Distinct from
+// UpdateDhcpProxyForm because relay mode has an entirely different, much
+// smaller config surface -- only its own client-facing local address (the
+// giaddr source) and the upstream DHCP server it forwards to. Everything the
+// ProxyDHCP form carries (subnet/DNS/PXE) is meaningless to a relay.
+#[derive(Deserialize)]
+pub struct UpdateDhcpRelayForm {
+    pub csrf_token: String,
+    pub dhcp_relay_local_addr: String,
+    pub upstream_dhcp_ip: String,
+}
+
 #[derive(Deserialize)]
 pub struct RollbackKeaSnapshotForm {
     pub csrf_token: String,
@@ -466,6 +487,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     let dhcp_ntp_servers = state.config.effective_dhcp_ntp_servers();
     let dhcp_proxy_subnet_start = state.config.effective_dhcp_proxy_subnet_start();
     let dhcp_upstream_dhcp_ip = state.config.effective_dhcp_upstream_dhcp_ip();
+    let dhcp_relay_local_addr = state.config.effective_dhcp_relay_local_addr();
     let dhcp_proxy_interface = state.config.effective_dhcp_proxy_interface();
     let dhcp_proxy_router = state.config.effective_dhcp_proxy_router();
     let dhcp_proxy_domain = state.config.effective_dhcp_proxy_domain();
@@ -482,6 +504,7 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert("dhcp_ntp_servers", &dhcp_ntp_servers);
     ctx.insert("dhcp_proxy_subnet_start", &dhcp_proxy_subnet_start);
     ctx.insert("dhcp_upstream_dhcp_ip", &dhcp_upstream_dhcp_ip);
+    ctx.insert("dhcp_relay_local_addr", &dhcp_relay_local_addr);
     ctx.insert("dhcp_proxy_interface", &dhcp_proxy_interface);
     ctx.insert("dhcp_proxy_router", &dhcp_proxy_router);
     ctx.insert("dhcp_proxy_domain", &dhcp_proxy_domain);
@@ -490,6 +513,14 @@ pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert(
         "dhcp_proxy_custom_options_form",
         &dhcp_proxy_custom_options_form,
+    );
+    // Issue #1079: lets dhcp.html warn that the per-subnet NTP field is
+    // currently auto-managed by LanCache-NG-NTP (see
+    // apply_ntp_lan_ip_to_all_subnets), rather than an operator discovering
+    // that only after their manual edit gets silently overwritten.
+    ctx.insert(
+        "ntp_auto_dhcp_active",
+        &(state.config.effective_ntp_enabled() && state.config.effective_ntp_auto_dhcp()),
     );
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 
@@ -570,7 +601,35 @@ fn parse_dhcp_mode_input(value: &str) -> Option<crate::config::DhcpMode> {
         "disabled" => Some(crate::config::DhcpMode::Disabled),
         "kea" => Some(crate::config::DhcpMode::Kea),
         "dnsmasq-proxy" => Some(crate::config::DhcpMode::DnsmasqProxy),
+        "dnsmasq-relay" => Some(crate::config::DhcpMode::DnsmasqRelay),
         _ => None,
+    }
+}
+
+// Turns a start_service failure into a DhcpError, adding actionable
+// create-the-container guidance when the underlying cause is a 404 (see
+// docker_client::is_container_not_created's own comment for why that
+// specific status code means "never created", not "crashed"). Without this,
+// an operator switching to a DHCP mode that was never active before saw only
+// "Failed to start 'dhcp-proxy'" with no indication of what to actually do
+// (issue #1068 item 6) -- the docker-socket-proxy allowlist this module
+// talks through has no create capability, so the Admin UI itself cannot
+// bring the missing container up; the operator (or the host's
+// lancache-converge.timer, once installed) has to run `docker compose up`
+// with the matching profile at least once.
+fn start_service_error(err: anyhow::Error, service_name: &str, profile: &str) -> DhcpError {
+    if docker_client::is_container_not_created(&err) {
+        DhcpError::config_error(format!(
+            "The '{service_name}' container has not been created yet: this Compose stack was \
+             never started with the '{profile}' profile active, so Docker has no container for \
+             the Admin UI to start (it is only allowed to start/stop existing containers, never \
+             create new ones). Fix: in the lancache-ng install directory, run \
+             `docker compose --profile {profile} up -d {service_name}` once to create it, then \
+             switch DHCP mode again here. If a `lancache-converge.timer` is installed, it will \
+             also pick this up automatically within a few minutes after that."
+        ))
+    } else {
+        DhcpError::config_error(format!("{err:#}"))
     }
 }
 
@@ -585,29 +644,110 @@ async fn reconcile_dhcp_mode(
         crate::config::DhcpMode::Disabled => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
         crate::config::DhcpMode::Kea => {
             docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
-        crate::config::DhcpMode::DnsmasqProxy => {
+        // Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in the
+        // same `dhcp-proxy` container -- it renders one config or the other
+        // from the DHCP_MODE it reads out of the persisted UI settings -- so
+        // reconciliation is identical: ensure Kea is stopped and the
+        // dhcp-proxy container is running. The container itself, on (re)start,
+        // reads the new mode and renders the matching config.
+        crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
             docker_client::stop_service_if_present(&state.docker, "dhcp")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp-proxy")
                 .await
-                .map_err(|err| DhcpError::config_error(err.to_string()))?;
+                .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
         }
     }
+
+    // Issue #1079's requirement 4: if LanCache-NG-NTP's "auto-set as DHCP
+    // NTP server" toggle is already on when DHCP switches into Kea mode,
+    // push this container's LAN address into every subnet immediately
+    // instead of waiting for the next unrelated NTP/DHCP settings save.
+    // Best-effort and non-fatal: Kea's control-agent may not have finished
+    // starting yet (start_service above just requested the container start,
+    // it does not wait for readiness), and a transient failure here must
+    // never fail the DHCP mode switch itself.
+    if mode.is_kea()
+        && state.config.effective_ntp_enabled()
+        && state.config.effective_ntp_auto_dhcp()
+        && let Err(err) = apply_ntp_lan_ip_to_all_subnets(state).await
+    {
+        tracing::warn!(
+            error = %err,
+            "failed to push LanCache-NG-NTP's LAN address into Kea subnets after switching to Kea mode; it will be retried on the next NTP/DHCP settings save"
+        );
+    }
+
     Ok(())
+}
+
+// Forces every Kea subnet's ntp-servers option to LanCache-NG-NTP's
+// configured LAN address (state.config.standard_ip) -- issue #1079's
+// requirement 4. Deliberately overrides any per-subnet value an operator
+// set manually via add_subnet/update_subnet for as long as the "auto-set as
+// DHCP NTP server" toggle stays on; see restore_default_ntp_on_all_subnets
+// for the counterpart that hands control back when the toggle turns off.
+// A no-op (Ok(())) when DHCP isn't actually running in reachable Kea mode.
+pub(crate) async fn apply_ntp_lan_ip_to_all_subnets(state: &AppState) -> Result<(), DhcpError> {
+    if !kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
+        return Ok(());
+    }
+    set_ntp_option_on_all_subnets(state, state.config.standard_ip.clone()).await
+}
+
+// Restores every Kea subnet's ntp-servers option to the project-wide
+// configured default (effective_dhcp_ntp_servers(), resolved to IPv4 the
+// same way add_subnet/update_subnet already do) -- called when the "auto-set
+// as DHCP NTP server" toggle turns off, so subnets converge back to one
+// well-known, documented value (AG-OP-014) instead of whatever they
+// individually held before auto-populate took them over. A no-op when DHCP
+// isn't actually running in reachable Kea mode.
+pub(crate) async fn restore_default_ntp_on_all_subnets(state: &AppState) -> Result<(), DhcpError> {
+    if !kea_api_available(
+        state.config.effective_dhcp_mode(),
+        &state.config.dhcp_api_url,
+    ) {
+        return Ok(());
+    }
+    let resolved = resolve_ntp_servers(&state.config.effective_dhcp_ntp_servers())
+        .await
+        .unwrap_or_default();
+    set_ntp_option_on_all_subnets(state, resolved).await
+}
+
+// Shared plumbing for the two reconcile entry points above: rewrites every
+// subnet's ntp-servers option to the same already-resolved value via
+// set_subnet_ntp_option, leaving every other subnet field untouched.
+async fn set_ntp_option_on_all_subnets(
+    state: &AppState,
+    ntp_servers: String,
+) -> Result<(), DhcpError> {
+    kea_config_modify(state, move |config| {
+        let subnets = dhcp4_subnets_mut(config)?;
+        for subnet in subnets.iter_mut() {
+            set_subnet_ntp_option(subnet, &ntp_servers)?;
+        }
+        Ok(())
+    })
+    .await
+    .map_err(|e| DhcpError::config_error(e.to_string()))
 }
 
 // Best-effort pre-flight check that update_dhcp_mode runs BEFORE
@@ -708,6 +848,10 @@ pub(crate) fn persist_stack_settings(
                 state.config.effective_dhcp_upstream_dhcp_ip(),
             ),
             (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
+            (
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
@@ -740,6 +884,239 @@ pub(crate) fn persist_stack_settings(
                 "AUTO_UPDATE_ENABLED",
                 if auto_update_enabled { "1" } else { "0" }.to_string(),
             ),
+            // LanCache-NG-NTP settings: this route never edits these, but
+            // write_ui_settings_file overwrites the whole file each call --
+            // carried through unchanged so a release-channel save never
+            // silently reverts an operator's NTP configuration back to its
+            // env default.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // Issue #1069 part 3: this route never edits a pending cache
+            // resize, but write_ui_settings_file overwrites the whole file
+            // each call -- carried through unchanged so a release-channel
+            // save never silently reverts an operator's requested resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )
+}
+
+// Counterpart to persist_stack_settings for routes/ntp.rs's own settings
+// save (update_ntp_settings): writes the three NTP_* keys plus every current
+// DHCP/release-channel value unchanged, for the same whole-file-overwrite
+// reason documented on write_ui_settings_file. `pub(crate)` so routes/ntp.rs
+// can call it without duplicating this file's ownership of the settings
+// file's write contract.
+pub(crate) fn persist_ntp_settings(
+    state: &AppState,
+    ntp_enabled: bool,
+    ntp_upstream_servers: &str,
+    ntp_auto_dhcp: bool,
+) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_ENABLED",
+                if ntp_enabled { "1" } else { "0" }.to_string(),
+            ),
+            ("NTP_UPSTREAM_SERVERS", ntp_upstream_servers.to_string()),
+            (
+                "NTP_AUTO_DHCP",
+                if ntp_auto_dhcp { "1" } else { "0" }.to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // persist_stack_settings's own CACHE_MAX_GB line -- this route
+            // never edits a pending cache resize either.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )
+}
+
+// Cache resize (issue #1069 part 3): counterpart to persist_stack_settings/
+// persist_ntp_settings for routes/cache.rs's own settings save
+// (resize_cache). Writes the requested CACHE_MAX_GB plus every current
+// DHCP/release-channel/NTP value unchanged, for the same whole-file-
+// overwrite reason documented on write_ui_settings_file. `pub(crate)` so
+// routes/cache.rs can call it without duplicating this file's ownership of
+// the settings file's write contract. Callers are expected to have already
+// validated `cache_gb` (a positive whole number of GiB that leaves the
+// required safety buffer on the real cache disk) before calling this --
+// this function only persists, it does not re-validate.
+pub(crate) fn persist_cache_settings(state: &AppState, cache_gb: u64) -> Result<(), DhcpError> {
+    write_ui_settings_file(
+        Path::new(&state.config.ui_settings_file),
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            (
+                "UPSTREAM_DHCP_IP",
+                state.config.effective_dhcp_upstream_dhcp_ip(),
+            ),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            ("CACHE_MAX_GB", cache_gb.to_string()),
         ],
     )
 }
@@ -769,6 +1146,9 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         "DHCP_DNS_PRIMARY",
         "DHCP_DNS_SECONDARY",
         "UPSTREAM_DHCP_IP",
+        // Issue #844: DHCP-relay-mode local address. Same whitelist rule as
+        // the keys around it -- must be listed here or persist silently drops it.
+        "DHCP_RELAY_LOCAL_ADDR",
         "DHCP_NTP_SERVERS",
         // Issue #450's optional relay/PXE fields -- this key list is the
         // authoritative whitelist of what this file can ever contain, so a
@@ -787,6 +1167,22 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
         // function's doc comment for the full read path.
         "LANCACHE_IMAGE_CHANNEL",
         "AUTO_UPDATE_ENABLED",
+        // LanCache-NG-NTP settings, written by routes/ntp.rs's
+        // update_ntp_settings (via persist_ntp_settings below). Same
+        // whole-file-overwrite contract: every other save site in this file
+        // must keep carrying these three keys through unchanged, or an
+        // unrelated DHCP/release-channel save would silently reset them to
+        // their env defaults.
+        "NTP_ENABLED",
+        "NTP_UPSTREAM_SERVERS",
+        "NTP_AUTO_DHCP",
+        // Cache resize (issue #1069 part 3), written by routes/cache.rs's
+        // resize_cache (via persist_cache_settings below). Same
+        // whole-file-overwrite contract: every other save site in this file
+        // must keep carrying this key through unchanged, or an unrelated
+        // DHCP/release-channel/NTP save would silently drop a pending
+        // resize back to the container's raw startup CACHE_MAX_GB.
+        "CACHE_MAX_GB",
     ] {
         if let Some(value) = map.get(key) {
             content.push_str(key);
@@ -883,6 +1279,10 @@ pub async fn update_dhcp_mode(
                 state.config.effective_dhcp_upstream_dhcp_ip(),
             ),
             (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
+            (
                 "DHCP_NTP_SERVERS",
                 state.config.effective_dhcp_ntp_servers(),
             ),
@@ -933,6 +1333,38 @@ pub async fn update_dhcp_mode(
                 }
                 .to_string(),
             ),
+            // LanCache-NG-NTP settings: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED above -- this route
+            // never edits these either.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/NTP_* above -- this route never edits a
+            // pending cache resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
         ],
     );
 
@@ -941,19 +1373,19 @@ pub async fn update_dhcp_mode(
         // they're already on; reconcile_dhcp_mode is then a no-op repeat of
         // the current state, so there is nothing to roll back to and doing
         // so would just repeat the exact same persist failure.
-        if mode != previous_mode {
-            if let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await {
-                return Err(DhcpError::config_error(format!(
-                    "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
-                     back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
-                     are now running in '{}' mode but the UI may still report '{}' until this is \
-                     resolved manually.",
-                    mode.as_str(),
-                    previous_mode.as_str(),
-                    mode.as_str(),
-                    previous_mode.as_str()
-                )));
-            }
+        if mode != previous_mode
+            && let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await
+        {
+            return Err(DhcpError::config_error(format!(
+                "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
+                 back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
+                 are now running in '{}' mode but the UI may still report '{}' until this is \
+                 resolved manually.",
+                mode.as_str(),
+                previous_mode.as_str(),
+                mode.as_str(),
+                previous_mode.as_str()
+            )));
         }
         return Err(persist_err);
     }
@@ -1077,6 +1509,14 @@ pub async fn update_dhcp_proxy(
             ("DHCP_DNS_PRIMARY", form.dhcp_dns_primary),
             ("DHCP_DNS_SECONDARY", form.dhcp_dns_secondary),
             ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            // #844: this ProxyDHCP-settings route never edits the relay local
+            // address, but persist rewrites the whole file, so carry the
+            // current value through unchanged (via effective_*, not the form)
+            // rather than blanking it when an operator saves proxy settings.
+            (
+                "DHCP_RELAY_LOCAL_ADDR",
+                state.config.effective_dhcp_relay_local_addr(),
+            ),
             ("DHCP_NTP_SERVERS", form.dhcp_ntp_servers.trim().to_string()),
             (
                 "DHCP_PROXY_INTERFACE",
@@ -1114,6 +1554,133 @@ pub async fn update_dhcp_proxy(
                 }
                 .to_string(),
             ),
+            // LanCache-NG-NTP settings: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/AUTO_UPDATE_ENABLED above -- this route
+            // never edits these either.
+            (
+                "NTP_ENABLED",
+                if state.config.effective_ntp_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            (
+                "NTP_UPSTREAM_SERVERS",
+                state.config.effective_ntp_upstream_servers(),
+            ),
+            (
+                "NTP_AUTO_DHCP",
+                if state.config.effective_ntp_auto_dhcp() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
+            // Issue #1069 part 3: same carry-through reasoning as
+            // LANCACHE_IMAGE_CHANNEL/NTP_* above -- this route never edits a
+            // pending cache resize.
+            (
+                "CACHE_MAX_GB",
+                format!("{:.0}", state.config.effective_cache_max_gb()),
+            ),
+        ],
+    )?;
+    Ok(Redirect::to("/dhcp"))
+}
+
+// Saves the DHCP-relay-mode settings (issue #844). Mirrors update_dhcp_proxy's
+// persist-only contract (no container mutation here; the dhcp-proxy container
+// re-renders from the persisted DHCP_MODE/relay settings on its next start),
+// but with relay's own two required, IPv4-validated fields. Every ProxyDHCP
+// setting is carried through unchanged via effective_* so switching between
+// the two dnsmasq modes never silently discards the other mode's config.
+pub async fn update_dhcp_relay(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<UpdateDhcpRelayForm>,
+) -> Result<Redirect, DhcpError> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    if parse_ipv4(&form.dhcp_relay_local_addr).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Relay local address must be a valid IPv4 address (this relay's own IP on the client network).",
+        ));
+    }
+    if parse_ipv4(&form.upstream_dhcp_ip).is_none() {
+        return Err(DhcpError::new(
+            StatusCode::BAD_REQUEST,
+            "Upstream DHCP server must be a valid IPv4 address.",
+        ));
+    }
+
+    persist_ui_settings(
+        &state,
+        &[
+            (
+                "DHCP_MODE",
+                state.config.effective_dhcp_mode().as_str().to_string(),
+            ),
+            // ProxyDHCP settings carried through unchanged (relay ignores them,
+            // but a later switch back to ProxyDHCP mode must not lose them).
+            (
+                "DHCP_SUBNET_START",
+                state.config.effective_dhcp_proxy_subnet_start(),
+            ),
+            (
+                "DHCP_DNS_PRIMARY",
+                state.config.effective_dhcp_dns_primary(),
+            ),
+            (
+                "DHCP_DNS_SECONDARY",
+                state.config.effective_dhcp_dns_secondary(),
+            ),
+            // The two values this form actually edits.
+            ("UPSTREAM_DHCP_IP", form.upstream_dhcp_ip),
+            ("DHCP_RELAY_LOCAL_ADDR", form.dhcp_relay_local_addr),
+            (
+                "DHCP_NTP_SERVERS",
+                state.config.effective_dhcp_ntp_servers(),
+            ),
+            (
+                "DHCP_PROXY_INTERFACE",
+                state.config.effective_dhcp_proxy_interface(),
+            ),
+            (
+                "DHCP_PROXY_ROUTER",
+                state.config.effective_dhcp_proxy_router(),
+            ),
+            (
+                "DHCP_PROXY_DOMAIN",
+                state.config.effective_dhcp_proxy_domain(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_FILENAME",
+                state.config.effective_dhcp_proxy_boot_filename(),
+            ),
+            (
+                "DHCP_PROXY_BOOT_SERVER",
+                state.config.effective_dhcp_proxy_boot_server(),
+            ),
+            (
+                "DHCP_PROXY_CUSTOM_OPTIONS",
+                state.config.effective_dhcp_proxy_custom_options(),
+            ),
+            (
+                "LANCACHE_IMAGE_CHANNEL",
+                state.config.effective_lancache_image_channel_override(),
+            ),
+            (
+                "AUTO_UPDATE_ENABLED",
+                if state.config.effective_auto_update_enabled() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .to_string(),
+            ),
         ],
     )?;
     Ok(Redirect::to("/dhcp"))
@@ -1136,8 +1703,10 @@ fn is_valid_interface_name(raw: &str) -> bool {
 
 // Checks the whole dotted name against DNS's own length rules (each label
 // max 63 bytes, the full name max 253) before checking each label's
-// characters via is_valid_dns_label below.
-fn is_valid_domain_name(raw: &str) -> bool {
+// characters via is_valid_dns_label below. `pub(crate)`: routes/ntp.rs
+// reuses this to validate NTP_UPSTREAM_SERVERS hostname entries rather than
+// duplicating DNS label-syntax validation.
+pub(crate) fn is_valid_domain_name(raw: &str) -> bool {
     let name = raw.trim();
     !name.is_empty()
         && name.len() <= 253
@@ -1725,10 +2294,10 @@ async fn fetch_lease_hostname(state: &AppState, ip: &str) -> Option<String> {
 async fn cleanup_lease_ddns_records(state: &AppState, ip: &str, hostname: Option<&str>) {
     // Forward A record: keyed by Kea's own FQDN for the lease. Skipped when the
     // lease had no hostname (nothing was ever registered forward).
-    if let Some(hostname) = hostname {
-        if let Some((zone, name)) = forward_record_zone_and_name(hostname) {
-            publish_dns_record_delete(state, &zone, &name, "A").await;
-        }
+    if let Some(hostname) = hostname
+        && let Some((zone, name)) = forward_record_zone_and_name(hostname)
+    {
+        publish_dns_record_delete(state, &zone, &name, "A").await;
     }
     // Reverse PTR record: name + zone derive purely from the IPv4, so this runs
     // even when the lease carried no hostname.
@@ -2407,35 +2976,28 @@ async fn check_dhcp_probe(state: &AppState) -> DhcpCheckReport {
     parse_dhcp_probe_report(&output)
 }
 
-// Strips nmap's own output decoration (`|` and `|_` prefixes nmap uses for
-// script-result lines) so parse_conflict_probe_result's plain-text fallback
-// scan (see below) can match "Server Identifier:" regardless of which
-// nmap output line style produced it.
-fn normalize_nmap_line(line: &str) -> &str {
-    line.trim_start_matches(|ch: char| ch == '|' || ch == '_' || ch.is_whitespace())
-        .trim_end()
-}
-
 const DHCP_PROBE_SERVICE: &str = "dhcp-probe";
-const DHCP_PROBE_START_MARKER: &str = "__LANCACHE_DHCP_PROBE_START__";
-const DHCP_CONFLICT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CONFLICT_RESULT__";
-const DHCP_CLIENT_RESULT_MARKER: &str = "__LANCACHE_DHCP_CLIENT_RESULT__";
 
 // Bounded ceiling for a single dhcp-probe container wait (issue #1136: the
 // previous code awaited Docker's wait_container with no timeout at all, so
-// any future hang inside the probe script -- a stuck nmap scan, a dhclient
-// behavior change, an unrelated container-runtime hiccup -- would block the
-// Admin UI's /api/dhcp/check handler forever). Chosen against the actual
-// worst case the probe script (services/ui/dhcp-probe.sh) can legitimately
-// take today: nmap's own `broadcast-dhcp-discover.timeout=5` (5s) plus
-// dhclient's `-1` built-in no-offer timeout (60s -- dhclient.conf(5)'s
-// documented default when no explicit `timeout` statement is configured,
-// and this probe script sets none) gives ~65s for a clean run that simply
-// finds no DHCP server at all. 100s leaves a comfortable ~35s margin over
-// that for container start/log-flush overhead, while still resolving in
-// well under the "minutes" of masking the issue's follow-up comment warned
-// against, and sits inside the 90-120s range the issue itself suggested.
-const DHCP_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(100);
+// any future hang inside the probe would block the Admin UI's
+// /api/dhcp/check handler forever).
+//
+// Recomputed for the native probe (issue #1288, superseding this comment's
+// former nmap/dhclient-based math): dhcp_probe_native's own worst-case run
+// time is DISCOVER_WINDOW (5s, always waited out in full) plus
+// REQUEST_TIMEOUT (3s, only reached when at least one DHCPOFFER arrived) --
+// about 8s total, versus the former dhcp-probe.sh's ~65s worst case (nmap's
+// 5s scan plus dhclient's separate up-to-60s no-offer timeout). 30s leaves
+// a still-comfortable ~22s margin over that new 8s worst case for container
+// start/log-flush overhead -- proportionally similar headroom to the
+// previous 100s/65s ratio, just rescaled to the native probe's much faster
+// real run time. STATUS: as of 2026-07-31, this margin has not yet been
+// re-confirmed against a real container start/stop cycle on production
+// hardware (issue #1288's own scope explicitly defers real on-LAN
+// validation) -- revisit if real-world container start overhead turns out
+// to eat into it more than expected.
+const DHCP_PROBE_WAIT_TIMEOUT: Duration = Duration::from_secs(30);
 
 // Trailing byte budget for the log tail captured at timeout time (see
 // ProbeError::TimedOut / wait_for_probe_container below) -- long enough to
@@ -2569,8 +3131,8 @@ where
 }
 
 // Restarts the predeclared dhcp-probe container fresh and runs it to
-// completion (an nmap DHCP-conflict scan plus a dhclient dry-run, see
-// services/dhcp-probe), then returns only the log output from this run.
+// completion (a native broadcast DHCP conflict scan plus a client dry-run,
+// see dhcp_probe_native.rs), then returns only the log output from this run.
 // Two layers keep an old run's output from leaking into a new result:
 // `started_since` (captured right after stopping the container) is passed
 // to Docker's own log API as a `since` filter, and current_probe_output
@@ -2625,304 +3187,152 @@ async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, ProbeError> 
     Ok(output)
 }
 
+// Deserializes the native probe's JSON result line (see dhcp_probe_native's
+// own module doc comment for the full wire contract) and maps it onto this
+// module's existing Admin-UI-facing shapes -- dhcp.html's rendering and the
+// /api/dhcp/check JSON contract are both unchanged by this issue #1288
+// rewrite, only how the container's raw log text gets turned into
+// DhcpCheckReport changed (a direct serde deserialize now, not text-marker
+// scraping).
 fn parse_dhcp_probe_report(output: &str) -> DhcpCheckReport {
-    DhcpCheckReport {
-        conflict: parse_conflict_probe_result(output),
-        client: parse_client_probe_result(output),
-    }
-}
-
-// Prefers the probe script's own explicit `__LANCACHE_DHCP_CONFLICT_RESULT__`
-// marker line (see parse_probe_result_line) when present, since that's an
-// unambiguous status the probe script itself computed (services/ui/dhcp-probe.sh
-// always emits it). The raw nmap-output scan below it is a defensive
-// fallback for output that doesn't include that marker line at all.
-fn parse_conflict_probe_result(output: &str) -> DhcpConflictCheckStatus {
-    if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CONFLICT_RESULT_MARKER) {
-        return match status {
-            // `output` (the full multi-line container log, not `detail`,
-            // which is only the marker line's single-word IP) is scanned
-            // again here for the richer field list -- it still holds the
-            // raw `cat "$nmap_out"` text services/ui/dhcp-probe.sh printed
-            // before its own marker line (see current_probe_output, which
-            // preserves everything after the run's start marker).
-            "found" if !detail.is_empty() => DhcpConflictCheckStatus::Found {
-                output: detail.to_string(),
-                details: extract_dhcp_offer_details(output),
+    // Scans in reverse (last matching line wins), same reasoning the former
+    // marker-text parser used: a stale previous run's result line surviving
+    // Docker's own second-granularity `since` log filter must never shadow
+    // this run's real, final result line.
+    let Some(json) = output.lines().rev().find_map(|line| {
+        line.trim()
+            .strip_prefix(DHCP_PROBE_RESULT_MARKER)
+            .map(str::trim)
+    }) else {
+        let reason = "dhcp-probe produced no JSON result line".to_string();
+        return DhcpCheckReport {
+            conflict: DhcpConflictCheckStatus::Unavailable {
+                reason: reason.clone(),
             },
-            "not_found" => DhcpConflictCheckStatus::NotFound,
-            "unavailable" => DhcpConflictCheckStatus::Unavailable {
-                reason: if detail.is_empty() {
-                    "nmap did not return a summary".to_string()
-                } else {
-                    detail.to_string()
-                },
-            },
-            _ => DhcpConflictCheckStatus::Unavailable {
-                reason: format!("unexpected conflict summary: {} {}", status, detail),
-            },
+            client: DhcpClientCheckStatus::Unavailable { reason },
         };
-    }
+    };
 
-    for line in output.lines() {
-        let line = normalize_nmap_line(line);
-        if let Some(rest) = line.strip_prefix("Server Identifier:") {
-            let ip = rest.trim().to_string();
-            if !ip.is_empty() {
-                return DhcpConflictCheckStatus::Found {
-                    output: ip,
-                    details: extract_dhcp_offer_details(output),
-                };
+    match serde_json::from_str::<NativeProbeReport>(json) {
+        Ok(report) => DhcpCheckReport {
+            conflict: map_native_conflict(report.conflict),
+            client: map_native_client(report.client),
+        },
+        Err(e) => {
+            let reason = format!("malformed dhcp-probe result: {e}");
+            DhcpCheckReport {
+                conflict: DhcpConflictCheckStatus::Unavailable {
+                    reason: reason.clone(),
+                },
+                client: DhcpClientCheckStatus::Unavailable { reason },
             }
         }
     }
-
-    DhcpConflictCheckStatus::NotFound
 }
 
-// Known field labels nmap's broadcast-dhcp-discover script prints for a
-// DHCPOFFER response, in the order the Admin UI should list them (not the
-// order they happen to appear on the wire, which nmap does not guarantee is
-// stable) -- see extract_dhcp_offer_details.
-const DHCP_OFFER_DETAIL_LABELS: &[&str] = &[
-    "Server Identifier",
-    "IP Offered",
-    "DHCP Message Type",
-    "IP Address Lease Time",
-    "Renewal Time Value",
-    "Rebinding Time Value",
-    "Subnet Mask",
-    "Router",
-    "Domain Name Server",
-    "Domain Name",
-    "Broadcast Address",
-    "TFTP Server Name",
-    "Vendor Class Identifier",
-];
-
-// Pulls the known identifying fields (see DHCP_OFFER_DETAIL_LABELS) nmap's
-// broadcast-dhcp-discover script reports for a DHCPOFFER out of the probe
-// container's full log text, so the Admin UI can show an operator more than
-// just the bare Server Identifier IP already in DhcpConflictCheckStatus::
-// Found's `output` field. Only the first response block is scanned:
-// nmap prints one "Response N of M:" block per answering DHCP server when
-// more than one replies, and mixing fields from a second, different server
-// into one details list would misattribute e.g. its Router to the first
-// server's Subnet Mask. Output that never has a "Response" line at all (the
-// overwhelmingly common single-rogue-server case) has no such boundary and
-// is scanned in full. First occurrence of each label wins, same as
-// server_identifier's "take the first match" rule elsewhere in this file.
-fn extract_dhcp_offer_details(output: &str) -> Vec<DhcpProbeDetail> {
-    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
-    let mut response_blocks_seen = 0u32;
-
-    for line in output.lines() {
-        let line = normalize_nmap_line(line);
-
-        if let Some(rest) = line.strip_prefix("Response ") {
-            if rest.contains(" of ") {
-                response_blocks_seen += 1;
-                if response_blocks_seen > 1 {
-                    break;
-                }
-                continue;
-            }
-        }
-
-        // `.iter().copied()` (not a bare `for label in DHCP_OFFER_DETAIL_LABELS`)
-        // deliberately keeps `label` a single `&str` rather than `&&str` --
-        // `str::strip_prefix` below needs a `Pattern`, which `&str` (but not
-        // `&&str`) implements, and using the same single-reference type for
-        // both the BTreeMap key and the Pattern argument avoids relying on
-        // implicit deref coercion at either call site.
-        for label in DHCP_OFFER_DETAIL_LABELS.iter().copied() {
-            if found.contains_key(label) {
-                continue;
-            }
-            if let Some(value) = line
-                .strip_prefix(label)
-                .and_then(|rest| rest.strip_prefix(':'))
-            {
-                let value = value.trim();
-                if !value.is_empty() {
-                    found.insert(label, value.to_string());
-                }
-                break;
-            }
-        }
-    }
-
-    DHCP_OFFER_DETAIL_LABELS
-        .iter()
-        .copied()
-        .filter_map(|label| {
-            found.get(label).map(|value| DhcpProbeDetail {
+// Field labels for a rogue/conflicting server's DHCPOFFER, in the order the
+// Admin UI should list them -- the native-probe successor to the former
+// nmap-output-derived DHCP_OFFER_DETAIL_LABELS table. Kept as a fixed
+// display-order list (like that table was) even though the values now come
+// from real struct fields, not text scanning, since dhcp.html's rendering
+// contract (an ordered label/value list) is unchanged.
+fn native_lease_details(lease: &NativeLeaseInfo) -> Vec<DhcpProbeDetail> {
+    let mut details = Vec::new();
+    let mut push = |label: &str, value: Option<String>| {
+        if let Some(value) = value.filter(|v| !v.is_empty()) {
+            details.push(DhcpProbeDetail {
                 label: label.to_string(),
-                value: value.clone(),
-            })
-        })
-        .collect()
+                value,
+            });
+        }
+    };
+
+    push(
+        "Server Identifier",
+        lease.server_identifier.map(|ip| ip.to_string()),
+    );
+    push("IP Offered", lease.offered_ip.map(|ip| ip.to_string()));
+    push(
+        "IP Address Lease Time (seconds)",
+        lease.lease_time_secs.map(|v| v.to_string()),
+    );
+    push(
+        "Renewal Time (seconds)",
+        lease.renewal_time_secs.map(|v| v.to_string()),
+    );
+    push(
+        "Rebinding Time (seconds)",
+        lease.rebinding_time_secs.map(|v| v.to_string()),
+    );
+    push("Subnet Mask", lease.subnet_mask.map(|ip| ip.to_string()));
+    push("Router", lease.router.map(|ip| ip.to_string()));
+    if !lease.dns_servers.is_empty() {
+        push(
+            "Domain Name Server",
+            Some(
+                lease
+                    .dns_servers
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ),
+        );
+    }
+    push("Domain Name", lease.domain_name.clone());
+    push(
+        "Broadcast Address",
+        lease.broadcast_address.map(|ip| ip.to_string()),
+    );
+
+    details
 }
 
-// Known fields dhclient's own leases file (`-lf`, ISC "lease { ... }" syntax)
-// records for a successfully bound lease, mapped to the human-readable label
-// the Admin UI should show -- in display order (see extract_dhcp_lease_details).
-// A dedicated table, not a reuse of DHCP_OFFER_DETAIL_LABELS: confirmed live
-// (a real dhclient run, see dhcp-probe.sh's own comment on the dhclient
-// invocation) that dhclient's stdout transcript never prints a "Label: value"
-// breakdown at all -- only protocol-exchange lines -- and the leases file's
-// own syntax uses ISC's internal option names (`routers`, `dhcp-lease-time`,
-// ...), not nmap's human-readable ones, with some units differing too (e.g.
-// `dhcp-lease-time` is a bare integer of seconds, unlike nmap's own
-// duration-formatted "1h00m00s" for the equivalent field) -- so reusing
-// DHCP_OFFER_DETAIL_LABELS's labels here would misleadingly imply identical
-// formatting. The first element of each pair is the exact leases-file field
-// name this label maps to (see extract_dhcp_lease_details for how bare vs
-// `option`-prefixed keys are both normalized to this same key space).
-const DHCP_LEASE_DETAIL_LABELS: &[(&str, &str)] = &[
-    ("fixed-address", "Assigned IP Address"),
-    ("dhcp-server-identifier", "Server Identifier"),
-    ("subnet-mask", "Subnet Mask"),
-    ("routers", "Router"),
-    ("domain-name-servers", "Domain Name Server"),
-    ("domain-name", "Domain Name"),
-    ("broadcast-address", "Broadcast Address"),
-    ("dhcp-lease-time", "Lease Time (seconds)"),
-    ("dhcp-renewal-time", "Renewal Time (seconds)"),
-    ("dhcp-rebinding-time", "Rebinding Time (seconds)"),
-    ("ntp-servers", "NTP Servers"),
-    ("host-name", "Host Name"),
-    ("netbios-name-servers", "NetBIOS Name Server"),
-];
-
-// Pulls the known lease fields (see DHCP_LEASE_DETAIL_LABELS) out of the
-// dhclient leases file text dhcp-probe.sh now cat's alongside a successful
-// client dry-run's own stdout transcript (see its comment on the dhclient
-// invocation). Only the LAST "lease { ... }" block is kept -- the opposite
-// direction from extract_dhcp_offer_details's "first response block wins":
-// a renewed/rebound lease appends a new block after the original rather than
-// replacing it in place, so the most recent block is the one that reflects
-// the lease dhclient is actually holding now. `found` is cleared every time
-// a new "lease {" line is seen for exactly this reason: by the time every
-// line has been scanned, only the final block's fields remain in it.
-fn extract_dhcp_lease_details(output: &str) -> Vec<DhcpProbeDetail> {
-    let mut found: BTreeMap<&'static str, String> = BTreeMap::new();
-
-    for line in output.lines() {
-        let line = line.trim().trim_end_matches(';');
-
-        if line == "lease {" {
-            found.clear();
-            continue;
+// Maps dhcp_probe_native's ConflictOutcome onto the existing
+// DhcpConflictCheckStatus the Admin UI template renders. When more than one
+// server answered (real rogue-conflict case), the first offer's identifier
+// stays in `output` for backward compatibility with dhcp.html's existing
+// `data.conflict.output` usage, and every offer's fields are folded into a
+// single `details` list -- multiple full offers would need a richer
+// per-server UI this issue does not add; see the PR description's
+// documented scope boundary.
+fn map_native_conflict(outcome: NativeConflictOutcome) -> DhcpConflictCheckStatus {
+    match outcome {
+        NativeConflictOutcome::Found { offers } => {
+            let output = offers
+                .first()
+                .and_then(|o| o.server_identifier)
+                .map(|ip| ip.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            let details = offers.iter().flat_map(native_lease_details).collect();
+            DhcpConflictCheckStatus::Found { output, details }
         }
-
-        // Distinguishes `option <name> <value>` lines from the leases
-        // file's own bare keyword lines (`fixed-address ...`, `renew ...`)
-        // -- both end up compared against the same DHCP_LEASE_DETAIL_LABELS
-        // key space below, since dhclient's option names never collide with
-        // its bare structural keywords.
-        let rest = line.strip_prefix("option ").unwrap_or(line);
-        let Some((key, value)) = rest.split_once(char::is_whitespace) else {
-            continue;
-        };
-
-        // Look up the label FIRST, then check/insert keyed by that
-        // `&'static str` label -- not by `key` itself, which only borrows
-        // from `output` and would be the wrong (and, for an unknown key,
-        // entirely absent) thing to key `found` by. This also gives "first
-        // occurrence within the current block wins", same rule as
-        // extract_dhcp_offer_details.
-        let Some((_, label)) = DHCP_LEASE_DETAIL_LABELS
-            .iter()
-            .copied()
-            .find(|&(known_key, _)| known_key == key)
-        else {
-            continue;
-        };
-        if found.contains_key(label) {
-            continue;
+        NativeConflictOutcome::NotFound => DhcpConflictCheckStatus::NotFound,
+        NativeConflictOutcome::Unavailable { reason } => {
+            DhcpConflictCheckStatus::Unavailable { reason }
         }
-        // Only a curated subset of fields (see DHCP_LEASE_DETAIL_LABELS) are
-        // ever bare-quoted single strings (`domain-name`, `host-name`) --
-        // deliberately not e.g. `domain-search`, whose value is itself a
-        // comma-separated list of quoted strings that this simple
-        // outer-quote strip would mangle. Since none of the curated fields
-        // have that shape, stripping one matching outer quote pair here is
-        // safe and just tidies up the Admin UI's rendered value.
-        let value = value.trim();
-        let value = value
-            .strip_prefix('"')
-            .and_then(|v| v.strip_suffix('"'))
-            .unwrap_or(value);
-        if !value.is_empty() {
-            found.insert(label, value.to_string());
-        }
-    }
-
-    DHCP_LEASE_DETAIL_LABELS
-        .iter()
-        .copied()
-        .filter_map(|(_, label)| {
-            found.get(label).map(|value| DhcpProbeDetail {
-                label: label.to_string(),
-                value: value.clone(),
-            })
-        })
-        .collect()
-}
-
-// Same marker-line-first strategy as parse_conflict_probe_result, but for
-// the dhclient dry-run's own result marker. Unlike that function, there is
-// no plain-text fallback scan here -- if the marker line is absent, this
-// falls straight through to "dhclient summary missing" below.
-fn parse_client_probe_result(output: &str) -> DhcpClientCheckStatus {
-    if let Some((status, detail)) = parse_probe_result_line(output, DHCP_CLIENT_RESULT_MARKER) {
-        return match status {
-            "passed" => DhcpClientCheckStatus::Passed {
-                output: if detail.is_empty() {
-                    "dhclient dry-run succeeded".to_string()
-                } else {
-                    detail.to_string()
-                },
-                details: extract_dhcp_lease_details(output),
-            },
-            "failed" => DhcpClientCheckStatus::Failed {
-                output: if detail.is_empty() {
-                    "dhclient dry-run failed".to_string()
-                } else {
-                    detail.to_string()
-                },
-            },
-            "unavailable" => DhcpClientCheckStatus::Unavailable {
-                reason: if detail.is_empty() {
-                    "dhclient dry-run unavailable".to_string()
-                } else {
-                    detail.to_string()
-                },
-            },
-            _ => DhcpClientCheckStatus::Unavailable {
-                reason: format!("unexpected client summary: {} {}", status, detail),
-            },
-        };
-    }
-
-    DhcpClientCheckStatus::Unavailable {
-        reason: "dhclient summary missing".to_string(),
     }
 }
 
-// Scans lines in reverse (last line matching the marker wins) so a marker
-// that happens to appear earlier in unrelated log noise (e.g. echoed from a
-// previous probe run's leftover buffer) never shadows this run's real,
-// final result line.
-fn parse_probe_result_line<'a>(output: &'a str, marker: &str) -> Option<(&'a str, &'a str)> {
-    output.lines().rev().find_map(|line| {
-        let line = line.trim();
-        let rest = line.strip_prefix(marker)?;
-        let rest = rest.trim_start();
-        let (status, detail) = rest.split_once(' ').unwrap_or((rest, ""));
-        Some((status.trim(), detail.trim()))
-    })
+// Maps dhcp_probe_native's ClientOutcome onto the existing
+// DhcpClientCheckStatus the Admin UI template renders.
+fn map_native_client(outcome: NativeClientOutcome) -> DhcpClientCheckStatus {
+    match outcome {
+        NativeClientOutcome::Passed { lease } => {
+            let output = match lease.offered_ip {
+                Some(ip) => format!("DHCP client dry-run succeeded, assigned {ip}"),
+                None => "DHCP client dry-run succeeded".to_string(),
+            };
+            DhcpClientCheckStatus::Passed {
+                output,
+                details: native_lease_details(&lease),
+            }
+        }
+        NativeClientOutcome::Failed { reason } => DhcpClientCheckStatus::Failed { output: reason },
+        NativeClientOutcome::Unavailable { reason } => {
+            DhcpClientCheckStatus::Unavailable { reason }
+        }
+    }
 }
 
 // Reads every stdout/stderr log chunk emitted since `since` and concatenates
@@ -3008,29 +3418,8 @@ async fn stop_container_if_running(
 
 // ─── Validators ───
 
-fn normalize_mac(mac: &str) -> String {
-    // Accept common operator input styles (`aa:bb`, `aa-bb`, `aabb`) by keeping
-    // only hex digits, then rebuild the canonical colon-separated form used by
-    // Kea reservations. Validation remains separate below, so this helper does
-    // not silently accept malformed lengths.
-    let hex: String = mac
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_hexdigit())
-        .collect();
-
-    // Reinsert a colon before every byte boundary after the first byte.
-    hex.chars()
-        .enumerate()
-        .flat_map(|(i, c)| {
-            if i > 0 && i % 2 == 0 {
-                vec![':', c]
-            } else {
-                vec![c]
-            }
-        })
-        .collect()
-}
+// normalize_mac is now defined in the lancache_ui library crate (see the
+// `use lancache_ui::kea_response_parse::...` import near the top of this file).
 
 fn is_valid_ip(ip: &str) -> bool {
     parse_ipv4(ip).is_some()
@@ -3117,7 +3506,9 @@ fn validate_dhcp_form(input: DhcpFormValidation<'_>) -> Result<u32, StatusCode> 
     Ok(lease_time)
 }
 
-fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
+// `pub(crate)`: routes/ntp.rs reuses this to validate NTP_UPSTREAM_SERVERS
+// IPv4-literal entries rather than duplicating the same parse.
+pub(crate) fn parse_ipv4(ip: &str) -> Option<Ipv4Addr> {
     Ipv4Addr::from_str(ip).ok()
 }
 
@@ -3672,6 +4063,33 @@ fn parse_ntp_server_list(raw: &str) -> Vec<String> {
     split_option_list(raw)
 }
 
+// Rewrites ONLY a subnet's ntp-servers option-data entry in place, leaving
+// every other option (routers, DNS, domain, custom options, reservations)
+// untouched. Used by reconcile_ntp_dhcp_option (issue #1079's requirement 4)
+// instead of apply_subnet_value/build_subnet_options: those two rebuild a
+// subnet's ENTIRE option-data array from an add_subnet/update_subnet form
+// submission, which this reconcile pass never has -- it only ever knows the
+// one NTP value it needs to push (or restore), not the subnet's current
+// gateway/DNS/domain, so reusing them would silently blank those out.
+fn set_subnet_ntp_option(subnet: &mut Value, ntp_servers: &str) -> Result<(), &'static str> {
+    let options = subnet
+        .get_mut("option-data")
+        .and_then(|value| value.as_array_mut())
+        .ok_or("subnet option-data missing or not an array")?;
+
+    options.retain(|option| {
+        !is_dhcp4_option_space(option)
+            || !(option.get("name").and_then(|value| value.as_str()) == Some("ntp-servers")
+                || option.get("code").and_then(|value| value.as_u64()) == Some(42))
+    });
+
+    if let Some(data) = format_ntp_server_option(ntp_servers) {
+        options.push(json!({"name": "ntp-servers", "data": data}));
+    }
+
+    Ok(())
+}
+
 // One entry of a parsed NTP server list, split into the three shapes
 // resolve_ntp_servers below has to handle differently: an entry that is
 // already the IPv4 literal Kea's ntp-servers option-42 data requires
@@ -3883,31 +4301,9 @@ fn compatible_reservations_for_subnet(
         .unwrap_or_default())
 }
 
-// Converts one Kea reservation JSON entry into the Reservation read-model.
-// Always returns Some (never None) despite the Option return type -- kept
-// as Option to match fetch_reservations_from_config's filter_map call site,
-// which is written generically enough to skip an entry in the future if a
-// stricter reservation shape check is ever added here.
-fn parse_reservation_entry(subnet_id: u32, reservation: &Value) -> Option<Reservation> {
-    Some(Reservation {
-        subnet_id,
-        ip: reservation
-            .get("ip-address")
-            .and_then(|v| v.as_str())
-            .map(|ip| ip.to_string())
-            .unwrap_or_else(|| "?".to_string()),
-        mac: reservation
-            .get("hw-address")
-            .and_then(|v| v.as_str())
-            .map(normalize_mac)
-            .unwrap_or_else(|| "?".to_string()),
-        hostname: reservation
-            .get("hostname")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string(),
-    })
-}
+// parse_reservation_entry is now defined in the lancache_ui library crate
+// (see the `use lancache_ui::kea_response_parse::...` import near the top of
+// this file), fuzzed directly by fuzz/fuzz_targets/kea_reservation_parse.rs.
 
 // Same "create the array if it's the first entry" pattern as
 // subnet_options_mut, but for a subnet's reservations array instead of its
@@ -3993,6 +4389,56 @@ mod tests {
     use std::collections::VecDeque;
     use std::error::Error;
     use std::sync::Arc;
+
+    // Issue #1068 item 6: switching to a DHCP mode whose container was never
+    // created (the docker-socket-proxy allowlist has no create capability --
+    // see docker_client's own module comment) used to surface as a bare
+    // "Failed to start 'dhcp-proxy'" with no indication of what to do about
+    // it. Confirms the 404 case is rewritten into the actionable
+    // create-it-yourself guidance instead of the raw Docker error text.
+    #[test]
+    fn start_service_error_gives_actionable_guidance_for_a_missing_container() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 404,
+            message: "No such container: lancache-dhcp-proxy".to_string(),
+        };
+        let err: anyhow::Error =
+            anyhow::Error::new(bollard_err).context("Failed to start 'dhcp-proxy'");
+        let dhcp_err = start_service_error(err, "dhcp-proxy", "dhcp-proxy");
+        assert_eq!(dhcp_err.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            dhcp_err.message.contains("has not been created yet"),
+            "expected actionable guidance, got: {}",
+            dhcp_err.message
+        );
+        assert!(
+            dhcp_err
+                .message
+                .contains("docker compose --profile dhcp-proxy up -d dhcp-proxy"),
+            "expected the exact fix command, got: {}",
+            dhcp_err.message
+        );
+    }
+
+    // A real operational failure (not a missing container) must still
+    // surface as an honest error -- this must not be misclassified as the
+    // "run this command" bootstrap case, which would send an operator
+    // chasing a fix that cannot possibly help.
+    #[test]
+    fn start_service_error_passes_through_other_failures_unchanged() {
+        let bollard_err = bollard::errors::Error::DockerResponseServerError {
+            status_code: 500,
+            message: "container crashed on start".to_string(),
+        };
+        let err: anyhow::Error = anyhow::Error::new(bollard_err).context("Failed to start 'dhcp'");
+        let dhcp_err = start_service_error(err, "dhcp", "dhcp-kea");
+        assert!(
+            !dhcp_err.message.contains("has not been created yet"),
+            "a real failure must not get the missing-container message: {}",
+            dhcp_err.message
+        );
+        assert!(dhcp_err.message.contains("container crashed on start"));
+    }
 
     // Wraps validate_dhcp_form's 9-field DhcpFormValidation struct literal
     // so individual tests below can call it with plain positional
@@ -4130,64 +4576,101 @@ mod tests {
         std::env::temp_dir().join(format!("lancache-ng-dhcp-rs-{name}-{stamp}"))
     }
 
-    // The probe's two result markers (conflict scan, dhclient dry-run) are
-    // parsed independently and can disagree (e.g. a conflict found but the
-    // client check still passes) -- overall_status() must reflect whichever
+    // Builds the exact stdout text dhcp_probe_native's run_cli_and_print
+    // emits for a given ProbeReport (start marker line, then the result
+    // marker + real serde_json-encoded JSON) -- used by every test below
+    // instead of hand-typed JSON literals, so a test fixture can never
+    // silently drift from the real wire shape the two sides of this
+    // process boundary actually exchange.
+    fn native_probe_output(report: &NativeProbeReport) -> String {
+        format!(
+            "{DHCP_PROBE_START_MARKER}\n{DHCP_PROBE_RESULT_MARKER} {}\n",
+            serde_json::to_string(report).expect("test fixture report must serialize")
+        )
+    }
+
+    // The probe's two outcomes (conflict scan, client dry-run) are mapped
+    // independently and can disagree (e.g. a conflict found but the client
+    // check still passes) -- overall_status() must reflect whichever
     // signal is worse, not just the last one parsed.
     #[test]
     fn parses_dual_dhcp_probe_report_with_conflict_and_client_success() {
-        let report = parse_dhcp_probe_report(
-            "__LANCACHE_DHCP_PROBE_START__ 1\n\
-             __LANCACHE_DHCP_CONFLICT_RESULT__ found 192.168.1.1\n\
-             __LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
-        );
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::Found {
+                offers: vec![NativeLeaseInfo {
+                    server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    ..Default::default()
+                }],
+            },
+            client: NativeClientOutcome::Passed {
+                lease: NativeLeaseInfo {
+                    offered_ip: Some(Ipv4Addr::new(192, 168, 1, 211)),
+                    ..Default::default()
+                },
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
 
         assert_eq!(report.overall_status(), "conflict_found");
         match report.conflict {
             DhcpConflictCheckStatus::Found { output, details } => {
                 assert_eq!(output, "192.168.1.1");
-                // No extra nmap fields in this fixture's single-line input --
-                // details must default to empty, not panic or fabricate data.
-                assert!(details.is_empty());
+                assert_eq!(
+                    details,
+                    vec![DhcpProbeDetail {
+                        label: "Server Identifier".to_string(),
+                        value: "192.168.1.1".to_string(),
+                    }]
+                );
             }
             other => panic!("unexpected conflict result: {:?}", other),
         }
         match report.client {
             DhcpClientCheckStatus::Passed { output, details } => {
-                assert_eq!(output, "dhclient succeeded on eth0");
-                // No leases-file text in this fixture's single-line input --
-                // details must default to empty, not panic or fabricate data.
-                assert!(details.is_empty());
+                assert_eq!(
+                    output,
+                    "DHCP client dry-run succeeded, assigned 192.168.1.211"
+                );
+                assert_eq!(
+                    details,
+                    vec![DhcpProbeDetail {
+                        label: "IP Offered".to_string(),
+                        value: "192.168.1.211".to_string(),
+                    }]
+                );
             }
             other => panic!("unexpected client result: {:?}", other),
         }
     }
 
-    // A real dhcp-probe.sh run prints the full `cat "$nmap_out"` text
-    // before its own result marker, so this fixture mirrors that -- the
-    // marker line alone only carries the bare Server Identifier IP, but the
-    // Admin UI should also get the surrounding nmap fields out of the same
-    // container log text.
+    // Full-field fixture: every known LeaseInfo field set at once, checking
+    // native_lease_details' fixed display order (not the struct's own
+    // declaration order, which differs -- see the function's own comment).
     #[test]
-    fn parses_dhcp_probe_report_extracts_offer_details_alongside_marker_ip() {
-        let report = parse_dhcp_probe_report(
-            "__LANCACHE_DHCP_PROBE_START__ 1\n\
-             Pre-scan script results:\n\
-             | broadcast-dhcp-discover: \n\
-             |   IP Offered: 192.168.1.50\n\
-             |   DHCP Message Type: DHCPOFFER\n\
-             |   Server Identifier: 192.168.1.1\n\
-             |   IP Address Lease Time: 1d00h00m00s\n\
-             |   Subnet Mask: 255.255.255.0\n\
-             |   Router: 192.168.1.1\n\
-             |_  Domain Name Server: 192.168.1.1\n\
-             __LANCACHE_DHCP_CONFLICT_RESULT__ found 192.168.1.1\n\
-             __LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
-        );
+    fn parses_dhcp_probe_report_extracts_full_offer_details_in_display_order() {
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::Found {
+                offers: vec![NativeLeaseInfo {
+                    offered_ip: Some(Ipv4Addr::new(192, 168, 1, 50)),
+                    server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    subnet_mask: Some(Ipv4Addr::new(255, 255, 255, 0)),
+                    router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                    dns_servers: vec![Ipv4Addr::new(192, 168, 1, 1), Ipv4Addr::new(1, 1, 1, 1)],
+                    domain_name: Some("lan.local".to_string()),
+                    broadcast_address: Some(Ipv4Addr::new(192, 168, 1, 255)),
+                    lease_time_secs: Some(3600),
+                    renewal_time_secs: Some(1800),
+                    rebinding_time_secs: Some(3150),
+                }],
+            },
+            client: NativeClientOutcome::Unavailable {
+                reason: "not reached in this fixture".to_string(),
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
 
         match report.conflict {
-            DhcpConflictCheckStatus::Found { output, details } => {
-                assert_eq!(output, "192.168.1.1");
+            DhcpConflictCheckStatus::Found { details, .. } => {
                 assert_eq!(
                     details,
                     vec![
@@ -4200,12 +4683,16 @@ mod tests {
                             value: "192.168.1.50".to_string(),
                         },
                         DhcpProbeDetail {
-                            label: "DHCP Message Type".to_string(),
-                            value: "DHCPOFFER".to_string(),
+                            label: "IP Address Lease Time (seconds)".to_string(),
+                            value: "3600".to_string(),
                         },
                         DhcpProbeDetail {
-                            label: "IP Address Lease Time".to_string(),
-                            value: "1d00h00m00s".to_string(),
+                            label: "Renewal Time (seconds)".to_string(),
+                            value: "1800".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Rebinding Time (seconds)".to_string(),
+                            value: "3150".to_string(),
                         },
                         DhcpProbeDetail {
                             label: "Subnet Mask".to_string(),
@@ -4217,7 +4704,15 @@ mod tests {
                         },
                         DhcpProbeDetail {
                             label: "Domain Name Server".to_string(),
-                            value: "192.168.1.1".to_string(),
+                            value: "192.168.1.1, 1.1.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Domain Name".to_string(),
+                            value: "lan.local".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Broadcast Address".to_string(),
+                            value: "192.168.1.255".to_string(),
                         },
                     ]
                 );
@@ -4226,44 +4721,128 @@ mod tests {
         }
     }
 
-    // Two answering DHCP servers (nmap's "Response N of M:" block separator)
-    // must not have their fields merged -- only the first server's details
-    // may end up in the list, even though both blocks contain fields this
-    // parser knows how to extract.
+    // Deliberate behavior change from the former nmap-based parser (flagged
+    // in this issue's PR description, not a silent regression): when
+    // multiple servers answer the broadcast DISCOVER, the FIRST server's
+    // identifier still becomes `output` (dhcp.html's existing bare-IP
+    // contract), but EVERY answering server's fields are now folded into
+    // `details` -- the old nmap-text parser discarded every response block
+    // after the first entirely. Real per-server grouping in the UI is not
+    // added here; see the PR's documented scope boundary.
     #[test]
-    fn extract_dhcp_offer_details_stops_at_second_response_block() {
-        let details = extract_dhcp_offer_details(
-            "| broadcast-dhcp-discover: \n\
-             |   Response 1 of 2: \n\
-             |     Server Identifier: 192.168.1.1\n\
-             |     Router: 192.168.1.1\n\
-             |   Response 2 of 2: \n\
-             |     Server Identifier: 10.0.0.1\n\
-             |_    Router: 10.0.0.1\n",
-        );
+    fn parses_dhcp_probe_report_includes_every_answering_servers_details() {
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::Found {
+                offers: vec![
+                    NativeLeaseInfo {
+                        server_identifier: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                        router: Some(Ipv4Addr::new(192, 168, 1, 1)),
+                        ..Default::default()
+                    },
+                    NativeLeaseInfo {
+                        server_identifier: Some(Ipv4Addr::new(10, 0, 0, 1)),
+                        router: Some(Ipv4Addr::new(10, 0, 0, 1)),
+                        ..Default::default()
+                    },
+                ],
+            },
+            client: NativeClientOutcome::Unavailable {
+                reason: "not reached in this fixture".to_string(),
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
 
-        assert_eq!(
-            details,
-            vec![
-                DhcpProbeDetail {
-                    label: "Server Identifier".to_string(),
-                    value: "192.168.1.1".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Router".to_string(),
-                    value: "192.168.1.1".to_string(),
-                },
-            ]
-        );
+        match report.conflict {
+            DhcpConflictCheckStatus::Found { output, details } => {
+                assert_eq!(output, "192.168.1.1", "first server's IP wins `output`");
+                assert_eq!(
+                    details,
+                    vec![
+                        DhcpProbeDetail {
+                            label: "Server Identifier".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Router".to_string(),
+                            value: "192.168.1.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Server Identifier".to_string(),
+                            value: "10.0.0.1".to_string(),
+                        },
+                        DhcpProbeDetail {
+                            label: "Router".to_string(),
+                            value: "10.0.0.1".to_string(),
+                        },
+                    ]
+                );
+            }
+            other => panic!("unexpected conflict result: {:?}", other),
+        }
     }
 
-    // No known label present anywhere in the input (e.g. a probe run that
-    // never got far enough to print nmap's field breakdown) must yield an
-    // empty list, not a panic -- the caller (DhcpConflictCheckStatus::Found)
-    // relies on this being a safe default.
+    // No JSON result line at all (e.g. the probe binary crashed before
+    // printing one) must mark BOTH checks unavailable, not just the client
+    // side -- unlike the former text-marker parser, there is no plain-text
+    // fallback scan to fall back to for the conflict side either, since
+    // there is no more free-text nmap output to scan.
     #[test]
-    fn extract_dhcp_offer_details_returns_empty_for_unrelated_text() {
-        assert!(extract_dhcp_offer_details("some unrelated log line\n").is_empty());
+    fn parses_dhcp_probe_report_with_no_result_line_marks_both_checks_unavailable() {
+        let report = parse_dhcp_probe_report("__LANCACHE_DHCP_PROBE_START__ 1\n");
+
+        assert_eq!(report.overall_status(), "unavailable");
+        assert!(matches!(
+            report.conflict,
+            DhcpConflictCheckStatus::Unavailable { .. }
+        ));
+        assert!(matches!(
+            report.client,
+            DhcpClientCheckStatus::Unavailable { .. }
+        ));
+    }
+
+    // A result line whose JSON payload doesn't actually deserialize (a
+    // truncated write, a future format change on one side without the
+    // other) must fail closed as Unavailable with a diagnostic reason, not
+    // panic the whole /api/dhcp/check handler.
+    #[test]
+    fn parses_dhcp_probe_report_with_malformed_json_marks_both_checks_unavailable() {
+        let report = parse_dhcp_probe_report(&format!(
+            "{DHCP_PROBE_START_MARKER}\n{DHCP_PROBE_RESULT_MARKER} {{not valid json\n"
+        ));
+
+        match report.conflict {
+            DhcpConflictCheckStatus::Unavailable { reason } => {
+                assert!(reason.contains("malformed"), "reason was: {reason}");
+            }
+            other => panic!("unexpected conflict result: {:?}", other),
+        }
+        assert!(matches!(
+            report.client,
+            DhcpClientCheckStatus::Unavailable { .. }
+        ));
+    }
+
+    // A failed dry-run (no DHCPOFFER at all, or a NAK) must render as
+    // Failed with the native probe's own reason text, and must never carry
+    // details -- there is no partial lease data in that case.
+    #[test]
+    fn parses_dhcp_probe_report_client_failed_has_no_details() {
+        let native = NativeProbeReport {
+            conflict: NativeConflictOutcome::NotFound,
+            client: NativeClientOutcome::Failed {
+                reason: "no DHCPOFFER received within 5s".to_string(),
+            },
+        };
+        let report = parse_dhcp_probe_report(&native_probe_output(&native));
+
+        assert!(matches!(report.conflict, DhcpConflictCheckStatus::NotFound));
+        match report.client {
+            DhcpClientCheckStatus::Failed { output } => {
+                assert_eq!(output, "no DHCPOFFER received within 5s");
+            }
+            other => panic!("unexpected client result: {:?}", other),
+        }
     }
 
     // ─── Issue #1136: bounded dhcp-probe wait timeout ───
@@ -4416,203 +4995,6 @@ mod tests {
         }
     }
 
-    // Fixture text is a real dhclient.leases file captured from a live
-    // dhclient -4 -1 -v run against a real DHCP server (see dhcp-probe.sh's
-    // own comment on the dhclient invocation for how this was confirmed) --
-    // not a hand-guessed approximation of ISC's lease syntax.
-    #[test]
-    fn extract_dhcp_lease_details_parses_a_real_captured_lease_block() {
-        let details = extract_dhcp_lease_details(concat!(
-            "lease {\n",
-            "  interface \"eth0\";\n",
-            "  fixed-address 192.168.1.211;\n",
-            "  filename \"boot/grub/i386-pc/core.0\";\n",
-            "  server-name \"192.168.1.10\";\n",
-            "  option subnet-mask 255.255.255.0;\n",
-            "  option routers 192.168.1.2;\n",
-            "  option dhcp-lease-time 3600;\n",
-            "  option dhcp-message-type 5;\n",
-            "  option domain-name-servers 192.168.1.22,192.168.1.23;\n",
-            "  option dhcp-server-identifier 192.168.1.19;\n",
-            "  option interface-mtu 1500;\n",
-            "  option domain-search \"lan.local.\", \"local.\";\n",
-            "  option dhcp-renewal-time 1800;\n",
-            "  option ntp-servers 192.168.1.10;\n",
-            "  option broadcast-address 192.168.1.255;\n",
-            "  option dhcp-rebinding-time 3150;\n",
-            "  option host-name \"sccache-build-slave-240\";\n",
-            "  option netbios-name-servers 192.168.1.22,192.168.1.23;\n",
-            "  option domain-name \"lan.local\";\n",
-            "  renew 4 2026/07/23 13:03:59;\n",
-            "  rebind 4 2026/07/23 13:30:17;\n",
-            "  expire 4 2026/07/23 13:37:47;\n",
-            "}\n",
-        ));
-
-        assert_eq!(
-            details,
-            vec![
-                DhcpProbeDetail {
-                    label: "Assigned IP Address".to_string(),
-                    value: "192.168.1.211".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Server Identifier".to_string(),
-                    value: "192.168.1.19".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Subnet Mask".to_string(),
-                    value: "255.255.255.0".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Router".to_string(),
-                    value: "192.168.1.2".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Domain Name Server".to_string(),
-                    value: "192.168.1.22,192.168.1.23".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Domain Name".to_string(),
-                    value: "lan.local".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Broadcast Address".to_string(),
-                    value: "192.168.1.255".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Lease Time (seconds)".to_string(),
-                    value: "3600".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Renewal Time (seconds)".to_string(),
-                    value: "1800".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Rebinding Time (seconds)".to_string(),
-                    value: "3150".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "NTP Servers".to_string(),
-                    value: "192.168.1.10".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Host Name".to_string(),
-                    value: "sccache-build-slave-240".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "NetBIOS Name Server".to_string(),
-                    value: "192.168.1.22,192.168.1.23".to_string(),
-                },
-            ]
-        );
-    }
-
-    // A renewed lease appends a NEW "lease { ... }" block after the original
-    // rather than replacing it -- only the second (last) block's fields may
-    // end up in the result, even though the first block has fields this
-    // parser also knows how to extract. Opposite direction from
-    // extract_dhcp_offer_details_stops_at_second_response_block, which keeps
-    // the FIRST block: documented explicitly on extract_dhcp_lease_details.
-    #[test]
-    fn extract_dhcp_lease_details_keeps_only_the_last_lease_block() {
-        let details = extract_dhcp_lease_details(concat!(
-            "lease {\n",
-            "  fixed-address 192.168.1.50;\n",
-            "  option routers 192.168.1.1;\n",
-            "}\n",
-            "lease {\n",
-            "  fixed-address 192.168.1.211;\n",
-            "  option routers 192.168.1.2;\n",
-            "}\n",
-        ));
-
-        assert_eq!(
-            details,
-            vec![
-                DhcpProbeDetail {
-                    label: "Assigned IP Address".to_string(),
-                    value: "192.168.1.211".to_string(),
-                },
-                DhcpProbeDetail {
-                    label: "Router".to_string(),
-                    value: "192.168.1.2".to_string(),
-                },
-            ]
-        );
-    }
-
-    // No "lease {" block at all (e.g. a probe run that never reached the
-    // dhclient stage, or a failed dry-run where dhcp-probe.sh never cats an
-    // empty leases file) must yield an empty list, not a panic -- the caller
-    // (DhcpClientCheckStatus::Passed) relies on this being a safe default.
-    #[test]
-    fn extract_dhcp_lease_details_returns_empty_for_unrelated_text() {
-        assert!(extract_dhcp_lease_details("some unrelated log line\n").is_empty());
-    }
-
-    // parse_client_probe_result must wire extract_dhcp_lease_details into a
-    // real "passed" marker line's surrounding output, the same way
-    // parse_conflict_probe_result already wires extract_dhcp_offer_details in
-    // for the conflict path -- this is the actual code path the Admin UI
-    // depends on, not just the extractor function in isolation.
-    #[test]
-    fn parses_dhcp_probe_report_extracts_lease_details_alongside_passed_marker() {
-        let report = parse_dhcp_probe_report(concat!(
-            "__LANCACHE_DHCP_PROBE_START__ 1\n",
-            "__LANCACHE_DHCP_CONFLICT_RESULT__ not_found\n",
-            "Internet Systems Consortium DHCP Client 4.4.3-P1\n",
-            "DHCPACK of 192.168.1.211 from 192.168.1.19\n",
-            "bound to 192.168.1.211 -- renewal in 1572 seconds.\n",
-            "lease {\n",
-            "  fixed-address 192.168.1.211;\n",
-            "  option routers 192.168.1.2;\n",
-            "  option domain-name-servers 192.168.1.22,192.168.1.23;\n",
-            "}\n",
-            "__LANCACHE_DHCP_CLIENT_RESULT__ passed dhclient succeeded on eth0\n",
-        ));
-
-        match report.client {
-            DhcpClientCheckStatus::Passed { output, details } => {
-                assert_eq!(output, "dhclient succeeded on eth0");
-                assert_eq!(
-                    details,
-                    vec![
-                        DhcpProbeDetail {
-                            label: "Assigned IP Address".to_string(),
-                            value: "192.168.1.211".to_string(),
-                        },
-                        DhcpProbeDetail {
-                            label: "Router".to_string(),
-                            value: "192.168.1.2".to_string(),
-                        },
-                        DhcpProbeDetail {
-                            label: "Domain Name Server".to_string(),
-                            value: "192.168.1.22,192.168.1.23".to_string(),
-                        },
-                    ]
-                );
-            }
-            other => panic!("unexpected client result: {:?}", other),
-        }
-    }
-
-    // A probe run that never reaches the dhclient stage (e.g. the container
-    // crashed after the conflict scan) must render as "unavailable", not as
-    // a silent pass -- an operator must not read a missing client check as
-    // "no problems found".
-    #[test]
-    fn parses_dual_dhcp_probe_report_marks_missing_client_summary_unavailable() {
-        let report = parse_dhcp_probe_report("__LANCACHE_DHCP_PROBE_START__ 1\n");
-
-        assert_eq!(report.overall_status(), "unavailable");
-        assert!(matches!(report.conflict, DhcpConflictCheckStatus::NotFound));
-        assert!(matches!(
-            report.client,
-            DhcpClientCheckStatus::Unavailable { .. }
-        ));
-    }
-
     // Every DHCP-mutating route calls require_kea_mode() first; if this
     // guard ever accepted DnsmasqProxy/Disabled mode or an empty API URL, a
     // mutation route would try to POST to Kea's control agent with no
@@ -4644,7 +5026,12 @@ mod tests {
         // The mode-switch form is the only writer of DHCP_MODE from the UI, so
         // every supported value must parse back to its enum, and unknown input
         // must be rejected rather than silently coerced to a default.
-        for mode in [DhcpMode::Disabled, DhcpMode::Kea, DhcpMode::DnsmasqProxy] {
+        for mode in [
+            DhcpMode::Disabled,
+            DhcpMode::Kea,
+            DhcpMode::DnsmasqProxy,
+            DhcpMode::DnsmasqRelay,
+        ] {
             assert_eq!(parse_dhcp_mode_input(mode.as_str()), Some(mode));
         }
         // Case/whitespace tolerance mirrors the setup.sh prompt handling.
@@ -4652,8 +5039,32 @@ mod tests {
             parse_dhcp_mode_input("  Dnsmasq-Proxy "),
             Some(DhcpMode::DnsmasqProxy)
         );
+        // Issue #844: the new relay mode parses (incl. case/whitespace) and
+        // stays distinct from proxy -- not silently coerced to it or dropped.
+        assert_eq!(
+            parse_dhcp_mode_input(" DNSMASQ-RELAY "),
+            Some(DhcpMode::DnsmasqRelay)
+        );
         assert_eq!(parse_dhcp_mode_input("dnsmasq"), None);
         assert_eq!(parse_dhcp_mode_input(""), None);
+    }
+
+    // Issue #844: the DhcpMode helpers must classify the relay variant
+    // correctly -- is_dnsmasq covers both dnsmasq modes (they share the
+    // dhcp-proxy container), is_dnsmasq_relay is relay-only, and is_kea stays
+    // false for it. A miss here would render the wrong Admin UI panel or start
+    // the wrong container.
+    #[test]
+    fn dhcp_mode_relay_classification_helpers() {
+        use crate::config::DhcpMode;
+        assert!(DhcpMode::DnsmasqRelay.is_dnsmasq());
+        assert!(DhcpMode::DnsmasqProxy.is_dnsmasq());
+        assert!(!DhcpMode::Kea.is_dnsmasq());
+        assert!(!DhcpMode::Disabled.is_dnsmasq());
+        assert!(DhcpMode::DnsmasqRelay.is_dnsmasq_relay());
+        assert!(!DhcpMode::DnsmasqProxy.is_dnsmasq_relay());
+        assert!(!DhcpMode::DnsmasqRelay.is_kea());
+        assert_eq!(DhcpMode::DnsmasqRelay.as_str(), "dnsmasq-relay");
     }
 
     // validate_dhcp_form's containment/range checks are exactly the kind of
@@ -5993,34 +6404,50 @@ mod tests {
         // a code with "routers", and (3) fresh UI-managed entries reflect
         // this save's new form values.
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 3 && is_dhcp4_option_space(option)));
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 15 && is_dhcp4_option_space(option)));
-        assert!(!options
-            .iter()
-            .any(|option| option["code"] == 119 && is_dhcp4_option_space(option)));
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 3 && is_dhcp4_option_space(option))
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 15 && is_dhcp4_option_space(option))
+        );
+        assert!(
+            !options
+                .iter()
+                .any(|option| option["code"] == 119 && is_dhcp4_option_space(option))
+        );
         assert!(options.iter().any(|option| option["space"] == "vendor-foo"
             && option["code"] == 3
             && option["data"] == "keep-vendor-route"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.1.2, 10.0.1.3"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name-servers"
+                    && option["data"] == "10.0.1.2, 10.0.1.3")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.1.4")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.1.1")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name" && option["data"] == "new.lan")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-search" && option["data"] == "new.lan")
+        );
     }
 
     // Kea's own config-get response identifies well-known options by numeric
@@ -6103,13 +6530,17 @@ mod tests {
 
         let options = subnet["option-data"].as_array().expect("option-data array");
         assert_eq!(options.len(), 4);
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "domain-name-servers"
-                && option["data"] == "10.0.2.2, 10.0.2.3"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.2.1")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "domain-name-servers"
+                    && option["data"] == "10.0.2.2, 10.0.2.3")
+        );
         assert!(!options.iter().any(|option| option["name"] == "ntp-servers"));
     }
 
@@ -6139,15 +6570,21 @@ mod tests {
         .expect("subnet value");
 
         let options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me"));
-        assert!(options
-            .iter()
-            .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "boot-file-name" && option["data"] == "pxelinux.0")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "vendor-foo" && option["data"] == "keep-me")
+        );
+        assert!(
+            options
+                .iter()
+                .any(|option| option["name"] == "ntp-servers" && option["data"] == "10.0.3.4")
+        );
     }
 
     // The custom-option form (add_subnet_option) must refuse the 5 codes
@@ -6600,15 +7037,19 @@ mod tests {
 
         let options = custom_subnet_options(&subnet);
         assert_eq!(options.len(), 2);
-        assert!(options
-            .iter()
-            .any(|option| option.code == 66 && option.data == "10.0.0.20"));
+        assert!(
+            options
+                .iter()
+                .any(|option| option.code == 66 && option.data == "10.0.0.20")
+        );
 
         remove_custom_subnet_option(&mut subnet, 67, "bootx64.efi").expect("remove option");
         let raw_options = subnet["option-data"].as_array().expect("option-data array");
-        assert!(raw_options
-            .iter()
-            .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1"));
+        assert!(
+            raw_options
+                .iter()
+                .any(|option| option["name"] == "routers" && option["data"] == "10.0.0.1")
+        );
         assert!(!raw_options.iter().any(|option| option["code"] == 67));
     }
 
@@ -6651,15 +7092,21 @@ mod tests {
             compatible_reservations_for_subnet(&subnet, "10.0.2.0/24").expect("reservations");
 
         assert_eq!(reservations.len(), 2);
-        assert!(reservations
-            .iter()
-            .any(|reservation| reservation["ip-address"] == "10.0.2.50"));
-        assert!(!reservations
-            .iter()
-            .any(|reservation| reservation["ip-address"] == "10.0.3.50"));
-        assert!(reservations
-            .iter()
-            .any(|reservation| reservation["client-id"] == "01:02:03"));
+        assert!(
+            reservations
+                .iter()
+                .any(|reservation| reservation["ip-address"] == "10.0.2.50")
+        );
+        assert!(
+            !reservations
+                .iter()
+                .any(|reservation| reservation["ip-address"] == "10.0.3.50")
+        );
+        assert!(
+            reservations
+                .iter()
+                .any(|reservation| reservation["client-id"] == "01:02:03")
+        );
     }
 
     // Regression coverage for a real bug found by driving real Kea 2.6.3
@@ -6705,11 +7152,10 @@ mod tests {
         );
     }
 
-    // Same regression, but for an existing subnet that already (incorrectly,
-    // from before this fix) has the key set at subnet scope -- apply_subnet_value
-    // must actively strip it, not just avoid adding a new one, so an
-    // operator's next edit through the Admin UI self-heals instead of
-    // staying permanently broken.
+    // Same regression, but for an existing subnet that already (incorrectly)
+    // has the key set at subnet scope -- apply_subnet_value must actively
+    // strip it, not just avoid adding a new one, so an operator's next edit
+    // through the Admin UI self-heals instead of staying permanently broken.
     #[test]
     fn apply_subnet_value_strips_pre_existing_host_reservation_identifiers_at_subnet_scope() {
         let mut subnet = json!({
@@ -6747,8 +7193,8 @@ mod tests {
     // kea_config_modify_strips_hash_from_config_get_before_reuse already
     // uses for the `hash`-field regression, applied to this bug instead.
     #[tokio::test]
-    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope(
-    ) {
+    async fn kea_config_modify_reservation_add_never_sends_host_reservation_identifiers_at_subnet_scope()
+     {
         let config_get_response = kea_config_get_response(json!({
             "Dhcp4": {
                 "subnet4": [{"id": 1, "reservations": []}]
@@ -6991,5 +7437,154 @@ mod tests {
         );
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    // Issue #1079: same bug class as write_ui_settings_file_persists_
+    // release_channel_and_auto_update_keys above -- a key left off
+    // write_ui_settings_file's fixed list is silently dropped even if
+    // persist_ntp_settings/persist_stack_settings/update_dhcp_mode/
+    // update_dhcp_proxy all pass it in `values`.
+    #[test]
+    fn write_ui_settings_file_persists_ntp_keys() {
+        let dir = temp_snapshot_root("ntp-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(
+            &target,
+            &[
+                ("NTP_ENABLED", "1".to_string()),
+                (
+                    "NTP_UPSTREAM_SERVERS",
+                    "0.debian.pool.ntp.org time.cloudflare.com".to_string(),
+                ),
+                ("NTP_AUTO_DHCP", "0".to_string()),
+            ],
+        );
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content,
+            "NTP_ENABLED=1\nNTP_UPSTREAM_SERVERS=0.debian.pool.ntp.org time.cloudflare.com\nNTP_AUTO_DHCP=0\n"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Issue #1069 part 3: same bug class as write_ui_settings_file_persists_
+    // release_channel_and_auto_update_keys/write_ui_settings_file_persists_
+    // ntp_keys above -- CACHE_MAX_GB must be on write_ui_settings_file's
+    // fixed whitelist, or routes/cache.rs's persist_cache_settings would
+    // silently drop every resize request it tries to save.
+    #[test]
+    fn write_ui_settings_file_persists_cache_max_gb_key() {
+        let dir = temp_snapshot_root("cache-resize-settings-persist-roundtrip");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        let result = write_ui_settings_file(&target, &[("CACHE_MAX_GB", "75".to_string())]);
+        assert!(result.is_ok(), "expected a clean write: {result:?}");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(content, "CACHE_MAX_GB=75\n");
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // Every existing whole-file save site (update_dhcp_mode, update_dhcp_proxy,
+    // persist_stack_settings, persist_ntp_settings) must carry a pending
+    // CACHE_MAX_GB resize through unchanged, per the same "every other save
+    // site must re-include every key" contract documented on
+    // write_ui_settings_file's fixed key list. This directly exercises
+    // persist_ntp_settings (the one call site that does NOT take an AppState,
+    // making it callable here without a live Docker/NATS connection) writing
+    // a values slice that omits CACHE_MAX_GB, mirroring the shape a caller
+    // that forgot the carry-through line would produce, and asserts the
+    // result is what the *whitelist* alone determines -- i.e. that this
+    // failure class is caught by inspecting the actual call sites in this
+    // file (see the CACHE_MAX_GB carry-through lines added to all four save
+    // sites), not by this generic function silently reintroducing a dropped
+    // key on its own.
+    #[test]
+    fn write_ui_settings_file_omitted_cache_max_gb_is_dropped_not_silently_kept() {
+        let dir = temp_snapshot_root("cache-resize-omission-guard");
+        fs::create_dir_all(&dir).expect("create temp dir");
+        let target = dir.join("lancache-ui-settings.env");
+
+        // First write establishes a pending resize override.
+        write_ui_settings_file(&target, &[("CACHE_MAX_GB", "75".to_string())])
+            .expect("expected a clean first write");
+
+        // A whole-file save that forgets to carry CACHE_MAX_GB through (the
+        // exact bug this test guards every real call site against) silently
+        // wipes the pending resize -- proving why every persist_* function
+        // above must always include it.
+        write_ui_settings_file(&target, &[("NTP_ENABLED", "1".to_string())])
+            .expect("expected a clean second write");
+
+        let content = fs::read_to_string(&target).expect("settings file must exist");
+        assert_eq!(
+            content, "NTP_ENABLED=1\n",
+            "CACHE_MAX_GB must be re-included by every caller or it is lost, exactly as asserted here"
+        );
+
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    // set_subnet_ntp_option must replace an existing ntp-servers entry
+    // (matched by name OR by its well-known code 42, same dual-match
+    // is_ui_managed_subnet_option already relies on) while leaving every
+    // other option-data entry -- including custom, non-UI-managed ones --
+    // completely untouched. This is the core invariant
+    // apply_ntp_lan_ip_to_all_subnets/restore_default_ntp_on_all_subnets
+    // depend on: unlike apply_subnet_value, this function must never touch
+    // gateway/DNS/domain/custom options it was never given.
+    #[test]
+    fn set_subnet_ntp_option_replaces_only_the_ntp_entry() {
+        let mut subnet = json!({
+            "id": 1,
+            "option-data": [
+                {"name": "routers", "data": "10.0.0.1"},
+                {"name": "ntp-servers", "data": "203.0.113.1"},
+                {"code": 99, "data": "custom-value"}
+            ]
+        });
+
+        set_subnet_ntp_option(&mut subnet, "192.0.2.50").expect("must succeed");
+
+        let options = subnet["option-data"].as_array().expect("array");
+        assert_eq!(options.len(), 3, "routers/custom entries must be preserved");
+        assert!(
+            options
+                .iter()
+                .any(|o| o["name"] == "routers" && o["data"] == "10.0.0.1")
+        );
+        assert!(options.iter().any(|o| o["code"] == 99));
+        assert!(
+            options
+                .iter()
+                .any(|o| o["name"] == "ntp-servers" && o["data"] == "192.0.2.50")
+        );
+    }
+
+    // An empty target value (the resolved project-wide default when nothing
+    // is configured) must remove the ntp-servers entry entirely rather than
+    // leave a Kea-invalid empty-string option-data value, matching
+    // format_ntp_server_option's own "empty means omit" contract that
+    // build_subnet_options already relies on.
+    #[test]
+    fn set_subnet_ntp_option_with_empty_value_removes_the_entry() {
+        let mut subnet = json!({
+            "id": 1,
+            "option-data": [
+                {"name": "ntp-servers", "data": "203.0.113.1"}
+            ]
+        });
+
+        set_subnet_ntp_option(&mut subnet, "").expect("must succeed");
+
+        let options = subnet["option-data"].as_array().expect("array");
+        assert!(!options.iter().any(|o| o["name"] == "ntp-servers"));
     }
 }

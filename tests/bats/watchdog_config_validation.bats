@@ -98,8 +98,8 @@ setup() {
     done
 }
 
-# End-to-end: before this fix, only the exact literal "1" enabled SSL
-# monitoring. Reload the helper with each Admin-UI-truthy spelling and
+# End-to-end: without normalization, only the exact literal "1" would enable
+# SSL monitoring. Reload the helper with each Admin-UI-truthy spelling and
 # confirm the normalized SSL_ENABLED/C_DNS_SSL actually flow through to
 # write_status()'s DNS-SSL block, not just that is_truthy() itself returns
 # true in isolation.
@@ -175,15 +175,15 @@ setup() {
 # `mkdir -p "$(dirname "$STATUS_FILE")"` would otherwise target the real
 # default /var/run/watchdog -- writable inside the real watchdog container
 # image, but not guaranteed writable inside whatever CI test-runner
-# container executes this bats suite. CACHE_DIR is deliberately pointed at
-# a path that does NOT exist (rather than $BATS_TEST_TMPDIR itself): the
-# main loop also calls maybe_purge(), and if CACHE_DIR existed,
-# maybe_purge() would proceed past its missing-dir early-return and attempt
-# to write PURGE_STAMP, which is a hardcoded /var/run/watchdog path with no
-# env override -- the same permission risk STATUS_FILE avoids. A
-# nonexistent CACHE_DIR keeps maybe_purge() a same no-op it already is by
-# default (real deployments' CACHE_DIR won't exist inside this test image
-# either) without depending on that being true by coincidence.
+# container executes this bats suite. CACHE_DIR is pointed at a
+# BATS_TEST_TMPDIR path (rather than the real default) purely so
+# disk_info()'s `df -P "$CACHE_DIR"` reports on this test host's own
+# filesystem instead of a path that may not exist inside the CI container.
+# Since #842 moved maybe_purge()/PURGE_STAMP out of watchdog.sh entirely
+# (into services/watchdog/retention.sh, run as a separate process/container),
+# watchdog.sh's own main loop no longer performs any destructive filesystem
+# write at all -- disk_info() only reads (`df`/`stat`), so there is no
+# equivalent permission-risk concern left to avoid here.
 
 @test "watchdog.sh exits non-zero and logs a fatal when CONTAINER_PROXY does not match the socket-proxy allowlist" {
     run timeout 5 env CONTAINER_PROXY=my-renamed-proxy DOCKER_PROXY_URL="http://127.0.0.1:1" \
@@ -207,6 +207,17 @@ setup() {
         bash "$repo_root/services/watchdog/watchdog.sh"
     [ "$status" -ne 0 ]
     [[ "$output" == *"CONTAINER_DNS_SSL=my-renamed-ssl is not supported"* ]]
+}
+
+# CONTAINER_NATS (#842): unlike CONTAINER_DNS_SSL, nats is never
+# profile/flag-gated, so a mismatch is always fatal, the same as
+# CONTAINER_PROXY/CONTAINER_DNS_STANDARD above.
+@test "watchdog.sh exits non-zero when CONTAINER_NATS does not match the socket-proxy allowlist" {
+    run timeout 5 env CONTAINER_NATS=my-renamed-nats DOCKER_PROXY_URL="http://127.0.0.1:1" \
+        STATUS_FILE="$BATS_TEST_TMPDIR/sub-status.json" CACHE_DIR="$BATS_TEST_TMPDIR/sub-nonexistent-cache" \
+        bash "$repo_root/services/watchdog/watchdog.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CONTAINER_NATS=my-renamed-nats is not supported"* ]]
 }
 
 # A mismatched CONTAINER_DNS_SSL must NOT be fatal when SSL is disabled --

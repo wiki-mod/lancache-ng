@@ -145,6 +145,36 @@ always_fail_cmd() {
     [[ "$output" == *"retrying without a fresh login"* ]]
 }
 
+@test "ghcr_retry returns immediately on GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE, without retrying, backing off, or re-authenticating" {
+    # A wrapped command can signal "this is a permanent failure, retrying
+    # cannot help" (e.g. scripts/lib/staging-ancestor-fallback.sh's
+    # _saf_github_api_get classifying a 401/404 GitHub API response) by
+    # exiting with this specific reserved code. ghcr_retry must stop right
+    # there -- one attempt total, no backoff sleep, no relogin -- rather than
+    # spending its whole retry budget on an error no amount of retrying or
+    # re-authenticating can fix.
+    permanent_fail_cmd() {
+        echo "attempt" >> "$attempt_log"
+        return "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+    }
+    export -f permanent_fail_cmd
+    run ghcr_retry ghcr.io testuser testpass -- permanent_fail_cmd
+    [ "$status" -eq "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE" ]
+    [ "$(wc -l < "$attempt_log")" -eq 1 ]
+    [ "$(relogin_calls)" -eq 0 ]
+    [[ "$output" == *"permanent (non-retryable) error"* ]]
+}
+
+@test "ghcr_retry still retries an ordinary (non-permanent) failure exactly as before, unaffected by the new exit-code check" {
+    # Regression guard: adding the permanent-failure early exit must not
+    # change behavior for every OTHER nonzero exit code -- only the one
+    # specific reserved code short-circuits the retry loop.
+    FAKE_FAIL_COUNT=2
+    run ghcr_retry ghcr.io testuser testpass -- flaky_cmd
+    [ "$status" -eq 0 ]
+    [ "$(wc -l < "$attempt_log")" -eq 3 ]
+}
+
 @test "ghcr_retry rejects a call missing the -- separator" {
     run ghcr_retry ghcr.io testuser testpass flaky_cmd
     [ "$status" -eq 2 ]

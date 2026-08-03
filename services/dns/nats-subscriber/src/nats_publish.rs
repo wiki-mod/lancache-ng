@@ -10,7 +10,7 @@
 //! call sites independently reconstructing it and risking drift.
 
 use async_nats::jetstream;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// The `lancache.dns.record` message fields, grouped into one struct rather
 /// than individual function parameters purely to keep `publish_dns_record`

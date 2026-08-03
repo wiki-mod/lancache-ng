@@ -30,7 +30,11 @@ name: GC PR Staging Images
 on:
   pull_request:
     types: [closed]
-    branches: [master, "v[0-9]*"]
+    # current_dev is the active development branch today (v0.2.0 is frozen).
+    # Without it, a closed PR against current_dev misses this prompt reap and
+    # falls back to the weekly schedule sweep below as its only cleanup path
+    # (#709).
+    branches: [master, current_dev, "v[0-9]*"]
   schedule:
     # Weekly, offset from build-tools.yml's Sunday 03:23 refresh so the two
     # scheduled jobs don't contend for the same runner at the same minute.
@@ -50,6 +54,7 @@ jobs:
   gc:
     name: reap closed-PR staging tags
     runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
     steps:
       # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
       # storing it is a deliberate human/admin action (a new credential with
@@ -85,14 +90,14 @@ jobs:
           # (see #626's build-job change), so they need reaping too.
           # build-tools is included: full-setup-validate's client-simulation
           # step pulls it at the PR staging tag as well.
-          services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
 
           declare -A pr_state_cache=()
 
           # Prints exactly one of OPEN / CLOSED / LOOKUP_FAILED for PR $1.
-          # These are NOT the same thing, and collapsing them was a real bug
-          # caught in review: `gh pr view ... 2>/dev/null || echo MISSING`
-          # can't tell "this PR genuinely doesn't exist" apart from "the API
+          # These are NOT the same thing, and collapsing them is a real bug:
+          # `gh pr view ... 2>/dev/null || echo MISSING` can't tell "this PR
+          # genuinely doesn't exist" apart from "the API
           # call itself failed" (rate limit, auth hiccup, GitHub outage,
           # network blip) -- both looked identical to the caller and both
           # got deleted. A transient lookup failure must NOT be treated as
@@ -114,9 +119,8 @@ jobs:
             # itself a "simple command" under `set -e`: if `gh api` returns
             # non-zero, THIS SCRIPT (not just the function) would exit right
             # here, before a separately-captured `$?` on the next line could
-            # ever be read -- an earlier version of this function did
-            # exactly that and was caught in review. Putting the assignment
-            # directly in the `if` condition makes it a tested context, so a
+            # ever be read. Putting the assignment directly in the `if`
+            # condition makes it a tested context, so a
             # failure is handled by the `else` branches below instead of
             # aborting the whole GC run.
             if api_output="$(gh api "repos/${repo}/pulls/${pr_number}" 2>&1)"; then

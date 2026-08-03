@@ -1,0 +1,168 @@
+#!/usr/bin/env bats
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Docker-free coverage for scripts/lib/push-reuse.sh's push_reuse_decide
+# (Step 4, issue #1095): the per-service "is it safe to retag the channel
+# image instead of rebuilding" decision. Mirrors
+# tests/bats/staging_image_freshness.bats's stubbing conventions: sif_image_revision
+# is stubbed via STAGING_IMAGE_REVISION_CMD, sif_is_ancestor_or_equal runs
+# against a real disposable git repo via STAGING_FRESHNESS_GIT_DIR (so the
+# actual `git merge-base --is-ancestor` logic is exercised for real, not
+# mocked away), and the one primitive genuinely new to this file --
+# classify-image-impact.sh -- is stubbed via PUSH_REUSE_CLASSIFY_CMD.
+#
+# Covers every fail-closed branch named in this file's own header comment:
+# unreadable/missing revision label, a revision that is not a real ancestor
+# of github.sha, a classify failure, a classify verdict of "true" (real
+# change) for the service under test, a missing/malformed classify key, and
+# the one path where all three checks pass and reuse is declared safe.
+
+setup() {
+    repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    # shellcheck source=scripts/lib/staging-image-freshness.sh
+    source "$repo_root/scripts/lib/staging-image-freshness.sh"
+    # shellcheck source=scripts/lib/push-reuse.sh
+    source "$repo_root/scripts/lib/push-reuse.sh"
+
+    # Two sequential commits in a disposable repo: c1 (the channel image's
+    # claimed build commit) -> c2 (github.sha, the commit under test). c1 is
+    # a real ancestor of c2, matching the ordinary "channel is behind but
+    # still an ancestor" case this function must accept before also checking
+    # content.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    git -C "$git_dir" commit -q --allow-empty -m c1
+    c1="$(git -C "$git_dir" rev-parse HEAD)"
+    git -C "$git_dir" commit -q --allow-empty -m c2
+    c2="$(git -C "$git_dir" rev-parse HEAD)"
+    export STAGING_FRESHNESS_GIT_DIR="$git_dir"
+}
+
+revision_stub() {
+    # Writes a stub that always echoes $1 as the "image revision" (or exits
+    # 1 with no output if $1 is the literal string "MISSING"), and exports
+    # it as STAGING_IMAGE_REVISION_CMD.
+    local revision="$1"
+    stub="$BATS_TEST_TMPDIR/revision.sh"
+    if [[ "$revision" == "MISSING" ]]; then
+        cat > "$stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    else
+        cat > "$stub" <<STUB
+#!/usr/bin/env bash
+echo "$revision"
+STUB
+    fi
+    chmod +x "$stub"
+    export STAGING_IMAGE_REVISION_CMD="$stub"
+}
+
+classify_stub() {
+    # Writes a stub that echoes the given key=value lines regardless of its
+    # own arguments (or exits 1 with no output if the first line is the
+    # literal string "FAIL"), and exports it as PUSH_REUSE_CLASSIFY_CMD.
+    local body="$1"
+    stub="$BATS_TEST_TMPDIR/classify.sh"
+    if [[ "$body" == "FAIL" ]]; then
+        cat > "$stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    else
+        cat > "$stub" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "$body"
+STUB
+    fi
+    chmod +x "$stub"
+    export PUSH_REUSE_CLASSIFY_CMD="$stub"
+}
+
+@test "push_reuse_decide: reuse=true when revision is a real ancestor and classify reports the service unchanged" {
+    revision_stub "$c1"
+    classify_stub $'ntp=false\nworkflow=false'
+
+    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2"
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "push_reuse_decide: reuse=false when the channel image has no readable revision label" {
+    # Diagnostic lines go to stderr (push-reuse.sh's own documented
+    # discipline, matching sif_wait_for_fresh_base_image's convention) --
+    # captured directly via `$(... 2>/dev/null)` instead of bats' `run`,
+    # which merges stdout+stderr into `$output` and would corrupt this exact
+    # comparison (see staging_image_freshness.bats's own "stdout carries
+    # ONLY the confirmed revision" test for the same reasoning).
+    revision_stub "MISSING"
+    classify_stub $'ntp=false'
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false when the revision is NOT an ancestor of github.sha (wrong-direction/divergent)" {
+    # c2 is stubbed as the "revision" while github.sha is c1 -- c2 is a
+    # DESCENDANT of c1, not an ancestor, so sif_is_ancestor_or_equal(c2, c1)
+    # must fail. This is the "channel image built from a commit that isn't
+    # even reachable from github.sha" case -- e.g. a corrupted/mislabeled
+    # image, or a divergent ref.
+    revision_stub "$c2"
+    classify_stub $'ntp=false'
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c1" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false when classify-image-impact.sh reports this service DID change between revision and sha" {
+    # This is the whole point of doing a real content diff instead of
+    # trusting ancestry alone (C-7): the channel image is an ancestor, but
+    # something under this service's own path landed between revision and
+    # sha (e.g. in an earlier push, before nightly's last refresh).
+    revision_stub "$c1"
+    classify_stub $'ntp=true\nworkflow=false'
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false (fail closed) when classify-image-impact.sh itself fails" {
+    revision_stub "$c1"
+    classify_stub "FAIL"
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false (fail closed) when the classify output is missing this service's key entirely" {
+    # A malformed/unexpected classify output (e.g. a key-name typo, or a
+    # future classify-image-impact.sh refactor that drops a key) must not be
+    # silently treated as "unchanged" just because grep found nothing to
+    # contradict it.
+    revision_stub "$c1"
+    classify_stub $'workflow=false\ndns_image=false'
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: requires all three positional arguments" {
+    run push_reuse_decide
+    [ "$status" -ne 0 ]
+
+    run push_reuse_decide "ntp"
+    [ "$status" -ne 0 ]
+
+    run push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly"
+    [ "$status" -ne 0 ]
+}

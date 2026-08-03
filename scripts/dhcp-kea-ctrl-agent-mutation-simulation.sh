@@ -163,9 +163,8 @@ work_dir="${TMPDIR:-/tmp}/lancache-ng-dhcp-kea-ctrl-agent-mutation.$$"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
 # Bind-mounted onto BOTH the Kea and Admin UI containers below at
-# /var/lib/kea, exactly like deploy/dev/docker-compose.yml and
-# deploy/prod/docker-compose.yml share their own kea-data volume between
-# those two services. Needed so the Admin UI's known-good-config-snapshot
+# /var/lib/kea, exactly like deploy/prod/docker-compose.yml shares its own
+# kea-data volume between those two services. Needed so the Admin UI's known-good-config-snapshot
 # write (services/ui/src/kea_snapshots.rs, #614) after each successful
 # mutation actually succeeds here instead of only in those two compose
 # stacks: services/dhcp/entrypoint.sh (run as root, see the Kea container
