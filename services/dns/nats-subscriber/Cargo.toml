@@ -34,7 +34,7 @@ path = "src/main.rs"
 # cargo-fuzz's default AddressSanitizer + SanitizerCoverage instrumentation
 # on nightly-2026-07-24 -- confirmed empirically while building this issue's
 # fuzz harness, not a hypothetical concern.
-async-nats = { version = "0.49", optional = true }
+async-nats = { version = "0.50", optional = true }
 futures = { version = "0.3", optional = true }
 tokio = { version = "1", features = ["full"], optional = true }
 reqwest = { version = "0.12", default-features = false, features = [
