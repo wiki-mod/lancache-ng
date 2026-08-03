@@ -54,7 +54,19 @@ jobs:
   gc:
     name: reap closed-PR staging tags
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    timeout-minutes: 15
+    # TEMPORARY DIAGNOSTIC BUMP (2026-08-03, maintainer-requested): was 15.
+    # Confirmed hitting this timeout repeatedly (cancelled mid-run, e.g. run
+    # 30790528643) with large, unexplained gaps between per-service deletes
+    # (minutes of apparent idle time between fast bursts of individual
+    # `gh api -X DELETE .../versions/<id>` calls) -- looks like GHCR-side
+    # rate-limiting/contention, not a real infinite hang, but that was never
+    # actually confirmed. This bump to 150 is explicitly a test to find out
+    # which: if a run completes well under 150m, the real fix is understanding
+    # and addressing the GHCR contention (not just living with a bigger
+    # number); if it never completes even given 150m, that's a genuine hang
+    # needing real investigation. Revert to a sane bound (not necessarily 15)
+    # once the actual behavior is known -- this number is not itself a fix.
+    timeout-minutes: 150
     steps:
       # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
       # storing it is a deliberate human/admin action (a new credential with
