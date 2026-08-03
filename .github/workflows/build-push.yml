@@ -2172,13 +2172,18 @@ jobs:
           grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Release notes must run after channel promotion."; exit 1; }
 
+          # Only prerelease is protected here, not draft: prerelease/stable is a
+          # real maintainer policy call PATCH must never silently flip, but a
+          # draft has no legitimate "leave it hidden forever" case once this
+          # job runs -- forcing draft:false in that path (2026-08-03 fix) is
+          # required, not a violation, so it must not trip this guard.
           if awk '
             /if \[ "\$status" = "200" \]/ { in_patch=1 }
             /elif \[ "\$status" = "404" \]/ { in_patch=0 }
-            in_patch && /(draft[[:space:]]*:[[:space:]]*false|prerelease[[:space:]]*:[[:space:]]*false)/ { print FILENAME ":" FNR ":" $0; found=1 }
+            in_patch && /prerelease[[:space:]]*:[[:space:]]*false/ { print FILENAME ":" FNR ":" $0; found=1 }
             END { exit found ? 0 : 1 }
           ' .github/workflows/build-push.yml; then
-            echo "::error::Existing release PATCH must preserve draft/prerelease state."
+            echo "::error::Existing release PATCH must preserve prerelease state."
             exit 1
           fi
 
