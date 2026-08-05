@@ -88,7 +88,7 @@ if ! tracked_scan_files="$(git ls-files -- \
   'tools/*.sh' 'tools/**/*.sh' \
   'tools/*/Dockerfile*' \
   'setup.sh')"; then
-  printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Refusing to report a false OK.\n' "$repo_root" >&2
+  printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Not treating this as a clean pass.\n' "$repo_root" >&2
   exit 1
 fi
 
