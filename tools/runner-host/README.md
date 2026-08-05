@@ -67,13 +67,18 @@ sudo tail -n 40 /var/log/lancache-ci-cleanup.log
    for all three kinds above, regardless of whether some future leak-prone
    container happens to carry a restart policy too.
 3. reaps `lancache-ng-validation-*` Docker networks left with zero attached
-   containers once step 2 above removes their last container (issue
-   #1095/#932 pattern: an orphaned validation network, not just its
+   containers AND older than the same `REAP_VALIDATION_AFTER_HOURS` threshold
+   (issue #1095/#932 pattern: an orphaned validation network, not just its
    container, blocks a later run's subnet reservation on the same host —
    `docker rm -f` alone never touches the Compose-created bridge network a
-   removed container was attached to). Conservative by construction: only
-   ever removes a network Docker itself reports as having zero attached
-   containers, never a blanket sweep;
+   removed container was attached to). The age check matters, not just the
+   zero-attached check: `docker compose up` creates a project's network
+   *before* creating or starting its containers, so a zero-attached network
+   can legitimately be a stack that is still mid-bringup (issue #834's
+   network-teardown-race territory) rather than a leak. Conservative by
+   construction: only ever removes a network Docker itself reports as having
+   zero attached containers AND past its own age threshold, never a blanket
+   sweep;
 4. reaps stale per-branch Trivy cache directories (`/var/tmp/lancache-ng-
    trivy-cache/<service>-<arch>-<ref>`, by mtime, default past 1 day) — these
    belong to `build-push.yml`'s `container-scan` job and persist forever for a

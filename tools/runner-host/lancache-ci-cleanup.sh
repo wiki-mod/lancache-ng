@@ -168,27 +168,59 @@ reap_orphaned_running_containers() {
 }
 
 # Removes lancache-ng-validation-* Docker networks with zero currently
-# attached containers (issue #1095, issue #932 pattern): `docker rm -f` above
-# deletes a leaked validation container but never touches the Compose-created
-# bridge network it was attached to, so a stale, now-empty network is left
-# behind on every host indefinitely -- exactly the class of leftover #932
-# already established can block a *future* run's subnet reservation on the
-# same host. Filters by the same VALIDATION_NAME_MATCH prefix as the
-# container reap above (Compose names each project's network
-# "<project>_validation", so the plain name-substring match still applies),
-# and only ever removes a network reporting zero attached containers --
-# never a blanket sweep, so a network still legitimately backing an in-flight
-# validation stack is left alone. Runs after the container reap so a network
-# freed by that reap in this SAME pass is already eligible; safe to call
-# again next run for one a still-running container attaches to today.
+# attached containers AND past their own age threshold (issue #1095, issue
+# #932 pattern): `docker rm -f` above deletes a leaked validation container
+# but never touches the Compose-created bridge network it was attached to, so
+# a stale, now-empty network is left behind on every host indefinitely --
+# exactly the class of leftover #932 already established can block a
+# *future* run's subnet reservation on the same host. Filters by the same
+# VALIDATION_NAME_MATCH prefix as the container reap above (Compose names
+# each project's network "<project>_validation", so the plain name-substring
+# match still applies).
+#
+# The age threshold is not optional decoration: `docker compose up` creates a
+# project's network BEFORE creating or starting any of its containers, and on
+# a cold image pull that empty-network window can run to several minutes, not
+# seconds. A zero-attached-containers check ALONE would race a stack that is
+# still mid-bringup and rip its network out from under it -- this project has
+# scar tissue for exactly this failure shape (issue #834, full-setup-deep-
+# validate's own teardown race leaving networks with "active endpoints").
+# Requiring the network to ALSO be older than threshold_hours means only a
+# network that has been sitting empty for a genuinely long time (matching the
+# container reap's own leak-detection window) is ever removed, never one a
+# job is still in the process of standing up.
+#
+# `docker network inspect --format '{{.Created}}'` returns Go's default
+# `time.Time` string form (e.g. "2026-08-05 22:56:56.672032374 +0000 UTC" or,
+# on a non-UTC host, "...+0200 CEST") -- NOT the RFC3339 form the container
+# reap's `.Created` field uses. Confirmed live on two different runner hosts:
+# GNU `date -d` cannot parse the numeric-offset-plus-zone-name combination
+# directly ("invalid date"), but parses cleanly once the trailing zone-name
+# word is stripped. `${created% *}` (strip everything after the last space)
+# handles this generically regardless of which zone abbreviation a given
+# host's local time happens to produce, rather than hardcoding "UTC".
+#
+# Runs after the container reap so a network whose last container this same
+# pass just removed is already eligible for its OWN age check next run (its
+# own emptiness started this run, not threshold_hours ago) -- deliberately
+# not reaped in the same pass it just emptied, since that would reintroduce
+# the exact race this function exists to avoid for a network some other,
+# still-starting job created around the same time.
 reap_orphaned_validation_networks() {
-    local name_match="$1"
-    echo "--- reap orphaned validation networks (0 attached containers, matching ${name_match}) ---"
+    local name_match="$1" threshold_hours="$2"
+    local reap_before_epoch
+    reap_before_epoch=$(( $(date +%s) - threshold_hours * 3600 ))
+    echo "--- reap orphaned validation networks older than ${threshold_hours}h (0 attached containers, matching ${name_match}) ---"
     for network_name in $(docker network ls --filter "name=${name_match}" --format '{{.Name}}' 2>/dev/null); do
         local attached
         attached="$(docker network inspect "$network_name" --format '{{len .Containers}}' 2>/dev/null || echo '')"
-        if [ "$attached" = "0" ]; then
-            echo "reaping orphaned validation network $network_name (0 attached containers)"
+        [ "$attached" = "0" ] || continue
+        local created created_epoch
+        created="$(docker network inspect "$network_name" --format '{{.Created}}' 2>/dev/null || echo '')"
+        [ -n "$created" ] || continue
+        created_epoch="$(date -d "${created% *}" +%s 2>/dev/null || echo 0)"
+        if [ "$created_epoch" -gt 0 ] && [ "$created_epoch" -lt "$reap_before_epoch" ]; then
+            echo "reaping orphaned validation network $network_name (0 attached containers, created $created)"
             docker network rm "$network_name" >/dev/null 2>&1 || true
         fi
     done
@@ -230,7 +262,7 @@ reap_stale_trivy_cache_dirs() {
 
     reap_orphaned_running_containers "build-tools" image "$BUILD_TOOLS_IMAGE_MATCH" "$REAP_BUILD_TOOLS_AFTER_HOURS"
     reap_orphaned_running_containers "validation" name "$VALIDATION_NAME_MATCH" "$REAP_VALIDATION_AFTER_HOURS"
-    reap_orphaned_validation_networks "$VALIDATION_NAME_MATCH"
+    reap_orphaned_validation_networks "$VALIDATION_NAME_MATCH" "$REAP_VALIDATION_AFTER_HOURS"
     reap_orphaned_running_containers "buildx-builder" name "$BUILDX_BUILDER_NAME_MATCH" "$REAP_BUILDX_BUILDER_AFTER_HOURS"
     reap_stale_trivy_cache_dirs "$TRIVY_CACHE_ROOT" "$REAP_TRIVY_CACHE_AFTER_DAYS"
 
