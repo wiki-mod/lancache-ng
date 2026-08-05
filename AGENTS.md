@@ -95,6 +95,7 @@ This matrix maps the hard rules defined below to how they are currently enforced
 | AG-KD-006 | `proxy_cache_lock on` (only one nginx worker fetches a cache-miss URL at a time) | Code review (nginx config inspection) |
 | AG-KD-007 | nginx installed from nginx.org's mainline apt repo (statically-compiled stream module, no `load_module` directive), not Debian's own `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
 | AG-KD-008 | No separate dev deployment profile — `deploy/prod/` is the only profile; do not reintroduce a parallel `deploy/dev/`/`config/dev/` pair | Manual review (repo inspection — no second deployment profile exists) |
+| AG-KD-009 | `build-tools` stays Debian-based (`rust:latest`/`golang:latest`), not migrated to Alpine/musl; `trixie-backports` is pinned in project-wide for current tooling; Ubuntu or another actively-current Debian derivative may be reconsidered for this image specifically if Debian's package currency becomes a real blocker | Manual review (`tools/build-tools/Dockerfile` inspection) |
 | AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
 | AG-OP-002 | DNS resolver points to real upstream DNS (`NGINX_UPSTREAM_RESOLVER`), never the local PowerDNS recursor | Code review (nginx resolver config inspection) |
 | AG-OP-003 | Lazy proxy default | Manual review + documentation |
@@ -529,6 +530,26 @@ by configuring which DNS server IP they point to:
   SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
   builds and full-stack `docker compose up` runs are not exercised on the Windows
   authoring host — see AG-IPV6-001 for one concrete Docker-Desktop-on-Windows limitation).
+- **[AG-KD-009]** **`build-tools` stays Debian, on purpose, with `trixie-backports` pinned in for
+  currency**: #815's own research explicitly excluded `tools/build-tools` from the project's
+  Alpine-migration push (unlike `dhcp`, `dhcp-proxy`, `dns`, `proxy`, `ntp`, and `ui`'s runtime
+  stage, all evaluated or migrated separately). Rebasing `build-tools` itself onto Alpine/musl
+  would hit its own full CI/dev toolchain (`distcc`/`distcc-pump` as a Debian `.deb`,
+  `isc-dhcp-client`, `tcpdump`, `bind9-dnsutils`, `cmake`/`clang`/`lld`, `python3` for
+  `distcc-pump`'s include-server) — largely glibc/`apt`-idiomatic tooling with no clean musl
+  equivalent, and no attack-surface argument in this image's favor the way there is for a
+  network-facing runtime service. `trixie-backports` (the same project-wide pin already applied
+  in every Debian-based service's Dockerfile) is pinned into this image too, so its tools stay
+  reasonably current without needing a base-OS change. If Debian's package currency ever becomes
+  a real blocker for this image specifically, Ubuntu (or another actively-current Debian
+  derivative) is the fallback to evaluate first — #815's `services/proxy` research already
+  piloted Ubuntu 26.04 ("resolute") for a different service and found its `resolute-backports`
+  channel has no `Suite`/`Codename` mismatch (unlike Debian's own `trixie-backports` gotcha, see
+  AG-KD-007's sibling Dockerfile comments), a real, already-verified mechanism this image could
+  reuse if the maintainer decides to pursue it. This is separate from the musl cross-compilation
+  *target* already added to this image for `services/ui`/`services/dns`'s Rust builder stages
+  (#815, landed via PR #1374) — that does not change this image's own base OS and does not
+  affect this decision.
 
 ## CDN Domains, First-time Setup, IPv6
 
