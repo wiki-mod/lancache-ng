@@ -45,7 +45,9 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and
     // only diverge when an operator explicitly runs standard-mode and
     // ssl-mode as two separate proxy services with different stub_status
-    // endpoints (see CLAUDE.md's "Two-Mode / Two-IP Architecture"). When
+    // endpoints (see AGENTS.md's "Two-Mode / Two-IP Architecture" section --
+    // corrected 2026-08-05, issue #1391 doc-sweep audit: this used to cite
+    // CLAUDE.md, which moved this section to AGENTS.md on 2026-07-31). When
     // they're equal, the second HTTP call would just re-fetch identical
     // stats from the same nginx, so it's skipped and the first result is
     // reused instead.

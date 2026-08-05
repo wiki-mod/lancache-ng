@@ -61,14 +61,21 @@ setup() {
 # each DHCP mode (kea, dnsmasq-proxy, disabled) must emit the correct profile(s).
 # The mutual-exclusion test below builds on this baseline by verifying that
 # switching modes always removes the unneeded profile.
+# Issue #1343: logging_enabled (5th arg) defaults to "1" (on by default), unlike
+# ssl/ntp above it which default to "0" -- every call below that is testing DHCP
+# mode mapping in isolation passes an explicit "0 0" for ntp_enabled/
+# logging_enabled so its expected output stays focused on DHCP behavior instead
+# of coupling every DHCP-mode assertion to the separate logging-default
+# decision (which has its own dedicated coverage further down and in
+# tests/bats/setup_update_idempotence.bats).
 @test "compose_profiles_for_runtime emits dhcp-kea for kea mode" {
-    run compose_profiles_for_runtime "" 0 kea
+    run compose_profiles_for_runtime "" 0 kea 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "dhcp-kea" ]
 }
 
 @test "compose_profiles_for_runtime emits dhcp-proxy for dnsmasq-proxy mode" {
-    run compose_profiles_for_runtime "" 0 dnsmasq-proxy
+    run compose_profiles_for_runtime "" 0 dnsmasq-proxy 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "dhcp-proxy" ]
 }
@@ -76,13 +83,13 @@ setup() {
 # Issue #844: relay mode shares the dhcp-proxy container/profile with ProxyDHCP
 # mode (DHCP_MODE tells them apart), so it must map to the same profile.
 @test "compose_profiles_for_runtime emits dhcp-proxy for dnsmasq-relay mode" {
-    run compose_profiles_for_runtime "" 0 dnsmasq-relay
+    run compose_profiles_for_runtime "" 0 dnsmasq-relay 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "dhcp-proxy" ]
 }
 
 @test "compose_profiles_for_runtime emits no DHCP profile when disabled" {
-    run compose_profiles_for_runtime "" 0 disabled
+    run compose_profiles_for_runtime "" 0 disabled 0 0
     [ "$status" -eq 0 ]
     [ "$output" = "" ]
 }
@@ -92,7 +99,7 @@ setup() {
     # hand-edited or migrated .env), selecting one mode must strip the other so
     # Kea and dnsmasq can never both claim UDP port 67.
     for mode in kea dnsmasq-proxy dnsmasq-relay disabled; do
-        run compose_profiles_for_runtime "dhcp-kea,dhcp-proxy" 0 "$mode"
+        run compose_profiles_for_runtime "dhcp-kea,dhcp-proxy" 0 "$mode" 0 0
         [ "$status" -eq 0 ]
         # Not both.
         if [[ ",$output," == *,dhcp-kea,* && ",$output," == *,dhcp-proxy,* ]]; then
@@ -103,9 +110,50 @@ setup() {
 }
 
 @test "compose_profiles_for_runtime preserves unrelated profiles and ssl" {
+    # logging_enabled deliberately left at its "1" default here (not passed
+    # explicitly) to also prove the existing "logging" entry in the incoming
+    # string is stripped and correctly re-added by the default, not just
+    # passed through verbatim -- "ssl,dhcp-proxy,logging" is the real emission
+    # order (ssl, then DHCP, then logging last), not the incoming order.
     run compose_profiles_for_runtime "logging,dhcp-kea" 1 dnsmasq-proxy
     [ "$status" -eq 0 ]
-    [ "$output" = "logging,ssl,dhcp-proxy" ]
+    [ "$output" = "ssl,dhcp-proxy,logging" ]
+}
+
+# ─── Central logging default (issue #1343) ───
+# Central logging is the one profile flag in this function that defaults to
+# enabled instead of disabled -- these tests pin down that default, its real
+# opt-out, and the omitted-argument fail-safe explicitly, since a regression
+# here would silently reintroduce the exact bug #1343 was filed for (a normal
+# install never enabling central logging).
+
+@test "compose_profiles_for_runtime enables logging by default when no 5th argument is given" {
+    # Mirrors a caller that has not been updated to pass logging_enabled at
+    # all -- must fail SAFE toward "still enabled", not toward the old bug.
+    run compose_profiles_for_runtime "" 0 disabled 0
+    [ "$status" -eq 0 ]
+    [ "$output" = "logging" ]
+}
+
+@test "compose_profiles_for_runtime respects an explicit logging opt-out" {
+    run compose_profiles_for_runtime "" 0 disabled 0 0
+    [ "$status" -eq 0 ]
+    [ "$output" = "" ]
+}
+
+@test "compose_profiles_for_runtime keeps logging enabled when explicitly requested" {
+    run compose_profiles_for_runtime "" 0 disabled 0 1
+    [ "$status" -eq 0 ]
+    [ "$output" = "logging" ]
+}
+
+@test "compose_profiles_for_runtime is idempotent for an already-present logging profile" {
+    # Running the operation twice with identical input must produce identical
+    # output (AG-OP-006/the Convergence/Idempotence Checklist) -- feeding
+    # logging back in as already-present existing state must not duplicate it.
+    run compose_profiles_for_runtime "logging" 0 disabled 0 1
+    [ "$status" -eq 0 ]
+    [ "$output" = "logging" ]
 }
 
 # ─── dnsmasq-proxy template rendering ───

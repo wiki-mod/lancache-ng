@@ -505,8 +505,10 @@ _load_public_suffix_list
 # to arbitrary depth; the same gap recurs one level further for a CDN that
 # genuinely serves from unpredictable subdomain depths. Fully closing this
 # needs dynamic per-SNI certificate issuance at handshake time, a materially
-# different architecture than this pre-generated-cert design (see CLAUDE.md's
-# "Pre-generated wildcard certs" decision) -- a maintainer decision, not a
+# different architecture than this pre-generated-cert design (see AGENTS.md's
+# AG-KD-005 -- corrected 2026-08-05, issue #1391 doc-sweep audit: this used to
+# cite CLAUDE.md's "Pre-generated wildcard certs" decision, which moved to
+# AGENTS.md on 2026-07-31) -- a maintainer decision, not a
 # fix reachable here. STATUS: as of 2026-07-30, unresolved; see issue #1322.
 #
 # Multiple DNS entries commonly derive the

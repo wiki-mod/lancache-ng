@@ -35,8 +35,10 @@ source "$repo_root/scripts/lib/reserve-validation-subnet.sh"
 test_domain="deb.debian.org"
 test_path="/debian/README"
 # A second, distinct real path on the same host for the SSL-mode leg: the
-# cache key is $host$uri (see CLAUDE.md), shared between HTTP and HTTPS on
-# the same proxy container, so reusing test_path here found it already
+# cache key is $host$uri$slice_range (see AGENTS.md's AG-OP-001 -- corrected
+# 2026-08-05, issue #1391 doc-sweep audit: this used to cite CLAUDE.md, which
+# no longer carries this content as of 2026-07-31), shared between HTTP and
+# HTTPS on the same proxy container, so reusing test_path here found it already
 # cached by the standard-mode test above and reported HIT on its supposedly
 # fresh first request -- confirmed directly. A different path guarantees an
 # independent, genuinely fresh cache entry for this leg.
@@ -324,7 +326,9 @@ echo "Distinguishing property proven end-to-end (issue #668): dns-ssl's own DNS 
 #
 # -w appends the actual HTTP status code after the headers so it can be
 # asserted below alongside X-Cache-Status: services/proxy also caches 3xx
-# responses (see CLAUDE.md), so a redirect could otherwise produce a
+# responses (see AGENTS.md's Architecture section -- corrected 2026-08-05,
+# issue #1391 doc-sweep audit: this used to cite CLAUDE.md, which no longer
+# carries this content as of 2026-07-31), so a redirect could otherwise produce a
 # plausible-looking MISS-then-HIT pair without ever fetching real content.
 #
 # The -w argument's single quotes must stay inline in each run_client
