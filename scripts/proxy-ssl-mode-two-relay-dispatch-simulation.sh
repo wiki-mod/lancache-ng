@@ -29,11 +29,12 @@
 # picked showed up as 127.0.0.1, not the real client, regardless of what
 # was configured on the relay alone.
 #
-# Includes a real negative control: builds the immediately-prior commit's
-# proxy image (this fix not yet applied) and proves live that the exact
-# same depth-2 SNI gets served a real, CA-verifiable but hostname-mismatched
-# certificate there -- this test would have caught the original bug, not
-# just documented its absence after the fact.
+# Includes a real negative control: builds a proxy image from the merge-base
+# with this branch's base branch (this fix not yet applied, however many
+# commits or merges this branch has picked up since) and proves live that
+# the exact same depth-2 SNI gets served a real, CA-verifiable but
+# hostname-mismatched certificate there -- this test would have caught the
+# original bug, not just documented its absence after the fact.
 #
 # Fake-origin/network-alias mechanism, RFC 2606-reserved test domain, and
 # Docker embedded-DNS resolver technique all mirror
@@ -90,10 +91,34 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
 echo "== Building the real proxy image (this fix applied) =="
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" services/proxy >/dev/null
 
-echo "== Building the negative-control proxy image (this fix NOT applied, from the immediately-prior commit) =="
-before_ref="$(git rev-parse HEAD)"
-git worktree add -q --detach "$work_dir/before-checkout" "${before_ref}^" 2>/dev/null \
-    || git worktree add -q --detach "$work_dir/before-checkout" "$before_ref" # fallback: first commit in a shallow history has no parent
+echo "== Building the negative-control proxy image (this fix NOT applied, from the branch point where it diverged from ${BASE_BRANCH:-current_dev}) =="
+# Plain "HEAD^" (first parent) is NOT a reliable "pre-fix" reference: it
+# only means that on a linear, single-commit branch. A merge commit's first
+# parent can be anything (whichever side was checked out first) -- e.g.
+# merging the target branch's own later commits into this PR branch
+# produces a HEAD whose first parent already contains this fix, so
+# "HEAD^" would build an image that ALSO has the fix applied, silently
+# defeating the negative control instead of failing loudly (confirmed
+# live: this produced a real backend-two-real cert instead of either a
+# hostname-mismatch OR a build/checkout error, which is a materially
+# different, easy-to-miss silent-defeat failure mode). The actual
+# pre-fix reference this negative control needs is well-defined
+# regardless of merge topology: the merge-base between HEAD and the PR's
+# own base branch, which by definition predates every commit this PR
+# (this branch) has added, however many merges or extra commits it
+# picked up along the way.
+base_branch="${BASE_BRANCH:-current_dev}"
+# --depth=1000, not a plain (possibly shallow-respecting) fetch: this job's
+# own checkout step may be shallow (fetch-depth: 2, only enough for this
+# script's OWN commit history), which is not automatically enough depth to
+# reach a real common ancestor with a separately-fetched base-branch ref --
+# 1000 is comfortably past how many commits any single PR branch or
+# in-flight current_dev delta is expected to need for merge-base purposes.
+git fetch --quiet --depth=1000 origin "$base_branch" 2>/dev/null || true
+before_ref="$(git merge-base HEAD "origin/${base_branch}" 2>/dev/null)" \
+    || before_ref="$(git rev-parse HEAD^ 2>/dev/null)" \
+    || before_ref="$(git rev-parse HEAD)" # last-resort fallback: first commit in a shallow, remote-less history
+git worktree add -q --detach "$work_dir/before-checkout" "$before_ref"
 docker build -q -t "$before_image" --build-context "dns-domains=$work_dir/fixture" "$work_dir/before-checkout/services/proxy" >/dev/null
 
 docker network create --subnet 172.29.77.0/24 "$network_name" >/dev/null

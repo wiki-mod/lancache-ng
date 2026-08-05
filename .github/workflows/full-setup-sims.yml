@@ -402,17 +402,21 @@ jobs:
     # anchored depth dispatch (MITM-covered vs passthrough-only SNI), real
     # client-IP preservation through the two internal relays for
     # PROXY_ALLOWED_CLIENT_CIDRS/access logging, the dedicated healthcheck
-    # port, and a live negative control against the immediately-prior
-    # (pre-fix) commit. See scripts/proxy-ssl-mode-two-relay-dispatch-
-    # simulation.sh's own header for the full mechanism. Needs `fetch-depth:
-    # 2` (unlike its sibling jobs above) specifically for that negative
-    # control -- it builds and boots the immediately-prior commit's proxy
-    # image via `git worktree add HEAD^`, which a shallow (depth-1) checkout
-    # cannot resolve. Chained after proxy-standard-mode-sni-routing-
-    # simulation for the same AG-CI-017 BuildKit-content-store contention
-    # reasoning every job in this file already documents -- this job also
-    # builds its own throwaway proxy images (two of them, current + prior
-    # commit) on the same runner pool.
+    # port, and a live negative control against this PR's own pre-fix state.
+    # See scripts/proxy-ssl-mode-two-relay-dispatch-simulation.sh's own
+    # header for the full mechanism. `fetch-depth: 2` here is only a
+    # reasonable minimum for the checkout step itself -- the negative
+    # control's actual "which commit is pre-fix" resolution does its own
+    # `git fetch --depth=1000` of the base branch and computes a real
+    # merge-base at runtime (not a plain `HEAD^`, which is not a reliable
+    # pre-fix reference once any merge commit is involved: a merge commit's
+    # first parent can be either side, so `HEAD^` can resolve to a commit
+    # that already has the fix applied, silently building a "before" image
+    # that isn't actually before anything). Chained
+    # after proxy-standard-mode-sni-routing-simulation for the same
+    # AG-CI-017 BuildKit-content-store contention reasoning every job in
+    # this file already documents -- this job also builds its own throwaway
+    # proxy images (two of them, current + pre-fix) on the same runner pool.
     name: Proxy SSL-mode two-relay dispatch simulation
     needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
     if: >-
