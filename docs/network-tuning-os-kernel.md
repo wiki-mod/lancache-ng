@@ -218,7 +218,7 @@ as "needs testing in the abstract":
   level on this fleet.
 - **OpenSSL support**: the actual published `proxy` image
   (`ghcr.io/wiki-mod/lancache-ng/proxy:latest`) links OpenSSL 3.5.6.
-  `grep -a` against the shipped `libssl.so.3` for print able strings found
+  `grep -a` against the shipped `libssl.so.3` for printable strings found
   `KTLS`, `KTLSTxZerocopySendfile`, `ktls_sendfile failure`,
   `../ssl/record/methods/ktls_meth.c`, `ktls_read_n`,
   `ktls_validate_record_header` -- this build of OpenSSL was compiled with
@@ -335,61 +335,61 @@ and already tolerate this containerized environment's missing detailed
 stat file -- **no new collector code is needed for the basic utilization
 chart and alarm to exist.**
 
-**The real gap, found by reading the actual `deploy/prod/docker-compose.yml`
-netdata service definition:** the `netdata` service does not set
-`network_mode: host` (it only sets `pid: host`, for `apps.plugin`'s
-per-process `/proc/<pid>` access, plus `cap_add: SYS_PTRACE`) and does not
-add `NET_ADMIN`. Conntrack accounting is per-network-namespace; Docker's
-actual NAT/DNAT decisions for every published port (including the `proxy`
-service's) happen in the **host's own root network namespace** (in this
-fleet, that is the LXC container's own root netns, the same one this
-investigation queried directly via SSH above), not inside any individual
-container's isolated bridge-network namespace. Since the `netdata`
-container itself sits on the default bridge network in its own namespace,
-its conntrack collector -- confirmed enabled and functional above -- is by
-default measuring **its own container's mostly-idle network namespace**,
-not the host-level namespace where the `proxy` service's real client
-connections actually accumulate conntrack entries. This was not tested
-end-to-end against a live proxy container under load (no persistent
-deployment exists on any reachable host to test against, per the Scope
-caveat), so it is recorded as a well-evidenced expected consequence of the
-current network topology, not a directly observed failure.
+**Network namespace check -- verified, not assumed, and the result is good
+news:** the initial working hypothesis for this section was that
+`netdata`'s conntrack collector would be observing its own isolated
+container network namespace rather than the host's, since the `netdata`
+service in `deploy/prod/docker-compose.yml` sets `pid: host` but not
+`network_mode: host`. Reading the rest of that service's actual `volumes:`
+block (not just the part read on the first pass) disproves that
+hypothesis: it mounts `- /proc:/host/proc:ro` and `- /sys:/host/sys:ro`.
+Netdata's own official Docker entrypoint (`packaging/docker/run.sh`,
+checked directly against its upstream source) execs the daemon with a
+**hardcoded** `-s /host` host-prefix flag unconditionally (it does not
+conditionally detect the mount and does not need to -- the flag is always
+passed). With `-s /host` and a real `/proc:/host/proc:ro` bind mount in
+place, netdata's `/proc/sys/net/netfilter/nf_conntrack_count`/`_max` reads
+resolve through that bind-mounted procfs instance -- i.e. the **real host
+network namespace's** conntrack counters (in this fleet, the LXC
+container's own root netns, the exact same one this investigation queried
+directly via SSH above), not netdata's own container-local, isolated
+bridge-network namespace. Network namespace isolation between containers
+does not change this, because a bind-mounted `/proc` reflects whichever
+namespace it was mounted *from*, independent of which namespace the
+*reading* process itself lives in. **So the conntrack chart and its alarm
+already observe the right, host-level, aggregate numbers today, with no
+`network_mode: host` needed and no code change required** -- the opposite
+of this section's original working hypothesis, corrected here before
+publication rather than shipped as a wrong claim.
 
-Separately: `grep`-ing this repository for any netdata alerting/
-notification wiring (`health_alarm_notify.conf`, `SEND_EMAIL`, webhook
-config, etc.) found nothing -- the default `netfilter_conntrack_full`
-alarm, even if it fires against the right namespace, has no configured
-notification channel today. It would be visible on netdata's own dashboard
-(port 19999) to someone actively looking, but would not proactively alert
-anyone.
+Separately, still a real and unresolved gap: `grep`-ing this repository
+for any netdata alerting/notification wiring (`health_alarm_notify.conf`,
+`SEND_EMAIL`, webhook config, etc.) found nothing -- the default
+`netfilter_conntrack_full` alarm, confirmed above to observe the right
+namespace, still has no configured notification channel today. It would be
+visible on netdata's own dashboard (port 19999) to someone actively
+looking, but would not proactively alert anyone.
 
 ### Structured decision for the maintainer
 
-- [ ] **Netdata network namespace for conntrack (and other host-level
-      metrics)**: should the `netdata` service be switched to
-      `network_mode: host` so its conntrack (and other network-level)
-      collectors observe the host's real network namespace instead of
-      their own isolated one? This is a real architecture/security
-      tradeoff (broader network exposure for the netdata container, loses
-      its own bridge-network isolation) not evaluated in depth here, and
-      touches `deploy/prod/docker-compose.yml` -- not something this pass
-      changed unilaterally. Alternative: leave as-is and treat conntrack
-      monitoring as a known, documented gap.
 - [ ] **Netdata alarm notifications**: should this project wire up a
       notification channel (`health_alarm_notify.conf`) for netdata's
-      existing default alarms (including `netfilter_conntrack_full`), or
-      is dashboard-only visibility (port 19999) considered sufficient for
-      now?
+      existing default alarms (including `netfilter_conntrack_full`,
+      confirmed above to already observe the correct host-level
+      namespace), or is dashboard-only visibility (port 19999) considered
+      sufficient for now?
 - [ ] **Watchdog's own conntrack visibility**: separately from netdata,
       should the Rust watchdog (issue #842, still not stack-wide) surface
       conntrack pressure itself, or is relying on netdata's existing
-      collector/alarm (once the namespace question above is resolved)
+      collector/alarm (already confirmed correctly scoped, see above)
       sufficient, avoiding duplicate monitoring logic?
 
-No code change is included in this pass for item 14: the namespace fix is
-an architecture/security tradeoff needing the maintainer's decision, not a
-small, risk-free tweak, and the underlying collector/alarm already exist
-without any new code.
+No code change is included in this pass for item 14: the collector and
+its alarm are already correctly configured and already observe the right
+namespace by virtue of the existing `/proc:/host/proc:ro` mount -- the
+only open question is notification wiring, which is a maintainer policy
+decision (does this project want proactive alerting at all, and through
+which channel), not a technical gap in the monitoring itself.
 
 ## Item 15: RPS tuning -- the actual commands, computed, not copied
 
