@@ -260,3 +260,55 @@ setup() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"_fix_chrony_dir_ownership_core chrony:chrony /var/log/chrony /var/lib/chrony"* ]]
 }
+
+# Least-privilege hardening (issue #1358), leg 1: the real, committed
+# chrony.conf.template must carry the explicit `user chrony` directive, not
+# rely on chronyd's own compiled-in PRIVDROP default target user staying an
+# unwritten assumption forever (AG-VAL-023: don't build/document around a
+# third-party tool's unverified default). A plain static content check on
+# the real template file, not a rendering/functional test -- the actual
+# runtime effect (chronyd really ending up as the `chrony` user, both with
+# and without this line, on this project's shipped chrony-nts build) was
+# verified live on a real runner instead; see the PR implementing this
+# issue for the full session.
+@test "the real chrony.conf.template carries an explicit user chrony directive" {
+    run grep -E '^user chrony$' "$repo_root/services/ntp/chrony.conf"
+    [ "$status" -eq 0 ]
+}
+
+# Least-privilege hardening (issue #1358), leg 3: the final chronyd exec
+# must pass `-F 1` (chrony's own strict seccomp allow-list level, per
+# chrony-project.org's chronyd(8) docs) -- only added after live
+# confirmation that this image's Alpine chrony-nts build actually reports
+# `+SCFILTER` in `chronyd -v`'s feature list (see services/ntp/Dockerfile's
+# comment), and that chronyd still starts/syncs/serves normally with it
+# (verified live on a real runner; see the PR implementing this issue for
+# the full session, and `scripts/ntp-cap-sys-time-simulation.sh`'s
+# GitHub-hosted CI job for the real clock-stepping-under-seccomp proof)
+# rather than being killed on its first disallowed syscall, which is the
+# failure mode an over-strict or unsupported seccomp level would produce
+# instead.
+@test "the final chronyd exec passes -F 1 (seccomp strict allow-list)" {
+    run grep -E '^exec chronyd .* -F 1$' "$repo_root/services/ntp/entrypoint.sh"
+    [ "$status" -eq 0 ]
+}
+
+# Real bug fix (found while validating issue #1358, unrelated to and
+# pre-existing before that hardening -- see entrypoint.sh's own comment on
+# this line for the full incident): nothing in this project ever created
+# /run/chrony, chronyd's own pidfile directory, and chronyd does not create
+# it itself. This project's self-hosted CI runner fleet never surfaced it
+# because every host there dies earlier at an unrelated CAP_SYS_TIME/
+# adjtimex restriction (issue #1296) before ever reaching the pidfile-open
+# step this bug lives in -- confirmed live on a real runner by deliberately
+# bypassing that earlier failure with chronyd's own `-x` flag as a
+# diagnostic probe. A real deployment where CAP_SYS_TIME actually works
+# would hit this unconditionally today. Static content check (like the
+# `user chrony` test above) since this is a plain top-level `mkdir -p`, not
+# a function this file's existing helper-extraction mechanism can load in
+# isolation; the real fix was proven functionally on a real runner (see PR
+# #1358's validation notes), not just here.
+@test "entrypoint.sh creates chronyd's own pidfile directory before starting chronyd" {
+    run grep -E '^mkdir -p /run/chrony$' "$repo_root/services/ntp/entrypoint.sh"
+    [ "$status" -eq 0 ]
+}
