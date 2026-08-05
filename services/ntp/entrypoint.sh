@@ -10,6 +10,30 @@ set -e
 
 mkdir -p /var/log/chrony /var/lib/chrony
 
+# Real bug found while validating issue #1358's least-privilege hardening,
+# unrelated to and pre-existing before that hardening itself (present
+# identically on the unmodified image; not something cap_drop/user/-F
+# introduced): nothing in this project ever created /run/chrony, and
+# chronyd does not create its own pidfile's parent directory -- it only
+# opens the pidfile assuming the directory already exists. This project's
+# own self-hosted CI runner fleet never surfaced it because every one of
+# those hosts is itself LXC-nested and chronyd there always dies earlier,
+# at the unrelated adjtimex/CAP_SYS_TIME step (issue #1296), before ever
+# reaching the pidfile-open step this bug lives in -- confirmed live by
+# deliberately bypassing that earlier failure with chronyd's own `-x` flag
+# (never step/slew) as a diagnostic-only probe, which let startup proceed
+# far enough to hit "Fatal error : Could not open /run/chrony/chronyd.pid :
+# No such file or directory" instead. A real deployment where CAP_SYS_TIME
+# actually works (i.e. anywhere outside this project's own nested-LXC CI
+# fleet) would reach this same failure today, unconditionally, matching
+# AG-WF-027 ("fix identified problems in the same pass," even ones outside
+# the change's original narrow scope, when reachable without a separate
+# approval gate). /run is typically a fresh tmpfs each container start, so
+# this must be created every start, not just once at image build time (a
+# build-time `mkdir -p /run/chrony` in the Dockerfile would not survive
+# into the running container).
+mkdir -p /run/chrony
+
 # The Admin UI persists its own settings (including this service's) to the
 # shared ui-data volume rather than mutating this container's environment
 # directly -- same mechanism services/dhcp-proxy/entrypoint.sh already uses,
@@ -253,5 +277,30 @@ validate_ntp_config "$NTP_RUNTIME_CONF" || exit 1
 cleanup_stale_ntp_pidfile
 fix_chrony_dir_ownership
 
+# Least-privilege hardening, seccomp leg (issue #1358): `-F 1` only makes
+# sense if this build was actually compiled with seccomp support at all --
+# checked live rather than assumed (AG-VAL-023) via `chronyd -v`'s own
+# reported feature list, which shows `+SCFILTER` for this image's Alpine
+# `chrony-nts` package (its `chrony-common`/`chrony-nts` APKBUILD links
+# against `libseccomp`, pulled in automatically as a real package
+# dependency, not something this Dockerfile opts into itself). Level 1 (not
+# 2) per chrony-project.org's own chronyd(8) docs: level 1 is the strict
+# allow-list ("only selected system calls... normally expected to be made
+# by chronyd"; anything else is blocked), whereas level 2 only blocks a
+# small named set (e.g. fork/exec) -- level 1 is the actual least-privilege
+# choice this issue asks for, not the lighter one. Confirmed live on this
+# project's self-hosted runner fleet (see the PR implementing this issue
+# for the full session) that chronyd starts with this flag set, reaches a
+# genuinely synchronised state (real `Stratum`/`Leap status: Normal`)
+# against real upstream servers, and keeps answering `chronyc tracking`/LAN
+# NTP queries normally -- an over-strict seccomp level would instead kill
+# the process outright on its first disallowed syscall, which is not what
+# was observed. That verification used chronyd's own `-x` flag (never
+# step/slew) to work around this project's self-hosted fleet's unrelated
+# CAP_SYS_TIME/adjtimex restriction (issue #1296), so it proves `-F 1`
+# doesn't block the syscalls chronyd needs for config parsing, binding,
+# privilege-drop, and NTP query/response handling; the real clock-stepping
+# syscall path itself under `-F 1` is proven separately, on a real non-LXC
+# kernel, by `scripts/ntp-cap-sys-time-simulation.sh`'s GitHub-hosted CI job.
 echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
-exec chronyd -n -f "$NTP_RUNTIME_CONF"
+exec chronyd -n -f "$NTP_RUNTIME_CONF" -F 1
