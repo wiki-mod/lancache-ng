@@ -82,7 +82,14 @@ extract_netdata_version() {
   # `-z` check below ever runs -- the identical dead-fail-closed-branch
   # pattern PR #937 hit. Neutralizing the pipeline's own exit code here is
   # what lets the explicit check and friendly error message actually execute.
-  version="$(grep -E '^ARG NETDATA_VERSION=' "${dockerfile_path}" | head -1 | cut -d= -f2 | tr -d '[:space:]' || true)"
+  # grep runs to completion into a variable first (the `|| true` above still
+  # covers its own zero-match case), then `head -1` reads that captured
+  # variable via a here-string instead of a live pipe from grep -- a live
+  # `grep ... | head -1` pipe can SIGPIPE grep if the Dockerfile ever grows a
+  # second matching ARG line (issue #1377's repo-wide pipefail/SIGPIPE audit).
+  local version_line
+  version_line="$(grep -E '^ARG NETDATA_VERSION=' "${dockerfile_path}" || true)"
+  version="$(head -1 <<<"${version_line}" | cut -d= -f2 | tr -d '[:space:]')"
   if [ -z "${version}" ]; then
     echo "::error::Could not find 'ARG NETDATA_VERSION=' in ${dockerfile_path}" >&2
     return 1
@@ -105,7 +112,13 @@ extract_curl_version_tag() {
   # finding zero matches is the "unparseable content" case this function
   # must be able to detect and report, not something errexit should be
   # allowed to short-circuit past silently.
-  raw="$(printf '%s\n' "${content}" | grep -E '^CURL_VERSION=' | head -1 | sed -E 's/^CURL_VERSION="?curl-([0-9_]+)"?.*/\1/' || true)"
+  # Here-string into grep, then grep's own output captured into a variable
+  # before `head -1` reads it -- avoids a live pipe an early-exiting consumer
+  # could SIGPIPE if the content ever has more than one matching line
+  # (issue #1377).
+  local curl_version_line
+  curl_version_line="$(grep -E '^CURL_VERSION=' <<<"${content}" || true)"
+  raw="$(head -1 <<<"${curl_version_line}" | sed -E 's/^CURL_VERSION="?curl-([0-9_]+)"?.*/\1/' || true)"
   if [ -z "${raw}" ]; then
     echo "::error::Could not find a parseable CURL_VERSION=\"curl-X_Y_Z\" line in the given bundled-packages.version content" >&2
     return 1

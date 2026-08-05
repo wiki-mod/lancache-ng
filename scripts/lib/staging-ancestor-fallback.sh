@@ -401,7 +401,8 @@ saf_base_commit_service_untouched() {
   if (( classify_status != 0 )); then
     return 2
   fi
-  value="$(printf '%s\n' "$classify_output" | grep -m1 "^${classify_key}=" | cut -d= -f2)"
+  # Here-string, not a live pipe into grep -m1 (issue #1377).
+  value="$(grep -m1 "^${classify_key}=" <<<"$classify_output" | cut -d= -f2)"
   case "$value" in
     false) return 0 ;;
     true) return 1 ;;

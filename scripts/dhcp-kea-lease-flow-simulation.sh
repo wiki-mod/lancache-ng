@@ -296,15 +296,18 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
         echo "::error::Could not lock a free validation subnet octet after $subnet_max_attempts attempts." >&2
         exit 1
     }
-    if ! attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"; then
+    # Here-strings, not `printf ... | sed -n` pipes -- consistent with this
+    # file's own pipefail setting and issue #1377's repo-wide audit (a
+    # here-string has no second writer process for pipefail to trip on).
+    if ! attempt="$(sed -n 's/^attempt=//p' <<<"$reservation")"; then
         echo "::error::Could not parse the 'attempt=' field out of validation_subnet_reserve's output." >&2
         exit 1
     fi
-    if ! candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"; then
+    if ! candidate_octet="$(sed -n 's/^octet=//p' <<<"$reservation")"; then
         echo "::error::Could not parse the 'octet=' field out of validation_subnet_reserve's output." >&2
         exit 1
     fi
-    if ! candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"; then
+    if ! candidate_pid="$(sed -n 's/^holder_pid=//p' <<<"$reservation")"; then
         echo "::error::Could not parse the 'holder_pid=' field out of validation_subnet_reserve's output." >&2
         exit 1
     fi
@@ -432,7 +435,13 @@ echo "== Waiting for PowerDNS to finish TSIG/zone setup and start serving (issue
 dns_ready_deadline=$((SECONDS + 60))
 dns_ready=0
 while (( SECONDS < dns_ready_deadline )); do
-    if docker logs "$dns_container" 2>&1 | grep -q "Configured TSIG-authenticated DDNS updates for LAN zones." \
+    # `docker logs` runs to completion into a variable first, then grep -q
+    # reads it via a here-string -- a live `docker logs ... | grep -q` pipe
+    # can SIGPIPE `docker logs` the moment the log already contains the
+    # matched line plus more (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit; this is the exact shape that failed real CI in PR #1374).
+    dns_log="$(docker logs "$dns_container" 2>&1)"
+    if grep -q "Configured TSIG-authenticated DDNS updates for LAN zones." <<<"$dns_log" \
         && docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 lan. SOA >/dev/null 2>&1; then
         dns_ready=1
         break

@@ -147,7 +147,7 @@ wait_for_tls() {
     local container="$1"
     local deadline=$((SECONDS + 60))
     while (( SECONDS < deadline )); do
-        if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
+        if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then # pipefail-safe: docker inspect --format on one field of one container always emits exactly one line (issue #1377)
             echo "::error::$container is not running (crashed during startup). Logs:" >&2
             docker logs "$container" 2>&1 | tail -60 >&2
             return 1

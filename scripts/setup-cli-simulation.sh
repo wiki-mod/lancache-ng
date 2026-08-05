@@ -481,8 +481,10 @@ diff -q \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.before-forced-failure") \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
     || { echo "::error::setup.sh update changed unrelated .env keys during a failed update -- unsafe partial state." >&2; exit 1; }
-find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . \
-    || { echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2; exit 1; }
+find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . || { # pipefail-safe: find's own -print -quit self-limits to at most one line (issue #1377)
+    echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2
+    exit 1
+}
 echo "setup.sh update failed safely on a broken image tag at the platform preflight: .env is intact and a rollback backup exists."
 
 # Not asserted: that the stack stays up and healthy through the failed
@@ -536,7 +538,12 @@ legacy_backup_root="$repo_root/.setup-cli-simulation-tmp/legacy-backup"
 rm -rf "$legacy_backup_root"
 mkdir -p "$legacy_backup_root"
 tar -C "$legacy_backup_root" -xzf "$noop_backup"
-if ! legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d | head -1)"; then
+# `-quit` makes find itself stop after the first match (mirroring this
+# file's own line 484 idiom) instead of relying on `head -1` to force an
+# early pipe close that could SIGPIPE find if it ever has more than one
+# extracted directory to report (issue #1377's repo-wide pipefail/SIGPIPE
+# audit).
+if ! legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"; then
     echo "::error::Could not list extracted directories under $legacy_backup_root to find the synthetic legacy backup fixture." >&2
     exit 1
 fi
@@ -551,14 +558,18 @@ legacy_env_path="$legacy_stamp_dir/rootfs${install_dir}/.env"
 # collapses them back into CACHE_DIR, the post-restore stack actually mounts
 # this path, so an arbitrary non-existent path would fail the health check
 # below for an unrelated reason and mask what this phase is testing.
-# grep exits 1 on no match even though head/cut downstream still exit 0, and
-# pipefail propagates that: a legacy_env_path with no CACHE_DIR= line at all
-# (not just an empty value) fails this substitution outright rather than
-# just yielding an empty real_cache_dir.
-if ! real_cache_dir=$(grep '^CACHE_DIR=' "$legacy_env_path" | head -1 | cut -d= -f2-); then
+# grep exits 1 on no match, and this must still fail closed: a
+# legacy_env_path with no CACHE_DIR= line at all (not just an empty value)
+# fails this substitution outright rather than just yielding an empty
+# real_cache_dir. Captured into a variable directly off grep's own exit
+# status instead of a live `grep | head -1` pipe, which could otherwise
+# SIGPIPE grep if the file ever had more than one CACHE_DIR= line (issue
+# #1377's repo-wide pipefail/SIGPIPE audit).
+if ! cache_dir_line="$(grep '^CACHE_DIR=' "$legacy_env_path")"; then
     echo "::error::Could not read CACHE_DIR from $legacy_env_path (no matching line found)." >&2
     exit 1
 fi
+real_cache_dir="$(head -1 <<<"$cache_dir_line" | cut -d= -f2-)"
 [[ -n "$real_cache_dir" ]] \
     || { echo "::error::Synthetic legacy backup fixture has no CACHE_DIR to seed the legacy split keys from." >&2; exit 1; }
 sed -i \

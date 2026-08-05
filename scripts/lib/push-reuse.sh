@@ -148,7 +148,11 @@ push_reuse_decide() {
   # exactly the case ancestry alone cannot detect), a missing key (malformed
   # classify output), or an unexpected value all mean "do not trust this as
   # unchanged".
-  changed_flag="$(printf '%s\n' "$classify_output" | grep -m1 "^${service_key}=" | cut -d= -f2)"
+  # Here-string, not a live pipe into grep -m1 -- $classify_output lists
+  # every service classify-image-impact.sh knows about, and a live pipe
+  # could SIGPIPE the moment there is more output after the first match
+  # (issue #1377's repo-wide pipefail/SIGPIPE audit).
+  changed_flag="$(grep -m1 "^${service_key}=" <<<"$classify_output" | cut -d= -f2)"
   if [[ "$changed_flag" != "false" ]]; then
     echo "push_reuse_decide: classify-image-impact.sh reported '${service_key}=${changed_flag:-<missing>}' for ${revision}..${github_sha} -- failing closed to a real rebuild." >&2
     printf 'false\n'

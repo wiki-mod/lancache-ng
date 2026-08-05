@@ -413,7 +413,12 @@ echo "Live connection for removed secondary 'authcallout-a' is confirmed gone fr
 # real disconnect for the kicked connection. Not treated as fatal on its own
 # (the connz poll above is the authoritative check) since log line wording is
 # more likely to drift across nats-server versions than the connz JSON shape.
-if "${compose[@]}" logs --no-color nats 2>/dev/null | grep -qi "authcallout-a\|Client Kicked\|Client connection closed"; then
+# Captured into a variable first, not a live `compose logs | grep -qi` pipe
+# -- nats-server's full log can be large by the time this runs, and a live
+# pipe can SIGPIPE the compose CLI once the log already has the matched
+# line plus more (issue #1377's repo-wide pipefail/SIGPIPE audit).
+nats_log="$("${compose[@]}" logs --no-color nats 2>/dev/null)"
+if grep -qi "authcallout-a\|Client Kicked\|Client connection closed" <<<"$nats_log"; then
     echo "nats-server's own log also shows evidence of the disconnect."
 else
     echo "::warning::nats-server's log did not show an obviously matching disconnect line (non-fatal -- connz poll above is the authoritative proof)."

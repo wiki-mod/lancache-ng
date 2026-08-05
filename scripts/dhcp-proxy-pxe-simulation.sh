@@ -157,15 +157,17 @@ while [[ -z "$octet" && "$subnet_next_attempt" -le "$subnet_max_attempts" ]]; do
     # before any of the [[ -n ]] checks a later line might have had a chance to run.
     # Wrap each so a broken parse of $reservation reports its own cause instead of a
     # bare "Process completed with exit code 1".
-    if ! attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"; then
+    # Here-strings, not `printf ... | sed -n` pipes (issue #1377's repo-wide
+    # pipefail/SIGPIPE audit -- a here-string has no second writer process).
+    if ! attempt="$(sed -n 's/^attempt=//p' <<<"$reservation")"; then
         echo "::error::Could not parse 'attempt' out of the subnet reservation output." >&2
         exit 1
     fi
-    if ! candidate_octet="$(printf '%s\n' "$reservation" | sed -n 's/^octet=//p')"; then
+    if ! candidate_octet="$(sed -n 's/^octet=//p' <<<"$reservation")"; then
         echo "::error::Could not parse 'octet' out of the subnet reservation output." >&2
         exit 1
     fi
-    if ! candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"; then
+    if ! candidate_pid="$(sed -n 's/^holder_pid=//p' <<<"$reservation")"; then
         echo "::error::Could not parse 'holder_pid' out of the subnet reservation output." >&2
         exit 1
     fi
@@ -250,11 +252,18 @@ echo "== Waiting for dnsmasq to report it is serving the proxy subnet =="
 deadline=$((SECONDS + 30))
 dhcp_ready=0
 while (( SECONDS < deadline )); do
-    if docker logs "$dhcp_container" 2>&1 | grep -q 'DHCP, proxy on subnet'; then
+    # `docker logs` captured into a variable first, then grep -q reads it
+    # via a here-string -- a live pipe here can SIGPIPE `docker logs` once
+    # the log already has the matched line plus more (issue #1377).
+    dhcp_log="$(docker logs "$dhcp_container" 2>&1)"
+    if grep -q 'DHCP, proxy on subnet' <<<"$dhcp_log"; then
         dhcp_ready=1
         break
     fi
-    if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then
+    # `--filter name=<exact>$` anchors on the one container name this
+    # script itself created, so `docker ps -q` can only ever produce 0 or 1
+    # lines here (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    if ! docker ps -q --filter "name=${dhcp_container}$" | grep -q .; then # pipefail-safe: --filter name=<exact>$ bounds docker ps -q to 0 or 1 lines
         echo "::error::dhcp-proxy container exited before it started serving. Logs:" >&2
         docker logs "$dhcp_container" >&2 || true
         exit 1

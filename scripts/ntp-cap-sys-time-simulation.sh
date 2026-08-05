@@ -115,12 +115,20 @@ echo "== Polling for up to 120s: fail fast on the known CAP_SYS_TIME crash signa
 deadline=$((SECONDS + 120))
 synced=0
 while (( SECONDS < deadline )); do
-    if docker logs "$container_name" 2>&1 | grep -qi "adjtimex.*Operation not permitted\|Another chronyd may already be running"; then
+    # `docker logs` captured into a variable first, then grep -qi reads it
+    # via a here-string -- a live pipe here can SIGPIPE `docker logs` once
+    # the log already has the matched line plus more (issue #1377's
+    # repo-wide pipefail/SIGPIPE audit).
+    ntp_log="$(docker logs "$container_name" 2>&1)"
+    if grep -qi "adjtimex.*Operation not permitted\|Another chronyd may already be running" <<<"$ntp_log"; then
         echo "::error::chronyd hit the same CAP_SYS_TIME restriction confirmed on this project's self-hosted (LXC) runner fleet -- this GitHub-hosted runner no longer grants real CAP_SYS_TIME, or the ntp image/entrypoint changed in a way that broke this. See #1296 for the original investigation." >&2
         docker logs "$container_name" >&2
         exit 1
     fi
-    if ! docker inspect --format '{{.State.Running}}' "$container_name" 2>/dev/null | grep -qx true; then
+    # `docker inspect --format` on one field of one container always
+    # produces exactly one line, so grep -qx's early exit has nothing else
+    # to cut off (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    if ! docker inspect --format '{{.State.Running}}' "$container_name" 2>/dev/null | grep -qx true; then # pipefail-safe: docker inspect --format on one field of one container always emits exactly one line
         echo "::error::$container_name is no longer running (unexpected exit, not the known CAP_SYS_TIME crash signature). Full logs:" >&2
         docker logs "$container_name" >&2
         exit 1

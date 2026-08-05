@@ -447,7 +447,11 @@ run_kea_dhcp_activation_preflight() {
     # Anchors at the start of the line (after stripping nmap's leading |/_
     # prefixes and whitespace) instead of a bare substring match, and takes
     # the first match rather than assuming there is exactly one.
-    server_identifier="$(printf '%s\n' "$output" | sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' | sed -n '1p')"
+    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit) -- both sed stages here already lack an explicit q/Q and read
+    # to EOF regardless, but converting keeps this consistent with the rest
+    # of the fix and needs no further reasoning about $output's size.
+    server_identifier="$(sed -n '1p' <<<"$(sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' <<<"$output")")"
 
     if [[ -n "$server_identifier" ]]; then
         print_warn "An existing DHCP server answered before Kea activation: $server_identifier"
@@ -1925,7 +1929,9 @@ assert_resolved_image_tag_platform_supported() {
     [[ -n "$discovered_platforms" ]] \
         || { die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."; return 1; }
 
-    printf '%s\n' "$discovered_platforms" | grep -Eq "^${platform}(/.*)?$" \
+    # Here-string, not a live pipe into grep -q -- $discovered_platforms can
+    # list several platforms (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
 }
 
@@ -3095,7 +3101,14 @@ compose_project_name() {
     name="${COMPOSE_PROJECT_NAME:-}"
     [[ -n "$name" ]] || name=$(get_env_var COMPOSE_PROJECT_NAME "$env_file")
     if [[ -z "$name" && -f "$compose_dir/docker-compose.yml" ]]; then
-        name=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml" | head -1)
+        # sed's own matches captured into a variable first, then `head -1`
+        # reads them via a here-string instead of a live pipe from sed --
+        # avoids a SIGPIPE if the compose file ever has more than one
+        # unindented top-level `name:` key (issue #1377's repo-wide
+        # pipefail/SIGPIPE audit).
+        local compose_name_lines
+        compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml")
+        name=$(head -1 <<<"$compose_name_lines")
     fi
     name="${name:-$(basename "$compose_dir")}"
     printf '%s\n' "$name"
@@ -3465,7 +3478,13 @@ cmd_restore() {
     }
     trap restore_cleanup EXIT
     tar -C "$tmp" -xzf "$archive"
-    root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs | head -1)
+    # `-print -quit` makes find itself stop after the first match instead of
+    # relying on `head -1` to force an early pipe close, which could
+    # otherwise SIGPIPE find if a backup archive's layout ever nests more
+    # than one `rootfs` directory (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit -- this is a real, restore-path-critical script, so this is
+    # fixed rather than merely marked safe).
+    root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs -print -quit)
     [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
     backup_dir=$(dirname "$root")
     archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt" 2>/dev/null || true)
@@ -4372,7 +4391,9 @@ lancache_read_ui_settings_override() {
     docker volume inspect "$volume" >/dev/null 2>&1 || return 0
     raw=$(docker run --rm -v "${volume}:/volume:ro" alpine \
         sh -c 'cat /volume/lancache-ui-settings.env 2>/dev/null') 2>/dev/null || return 0
-    printf '%s\n' "$raw" | sed -n "s/^${key}=//p" | tail -1
+    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit).
+    sed -n "s/^${key}=//p" <<<"$raw" | tail -1
 }
 
 # Makes lancache-auto-update.timer's actual systemctl enabled/active state
@@ -5049,6 +5070,7 @@ list_kea_snapshot_ids() {
 kea_ctrl_post() {
     local kea_ctrl_url="$1" kea_ctrl_token="$2" body="$3"
     local response_file http_status response result_code result_text
+    local result_code_lines result_text_lines
 
     response_file=$(mktemp)
     # The Basic-Auth credential is passed to curl via -K (config read from
@@ -5073,8 +5095,15 @@ kea_ctrl_post() {
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
     fi
-    result_code=$(printf '%s' "$response" | grep -oP '"result"\s*:\s*\K-?[0-9]+' | head -1)
-    result_text=$(printf '%s' "$response" | grep -oP '"text"\s*:\s*"\K[^"]*' | head -1)
+    # Here-strings feed grep, and grep's own matches (Kea's JSON response can
+    # be a batched array with more than one "result"/"text" key) are
+    # captured into variables before `head -1` reads them -- avoids a live
+    # `grep | head -1` pipe that could SIGPIPE grep (issue #1377's
+    # repo-wide pipefail/SIGPIPE audit).
+    result_code_lines=$(grep -oP '"result"\s*:\s*\K-?[0-9]+' <<<"$response")
+    result_code=$(head -1 <<<"$result_code_lines")
+    result_text_lines=$(grep -oP '"text"\s*:\s*"\K[^"]*' <<<"$response")
+    result_text=$(head -1 <<<"$result_text_lines")
     [[ -n "$result_code" ]] || die "Unrecognized response from Kea's Control Agent: ${response}"
     if [[ "$result_code" != "0" ]]; then
         die "Kea's Control Agent rejected the command (result=${result_code}): ${result_text:-<no message>}"
@@ -5222,9 +5251,14 @@ list_dns_zones_with_snapshots() {
 # non-greedily up to the first ']' is a safe boundary for this specific,
 # known-flat shape -- not a general JSON parser.
 dns_zone_snapshot_entries() {
-    local body="$1" zone="$2" zone_escaped zone_array
+    local body="$1" zone="$2" zone_escaped zone_array zone_array_matches
     zone_escaped="${zone//./\\.}"
-    zone_array=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]" | head -1)
+    # grep's own matches captured into a variable first, then `head -1`
+    # reads them via a here-string -- avoids a live `grep | head -1` pipe
+    # that could SIGPIPE grep if $body ever repeats the zone key (issue
+    # #1377's repo-wide pipefail/SIGPIPE audit).
+    zone_array_matches=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]")
+    zone_array=$(head -1 <<<"$zone_array_matches")
     [[ -n "$zone_array" ]] || return 0
     paste -d' ' \
         <(printf '%s' "$zone_array" | grep -oP '"id"\s*:\s*"\K[0-9]+') \
@@ -5974,7 +6008,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line (issue #1377)
       interval: 30s
       timeout: 5s
       retries: 3
@@ -6189,16 +6223,32 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
         exec /opt/lancache-ng/setup.sh "$@"
     fi
 
-    print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
+    # `docker --version` itself is always one line, but grep -oP can still
+    # find more than one digit-run on that line (e.g. a build-hash fragment
+    # after the version proper) -- captured into a variable first, then
+    # `head -1` reads it via a here-string instead of a live pipe from grep
+    # (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    docker_version_numbers="$(docker --version | grep -oP '[\d.]+')"
+    print_ok "Docker $(head -1 <<<"$docker_version_numbers")"
     print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
 fi
 
 # ── 2. Network IPs ────────────────────────────────────────────────────────────
 print_step "Network configuration"
 
-detected_ip=$(ip -4 addr show | grep -oP '(?<=inet )[\d.]+' \
-    | grep -v '^127\.' | grep -v '^172\.' | head -1 || true)
-detected_iface=$(ip -4 route show default | awk '{print $5}' | head -1 || true)
+# `ip` output captured into a variable first: a host can have several
+# interfaces/addresses, and a live `ip ... | grep ... | head -1` pipe can
+# SIGPIPE the `ip`/`grep` processes still writing once `head -1` already
+# has its one line (issue #1377's repo-wide pipefail/SIGPIPE audit -- this
+# is the production installer, so converted rather than merely reasoned
+# about as low-risk).
+ip_addr_output="$(ip -4 addr show)"
+candidate_ips="$(grep -oP '(?<=inet )[\d.]+' <<<"$ip_addr_output" \
+    | grep -v '^127\.' | grep -v '^172\.' || true)"
+detected_ip=$(head -1 <<<"$candidate_ips")
+ip_route_output="$(ip -4 route show default)"
+route_ifaces="$(awk '{print $5}' <<<"$ip_route_output" || true)"
+detected_iface=$(head -1 <<<"$route_ifaces")
 
 printf "\n  Found LAN addresses:\n"
 ip -4 addr show | grep "inet " | grep -v " 127\." | grep -v " 172\." \
@@ -6229,7 +6279,11 @@ if [[ "${REPLY,,}" = "y" ]]; then
     done
     [[ "$IP_STANDARD" != "$IP_SSL" ]] \
         || die "Standard IP and SSL IP must be different."
-    if ip -4 addr show | grep -q "inet ${IP_SSL}/"; then
+    # Captured into a variable first, not a live `ip ... | grep -q` pipe --
+    # a host can have several interfaces/addresses (issue #1377's
+    # repo-wide pipefail/SIGPIPE audit).
+    ip_ssl_check_output="$(ip -4 addr show)"
+    if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
         print_ok "$IP_SSL already assigned"
     else
         print_warn "$IP_SSL not yet assigned to an interface"
