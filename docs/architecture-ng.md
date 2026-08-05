@@ -282,10 +282,16 @@ widen watchdog's own monitored-service list -- see #842):
   container is; its own healthcheck (`fluent-bit -V`) only proves the binary
   is intact, not that the tailing pipeline actually works (see the compose
   comment next to that healthcheck). Both are also gated behind the
-  `logging` Compose profile -- on by default since issue #1343 (a real,
-  operator-controllable opt-out remains via `LOGGING_ENABLED=0` in `.env` or
-  the Admin UI, for genuinely storage-constrained installs), not the
-  off-by-default state this section previously described.
+  `logging` Compose profile -- on by default since issue #1343 for every
+  `setup.sh`-managed install (fresh wizard installs default the "Enable
+  central logging?" prompt to `Y`, and `setup.sh update` converges an
+  existing install toward `LOGGING_ENABLED=1` if the key was never set; a
+  real, operator-controllable opt-out remains via `LOGGING_ENABLED=0` in
+  `.env` or the Admin UI, for genuinely storage-constrained installs), not
+  the off-by-default state this section previously described. A from-scratch
+  manual `deploy/prod` install that never runs `setup.sh` still starts with
+  `logging` off, same as its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles --
+  see `deploy/prod/.env`'s own comment on this profile.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via

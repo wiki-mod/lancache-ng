@@ -134,8 +134,11 @@ the Docker socket proxy currently allowlists:
    unexplained exceptions. This PR adds explicit `container_name:` values
    for these four (`lancache-docker-socket-proxy`, `lancache-watchdog`,
    `lancache-ui`, `lancache-netdata`) and for the `syslog` service (Compose-
-   profile-gated; on by default since issue #1343, not "optional" in the
-   off-by-default sense the original wording implied) where present (and,
+   profile-gated; on by default since issue #1343 for `setup.sh`-managed
+   installs, not "optional" in the off-by-default sense the original wording
+   implied -- a from-scratch manual `deploy/prod` install still starts with
+   it off, matching its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles) where
+   present (and,
    at the time, the since-removed `watchtower` service --
    see #819), so "every lancache-ng service has a stable, predictable name"
    is a rule without exceptions instead of a rule with four undocumented
