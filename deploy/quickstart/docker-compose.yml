@@ -1549,10 +1549,29 @@ services:
       # protocol like DHCP, so Docker's normal port-publish DNAT already
       # preserves real client source IPs without network_mode: host.
       - "123:123/udp"
+    # Least-privilege hardening (issue #1358): `cap_drop: [ALL]` then a
+    # narrow `cap_add`, empirically determined via live `strace` against the
+    # real chronyd binary, not guessed -- see deploy/prod/docker-compose.yml's
+    # `ntp` service for the full per-capability rationale (bind-before-drop,
+    # transient privilege-drop syscalls, entrypoint.sh's own chown step).
+    cap_drop:
+      - ALL
     cap_add:
       # chronyd needs to step/slew the container HOST's real system clock to
       # genuinely discipline time -- see services/ntp/Dockerfile's comment.
       - SYS_TIME
+      # Binds UDP/123 (and its cmdmon socket) before dropping to `chrony`.
+      - NET_BIND_SERVICE
+      # Transient-only: chronyd's own internal setgroups/setgid/setuid/
+      # capset() privilege-drop sequence needs these to run as root, but the
+      # long-running post-drop process retains none of them. Deliberately
+      # does NOT include SETPCAP -- confirmed live it changes nothing (see
+      # deploy/prod/docker-compose.yml's fuller comment for why).
+      - SETUID
+      - SETGID
+      # entrypoint.sh's own chown of /var/log/chrony and /var/lib/chrony to
+      # chrony:chrony needs this once root no longer has it implicitly.
+      - CHOWN
     healthcheck:
       # Real query/response probe (#1169, matching AG-VAL-018's spirit for
       # DNS): `chronyc tracking` is a genuine round-trip over chronyd's own

@@ -20,7 +20,7 @@ document.
 | Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
-| syslog-ng | off (`--profile logging`) | — | Central log receiver; fluent-bit forwards logs from every wired service to it (#453) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
+| syslog-ng | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to it (#453) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
 | Cache Warmer | not implemented | — | **Design-only, not shipped**: no `services/` code, no Compose service, nothing runnable exists yet under this name. See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the current proactive cache-warming design plan and its open maintainer decisions. Do not treat this row as an existing on/off feature until that design actually lands. |
 
@@ -289,9 +289,32 @@ added speculatively.
   `container_name:` added in `deploy/prod/docker-compose.yml` (`syslog-ng`
   also in `deploy/quickstart/docker-compose.yml` -- `syslog` already had one
   there) before either could be addressed by a stable Docker-API path at
-  all; both remain gated behind the optional `logging` profile
-  (`SYSLOG_ENABLED`), off by default, so watchdog only adds them to its
-  alert-only set when that profile is actually active.
+  all. Their *containers'* existence is gated by the `logging` Compose
+  profile, controlled by `LOGGING_ENABLED` -- **on by default since issue
+  #1343** for every `setup.sh`-managed install (fresh wizard installs default
+  the "Enable central logging?" prompt to `Y`, and `setup.sh update`
+  converges an existing install toward `LOGGING_ENABLED=1` if the key was
+  never set; a real, operator-controllable opt-out remains via
+  `LOGGING_ENABLED=0` in `.env` or the Admin UI). A from-scratch manual
+  `deploy/prod` install that never runs `setup.sh` still starts with
+  `logging` off, same as its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles --
+  see `deploy/prod/.env`'s own comment on this profile.
+  **This PR's own watchdog alert-only monitoring of `syslog`/`syslog-ng` is
+  gated by a second, separate flag, `SYSLOG_ENABLED`** (`resolve_bool`,
+  default `false`) -- the same pre-existing double-opt-in `retention.sh`
+  already used for its own syslog-pruning engine (see `deploy/prod/.env`'s
+  "DOUBLE opt-in" comment), reused here for consistency rather than
+  introduced fresh. **Known gap surfaced by reconciling this section with
+  issue #1343's landing (not present when this PR was originally written):**
+  since `LOGGING_ENABLED` now defaults to `1`, a fresh default install runs
+  the `syslog`/`syslog-ng` containers out of the box, but watchdog will
+  *not* alert-monitor them unless an operator also separately sets
+  `SYSLOG_ENABLED=true` -- these two flags are independent, and nothing
+  today converges `SYSLOG_ENABLED` to follow `LOGGING_ENABLED`'s default.
+  Whether `resolve_alert_only_targets()` should instead key off actual
+  container liveness (or off `LOGGING_ENABLED` directly) rather than the
+  separate double-opt-in flag is an open follow-up question, not decided or
+  changed here -- posted as a structured decision on #842.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
@@ -522,7 +545,7 @@ Runs on its own Axum webserver (port 8080) — independent from nginx. If nginx 
 - DNS: create zones, host entries, PTR checkbox for LAN IPs
 - Kea: lease overview, create/edit static assignments
 - Cache: start warming, progress, purging, retention + slice/size settings
-- Logs: filtered by host/service (implemented against the central syslog-ng path, #848); level-selectable filtering is not yet implemented (no open tracking issue as of this writing)
+- Logs: filtered by host/service (implemented against the central syslog-ng path, #848); level-selectable filtering is not yet implemented -- raised during #1343's scope discussion and left an explicit open decision there rather than built ad hoc, since fluent-bit's pipeline forwards every tailed line verbatim today with no severity filter anywhere, and nginx's `access.log` in particular has no severity field to filter on at all
 - Advanced options (root mirror, filter AAAA, secondary, syslog forwarding) under "Advanced" (syslog forwarding configuration is not yet exposed in the UI; no open tracking issue as of this writing — see the syslog-ng section's "Not implemented yet" note above)
 
 ## IPv6
