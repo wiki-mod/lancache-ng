@@ -271,7 +271,8 @@ async fn main() {
     // FailureCounter would) -- see HealthReading::is_alert_ok's own doc
     // comment for the reasoning behind reusing AlertCounter's semantics
     // here instead of FailureCounter's.
-    let alert_only_targets = resolve_alert_only_targets(&settings.dhcp_mode, settings.syslog_enabled);
+    let alert_only_targets =
+        resolve_alert_only_targets(&settings.dhcp_mode, settings.syslog_enabled);
     let mut alert_only_counters: HashMap<&'static str, AlertCounter> = alert_only_targets
         .iter()
         .map(|name| (*name, AlertCounter::default()))
