@@ -434,6 +434,14 @@ Part A is the "what does each individual claim need to prove" framing.
   the binary is intact, not that the tailing pipeline actually works — validate the
   pipeline directly (a real log line arriving at the target), don't trust the
   healthcheck alone.
+- **Standing check (AG-VAL-029, added by issue #1343):** `scripts/setup-cli-simulation.sh`'s
+  Phase 1 now asserts, after a default fresh install (every wizard prompt answered
+  with its default), that `.env` contains `LOGGING_ENABLED=1`, that `COMPOSE_PROFILES`
+  includes `logging`, and that the real `syslog`/`syslog-ng` containers are actually
+  running — guarding against a regression back to the bug this issue fixed (central
+  logging silently never starting on a normal install). This runs as part of the same
+  CI job the rest of this section already points at (`setup-cli-simulation` in
+  `full-setup-sims.yml`), not a new standalone check.
 
 ### 9. Resource-Leak / Cleanup Pass (standing check, run every release)
 
