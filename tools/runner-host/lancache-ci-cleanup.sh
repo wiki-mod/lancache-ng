@@ -201,11 +201,14 @@ reap_orphaned_running_containers() {
 # host's local time happens to produce, rather than hardcoding "UTC".
 #
 # Runs after the container reap so a network whose last container this same
-# pass just removed is already eligible for its OWN age check next run (its
-# own emptiness started this run, not threshold_hours ago) -- deliberately
-# not reaped in the same pass it just emptied, since that would reintroduce
-# the exact race this function exists to avoid for a network some other,
-# still-starting job created around the same time.
+# pass just removed is immediately eligible -- but the age check, not the
+# ordering, is what decides its fate: a network created long enough ago to
+# already be past threshold_hours is reaped in this same pass (that IS the
+# leak this function exists to close), while a network some other,
+# still-starting job created only moments ago stays protected by the SAME age
+# check regardless of when the last-attached-container check happens to run.
+# The race this avoids is a zero-attached read racing a network's own
+# creation, not a same-pass-vs-next-run timing question.
 reap_orphaned_validation_networks() {
     local name_match="$1" threshold_hours="$2"
     local reap_before_epoch
