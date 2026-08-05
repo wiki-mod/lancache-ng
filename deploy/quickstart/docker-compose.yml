@@ -1034,6 +1034,11 @@ services:
   # logs-syslog-ng. Config and the rotation/compression loop are generated
   # inline for the same reason as fluent-bit above.
   syslog-ng:
+    # container_name (issue #842/#849): matches deploy/prod/docker-compose.yml
+    # -- watchdog's Rust rewrite needs a fixed name to add this service to
+    # its alert-only monitored set (this compose file's own `syslog` service
+    # already had one; syslog-ng had none anywhere in the repo before this).
+    container_name: lancache-syslog-ng
     image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
     profiles: [logging]
     entrypoint: ["/bin/bash", "-c"]
@@ -1308,6 +1313,13 @@ services:
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - CONTAINER_NATS=lancache-nats
       - SSL_ENABLED=${SSL_ENABLED:-0}
+      # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
+      # deploy/prod/docker-compose.yml's identical addition -- currently
+      # unused by watchdog.sh (the bash entrypoint this ENTRYPOINT still
+      # runs), read only by the Rust crate's resolve_alert_only_targets()
+      # once that becomes this service's actual ENTRYPOINT.
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see

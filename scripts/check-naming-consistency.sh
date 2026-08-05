@@ -14,10 +14,17 @@
 # instead (a different, non-interchangeable namespace -- see
 # docs/naming-conventions.md's "Two separate name namespaces" section).
 #
-# These are subset relations, not equalities -- ui/watchdog/docker-socket-proxy/
-# netdata/syslog deliberately have a container_name but must NOT appear in the
-# allowlist, so this script never asserts the reverse direction (every
-# container_name in the allowlist).
+# These are subset relations, not equalities -- watchdog/docker-socket-proxy
+# deliberately have a container_name but must NOT appear in the allowlist (a
+# service never needs Docker-API access to itself), so this script never
+# asserts the reverse direction (every container_name in the allowlist).
+# ui/netdata/syslog/syslog-ng USED to be in that same "container_name but not
+# in the allowlist" set too, but issue #842/#849 added all four to the
+# allowlist's safe_container_inspect/lancache_container acls (inspect-only,
+# no restart grant) so watchdog's Rust rewrite can alert-only-monitor them --
+# see scripts/docker-socket-proxy.sh's own comment on that addition. This
+# comment is corrected here rather than left stale, per this project's own
+# documentation-drift rule (AG-DOC-001).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
