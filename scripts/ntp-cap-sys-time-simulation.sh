@@ -64,6 +64,17 @@
 #      hours of drift/leap-second handling) -- only that a real, deliberate
 #      clock error gets corrected and reaches a genuinely synchronised state
 #      within this job's short runtime.
+#   4. (Issue #1358, least-privilege hardening) That the real production
+#      `cap_drop: [ALL]` + narrow `cap_add` set (not Docker's old, wider
+#      default set plus SYS_TIME) is genuinely sufficient for chronyd's own
+#      internal privilege-drop sequence AND real clock-stepping together --
+#      this is the only CI job in this project that runs on a real,
+#      non-LXC-nested kernel, so it is also the only place capable of
+#      proving that intersection at all; the self-hosted fleet can prove
+#      the capability set gets chronyd running (see the PR implementing
+#      issue #1358 for that `strace`-based session) but can never prove
+#      the actual `adjtimex` clock-step succeeds under it, since every
+#      self-hosted host fails that step regardless of capabilities granted.
 #
 # Required env: REPOSITORY, IMAGE_TAG (the resolved tag from
 # scripts/lib/validation-image-tag.sh's vit_resolve_tag, matching every
@@ -98,8 +109,29 @@ echo "== Forcing a real +300s clock skew via cap_add: SYS_TIME (the exact mechan
 docker run --rm --cap-add SYS_TIME alpine date -s "$(date -d '+5 minutes' -u '+%Y-%m-%d %H:%M:%S')"
 echo "Skewed clock: $(date -u)"
 
-echo "== Starting the real ntp image with cap_add: SYS_TIME (matching production's compose declaration) =="
-docker run -d --name "$container_name" --cap-add SYS_TIME "$image"
+echo "== Starting the real ntp image with the real production capability set (matching deploy/prod/docker-compose.yml's ntp service exactly) =="
+# Issue #1358 (least-privilege hardening): the compose files no longer just
+# `cap_add: [SYS_TIME]` on top of Docker's full default set -- they
+# `cap_drop: [ALL]` first, then add back only this empirically-determined
+# minimal set (see deploy/prod/docker-compose.yml's own comment for the
+# per-capability rationale, and the PR implementing this issue for the live
+# `strace` session that determined it). This job is the ONLY one in
+# this project's CI that runs on a real, non-LXC-nested kernel (see this
+# file's own header), so it is also the only place that can genuinely prove
+# the real production capability set -- not just Docker's old, wider
+# defaults plus SYS_TIME -- actually completes chronyd's own internal
+# privilege-drop sequence AND performs real clock-stepping. Keep this in
+# sync with the compose files' own cap_drop/cap_add lists whenever either
+# changes; a mismatch here would silently stop testing what production
+# actually runs.
+docker run -d --name "$container_name" \
+    --cap-drop ALL \
+    --cap-add SYS_TIME \
+    --cap-add NET_BIND_SERVICE \
+    --cap-add SETUID \
+    --cap-add SETGID \
+    --cap-add CHOWN \
+    "$image"
 
 echo "== Polling for up to 120s: fail fast on the known CAP_SYS_TIME crash signature, or on the container exiting; otherwise wait for real synchronisation =="
 # Fails fast and loudly on the exact CAP_SYS_TIME crash signature confirmed
