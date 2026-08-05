@@ -362,6 +362,77 @@ Since issue #1170 Part 1, the `services` map also includes an entry for
 the dashboard renders it through the same generic per-service loop as every
 other entry, with no template or route changes needed for it specifically.
 
+### Known benign startup/log messages (issue #849 item 8)
+
+Four log lines observed during real field testing (#1068 item 8) that read
+as alarming out of context but are expected, documented behavior once traced
+to their actual source -- collected here rather than left as unexplained
+"is this a problem?" notes:
+
+- **`Reconciler: published 0 records`** (`services/dns/nats-subscriber/src/main.rs`'s
+  `reconciler()`): a periodic (every 60s) full-resync pass that queries
+  PowerDNS's `lan.` zone via its REST API and re-publishes every non-SOA/NS
+  record over NATS, independent of the event-driven immediate-publish path
+  used when a record actually changes. **Expected** whenever the `lan.` zone
+  genuinely has no non-SOA/NS records yet -- a fresh install before any
+  DHCP-DDNS client has registered, an install with DHCP-DDNS disabled
+  entirely (`DHCP_DDNS_ENABLED=false`, the default -- see `config/prod/dhcp.env`),
+  or any deployment that legitimately has zero dynamically-registered LAN
+  hosts. **Would be a real problem** only if DHCP-DDNS is enabled with active
+  leases and this line persists anyway -- that would point at a PowerDNS
+  API-connectivity or zone-content issue worth investigating directly (e.g.
+  `pdns_control` / the zone's REST endpoint), not this reconciler's own logic.
+- **`pdns_server is ready (attempt 2)`** (`services/dns/entrypoint.sh`): after
+  starting the PowerDNS authoritative server (`run_auth &`) in the
+  background, the entrypoint polls `pdns_control rping` (a real control-socket
+  RPC, not a bare network ping -- satisfies AG-VAL-018's "real query/response
+  probe" requirement) up to 10 times, 0.5s apart, before starting the
+  recursor, so the recursor's own startup never races ahead of the auth
+  server's control socket becoming responsive. `attempt 2` simply means the
+  auth server took slightly over 0.5s (one extra poll cycle) to finish
+  initializing after being forked -- a normal, self-resolving startup
+  ordering delay, not a retry-after-failure or a bug. Any single-digit
+  attempt count here is unremarkable; only exhausting all 10 attempts (the
+  `WARNING: pdns_server did not respond to ping` line) would indicate a real
+  problem.
+- **NATS connection-refused-then-retry on `lancache-ui` startup**
+  (`services/ui/src/main.rs`'s `connect_nats_with_retry()`): the Admin UI's
+  `main()` awaits this function -- with a 1s-to-30s capped exponential
+  backoff loop that treats "not yet reachable" as its normal steady state --
+  *before* binding its own HTTP listener at all. Since Compose starts `ui`
+  and `nats` concurrently (no blocking `depends_on: condition:
+  service_healthy` between them), a connection-refused during `ui`'s first
+  few seconds while `nats-server` is still initializing is an expected,
+  self-resolving start-order race, confirmed harmless by design (the same
+  reasoning already documented on `services/ui/src/nats_auth_callout.rs`'s
+  own unconditional reconnect loop, which treats "connection dropped, retry"
+  as its permanent steady state, not just a startup-only condition).
+- **netdata: permission-denied on `/host/proc/<pid>/io` for nginx, and a
+  missing `/etc/netdata/scripts.d`** -- two distinct findings bundled in the
+  original report:
+  - The permission-denied error is **already fixed** (PR #1125, `pid: host`
+    in `deploy/*/docker-compose.yml`'s `netdata:` service, plus
+    `cap_add: SYS_PTRACE` and `security_opt: apparmor:unconfined`): without
+    `pid: host`, netdata's own PID namespace is merely a sibling of, not an
+    ancestor of, the host's, so the kernel's `ptrace_may_access` check for a
+    process outside netdata's own container fails with `Permission denied`
+    regardless of `SYS_PTRACE` -- this is netdata's own documented
+    requirement for `apps.plugin` to read other containers' `/proc/<pid>`
+    entries, not a project-specific workaround.
+  - The missing `/etc/netdata/scripts.d` message is **netdata's own,
+    harmless, expected behavior for an unused optional collector**, verified
+    against netdata's own documentation (AG-VAL-023) rather than assumed:
+    `scripts.d.plugin` is a real, separate netdata external plugin that runs
+    Nagios-compatible/custom scripts, configured via `scripts.d/nagios.conf`
+    under that directory. This project configures no custom Nagios-style
+    scripts anywhere, so the directory is legitimately absent, and netdata
+    logs this the same way it reports any other optional, unconfigured
+    external plugin at startup -- informational, not an error, and not
+    something this project's `netdata:` service needs to create or mount. An
+    operator who wants to silence the message specifically (not required for
+    correct operation) can disable `scripts.d.plugin` in netdata's own
+    `netdata.conf` `[plugins]` section.
+
 ## syslog-ng
 
 Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `dev`, `prod`, and `quickstart` alike. `fluent-bit` (the `syslog` service) is the collector/forwarder: it tails every wired service's log file(s) (see the matrix below) and fans each one out to a forward to `syslog-ng` over TCP/601 (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`); the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job in dev). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`.
