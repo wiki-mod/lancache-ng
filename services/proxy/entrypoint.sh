@@ -639,11 +639,9 @@ _collect_domain_rows() {
             # whole while loop's, and therefore _collect_domain_rows'
             # itself -- exit status non-zero, silently killing the entire
             # entrypoint at its own bare top-level "_collect_domain_rows"
-            # call site with zero output (confirmed live: this exact crash,
-            # reproduced and root-caused on a real container before this fix
-            # was written). An explicit "if" with no "else" always returns 0
-            # when its condition is false, so it can't leak a false exit
-            # status out of the loop this way.
+            # call site with zero output. An explicit "if" with no "else"
+            # always returns 0 when its condition is false, so it can't leak
+            # a false exit status out of the loop this way.
             if [ "$domain" = "$root" ]; then
                 _ROOT_HAS_WILDCARD_ENTRY["$root"]=1
             fi
