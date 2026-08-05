@@ -238,7 +238,17 @@ docker run -d --name "$before_container" --network "$network_name" \
     -e CACHE_VALID_HIT=1d -e CACHE_VALID_ANY=1m -e CACHE_INACTIVE=1d \
     "$before_image" >/dev/null
 wait_for_tcp "$before_container" 443
-before_out="$(docker run --rm --network "$network_name" -v "$work_dir/ca.crt:/ca.crt:ro" "$build_tools_image" bash -c \
+# Each proxy container generates its OWN independent CA at first boot (no
+# shared volume between the "after" and "before" containers) -- reusing the
+# "after" container's ca.crt here would fail with "unable to get local
+# issuer certificate" regardless of hostname matching, which is a
+# different, misleading failure mode from the actual bug this negative
+# control needs to reproduce. Fetch the "before" container's own CA
+# instead, exactly as the real client-facing setup docs require per
+# container.
+before_ca="$(docker exec "$before_container" cat /etc/nginx/ssl/ca/ca.crt)"
+printf '%s' "$before_ca" > "$work_dir/before-ca.crt"
+before_out="$(docker run --rm --network "$network_name" -v "$work_dir/before-ca.crt:/ca.crt:ro" "$build_tools_image" bash -c \
     "timeout 10 openssl s_client -connect ${before_container}:443 -servername two.levels.example.net -CAfile /ca.crt -verify_hostname two.levels.example.net -verify_return_error < /dev/null 2>&1" || true)"
 if ! grep -q 'hostname mismatch' <<<"$before_out"; then
     echo "::error::Expected the PRE-FIX image to reproduce the original bug (a hostname-mismatched local cert for depth-2 SNI) as a negative control, but it did not. This means either the 'before' checkout is not actually pre-fix, or something else changed. Full openssl output:" >&2
