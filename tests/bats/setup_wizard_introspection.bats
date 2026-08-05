@@ -45,14 +45,16 @@ write_answers() {
 @test "list-prompts with no answers file reports the all-defaults prompt sequence" {
     run bash "$setup_sh" list-prompts
     [ "$status" -eq 0 ]
-    # 13 prompts on the never-set-LANCACHE_IMAGE_CHANNEL path: the 12 always
-    # asked plus "Release channel [nightly/stable]" (skipped only when
+    # 14 prompts on the never-set-LANCACHE_IMAGE_CHANNEL path: the 13 always
+    # asked (12 pre-#1343, plus "Enable central logging? [Y/n]" added by
+    # issue #1343) plus "Release channel [nightly/stable]" (skipped only when
     # LANCACHE_IMAGE_CHANNEL is already set, see setup.sh's own comment on
     # that prompt).
     prompt_count="$(printf '%s\n' "$output" | grep -c '^PROMPT	')"
-    [ "$prompt_count" -eq 13 ]
+    [ "$prompt_count" -eq 14 ]
     printf '%s\n' "$output" | grep -qF $'PROMPT\tEnable SSL mode? [y/N]\tN'
     printf '%s\n' "$output" | grep -qF $'PROMPT\tDHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)\tdisabled'
+    printf '%s\n' "$output" | grep -qF $'PROMPT\tEnable central logging? [Y/n]\tY'
     printf '%s\n' "$output" | grep -qF $'PROMPT\tStart now? [Y/n]\tY'
 }
 
@@ -60,7 +62,7 @@ write_answers() {
     LANCACHE_IMAGE_CHANNEL=nightly run bash "$setup_sh" list-prompts
     [ "$status" -eq 0 ]
     prompt_count="$(printf '%s\n' "$output" | grep -c '^PROMPT	')"
-    [ "$prompt_count" -eq 12 ]
+    [ "$prompt_count" -eq 13 ]
     # Checked against the "PROMPT\t" tag specifically, not a bare substring:
     # setup.sh's own `print_step "Release channel"` section header prints
     # unconditionally either way (it is not itself a prompt), so a plain
@@ -187,9 +189,10 @@ EOF
 @test "build_expect_prompt_block fails closed on a reply-count mismatch instead of silently misaligning" {
     # shellcheck source=scripts/lib/setup-wizard-introspect.sh
     source "$lib"
-    # The default (LANCACHE_IMAGE_CHANNEL unset) path asks 13 prompts; supply
-    # only 3 replies so the mismatch is unambiguous either way this fixture
-    # is read.
+    # The default (LANCACHE_IMAGE_CHANNEL unset) path asks 14 prompts (issue
+    # #1343 added the "Enable central logging?" prompt, +1 from the prior
+    # 13); supply only 3 replies so the mismatch is unambiguous either way
+    # this fixture is read.
     run build_expect_prompt_block "$setup_sh" "$BATS_TEST_TMPDIR/answers.txt" "a" "b" "c"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -qF 'out of sync'
@@ -202,11 +205,13 @@ EOF
     run env LANCACHE_IMAGE_CHANNEL=nightly bash -c "
         source '$lib'
         build_expect_prompt_block '$setup_sh' '$BATS_TEST_TMPDIR/answers.txt' \
-            '127.0.0.2' '' '$install_dir' '' '' '' '' '' '' '' '' ''
+            '127.0.0.2' '' '$install_dir' '' '' '' '' '' '' '' '' '' ''
     "
     [ "$status" -eq 0 ]
     line_count="$(printf '%s\n' "$output" | grep -c '^expect_prompt ')"
-    [ "$line_count" -eq 12 ]
+    # Issue #1343 added the unconditional "Enable central logging?" prompt
+    # (default Y), one more than the prior 12 for this exact reply sequence.
+    [ "$line_count" -eq 13 ]
     printf '%s\n' "$output" | grep -qF 'expect_prompt {Server IP \(Standard mode\)'
     printf '%s\n' "$output" | grep -qF 'expect_prompt {Start now\?'
     # The install-dir reply must be Tcl-brace-quoted verbatim, not escaped as
