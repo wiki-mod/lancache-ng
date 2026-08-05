@@ -3873,12 +3873,31 @@ EOF
 # progress." Not meant to be read outside of the functions in this section.
 _UPDATE_ENV_FILE=""
 _UPDATE_COMPOSE_FILES=()
+# Pre-update per-service health snapshot (service name -> "1" healthy / "0"
+# unhealthy), populated once by capture_stack_health_baseline right before
+# apply_stack_update_ordered recreates anything, and read by
+# wait_for_stack_health afterward so the post-update gate can fail on a real
+# regression (healthy -> unhealthy) instead of on any currently-unhealthy
+# service regardless of whether the update caused it. See both functions'
+# own header comments for the full rationale (issue #1391).
+declare -A _UPDATE_HEALTH_BASELINE=()
 
 # `docker compose` pre-loaded with the current update flow's env-file and
 # compose files, so every helper below calls the exact same stack the rest of
 # the flow is already operating on.
 dc_update() {
     docker compose --env-file "$_UPDATE_ENV_FILE" "${_UPDATE_COMPOSE_FILES[@]}" "$@"
+}
+
+# Shared container-id lookup for the current update flow's compose project.
+# Factored out of service_container_is_healthy so capture_stack_health_baseline
+# can reuse the exact same -a/--all lookup (see that function's own comment
+# for why --all matters) without duplicating it -- two independent copies of
+# this lookup drifting apart across a future edit would be exactly the kind
+# of same-class bug AG-WF-011 asks callers to guard against.
+service_container_id() {
+    local service="$1"
+    dc_update ps -a -q "$service" 2>/dev/null
 }
 
 # Real per-container status probe, not just "the process started". If the
@@ -3913,7 +3932,7 @@ service_container_is_healthy() {
     # before the one-shot-exit-0 handling below is ever reached -- confirmed
     # directly while validating the issue #1155 fix (the fix below alone was
     # not sufficient; this lookup itself was the second half of the bug).
-    container_id=$(dc_update ps -a -q "$service" 2>/dev/null)
+    container_id=$(service_container_id "$service")
     [[ -n "$container_id" ]] || return 1
 
     health=$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{end}}' "$container_id" 2>/dev/null)
@@ -4009,6 +4028,72 @@ verify_stack_functional_health() {
     return 0
 }
 
+# How many consecutive healthy reads capture_stack_health_baseline requires
+# before trusting a service as genuinely, stably healthy pre-update, and how
+# many seconds apart each read is taken.
+_UPDATE_HEALTH_BASELINE_SAMPLES=3
+_UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL=2
+
+# Snapshots each named service's PRE-update container health into the global
+# _UPDATE_HEALTH_BASELINE map (service -> "1" healthy / "0" unhealthy), read
+# afterward by wait_for_stack_health so the post-update gate can fail only on
+# a real regression (a service that WAS healthy going in) instead of on any
+# service that was already broken before the update touched anything.
+#
+# Must be called from apply_stack_update_ordered BEFORE it recreates any
+# container (i.e. while the OLD, pre-update containers are still the ones
+# running) -- images may already be pulled at that point, but nothing has
+# been applied yet, so this is the last moment "current state" still means
+# "pre-update state".
+#
+# A single sample is not reliable against a genuinely crash-looping
+# container: Docker's reported state can transiently read "running" (or, for
+# a container whose healthcheck hasn't failed often enough yet to flip to
+# "unhealthy", even "starting"/"healthy") for a brief instant between one
+# restart attempt and the next crash a few seconds later. A single lucky
+# sample landing in that window would wrongly record the service as
+# baseline-healthy, and the gate below would then treat its post-update
+# unhealthiness as a "regression" -- recreating the exact permanent-update
+# -block bug this baseline exists to fix, just intermittently instead of
+# always (concretely: issue #1391's reproduced ntp crash loop under this
+# project's LXC-hosted runners' CAP_SYS_TIME limitation, issue #1296).
+# Requiring _UPDATE_HEALTH_BASELINE_SAMPLES consecutive healthy reads, a few
+# seconds apart, filters that out: a service that has been genuinely stable
+# for the (typically hours or days) lifetime of an existing install before an
+# update starts trivially passes every sample, while a crash-looping one does
+# not survive even one retry.
+capture_stack_health_baseline() {
+    local -a services=("$@")
+    local svc container_id sample healthy_streak
+
+    _UPDATE_HEALTH_BASELINE=()
+    for svc in "${services[@]}"; do
+        container_id=$(service_container_id "$svc")
+        if [[ -z "$container_id" ]]; then
+            # No pre-existing container for this service at all -- e.g. a
+            # brand-new service this very update introduces to the compose
+            # file. There is no "already broken" precedent to forgive here,
+            # so deliberately leave it out of the baseline map entirely:
+            # wait_for_stack_health's own missing-key default (treat as
+            # previously healthy) then requires it to become healthy like
+            # any other freshly deployed service, same as before this
+            # baseline logic existed.
+            continue
+        fi
+
+        healthy_streak=1
+        for (( sample = 0; sample < _UPDATE_HEALTH_BASELINE_SAMPLES; sample++ )); do
+            if ! service_container_is_healthy "$svc"; then
+                healthy_streak=0
+                break
+            fi
+            (( sample < _UPDATE_HEALTH_BASELINE_SAMPLES - 1 )) \
+                && sleep "$_UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL"
+        done
+        _UPDATE_HEALTH_BASELINE["$svc"]="$healthy_streak"
+    done
+}
+
 # Polls every named service until each is container-healthy (see
 # service_container_is_healthy) AND the whole set passes the functional probe,
 # or the timeout elapses. This is the real decision point the removed
@@ -4016,26 +4101,55 @@ verify_stack_functional_health() {
 # "log a warning and continue anyway" (its actual documented behavior even in
 # its one health-aware mode, confirmed on #819 -- see the mechanics research
 # there for the primary-source citations).
+#
+# A service still unhealthy is only treated as a gate FAILURE when
+# _UPDATE_HEALTH_BASELINE (see capture_stack_health_baseline) says it was
+# healthy before this update started -- a real regression. A service that was
+# already unhealthy pre-update (baseline "0") is not blocked on here, since
+# whatever is wrong with it predates and is unrelated to this update (issue
+# #1391: a permanently crash-looping opt-in service, e.g. ntp under this
+# project's LXC CAP_SYS_TIME limitation from issue #1296, must not
+# permanently block every future update including unrelated security fixes).
+# A service with no baseline entry at all (missing-key default below reads
+# "1") is treated exactly like a previously-healthy one -- i.e. it must
+# become healthy -- which preserves this function's original, stricter
+# behavior for a fresh install or a brand-new service with no prior state to
+# compare against.
 wait_for_stack_health() {
     local timeout_seconds="$1"
     shift
     local -a services=("$@")
-    local interval_seconds=3 elapsed=0 svc all_healthy
+    local interval_seconds=3 elapsed=0 svc all_healthy baseline
+    local -a regressed_services pre_existing_unhealthy_services
 
     while (( elapsed < timeout_seconds )); do
         all_healthy=1
+        regressed_services=()
+        pre_existing_unhealthy_services=()
         for svc in "${services[@]}"; do
             if ! service_container_is_healthy "$svc"; then
-                all_healthy=0
-                break
+                baseline="${_UPDATE_HEALTH_BASELINE[$svc]-1}"
+                if [[ "$baseline" = "1" ]]; then
+                    all_healthy=0
+                    regressed_services+=("$svc")
+                else
+                    pre_existing_unhealthy_services+=("$svc")
+                fi
             fi
         done
         if [[ "$all_healthy" = "1" ]] && verify_stack_functional_health; then
+            if (( ${#pre_existing_unhealthy_services[@]} > 0 )); then
+                print_warn "Proceeding despite service(s) unhealthy before this update started too (not a regression this update caused, so not blocking it): ${pre_existing_unhealthy_services[*]}"
+            fi
             return 0
         fi
         sleep "$interval_seconds"
         elapsed=$((elapsed + interval_seconds))
     done
+
+    if (( ${#regressed_services[@]} > 0 )); then
+        print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
+    fi
     return 1
 }
 
@@ -4097,6 +4211,15 @@ apply_stack_update_ordered() {
     # of silently falling into that behavior if this assumption is ever wrong.
     (( ${#non_ui_services[@]} > 0 )) \
         || die "No non-UI services found in this compose configuration; refusing to apply an update that cannot guarantee UI-last ordering."
+
+    # Must run before the very first container gets recreated below: this is
+    # the last point at which "the current containers" still means "the
+    # pre-update containers" (see capture_stack_health_baseline's own header
+    # comment). Baselines every service, including "ui", in one call so both
+    # wait_for_stack_health invocations further down (non-UI, then UI) share
+    # the same pre-update snapshot.
+    print_step "Capturing pre-update health baseline"
+    capture_stack_health_baseline "${all_services[@]}"
 
     print_step "Starting non-UI services"
     if ! dc_update up -d --remove-orphans "${non_ui_services[@]}"; then
