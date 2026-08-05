@@ -82,10 +82,17 @@
 # REAL setup.sh CLI through `expect`, exactly like setup-cli-simulation.sh's
 # own Phase 1 -- hand-crafting that many secrets/values here would risk
 # silently drifting from what setup.sh actually generates. `Start now? [Y/n]`
-# is answered "n": this script brings the stack up itself afterward with the
-# additional `logging` profile and SYSLOG_ENABLED=true, which setup.sh's own
-# wizard has no prompt for at all (logging is a manual opt-in per
-# docs/architecture-ng.md, not part of the guided install flow).
+# is answered "n": this script brings the stack up itself afterward.
+#
+# UPDATED (issue #1343): the wizard's "Enable central logging? [Y/n]" prompt
+# now defaults to enabled and this script accepts that default, so
+# COMPOSE_PROFILES already contains `logging` and SYSLOG_ENABLED needs no
+# fixing up by the time Phase 1 finishes. Phase 2 below still sets both
+# explicitly as a defense-in-depth double-check (its dedup logic is a no-op
+# if `logging` is already present) rather than relying solely on the wizard
+# default never regressing silently -- this was previously the ONLY place
+# either got set, since the wizard had no prompt for this at all before
+# #1343's fix.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -233,10 +240,12 @@ echo "== Phase 1: fresh install via the real setup.sh CLI (expect-driven, mirror
 # "disabled" in the main .env deliberately: dhcp/dhcp-proxy (Triggers 7/8
 # below) are started via their own explicit `--profile dhcp-kea --profile
 # dhcp-proxy` plus a dedicated override (dhcp-test-override.yml, built below)
-# that fully replaces their environment -- the same "wizard has no prompt
-# for this, set it directly" approach the `logging` profile below already
-# uses, so the main .env's DHCP_MODE is never consulted for these two
-# containers. Admin-UI auth disabled (ALLOW_INSECURE_UI=true) so every curl
+# that fully replaces their environment -- the same "wizard has no prompt for
+# this, set it directly" approach Phase 2 below still uses as a defense-in-
+# depth double-check for the `logging` profile (which the wizard DOES now
+# prompt for and default to enabled, see the file header's #1343 update), so
+# the main .env's DHCP_MODE is never consulted for these two containers.
+# Admin-UI auth disabled (ALLOW_INSECURE_UI=true) so every curl
 # call below needs no login flow -- the same simplification the other
 # full-setup simulation scripts get for free from their own validation-only
 # compose file's insecure defaults.
@@ -257,7 +266,7 @@ if ! expect_prompt_block="$(
     LANCACHE_IMAGE_CHANNEL="$setup_sim_fresh_install_channel" \
     LANCACHE_IMAGE_TAG="$setup_sim_fresh_install_tag" \
     build_expect_prompt_block "$repo_root/setup.sh" "$setup_sim_answers_file" \
-        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "disabled" "" "n" "y" "n"
+        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "disabled" "" "" "n" "y" "n"
 )"; then
     echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
     exit 1
@@ -295,13 +304,18 @@ EXPECT_SCRIPT
 [[ -f "$install_dir/docker-compose.yml" ]] \
     || { echo "::error::Fresh install did not copy docker-compose.yml into $install_dir." >&2; exit 1; }
 
-echo "== Phase 2: enabling the logging profile (SYSLOG_ENABLED, COMPOSE_PROFILES+=logging) =="
+echo "== Phase 2: confirming the logging profile (SYSLOG_ENABLED, COMPOSE_PROFILES+=logging) =="
 
-# setup.sh's own wizard has no prompt for this (logging is a manual,
-# documented opt-in per docs/architecture-ng.md, not part of the guided
-# install flow) -- these two keys are appended/updated directly, exactly
-# the same direct-.env-mutation technique setup-cli-simulation.sh's own
-# Phase 2/3 already use for scenarios setup.sh's wizard doesn't cover.
+# Issue #1343: the wizard's "Enable central logging?" prompt (Phase 1 above,
+# accepted at its default "Y") already wrote LOGGING_ENABLED=1 and put
+# `logging` into COMPOSE_PROFILES, so this block is now a defense-in-depth
+# double-check rather than the only place either got set -- kept because the
+# dedup logic below is a safe no-op when `logging` is already present, and
+# because SYSLOG_ENABLED itself (a separate flag the Admin UI's /logs route
+# reads to decide whether to render the syslog panel at all) still has no
+# wizard prompt of its own. Same direct-.env-mutation technique
+# setup-cli-simulation.sh's own Phase 2/3 use for scenarios setup.sh's wizard
+# doesn't cover.
 if grep -q '^SYSLOG_ENABLED=' "$install_dir/.env"; then
     sed -i 's/^SYSLOG_ENABLED=.*/SYSLOG_ENABLED=true/' "$install_dir/.env"
 else

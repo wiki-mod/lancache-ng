@@ -540,7 +540,7 @@ codebase.
 | 11 | netdata_proxy hardcodes Content-Type: application/json | Minor | Open |
 | 12 | `stats.html` error banner only shows once per page load | Minor | Open |
 | 13 | Dashboard per-host syslog stats computed, never rendered | Minor | Open |
-| 14 | architecture-ng.md stale summary line (internal drift) | Info | Open |
+| 14 | architecture-ng.md stale summary line (internal drift) | Info | **FIXED** by issue #1343's PR (the top table row no longer says "off"; it now matches the later logging-matrix section, describing the profile as on-by-default) |
 | 15 | architecture-ng.md cites closed #633 for open gap | Info | Open |
 | 16 | check-logging-matrix.sh structurally can't catch Finding 6 | Info | Open |
 | 17 | syslog-ng zstd install repeats every restart, no retry later | Info | Open |

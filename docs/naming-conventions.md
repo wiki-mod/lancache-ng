@@ -133,8 +133,10 @@ the Docker socket proxy currently allowlists:
    operator has to mentally parse, and a naming rule with silent,
    unexplained exceptions. This PR adds explicit `container_name:` values
    for these four (`lancache-docker-socket-proxy`, `lancache-watchdog`,
-   `lancache-ui`, `lancache-netdata`) and for the optional `syslog` service
-   where present (and, at the time, the since-removed `watchtower` service --
+   `lancache-ui`, `lancache-netdata`) and for the `syslog` service (Compose-
+   profile-gated; on by default since issue #1343, not "optional" in the
+   off-by-default sense the original wording implied) where present (and,
+   at the time, the since-removed `watchtower` service --
    see #819), so "every lancache-ng service has a stable, predictable name"
    is a rule without exceptions instead of a rule with four undocumented
    ones. See "Migration impact" below — this is a

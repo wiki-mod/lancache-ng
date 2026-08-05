@@ -422,7 +422,8 @@ Part A is the "what does each individual claim need to prove" framing.
 
 ### 8. Central logging / syslog forwarding
 
-- If the optional `logging` profile is enabled: confirm real log lines from a
+- The `logging` profile is on by default since issue #1343 (a real opt-out remains
+  via `LOGGING_ENABLED=0`, not an opt-in feature) — confirm real log lines from a
   monitored service actually arrive at the `syslog-ng`/fluent-bit target, not just
   that the containers are up. `syslog-forwarding-simulation` (part of
   `full-setup-deep-validate.yml`) is the reusable proof for this — invoke it directly

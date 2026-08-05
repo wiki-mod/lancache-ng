@@ -472,6 +472,33 @@ is real, live, running code, not just work sitting in source control.
 
 ### Fixed
 
+- Fixed central logging (`syslog`/`syslog-ng`) never actually starting on a
+  normal `setup.sh` install (#1343). Both services carried `profiles:
+  [logging]` in every Compose file, but `setup.sh`'s
+  `compose_profiles_for_runtime()` never treated `logging` as a
+  wizard-driven choice at all, so a standard interactive install (or a
+  `setup.sh update` against an existing `.env`) never enabled the profile,
+  contradicting this project's own stated intent that central logging is a
+  core, always-on feature. `compose_profiles_for_runtime()` now defaults
+  `logging` to enabled (a new `LOGGING_ENABLED` key, default `1`), the
+  install wizard gained an "Enable central logging? [Y/n]" prompt
+  (default `Y`), existing installs converge to enabled on their next
+  `setup.sh update`, and a real opt-out remains for genuinely
+  storage-constrained installs (`LOGGING_ENABLED=0` in `.env`). The
+  converge-reconcile daemon also recognizes a future Admin-UI-driven
+  `LOGGING_ENABLED` override (same `ui_settings_file` pattern as
+  `AUTO_UPDATE_ENABLED`/`DHCP_MODE`), even though no Admin UI control writes
+  it yet -- a genuinely per-service log-level/verbosity control (raised
+  during this issue's discussion) needs its own design decision, since
+  fluent-bit's pipeline currently forwards every line verbatim with no
+  severity filter at all and nginx's `access.log` has no severity field to
+  filter on; tracked as an open decision on #1343 rather than built or
+  dropped silently. Also fixed a related, previously-unnoticed bug found
+  while touching this same function: the Admin UI's DHCP-mode-change
+  convergence path called `compose_profiles_for_runtime()` with the `ntp`
+  argument omitted entirely, so an operator with LanCache-NG-NTP already
+  enabled who then changed DHCP mode from the Admin UI had `ntp` silently
+  stripped from `COMPOSE_PROFILES` on that exact tick.
 - Fixed remote secondary DNS node registration handing out a NATS URL that
   can never be reached from outside the primary's own Docker network (#866).
   `routes/secondaries.rs::register_secondary`'s JSON response always
