@@ -70,21 +70,31 @@ cd "$repo_root"
 # tools/ is automatically covered without needing this list hand-maintained
 # -- the exact kind of drift that let the original narrow scope (a single
 # hardcoded path) go unnoticed for as long as it did.
-mapfile -t scan_files < <(git ls-files -- \
+#
+# Captured via a plain assignment first (not `mapfile -t scan_files < <(git
+# ls-files ...)` directly), specifically so `git ls-files`'s own exit status
+# is checked explicitly: a process substitution's failure does not
+# propagate through `mapfile`, so a broken discovery (no git work tree
+# here, or `git` itself missing) would otherwise silently leave scan_files
+# empty, the scan loop below would iterate zero times, and the script would
+# report a false "OK" with exit 0 -- a check that can never fail is not a
+# check, per AG-VAL-002/AG-VAL-015. This is deliberately distinct from a
+# valid git work tree that genuinely has zero tracked files matching these
+# patterns (e.g. a bats fixture repo with only an untracked scratch file):
+# that is a legitimate empty scan, not a discovery failure, and must still
+# report OK.
+if ! tracked_scan_files="$(git ls-files -- \
   'scripts/*.sh' 'scripts/**/*.sh' \
   'tools/*.sh' 'tools/**/*.sh' \
   'tools/*/Dockerfile*' \
-  'setup.sh' \
-  | sort)
-
-# `mapfile < <(...)` does not propagate the process substitution's own
-# failure (a broken `git ls-files` -- not a git work tree, or `git` itself
-# missing -- would otherwise silently leave scan_files empty, and the loop
-# below would then iterate zero times and report a false "OK" with exit 0,
-# a check that can never fail is not a check, per AG-VAL-002/AG-VAL-015).
-if [ "${#scan_files[@]}" -eq 0 ]; then
-  printf '::error::check-pipefail-early-exit-grep: scan_files discovery returned nothing -- is %s a real git work tree with tracked scripts/tools files? Refusing to report a false OK.\n' "$repo_root" >&2
+  'setup.sh')"; then
+  printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Refusing to report a false OK.\n' "$repo_root" >&2
   exit 1
+fi
+
+scan_files=()
+if [ -n "$tracked_scan_files" ]; then
+  mapfile -t scan_files < <(sort <<<"$tracked_scan_files")
 fi
 
 # Early-exiting-consumer patterns, matched immediately after a live pipe
