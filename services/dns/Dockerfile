@@ -32,9 +32,10 @@ FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 # execute its own application logic (reaching a real startup-validation error
 # message, not just failing to load) inside a real `alpine:3.24` container.
 RUN set -eu; \
-    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config musl-gcc; do \
+    for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
+    command -v musl-gcc >/dev/null; \
     case "$(dpkg --print-architecture)" in \
       amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
       arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
