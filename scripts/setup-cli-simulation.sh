@@ -258,7 +258,7 @@ run_fresh_install_expect() {
         LANCACHE_IMAGE_CHANNEL="$fresh_install_image_channel" \
         LANCACHE_IMAGE_TAG="$fresh_install_image_tag" \
         build_expect_prompt_block "$repo_root/setup.sh" "$answers_file" \
-            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" ""
+            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
     )"; then
         echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
         return 1

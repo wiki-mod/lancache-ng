@@ -2743,8 +2743,8 @@ migrate_env_for_update() {
     # (AG-OP-007: converge old/incomplete installations toward the current
     # expected state). An operator who has already explicitly set
     # LOGGING_ENABLED=0 keeps that choice (AG-OP-009: preserve existing
-    # non-empty local values) -- append_env_key_if_missing only writes the
-    # default when the key is absent, never overwriting a real prior value.
+    # non-empty local values) -- this helper writes the default value only
+    # when the key is absent, never overwriting a real prior value.
     append_env_key_if_missing LOGGING_ENABLED "1" "$env_file"
 
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")

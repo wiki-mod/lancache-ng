@@ -45,14 +45,16 @@ write_answers() {
 @test "list-prompts with no answers file reports the all-defaults prompt sequence" {
     run bash "$setup_sh" list-prompts
     [ "$status" -eq 0 ]
-    # 13 prompts on the never-set-LANCACHE_IMAGE_CHANNEL path: the 12 always
-    # asked plus "Release channel [nightly/stable]" (skipped only when
+    # 14 prompts on the never-set-LANCACHE_IMAGE_CHANNEL path: the 13 always
+    # asked (12 pre-#1343, plus "Enable central logging? [Y/n]" added by
+    # issue #1343) plus "Release channel [nightly/stable]" (skipped only when
     # LANCACHE_IMAGE_CHANNEL is already set, see setup.sh's own comment on
     # that prompt).
     prompt_count="$(printf '%s\n' "$output" | grep -c '^PROMPT	')"
-    [ "$prompt_count" -eq 13 ]
+    [ "$prompt_count" -eq 14 ]
     printf '%s\n' "$output" | grep -qF $'PROMPT\tEnable SSL mode? [y/N]\tN'
     printf '%s\n' "$output" | grep -qF $'PROMPT\tDHCP mode (disabled, kea, dnsmasq-proxy, dnsmasq-relay)\tdisabled'
+    printf '%s\n' "$output" | grep -qF $'PROMPT\tEnable central logging? [Y/n]\tY'
     printf '%s\n' "$output" | grep -qF $'PROMPT\tStart now? [Y/n]\tY'
 }
 
@@ -60,7 +62,7 @@ write_answers() {
     LANCACHE_IMAGE_CHANNEL=nightly run bash "$setup_sh" list-prompts
     [ "$status" -eq 0 ]
     prompt_count="$(printf '%s\n' "$output" | grep -c '^PROMPT	')"
-    [ "$prompt_count" -eq 12 ]
+    [ "$prompt_count" -eq 13 ]
     # Checked against the "PROMPT\t" tag specifically, not a bare substring:
     # setup.sh's own `print_step "Release channel"` section header prints
     # unconditionally either way (it is not itself a prompt), so a plain
