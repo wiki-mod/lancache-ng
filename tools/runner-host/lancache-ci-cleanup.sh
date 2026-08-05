@@ -36,6 +36,18 @@
 #         2026-07-30: 19 orphaned containers, mostly this kind and the
 #         validation kind above, had accumulated on one host over 6 days,
 #         going undetected because neither kind was covered by this reap)
+#   - keys the above age check on each container's own immutable `.Created`
+#     timestamp, not `.State.StartedAt` (issue #1095, 2026-08-05): a
+#     `restart:`-policy container's `StartedAt` is reset by ANY process
+#     restart, including the one Docker's own restart manager performs for
+#     every non-"no"-policy container on daemon startup -- so a container
+#     that leaked days before a host reboot looked freshly-started at every
+#     check afterward and was never reaped. See reap_orphaned_running_containers's
+#     own comment for the confirmed-live incident this closes.
+#   - reaps lancache-ng-validation-* Docker networks left with zero attached
+#     containers after the container reap above removes their last container
+#     (issue #1095/#932 pattern: an orphaned validation network, not just its
+#     container, can block a later run's subnet reservation on the same host)
 #   - measures disk usage BEFORE and AFTER and logs the delta (AG-CI-016:
 #     measure -> clean -> re-measure, so a run that reclaimed nothing is visible
 #     rather than assumed successful).
@@ -107,6 +119,27 @@ fi
 # "name"), $3 = substring pattern for that field, $4 = age threshold hours.
 # Conservative by construction: only containers matching the given kind, only
 # past its own threshold -- never a blanket sweep of everything running.
+#
+# Keys the age check on `.Created` (the container object's own, immutable
+# creation timestamp), NOT `.State.StartedAt` (issue #1095, 2026-08-05):
+# `.State.StartedAt` is reset every time Docker (re)starts the container's
+# process -- including a crash-loop restart AND, critically, the restart
+# Docker's own restart manager performs for every `restart:` non-"no" policy
+# container on daemon startup (i.e. after a host reboot). A container that
+# leaked days ago but happened to get restarted by the daemon coming back up
+# looks freshly-started at every check thereafter under `StartedAt`, so this
+# threshold check never trips -- confirmed live on runner host 192.168.1.240
+# (2026-08-05): three `lancache-ng-validation-*-standard-passthrough-shim-1`
+# containers created 2026-08-03 survived that host's own reboot ~14h earlier
+# and every scheduled cleanup run since, because each run's `StartedAt` read
+# showed only the few-minutes-old post-reboot restart time, not the true
+# ~2-day container age. `.Created` never changes for a given container
+# object regardless of internal process crashes or daemon/host restarts, so
+# it is the correct "how long has this specific container existed" signal for
+# every kind this function reaps -- none of them (a one-shot build-tools
+# check, a per-run validation stack, a per-build buildx builder) has any
+# legitimate reason to still exist, under any name, past its own threshold,
+# whether or not something in between restarted its process.
 reap_orphaned_running_containers() {
     local label="$1" match_field="$2" pattern="$3" threshold_hours="$4"
     local reap_before_epoch
@@ -123,13 +156,40 @@ reap_orphaned_running_containers() {
             *"$pattern"*) ;;
             *) continue ;;
         esac
-        local started started_epoch
-        started="$(docker inspect --format '{{.State.StartedAt}}' "$cid" 2>/dev/null || echo '')"
-        [ -n "$started" ] || continue
-        started_epoch="$(date -d "$started" +%s 2>/dev/null || echo 0)"
-        if [ "$started_epoch" -gt 0 ] && [ "$started_epoch" -lt "$reap_before_epoch" ]; then
-            echo "reaping hung ${label} container $cid (${match_field}=${field_value}, started $started)"
+        local created created_epoch
+        created="$(docker inspect --format '{{.Created}}' "$cid" 2>/dev/null || echo '')"
+        [ -n "$created" ] || continue
+        created_epoch="$(date -d "$created" +%s 2>/dev/null || echo 0)"
+        if [ "$created_epoch" -gt 0 ] && [ "$created_epoch" -lt "$reap_before_epoch" ]; then
+            echo "reaping hung ${label} container $cid (${match_field}=${field_value}, created $created)"
             docker rm -f "$cid" >/dev/null 2>&1 || true
+        fi
+    done
+}
+
+# Removes lancache-ng-validation-* Docker networks with zero currently
+# attached containers (issue #1095, issue #932 pattern): `docker rm -f` above
+# deletes a leaked validation container but never touches the Compose-created
+# bridge network it was attached to, so a stale, now-empty network is left
+# behind on every host indefinitely -- exactly the class of leftover #932
+# already established can block a *future* run's subnet reservation on the
+# same host. Filters by the same VALIDATION_NAME_MATCH prefix as the
+# container reap above (Compose names each project's network
+# "<project>_validation", so the plain name-substring match still applies),
+# and only ever removes a network reporting zero attached containers --
+# never a blanket sweep, so a network still legitimately backing an in-flight
+# validation stack is left alone. Runs after the container reap so a network
+# freed by that reap in this SAME pass is already eligible; safe to call
+# again next run for one a still-running container attaches to today.
+reap_orphaned_validation_networks() {
+    local name_match="$1"
+    echo "--- reap orphaned validation networks (0 attached containers, matching ${name_match}) ---"
+    for network_name in $(docker network ls --filter "name=${name_match}" --format '{{.Name}}' 2>/dev/null); do
+        local attached
+        attached="$(docker network inspect "$network_name" --format '{{len .Containers}}' 2>/dev/null || echo '')"
+        if [ "$attached" = "0" ]; then
+            echo "reaping orphaned validation network $network_name (0 attached containers)"
+            docker network rm "$network_name" >/dev/null 2>&1 || true
         fi
     done
 }
@@ -170,6 +230,7 @@ reap_stale_trivy_cache_dirs() {
 
     reap_orphaned_running_containers "build-tools" image "$BUILD_TOOLS_IMAGE_MATCH" "$REAP_BUILD_TOOLS_AFTER_HOURS"
     reap_orphaned_running_containers "validation" name "$VALIDATION_NAME_MATCH" "$REAP_VALIDATION_AFTER_HOURS"
+    reap_orphaned_validation_networks "$VALIDATION_NAME_MATCH"
     reap_orphaned_running_containers "buildx-builder" name "$BUILDX_BUILDER_NAME_MATCH" "$REAP_BUILDX_BUILDER_AFTER_HOURS"
     reap_stale_trivy_cache_dirs "$TRIVY_CACHE_ROOT" "$REAP_TRIVY_CACHE_AFTER_DAYS"
 
