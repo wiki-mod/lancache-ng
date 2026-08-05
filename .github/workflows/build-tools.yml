@@ -1001,6 +1001,266 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
+  # ================================================================
+  # TEMPORARY INVESTIGATION JOB -- issue #815, not a permanent CI gate.
+  #
+  # PR #1374 proved real musl network paths (NATS connect, Docker
+  # socket-proxy round-trip, DNS resolution) for a musl-targeted
+  # services/ui build, but that proof only ran once, by hand, on the
+  # self-hosted amd64 runner lancache-240 -- never committed as CI, and
+  # never repeated on arm64. The "build amd64 build-tools image"/"build
+  # arm64 build-tools image (native)" jobs above only prove the musl
+  # *target* compiles and registers on both architectures; they say
+  # nothing about musl's stub resolver actually completing a real
+  # network round-trip on arm64.
+  #
+  # This job repeats PR #1374's own three checks (NATS connect, Docker
+  # socket-proxy roundtrip, short-name + external-FQDN DNS resolution)
+  # for real, natively, on ubuntu-24.04-arm (no QEMU) against the real,
+  # already-published arm64 build-tools image -- closing that gap for
+  # this one investigation, not adding a standing arm64 network gate.
+  # `continue-on-error: true` so a finding here (pass or fail) never
+  # blocks this or any other PR; scoped to `pull_request` only so it
+  # never runs on the weekly schedule or a real push. Intended to be
+  # removed again once the finding is captured on issue #815, per that
+  # issue's own investigation request -- see the PR body for the actual
+  # disposition.
+  # ================================================================
+  investigate-815-arm64-musl-network:
+    name: "[INVESTIGATION #815] arm64 musl network verification (temporary, remove after use)"
+    if: github.event_name == 'pull_request'
+    continue-on-error: true
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Resolve published arm64 build-tools image (immutable digest)
+        id: resolve-image
+        run: |
+          set -euo pipefail
+          # BUILD_TOOLS_REQUIRE_PUBLISHED=true (same flag build-push.yml's own
+          # jobs use) refuses select-build-tools-image.sh's local-build
+          # fallback: the whole point here is to prove out the image PR #1374
+          # already pushed, not a fresh rebuild that would not answer the
+          # question this investigation asks.
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "Resolved published build-tools image: $image"
+
+      - name: Confirm native arm64 pull (no QEMU emulation)
+        run: |
+          set -euo pipefail
+          timeout 180 docker pull "${{ steps.resolve-image.outputs.image }}"
+          arch="$(docker image inspect "${{ steps.resolve-image.outputs.image }}" --format '{{.Architecture}}')"
+          echo "Pulled image architecture: $arch"
+          if [ "$arch" != "arm64" ]; then
+            echo "::error::Expected the native arm64 manifest entry on this ubuntu-24.04-arm runner, got '$arch' -- this would not be a real arm64 verification." >&2
+            exit 1
+          fi
+
+      - name: Assert musl toolchain is present in the published arm64 image
+        run: |
+          set -euo pipefail
+          # Confirms PR #1374's musl RUN step actually reached the image this
+          # job just pulled (published channels are mutable tags -- see
+          # AG-VAL-026 -- so this is a real check, not an assumption).
+          timeout 120 docker run --rm "${{ steps.resolve-image.outputs.image }}" bash -c '
+            set -euo pipefail
+            command -v musl-gcc
+            musl-gcc --version
+            rustup target list --installed | grep -F "aarch64-unknown-linux-musl"
+          '
+
+      - name: Write throwaway musl network-verification harness (never committed, mirrors PR #1374)
+        run: |
+          set -euo pipefail
+          # docker_client.rs is a private module (main.rs's `mod docker_client;`,
+          # not exposed via lib.rs), so a second [[bin]] can't import it
+          # without a crate change this investigation does not make -- same
+          # constraint PR #1374 hit on amd64. This reproduces
+          # connect_from_env() verbatim (read, not modified) plus a minimal
+          # driver exercising the docker-socket-proxy allowlist and a real
+          # external-FQDN GET. Written at runtime into the checkout on this
+          # ephemeral runner only; never staged, committed, or part of any
+          # diff -- ceases to exist once this job's VM is destroyed.
+          mkdir -p services/ui/src/bin
+          cat > services/ui/src/bin/musl_network_verify.rs <<'RUST_EOF'
+          // Ephemeral CI-only harness (issue #815 arm64 verification).
+          // NOT part of the crate's real source -- written by the
+          // investigate-815-arm64-musl-network job in
+          // .github/workflows/build-tools.yml at run time and discarded with
+          // the job's workspace. See docker_client.rs for the real,
+          // production connect_from_env() this copies verbatim.
+          use anyhow::{Context, Result};
+          use bollard::Docker;
+
+          fn connect_from_env() -> Result<Docker> {
+              if let Ok(proxy_url) = std::env::var("DOCKER_PROXY_URL") {
+                  let proxy_url = proxy_url.trim();
+                  if !proxy_url.is_empty() {
+                      return Docker::connect_with_http(proxy_url, 120, bollard::API_DEFAULT_VERSION)
+                          .context("Failed to connect to Docker proxy");
+                  }
+              }
+
+              if let Ok(host) = std::env::var("DOCKER_HOST") {
+                  if let Some(tcp_url) = host.trim().strip_prefix("tcp://") {
+                      if !tcp_url.is_empty() {
+                          return Docker::connect_with_http(tcp_url, 120, bollard::API_DEFAULT_VERSION)
+                              .context("Failed to connect to Docker host");
+                      }
+                  }
+              }
+
+              Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")
+          }
+
+          #[tokio::main]
+          async fn main() -> Result<()> {
+              println!("=== musl network verification harness (issue #815, arm64) ===");
+
+              let docker = connect_from_env()?;
+
+              let ping = docker.ping().await.context("docker-socket-proxy ping() failed")?;
+              println!("[docker-socket-proxy] ping() -> {:?}", ping);
+
+              let target =
+                  std::env::var("VERIFY_TARGET_CONTAINER").unwrap_or_else(|_| "lancache-nats".to_string());
+              let inspect = docker
+                  .inspect_container(&target, None)
+                  .await
+                  .context("docker-socket-proxy inspect_container() failed")?;
+              println!(
+                  "[docker-socket-proxy] inspect_container({}) -> id={:?} state={:?}",
+                  target,
+                  inspect.id,
+                  inspect.state.as_ref().and_then(|s| s.status.as_ref())
+              );
+
+              let url = std::env::var("VERIFY_EXTERNAL_URL").unwrap_or_else(|_| "https://example.com".to_string());
+              let client = reqwest::Client::new();
+              let resp = client.get(&url).send().await.context("external-dns GET failed")?;
+              let status = resp.status();
+              let body = resp.text().await.context("reading external-dns response body failed")?;
+              println!(
+                  "[external-dns] GET {} -> HTTP {} (content-length={} bytes)",
+                  url,
+                  status,
+                  body.len()
+              );
+
+              println!("=== all real network round-trips completed successfully ===");
+              Ok(())
+          }
+          RUST_EOF
+
+      - name: Cross-compile services/ui (release, aarch64-unknown-linux-musl)
+        run: |
+          set -euo pipefail
+          # Writable bind mount (not AG-VAL-016's usual `-u $(id -u):$(id -g)`
+          # + read-only `/work` pattern): cargo needs to write build output
+          # and a scratch CARGO_HOME under /work, which a read-only mount
+          # cannot provide. Justified deviation for this investigation job
+          # only -- every other build-tools consumer in this workflow keeps
+          # the read-only pattern.
+          timeout 1800 docker run --rm \
+            -v "$PWD:/work" \
+            -w /work/services/ui \
+            -e CARGO_HOME=/work/.cargo-investigate-815 \
+            "${{ steps.resolve-image.outputs.image }}" \
+            bash -c 'set -euo pipefail; cargo build --release --locked --target aarch64-unknown-linux-musl --bins'
+          file services/ui/target/aarch64-unknown-linux-musl/release/lancache-ui
+          file services/ui/target/aarch64-unknown-linux-musl/release/musl_network_verify
+
+      - name: Start real NATS + docker-socket-proxy containers on a user-defined bridge network
+        run: |
+          set -euo pipefail
+          # A user-defined bridge network is required for Docker's embedded
+          # DNS (127.0.0.11) to resolve the short container-alias names
+          # below -- the default bridge network has no embedded resolver.
+          docker network create musl-arm64-verify-net
+
+          timeout 60 docker pull --platform linux/arm64 nats:2-alpine
+          # Named lancache-nats (not a generic test name) on purpose: this
+          # repo's own docker-socket-proxy.sh allowlists container inspect
+          # calls by this exact fixed name (see that script's
+          # safe_container_inspect ACL) -- same real allowlist path
+          # production traffic uses, not a relaxed test-only rule.
+          docker run -d --name lancache-nats \
+            --network musl-arm64-verify-net --network-alias nats \
+            nats:2-alpine
+
+          timeout 60 docker pull --platform linux/arm64 \
+            tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+          # Exact same pinned digest and unmodified scripts/docker-socket-proxy.sh
+          # as deploy/prod/docker-compose.yml's real docker-socket-proxy
+          # service definition.
+          docker run -d --name lancache-docker-socket-proxy \
+            --network musl-arm64-verify-net --network-alias docker-socket-proxy \
+            -v /var/run/docker.sock:/var/run/docker.sock:ro \
+            -v "$PWD/scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro" \
+            --entrypoint /usr/local/bin/lancache-docker-socket-proxy.sh \
+            tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
+
+          sleep 3
+          docker logs lancache-nats
+          docker logs lancache-docker-socket-proxy
+
+      - name: "Test 1: real NATS connection from the musl-targeted production binary"
+        run: |
+          set -euo pipefail
+          timeout 60 docker pull --platform linux/arm64 alpine:3.24
+          docker run -d --name musl-ui-verify \
+            --network musl-arm64-verify-net --network-alias musl-ui-verify \
+            -v "$PWD/services/ui/target/aarch64-unknown-linux-musl/release/lancache-ui:/lancache-ui:ro" \
+            --tmpfs /data \
+            -e ALLOW_INSECURE_UI=true \
+            -e NATS_URL=nats://nats:4222 \
+            alpine:3.24 /lancache-ui
+          sleep 5
+          docker logs musl-ui-verify | tee nats-test.log
+          grep -F "Connected to NATS at nats://nats:4222" nats-test.log
+          timeout 30 docker run --rm --network musl-arm64-verify-net \
+            curlimages/curl:8.11.1 -sf http://musl-ui-verify:8080/health
+
+      - name: "Test 2: docker-socket-proxy round-trip + external DNS from the musl-targeted harness"
+        run: |
+          set -euo pipefail
+          timeout 60 docker run --rm \
+            --network musl-arm64-verify-net \
+            -v "$PWD/services/ui/target/aarch64-unknown-linux-musl/release/musl_network_verify:/musl_network_verify:ro" \
+            -e DOCKER_PROXY_URL=http://docker-socket-proxy:2375 \
+            -e VERIFY_TARGET_CONTAINER=lancache-nats \
+            -e VERIFY_EXTERNAL_URL=https://example.com \
+            alpine:3.24 /musl_network_verify | tee harness-test.log
+          grep -F "ping() ->" harness-test.log
+          grep -F "inspect_container(lancache-nats)" harness-test.log
+          grep -F "[external-dns] GET" harness-test.log
+          grep -F "all real network round-trips completed successfully" harness-test.log
+
+      - name: Write verification summary
+        if: always()
+        run: |
+          {
+            echo "## Issue #815 -- arm64 musl network verification (investigation, ubuntu-24.04-arm, native)"
+            echo ""
+            echo '```'
+            cat nats-test.log 2>/dev/null || echo "(nats-test.log not produced -- see failed step above)"
+            echo "---"
+            cat harness-test.log 2>/dev/null || echo "(harness-test.log not produced -- see failed step above)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Clean up investigation containers/network
+        if: always()
+        run: |
+          docker rm -f musl-ui-verify lancache-nats lancache-docker-socket-proxy 2>/dev/null || true
+          docker network rm musl-arm64-verify-net 2>/dev/null || true
+
   merge-build-tools-manifests:
     # Combines build-tools's linux/amd64 tag with build-tools-arm64's
     # linux/arm64 tag into the real sha-<commit> multi-platform tag that
