@@ -416,8 +416,13 @@ echo "Live connection for removed secondary 'authcallout-a' is confirmed gone fr
 # Captured into a variable first, not a live `compose logs | grep -qi` pipe
 # -- nats-server's full log can be large by the time this runs, and a live
 # pipe can SIGPIPE the compose CLI once the log already has the matched
-# line plus more (issue #1377's repo-wide pipefail/SIGPIPE audit).
-nats_log="$("${compose[@]}" logs --no-color nats 2>/dev/null)"
+# line plus more (issue #1377's repo-wide pipefail/SIGPIPE audit). `|| true`
+# matters under `set -e`: this used to sit directly inside the `if` below
+# (exempt from errexit on its own); pulled into its own assignment, a
+# transient `compose logs` failure would otherwise abort this
+# already-non-fatal corroborating check instead of falling through to its
+# own `::warning::` branch (caught by advisor review).
+nats_log="$("${compose[@]}" logs --no-color nats 2>/dev/null || true)"
 if grep -qi "authcallout-a\|Client Kicked\|Client connection closed" <<<"$nats_log"; then
     echo "nats-server's own log also shows evidence of the disconnect."
 else

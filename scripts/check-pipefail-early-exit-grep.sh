@@ -77,6 +77,16 @@ mapfile -t scan_files < <(git ls-files -- \
   'setup.sh' \
   | sort)
 
+# `mapfile < <(...)` does not propagate the process substitution's own
+# failure (a broken `git ls-files` -- not a git work tree, or `git` itself
+# missing -- would otherwise silently leave scan_files empty, and the loop
+# below would then iterate zero times and report a false "OK" with exit 0,
+# a check that can never fail is not a check, per AG-VAL-002/AG-VAL-015).
+if [ "${#scan_files[@]}" -eq 0 ]; then
+  printf '::error::check-pipefail-early-exit-grep: scan_files discovery returned nothing -- is %s a real git work tree with tracked scripts/tools files? Refusing to report a false OK.\n' "$repo_root" >&2
+  exit 1
+fi
+
 # Early-exiting-consumer patterns, matched immediately after a live pipe
 # (`|`, not `||`): grep with -q or -m<N> (any short-option cluster containing
 # one of those, e.g. `-qx`, `-qE`, `-m1`), a bare `head` invocation, or

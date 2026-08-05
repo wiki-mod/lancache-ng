@@ -217,6 +217,24 @@ write_script() {
     [[ "$output" == *"OK"* ]]
 }
 
+@test "fails closed (does not silently report OK) when pointed at a directory that is not a git work tree" {
+    # `mapfile -t scan_files < <(git ls-files ...)` does not propagate the
+    # process substitution's own failure -- a broken discovery (no .git
+    # here, or git itself missing) would otherwise silently leave
+    # scan_files empty, the scan loop would iterate zero times, and the
+    # script would report a false "OK" with exit 0. A non-git directory is
+    # the simplest real reproduction of that failure mode (advisor review,
+    # issue #1377).
+    non_git="$BATS_TEST_TMPDIR/not-a-git-repo"
+    mkdir -p "$non_git/scripts"
+    printf '#!/usr/bin/env bash\nset -euo pipefail\nsome_producer | grep -q "needle"\n' \
+        > "$non_git/scripts/some-check.sh"
+    run bash "$script" "$non_git"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"OK"* ]]
+    [[ "$output" == *"scan_files discovery returned nothing"* ]]
+}
+
 @test "the real repository passes this guard repo-wide (scripts/**, tools/**, setup.sh)" {
     # Defense-in-depth self-check: every file the real, repo-wide scan_files
     # discovers today must actually satisfy this guard, so a future edit

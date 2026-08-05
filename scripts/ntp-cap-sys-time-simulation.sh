@@ -118,8 +118,12 @@ while (( SECONDS < deadline )); do
     # `docker logs` captured into a variable first, then grep -qi reads it
     # via a here-string -- a live pipe here can SIGPIPE `docker logs` once
     # the log already has the matched line plus more (issue #1377's
-    # repo-wide pipefail/SIGPIPE audit).
-    ntp_log="$(docker logs "$container_name" 2>&1)"
+    # repo-wide pipefail/SIGPIPE audit). `|| true` matters under `set -e`:
+    # this used to sit directly inside the `if` below (exempt from errexit
+    # on its own); pulled into its own assignment, a transient `docker logs`
+    # failure would otherwise abort this polling loop instead of retrying
+    # (caught by advisor review).
+    ntp_log="$(docker logs "$container_name" 2>&1 || true)"
     if grep -qi "adjtimex.*Operation not permitted\|Another chronyd may already be running" <<<"$ntp_log"; then
         echo "::error::chronyd hit the same CAP_SYS_TIME restriction confirmed on this project's self-hosted (LXC) runner fleet -- this GitHub-hosted runner no longer grants real CAP_SYS_TIME, or the ntp image/entrypoint changed in a way that broke this. See #1296 for the original investigation." >&2
         docker logs "$container_name" >&2

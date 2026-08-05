@@ -254,8 +254,12 @@ dhcp_ready=0
 while (( SECONDS < deadline )); do
     # `docker logs` captured into a variable first, then grep -q reads it
     # via a here-string -- a live pipe here can SIGPIPE `docker logs` once
-    # the log already has the matched line plus more (issue #1377).
-    dhcp_log="$(docker logs "$dhcp_container" 2>&1)"
+    # the log already has the matched line plus more (issue #1377). `|| true`
+    # matters under `set -e`: this used to sit directly inside the `if`
+    # below (exempt on its own); pulled into its own assignment, a
+    # transient failure would otherwise abort the loop instead of retrying
+    # (caught by advisor review).
+    dhcp_log="$(docker logs "$dhcp_container" 2>&1 || true)"
     if grep -q 'DHCP, proxy on subnet' <<<"$dhcp_log"; then
         dhcp_ready=1
         break

@@ -440,7 +440,12 @@ while (( SECONDS < dns_ready_deadline )); do
     # can SIGPIPE `docker logs` the moment the log already contains the
     # matched line plus more (issue #1377's repo-wide pipefail/SIGPIPE
     # audit; this is the exact shape that failed real CI in PR #1374).
-    dns_log="$(docker logs "$dns_container" 2>&1)"
+    # `|| true` matters under `set -e`: this used to sit directly inside the
+    # `if` condition below (exempt from errexit on its own); pulled out into
+    # its own assignment, a transient `docker logs` failure would otherwise
+    # abort this polling loop instead of just letting this iteration's check
+    # come back false and retry (caught by advisor review).
+    dns_log="$(docker logs "$dns_container" 2>&1 || true)"
     if grep -q "Configured TSIG-authenticated DDNS updates for LAN zones." <<<"$dns_log" \
         && docker exec "$dns_container" dig +short +time=2 +tries=1 @127.0.0.1 -p 5300 lan. SOA >/dev/null 2>&1; then
         dns_ready=1

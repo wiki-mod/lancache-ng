@@ -6228,7 +6228,14 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
     # after the version proper) -- captured into a variable first, then
     # `head -1` reads it via a here-string instead of a live pipe from grep
     # (issue #1377's repo-wide pipefail/SIGPIPE audit).
-    docker_version_numbers="$(docker --version | grep -oP '[\d.]+')"
+    # `|| true` matters here under `set -e`: this used to be an argument
+    # expression (`print_ok "Docker $(...)"`), where a failing substitution
+    # cannot itself abort the script -- only print_ok's own exit status can.
+    # As a bare assignment it can, so the same fail-soft behavior (an
+    # unparseable `docker --version` degrades this line, it does not abort
+    # setup.sh) needs to be restored explicitly (issue #1377 follow-up,
+    # caught by advisor review after the initial conversion).
+    docker_version_numbers="$(docker --version | grep -oP '[\d.]+' || true)"
     print_ok "Docker $(head -1 <<<"$docker_version_numbers")"
     print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
 fi
@@ -6241,12 +6248,19 @@ print_step "Network configuration"
 # SIGPIPE the `ip`/`grep` processes still writing once `head -1` already
 # has its one line (issue #1377's repo-wide pipefail/SIGPIPE audit -- this
 # is the production installer, so converted rather than merely reasoned
-# about as low-risk).
-ip_addr_output="$(ip -4 addr show)"
+# about as low-risk). `|| true` on each bare assignment restores this
+# section's original fail-soft behavior under `set -e`: the prior one-line
+# pipelines ended in `|| true` covering `ip` itself failing too (e.g. no
+# `iproute2` on a minimal host), which a bare `var=$(...)` assignment does
+# not inherit on its own -- without it, a host missing `ip` would abort
+# setup.sh here instead of falling through to `ask`'s own `${detected_ip:-
+# 192.168.1.10}` default below (caught by advisor review, not the original
+# conversion pass).
+ip_addr_output="$(ip -4 addr show || true)"
 candidate_ips="$(grep -oP '(?<=inet )[\d.]+' <<<"$ip_addr_output" \
     | grep -v '^127\.' | grep -v '^172\.' || true)"
 detected_ip=$(head -1 <<<"$candidate_ips")
-ip_route_output="$(ip -4 route show default)"
+ip_route_output="$(ip -4 route show default || true)"
 route_ifaces="$(awk '{print $5}' <<<"$ip_route_output" || true)"
 detected_iface=$(head -1 <<<"$route_ifaces")
 
@@ -6281,8 +6295,14 @@ if [[ "${REPLY,,}" = "y" ]]; then
         || die "Standard IP and SSL IP must be different."
     # Captured into a variable first, not a live `ip ... | grep -q` pipe --
     # a host can have several interfaces/addresses (issue #1377's
-    # repo-wide pipefail/SIGPIPE audit).
-    ip_ssl_check_output="$(ip -4 addr show)"
+    # repo-wide pipefail/SIGPIPE audit). `|| true` matters here under
+    # `set -e`: the original `ip -4 addr show | grep -q ...` sat directly in
+    # an `if` condition, where a failing command cannot abort the script --
+    # only the if's own branch selection is affected. Pulled out into its
+    # own bare assignment, that exemption no longer applies unless restored
+    # explicitly (caught by advisor review, not the original conversion
+    # pass).
+    ip_ssl_check_output="$(ip -4 addr show || true)"
     if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
         print_ok "$IP_SSL already assigned"
     else

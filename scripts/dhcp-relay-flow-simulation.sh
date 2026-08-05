@@ -127,12 +127,19 @@ while (( SECONDS < deadline )); do
     # `--filter` here lists every container on the host, not just this
     # script's own, so it is not bounded to one line the way a filtered
     # `docker ps -q --filter name=^X$` would be).
-    relay_log="$(docker logs "$relay_container" 2>&1)"
+    # `|| true` on both matters under `set -e`: each used to sit directly
+    # inside its own `if` (exempt from errexit on its own); pulled into
+    # their own assignments, a transient `docker logs`/`docker ps` failure
+    # would otherwise abort this polling loop instead of retrying, or (for
+    # the `docker ps` case) instead of falling through to this script's own
+    # controlled "container exited early" error path (caught by advisor
+    # review).
+    relay_log="$(docker logs "$relay_container" 2>&1 || true)"
     if grep -q "DHCP-relay mode" <<<"$relay_log"; then
         relay_ready=1
         break
     fi
-    running_names="$(docker ps --format '{{.Names}}')"
+    running_names="$(docker ps --format '{{.Names}}' || true)"
     if ! grep -q "^${relay_container}$" <<<"$running_names"; then
         echo "::error::Relay container exited early." >&2
         docker logs "$relay_container" >&2 || true
@@ -149,8 +156,13 @@ fi
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
     # Captured into a variable first, not a live `docker logs | grep -q`
-    # pipe (issue #1377).
-    upstream_boot_log="$(docker logs "$upstream_container" 2>&1)"
+    # pipe (issue #1377). `|| true` matters under `set -e`: this used to be
+    # part of the same `... | grep -q ... && break` statement, where the
+    # whole pipe sat on the non-last side of `&&` (exempt from errexit);
+    # pulled into its own assignment, a transient `docker logs` failure
+    # would otherwise abort the loop instead of retrying (caught by advisor
+    # review).
+    upstream_boot_log="$(docker logs "$upstream_container" 2>&1 || true)"
     grep -q "dnsmasq-dhcp" <<<"$upstream_boot_log" && break
     sleep 3
 done
