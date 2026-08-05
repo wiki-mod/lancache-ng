@@ -3,8 +3,12 @@
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# This is the only deployment profile -- see CLAUDE.md's "No Separate Dev
-# Environment" for why there is no parallel deploy/dev stack.
+# This is the only *production* deployment profile -- see AGENTS.md's AG-KD-008
+# for why there is no parallel deploy/dev stack (corrected 2026-08-05, issue #1391
+# doc-sweep audit: this used to cite CLAUDE.md's "No Separate Dev Environment"
+# section, which moved to AGENTS.md on 2026-07-31; deploy/quickstart/ and
+# deploy/full-setup/ are the other two real profiles that exist today, for
+# quickstart and CI-validation use respectively).
 
 name: lancache-ng
 
@@ -617,6 +621,28 @@ services:
       # genuine LAN traffic without needing network_mode: host. Bound to all
       # interfaces, matching how `dhcp`'s port 67/udp is published above.
       - "123:123/udp"
+    # Least-privilege hardening (issue #1358): before this, `ntp` had only
+    # `cap_add: [SYS_TIME]` layered on top of Docker's full default
+    # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
+    # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
+    # proven necessary (same pattern as PR #1360's `retention` service, see
+    # its own comment in this file), removes every one of those unused
+    # defaults instead of relying on chronyd's own good behavior to not
+    # misuse them. This set was NOT guessed -- determined empirically on a
+    # real runner via `strace` against the real chronyd binary, starting
+    # from `cap_drop: ALL` and adding capabilities one at a time until each
+    # specific "Operation not permitted" error (each one tied to a specific
+    # syscall in the strace output) went away, INCLUDING a negative check
+    # (re-removing a capability that was added and confirming its specific
+    # failure comes back, not just adding until things looked fine) -- see
+    # the PR implementing this issue for the full session. Real end-to-end
+    # clock-stepping under this exact capability set is additionally
+    # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
+    # GitHub-hosted CI job, the only environment in this project's CI that
+    # runs on a real, non-LXC-nested kernel (see that script's own header) --
+    # kept in sync with this cap_add list; update both together.
+    cap_drop:
+      - ALL
     cap_add:
       # chronyd needs to step/slew the container HOST's real system clock to
       # genuinely discipline time (containers share one kernel clock; there
@@ -624,7 +650,45 @@ services:
       # set excludes CAP_SYS_TIME, so this must be granted explicitly. This
       # is inherent to running any real NTP server in Docker, not specific
       # to this project -- see services/ntp/Dockerfile's matching comment.
+      # This project's self-hosted CI runner fleet cannot itself confirm
+      # chronyd actually retains and uses this post-privilege-drop (every
+      # host there is LXC-nested and dies earlier at an unrelated adjtimex
+      # restriction, issue #1296); `scripts/ntp-cap-sys-time-simulation.sh`'s
+      # GitHub-hosted job is what proves the real clock-stepping path.
       - SYS_TIME
+      # chronyd binds UDP/123 (and its cmdmon socket) BEFORE dropping to the
+      # `chrony` user -- confirmed live via strace (`bind()` on all three
+      # sockets precedes `setuid`/`setgid`/`capset()`). Low ports (<1024)
+      # need this capability once root no longer implicitly has it via
+      # Docker's removed default set.
+      - NET_BIND_SERVICE
+      # These two are needed only transiently, for chronyd's own internal
+      # privilege-drop sequence (confirmed live via strace:
+      # `setgroups`->`setgid`->`setuid`->`capset()`, each failing with
+      # "Operation not permitted" in turn until its corresponding capability
+      # was present) -- root itself loses these under `cap_drop: ALL`, the
+      # same "CHOWN removed from root, not just the eventual non-root user"
+      # reasoning as PR #1360's `retention` service. Deliberately does NOT
+      # include SETPCAP: unlike `retention` (which uses `setpriv
+      # --bounding-set` to manually narrow its own capability bounding set,
+      # an operation that itself needs CAP_SETPCAP), chronyd's own capset()
+      # call here only sets its effective/permitted/inheritable sets
+      # (confirmed via strace: `inheritable=0`, no bounding-set change at
+      # all) -- confirmed live that including SETPCAP changes nothing
+      # (identical result with and without it) and that removing it does
+      # not reintroduce any failure. `ntp` does not need a `setpriv`/manual
+      # narrowing wrapper of its own at all: chronyd's own compiled-in
+      # `+PRIVDROP` (confirmed via `chronyd -v`) does this internally.
+      - SETUID
+      - SETGID
+      # entrypoint.sh's own `chown chrony:chrony /var/log/chrony
+      # /var/lib/chrony` step (see its comment) needs this once root no
+      # longer implicitly has it -- confirmed live: without it, that step
+      # logs a non-fatal WARNING and the resulting directories stay
+      # root-owned and unwritable by the privilege-dropped chronyd; with
+      # it, the chown succeeds and chronyd's own log/driftfile writes work
+      # as intended.
+      - CHOWN
     healthcheck:
       # Real query/response probe (#1169, matching AG-VAL-018's spirit for
       # DNS): `chronyc tracking` is a genuine round-trip over chronyd's own

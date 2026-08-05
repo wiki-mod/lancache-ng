@@ -507,8 +507,10 @@ _load_public_suffix_list
 # hostname verification. What did NOT change: that traffic still isn't
 # cached or MITM'd at that depth -- only dynamic per-SNI certificate
 # issuance at handshake time (a materially different architecture than
-# this pre-generated-cert design, see CLAUDE.md's "Pre-generated wildcard
-# certs" decision) would close that residual gap, and that remains a
+# this pre-generated-cert design, see AGENTS.md's AG-KD-005 -- corrected
+# 2026-08-05, issue #1391 doc-sweep audit: this used to cite CLAUDE.md's
+# "Pre-generated wildcard certs" decision, which moved to AGENTS.md on
+# 2026-07-31) would close that residual gap, and that remains a
 # separate, not-yet-scoped architecture question. The operator mitigation
 # (add the specific deeper level as its own leading-dot entry, e.g.
 # ".b.cdn.ea.com", to get real MITM/caching for that one additional level)

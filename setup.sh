@@ -4638,7 +4638,9 @@ cmd_debug() {
 # ── create-logs-for-issue subcommand ──────────────────────────────────────────
 # #762: bundles the diagnostic state a maintainer needs to triage a bug
 # report into one compressed, secret-redacted archive, so a non-technical
-# operator (this project's actual audience per CLAUDE.md) can attach one
+# operator (this project's actual audience per AGENTS.md's project description --
+# corrected 2026-08-05, issue #1391 doc-sweep audit: CLAUDE.md no longer carries
+# this content as of 2026-07-31) can attach one
 # file to a GitHub issue instead of manually running and pasting a series of
 # commands. Read-only like cmd_debug above: this never repairs, restarts, or
 # rewrites anything, it only collects and redacts.
@@ -6946,8 +6948,10 @@ CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
-# Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
-# dual-stack rationale); IPv6 literals are bracketed because nginx's
+# Includes both IPv4 and IPv6 Google Public DNS (see AGENTS.md's project description
+# and AG-IPV6-001 for the dual-stack rationale -- corrected 2026-08-05, issue #1391
+# doc-sweep audit: this used to cite CLAUDE.md, which no longer carries this content
+# as of 2026-07-31); IPv6 literals are bracketed because nginx's
 # \`resolver\` directive requires brackets around IPv6 nameservers. (Backticks
 # escaped: this whole heredoc is deliberately unquoted so ${IP_STANDARD} etc.
 # below interpolate -- an unescaped backtick here is real command
