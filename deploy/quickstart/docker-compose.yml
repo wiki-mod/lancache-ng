@@ -1552,10 +1552,11 @@ services:
       - NET_BIND_SERVICE
       # Transient-only: chronyd's own internal setgroups/setgid/setuid/
       # capset() privilege-drop sequence needs these to run as root, but the
-      # long-running post-drop process retains none of them.
+      # long-running post-drop process retains none of them. Deliberately
+      # does NOT include SETPCAP -- confirmed live it changes nothing (see
+      # deploy/prod/docker-compose.yml's fuller comment for why).
       - SETUID
       - SETGID
-      - SETPCAP
       # entrypoint.sh's own chown of /var/log/chrony and /var/lib/chrony to
       # chrony:chrony needs this once root no longer has it implicitly.
       - CHOWN

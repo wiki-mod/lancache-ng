@@ -269,7 +269,8 @@ setup() {
 # the real template file, not a rendering/functional test -- the actual
 # runtime effect (chronyd really ending up as the `chrony` user, both with
 # and without this line, on this project's shipped chrony-nts build) was
-# verified live on a real runner instead; see PR #1358's validation notes.
+# verified live on a real runner instead; see the PR implementing this
+# issue for the full session.
 @test "the real chrony.conf.template carries an explicit user chrony directive" {
     run grep -E '^user chrony$' "$repo_root/services/ntp/chrony.conf"
     [ "$status" -eq 0 ]
@@ -281,9 +282,12 @@ setup() {
 # confirmation that this image's Alpine chrony-nts build actually reports
 # `+SCFILTER` in `chronyd -v`'s feature list (see services/ntp/Dockerfile's
 # comment), and that chronyd still starts/syncs/serves normally with it
-# (verified live on a real runner; see PR #1358's validation notes) rather
-# than being killed on its first disallowed syscall, which is the failure
-# mode an over-strict or unsupported seccomp level would produce instead.
+# (verified live on a real runner; see the PR implementing this issue for
+# the full session, and `scripts/ntp-cap-sys-time-simulation.sh`'s
+# GitHub-hosted CI job for the real clock-stepping-under-seccomp proof)
+# rather than being killed on its first disallowed syscall, which is the
+# failure mode an over-strict or unsupported seccomp level would produce
+# instead.
 @test "the final chronyd exec passes -F 1 (seccomp strict allow-list)" {
     run grep -E '^exec chronyd .* -F 1$' "$repo_root/services/ntp/entrypoint.sh"
     [ "$status" -eq 0 ]

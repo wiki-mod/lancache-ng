@@ -288,10 +288,19 @@ fix_chrony_dir_ownership
 # allow-list ("only selected system calls... normally expected to be made
 # by chronyd"; anything else is blocked), whereas level 2 only blocks a
 # small named set (e.g. fork/exec) -- level 1 is the actual least-privilege
-# choice this issue asks for, not the lighter one. Confirmed live (see PR
-# #1358's validation notes) that chronyd starts, disciplines its clock, and
-# keeps answering `chronyc tracking`/LAN NTP queries normally with this
-# flag set -- an over-strict seccomp level would instead kill the process
-# outright on its first disallowed syscall, which is not what was observed.
+# choice this issue asks for, not the lighter one. Confirmed live on this
+# project's self-hosted runner fleet (see the PR implementing this issue
+# for the full session) that chronyd starts with this flag set, reaches a
+# genuinely synchronised state (real `Stratum`/`Leap status: Normal`)
+# against real upstream servers, and keeps answering `chronyc tracking`/LAN
+# NTP queries normally -- an over-strict seccomp level would instead kill
+# the process outright on its first disallowed syscall, which is not what
+# was observed. That verification used chronyd's own `-x` flag (never
+# step/slew) to work around this project's self-hosted fleet's unrelated
+# CAP_SYS_TIME/adjtimex restriction (issue #1296), so it proves `-F 1`
+# doesn't block the syscalls chronyd needs for config parsing, binding,
+# privilege-drop, and NTP query/response handling; the real clock-stepping
+# syscall path itself under `-F 1` is proven separately, on a real non-LXC
+# kernel, by `scripts/ntp-cap-sys-time-simulation.sh`'s GitHub-hosted CI job.
 echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
 exec chronyd -n -f "$NTP_RUNTIME_CONF" -F 1
