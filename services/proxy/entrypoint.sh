@@ -28,6 +28,18 @@ SSL_ENABLED="${SSL_ENABLED:-0}"
 NGINX_UPSTREAM_RESOLVER="${NGINX_UPSTREAM_RESOLVER:-8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]}"
 PROXY_SECURITY_MODE="${PROXY_SECURITY_MODE:-lazy}"
 PROXY_ALLOWED_CLIENT_CIDRS="${PROXY_ALLOWED_CLIENT_CIDRS:-}"
+# Unlike the other CACHE_* variables below (CACHE_MEM_MB, CACHE_MAX_SIZE,
+# CACHE_INACTIVE), which have always been mandatory (present since this
+# project's first commit setting them), CACHE_MIN_FREE is new (bug-hunt #849
+# item 11) -- an existing deployment that pulls an updated proxy image
+# without also re-running `setup.sh update` (or hand-editing its .env) would
+# otherwise have no value at all for it. Confirmed live: envsubst then
+# renders nginx.conf's `min_free=${CACHE_MIN_FREE}` as `min_free=` (empty),
+# which real nginx rejects outright ("invalid min_free value") -- a fallback
+# here is what keeps that upgrade path from becoming a hard proxy startup
+# failure. 1g matches the example value bug-hunt #849/#1068's own
+# field-testing finding suggested when it first raised min_free.
+CACHE_MIN_FREE="${CACHE_MIN_FREE:-1g}"
 KEEP_KNOWN_GOOD_CONFIGS="${KEEP_KNOWN_GOOD_CONFIGS:-3}"
 PROXY_CONFIG_SNAPSHOT_DIR="${PROXY_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-proxy/config-snapshots}"
 
@@ -648,7 +660,7 @@ case "$PROXY_SECURITY_MODE" in
         ;;
 esac
 
-export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS
+export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS CACHE_MIN_FREE
 
 # Deterministic, length-bounded cert/key filename for a domain that may
 # be up to 253 bytes long (_is_valid_domain's own limit) -- well past
@@ -1015,7 +1027,7 @@ fi
 # ────────────────────────────────────────────────────────────────────────────
 # 4. Render nginx.conf and proxy-params from templates
 # ────────────────────────────────────────────────────────────────────────────
-envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \
+envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_MIN_FREE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \
     < /etc/nginx/nginx.conf.template > /etc/nginx/nginx.conf
 
 envsubst '${CACHE_SLICE_SIZE} ${CACHE_VALID_HIT} ${CACHE_VALID_ANY}' \
