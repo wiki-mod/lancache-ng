@@ -1231,9 +1231,14 @@ jobs:
           # auth configured (anonymous, same as PR #1374's own container), so
           # any syntactically-valid credentials satisfy the preflight check
           # without needing to configure real NATS auth in this test network.
+          # The production Dockerfile COPYs src/templates to /templates and
+          # defaults TEMPLATE_DIR there (config.rs); the first attempt only
+          # mounted the bare binary, so main.rs panicked before ever reaching
+          # the NATS connection this test is actually meant to verify.
           docker run -d --name musl-ui-verify \
             --network musl-arm64-verify-net --network-alias musl-ui-verify \
             -v "$PWD/services/ui/target/aarch64-unknown-linux-musl/release/lancache-ui:/lancache-ui:ro" \
+            -v "$PWD/services/ui/src/templates:/templates:ro" \
             --tmpfs /data \
             -e ALLOW_INSECURE_UI=true \
             -e NATS_URL=nats://nats:4222 \
