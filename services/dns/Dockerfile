@@ -332,15 +332,28 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # release with the fix (re-checked live against the real current package
 # index, not assumed stale from #815's original 2026-07-13/14 research
 # table); Alpine's `edge` branch already carries 5.1.3 (past the named fix
-# version 5.1.2), confirmed live. Pinning only these two packages to `edge`
-# -- not the whole base image, and not pdns-recursor-luajit, which resolves
-# to the identical 5.4.4-r0 on both channels and is not named in this
-# advisory at all -- keeps edge-channel exposure to the minimum needed to
-# avoid shipping a known, fixed-upstream DoS regression, while everything
-# else in this image stays on the stable v3.24 channel. Re-evaluate this
-# pin once v3.24 stable itself picks up 5.0.6 or later (track via
-# `apk policy pdns` against the real v3.24 index) -- at that point the
-# plain (non-`@edge`) package should be preferred again, mirroring how this
+# version 5.1.2), confirmed live. Pinned to an EXACT version on `edge`
+# (`pdns@edge=5.1.3-r0`, not a bare `pdns@edge`), deliberately, after
+# confirming apk's `name@tag=version` syntax actually resolves: a bare
+# `@edge` pin would trade the CVE regression for a reproducibility
+# regression instead (edge is a rolling, unversioned repo -- two builds of
+# the same commit could silently resolve different pdns versions with a
+# possible ABI mismatch against this image's other, stable-channel-sourced
+# libraries, e.g. boost/sqlite-libs/luajit). The exact-version pin gets both
+# properties: CVE-free today, and byte-for-byte reproducible across rebuilds
+# -- if `edge` ever drops this exact build (superseded by a newer point
+# release), `apk add` fails loudly at build time instead of silently
+# drifting to a different version, matching this project's own
+# fail-loud-not-silent-drift principle (Rule-Ref: AG-VAL-026). Pinning only
+# these two packages -- not the whole base image, and not
+# pdns-recursor-luajit, which resolves to the identical 5.4.4-r0 on both
+# channels and is not named in this advisory at all -- keeps edge-channel
+# exposure to the minimum needed to avoid shipping a known, fixed-upstream
+# DoS regression, while everything else in this image stays on the stable
+# v3.24 channel. Re-evaluate this pin once v3.24 stable itself picks up
+# 5.0.6 or later (track via `apk policy pdns` against the real v3.24 index,
+# or simply once a build starts failing because edge moved past 5.1.3-r0)
+# -- at that point the plain (non-`@edge`) package should be preferred again, mirroring how this
 # project already treats `trixie-backports` as a currency mechanism to drop
 # once the base channel catches up, not a permanent fixture.
 RUN printf '%s\n' \
@@ -349,8 +362,8 @@ RUN printf '%s\n' \
       >> /etc/apk/repositories \
     && apk update \
     && apk add --no-cache \
-    pdns@edge \
-    pdns-backend-sqlite3@edge \
+    pdns@edge=5.1.3-r0 \
+    pdns-backend-sqlite3@edge=5.1.3-r0 \
     pdns-recursor-luajit \
     bind-tools \
     sqlite \
