@@ -63,7 +63,12 @@ services:
       - "${IP_SSL:-127.0.0.1}:80:80"
       - "${IP_SSL:-127.0.0.1}:443:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1/healthz >/dev/null; }"]
+      # Since #1276/#1322: see deploy/prod/docker-compose.yml's matching
+      # comment -- container port 443 is now the stream-level SNI dispatch
+      # listener, which has no SNI to route on for an IP-literal curl target.
+      # Retargeted at conf.d/https.conf's dedicated, non-PROXY-protocol
+      # healthcheck port (8445) instead.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
       timeout: 5s
       retries: 3
