@@ -4483,17 +4483,14 @@ cmd_converge_reconcile() {
         if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
             current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
             current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
-            # Bug fix (found while adding logging_enabled below, issue #1343):
-            # this call previously passed only 3 of compose_profiles_for_runtime's
-            # arguments, omitting ntp_enabled entirely. Since that parameter
-            # defaults to "0" when omitted, an operator with LanCache-NG-NTP
-            # already enabled who then changed DHCP mode from the Admin UI had
-            # `ntp` silently stripped from COMPOSE_PROFILES on this exact tick --
-            # the NTP container would disappear on the next `docker compose up`
-            # convergence even though nothing about NTP itself changed. Reading
-            # the real current value here instead of relying on the default
-            # closes that gap (AG-WF-027: fix identified problems in the same
-            # pass, not just the one this edit was originally about).
+            # Must read the real current NTP_ENABLED and LOGGING_ENABLED
+            # values here rather than relying on compose_profiles_for_runtime's
+            # own parameter defaults ("0" for ntp_enabled): omitting either
+            # argument on this DHCP-mode-change tick would silently strip that
+            # profile from COMPOSE_PROFILES even though nothing about it
+            # changed -- e.g. an operator with LanCache-NG-NTP already enabled
+            # would lose the NTP container on the next `docker compose up`
+            # convergence, purely as a side effect of a DHCP mode change.
             current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
             current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
             new_compose_profiles=$(compose_profiles_for_runtime \

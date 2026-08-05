@@ -84,15 +84,14 @@
 # silently drifting from what setup.sh actually generates. `Start now? [Y/n]`
 # is answered "n": this script brings the stack up itself afterward.
 #
-# UPDATED (issue #1343): the wizard's "Enable central logging? [Y/n]" prompt
-# now defaults to enabled and this script accepts that default, so
-# COMPOSE_PROFILES already contains `logging` and SYSLOG_ENABLED needs no
-# fixing up by the time Phase 1 finishes. Phase 2 below still sets both
-# explicitly as a defense-in-depth double-check (its dedup logic is a no-op
-# if `logging` is already present) rather than relying solely on the wizard
-# default never regressing silently -- this was previously the ONLY place
-# either got set, since the wizard had no prompt for this at all before
-# #1343's fix.
+# The wizard's "Enable central logging? [Y/n]" prompt defaults to enabled
+# and this script accepts that default, so COMPOSE_PROFILES already contains
+# `logging` and SYSLOG_ENABLED needs no fixing up by the time Phase 1
+# finishes. Phase 2 below still sets both explicitly as a defense-in-depth
+# double-check (its dedup logic is a no-op if `logging` is already present)
+# rather than relying solely on the wizard default never regressing
+# silently: an independent, redundant assertion of the desired end state,
+# not a fixup path this script depends on.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)

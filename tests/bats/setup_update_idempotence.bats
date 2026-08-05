@@ -49,10 +49,10 @@ setup() {
 # fail on its first run, not just its second -- confirmed the hard way when
 # #819's own PR broke this exact test on first CI run, again by #1082's NTP
 # feature (issue #1171), a third time by #844's relay mode, and a fourth time
-# by #1343's LOGGING_ENABLED addition (caught here, before landing,
-# by the very guard test this repeated recurrence motivated -- see that
-# test's own comment below), which is exactly the failure mode this comment
-# exists to warn the next feature about. (#1082 itself repeated the exact
+# by #1343's LOGGING_ENABLED addition, guarded against here by the dedicated
+# guard test this repeated recurrence motivated (see that test's own comment
+# below), which is exactly the failure mode this comment exists to warn the
+# next feature about. (#1082 itself repeated the exact
 # same mistake, undetected until #681 found this fixture failing on a clean,
 # unmodified current_dev checkout -- i.e. before any #681 change ever touched
 # this file. Fixed here, incidentally, as part of #681 only because that PR
