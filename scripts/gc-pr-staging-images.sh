@@ -265,6 +265,33 @@ process_service() {
       continue # untagged -- classified in Pass 2 below, not here
     fi
 
+    # sha256-<64-hex> attestation-reference tags (see the full live-verified
+    # rationale below, at the tag this shape is actually classified under)
+    # are scanned in their OWN pass over every one of this version's tags,
+    # BEFORE the protected/has_closed_pr_tag decision loop below -- NOT
+    # folded into that loop's own per-tag branch, even though a
+    # sha256-<hex> tag would also be caught there. That decision loop
+    # `break`s as soon as it reaches a decisive tag (protected=1), which is
+    # correct and harmless for a decision (the outcome doesn't change by
+    # looking at more tags once one of them already says "keep"), but WRONG
+    # for data collection: a hypothetical multi-tag version like
+    # ["latest", "sha256-<hex>"] would hit "latest" first, set protected=1,
+    # `break`, and never reach the sha256-<hex> tag at all -- silently
+    # under-populating children_digests, which is exactly the dangerous
+    # direction (a still-referenced manifest looking orphaned) this whole
+    # orphan phase exists to prevent. Every real version sampled live
+    # (2026-08-06) carried exactly one tag, so this ordering bug cannot
+    # currently fire in practice -- but that observation was drawn from a
+    # sample, not a guarantee about every version this reaper will ever see,
+    # so the loop is still written to not depend on it.
+    local attestation_tag
+    while IFS= read -r attestation_tag; do
+      [[ -z "$attestation_tag" ]] && continue
+      if [[ "$attestation_tag" =~ ^sha256-([0-9a-f]{64})$ ]]; then
+        children_digests["sha256:${BASH_REMATCH[1]}"]=1
+      fi
+    done <<< "$tag_list"
+
     local protected=0 has_closed_pr_tag=0 tag
     while IFS= read -r tag; do
       [[ -z "$tag" ]] && continue
@@ -315,46 +342,13 @@ process_service() {
         # so blanket-protecting all of them costs nothing worth trading for
         # that fragile inference.
         #
-        # `sha256-<64-hex>` specifically (found and verified live against
-        # this project's real lancache-ng/proxy package, 2026-08-06: 1107 of
-        # 3522 versions in that one service alone carry exactly this tag
-        # shape) is GHCR/Buildx's legacy referrers-fallback convention for an
-        # attestation manifest that associates itself with a subject purely
-        # via its OWN tag name, not via an OCI 1.1 `subject.digest` field in
-        # its manifest body -- confirmed empirically: fetching one of these
-        # tagged versions' manifests showed a plain image-index with no
-        # `subject` field anywhere in it, so gcps_extract_manifest_children()
-        # (which only ever reads `.manifests[]`/`.subject.digest` from an
-        # ALREADY-FETCHED manifest body) can never discover this relationship
-        # from either side of it -- not from the subject's manifest (which
-        # has no reason to list its own attestations) and not from the
-        # attestation's own manifest body (which, in this fallback scheme,
-        # never mentions the subject at all). The one and only place this
-        # association is recorded is the tag string itself. Also confirmed
-        # live: of a same-service sample of these targets, some resolve to a
-        # version that itself carries NO tag of its own (a bare, real
-        # single-platform image manifest, config+layers, not a leftover
-        # index) -- i.e. a version Pass 2 below would have no OTHER way to
-        # know is still referenced, and would misclassify as a genuine
-        # orphan. Extracting the target digest straight out of the tag
-        # string and adding it to children_digests (no extra API call
-        # needed -- this is pure string parsing on data already in hand)
-        # closes exactly that gap. This is deliberately ADDITIVE to, not a
-        # replacement for, `protected=1` below: the attestation version
-        # itself keeps its existing (already-safe) permanent protection
-        # unchanged -- seen live: 302 of the 1107 sampled targets no longer
-        # exist at all (already reaped some other way), meaning a real,
-        # already-growing, permanently-unreapable-by-this-script share of
-        # these tags is pure dead weight under this PR's logic. That is a
-        # known, deliberately out-of-scope completeness gap (reclaiming it
-        # would mean making an attestation version's own deletability
-        # depend on its subject's fate, a materially bigger and riskier
-        # change than this PR's mandate), not a safety gap -- flagged here,
-        # not silently left unexplained, and separate from the actual safety
-        # fix below.
-        if [[ "$tag" =~ ^sha256-([0-9a-f]{64})$ ]]; then
-          children_digests["sha256:${BASH_REMATCH[1]}"]=1
-        fi
+        # `sha256-<64-hex>` tags (GHCR/Buildx's legacy referrers-fallback
+        # attestation-association convention) also fall into this branch --
+        # a real one, protected the same as any other non pr-* tag -- but
+        # their target-digest EXTRACTION into children_digests happens in
+        # the dedicated pass above this decision loop, not here: see that
+        # pass's own comment for the full live-verified rationale and for
+        # why it must not be gated by this loop's `break`.
         protected=1
         break
       fi
