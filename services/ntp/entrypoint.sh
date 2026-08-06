@@ -40,10 +40,76 @@ mkdir -p /run/chrony
 # since (unlike Kea) this daemon has no live control API the UI can call
 # instead. An operator-supplied real env var still wins if set directly
 # (e.g. via config/*/ntp.env), matching that same precedent.
-if [ -f /data/lancache-ui-settings.env ]; then
-    # shellcheck disable=SC1091
-    . /data/lancache-ui-settings.env
-fi
+#
+# _ntp_source_ui_settings <settings_file>
+#
+# Reads the Admin-UI-persisted settings file if it exists, WITHOUT executing
+# it as shell code; a missing file is not an error -- a fresh install has
+# none yet, and every var this function might set has its own
+# `: "${VAR:=}"` fallback further down.
+#
+# Deliberately does NOT `. <file>` (dot-source) the settings file, even
+# though an earlier version of this entrypoint did (issue #849 finding,
+# same root cause as services/dhcp-proxy/entrypoint.sh's identical pattern,
+# fixed there first). This file is SHARED across multiple services'
+# Admin-UI-persisted settings -- NTP_UPSTREAM_SERVERS itself is strictly
+# validated (validate_ntp_upstream_servers, services/ui/src/routes/ntp.rs:
+# every entry must parse as a bare IPv4/IPv6 literal or an RFC 1123 hostname
+# label, no shell metacharacters possible), but this entrypoint dot-sourced
+# the WHOLE file, not just its own keys -- so a weakly-validated value
+# written by a DIFFERENT route into this SAME file (confirmed real:
+# DHCP_PROXY_CUSTOM_OPTIONS, validated only for length/embedded-newlines by
+# validate_custom_dhcp_option_data, not shell metacharacters) would be
+# executed here too, during this container's own startup, even though ntp
+# never reads that variable itself. Parsing the file as plain KEY=value text
+# instead (a case-statement allowlist of the exact key names this service
+# actually reads, `printf -v` for the assignment, never `eval` or a
+# dot-source) closes that off entirely, regardless of what any other
+# service's route ever writes into this shared file.
+_ntp_source_ui_settings() {
+    local settings_file="$1"
+    [ -f "$settings_file" ] || return 0
+
+    local line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            '' | '#'*) continue ;;
+        esac
+        case "$line" in
+            *=*)
+                key="${line%%=*}"
+                value="${line#*=}"
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        # Strip one layer of matching quotes for an operator's own
+        # hand-edited file -- the Admin UI's own writer never quotes
+        # values. Never interpreted as shell syntax either way: this is a
+        # plain string trim, not a re-parse.
+        case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
+        # Allowlist: only assign the variables this script actually reads
+        # further down. $key can only ever equal one of these exact literal
+        # strings after matching this case pattern (bash case matching here
+        # is a literal string comparison, not a regex/glob substitution
+        # into the pattern), so this cannot become a variable-name
+        # injection either -- an unrecognized key in the file (settings
+        # belonging to a different service, a future Admin-UI-only setting,
+        # a typo, or anything else) is silently ignored rather than
+        # exported as an arbitrary shell variable.
+        case "$key" in
+            NTP_UPSTREAM_SERVERS | NTP_ALLOWED_CLIENT_CIDRS)
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$settings_file"
+}
+
+_ntp_source_ui_settings /data/lancache-ui-settings.env
 
 # Curated default: the four official Debian NTP pool zones plus Cloudflare's
 # well-known anycast NTP service, for a sensible default an operator never
