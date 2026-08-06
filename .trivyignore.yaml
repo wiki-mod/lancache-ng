@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Trivy security scanner ignore list for accepted vulnerabilities with expiry dates
 vulnerabilities:
@@ -145,7 +146,28 @@ vulnerabilities:
       renders `chrony.conf` with plain shell, not `curl`, and its Compose
       healthcheck uses `chronyc tracking`, not curl) -- an even stronger
       argument for acceptance here than a narrow-but-real invocation, since
-      no code path in this image executes curl at all today. No
+      no code path in this image executes curl at all today. Accuracy
+      update (2026-08-06): `services/proxy` migrated off `debian:13-slim` to
+      `alpine:3.24` (issue #815's staged Alpine migration) after this entry
+      was written, the same way `services/watchdog` already had -- it no
+      longer carries the `curl`/`libcurl4t64` package versions named above,
+      shipping Alpine's own `curl` 8.21.0-r0 build instead (confirmed live
+      during that migration: identical version to the Alpine build already
+      noted for `services/watchdog` above). This entry's own
+      proxy-specific usage-narrowness argument above (a Compose healthcheck's
+      plain loopback GET) is unaffected by the base-OS change and remains
+      accurate background for why curl's usage here never reached this CVE
+      group's trigger conditions in the first place, but the entry no longer
+      needs to carry live risk-acceptance weight for that image specifically
+      -- it stays in force for the remaining Debian-based images it still
+      names (`services/dns`, `services/ui`; `services/ntp`'s own status is
+      tracked separately per the note above, and appears independently
+      stale in this same entry's per-CVE image lists below -- `services/ntp`
+      also migrated to Alpine, PR #1345, before this file was last updated
+      for it -- flagged here rather than corrected in the same pass, since
+      that correction is unrelated to the `services/proxy` migration this
+      note documents and touches a security-suppression file issue #1304
+      already tracks as its own maintainer-reviewed decision). No
       `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian`
       finding class -- how curl/libcurl4t64 are detected here, being
       installed via `apt`/`dpkg` rather than a language-specific analyzer --
