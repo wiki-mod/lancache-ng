@@ -82,10 +82,16 @@
 # REAL setup.sh CLI through `expect`, exactly like setup-cli-simulation.sh's
 # own Phase 1 -- hand-crafting that many secrets/values here would risk
 # silently drifting from what setup.sh actually generates. `Start now? [Y/n]`
-# is answered "n": this script brings the stack up itself afterward with the
-# additional `logging` profile and SYSLOG_ENABLED=true, which setup.sh's own
-# wizard has no prompt for at all (logging is a manual opt-in per
-# docs/architecture-ng.md, not part of the guided install flow).
+# is answered "n": this script brings the stack up itself afterward.
+#
+# The wizard's "Enable central logging? [Y/n]" prompt defaults to enabled
+# and this script accepts that default, so COMPOSE_PROFILES already contains
+# `logging` and SYSLOG_ENABLED needs no fixing up by the time Phase 1
+# finishes. Phase 2 below still sets both explicitly as a defense-in-depth
+# double-check (its dedup logic is a no-op if `logging` is already present)
+# rather than relying solely on the wizard default never regressing
+# silently: an independent, redundant assertion of the desired end state,
+# not a fixup path this script depends on.
 set -euo pipefail
 
 repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
@@ -233,10 +239,12 @@ echo "== Phase 1: fresh install via the real setup.sh CLI (expect-driven, mirror
 # "disabled" in the main .env deliberately: dhcp/dhcp-proxy (Triggers 7/8
 # below) are started via their own explicit `--profile dhcp-kea --profile
 # dhcp-proxy` plus a dedicated override (dhcp-test-override.yml, built below)
-# that fully replaces their environment -- the same "wizard has no prompt
-# for this, set it directly" approach the `logging` profile below already
-# uses, so the main .env's DHCP_MODE is never consulted for these two
-# containers. Admin-UI auth disabled (ALLOW_INSECURE_UI=true) so every curl
+# that fully replaces their environment -- the same "wizard has no prompt for
+# this, set it directly" approach Phase 2 below still uses as a defense-in-
+# depth double-check for the `logging` profile (which the wizard DOES now
+# prompt for and default to enabled, see the file header's #1343 update), so
+# the main .env's DHCP_MODE is never consulted for these two containers.
+# Admin-UI auth disabled (ALLOW_INSECURE_UI=true) so every curl
 # call below needs no login flow -- the same simplification the other
 # full-setup simulation scripts get for free from their own validation-only
 # compose file's insecure defaults.
@@ -257,7 +265,7 @@ if ! expect_prompt_block="$(
     LANCACHE_IMAGE_CHANNEL="$setup_sim_fresh_install_channel" \
     LANCACHE_IMAGE_TAG="$setup_sim_fresh_install_tag" \
     build_expect_prompt_block "$repo_root/setup.sh" "$setup_sim_answers_file" \
-        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "disabled" "" "n" "y" "n"
+        "$ip_standard" "y" "$ip_ssl" "" "$install_dir" "" "" "" "" "disabled" "" "" "n" "y" "n"
 )"; then
     echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
     exit 1
@@ -295,13 +303,18 @@ EXPECT_SCRIPT
 [[ -f "$install_dir/docker-compose.yml" ]] \
     || { echo "::error::Fresh install did not copy docker-compose.yml into $install_dir." >&2; exit 1; }
 
-echo "== Phase 2: enabling the logging profile (SYSLOG_ENABLED, COMPOSE_PROFILES+=logging) =="
+echo "== Phase 2: confirming the logging profile (SYSLOG_ENABLED, COMPOSE_PROFILES+=logging) =="
 
-# setup.sh's own wizard has no prompt for this (logging is a manual,
-# documented opt-in per docs/architecture-ng.md, not part of the guided
-# install flow) -- these two keys are appended/updated directly, exactly
-# the same direct-.env-mutation technique setup-cli-simulation.sh's own
-# Phase 2/3 already use for scenarios setup.sh's wizard doesn't cover.
+# Issue #1343: the wizard's "Enable central logging?" prompt (Phase 1 above,
+# accepted at its default "Y") already wrote LOGGING_ENABLED=1 and put
+# `logging` into COMPOSE_PROFILES, so this block is now a defense-in-depth
+# double-check rather than the only place either got set -- kept because the
+# dedup logic below is a safe no-op when `logging` is already present, and
+# because SYSLOG_ENABLED itself (a separate flag the Admin UI's /logs route
+# reads to decide whether to render the syslog panel at all) still has no
+# wizard prompt of its own. Same direct-.env-mutation technique
+# setup-cli-simulation.sh's own Phase 2/3 use for scenarios setup.sh's wizard
+# doesn't cover.
 if grep -q '^SYSLOG_ENABLED=' "$install_dir/.env"; then
     sed -i 's/^SYSLOG_ENABLED=.*/SYSLOG_ENABLED=true/' "$install_dir/.env"
 else
@@ -315,7 +328,13 @@ fi
 # whole pipeline even though `cut` itself succeeds and yields the same empty
 # output either way, so the trailing `|| true` neutralizes only that expected
 # no-match case instead of turning it into an unrelated fatal error.
-current_profiles="$(grep '^COMPOSE_PROFILES=' "$install_dir/.env" | head -1 | cut -d= -f2- || true)"
+# grep runs to completion into a variable first (the `|| true` above still
+# covers its own no-match case), then `head -1` reads that captured
+# variable via a here-string instead of a live pipe from grep -- a live
+# `grep ... | head -1` pipe can SIGPIPE grep if .env ever has more than one
+# matching line (issue #1377's repo-wide pipefail/SIGPIPE audit).
+compose_profiles_line="$(grep '^COMPOSE_PROFILES=' "$install_dir/.env" || true)"
+current_profiles="$(head -1 <<<"$compose_profiles_line" | cut -d= -f2-)"
 case ",${current_profiles}," in
     *,logging,*) ;;
     *)
@@ -444,8 +463,8 @@ EOF
 compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" -f "$work_dir/logging-test-override.yml" -f "$work_dir/dhcp-test-override.yml" --env-file "$install_dir/.env")
 
 echo "== Phase 3: bringing the stack up (ssl + logging + dhcp-kea + dhcp-proxy profiles) =="
-"${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng dhcp dhcp-proxy
-"${compose[@]}" --profile ssl --profile logging --profile dhcp-kea --profile dhcp-proxy up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng dhcp dhcp-proxy
+"${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog dhcp dhcp-proxy
+"${compose[@]}" --profile ssl --profile logging --profile dhcp-kea --profile dhcp-proxy up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog dhcp dhcp-proxy
 
 # nats and ui are back in this list: deploy/quickstart/docker-compose.yml now
 # defines a real Docker HEALTHCHECK for both (nats: http_port 8222 + a wget
@@ -482,18 +501,24 @@ echo "== Phase 3: bringing the stack up (ssl + logging + dhcp-kea + dhcp-proxy p
 # liveness/config-integrity check for dhcp-proxy, since dnsmasq has no
 # HTTP/control-socket API and this config disables DNS entirely). Neither had
 # any Docker healthcheck before #1169.
-# syslog and syslog-ng ALSO join this list under #1169 -- correcting a
-# pre-existing, unrelated inaccuracy in this file rather than something #1169
-# itself introduced: both have had a real healthcheck since issue #633
-# (`fluent-bit -V` / `syslog-ng-ctl healthcheck`, see
-# docs/architecture-ng.md's "syslog-ng" section), well before #1169 existed.
-# This script's own comment previously (incorrectly) grouped them with
-# docker-socket-proxy as services that "genuinely have none" -- #1169's
-# ground-truth compose-file audit caught the same stale claim in issue
-# #1169's own description and in docs/architecture-ng.md's now-updated
-# healthcheck list, so it is fixed here too rather than left as the one
-# place still asserting it.
-services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp docker-socket-proxy dhcp-proxy syslog syslog-ng"
+# syslog joined this list under #1169 -- correcting a pre-existing,
+# unrelated inaccuracy in this file rather than something #1169 itself
+# introduced: it has had a real healthcheck since issue #633, well before
+# #1169 existed. This script's own comment previously (incorrectly) grouped
+# it with docker-socket-proxy as a service that "genuinely has none" --
+# #1169's ground-truth compose-file audit caught the same stale claim.
+#
+# UPDATED (syslog+fluent-bit consolidation PR, 2026-08): `syslog` and
+# `syslog-ng` used to be two separate Compose services, each with its own
+# healthcheck (`fluent-bit -V` / `syslog-ng-ctl healthcheck` respectively,
+# both entries in this list). They are now ONE combined container
+# (`services/syslog/`) with ONE Compose service name (`syslog`) and ONE
+# Docker HEALTHCHECK slot -- but that single check
+# (`services/syslog/healthcheck.sh`) verifies both underlying processes
+# independently and only reports healthy when both are, so this script's
+# per-service health-wait loop still gets the same real, non-degraded
+# coverage it always did, just through one list entry instead of two.
+services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp docker-socket-proxy dhcp-proxy syslog"
 all_services="$services_with_healthcheck"
 
 deadline=$((SECONDS + 120))
@@ -801,10 +826,16 @@ if [[ "$dhcp_lease_obtained" -ne 1 ]]; then
     exit 1
 fi
 
-if ! dhcp_offered_address="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases" | head -1 | cut -d' ' -f2)"; then
+# A dhclient lease file can accumulate more than one "lease {...}" block
+# across renewals, so grep runs to completion into a variable first, and
+# `head -1` reads it via a here-string -- a live `grep | head -1` pipe
+# could SIGPIPE grep once there is more than one fixed-address line (issue
+# #1377's repo-wide pipefail/SIGPIPE audit).
+if ! fixed_address_lines="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases")"; then
     echo "::error::Could not parse the offered address out of the real dhclient lease file." >&2
     exit 1
 fi
+dhcp_offered_address="$(head -1 <<<"$fixed_address_lines" | cut -d' ' -f2)"
 [[ -n "$dhcp_offered_address" ]] || { echo "::error::dhclient's lease file had no fixed-address field." >&2; exit 1; }
 echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC log line names this address verbatim)."
 # Marker is "lease <address> has been allocated" (Kea's own DHCP4_LEASE_ALLOC

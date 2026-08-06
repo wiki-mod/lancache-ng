@@ -224,11 +224,16 @@ images.
 
 ### Building the full stack
 
-There is only one deployment profile, `deploy/prod/docker-compose.yml` (the
-former `deploy/dev/` stack was retired in v0.3.0, #766 — see `CLAUDE.md`'s
-"No Separate Dev Environment"). It, like `deploy/quickstart/` and
-`deploy/full-setup/`, references every service by `image:` rather than
-`build:`, so there is no compose-level `--build` shortcut to rebuild every
+There is only one *production* deployment profile, `deploy/prod/docker-compose.yml` (the
+former `deploy/dev/` stack was retired in v0.3.0, #766 — see `AGENTS.md`'s `AG-KD-008`;
+**corrected 2026-08-05, issue #1391 doc-sweep audit** — a prior version of this section said
+"there is only one deployment profile" outright, then immediately named two more
+[`deploy/quickstart/`, `deploy/full-setup/`] as siblings in the very next sentence, and
+pointed at `CLAUDE.md`'s "No Separate Dev Environment" section, which no longer exists there
+— that content moved into `AGENTS.md`'s `## Architecture` section on 2026-07-31, per
+`CLAUDE.md`'s own current text). All three real profiles that exist today
+(`deploy/prod/`, `deploy/quickstart/`, `deploy/full-setup/`) reference every service by
+`image:` rather than `build:`, so there is no compose-level `--build` shortcut to rebuild every
 service from source in one command. This matches how CI itself builds first
 -party images: `docker buildx build` directly against each
 `services/<name>/Dockerfile` (see `.github/workflows/build-push.yml`), then
@@ -438,7 +443,13 @@ Required rules:
 
 - first-party runtime images are promoted as one stack package set
 - `latest` means the latest stable release only
-- `nightly` is the tested pre-stable channel built continuously from `master` (formerly `edge`)
+- `nightly` is the tested pre-stable channel, built from `current_dev`'s tip once a day
+  (01:00 UTC) plus on-demand, gated on a full green build+scan (formerly `edge`; **corrected
+  2026-08-05, issue #1391 doc-sweep audit** — a prior version of this line said "built
+  continuously from `master`," which was wrong on both counts: `nightly` has been built from
+  `current_dev`, not `master`, since v0.3.0 [#825/#1141], and has been once-daily-plus-on-demand,
+  not continuous, since #1254/#1255 [2026-07-25] — see `docs/release-versioning.md`, the
+  authoritative source for this channel's semantics, for the full history)
 - release candidates use `vX.Y.Z-rc.N` and must be GitHub prereleases
 - stable releases use `vX.Y.Z` and may move `latest`
 - release-capable paths must not depend on mutable `build-tools:latest`

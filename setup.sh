@@ -349,10 +349,19 @@ validate_ui_session_ttl_seconds() {
 }
 
 # Centralize runtime profile calculation so install and update cannot drift:
-# SSL, Kea DHCP, dnsmasq proxy mode, and LanCache-NG-NTP are represented once
-# in COMPOSE_PROFILES while unrelated profiles are preserved.
+# SSL, Kea DHCP, dnsmasq proxy mode, LanCache-NG-NTP, and central logging are
+# represented once in COMPOSE_PROFILES while unrelated profiles are preserved.
+#
+# logging_enabled defaults to "1" (issue #1343), unlike every other profile
+# flag here, which defaults to "0"/disabled -- central logging is meant to be
+# on by default with a real, working opt-out (LOGGING_ENABLED=0 in .env, or
+# "n" at the install wizard's logging prompt), not an opt-in feature like SSL/
+# DHCP/NTP. A caller that omits this argument entirely (there should be none
+# left after this change, but a future call site addition might forget it)
+# fails safe toward "still enabled" rather than silently regressing to the
+# exact bug this issue exists to fix.
 compose_profiles_for_runtime() {
-    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}"
+    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}" logging_enabled="${5:-1}"
     local profile result="" trimmed
 
     IFS=',' read -r -a profiles <<< "$existing"
@@ -360,7 +369,7 @@ compose_profiles_for_runtime() {
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
         case "$trimmed" in
-            ""|ssl|dhcp-kea|dhcp-proxy|ntp) continue ;;
+            ""|ssl|dhcp-kea|dhcp-proxy|ntp|logging) continue ;;
         esac
         case ",$result," in
             *",$trimmed,"*) ;;
@@ -394,6 +403,11 @@ compose_profiles_for_runtime() {
     if [[ "$ntp_enabled" = "1" ]]; then
         [[ -n "$result" ]] && result+=","
         result+="ntp"
+    fi
+
+    if [[ "$logging_enabled" = "1" ]]; then
+        [[ -n "$result" ]] && result+=","
+        result+="logging"
     fi
 
     printf '%s\n' "$result"
@@ -447,7 +461,11 @@ run_kea_dhcp_activation_preflight() {
     # Anchors at the start of the line (after stripping nmap's leading |/_
     # prefixes and whitespace) instead of a bare substring match, and takes
     # the first match rather than assuming there is exactly one.
-    server_identifier="$(printf '%s\n' "$output" | sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' | sed -n '1p')"
+    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit) -- both sed stages here already lack an explicit q/Q and read
+    # to EOF regardless, but converting keeps this consistent with the rest
+    # of the fix and needs no further reasoning about $output's size.
+    server_identifier="$(sed -n '1p' <<<"$(sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' <<<"$output")")"
 
     if [[ -n "$server_identifier" ]]; then
         print_warn "An existing DHCP server answered before Kea activation: $server_identifier"
@@ -1925,7 +1943,9 @@ assert_resolved_image_tag_platform_supported() {
     [[ -n "$discovered_platforms" ]] \
         || { die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."; return 1; }
 
-    printf '%s\n' "$discovered_platforms" | grep -Eq "^${platform}(/.*)?$" \
+    # Here-string, not a live pipe into grep -q -- $discovered_platforms can
+    # list several platforms (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
 }
 
@@ -2551,7 +2571,7 @@ migrate_env_for_update() {
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
-    local ntp_data_default ntp_data_dir ntp_enabled
+    local ntp_data_default ntp_data_dir ntp_enabled logging_enabled
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
@@ -2722,6 +2742,17 @@ migrate_env_for_update() {
     ntp_data_dir="$ntp_data_default"
     set_optional_env_path_override_if_needed NTP_DATA_DIR "$ntp_data_dir" "$ntp_data_default" "$env_file"
 
+    # Central logging (issue #1343): unlike DHCP/NTP above, this default is
+    # "1" (enabled), not "0" -- a pre-existing install that has never touched
+    # LOGGING_ENABLED gets converged to the now-correct always-on-by-default
+    # behavior on its next `setup.sh update`, exactly as this issue requires
+    # (AG-OP-007: converge old/incomplete installations toward the current
+    # expected state). An operator who has already explicitly set
+    # LOGGING_ENABLED=0 keeps that choice (AG-OP-009: preserve existing
+    # non-empty local values) -- this helper writes the default value only
+    # when the key is absent, never overwriting a real prior value.
+    append_env_key_if_missing LOGGING_ENABLED "1" "$env_file"
+
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
@@ -2863,9 +2894,10 @@ migrate_env_for_update() {
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
     ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
+    logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
     set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled")" \
+        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled" "$logging_enabled")" \
         "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real
@@ -3095,7 +3127,14 @@ compose_project_name() {
     name="${COMPOSE_PROJECT_NAME:-}"
     [[ -n "$name" ]] || name=$(get_env_var COMPOSE_PROJECT_NAME "$env_file")
     if [[ -z "$name" && -f "$compose_dir/docker-compose.yml" ]]; then
-        name=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml" | head -1)
+        # sed's own matches captured into a variable first, then `head -1`
+        # reads them via a here-string instead of a live pipe from sed --
+        # avoids a SIGPIPE if the compose file ever has more than one
+        # unindented top-level `name:` key (issue #1377's repo-wide
+        # pipefail/SIGPIPE audit).
+        local compose_name_lines
+        compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml")
+        name=$(head -1 <<<"$compose_name_lines")
     fi
     name="${name:-$(basename "$compose_dir")}"
     printf '%s\n' "$name"
@@ -3465,7 +3504,13 @@ cmd_restore() {
     }
     trap restore_cleanup EXIT
     tar -C "$tmp" -xzf "$archive"
-    root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs | head -1)
+    # `-print -quit` makes find itself stop after the first match instead of
+    # relying on `head -1` to force an early pipe close, which could
+    # otherwise SIGPIPE find if a backup archive's layout ever nests more
+    # than one `rootfs` directory (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit -- this is a real, restore-path-critical script, so this is
+    # fixed rather than merely marked safe).
+    root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs -print -quit)
     [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
     backup_dir=$(dirname "$root")
     archived_install=$(awk -F': ' '/^Install directory: / {print $2; exit}' "$backup_dir/README.txt" 2>/dev/null || true)
@@ -4530,7 +4575,9 @@ lancache_read_ui_settings_override() {
     docker volume inspect "$volume" >/dev/null 2>&1 || return 0
     raw=$(docker run --rm -v "${volume}:/volume:ro" alpine \
         sh -c 'cat /volume/lancache-ui-settings.env 2>/dev/null') 2>/dev/null || return 0
-    printf '%s\n' "$raw" | sed -n "s/^${key}=//p" | tail -1
+    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
+    # audit).
+    sed -n "s/^${key}=//p" <<<"$raw" | tail -1
 }
 
 # Makes lancache-auto-update.timer's actual systemctl enabled/active state
@@ -4559,6 +4606,7 @@ cmd_converge_reconcile() {
     local ui_channel ui_auto_update current_channel current_auto_update
     local ui_cache_max_gb current_cache_max_gb
     local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
+    local current_ntp_enabled ui_logging_enabled current_logging_enabled
 
     install_dir=$(realpath -m "$install_dir")
     # A converge tick can fire before the very first install completes (the
@@ -4614,11 +4662,42 @@ cmd_converge_reconcile() {
         if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
             current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
             current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+            # Must read the real current NTP_ENABLED and LOGGING_ENABLED
+            # values here rather than relying on compose_profiles_for_runtime's
+            # own parameter defaults ("0" for ntp_enabled): omitting either
+            # argument on this DHCP-mode-change tick would silently strip that
+            # profile from COMPOSE_PROFILES even though nothing about it
+            # changed -- e.g. an operator with LanCache-NG-NTP already enabled
+            # would lose the NTP container on the next `docker compose up`
+            # convergence, purely as a side effect of a DHCP mode change.
+            current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
+            current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
             new_compose_profiles=$(compose_profiles_for_runtime \
-                "$current_compose_profiles" "$current_ssl_enabled" "$ui_dhcp_mode")
+                "$current_compose_profiles" "$current_ssl_enabled" "$ui_dhcp_mode" "$current_ntp_enabled" "$current_logging_enabled")
             set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
             set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
             print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
+        fi
+    fi
+
+    # Central logging (issue #1343): same fold-into-convergence pattern as
+    # DHCP_MODE above -- LOGGING_ENABLED has a real Compose-profile side
+    # effect (the `syslog`/`syslog-ng` services are profile-gated), so an
+    # Admin UI toggle must reach COMPOSE_PROFILES here, not just the
+    # ui-settings volume.
+    ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LOGGING_ENABLED")
+    if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
+        current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
+        if [[ "$ui_logging_enabled" != "$current_logging_enabled" ]]; then
+            current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
+            current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+            current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
+            current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
+            new_compose_profiles=$(compose_profiles_for_runtime \
+                "$current_compose_profiles" "$current_ssl_enabled" "$current_dhcp_mode" "$current_ntp_enabled" "$ui_logging_enabled")
+            set_env_key LOGGING_ENABLED "$ui_logging_enabled" "$env_file"
+            set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
+            print_ok "Central logging updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
         fi
     fi
 
@@ -4738,7 +4817,9 @@ cmd_debug() {
 # ── create-logs-for-issue subcommand ──────────────────────────────────────────
 # #762: bundles the diagnostic state a maintainer needs to triage a bug
 # report into one compressed, secret-redacted archive, so a non-technical
-# operator (this project's actual audience per CLAUDE.md) can attach one
+# operator (this project's actual audience per AGENTS.md's project description --
+# corrected 2026-08-05, issue #1391 doc-sweep audit: CLAUDE.md no longer carries
+# this content as of 2026-07-31) can attach one
 # file to a GitHub issue instead of manually running and pasting a series of
 # commands. Read-only like cmd_debug above: this never repairs, restarts, or
 # rewrites anything, it only collects and redacts.
@@ -5207,6 +5288,7 @@ list_kea_snapshot_ids() {
 kea_ctrl_post() {
     local kea_ctrl_url="$1" kea_ctrl_token="$2" body="$3"
     local response_file http_status response result_code result_text
+    local result_code_lines result_text_lines
 
     response_file=$(mktemp)
     # The Basic-Auth credential is passed to curl via -K (config read from
@@ -5231,8 +5313,15 @@ kea_ctrl_post() {
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
     fi
-    result_code=$(printf '%s' "$response" | grep -oP '"result"\s*:\s*\K-?[0-9]+' | head -1)
-    result_text=$(printf '%s' "$response" | grep -oP '"text"\s*:\s*"\K[^"]*' | head -1)
+    # Here-strings feed grep, and grep's own matches (Kea's JSON response can
+    # be a batched array with more than one "result"/"text" key) are
+    # captured into variables before `head -1` reads them -- avoids a live
+    # `grep | head -1` pipe that could SIGPIPE grep (issue #1377's
+    # repo-wide pipefail/SIGPIPE audit).
+    result_code_lines=$(grep -oP '"result"\s*:\s*\K-?[0-9]+' <<<"$response")
+    result_code=$(head -1 <<<"$result_code_lines")
+    result_text_lines=$(grep -oP '"text"\s*:\s*"\K[^"]*' <<<"$response")
+    result_text=$(head -1 <<<"$result_text_lines")
     [[ -n "$result_code" ]] || die "Unrecognized response from Kea's Control Agent: ${response}"
     if [[ "$result_code" != "0" ]]; then
         die "Kea's Control Agent rejected the command (result=${result_code}): ${result_text:-<no message>}"
@@ -5380,9 +5469,14 @@ list_dns_zones_with_snapshots() {
 # non-greedily up to the first ']' is a safe boundary for this specific,
 # known-flat shape -- not a general JSON parser.
 dns_zone_snapshot_entries() {
-    local body="$1" zone="$2" zone_escaped zone_array
+    local body="$1" zone="$2" zone_escaped zone_array zone_array_matches
     zone_escaped="${zone//./\\.}"
-    zone_array=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]" | head -1)
+    # grep's own matches captured into a variable first, then `head -1`
+    # reads them via a here-string -- avoids a live `grep | head -1` pipe
+    # that could SIGPIPE grep if $body ever repeats the zone key (issue
+    # #1377's repo-wide pipefail/SIGPIPE audit).
+    zone_array_matches=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]")
+    zone_array=$(head -1 <<<"$zone_array_matches")
     [[ -n "$zone_array" ]] || return 0
     paste -d' ' \
         <(printf '%s' "$zone_array" | grep -oP '"id"\s*:\s*"\K[0-9]+') \
@@ -6132,7 +6226,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line (issue #1377)
       interval: 30s
       timeout: 5s
       retries: 3
@@ -6347,16 +6441,46 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
         exec /opt/lancache-ng/setup.sh "$@"
     fi
 
-    print_ok "Docker $(docker --version | grep -oP '[\d.]+' | head -1)"
+    # `docker --version` itself is always one line, but grep -oP can still
+    # find more than one digit-run on that line (e.g. a build-hash fragment
+    # after the version proper) -- captured into a variable first, then
+    # `head -1` reads it via a here-string instead of a live pipe from grep
+    # (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    # `|| true` matters here under `set -e`: this used to be an argument
+    # expression (`print_ok "Docker $(...)"`), where a failing substitution
+    # cannot itself abort the script -- only print_ok's own exit status can.
+    # As a bare assignment it can, so the same fail-soft behavior (an
+    # unparseable `docker --version` degrades this line, it does not abort
+    # setup.sh) needs to be restored explicitly (issue #1377 follow-up,
+    # caught by advisor review after the initial conversion).
+    docker_version_numbers="$(docker --version | grep -oP '[\d.]+' || true)"
+    print_ok "Docker $(head -1 <<<"$docker_version_numbers")"
     print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
 fi
 
 # ── 2. Network IPs ────────────────────────────────────────────────────────────
 print_step "Network configuration"
 
-detected_ip=$(ip -4 addr show | grep -oP '(?<=inet )[\d.]+' \
-    | grep -v '^127\.' | grep -v '^172\.' | head -1 || true)
-detected_iface=$(ip -4 route show default | awk '{print $5}' | head -1 || true)
+# `ip` output captured into a variable first: a host can have several
+# interfaces/addresses, and a live `ip ... | grep ... | head -1` pipe can
+# SIGPIPE the `ip`/`grep` processes still writing once `head -1` already
+# has its one line (issue #1377's repo-wide pipefail/SIGPIPE audit -- this
+# is the production installer, so converted rather than merely reasoned
+# about as low-risk). `|| true` on each bare assignment restores this
+# section's original fail-soft behavior under `set -e`: the prior one-line
+# pipelines ended in `|| true` covering `ip` itself failing too (e.g. no
+# `iproute2` on a minimal host), which a bare `var=$(...)` assignment does
+# not inherit on its own -- without it, a host missing `ip` would abort
+# setup.sh here instead of falling through to `ask`'s own `${detected_ip:-
+# 192.168.1.10}` default below (caught by advisor review, not the original
+# conversion pass).
+ip_addr_output="$(ip -4 addr show || true)"
+candidate_ips="$(grep -oP '(?<=inet )[\d.]+' <<<"$ip_addr_output" \
+    | grep -v '^127\.' | grep -v '^172\.' || true)"
+detected_ip=$(head -1 <<<"$candidate_ips")
+ip_route_output="$(ip -4 route show default || true)"
+route_ifaces="$(awk '{print $5}' <<<"$ip_route_output" || true)"
+detected_iface=$(head -1 <<<"$route_ifaces")
 
 printf "\n  Found LAN addresses:\n"
 ip -4 addr show | grep "inet " | grep -v " 127\." | grep -v " 172\." \
@@ -6387,7 +6511,17 @@ if [[ "${REPLY,,}" = "y" ]]; then
     done
     [[ "$IP_STANDARD" != "$IP_SSL" ]] \
         || die "Standard IP and SSL IP must be different."
-    if ip -4 addr show | grep -q "inet ${IP_SSL}/"; then
+    # Captured into a variable first, not a live `ip ... | grep -q` pipe --
+    # a host can have several interfaces/addresses (issue #1377's
+    # repo-wide pipefail/SIGPIPE audit). `|| true` matters here under
+    # `set -e`: the original `ip -4 addr show | grep -q ...` sat directly in
+    # an `if` condition, where a failing command cannot abort the script --
+    # only the if's own branch selection is affected. Pulled out into its
+    # own bare assignment, that exemption no longer applies unless restored
+    # explicitly (caught by advisor review, not the original conversion
+    # pass).
+    ip_ssl_check_output="$(ip -4 addr show || true)"
+    if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
         print_ok "$IP_SSL already assigned"
     else
         print_warn "$IP_SSL not yet assigned to an interface"
@@ -6814,7 +6948,43 @@ else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
 fi
 
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED")"
+# ── 7c. Central logging ───────────────────────────────────────────────────────
+# Issue #1343: central logging (syslog-ng + Fluent Bit, #453) was always meant
+# to be a core, on-by-default feature -- the maintainer confirmed directly
+# that it should be "always on" in intent -- but this wizard never asked
+# about it at all, and the underlying Compose services carry `profiles:
+# [logging]`, so a standard install never actually started them. Corrected
+# design (maintainer decision after the initial "fully non-optional" framing
+# was reconsidered): keep a real, working opt-out for genuinely
+# storage-constrained installs, but default it to enabled -- the opposite
+# default from SSL/DHCP/NTP above, which all default to OFF because they are
+# genuinely opt-in features. A separate, Admin-UI-configurable log-verbosity
+# control was considered while implementing this (per-service severity
+# filtering, e.g. "only forward nginx WARN+") but deliberately NOT built here:
+# fluent-bit's pipeline currently forwards every tailed line verbatim with no
+# severity filter anywhere, nginx's access.log has no severity field to filter
+# on at all, and a fluent-bit `-l`/Log_Level flag only controls fluent-bit's
+# OWN diagnostic verbosity, not what it forwards -- wiring that flag to a UI
+# control would have shipped a setting that does not do what its label says.
+# See the #1343 issue thread for the decision list this was flagged back to
+# the maintainer as, rather than silently building or silently dropping it.
+print_step "Central logging"
+
+printf "  Central logging (syslog-ng + Fluent Bit) collects and forwards logs from\n"
+printf "  every service into one place for easier troubleshooting -- a core,\n"
+printf "  on-by-default feature. Disable only for genuinely storage-constrained\n"
+printf "  installs.\n"
+printf "  Default: enabled.\n\n"
+
+if confirm "Enable central logging? [Y/n]" "Y"; then
+    LOGGING_ENABLED=1
+    print_ok "Central logging enabled — adjust verbosity from the Admin UI's logging settings"
+else
+    LOGGING_ENABLED=0
+    print_warn "Central logging disabled — re-enable later via LOGGING_ENABLED=1 in .env (or the Admin UI) and rerun setup.sh update"
+fi
+
+COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED" "$LOGGING_ENABLED")"
 
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
@@ -6965,6 +7135,7 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
     "NTP_ENABLED=${NTP_ENABLED}" \
     "NTP_DATA_DIR=${NTP_DATA_DIR}" \
+    "LOGGING_ENABLED=${LOGGING_ENABLED}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -7009,8 +7180,10 @@ CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
-# Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
-# dual-stack rationale); IPv6 literals are bracketed because nginx's
+# Includes both IPv4 and IPv6 Google Public DNS (see AGENTS.md's project description
+# and AG-IPV6-001 for the dual-stack rationale -- corrected 2026-08-05, issue #1391
+# doc-sweep audit: this used to cite CLAUDE.md, which no longer carries this content
+# as of 2026-07-31); IPv6 literals are bracketed because nginx's
 # \`resolver\` directive requires brackets around IPv6 nameservers. (Backticks
 # escaped: this whole heredoc is deliberately unquoted so ${IP_STANDARD} etc.
 # below interpolate -- an unescaped backtick here is real command
@@ -7072,6 +7245,14 @@ DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
 NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
+# ── Central logging ────────────────────────────────────────────────────────────
+# Issue #1343: on by default (unlike SSL/DHCP/NTP above) -- central logging
+# was always meant to be a core, always-available feature. Set to 0 here for
+# a genuinely storage-constrained install; this controls whether the
+# syslog-ng/fluent-bit containers are created at all (see the \`logging\`
+# Compose profile).
+LOGGING_ENABLED=${LOGGING_ENABLED}
+
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
 
@@ -7108,7 +7289,14 @@ NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────
-# ssl = SSL mode active; empty = disabled
+# Comma-separated Compose profiles, kept in sync by compose_profiles_for_runtime()
+# on every install/update/Admin-UI-driven change -- do not hand-edit without
+# also updating the matching *_ENABLED/DHCP_MODE key above, since the next
+# convergence tick recomputes this value from those keys, not the other way
+# around. Recognized values: ssl (SSL mode), dhcp-kea (Kea DHCP), dhcp-proxy
+# (dnsmasq ProxyDHCP/relay), ntp (LanCache-NG-NTP), logging (syslog-ng/
+# fluent-bit central logging, on by default per issue #1343). Empty = only the
+# always-on core services.
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
 # ── Scheduled automatic updates ─────────────────────────────────────────────────
@@ -7142,6 +7330,42 @@ fi
 if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
     mkdir -p "$NTP_DATA_DIR"
     print_ok "NTP data:       $NTP_DATA_DIR"
+fi
+if [[ "$LOGGING_ENABLED" = "1" ]]; then
+    # Real, reproduced bug this pre-creation step fixes (see the combined
+    # `syslog` container's own data-loss-detector.sh header for the full
+    # finding): a bind-mounted host directory that does not already exist
+    # before first container start is auto-created by Docker as root:root
+    # 0755, which the non-root (uid 10001) syslog-ng process in the combined
+    # container cannot write its own per-host subdirectories into --
+    # silently, with `syslog-ng-ctl stats` still reporting messages as
+    # "processed" even though zero bytes reach disk. Pre-creating and
+    # chowning this path here, mirroring $CACHE_DIR's existing pattern
+    # above, is the fix at the deployment-tooling layer; the combined
+    # container's own periodic detector is the defense-in-depth backstop for
+    # an install that predates this fix or has its permissions changed
+    # later (e.g. by a manual `chown` mistake, or a restore from a backup
+    # taken with different ownership).
+    #
+    # Idempotence (AG-OP-006/013): `mkdir -p` and `chown` are both naturally
+    # idempotent -- re-running this block against an already-correct
+    # directory changes nothing and does not error. `${SYSLOG_NG_LOG_DIR:-}`
+    # honors an operator override the same way deploy/*/docker-compose.yml's
+    # own `${SYSLOG_NG_LOG_DIR:-...}` fallback does, so a customized path is
+    # preserved rather than silently redirected to the computed default
+    # (AG-OP-009).
+    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$(production_state_root_default "$INSTALL_DIR")/syslog-ng}"
+    mkdir -p "$syslog_ng_log_dir"
+    if chown 10001:10001 "$syslog_ng_log_dir" 2>/dev/null; then
+        print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
+    else
+        # Non-fatal: this host may not grant setup.sh's own invoking user
+        # permission to chown (e.g. running unprivileged against an existing
+        # directory owned by someone else already). The combined container's
+        # data-loss detector still catches the resulting silent-write
+        # failure at runtime rather than this install failing closed here.
+        print_warn "Could not chown $syslog_ng_log_dir to uid 10001 -- the combined syslog container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
+    fi
 fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
@@ -7294,6 +7518,11 @@ if [[ "$NTP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"
 else
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
+fi
+if [[ "$LOGGING_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "Central logging:" "enabled"
+else
+    printf "  %-26s %s\n" "Central logging:" "disabled"
 fi
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"

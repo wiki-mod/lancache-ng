@@ -49,7 +49,37 @@ sudo tail -n 40 /var/log/lancache-ci-cleanup.log
      job never reached its own `docker buildx rm` (confirmed 2026-07-30: 19
      orphaned containers, mostly these last two kinds, had accumulated on one
      host over 6 days undetected, since neither kind was covered before);
-3. reaps stale per-branch Trivy cache directories (`/var/tmp/lancache-ng-
+
+   **The age check above keys on each container's own `.Created` timestamp,
+   not `.State.StartedAt` (issue #1095, 2026-08-05 fix).** `StartedAt` is
+   reset by any process restart, including the restart Docker's own restart
+   manager performs for every non-`"no"`-policy container when the daemon
+   itself (re)starts — so a container that leaked days before a host reboot
+   looked freshly-started at every check afterward and this reap never
+   tripped for it. Confirmed live on runner host `192.168.1.240` (2026-08-05):
+   three `lancache-ng-validation-*-standard-passthrough-shim-1` containers
+   created 2026-08-03 survived that host's reboot ~14h earlier, and every
+   scheduled run since, because each run only ever saw the few-minutes-old
+   post-reboot `StartedAt`. `deploy/full-setup/docker-compose.yml`'s
+   `standard-passthrough-shim` service no longer carries a restart policy at
+   all as of the same fix, closing the root cause for that specific service;
+   keying this reap on `.Created` instead closes the general failure class
+   for all three kinds above, regardless of whether some future leak-prone
+   container happens to carry a restart policy too.
+3. reaps `lancache-ng-validation-*` Docker networks left with zero attached
+   containers AND older than the same `REAP_VALIDATION_AFTER_HOURS` threshold
+   (issue #1095/#932 pattern: an orphaned validation network, not just its
+   container, blocks a later run's subnet reservation on the same host —
+   `docker rm -f` alone never touches the Compose-created bridge network a
+   removed container was attached to). The age check matters, not just the
+   zero-attached check: `docker compose up` creates a project's network
+   *before* creating or starting its containers, so a zero-attached network
+   can legitimately be a stack that is still mid-bringup (issue #834's
+   network-teardown-race territory) rather than a leak. Conservative by
+   construction: only ever removes a network Docker itself reports as having
+   zero attached containers AND past its own age threshold, never a blanket
+   sweep;
+4. reaps stale per-branch Trivy cache directories (`/var/tmp/lancache-ng-
    trivy-cache/<service>-<arch>-<ref>`, by mtime, default past 1 day) — these
    belong to `build-push.yml`'s `container-scan` job and persist forever for a
    branch that stops being scanned (merged, deleted, abandoned scratch
@@ -62,9 +92,9 @@ sudo tail -n 40 /var/log/lancache-ci-cleanup.log
    not per-branch, so even an active branch can go >24h without a job landing
    on one specific host) for actually bounding disk growth — a 14-day default
    reclaimed nothing in practice at this project's actual branch-churn rate;
-4. prunes stopped containers, build cache, unused images, and unreferenced
+5. prunes stopped containers, build cache, unused images, and unreferenced
    anonymous volumes;
-5. re-measures and logs the reclaimed delta, so a run that reclaimed nothing is
+6. re-measures and logs the reclaimed delta, so a run that reclaimed nothing is
    visible instead of assumed successful.
 
 Tunables (env): `REAP_BUILD_TOOLS_AFTER_HOURS`, `BUILD_TOOLS_IMAGE_MATCH`,

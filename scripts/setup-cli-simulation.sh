@@ -159,7 +159,14 @@ trap cleanup EXIT
 
 # Mirrors the proven health-wait pattern from full-setup-validate.yml: proxy,
 # dns-standard, nats, and ui declare a real healthcheck in this minimal
-# profile (SSL/DHCP/scheduled-updates/logging all disabled) --
+# profile (SSL/DHCP/scheduled-updates disabled; central logging is on by
+# default since issue #1343 and verified separately, right after Phase 1's
+# call to this function, rather than folded into all_services/
+# services_with_healthcheck below -- those two lists are shared by every
+# phase in this script, including older-.env migration fixtures this file's
+# own Phase 2/3/4 exercise, and unconditionally requiring syslog/syslog-ng
+# there risks a false failure on a fixture this script does not control as
+# tightly as Phase 1's own fresh, wizard-driven install) --
 # deploy/quickstart/docker-compose.yml previously left nats/ui without one
 # (no http_port set for nats, no HEALTHCHECK in the ui image), which is why
 # they were absent from this list; both now have one, matching
@@ -251,7 +258,7 @@ run_fresh_install_expect() {
         LANCACHE_IMAGE_CHANNEL="$fresh_install_image_channel" \
         LANCACHE_IMAGE_TAG="$fresh_install_image_tag" \
         build_expect_prompt_block "$repo_root/setup.sh" "$answers_file" \
-            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" ""
+            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
     )"; then
         echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
         return 1
@@ -376,6 +383,41 @@ grep -qF 'UI_AUTH_USER=admin' "$install_dir/.env" \
 wait_for_stack_healthy
 echo "Fresh install produced a valid .env and a healthy running stack."
 
+# Issue #1343: a default fresh install (every wizard prompt answered with its
+# default, including the new "Enable central logging?" one) must start
+# central logging unconditionally, proving the actual bug this issue was
+# filed for is fixed -- not just that compose_profiles_for_runtime() computes
+# the right string in isolation (already covered at the unit level by
+# tests/bats/setup_update_idempotence.bats and similar), but that the real
+# setup.sh CLI, run exactly the way an operator would run it, produces a
+# running syslog-ng/fluent-bit pair with no extra flag or manual .env edit.
+#
+# UPDATED (syslog+fluent-bit consolidation PR, 2026-08): `syslog` and
+# `syslog-ng` used to be two separate Compose services/containers; they are
+# now ONE combined container (`services/syslog/`) under the single Compose
+# service name `syslog`. This used to be a `for logging_service in syslog
+# syslog-ng; do ... done` loop checking both names; with only one name left
+# to check, it is now flattened to plain straight-line code -- a
+# single-iteration `for` loop over one fixed word is dead weight ShellCheck
+# correctly flags as SC2043 (confirmed live: a real CI shellcheck run failed
+# on exactly this after the consolidation, not a hypothetical lint concern).
+# Still proves the same real-world fact this check exists for (central
+# logging actually running, not just `compose_profiles_for_runtime()`
+# computing the right string).
+grep -qF 'LOGGING_ENABLED=1' "$install_dir/.env" \
+    || { echo "::error::.env is missing LOGGING_ENABLED=1 after a default fresh install -- central logging should be on by default (issue #1343)." >&2; exit 1; }
+grep -qF 'logging' <(grep '^COMPOSE_PROFILES=' "$install_dir/.env") \
+    || { echo "::error::.env's COMPOSE_PROFILES does not include 'logging' after a default fresh install (issue #1343)." >&2; exit 1; }
+logging_compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env")
+logging_service="syslog"
+logging_cid="$("${logging_compose[@]}" ps -q "$logging_service")"
+[[ -n "$logging_cid" ]] \
+    || { echo "::error::$logging_service has no running container after a default fresh install -- central logging's Compose profile should be active unconditionally (issue #1343)." >&2; "${logging_compose[@]}" ps; exit 1; }
+logging_state="$(docker inspect --format '{{.State.Status}}' "$logging_cid")"
+[[ "$logging_state" = "running" ]] \
+    || { echo "::error::$logging_service container exists but is not running (state: $logging_state) after a default fresh install (issue #1343)." >&2; exit 1; }
+echo "Central logging (combined syslog+fluent-bit container) started unconditionally on a default fresh install, as issue #1343 requires."
+
 echo "== Phase 2: update/migration against a deliberately old-format .env =="
 
 # Simulate an install that still carries the legacy strict-without-allowlist
@@ -481,8 +523,10 @@ diff -q \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env.before-forced-failure") \
     <(grep -Ev '^(LANCACHE_IMAGE_TAG|LANCACHE_IMAGE_CHANNEL)=' "$install_dir/.env") >/dev/null \
     || { echo "::error::setup.sh update changed unrelated .env keys during a failed update -- unsafe partial state." >&2; exit 1; }
-find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . \
-    || { echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2; exit 1; }
+find "$backup_root" -name 'lancache-ng-config-*.tar.gz' -print -quit | grep -q . || { # pipefail-safe: find's own -print -quit self-limits to at most one line (issue #1377)
+    echo "::error::setup.sh update did not create a pre-update rollback backup before failing." >&2
+    exit 1
+}
 echo "setup.sh update failed safely on a broken image tag at the platform preflight: .env is intact and a rollback backup exists."
 
 # Not asserted: that the stack stays up and healthy through the failed
@@ -536,7 +580,12 @@ legacy_backup_root="$repo_root/.setup-cli-simulation-tmp/legacy-backup"
 rm -rf "$legacy_backup_root"
 mkdir -p "$legacy_backup_root"
 tar -C "$legacy_backup_root" -xzf "$noop_backup"
-if ! legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d | head -1)"; then
+# `-quit` makes find itself stop after the first match (mirroring this
+# file's own line 484 idiom) instead of relying on `head -1` to force an
+# early pipe close that could SIGPIPE find if it ever has more than one
+# extracted directory to report (issue #1377's repo-wide pipefail/SIGPIPE
+# audit).
+if ! legacy_stamp_dir="$(find "$legacy_backup_root" -mindepth 1 -maxdepth 1 -type d -print -quit)"; then
     echo "::error::Could not list extracted directories under $legacy_backup_root to find the synthetic legacy backup fixture." >&2
     exit 1
 fi
@@ -551,14 +600,18 @@ legacy_env_path="$legacy_stamp_dir/rootfs${install_dir}/.env"
 # collapses them back into CACHE_DIR, the post-restore stack actually mounts
 # this path, so an arbitrary non-existent path would fail the health check
 # below for an unrelated reason and mask what this phase is testing.
-# grep exits 1 on no match even though head/cut downstream still exit 0, and
-# pipefail propagates that: a legacy_env_path with no CACHE_DIR= line at all
-# (not just an empty value) fails this substitution outright rather than
-# just yielding an empty real_cache_dir.
-if ! real_cache_dir=$(grep '^CACHE_DIR=' "$legacy_env_path" | head -1 | cut -d= -f2-); then
+# grep exits 1 on no match, and this must still fail closed: a
+# legacy_env_path with no CACHE_DIR= line at all (not just an empty value)
+# fails this substitution outright rather than just yielding an empty
+# real_cache_dir. Captured into a variable directly off grep's own exit
+# status instead of a live `grep | head -1` pipe, which could otherwise
+# SIGPIPE grep if the file ever had more than one CACHE_DIR= line (issue
+# #1377's repo-wide pipefail/SIGPIPE audit).
+if ! cache_dir_line="$(grep '^CACHE_DIR=' "$legacy_env_path")"; then
     echo "::error::Could not read CACHE_DIR from $legacy_env_path (no matching line found)." >&2
     exit 1
 fi
+real_cache_dir="$(head -1 <<<"$cache_dir_line" | cut -d= -f2-)"
 [[ -n "$real_cache_dir" ]] \
     || { echo "::error::Synthetic legacy backup fixture has no CACHE_DIR to seed the legacy split keys from." >&2; exit 1; }
 sed -i \

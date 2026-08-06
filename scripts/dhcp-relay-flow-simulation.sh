@@ -120,11 +120,27 @@ echo "== Waiting for the relay and upstream to come up =="
 deadline=$((SECONDS + 60))
 relay_ready=0
 while (( SECONDS < deadline )); do
-    if docker logs "$relay_container" 2>&1 | grep -q "DHCP-relay mode"; then
+    # `docker logs`/`docker ps` each captured into a variable first, then
+    # grep -q reads via a here-string -- a live pipe here can SIGPIPE the
+    # docker CLI once its output already has the matched line plus more
+    # (issue #1377's repo-wide pipefail/SIGPIPE audit; `docker ps` with no
+    # `--filter` here lists every container on the host, not just this
+    # script's own, so it is not bounded to one line the way a filtered
+    # `docker ps -q --filter name=^X$` would be).
+    # `|| true` on both matters under `set -e`: each used to sit directly
+    # inside its own `if` (exempt from errexit on its own); pulled into
+    # their own assignments, a transient `docker logs`/`docker ps` failure
+    # would otherwise abort this polling loop instead of retrying, or (for
+    # the `docker ps` case) instead of falling through to this script's own
+    # controlled "container exited early" error path (caught by advisor
+    # review).
+    relay_log="$(docker logs "$relay_container" 2>&1 || true)"
+    if grep -q "DHCP-relay mode" <<<"$relay_log"; then
         relay_ready=1
         break
     fi
-    if ! docker ps --format '{{.Names}}' | grep -q "^${relay_container}$"; then
+    running_names="$(docker ps --format '{{.Names}}' || true)"
+    if ! grep -q "^${relay_container}$" <<<"$running_names"; then
         echo "::error::Relay container exited early." >&2
         docker logs "$relay_container" >&2 || true
         exit 1
@@ -139,7 +155,15 @@ fi
 # Give the upstream apt-install+start a moment; it logs when ready.
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
-    docker logs "$upstream_container" 2>&1 | grep -q "dnsmasq-dhcp" && break
+    # Captured into a variable first, not a live `docker logs | grep -q`
+    # pipe (issue #1377). `|| true` matters under `set -e`: this used to be
+    # part of the same `... | grep -q ... && break` statement, where the
+    # whole pipe sat on the non-last side of `&&` (exempt from errexit);
+    # pulled into its own assignment, a transient `docker logs` failure
+    # would otherwise abort the loop instead of retrying (caught by advisor
+    # review).
+    upstream_boot_log="$(docker logs "$upstream_container" 2>&1 || true)"
+    grep -q "dnsmasq-dhcp" <<<"$upstream_boot_log" && break
     sleep 3
 done
 echo "Relay and upstream are up."
@@ -177,16 +201,25 @@ echo "== Verifying the upstream received the RELAYED request and offered a clien
 # specific and deliberately NOT what this assertion depends on.)
 upstream_log="$(docker logs "$upstream_container" 2>&1)"
 echo "----- upstream DHCP transaction lines -----"
-printf '%s\n' "$upstream_log" | grep -E "DHCPDISCOVER|DHCPOFFER" | head -6 || true
+# A real DHCP transaction can contain several DISCOVER/OFFER rounds -- grep's
+# own matches are captured into a variable first, and `head -6` reads that
+# via a here-string instead of a live pipe from grep, which could otherwise
+# SIGPIPE grep the moment there are more than 6 matching lines (issue #1377).
+upstream_dhcp_lines="$(grep -E "DHCPDISCOVER|DHCPOFFER" <<<"$upstream_log" || true)"
+head -6 <<<"$upstream_dhcp_lines" || true
 echo "-------------------------------------------"
 
-if ! printf '%s\n' "$upstream_log" | grep -q "DHCPDISCOVER"; then
+if ! grep -q "DHCPDISCOVER" <<<"$upstream_log"; then
     echo "::error::The upstream never received a DHCPDISCOVER -- the relay did not forward the client's request across the segment boundary." >&2
     echo "Relay logs:" >&2
     docker logs "$relay_container" >&2 || true
     exit 1
 fi
-offered_ip="$(printf '%s\n' "$upstream_log" | sed -n 's/.*DHCPOFFER(eth0) \([0-9.]*\).*/\1/p' | head -n1)"
+# Same reasoning as upstream_dhcp_lines above: sed's matches (there can be
+# more than one DHCPOFFER line) are captured first, `head -n1` reads them
+# via a here-string (issue #1377).
+offered_lines="$(sed -n 's/.*DHCPOFFER(eth0) \([0-9.]*\).*/\1/p' <<<"$upstream_log")"
+offered_ip="$(head -n1 <<<"$offered_lines")"
 if [[ -z "$offered_ip" ]]; then
     echo "::error::The upstream received the relayed DISCOVER but issued no DHCPOFFER (check the pool/giaddr match)." >&2
     echo "Upstream logs:" >&2
