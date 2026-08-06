@@ -1053,6 +1053,10 @@ async fn main() -> Result<()> {
             post(routes::domains::toggle_aaaa_filter),
         )
         .route(
+            "/domains/ddns-allow-unsigned-updates",
+            post(routes::domains::toggle_ddns_allow_unsigned_updates),
+        )
+        .route(
             "/domains/zones/rollback",
             post(routes::dns_snapshots::rollback_zone_snapshot),
         )
