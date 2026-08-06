@@ -32,8 +32,8 @@ name: lancache-ng
 # `lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`. Left unset (the
 # default, and the only supported value for a real single-host install --
 # see docs/naming-conventions.md and issue #849 finding #5 for why these 14
-# names are otherwise fixed by design), every name is byte-identical to
-# before this change, so scripts/docker-socket-proxy.sh's HAProxy allowlist,
+# names are otherwise fixed by design), every name resolves to the plain
+# `lancache-<service>` literal, so scripts/docker-socket-proxy.sh's HAProxy allowlist,
 # services/watchdog/watchdog.sh's CONTAINER_* FATAL guard, and
 # services/ui/src/docker_client.rs's hardcoded match arms all keep working
 # unchanged. This variable exists ONLY so CI can run more than one
