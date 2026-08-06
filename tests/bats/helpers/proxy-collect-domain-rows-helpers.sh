@@ -66,6 +66,7 @@ declare -ag _EXTRA_WILDCARD_BASES=()
 declare -Ag _SEEN_EXTRA_WILDCARD_BASE=()
 declare -ag _EXTRA_EXACT_HOSTS=()
 declare -Ag _SEEN_EXTRA_EXACT_HOST=()
+declare -Ag _ROOT_HAS_WILDCARD_ENTRY=()
 _DOMAIN_ROWS_SKIPPED=0
 
 # Kept in sync by hand with services/proxy/entrypoint.sh's real
@@ -85,6 +86,7 @@ _collect_domain_rows() {
     _SEEN_EXTRA_WILDCARD_BASE=()
     _EXTRA_EXACT_HOSTS=()
     _SEEN_EXTRA_EXACT_HOST=()
+    _ROOT_HAS_WILDCARD_ENTRY=()
     _DOMAIN_ROWS_SKIPPED=0
     local raw_domain domain root is_wildcard_only
 
@@ -126,6 +128,14 @@ _collect_domain_rows() {
                 && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
                 _EXTRA_WILDCARD_BASES+=("$domain")
                 _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+            fi
+            # Kept in sync by hand with the real function's own "if ...;
+            # then ...; fi" (deliberately NOT the shorter "&&" idiom -- see
+            # entrypoint.sh's own comment on why that idiom would silently
+            # abort the whole entrypoint under set -e when this is the last
+            # statement of the last-processed row).
+            if [ "$domain" = "$root" ]; then
+                _ROOT_HAS_WILDCARD_ENTRY["$root"]=1
             fi
         else
             if ! _proxy_is_one_label_past "$domain" "$root" \
