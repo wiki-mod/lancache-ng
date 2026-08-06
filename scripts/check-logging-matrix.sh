@@ -129,7 +129,11 @@ fi
 
 service_in_canonical() {
   local name="$1"
-  printf '%s\n' "$canonical_services" | grep -qxF "$name"
+  # Here-string, not `printf ... | grep -qxF`: this file sets `pipefail`, and
+  # a live pipe into an early-exiting `grep -q` can SIGPIPE even from a
+  # captured-variable producer (proven empirically, issue #1377) -- a
+  # here-string has no second writer process to race.
+  grep -qxF "$name" <<<"$canonical_services"
 }
 
 # --- Consumer set: real services from `docker compose config --services` --
@@ -174,7 +178,9 @@ all_consumer_services=$(printf '%s\n' "$all_consumer_services" | sed '/^$/d' | s
 
 service_is_consumer() {
   local name="$1"
-  printf '%s\n' "$all_consumer_services" | grep -qxF "$name"
+  # Here-string, not a live pipe -- same pipefail/SIGPIPE reasoning as
+  # service_in_canonical() above (issue #1377).
+  grep -qxF "$name" <<<"$all_consumer_services"
 }
 
 while IFS= read -r name; do

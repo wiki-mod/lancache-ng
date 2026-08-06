@@ -41,8 +41,17 @@ frontend dockerfrontend
     acl safe_ping path,url_dec -m reg -i ^(/v[0-9.]+)?/_ping$
     acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
     acl docker_container_path path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/
-    acl lancache_container path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp)(/|$)
-    acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp)/json$
+    # ui/netdata/syslog/syslog-ng (issue #842/#849): added to the master
+    # allowlist and to safe_container_inspect only, NOT to
+    # safe_service_restart below -- watchdog's Rust rewrite monitors these
+    # four for dashboard visibility (alert-only, see
+    # services/watchdog/src/main.rs's resolve_alert_only_targets()) but
+    # never restarts them, so no restart grant belongs here for any of the
+    # four (mirrors how lancache-dhcp/lancache-dhcp-proxy already have
+    # inspect access without a restart grant -- see safe_dhcp_action below
+    # for why those two use start/stop instead).
+    acl lancache_container path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp|lancache-ui|lancache-netdata|lancache-syslog|lancache-syslog-ng)(/|$)
+    acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp|lancache-ui|lancache-netdata|lancache-syslog|lancache-syslog-ng)/json$
     acl safe_container_logs path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/logs$
     acl safe_service_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart$
     acl safe_dhcp_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-dhcp|lancache-dhcp-proxy)/(start|stop)$

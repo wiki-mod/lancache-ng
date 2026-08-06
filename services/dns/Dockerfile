@@ -9,10 +9,39 @@ FROM ${BUILD_TOOLS_IMAGE} AS subscriber-builder
 # The shared build-tools image already carries the Rust toolchain, sccache,
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
+#
+# musl cross-compilation target (issue #815): the final stage below now runs
+# on an Alpine (musl) base, so the nats-subscriber binary this stage compiles
+# must be musl-linked, not the glibc-linked binary a plain `rust:slim`-style
+# builder would have produced. tools/build-tools/Dockerfile (#815, PR #1374)
+# already added the musl-tools/musl-dev packages and a rustup target matching
+# this image's own host architecture (x86_64-unknown-linux-musl on amd64,
+# aarch64-unknown-linux-musl on arm64) -- deliberately the *native*-arch musl
+# target only, not a cross-arch one, so no separate cross-linker is needed
+# (see that file's own comments for why). Resolving the target by
+# `dpkg --print-architecture` here mirrors that file's exact pattern rather
+# than inventing a new one. Verified empirically (2026-08-05, runner
+# 192.168.1.229, the real ghcr.io/wiki-mod/lancache-ng/build-tools:latest
+# image): `cargo build --release --target x86_64-unknown-linux-musl --locked`
+# against this exact nats-subscriber crate (including `ring`, a cc-crate
+# dependency pulled in via rustls) succeeds with zero source changes and no
+# extra CC_*/CARGO_TARGET_*_LINKER environment variables -- musl-gcc is
+# picked up automatically for the native-arch musl target once musl-tools is
+# installed. The resulting binary was confirmed `static-pie linked` (no
+# dynamic library dependencies at all) via `file`, and confirmed to actually
+# execute its own application logic (reaching a real startup-validation error
+# message, not just failing to load) inside a real `alpine:3.24` container.
 RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
+    command -v musl-gcc >/dev/null; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
+    esac; \
+    rustup target list --installed | grep -qx "$(cat /tmp/musl-target)"; \
     distcc_bin="$(command -v distcc)"; \
     mkdir -p /usr/local/lib/distcc; \
     for wrapper in cc gcc c++ g++; do ln -sf "$distcc_bin" "/usr/local/lib/distcc/$wrapper"; done; \
@@ -46,6 +75,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
+    musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     original_path="$PATH"; \
     configure_sccache() { \
@@ -122,7 +152,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -130,7 +160,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -142,7 +172,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -155,72 +185,199 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    run_cargo_build
+    run_cargo_build; \
+    cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
-FROM mirror.gcr.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
 
-# trixie-backports is the standard package source for this image (maintainer
-# decision, 2026-07-30, mirrored from services/proxy/Dockerfile) -- not scoped
-# to any single package: `Package: *` at Pin-Priority 500 (tied with the
-# regular trixie archive) applies project-wide to every Debian-based image, so
-# ordinary version-comparison rules pick whichever archive has the newer
-# version for ANY package this stage installs. `apt-get dist-upgrade` then
-# `apt-get full-upgrade` are both run deliberately (a maintainer decision to
-# keep both explicit, even though modern apt treats `full-upgrade` as the same
-# operation `dist-upgrade` performs) so any package backports has already
-# patched gets picked up on every rebuild, not only whatever prompted the
-# original policy decision.
+# Alpine base (issue #815, services/dns Alpine migration -- the last of the
+# three original Part A services, done after dhcp/dhcp-proxy per #815's own
+# recommended staging order, because of the nats-subscriber musl builder-stage
+# work above). Same pinned digest already used by services/dhcp,
+# services/dhcp-proxy, and services/watchdog (issues #815/#1234/#1346), so
+# every Alpine-based service in this project tracks one shared, intentional
+# version bump rather than drifting independently.
 #
-# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
-# APT's `a=`/release-Archive selector matches the Release file's `Suite:`
-# field, and trixie-backports' own Release file declares
-# `Suite: stable-backports` / `Codename: trixie-backports` -- the two are not
-# interchangeable. Using `a=trixie-backports` silently never matches anything
-# (apt-cache policy still shows backports at its Debian-default priority 100),
-# so every "backports-sourced" package would silently stay on the plain-trixie
-# version despite the pin file being present -- this was caught for real on
-# services/proxy/Dockerfile by building the image and checking the installed
-# package version rather than trusting the Dockerfile comment; see that file's
-# own history for the incident.
+# This is a real major-version jump for the authoritative server, not just a
+# base-image swap: pdns-server goes from Debian trixie's 4.9.16 to 5.1.3
+# (pdns-recursor's own jump, 5.2.11 -> 5.4.4, is a minor bump by comparison).
+# 5.1.3, not v3.24 stable's own 5.0.5, because of a real CVE finding -- see
+# the dedicated comment on the `apk add`/`@edge` step below for the full
+# reasoning; initial breaking-change verification below was performed
+# against stable's 5.0.5 before that finding, then re-confirmed against the
+# actually-shipped 5.1.3 build. Reviewed PowerDNS's own upgrade documentation for
+# breaking changes across that authoritative-server jump and verified each
+# concretely, not just from doc prose (2026-08-05, runner 192.168.1.229, real
+# `alpine:3.24` containers):
+#   - Removed/renamed legacy replication settings (allow-unsigned-supermaster,
+#     master/slave-*, superslave) -- this project's pdns.conf.template never
+#     used any of them (single-server sqlite3 setup, no primary/secondary
+#     replication), confirmed by reading the template.
+#   - REST API: 5.0 rejects any API write containing a `priority` field, and
+#     normalizes record content on write. Checked nats-subscriber's actual
+#     rrset JSON shape (main.rs/lib.rs/zone_snapshots.rs): it only ever sends
+#     `name`/`type`/`ttl`/`records[].content`/`records[].disabled`/
+#     `changetype` -- no `priority` field anywhere, so the rejection doesn't
+#     apply. Record-content normalization is a real, if unlikely, risk for
+#     the read-back comparison zone_snapshots.rs's `matches_latest_snapshot`
+#     does, but only for record types PowerDNS reformats on write (e.g.
+#     trailing-dot targets, MX-style priority-in-content) -- this project
+#     only ever writes A/AAAA records (RPZ CDN-domain spoofing) and whatever
+#     the Admin UI/LAN-zone flow sends, verified functionally end-to-end
+#     below rather than assumed safe from the code review alone.
+#   - `pdnsutil create-zone`/`import-tsig-key`/`set-meta`'s flat-command
+#     syntax (as entrypoint.sh already calls them) still works unchanged --
+#     verified by actually running each one against a real Alpine
+#     pdns-server (5.0.5 initially, re-confirmed on the actually-shipped
+#     5.1.3), not inferred from a doc summary that suggested a possible
+#     hierarchical (`pdnsutil zone create ...`) shift.
+#   - `pdns_server --config=check --config-dir=...` (entrypoint.sh's own
+#     config validator) still works unchanged, verified against the real
+#     unmodified pdns.conf.template.
+#   - Recursor: `webservice:` YAML section still accepts this project's
+#     existing `address:`/`port:` keys on 5.4.4, verified by running
+#     `pdns_recursor --config=check` against the real, unmodified
+#     recursor.conf.template -- exits 0, no `listen:`-key migration needed
+#     despite upstream docs describing `listen:` as the newer/preferred form.
+#   - No LUA-record usage anywhere in this project's zone data (grepped),
+#     so 5.0's now-disabled-by-default `enable-lua-record-updates` is moot.
+#   - gsqlite3 schema: Alpine's pdns-backend-sqlite3 package ships no
+#     schema.sqlite3.sql file at all, on either the 5.0.5-r0 (v3.24 stable)
+#     or 5.1.3-r0 (edge, actually installed below) build (confirmed via
+#     `apk info -L` against both, unlike Debian's package) -- see
+#     schema.sqlite3.sql (vendored in this directory, fetched from
+#     PowerDNS's own upstream repo at tag auth-5.0.5) and entrypoint.sh's
+#     updated schema-lookup fallback below. Upstream's own migration-file
+#     chain confirms this base schema is unchanged since PowerDNS 4.7.0 --
+#     re-diffed byte-for-byte against the auth-5.1.3 tag's own copy too
+#     (identical) -- i.e. identical to what Debian trixie's 4.9.16 already
+#     used and to what the actually-shipped 5.1.3 package needs.
 #
-# Debian package triggers try to start services during image builds; the entrypoint starts PDNS instead.
-# The stub is restored to the real invoke-rc.d (not just left in place) once this
-# layer's installs finish, via a trap so it runs even if apt-get itself fails --
-# so a future RUN layer, or anything inspecting this image, still finds the real
-# invoke-rc.d rather than a permanent no-op stub that outlives the one install it
-# was needed for.
-RUN set -eu; \
-    export DEBIAN_FRONTEND=noninteractive; \
-    cleanup_invoke_rc_d() { \
-        rm -f /usr/sbin/invoke-rc.d; \
-        if [ -x /usr/sbin/invoke-rc.d.real ]; then mv /usr/sbin/invoke-rc.d.real /usr/sbin/invoke-rc.d; fi; \
-    }; \
-    trap cleanup_invoke_rc_d EXIT; \
-    if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
-    printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
-    chmod +x /usr/sbin/invoke-rc.d; \
-    echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list; \
-    printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports; \
-    apt-get update && apt-get dist-upgrade -y && apt-get full-upgrade -y && apt-get install -y --no-install-recommends \
-    pdns-recursor \
-    pdns-server \
-    pdns-backend-sqlite3 \
-    dnsutils \
-    sqlite3 \
-    gettext-base \
+# Package translations from the prior apt-get list (all confirmed live
+# against a real `alpine:3.24` container, not assumed from the apk package
+# index alone):
+#   - pdns-recursor -> pdns-recursor-luajit, NOT plain pdns-recursor: Alpine's
+#     default `pdns-recursor` package links against plain PUC Lua 5.4
+#     (`liblua-5.4.so.0`, confirmed via `ldd`), not LuaJIT -- exactly the
+#     "Lua-less-relative-to-Debian" build #815 said to check for before
+#     relying on it for filter-aaaa.lua/recursor.lua. The separate
+#     `pdns-recursor-luajit` package (same 5.4.4-r0 version) links
+#     `libluajit-5.1.so.2` instead, matching Debian's own LuaJIT-based build
+#     and this project's stated acceptance criterion.
+#   - dnsutils -> bind-tools.
+#   - gettext-base -> gettext-envsubst (Alpine splits envsubst out of the
+#     base gettext package; confirmed this exact sub-package, not plain
+#     gettext, is what #815's own proxy/dhcp-proxy research already named).
+#   - sqlite3 -> sqlite (Alpine's CLI package name).
+#   - locales/locale-gen/LANG=en_US.UTF-8 dropped entirely, not replaced:
+#     grepped recursor.lua, filter-aaaa.lua, and this file's own
+#     entrypoint.sh for any LANG/LC_ALL/locale/collation dependency -- none
+#     found. musl has no glibc-style locale-data system, and nothing in this
+#     service's actual behavior (pdns/recursor log output, Lua scripting)
+#     depends on real glibc locale data, so this block is purely cosmetic
+#     and safely droppable, per #815's own explicit instruction to check
+#     before assuming a substitute is needed.
+#   - findutils added: entrypoint.sh's kgs_list_snapshots() calls
+#     `find ... -printf '%f\n'`, a GNU-find-only flag BusyBox's own `find`
+#     applet does not support -- the same BusyBox gap already hit and fixed
+#     for services/watchdog (#1346) and services/dhcp/dhcp-proxy (#1347).
+#     Confirmed live: BusyBox find silently has no -printf support at all;
+#     installing findutils (GNU find) fixes it with zero script changes.
+#   - grep added: the RPZ-serial-preservation logic
+#     (`grep -oP '...\K\d+'` in entrypoint.sh, section 7) needs PCRE support
+#     BusyBox's own grep applet does not have at all (`grep: unrecognized
+#     option: P`, confirmed live). Alpine's real `grep` package is GNU grep
+#     built with PCRE2 support and resolves this with zero script changes
+#     (`apk info -e grep` pulls in `pcre2` automatically as a dependency).
+#   - coreutils added: BusyBox's own `date` applet silently produces an
+#     EMPTY nanosecond field for `date +%N` (confirmed live: real output was
+#     `20260805T193653.` -- a trailing dot with nothing after it, not even a
+#     literal "N") instead of erroring, which would make every
+#     kgs_new_snapshot_id() snapshot-id collision-prone within the same
+#     second. Installing coreutils (GNU date) fixes this with zero script
+#     changes; also makes basename/dirname/mktemp consistently GNU-flavored
+#     (BusyBox's own versions of those three already behaved correctly in
+#     this project's actual usage, verified live, so this is precautionary
+#     consistency rather than a second confirmed bug).
+#   - bash added: entrypoint.sh's own `#!/bin/bash` shebang plus its use of
+#     `local`, indexed arrays, `[[ ... ]]`, and `${var,,}` lowercasing all
+#     require real bash -- Alpine's base image has no bash by default,
+#     unlike Debian's.
+#   - iproute2 added: detect_pdns_local_address()'s `ip route get`/
+#     `ip -4 addr show` calls; same package name on Alpine, confirmed live.
+#
+# No invoke-rc.d service-trigger stub is needed here (unlike the prior
+# Debian stage): Alpine's apk has no equivalent init-script-trigger
+# mechanism that tries to start a daemon during package installation, so
+# there is nothing for that workaround to guard against on this base.
+#
+# `pdns`/`pdns-backend-sqlite3` pinned to Alpine's `edge` branch specifically
+# (via the `@edge` repository-tag mechanism below), NOT plain v3.24 stable:
+# live-verified (2026-08-05) that pdns-server 5.0.5 -- the version v3.24
+# stable currently ships -- is directly named as an affected version of
+# CVE-2026-42005 (PowerDNS Security Advisory 2026-07: "insufficient input
+# validation of internal web server" / unbounded-memory-allocation DoS),
+# fixed upstream in 5.0.6/5.1.2. The advisory calls this "minimal relevance"
+# only for a deployment with the internal webserver disabled -- this
+# project's pdns.conf.template explicitly sets `webserver=yes` (the REST API
+# on port 8081 nats-subscriber and the Admin UI both depend on), so that
+# carve-out does not apply here; this is a real, LAN-reachable regression
+# risk, not a theoretical one. It is also a genuine regression specifically
+# introduced by this migration: the advisory's own "Fixed Versions" list
+# includes 4.9.16 -- the exact pdns-server version the prior Debian
+# trixie-based stage already ran -- so the Debian image was never vulnerable
+# to this CVE in the first place. v3.24 stable has not yet picked up a point
+# release with the fix (re-checked live against the real current package
+# index, not assumed stale from #815's original 2026-07-13/14 research
+# table); Alpine's `edge` branch already carries 5.1.3 (past the named fix
+# version 5.1.2), confirmed live. Pinned to an EXACT version on `edge`
+# (`pdns@edge=5.1.3-r0`, not a bare `pdns@edge`), deliberately, after
+# confirming apk's `name@tag=version` syntax actually resolves: a bare
+# `@edge` pin would trade the CVE regression for a reproducibility
+# regression instead (edge is a rolling, unversioned repo -- two builds of
+# the same commit could silently resolve different pdns versions with a
+# possible ABI mismatch against this image's other, stable-channel-sourced
+# libraries, e.g. boost/sqlite-libs/luajit). The exact-version pin gets both
+# properties: CVE-free today, and byte-for-byte reproducible across rebuilds
+# -- if `edge` ever drops this exact build (superseded by a newer point
+# release), `apk add` fails loudly at build time instead of silently
+# drifting to a different version, matching this project's own
+# fail-loud-not-silent-drift principle (Rule-Ref: AG-VAL-026). Pinning only
+# these two packages -- not the whole base image, and not
+# pdns-recursor-luajit, which resolves to the identical 5.4.4-r0 on both
+# channels and is not named in this advisory at all -- keeps edge-channel
+# exposure to the minimum needed to avoid shipping a known, fixed-upstream
+# DoS regression, while everything else in this image stays on the stable
+# v3.24 channel. Re-evaluate this pin once v3.24 stable itself picks up
+# 5.0.6 or later (track via `apk policy pdns` against the real v3.24 index,
+# or simply once a build starts failing because edge moved past 5.1.3-r0)
+# -- at that point the plain (non-`@edge`) package should be preferred again, mirroring how this
+# project already treats `trixie-backports` as a currency mechanism to drop
+# once the base channel catches up, not a permanent fixture.
+RUN printf '%s\n' \
+      '@edge https://dl-cdn.alpinelinux.org/alpine/edge/main' \
+      '@edge https://dl-cdn.alpinelinux.org/alpine/edge/community' \
+      >> /etc/apk/repositories \
+    && apk update \
+    && apk add --no-cache \
+    pdns@edge=5.1.3-r0 \
+    pdns-backend-sqlite3@edge=5.1.3-r0 \
+    pdns-recursor-luajit \
+    bind-tools \
+    sqlite \
+    gettext-envsubst \
     iproute2 \
-    locales \
+    findutils \
+    grep \
+    coreutils \
+    bash \
     nano \
     lsof \
     ripgrep \
-    curl \
-    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-    && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
+    curl
 
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # nano/lsof/ripgrep: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.
 # curl: unlike Kea's Control Agent (reachable from the host directly via
@@ -234,16 +391,22 @@ ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
+# The `pdns` user/group (uid 100/gid 101) is created by the pdns package's
+# own pre-install script on Alpine (confirmed live via `getent passwd pdns`),
+# same as Debian's package -- no separate useradd step needed on either base.
 RUN mkdir -p /etc/pdns/auth /var/lib/powerdns /var/run/pdns \
     && chown -R pdns:pdns /var/lib/powerdns /var/run/pdns
 
-COPY --from=subscriber-builder /build/target/release/nats-subscriber /usr/local/bin/nats-subscriber
+COPY --from=subscriber-builder /build/nats-subscriber-out /usr/local/bin/nats-subscriber
 
 COPY recursor.conf.template /etc/pdns/recursor.conf.template
 COPY pdns.conf.template /etc/pdns/auth/pdns.conf.template
 COPY recursor.lua /etc/pdns/recursor.lua
 COPY filter-aaaa.lua /etc/pdns/filter-aaaa.lua
 COPY cdn-domains.txt /etc/pdns/cdn-domains.txt
+# Vendored gsqlite3 schema (see this file's own header comment for why
+# Alpine's pdns-backend-sqlite3 package needs it where Debian's didn't).
+COPY schema.sqlite3.sql /usr/share/lancache-ng/schema.sqlite3.sql
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod +x /entrypoint.sh
 

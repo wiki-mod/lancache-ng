@@ -203,10 +203,18 @@ DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 # UPDATE from anything that can send (or spoof, trivially on a shared LAN
 # segment/UDP) a packet with that source IP. Forcing
 # `dnsupdate-require-tsig=yes` globally in pdns.conf.template would close
-# this cleanly, but this image's pdns-server (Debian Trixie, 4.9.x) predates
-# that setting (added upstream only in PowerDNS 5.0.0) -- `--config=check`
-# would reject it as an unknown setting and the container would refuse to
-# start or roll back to a known-good snapshot. So the fix here is on the
+# this cleanly. STATUS as of 2026-08-05 (issue #815's Alpine migration,
+# which bumped this image's pdns-server from Debian trixie's 4.9.16 to
+# Alpine 5.0.5): this image's pdns-server no longer predates that setting
+# (added upstream in PowerDNS 5.0.0) the way the prior Debian-based image
+# did -- the reason this workaround was written no longer holds. Enabling
+# `dnsupdate-require-tsig=yes` globally was deliberately NOT done as part of
+# that migration: it is a real DDNS-auth security-posture change (not an
+# OS/package-currency one), and interacting correctly with every zone this
+# entrypoint creates needs its own explicit verification and maintainer
+# sign-off, not a silent add-on to an unrelated base-image PR. Flagged as an
+# explicit follow-up decision in that PR/issue rather than implemented here.
+# So the fix here is still on the
 # other side of the same equation: when DDNS_TSIG_KEY is empty (the shipped
 # default until an operator generates one) or still a placeholder, there is
 # no real auth control for DDNS at all, so allow-dnsupdate-from must not be
@@ -765,10 +773,13 @@ _dns_enter_rescue_mode() {
 
 # _dns_recursor_validate_snapshot_or_rollback <recursor_conf_file>
 # recursor.conf's validator: `pdns_recursor --config=check` is a genuine
-# side-effect-free check-only invocation, confirmed present in the Debian
-# Trixie pdns-recursor package (5.2.x) -- it parses and validates the YAML
-# config and exits non-zero on error without binding any sockets or starting
-# the recursor, exactly like `nginx -t`/`dnsmasq --test`. Factored into its
+# side-effect-free check-only invocation, confirmed present both in the
+# Debian Trixie pdns-recursor package (5.2.x) and, re-confirmed live
+# (2026-08-05, issue #815's Alpine migration), in Alpine's
+# pdns-recursor-luajit package (5.4.x) -- it parses and validates the YAML
+# config (including this project's existing recursor.conf.template
+# unchanged) and exits non-zero on error without binding any sockets or
+# starting the recursor, exactly like `nginx -t`/`dnsmasq --test`. Factored into its
 # own function so tests/bats/dns_known_good_snapshot.bats can drive it
 # against a stub `pdns_recursor` binary.
 _dns_recursor_validate_snapshot_or_rollback() {
@@ -825,12 +836,16 @@ _dns_recursor_validate_snapshot_or_rollback() {
 # pdns.conf's validator: `pdns_server --config=check --config-dir=<dir>` is
 # a genuine side-effect-free check-only invocation, exactly like
 # `pdns_recursor --config=check` above and `nginx -t`/`dnsmasq --test`.
-# `--help` on the packaged pdns-server (4.9.x) doesn't spell out "check" as
-# a value the way pdns_recursor's --help does, which earlier led this
-# adapter to a more complex start-then-verify probe (start the daemon, poll
-# `pdns_control rping`, tear down) instead. Live-verified against the real
-# binary on a self-hosted runner (not assumed) that the flag genuinely
-# exists and works: `--config=check` exits 0 on a valid config; exits 1 and
+# `--help` on the packaged pdns-server (originally Debian trixie's 4.9.x,
+# now Alpine's 5.0.x as of issue #815's Alpine migration) doesn't spell out
+# "check" as a value the way pdns_recursor's --help does, which earlier led
+# this adapter to a more complex start-then-verify probe (start the daemon,
+# poll `pdns_control rping`, tear down) instead. Live-verified against the
+# real binary on a self-hosted runner (not assumed), on both the original
+# Debian 4.9.x package and again on Alpine's 5.0.5 package, that the flag
+# genuinely exists and works there too: `--config=check` exits 0 on a valid
+# config (confirmed against this project's real, unmodified
+# pdns.conf.template); exits 1 and
 # prints a "Fatal error: Trying to set unknown setting '<name>'" on an
 # unknown/malformed setting (the realistic failure mode here -- a broken
 # `PDNS_API_KEY`/`DDNS_ALLOW_FROM` substitution corrupting the file); exits
@@ -928,9 +943,23 @@ render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then
     echo "[lancache-dns] Initializing SQLite database..."
+    # Debian's pdns-backend-sqlite3 package ships schema.sqlite3.sql
+    # somewhere under /usr/share (found generically here rather than
+    # hardcoding its exact path, which has moved across Debian releases).
+    # Alpine's own pdns-backend-sqlite3 package ships no schema file at all
+    # (confirmed empirically, issue #815's services/dns Alpine migration) --
+    # fall back to this image's own vendored copy
+    # (services/dns/schema.sqlite3.sql, installed to
+    # /usr/share/lancache-ng/schema.sqlite3.sql by the Dockerfile) so this
+    # script keeps working unmodified on either base OS, and stays correct
+    # automatically if a future Alpine release ever starts shipping the file
+    # under /usr/share too (the generic `find` would simply win first).
     SCHEMA=$(find /usr/share -name 'schema.sqlite3.sql' -print -quit 2>/dev/null)
+    if [ -z "$SCHEMA" ] && [ -f /usr/share/lancache-ng/schema.sqlite3.sql ]; then
+        SCHEMA=/usr/share/lancache-ng/schema.sqlite3.sql
+    fi
     if [ -z "$SCHEMA" ]; then
-        echo "[lancache-dns] FATAL: sqlite schema not found in /usr/share"
+        echo "[lancache-dns] FATAL: sqlite schema not found in /usr/share (checked generic find and the vendored fallback path)"
         exit 1
     fi
     echo "[lancache-dns] Using schema: $SCHEMA"

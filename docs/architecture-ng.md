@@ -56,7 +56,8 @@ dashboard's resize control, issue #1069 part 3):**
 | Variable | Default | Description |
 |---|---|---|
 | `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
-| `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
+| `CACHE_MEM_MB` | `512` | keys_zone size (1MB ≈ 8,000 keys, nginx's own documented rule of thumb — see "Cache tuning review" below for the sizing math; previously documented here as `200`, which never matched the real shipped default in `config/prod/proxy.env`/`deploy/quickstart/.env`/`setup.sh`, all `512` since this variable was introduced 2026-06-18/19) |
+| `CACHE_MIN_FREE` | `1g` | Free-disk-space floor (bug-hunt #849 item 11) — the cache manager evicts LRU entries once free space at `CACHE_DIR`'s filesystem drops below this, independent of and in addition to `CACHE_MAX_SIZE` |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
 | `CACHE_VALID_ANY` | `1m` | Validity duration for everything else |
@@ -70,7 +71,80 @@ proxy_set_header    Range $slice_range;
 proxy_cache_valid   206 $CACHE_VALID_HIT;
 ```
 
-**Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage.
+**Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage. `min_free` (see above) is an nginx-native backstop for the more common case (no crash, just an operator-chosen `CACHE_MAX_SIZE` that doesn't leave enough real headroom on a shared filesystem) — it does not cover the crashed-worker case either, since it is enforced by the same cache-manager process `max_size` already relies on.
+
+### Cache tuning review (bug-hunt #849/#1068 item 11)
+
+`proxy_cache_lock on` (see `services/proxy/proxy-params.conf`) was already in
+place before this review — only one worker fetches a given cache-miss URL at
+a time, with a 2h `proxy_cache_lock_timeout` for large in-flight game
+downloads (see `AGENTS.md`'s `AG-KD-006`). No change needed there.
+
+The rest of `proxy_cache_path`'s tuning knobs beyond `max_size`/`min_free`
+(`manager_files`, `manager_threshold`, `manager_sleep`, `loader_files`,
+`loader_threshold`, `loader_sleep`) are all still at nginx's untouched
+defaults (`100` files / `200ms` / `50ms` for both the manager and loader).
+Whether these need raising for a given deployment depends on two things this
+project's own install base varies on enormously and that this documentation
+cannot know in advance: how many cache files/slices actually accumulate, and
+how fast the host's disk can service metadata operations. Rather than invent
+a number, here is the reasoning and the exact commands to derive one for a
+real host:
+
+- **`keys_zone` sizing.** Every cached byte range is one key (see the slice
+  module above), so the number of keys a fully-populated cache holds is
+  `CACHE_MAX_SIZE / CACHE_SLICE_SIZE`, not the number of distinct files —
+  a single large game update sliced into `CACHE_SLICE_SIZE` chunks
+  contributes one key per chunk. Using nginx's own ~8,000-keys-per-MB rule
+  of thumb, the keys_zone memory a fully-populated cache needs is
+  approximately:
+  ```text
+  keys_zone_MB ≈ (CACHE_MAX_SIZE_bytes / CACHE_SLICE_SIZE_bytes) / 8000
+  ```
+  At the shipped defaults (`CACHE_MAX_SIZE=50g`, `CACHE_SLICE_SIZE=8m`) that
+  is `(50*1024/8)/8000 ≈ 0.8 MB` — the shipped `CACHE_MEM_MB=512` default
+  covers roughly `512*8000*8m ≈ 32 TB` of fully-populated cache before
+  running out of key-metadata space, i.e. comfortable headroom for any
+  `CACHE_MAX_SIZE` a home/LAN deployment is realistically likely to set. An
+  operator scaling `CACHE_MAX_SIZE` well past that point (a large multi-site
+  or ISP-scale deployment) should recompute `keys_zone_MB` with the formula
+  above rather than assume the shipped default still has headroom.
+- **Cache-loader throughput after a restart.** The cache loader (which
+  re-indexes on-disk cache entries into the keys_zone at nginx startup)
+  processes at most `loader_files` (default `100`) entries or runs for at
+  most `loader_threshold` (default `200ms`) per iteration, whichever comes
+  first, then sleeps `loader_sleep` (default `50ms`) before the next
+  iteration. At the disk-bound worst case (each iteration hits its `200ms`
+  threshold), that is a ceiling of `100 files / 250ms ≈ 400 files/sec`;
+  actual throughput on a fast disk that finishes each 100-file batch well
+  under the threshold can be higher (bounded instead by `loader_sleep`
+  alone, `100 files / 50ms = 2000 files/sec`). For a cache holding `N` slice
+  files, full re-indexing after a restart therefore takes somewhere between
+  `N/2000` and `N/400` seconds — on a slow/loaded disk or with a very large
+  `N`, this can be minutes, during which requests for not-yet-reloaded
+  entries are treated as cache misses. To find your own real `N` and decide
+  whether to raise `loader_files`/`loader_threshold`, run this against a
+  live deployment's actual cache directory:
+  ```bash
+  find "$CACHE_DIR" -type f | wc -l
+  ```
+  (`$CACHE_DIR` is the host path bind-mounted to `/var/cache/nginx/lancache`
+  via the `proxy-cache` named volume's `driver_opts.device` — see
+  `deploy/prod/docker-compose.yml`'s top-level `volumes:` block, or
+  `deploy/quickstart/docker-compose.yml`'s direct `${CACHE_DIR}:...` bind
+  mount, for the exact wiring in use on a given deployment profile.) The same
+  `manager_files`/`manager_threshold`/`manager_sleep` throttle governs the
+  cache **manager** (LRU/`min_free` eviction during normal operation, not
+  just at startup) — a deployment with a very large `N` and a cache that
+  stays near `CACHE_MAX_SIZE`/`CACHE_MIN_FREE` continuously may see eviction
+  lag behind ingestion under the same defaults, for the same reason. No
+  change is made to any of these defaults in this pass: this project's real
+  install base spans everything from small home hardware to larger LAN
+  setups, and a single hardcoded replacement value would be exactly as
+  unverified for most of that range as the untouched nginx default is —
+  raise `manager_files`/`loader_files` (and their paired `_threshold`
+  values) only after measuring `N` and disk latency on the actual target
+  host, not preemptively.
 
 ## PowerDNS
 
@@ -251,47 +325,70 @@ is alert-only rather than part of the auto-restart list above.
 Kea, syslog-ng, fluent-bit, `ui`, `dhcp-proxy`, `ntp`, `netdata`, and
 `docker-socket-proxy` all have a real Docker healthcheck too (so
 `docker inspect`/`docker compose ps` and CI's own wait-for-healthy scripts
-can see it), but the watchdog daemon does not poll or restart any of those
-eight itself (issue #842's per-service decision, not an oversight; #1169
-only added the missing healthchecks themselves, it deliberately did not
-widen watchdog's own monitored-service list -- see #842):
+can see it). As of issue #842/#849 (2026-08-05), six of these eight --
+`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, `syslog` (fluent-bit), and
+`syslog-ng` -- are now **alert-only monitored** by
+`services/watchdog/src/main.rs`'s `resolve_alert_only_targets()`/
+`HealthReading::is_alert_ok()` in the Rust rewrite (never auto-restarted --
+see the maintainer's own #842 scope note on why blind auto-restart is not
+obviously the right recovery mechanism for every additional service).
+**This coverage is not live yet**: `services/watchdog/Dockerfile`'s
+`ENTRYPOINT` (and every `deploy/*/docker-compose.yml`'s `watchdog` service
+`command:` override) still runs the legacy `watchdog.sh`, which has no
+knowledge of these six at all -- see that crate's `lib.rs` module doc
+comment for exactly why the `ENTRYPOINT` swap is a separate, larger,
+not-yet-attempted follow-up (no Rust builder stage exists in the Dockerfile
+today). `ntp` (chrony) and `docker-socket-proxy` remain the only two of the
+eight with neither restart nor alert-only coverage in either
+implementation -- `docker-socket-proxy` for the chicken-and-egg reason its
+own bullet below explains (unchanged by this update); `ntp` simply wasn't
+named in #842's checklist and was deliberately left alone rather than
+added speculatively.
 
-- **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
-  adding either to watchdog's blind restart-on-unhealthy loop would need the
-  Docker socket proxy's allowlist (`scripts/docker-socket-proxy.sh`) widened
-  first -- `ui` has no allowlist entry at all today (a deliberate boundary
-  documented in `docs/naming-conventions.md`'s "Operator-visible
-  consistency" section: nothing currently calls the Docker API to manage it
-  by name), and `dhcp` is only allowlisted for `start`/`stop`
-  (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
-  Widening that allowlist is a security-relevant architectural change in its
-  own right, not a side effect of extending a monitored-container list, so
-  #842 left both out of scope for a follow-up PR to decide deliberately
-  rather than as a byproduct of this change.
-- **`dhcp-proxy` (dnsmasq), `ntp` (chrony), and `netdata`**: all three now
-  have a real Docker `healthcheck:` block (#1169; previously
-  `get_health()` would have read `.State.Health.Status` as absent ("none")
-  for all three, so adding any of them to the monitored list before #1169
-  would have been a silent no-op, not real coverage). Whether to actually
-  add them to watchdog's polled/auto-restarted list is still its own
-  separate scoping question (#842), deliberately not decided as a byproduct
-  of #1169 landing their healthchecks.
-- **`syslog` (fluent-bit) and `syslog-ng`**: `syslog` has no `container_name:`
-  set in any Compose file at all (Compose auto-generates one), so it cannot
-  be addressed by a fixed name the way every other allowlisted/monitored
-  container is; its own healthcheck (`fluent-bit -V`) only proves the binary
-  is intact, not that the tailing pipeline actually works (see the compose
-  comment next to that healthcheck). Both are also gated behind the
-  `logging` Compose profile -- on by default since issue #1343 for every
-  `setup.sh`-managed install (fresh wizard installs default the "Enable
-  central logging?" prompt to `Y`, and `setup.sh update` converges an
-  existing install toward `LOGGING_ENABLED=1` if the key was never set; a
-  real, operator-controllable opt-out remains via `LOGGING_ENABLED=0` in
-  `.env` or the Admin UI, for genuinely storage-constrained installs), not
-  the off-by-default state this section previously described. A from-scratch
-  manual `deploy/prod` install that never runs `setup.sh` still starts with
+- **`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, `syslog`, `syslog-ng`**: all
+  six needed `scripts/docker-socket-proxy.sh`'s allowlist widened before
+  alert-only monitoring was possible at all -- `ui`/`netdata`/`syslog`/
+  `syslog-ng` had no `safe_container_inspect`/`lancache_container` entry
+  whatsoever before #842/#849 (a deliberate boundary previously documented
+  in `docs/naming-conventions.md`'s "Operator-visible consistency" section:
+  nothing called the Docker API to manage `ui` by name -- that section is
+  updated alongside this one); `dhcp`/`dhcp-proxy` already had inspect
+  access (added for the Admin UI's own `dhcp.rs`/`dhcp_proxy.rs` status
+  reads) but, same as before this change, still only `start`/`stop`
+  (`safe_dhcp_action`), never `restart` -- watchdog's alert-only monitoring
+  needs inspect only, so this PR does not touch `safe_service_restart` for
+  any of the six; restart-capability for any of them remains its own,
+  separately-scoped future decision, not a byproduct of this change.
+  `syslog` (fluent-bit) and `syslog-ng` additionally needed a fixed
+  `container_name:` added in `deploy/prod/docker-compose.yml` (`syslog-ng`
+  also in `deploy/quickstart/docker-compose.yml` -- `syslog` already had one
+  there) before either could be addressed by a stable Docker-API path at
+  all. Their *containers'* existence is gated by the `logging` Compose
+  profile, controlled by `LOGGING_ENABLED` -- **on by default since issue
+  #1343** for every `setup.sh`-managed install (fresh wizard installs default
+  the "Enable central logging?" prompt to `Y`, and `setup.sh update`
+  converges an existing install toward `LOGGING_ENABLED=1` if the key was
+  never set; a real, operator-controllable opt-out remains via
+  `LOGGING_ENABLED=0` in `.env` or the Admin UI). A from-scratch manual
+  `deploy/prod` install that never runs `setup.sh` still starts with
   `logging` off, same as its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles --
   see `deploy/prod/.env`'s own comment on this profile.
+  **This PR's own watchdog alert-only monitoring of `syslog`/`syslog-ng` is
+  gated by a second, separate flag, `SYSLOG_ENABLED`** (`resolve_bool`,
+  default `false`) -- the same pre-existing double-opt-in `retention.sh`
+  already used for its own syslog-pruning engine (see `deploy/prod/.env`'s
+  "DOUBLE opt-in" comment), reused here for consistency rather than
+  introduced fresh. **Known gap surfaced by reconciling this section with
+  issue #1343's landing (not present when this PR was originally written):**
+  since `LOGGING_ENABLED` now defaults to `1`, a fresh default install runs
+  the `syslog`/`syslog-ng` containers out of the box, but watchdog will
+  *not* alert-monitor them unless an operator also separately sets
+  `SYSLOG_ENABLED=true` -- these two flags are independent, and nothing
+  today converges `SYSLOG_ENABLED` to follow `LOGGING_ENABLED`'s default.
+  Whether `resolve_alert_only_targets()` should instead key off actual
+  container liveness (or off `LOGGING_ENABLED` directly) rather than the
+  separate double-opt-in flag is an open follow-up question, not decided or
+  changed here -- posted as a structured decision on #842.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
@@ -371,6 +468,77 @@ Since issue #1170 Part 1, the `services` map also includes an entry for
 the dashboard renders it through the same generic per-service loop as every
 other entry, with no template or route changes needed for it specifically.
 
+### Known benign startup/log messages (issue #849 item 8)
+
+Four log lines observed during real field testing (#1068 item 8) that read
+as alarming out of context but are expected, documented behavior once traced
+to their actual source -- collected here rather than left as unexplained
+"is this a problem?" notes:
+
+- **`Reconciler: published 0 records`** (`services/dns/nats-subscriber/src/main.rs`'s
+  `reconciler()`): a periodic (every 60s) full-resync pass that queries
+  PowerDNS's `lan.` zone via its REST API and re-publishes every non-SOA/NS
+  record over NATS, independent of the event-driven immediate-publish path
+  used when a record actually changes. **Expected** whenever the `lan.` zone
+  genuinely has no non-SOA/NS records yet -- a fresh install before any
+  DHCP-DDNS client has registered, an install with DHCP-DDNS disabled
+  entirely (`DHCP_DDNS_ENABLED=false`, the default -- see `config/prod/dhcp.env`),
+  or any deployment that legitimately has zero dynamically-registered LAN
+  hosts. **Would be a real problem** only if DHCP-DDNS is enabled with active
+  leases and this line persists anyway -- that would point at a PowerDNS
+  API-connectivity or zone-content issue worth investigating directly (e.g.
+  `pdns_control` / the zone's REST endpoint), not this reconciler's own logic.
+- **`pdns_server is ready (attempt 2)`** (`services/dns/entrypoint.sh`): after
+  starting the PowerDNS authoritative server (`run_auth &`) in the
+  background, the entrypoint polls `pdns_control rping` (a real control-socket
+  RPC, not a bare network ping -- satisfies AG-VAL-018's "real query/response
+  probe" requirement) up to 10 times, 0.5s apart, before starting the
+  recursor, so the recursor's own startup never races ahead of the auth
+  server's control socket becoming responsive. `attempt 2` simply means the
+  auth server took slightly over 0.5s (one extra poll cycle) to finish
+  initializing after being forked -- a normal, self-resolving startup
+  ordering delay, not a retry-after-failure or a bug. Any single-digit
+  attempt count here is unremarkable; only exhausting all 10 attempts (the
+  `WARNING: pdns_server did not respond to ping` line) would indicate a real
+  problem.
+- **NATS connection-refused-then-retry on `lancache-ui` startup**
+  (`services/ui/src/main.rs`'s `connect_nats_with_retry()`): the Admin UI's
+  `main()` awaits this function -- with a 1s-to-30s capped exponential
+  backoff loop that treats "not yet reachable" as its normal steady state --
+  *before* binding its own HTTP listener at all. Since Compose starts `ui`
+  and `nats` concurrently (no blocking `depends_on: condition:
+  service_healthy` between them), a connection-refused during `ui`'s first
+  few seconds while `nats-server` is still initializing is an expected,
+  self-resolving start-order race, confirmed harmless by design (the same
+  reasoning already documented on `services/ui/src/nats_auth_callout.rs`'s
+  own unconditional reconnect loop, which treats "connection dropped, retry"
+  as its permanent steady state, not just a startup-only condition).
+- **netdata: permission-denied on `/host/proc/<pid>/io` for nginx, and a
+  missing `/etc/netdata/scripts.d`** -- two distinct findings bundled in the
+  original report:
+  - The permission-denied error is **already fixed** (PR #1125, `pid: host`
+    in `deploy/*/docker-compose.yml`'s `netdata:` service, plus
+    `cap_add: SYS_PTRACE` and `security_opt: apparmor:unconfined`): without
+    `pid: host`, netdata's own PID namespace is merely a sibling of, not an
+    ancestor of, the host's, so the kernel's `ptrace_may_access` check for a
+    process outside netdata's own container fails with `Permission denied`
+    regardless of `SYS_PTRACE` -- this is netdata's own documented
+    requirement for `apps.plugin` to read other containers' `/proc/<pid>`
+    entries, not a project-specific workaround.
+  - The missing `/etc/netdata/scripts.d` message is **netdata's own,
+    harmless, expected behavior for an unused optional collector**, verified
+    against netdata's own documentation (AG-VAL-023) rather than assumed:
+    `scripts.d.plugin` is a real, separate netdata external plugin that runs
+    Nagios-compatible/custom scripts, configured via `scripts.d/nagios.conf`
+    under that directory. This project configures no custom Nagios-style
+    scripts anywhere, so the directory is legitimately absent, and netdata
+    logs this the same way it reports any other optional, unconfigured
+    external plugin at startup -- informational, not an error, and not
+    something this project's `netdata:` service needs to create or mount. An
+    operator who wants to silence the message specifically (not required for
+    correct operation) can disable `scripts.d.plugin` in netdata's own
+    `netdata.conf` `[plugins]` section.
+
 ## syslog-ng
 
 Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `dev`, `prod`, and `quickstart` alike. `fluent-bit` (the `syslog` service) is the collector/forwarder: it tails every wired service's log file(s) (see the matrix below) and fans each one out to a forward to `syslog-ng` over TCP/601 (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`); the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job in dev). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`.
@@ -413,19 +581,28 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 
 ## Cache Warming
 
-Separate container (`services/warmer`) with `steamcmd`.
+**Corrected 2026-08-05 (issue #1391 doc-sweep audit): this section previously described Cache
+Warming in the present tense as an already-shipped feature, contradicting this document's own
+services table above ("Cache Warmer | not implemented ... Design-only, not shipped: no
+`services/` code, no Compose service, nothing runnable exists yet under this name"), which is
+the accurate statement — confirmed directly against the real tree (`services/warmer/` does not
+exist; no `warmer`/`steamcmd` service in any `deploy/*/docker-compose.yml`).** The design below
+describes the current *plan*, not a shipped capability — see
+[docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the
+authoritative, up-to-date design discussion and its open maintainer decisions before relying on
+any detail here.
 
-**Workflow:**
+**Planned workflow** (not yet implemented — design-only):
 1. User enters Steam app ID
 2. `steamcmd` fetches depot manifest (anonymous for F2P, optional with account for paid games)
 3. Chunk URLs fetched through local proxy → cached
 4. Progress displayed live in Admin UI (total chunks / completed / MB/s)
 
-**Steam account:** optional via env var (`STEAM_USER`, `STEAM_PASS`) — never in repo, never in image.
+**Steam account:** planned to be optional via env var (`STEAM_USER`, `STEAM_PASS`) — never in repo, never in image.
 
-**Tracking:** which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
+**Tracking:** planned: which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
 
-Epic / GOG: not supported.
+Epic / GOG: not planned to be supported.
 
 ## Cache Retention & Cleanup
 

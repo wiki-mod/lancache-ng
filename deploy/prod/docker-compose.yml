@@ -3,8 +3,12 @@
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# This is the only deployment profile -- see CLAUDE.md's "No Separate Dev
-# Environment" for why there is no parallel deploy/dev stack.
+# This is the only *production* deployment profile -- see AGENTS.md's AG-KD-008
+# for why there is no parallel deploy/dev stack (corrected 2026-08-05, issue #1391
+# doc-sweep audit: this used to cite CLAUDE.md's "No Separate Dev Environment"
+# section, which moved to AGENTS.md on 2026-07-31; deploy/quickstart/ and
+# deploy/full-setup/ are the other two real profiles that exist today, for
+# quickstart and CI-validation use respectively).
 
 name: lancache-ng
 
@@ -48,7 +52,15 @@ services:
       - "${IP_SSL}:80:80"
       - "${IP_SSL}:443:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1/healthz >/dev/null; }"]
+      # Since #1276/#1322: IP_SSL:443 (container port 443) now reaches the
+      # stream-level SNI dispatch listener (entrypoint.sh's "2a."), which has
+      # no SNI to route on for an IP-literal curl target and would forward
+      # into the passthrough branch instead of the actual HTTPS/MITM server --
+      # retargeted directly at conf.d/https.conf's dedicated, non-PROXY-
+      # protocol healthcheck port (8445) instead, which bypasses the dispatch
+      # listener entirely but still proves the same nginx worker and cert
+      # config are alive.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -273,6 +285,18 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
+    # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): watchdog.env is a static,
+    # non-templated file (see its own header), so these two top-level .env
+    # values -- which do vary per install -- are passed the same way the
+    # `retention` service below already passes SYSLOG_ENABLED for its own
+    # syslog-ng retention gate. Neither var is read by watchdog.sh (the bash
+    # entrypoint this ENTRYPOINT still runs); the Rust crate's own
+    # resolve_alert_only_targets() reads both, currently unused until that
+    # crate becomes this service's actual ENTRYPOINT (see
+    # services/watchdog/src/lib.rs's module doc comment).
+    environment:
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
@@ -1053,6 +1077,13 @@ services:
   # bind-mount a config file from -- CLI flags are the one delivery mechanism
   # that works identically across dev/prod/quickstart.
   syslog:
+    # container_name (issue #842/#849): watchdog's Rust rewrite needs a
+    # stable, predictable Docker API path (/containers/<name>/json) to add
+    # this service to its alert-only monitored set -- without a fixed name,
+    # Compose's auto-generated one (<project>-syslog-1) would depend on the
+    # project name/directory and break the moment either changes. Matches
+    # deploy/quickstart/docker-compose.yml, which already set this.
+    container_name: lancache-syslog
     image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
     profiles: [logging]
     command:
@@ -1693,6 +1724,13 @@ services:
   # logs-syslog-ng. Config and the rotation/compression loop are generated
   # inline for the same reason as fluent-bit above.
   syslog-ng:
+    # container_name (issue #842/#849): same reasoning as the `syslog`
+    # (fluent-bit) service above -- watchdog's Rust rewrite needs a fixed
+    # name to add this service to its alert-only monitored set. Unlike
+    # `syslog`, this one had no fixed name anywhere in the repo before this
+    # change (confirmed via a repo-wide grep for "lancache-syslog-ng" as a
+    # container name, not just as a path/volume string).
+    container_name: lancache-syslog-ng
     image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
     profiles: [logging]
     entrypoint: ["/bin/bash", "-c"]

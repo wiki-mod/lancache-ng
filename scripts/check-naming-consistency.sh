@@ -14,10 +14,17 @@
 # instead (a different, non-interchangeable namespace -- see
 # docs/naming-conventions.md's "Two separate name namespaces" section).
 #
-# These are subset relations, not equalities -- ui/watchdog/docker-socket-proxy/
-# netdata/syslog deliberately have a container_name but must NOT appear in the
-# allowlist, so this script never asserts the reverse direction (every
-# container_name in the allowlist).
+# These are subset relations, not equalities -- watchdog/docker-socket-proxy
+# deliberately have a container_name but must NOT appear in the allowlist (a
+# service never needs Docker-API access to itself), so this script never
+# asserts the reverse direction (every container_name in the allowlist).
+# ui/netdata/syslog/syslog-ng USED to be in that same "container_name but not
+# in the allowlist" set too, but issue #842/#849 added all four to the
+# allowlist's safe_container_inspect/lancache_container acls (inspect-only,
+# no restart grant) so watchdog's Rust rewrite can alert-only-monitor them --
+# see scripts/docker-socket-proxy.sh's own comment on that addition. This
+# comment is corrected here rather than left stale, per this project's own
+# documentation-drift rule (AG-DOC-001).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -57,9 +64,12 @@ if [ -z "$allowlist_line" ]; then
   allowlist_names=""
 else
   # The line looks like: ...containers/(lancache-a|lancache-b|...)(/|\$)
-  allowlist_names=$(printf '%s\n' "$allowlist_line" \
-    | grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' \
-    | head -n1 \
+  # Here-string feeds grep, and grep's own (single-match-by-construction,
+  # since there is only one such acl alternation group in the line) output
+  # is captured into a variable before `head -n1` ever sees it -- neither
+  # stage is a live pipe an early-exiting consumer could race (issue #1377).
+  allowlist_group="$(grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' <<<"$allowlist_line")"
+  allowlist_names=$(head -n1 <<<"$allowlist_group" \
     | tr -d '()' \
     | tr '|' '\n' \
     | sort -u)
@@ -71,7 +81,8 @@ fi
 
 name_in_allowlist() {
   local name="$1"
-  printf '%s\n' "$allowlist_names" | grep -qxF "$name"
+  # Here-string, not a live pipe into grep -q (issue #1377).
+  grep -qxF "$name" <<<"$allowlist_names"
 }
 
 # --- Every allowlist name is a real container_name in every Compose file --
