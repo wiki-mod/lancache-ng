@@ -186,6 +186,10 @@ fn load_settings() -> Settings {
         env("CONTAINER_DNS_SSL").as_deref(),
         env("CONTAINER_NATS").as_deref(),
         ssl_enabled,
+        // Issue #1415: see resolve_container_names()'s own doc comment --
+        // empty/unset for every real install, only ever non-empty for a
+        // CI-coordinated quickstart-compose run.
+        env("LANCACHE_CONTAINER_SUFFIX").as_deref(),
     ) {
         Ok(names) => names,
         Err(msg) => {

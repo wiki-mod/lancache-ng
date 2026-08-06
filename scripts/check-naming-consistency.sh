@@ -90,13 +90,35 @@ name_in_allowlist() {
 # under that exact name in each deployment mode's Compose file -- an
 # allowlist entry with no matching container_name would be a name only the
 # security config knows about, not a real target.
-while IFS= read -r name; do
-  [ -n "$name" ] || continue
-  for compose_file in "${COMPOSE_FILES[@]}"; do
-    if ! grep -Eq "^[[:space:]]+container_name: ${name}\$" "$compose_file"; then
-      fail "$compose_file has no 'container_name: $name', but $SOCKET_PROXY_SCRIPT's allowlist grants Docker API actions on it."
+#
+# Issue #1415: deploy/quickstart/docker-compose.yml's container_name values
+# now end in the literal, fixed text `${LANCACHE_CONTAINER_SUFFIX:-}` (never
+# a different suffix expression, and never omitted -- see that file's own
+# top-of-file comment) so CI can give concurrent runs distinct real
+# container names while every real single-host install still gets the
+# byte-identical bare name (LANCACHE_CONTAINER_SUFFIX unset). This is
+# intentionally a fixed literal-text check, not a general "anything may
+# follow the name" wildcard: a real drift (e.g. a typo'd or unrelated
+# suffix expression) must still fail this check exactly like a missing
+# container_name would. deploy/prod/docker-compose.yml carries no such
+# mechanism and keeps the original exact-match requirement.
+for compose_file in "${COMPOSE_FILES[@]}"; do
+  case "$compose_file" in
+    deploy/quickstart/docker-compose.yml)
+      name_suffix='\$\{LANCACHE_CONTAINER_SUFFIX:-\}'
+      ;;
+    *)
+      name_suffix=''
+      ;;
+  esac
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    if ! grep -Eq "^[[:space:]]+container_name: ${name}${name_suffix}\$" "$compose_file"; then
+      fail "$compose_file has no 'container_name: ${name}${name_suffix}', but $SOCKET_PROXY_SCRIPT's allowlist grants Docker API actions on it."
     fi
-  done
+  done <<EOF_ALLOWLIST_PER_FILE
+$allowlist_names
+EOF_ALLOWLIST_PER_FILE
 done <<EOF_ALLOWLIST
 $allowlist_names
 EOF_ALLOWLIST
