@@ -327,8 +327,12 @@ jobs:
     # Real end-to-end proof for issue #1296 (completing the 3-of-3 full-setup
     # deep-validation ask -- dhcp/dhcp-proxy landed via #1305) that the real
     # `ntp` (chrony) image genuinely disciplines the system clock, not merely
-    # that its container starts. See scripts/ntp-cap-sys-time-simulation.sh's
-    # own header for the full design and proof technique.
+    # that its container starts (Scenario A) -- AND, added after the
+    # CAP_SYS_TIME graceful-degradation work, that when that capability is
+    # denied it correctly surfaces the real, maintainer-kept degraded/amber
+    # status AND still serves genuinely accurate time to real NTP clients
+    # (Scenario B). See scripts/ntp-cap-sys-time-simulation.sh's own header
+    # for the full design and proof technique for both scenarios.
     #
     # GITHUB-HOSTED, NOT SELF-HOSTED: confirmed live (2026-07-30) that every
     # host in this project's self-hosted runner fleet is itself an LXC
@@ -348,12 +352,15 @@ jobs:
     #
     # Deliberately does NOT use the self-hosted-only reserved-validation-
     # subnet machinery (scripts/lib/run-in-validation-subnet.sh) the other
-    # simulations here need: this test stands up exactly one isolated
-    # container via a plain `docker run`, with no compose stack, no shared
-    # network, and no host-port publish at all -- there is nothing here that
-    # could collide with a concurrent run the way a shared self-hosted pool's
-    # port-bound services could, so that whole isolation mechanism (built for
-    # a different problem) does not apply.
+    # simulations here need: this test stands up isolated containers via
+    # plain `docker run` calls, with no compose stack and no shared network.
+    # Scenario B (CAP_SYS_TIME denied, added #1296 after the graceful-
+    # degradation work) does publish one host port (123/udp, remapped to a
+    # high port to avoid ever colliding with a real NTP service) so a real
+    # external client can query it over the network -- safe here because
+    # each GitHub-hosted job gets its own fresh, single-tenant VM, unlike the
+    # self-hosted pool's shared, concurrently-reused hosts this isolation
+    # mechanism (built for a different problem) exists to protect.
     name: ntp CAP_SYS_TIME / clock-discipline simulation
     needs: [plan, ensure-pr-staging-images]
     if: >-
