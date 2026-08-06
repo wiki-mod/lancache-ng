@@ -7441,14 +7441,23 @@ jobs:
 
       # actions/attest is a standalone action step, so it cannot run inside the bash loops
       # above -- one explicit step per service is required, same as promote's single
-      # "Attest stack pointer provenance" step just repeated for each of the seven merged
-      # multi-platform manifests. Each step is gated only on its own digest output being
-      # non-empty: the "Create ..." step above already skips (via `continue`, not a step
-      # failure) any service with no per-arch inputs for this event, which leaves that
-      # service's *_digest output unset here -- nothing else needs checking.
+      # "Attest stack pointer provenance" step just repeated for each merged multi-platform
+      # manifest. Each step is gated only on its own digest output being non-empty: the
+      # "Create ..." step above already skips (via `continue`, not a step failure) any
+      # service with no per-arch inputs for this event, which leaves that service's
+      # *_digest output unset here -- nothing else needs checking.
+      #
+      # Routed through ghcr-attest-with-cache (issue #1095, attestation-caching finding),
+      # not ghcr-attest-retry directly: "Create multi-platform manifests" above runs
+      # unconditionally every push for every service with valid per-arch inputs, and
+      # `docker buildx imagetools create` is deterministic for identical inputs, so an
+      # unchanged service gets the exact same merged digest recreated and re-attested on
+      # every single push -- the same waste shape as G11, but for provenance attestations,
+      # firing far more often. Also fixes a real, separate gap found in the same pass:
+      # `syslog` (wired in by issue #1428/#1433) had no attest step here at all until now.
       - name: Attest proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.proxy_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7457,7 +7466,7 @@ jobs:
 
       - name: Attest dns merged manifest provenance
         if: steps.create-trusted-manifests.outputs.dns_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7466,7 +7475,7 @@ jobs:
 
       - name: Attest watchdog merged manifest provenance
         if: steps.create-trusted-manifests.outputs.watchdog_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7475,7 +7484,7 @@ jobs:
 
       - name: Attest dhcp merged manifest provenance
         if: steps.create-trusted-manifests.outputs.dhcp_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7484,7 +7493,7 @@ jobs:
 
       - name: Attest dhcp-proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.dhcp_proxy_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7493,7 +7502,7 @@ jobs:
 
       - name: Attest ntp merged manifest provenance
         if: steps.create-trusted-manifests.outputs.ntp_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7502,7 +7511,7 @@ jobs:
 
       - name: Attest ui merged manifest provenance
         if: steps.create-trusted-manifests.outputs.ui_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -7511,12 +7520,21 @@ jobs:
 
       - name: Attest build-tools merged manifest provenance
         if: steps.create-trusted-manifests.outputs.build_tools_digest != ''
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/build-tools
           subject-digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest }}
+
+      - name: Attest syslog merged manifest provenance
+        if: steps.create-trusted-manifests.outputs.syslog_digest != ''
+        uses: ./.github/actions/ghcr-attest-with-cache
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/syslog
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest }}
 
       # Fork PRs self-skip here without any extra guard needed: build/build-arm64
       # never push a fork PR's per-arch legs, so create-pr-staging-manifests'
@@ -7593,6 +7611,16 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ghcr.io/${{ github.repository }}/build-tools
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.build_tools_digest }}
+
+      # Same gap as the trusted-ref block above: syslog was missing here too.
+      - name: Attest syslog PR staging manifest provenance
+        if: steps.create-pr-staging-manifests.outputs.syslog_digest != ''
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/syslog
+          subject-digest: ${{ steps.create-pr-staging-manifests.outputs.syslog_digest }}
 
   promote:
     # Promotion is intentionally separate from image build. It moves coherent channel
@@ -8172,9 +8200,13 @@ jobs:
             git push "$push_url" "refs/tags/${next_tag}"
           echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
+      # Same digest-bound cache as merge-manifests' per-service attest steps (issue #1095
+      # attestation-caching finding): a push where every service was unchanged reproduces
+      # the identical stack-pointer digest, which would otherwise be re-attested for no
+      # reason every time.
       - name: Attest stack pointer provenance
         if: ${{ steps.promote-stack.outputs.stack-pointer-digest != '' }}
-        uses: ./.github/actions/ghcr-attest-retry
+        uses: ./.github/actions/ghcr-attest-with-cache
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
