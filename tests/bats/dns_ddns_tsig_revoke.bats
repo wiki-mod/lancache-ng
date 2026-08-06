@@ -1,0 +1,88 @@
+#!/usr/bin/env bats
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Regression tests for configure_ddns_tsig() (services/dns/entrypoint.sh),
+# fixing bug-hunt finding #9 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+# unsetting DDNS_TSIG_KEY after a previous run had it set used to just log a
+# message and return, leaving the TSIG-ALLOW-DNSUPDATE authorization from
+# that previous run active on every LAN/reverse zone -- an operator who
+# unsets the var believing they've disabled DDNS would find DNS UPDATE
+# requests signed with the old key still accepted. The fix revokes the
+# per-zone authorization and deletes the now-orphaned key whenever the var
+# is unset, unconditionally (safe even when DDNS was never configured).
+#
+# Loads the real functions via tests/bats/helpers/dns-ddns-tsig-helpers.sh's
+# dynamic awk-extraction rather than reimplementing them.
+
+setup() {
+    repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+
+    # shellcheck source=tests/bats/helpers/dns-ddns-tsig-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/dns-ddns-tsig-helpers.sh"
+    load_dns_ddns_tsig_helpers "$repo_root" "$BATS_TEST_TMPDIR/dns-ddns-tsig-helpers-extracted.sh"
+
+    DDNS_TSIG_NAME="lancache-ddns-key"
+    DDNS_TSIG_ALGORITHM="hmac-sha256"
+    DDNS_UPDATE_ZONES=("lan" "1.168.192.in-addr.arpa")
+
+    pdnsutil_calls="$BATS_TEST_TMPDIR/pdnsutil-calls.log"
+    : > "$pdnsutil_calls"
+}
+
+# Stub pdnsutil recording every invocation; all subcommands succeed by
+# default (PDNSUTIL_FAIL_ALL lets the revoke-path-is-best-effort test force
+# failures to prove they don't block the function).
+pdnsutil() {
+    echo "$*" >> "$pdnsutil_calls"
+    [ "${PDNSUTIL_FAIL_ALL:-0}" = "1" ] && return 1
+    return 0
+}
+
+@test "an unset DDNS_TSIG_KEY revokes TSIG-ALLOW-DNSUPDATE on every configured zone" {
+    unset DDNS_TSIG_KEY
+    run configure_ddns_tsig
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan TSIG-ALLOW-DNSUPDATE" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta 1.168.192.in-addr.arpa TSIG-ALLOW-DNSUPDATE" "$pdnsutil_calls"
+}
+
+@test "an unset DDNS_TSIG_KEY also deletes the now-orphaned TSIG key" {
+    unset DDNS_TSIG_KEY
+    run configure_ddns_tsig
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth delete-tsig-key lancache-ddns-key" "$pdnsutil_calls"
+}
+
+@test "the revoke path is best-effort: it never fails the container even if pdnsutil errors" {
+    unset DDNS_TSIG_KEY
+    PDNSUTIL_FAIL_ALL=1
+    run configure_ddns_tsig
+
+    # Every pdnsutil call in the revoke path is deliberately non-fatal (the
+    # zone/key may legitimately never have existed, e.g. a fresh install
+    # that never enabled DDNS) -- unlike bug-hunt finding #6's zone-creation
+    # fix, which made an equivalent-looking blanket swallow fatal, this one
+    # stays soft on purpose because there is no "should exist" invariant
+    # here to enforce.
+    [ "$status" -eq 0 ]
+}
+
+@test "a configured DDNS_TSIG_KEY still authorizes zones normally (no regression)" {
+    DDNS_TSIG_KEY="a-real-generated-shared-secret-not-a-placeholder"
+    run configure_ddns_tsig
+
+    [ "$status" -eq 0 ]
+    grep -qF -- "--config-dir=/etc/pdns/auth import-tsig-key lancache-ddns-key hmac-sha256 a-real-generated-shared-secret-not-a-placeholder" "$pdnsutil_calls"
+    grep -qF -- "--config-dir=/etc/pdns/auth set-meta lan TSIG-ALLOW-DNSUPDATE lancache-ddns-key" "$pdnsutil_calls"
+    ! grep -q "delete-tsig-key" "$pdnsutil_calls"
+}
+
+@test "a placeholder DDNS_TSIG_KEY is still rejected as fatal (no regression)" {
+    DDNS_TSIG_KEY="CHANGE_ME"
+    run configure_ddns_tsig
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"FATAL: DDNS_TSIG_KEY is still set to a default placeholder"* ]]
+}
