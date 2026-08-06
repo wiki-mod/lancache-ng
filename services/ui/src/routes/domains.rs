@@ -39,6 +39,23 @@ pub struct AaaaFilterForm {
     pub enabled: Option<String>,
 }
 
+// Superseded design note: this used to be DnsupdateRequireTsigForm, driving
+// a toggle that turned PowerDNS's global `dnsupdate-require-tsig` setting
+// ON. Real nsupdate testing proved that toggle a no-op in the common case
+// (see services/dns/pdns.conf.template's header comment for the full
+// history) -- PowerDNS already enforces TSIG per-zone via
+// TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY exists, which
+// is essentially always. Maintainer correction: invert the toggle so it has
+// a real, observable effect -- let an operator explicitly relax that
+// already-active enforcement instead of switching on a setting that was
+// never the actual enforcement point.
+#[derive(Deserialize)]
+pub struct DdnsAllowUnsignedForm {
+    pub csrf_token: String,
+    #[serde(default)]
+    pub enabled: Option<String>,
+}
+
 #[derive(Deserialize)]
 pub struct ToggleDomainForm {
     pub csrf_token: String,
@@ -92,6 +109,12 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              top-level domain (e.g. \"steamcontent.com\", not \"com\"). A leading \".\" for a \
              wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\").",
         ),
+        "ddns_allow_unsigned_no_key" => Some(
+            "Allowing unsigned DNS updates was not enabled: no real DDNS_TSIG_KEY is currently \
+             configured, so no zone actually has TSIG-based update enforcement to relax yet \
+             -- this toggle would have no effect. Configure DDNS_TSIG_KEY first (see \
+             docs/threat-model.md), then try again.",
+        ),
         _ => None,
     }
 }
@@ -108,6 +131,8 @@ pub async fn domains_page(
     // Kea-DDNS-auto-created; they are indistinguishable in PowerDNS).
     let ptr_records = fetch_ptr_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
+    let ddns_unsigned_updates_allowed = is_ddns_unsigned_updates_allowed(&state).await;
+    let ddns_tsig_key_configured = real_ddns_tsig_key_configured(&state);
     // #628: zone/record known-good snapshot rollback -- see
     // routes/dns_snapshots.rs's module doc comment for why this is a thin
     // HTTP call to nats-subscriber's own listener, not logic living here.
@@ -119,6 +144,11 @@ pub async fn domains_page(
     ctx.insert("lan_records", &lan_records);
     ctx.insert("ptr_records", &ptr_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
+    ctx.insert(
+        "ddns_unsigned_updates_allowed",
+        &ddns_unsigned_updates_allowed,
+    );
+    ctx.insert("ddns_tsig_key_configured", &ddns_tsig_key_configured);
     ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
     ctx.insert(
         "domain_error_message",
@@ -383,6 +413,110 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
+// toggle_ddns_allow_unsigned_updates (issue #815 follow-up, SUPERSEDES an
+// earlier design named toggle_dnsupdate_require_tsig): that earlier toggle
+// turned PowerDNS's global `dnsupdate-require-tsig` setting ON, framed as
+// closing an open hole. Real nsupdate testing then proved that framing
+// wrong -- configure_ddns_tsig() in services/dns/entrypoint.sh already sets
+// per-zone TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY
+// exists (essentially always), and PowerDNS enforces TSIG for those zones
+// off that metadata alone, independent of the global setting. So the old
+// toggle changed nothing observable in the common case (see
+// services/dns/pdns.conf.template's header comment for the full history).
+// Maintainer correction: invert the toggle so it has a real, observable
+// effect. TSIG enforcement is ALREADY ACTIVE BY DEFAULT (today, unchanged);
+// this toggle lets an operator explicitly RELAX it -- accept unsigned DNS
+// UPDATE packets for the LAN/reverse zones this project manages. Unlike
+// toggle_aaaa_filter above, this is still a static pdns.conf-adjacent
+// startup action (configure_ddns_tsig() runs its pdnsutil set-meta calls
+// once at process start, not on a live hook), so this handler must still
+// actually restart both DNS instances for the change to take effect.
+pub async fn toggle_ddns_allow_unsigned_updates(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<DdnsAllowUnsignedForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
+    let enable = form.enabled.as_deref() == Some("1");
+
+    // Not a security fail-closed gate anymore (there is no dangerous state
+    // to guard against here the way the old design's "reject every update"
+    // risk was) -- purely informational, in the UI too (entrypoint.sh has
+    // its own independent copy of this same check): if no real
+    // DDNS_TSIG_KEY exists, TSIG-ALLOW-DNSUPDATE was never set on any zone
+    // in the first place, so there is nothing for this toggle to relax, and
+    // silently accepting the click would leave an operator believing they
+    // changed something that has no effect either way.
+    if enable && !real_ddns_tsig_key_configured(&state) {
+        return Ok(Redirect::to("/domains?error=ddns_allow_unsigned_no_key"));
+    }
+
+    let mut failed_paths = Vec::new();
+    for marker_path in ddns_allow_unsigned_marker_paths(&state) {
+        if let Err(e) = set_aaaa_filter_marker(&marker_path, enable) {
+            tracing::error!(
+                path = %marker_path.display(),
+                enabled = enable,
+                error = %e,
+                "ddns-allow-unsigned-updates toggle failed"
+            );
+            failed_paths.push(marker_path);
+        }
+    }
+
+    if !failed_paths.is_empty() {
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // The marker write alone changes nothing until configure_ddns_tsig()
+    // re-runs its pdnsutil set-meta calls, which only happens at container
+    // start -- restart both instances so the operator's toggle click
+    // actually takes effect immediately, rather than silently waiting for
+    // some unrelated future restart. Best-effort: log and continue on a
+    // restart failure rather than reporting the whole toggle as failed,
+    // since the marker write (the actual persisted intent) already
+    // succeeded and a manual restart later will still pick it up
+    // correctly.
+    //
+    // KNOWN LIMITATION (flagged during this feature's own real-container
+    // testing, not yet fixed here): these two restarts are issued
+    // sequentially with no health-wait in between. `restart_service`'s
+    // await only resolves once Docker's API reports the restart accepted,
+    // not once PowerDNS is actually answering queries again (entrypoint.sh
+    // needs several more seconds after process start for zone
+    // creation/RPZ regen) -- so there is a real window where dns-standard
+    // and dns-ssl can both be simultaneously unable to answer DNS for every
+    // LAN client, not just for DNS UPDATE. No wait-for-healthy helper
+    // exists anywhere else in this codebase yet to reuse, so adding one
+    // here would be new shared infrastructure, not a one-line fix -- left
+    // for a maintainer decision on priority rather than expanding this
+    // PR's scope unilaterally.
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.dns_standard_service).await
+    {
+        // {:#} (anyhow's alternate Display), not {}: the bare context
+        // message alone ("Failed to restart 'dns-standard'") hid the real
+        // bollard/Docker-API cause during this feature's own real-container
+        // testing -- {:#} prints the full ": caused by: ..." chain so a
+        // future failure here is actually diagnosable from the log line
+        // alone instead of needing RUST_LOG=debug plus a live repro.
+        tracing::error!(
+            "Restart dns-standard for ddns-allow-unsigned-updates toggle failed: {:#}",
+            e
+        );
+    }
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.dns_ssl_service).await
+    {
+        tracing::error!(
+            "Restart dns-ssl for ddns-allow-unsigned-updates toggle failed: {:#}",
+            e
+        );
+    }
+
+    Ok(Redirect::to("/domains"))
+}
+
 async fn flush_recursor_cache(state: &AppState, domain: &str) {
     // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
     // parameter and only flushes an exact name match, not a subtree --
@@ -475,6 +609,56 @@ fn set_aaaa_filter_marker(path: &Path, enabled: bool) -> std::io::Result<()> {
 
 fn aaaa_filter_enabled_at(path: &Path) -> bool {
     fs::metadata(path).is_ok()
+}
+
+async fn is_ddns_unsigned_updates_allowed(state: &AppState) -> bool {
+    ddns_allow_unsigned_marker_paths(state)
+        .into_iter()
+        .any(|path| aaaa_filter_enabled_at(&path))
+}
+
+// Deliberately a NEW marker filename ("ddns-allow-unsigned-updates"), not a
+// repurposed "dnsupdate-require-tsig-enabled" -- see
+// services/dns/entrypoint.sh's DDNS_ALLOW_UNSIGNED_MARKER comment for why:
+// reusing the old filename with inverted meaning would silently flip any
+// pre-existing deployment that had the old (harmless, no-op) toggle turned
+// on into one that now accepts unsigned updates after an image upgrade, a
+// real, silent security regression. A new filename guarantees every
+// deployment starts this feature at its safe default (marker absent -> TSIG
+// still enforced, unchanged from today's actual behavior).
+fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
+    [
+        Path::new(&state.config.dns_standard_state_dir).join("ddns-allow-unsigned-updates"),
+        Path::new(&state.config.dns_ssl_state_dir).join("ddns-allow-unsigned-updates"),
+    ]
+}
+
+// True only when a real (non-empty) DDNS_TSIG_KEY has actually been
+// persisted to the shared-secrets volume by entrypoint.sh's
+// shared-secret-bootstrap library (file "ddns-tsig-key"). Reading the
+// file's own presence/content, not an env var, because the UI process never
+// receives DDNS_TSIG_KEY itself (it isn't one of this container's own
+// secrets) -- the shared-secrets volume is the only place both the DNS
+// containers (writers/generators) and this UI (reader) agree on the current
+// real value's existence without the UI needing the plaintext secret at
+// all. Deliberately does not attempt full placeholder-string detection
+// (Rule-Ref: secret_is_placeholder's three independently-maintained
+// copies, issue #967): resolve_shared_secret only ever persists a real,
+// generated-or-operator-supplied value to this file, never a checked-in
+// placeholder literal, so a non-empty file here is already a strong enough
+// signal for this specific gate.
+fn real_ddns_tsig_key_configured(state: &AppState) -> bool {
+    ddns_tsig_key_file_is_real(&Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key"))
+}
+
+// Split out from real_ddns_tsig_key_configured so the three cases that
+// matter for this fail-closed gate (file absent, file present but empty --
+// resolve_shared_secret never writes an empty file itself, but a hand-crafted
+// or truncated volume could still produce one -- and file present with real
+// content) are each directly unit-testable without needing a full AppState
+// (Docker/NATS connections, Tera instance) just to check a metadata() call.
+fn ddns_tsig_key_file_is_real(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
 }
 
 const MIN_TTL: u32 = 1;
@@ -1715,6 +1899,43 @@ mod tests {
         let marker = temp_dir("aaaa-filter-missing").join("missing/aaaa-filter-enabled");
 
         assert!(set_aaaa_filter_marker(&marker, true).is_err());
+    }
+
+    // Covers the three cases that matter for the dnsupdate-require-tsig
+    // fail-closed gate (issue #815 follow-up, real-tested via a live
+    // container in the accompanying PR): no file at all (the common case --
+    // shared-secrets volume freshly created), a present-but-empty file (not
+    // something resolve_shared_secret itself ever writes, but a defensive
+    // case worth locking in since an empty file must NOT be mistaken for a
+    // configured key), and a real non-empty file. Real-container testing
+    // separately confirmed entrypoint.sh's independent shell-side copy of
+    // this same check (secret_is_placeholder / a genuinely unwritable
+    // shared-secrets mount) also fails closed; this test locks in the Rust
+    // side of the same defense-in-depth pair.
+    #[test]
+    fn ddns_tsig_key_file_is_real_covers_absent_empty_and_real() {
+        let dir = temp_dir("ddns-tsig-key-real-check");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ddns-tsig-key");
+
+        assert!(
+            !ddns_tsig_key_file_is_real(&path),
+            "a missing file must not be treated as a configured key"
+        );
+
+        fs::write(&path, "").unwrap();
+        assert!(
+            !ddns_tsig_key_file_is_real(&path),
+            "a present-but-empty file must not be treated as a configured key"
+        );
+
+        fs::write(&path, "dGhpcyBpcyBhIHJlYWwgYmFzZTY0IHRzaWcga2V5").unwrap();
+        assert!(
+            ddns_tsig_key_file_is_real(&path),
+            "a non-empty file must be treated as a configured key"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
