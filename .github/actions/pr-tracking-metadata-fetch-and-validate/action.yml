@@ -20,7 +20,7 @@ inputs:
     required: true
   project-automation-pat:
     description: >-
-      Caller's ${{ secrets.PROJECT_AUTOMATION_PAT }} value (Projects v2 read scope;
+      Caller's `secrets.PROJECT_AUTOMATION_PAT` value (Projects v2 read scope;
       empty on fork PRs by design -- GITHUB_TOKEN cannot write/read Projects v2 data
       and forked-repo pull_request runs never receive repository secrets beyond it).
     required: false
