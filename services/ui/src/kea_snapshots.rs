@@ -189,6 +189,22 @@ pub fn prune_snapshots(snapshot_root: &Path, keep_n: u32) -> io::Result<()> {
     let excess = ids.len().saturating_sub(keep_n as usize);
 
     for id in ids.into_iter().take(excess) {
+        // Same failure class as read_snapshot's is_safe_snapshot_id guard
+        // above (Rule-Ref: AG-WF-011, Finding #7, docs/bug-hunt/ui-core.md,
+        // issue #849): lower risk here specifically, since every `id` in
+        // this loop came from list_snapshot_ids' own fs::read_dir entry
+        // names, which cannot contain a path separator -- but skipping a
+        // non-numeric id defensively before calling remove_dir_all costs
+        // nothing and keeps this function from ever recursively deleting
+        // something outside a real snapshot directory if that invariant is
+        // ever violated by a future change to list_snapshot_ids itself.
+        if !is_safe_snapshot_id(&id) {
+            kgs_log(
+                "FATAL",
+                &format!("refusing to prune unsafe known-good snapshot id {id:?}"),
+            );
+            continue;
+        }
         let dir = snapshot_root.join(&id);
         match fs::remove_dir_all(&dir) {
             Ok(()) => kgs_log(
