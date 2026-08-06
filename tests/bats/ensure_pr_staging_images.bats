@@ -204,10 +204,10 @@ STUB
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # All eight full-setup services get a base-commit back-fill (#1296: dhcp/
-    # dhcp-proxy joined the five original services first, ntp completes the
-    # 3-of-3 this issue asked for).
-    [ "$(wc -l < "$backfill_log")" -eq 8 ]
+    # All nine full-setup services get a base-commit back-fill (#1296: dhcp/
+    # dhcp-proxy joined the five original services first, ntp completed the
+    # 3-of-3 that issue asked for; #1428 then added syslog as the ninth).
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
     grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha_short}" "$backfill_log"
 }
 
@@ -218,11 +218,11 @@ STUB
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # proxy was touched+present (no back-fill); the other seven are
+    # proxy was touched+present (no back-fill); the other eight are
     # back-filled. Leading slash disambiguates from
-    # ".../dhcp-proxy:pr-715-sha-abcdef0", which is one of those seven and
+    # ".../dhcp-proxy:pr-715-sha-abcdef0", which is one of those eight and
     # would otherwise substring-match "proxy:...".
-    [ "$(wc -l < "$backfill_log")" -eq 7 ]
+    [ "$(wc -l < "$backfill_log")" -eq 8 ]
     # SC2314: a bare `!` never triggers Bats' own failure detection unless it
     # happens to be the test's last statement (the `!`-exemption from
     # `errexit` means a failing negation earlier in the body would silently
@@ -260,7 +260,8 @@ STUB
 
 @test "workflow change: build-tools untouched is still back-filled, not required" {
     # Every forced-touched service present (#1296: dhcp/dhcp-proxy joined
-    # first, ntp completes the set); build-tools untouched -> back-fill.
+    # first, ntp completed that set; #1428 then added syslog); build-tools
+    # untouched -> back-fill.
     # Declared and exported separately (SC2155): combining them would mask a
     # real failure exit status from the command substitution behind the
     # export builtin's own (always-successful-here) return value.
@@ -271,11 +272,12 @@ STUB
         ghcr.io/wiki-mod/lancache-ng/ui:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/dhcp:pr-715-sha-abcdef0 \
         ghcr.io/wiki-mod/lancache-ng/dhcp-proxy:pr-715-sha-abcdef0 \
-        ghcr.io/wiki-mod/lancache-ng/ntp:pr-715-sha-abcdef0)"
+        ghcr.io/wiki-mod/lancache-ng/ntp:pr-715-sha-abcdef0 \
+        ghcr.io/wiki-mod/lancache-ng/syslog:pr-715-sha-abcdef0)"
     export EXISTING_IMAGES
     export WORKFLOW_CHANGED="true"
     export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
-    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false" SYSLOG_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
     # Only build-tools is back-filled.
@@ -547,9 +549,10 @@ STUB
     export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
     run bash "$script"
     [ "$status" -eq 0 ]
-    # #1296: eight full-setup services now, not five (dhcp/dhcp-proxy joined
-    # first, ntp completes the 3-of-3 this issue asked for).
-    [ "$(wc -l < "$backfill_log")" -eq 8 ]
+    # #1296: eight full-setup services (dhcp/dhcp-proxy joined first, ntp
+    # completed the 3-of-3 that issue asked for); #1428 then added syslog as
+    # a ninth.
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
 }
 
 @test "#808: BASE_SHA is required -- an omitted BASE_SHA fails closed instead of silently skipping the freshness check" {
@@ -606,7 +609,7 @@ STUB
     run bash "$script"
     [ "$status" -eq 0 ]
     script_output="$output"
-    [ "$(wc -l < "$backfill_log")" -eq 8 ]
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
     grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${older_sha:0:7}" "$backfill_log"
     printf '%s\n' "$script_output" | grep -q "PREDATES base commit"
     printf '%s\n' "$script_output" | grep -q "Schritt 4 retag-unchanged-image path"
@@ -671,9 +674,9 @@ STUB
     # Captured immediately, before any further `run` calls below overwrite
     # bats' shared $output/$status -- see the SC2314 comment a few lines down.
     script_output="$output"
-    # All eight services back-filled, every one from ancestor2's tag, never
+    # All nine services back-filled, every one from ancestor2's tag, never
     # from base_sha's or older_sha's.
-    [ "$(wc -l < "$backfill_log")" -eq 8 ]
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
     grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${ancestor2_sha:0:7}" "$backfill_log"
     # SC2314: a bare `!` never triggers Bats' own failure detection unless it
     # happens to be the test's last statement -- `run !` (Bats >= 1.5.0, this

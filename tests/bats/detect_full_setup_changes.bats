@@ -59,6 +59,15 @@ val() {
     [ "$(val should_run)" = "true" ]
 }
 
+@test "syslog change: syslog touched, should_run true, docs_only false (#1428)" {
+    run_detect "services/syslog/entrypoint.sh"
+    [ "$status" -eq 0 ]
+    [ "$(val syslog)" = "true" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val should_run)" = "true" ]
+    [ "$(val docs_only)" = "false" ]
+}
+
 @test "this deep workflow itself runs the suite but does NOT force the staging guard" {
     # A change to this file must run the suite (should_run) yet leave workflow
     # false: build-push does not rebuild services for it, so forcing the

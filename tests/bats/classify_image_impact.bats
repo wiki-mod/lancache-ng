@@ -67,6 +67,17 @@ val() {
     [ "$(val dhcp)" = "false" ]
 }
 
+# #1428: syslog is the combined fluent-bit+syslog-ng first-party image wired
+# into the build matrix by this issue. Mirrors the independence check above
+# for the other per-service booleans.
+@test "syslog change: syslog true, other service flags stay false" {
+    run_classify "services/syslog/entrypoint.sh"
+    [ "$(val syslog)" = "true" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val watchdog)" = "false" ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+}
+
 @test "build-tools change: build_tools true" {
     run_classify "tools/build-tools/Dockerfile"
     [ "$(val build_tools)" = "true" ]
@@ -199,6 +210,7 @@ val() {
     [ "$(val dhcp)" = "true" ]
     [ "$(val dhcp_proxy)" = "true" ]
     [ "$(val build_tools)" = "true" ]
+    [ "$(val syslog)" = "true" ]
     [ "$(val workflow)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
