@@ -439,7 +439,7 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-Everything runs in Docker containers based on Debian 13 (Trixie) images.
+Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, and (as of this migration) `services/dns` run on Alpine (issues #815/#1234/#1346); `services/proxy`, `services/ntp`, and `services/ui` still run on Debian 13 (Trixie) images as of this writing. `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice. See issue #815 for the full per-service OS evaluation and remaining migration status.
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports

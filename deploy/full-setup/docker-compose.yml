@@ -92,7 +92,28 @@ services:
         ipv4_address: ${VALIDATION_STANDARD_SHIM_IP:-172.30.99.10}
     depends_on:
       - proxy
-    restart: unless-stopped
+    # Deliberately NOT "unless-stopped" like every other service in this file
+    # (issue #1095, 2026-08-05 multi-day container-leak finding): this is
+    # profile-gated, per-run, throwaway CI validation infrastructure with no
+    # legitimate reason to outlive the job that started it -- the ONLY caller
+    # is ssl-mitm-cache-simulation.sh's own `docker compose up ...
+    # standard-passthrough-shim` invocation for one job's duration. Worse, a
+    # restart policy actively defeats this project's own runner-host leak
+    # detector (tools/runner-host/lancache-ci-cleanup.sh's
+    # reap_orphaned_running_containers): confirmed live on runner host .240
+    # (2026-08-05) -- three of this exact service's containers, created
+    # 2026-08-03, survived a host reboot because Docker's restart manager
+    # brings back any "unless-stopped" container on daemon startup, which
+    # resets `docker inspect .State.StartedAt` to the reboot time. The
+    # cleanup script's age check ran on that same fresh StartedAt and saw a
+    # ~1-minute-old container instead of the true ~2-day-old one, so the
+    # 2-hour reap threshold never tripped, for every daily run since. Explicit
+    # `"no"` (quoted -- bare `no` parses as the YAML boolean `false`, not the
+    # string Compose's restart field expects) removes both problems at the
+    # source: a crashed/killed shim just stays exited, visible to `docker ps
+    # -a`/`docker container prune` and to a human, instead of silently
+    # resurrecting itself with a falsified age signal.
+    restart: "no"
     healthcheck:
       # nc -z: same "prove a real listener is up" check nats' own healthcheck
       # below uses (both are alpine-family images with busybox nc built in).
