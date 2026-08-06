@@ -96,7 +96,7 @@ This matrix maps the hard rules defined below to how they are currently enforced
 | AG-KD-004 | nginx instead of Squid: reads `Host`/`$ssl_server_name` directly rather than needing iptables DNAT + `SO_ORIGINAL_DST`, which a DNS-spoof scenario (no real DNAT) cannot provide | Code review (`services/proxy` architecture inspection) |
 | AG-KD-005 | Pre-generated per-domain wildcard certs, incl. the leading-dot-vs-bare-exact-host deeper-cert threshold, fixed placeholder CN, and SHA-256-hashed filenames for deeper entries | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
 | AG-KD-006 | `proxy_cache_lock on` (only one nginx worker fetches a cache-miss URL at a time) | Code review (nginx config inspection) |
-| AG-KD-007 | nginx installed from nginx.org's mainline apt repo (statically-compiled stream module, no `load_module` directive), not Debian's own `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
+| AG-KD-007 | nginx installed from nginx.org's own mainline package repository (statically-compiled stream module, no `load_module` directive), never the base OS's own distro `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
 | AG-KD-008 | No separate dev deployment profile — `deploy/prod/` is the only profile; do not reintroduce a parallel `deploy/dev/`/`config/dev/` pair | Manual review (repo inspection — no second deployment profile exists) |
 | AG-KD-009 | `build-tools` stays Debian-based (`rust:latest`/`golang:latest`), not migrated to Alpine/musl; `trixie-backports` is pinned in project-wide for current tooling; Ubuntu or another actively-current Debian derivative may be reconsidered for this image specifically if Debian's package currency becomes a real blocker | Manual review (`tools/build-tools/Dockerfile` inspection) |
 | AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
@@ -449,7 +449,7 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, and (as of this migration) `services/proxy` run on Alpine (issues #815/#1234/#1345/#1346); only `services/ui` still runs on a Debian 13 (Trixie) image as of this writing. `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice. See issue #815 for the full per-service OS evaluation and remaining migration status.
+Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy` (as of this migration), and `services/ui` (landed in a sibling PR while this one was in flight -- confirmed live against `services/ui/Dockerfile`'s current `FROM` line) all run on Alpine (issue #815's staged migration, now complete for every runtime service). `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice -- it is the only first-party image left on Debian. See issue #815 for the full per-service OS evaluation history.
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
