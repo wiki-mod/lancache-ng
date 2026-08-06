@@ -492,24 +492,32 @@ _load_public_suffix_list
 # fails, even though DNS resolution and standard-mode (SNI-passthrough, no
 # cert involved) both work fine.
 #
-# KNOWN LIMITATION (issue #1322): this only ever adds ONE extra label of
-# wildcard depth per leading-dot entry. A leading-dot entry's real DNS-side
-# match scope is arbitrary depth (services/dns/entrypoint.sh's RPZ generation
-# spoofs every subdomain of it, at any depth), but no static, pre-generated
-# X.509 cert scheme can match that: a client two or more labels below the
-# entry (e.g. "a.b.cdn.ea.com" under a ".cdn.ea.com" entry) still fails TLS
-# hostname verification. Mitigation that works today: add the specific
-# deeper level as its own leading-dot entry (e.g. ".b.cdn.ea.com") -- nginx's
-# hostnames map picks the more specific of two matching wildcard keys, so
-# the new, more specific cert wins for that level. This does not generalize
-# to arbitrary depth; the same gap recurs one level further for a CDN that
-# genuinely serves from unpredictable subdomain depths. Fully closing this
-# needs dynamic per-SNI certificate issuance at handshake time, a materially
-# different architecture than this pre-generated-cert design (see AGENTS.md's
-# AG-KD-005 -- corrected 2026-08-05, issue #1391 doc-sweep audit: this used to
-# cite CLAUDE.md's "Pre-generated wildcard certs" decision, which moved to
-# AGENTS.md on 2026-07-31) -- a maintainer decision, not a
-# fix reachable here. STATUS: as of 2026-07-30, unresolved; see issue #1322.
+# FORMER KNOWN LIMITATION (issue #1322), narrowed by #1276's stream-level
+# SNI depth-dispatch fix (see "2a." below): this only ever adds ONE extra
+# label of wildcard depth per leading-dot entry. A leading-dot entry's real
+# DNS-side match scope is arbitrary depth (services/dns/entrypoint.sh's RPZ
+# generation spoofs every subdomain of it, at any depth), but no static,
+# pre-generated X.509 cert scheme can match that: a client two or more
+# labels below the entry (e.g. "a.b.cdn.ea.com" under a ".cdn.ea.com" entry)
+# still cannot get a cert that validates for it. What changed: such a
+# client no longer gets served a mismatched cert and fails outright --
+# "2a." below now routes it to a passthrough relay instead (same
+# uncached, unencrypted-to-us blind-forward mechanism standard mode
+# already uses), so the connection succeeds instead of failing TLS
+# hostname verification. What did NOT change: that traffic still isn't
+# cached or MITM'd at that depth -- only dynamic per-SNI certificate
+# issuance at handshake time (a materially different architecture than
+# this pre-generated-cert design, see AGENTS.md's AG-KD-005 -- corrected
+# 2026-08-05, issue #1391 doc-sweep audit: this used to cite CLAUDE.md's
+# "Pre-generated wildcard certs" decision, which moved to AGENTS.md on
+# 2026-07-31) would close that residual gap, and that remains a
+# separate, not-yet-scoped architecture question. The operator mitigation
+# (add the specific deeper level as its own leading-dot entry, e.g.
+# ".b.cdn.ea.com", to get real MITM/caching for that one additional level)
+# still works exactly as before and still does not generalize to
+# unbounded depth. STATUS: connectivity gap closed 2026-08-05 (#1276);
+# caching-at-arbitrary-depth remains open, no longer tracked under #1322
+# (closed as consolidated, see #1276's own comment thread).
 #
 # Multiple DNS entries commonly derive the
 # same root (e.g. drivers.amd.com and pat.downloads.amd.com both derive
@@ -523,6 +531,17 @@ declare -a _EXTRA_WILDCARD_BASES=()
 declare -A _SEEN_EXTRA_WILDCARD_BASE=()
 declare -a _EXTRA_EXACT_HOSTS=()
 declare -A _SEEN_EXTRA_EXACT_HOST=()
+# root -> 1 whenever that root is ITSELF a leading-dot cdn-domains.txt entry
+# (e.g. ".steamcontent.com", where domain == root already). Unlike a deeper
+# leading-dot entry (_EXTRA_WILDCARD_BASES), this needs no extra cert -- the
+# root's own "*.${root}" wildcard cert already covers one label below it --
+# but it has the exact same residual issue #1322 gap one level further down
+# (services/dns/entrypoint.sh's RPZ generation spoofs arbitrary depth below
+# a leading-dot entry, not just one label), which only the SSL-mode stream
+# dispatch map (see "2a." below) needs to know about. Kept separate from
+# _EXTRA_WILDCARD_BASES rather than folded into it: that array specifically
+# means "needs its own dedicated cert," which a root-level entry does not.
+declare -A _ROOT_HAS_WILDCARD_ENTRY=()
 # Set to 1 by _collect_domain_rows when any cdn-domains.txt row is skipped
 # (invalid entry, or a root domain that could not be derived). A config
 # generated from a domain list with skipped rows can still pass `nginx -t`
@@ -553,6 +572,7 @@ _collect_domain_rows() {
     _SEEN_EXTRA_WILDCARD_BASE=()
     _EXTRA_EXACT_HOSTS=()
     _SEEN_EXTRA_EXACT_HOST=()
+    _ROOT_HAS_WILDCARD_ENTRY=()
     _DOMAIN_ROWS_SKIPPED=0
     local raw_domain domain root is_wildcard_only
 
@@ -606,6 +626,26 @@ _collect_domain_rows() {
                 && [[ -z "${_SEEN_EXTRA_WILDCARD_BASE[$domain]+set}" ]]; then
                 _EXTRA_WILDCARD_BASES+=("$domain")
                 _SEEN_EXTRA_WILDCARD_BASE["$domain"]=1
+            fi
+            # A root-level leading-dot entry (domain == root, e.g.
+            # ".steamcontent.com") needs no extra cert -- the root's own
+            # cert already covers this -- but does need to be flagged for
+            # the SSL-mode dispatch map below (see _ROOT_HAS_WILDCARD_ENTRY's
+            # own declaration comment).
+            #
+            # Deliberately "if ...; then ...; fi", NOT the shorter
+            # "[ cond ] && assignment" idiom used elsewhere in this function:
+            # this is the LAST statement in this branch of the loop body, so
+            # under `set -e`, a bare "&&" whose left side is false (domain
+            # != root) would make this iteration's -- and therefore this
+            # whole while loop's, and therefore _collect_domain_rows'
+            # itself -- exit status non-zero, silently killing the entire
+            # entrypoint at its own bare top-level "_collect_domain_rows"
+            # call site with zero output. An explicit "if" with no "else"
+            # always returns 0 when its condition is false, so it can't leak
+            # a false exit status out of the loop this way.
+            if [ "$domain" = "$root" ]; then
+                _ROOT_HAS_WILDCARD_ENTRY["$root"]=1
             fi
         else
             # A bare entry's matched host IS the entry text itself -- needs
@@ -678,6 +718,22 @@ export NGINX_UPSTREAM_RESOLVER PROXY_SECURITY_MODE PROXY_ALLOWED_CLIENT_CIDRS
 # breaking the generated map file and failing nginx -t on startup.
 _bounded_cert_name() {
     printf '%s' "${2}:${1}" | sha256sum | cut -c1-32
+}
+
+# _regex_escape_domain <domain>
+# Escapes literal dots for safe use inside an anchored nginx stream map regex
+# key (see "2a." below). _is_valid_domain_label restricts every label to
+# [a-z0-9-], so "." is the only regex-metacharacter a validated domain can
+# contain. Uses an intermediate variable for the replacement text rather
+# than "${d//./\\.}" directly -- confirmed live in bash that the inline form
+# silently drops the backslash in this project's shell (produces an
+# unescaped "." that would still parse as a valid regex, just matching any
+# character instead of a literal dot -- a real, silent correctness bug, not
+# a syntax error, so it would not have failed loudly).
+_regex_escape_domain() {
+    local d="$1"
+    local esc_dot='\.'
+    printf '%s' "${d//./$esc_dot}"
 }
 
 # ────────────────────────────────────────────────────────────────────────────
@@ -1006,9 +1062,161 @@ mkdir -p /etc/nginx/stream.d
 } > "$STREAM_TARGET_FILE"
 
 # ────────────────────────────────────────────────────────────────────────────
+# 2a. SSL mode: stream-level SNI depth-dispatch (issues #1276/#1322)
+#
+# A leading-dot cdn-domains.txt entry DNS-spoofs arbitrary depth below it
+# (services/dns/entrypoint.sh's RPZ generation, #1072), but a pre-generated
+# X.509 wildcard cert only ever covers exactly one label of depth (RFC
+# 6125) -- a client two or more labels below such an entry got served a
+# certificate that does not validate for its SNI, and the connection failed
+# even though DNS resolution worked (#1322). Fix: an outer stream-level
+# dispatcher reads the SNI via ssl_preread (before any TLS termination) and
+# routes to one of two internal relays depending on whether that exact
+# depth is covered by a real generated cert -- covered goes to the MITM
+# relay (real cert, cache path), uncovered-but-still-DNS-spoofed goes to
+# the passthrough relay (blind-forward, same mechanism standard mode
+# already uses for any host it doesn't recognize).
+#
+# Two relays, not one, and both required even though only the MITM branch
+# needed fixing: proxy_protocol (used to preserve the real client IP across
+# the stream-level hop -- see below) applies per stream server block, not
+# per destination within one block. A single new relay dedicated to only
+# the MITM branch would still leave the outer dispatcher itself making an
+# un-tagged connection to whichever backend $ssl_dispatch_backend picked --
+# confirmed live: the relay saw 127.0.0.1, not the real client, regardless
+# of what was configured on the relay end alone. Enabling proxy_protocol
+# directly on the outer dispatcher applies to BOTH branches uniformly (it
+# is per-block, not per-destination) -- correct for the MITM relay, but
+# would corrupt the raw TLS bytes nginx forwards to a real, unmodified
+# external CDN origin on the passthrough branch. Routing both branches
+# through their own dedicated internal relay first resolves this: the
+# passthrough relay accepts the PROXY-protocol-tagged connection from the
+# dispatcher, re-reads the SNI itself, and forwards the raw TLS bytes
+# onward unmodified -- passthrough itself stays structurally untouched.
+#
+# Uses regex-anchored map keys, NOT nginx's "hostnames" mode: hostnames
+# mode's "*.base" wildcard form matches *any* depth below base, not one
+# label -- confirmed live even against this file's own unmodified
+# $ssl_cert_name map above. A naive port of that map into this dispatcher
+# would silently reproduce the exact bug this section fixes. Regex keys
+# instead express the real one-label RFC 6125 boundary precisely: "exactly
+# one label below a covered base" routes to the MITM relay (matches that
+# base's own generated cert, see "2." above); "two or more labels below"
+# routes to the passthrough relay instead of a mismatched cert the client
+# would reject anyway. Mirrors _UNIQUE_DOMAINS/_DOMAIN_IS_ROOT/
+# _EXTRA_WILDCARD_BASES/_EXTRA_EXACT_HOSTS/_ROOT_HAS_WILDCARD_ENTRY --
+# the exact same coverage "2."'s $ssl_cert_name generation already computed
+# above -- rather than re-deriving it independently, so the two can never
+# drift apart as cdn-domains.txt changes.
+#
+# Ordering note: nginx's stream map picks the FIRST matching regex in file
+# order, not the most specific one (unlike "hostnames" mode's longest-match
+# behavior). A shallower base's "two or more labels below" catch-all could
+# otherwise shadow a deeper, more specific base's own "one label below"
+# entry (e.g. an operator-added ".b.cdn.ea.com" nested under an existing
+# ".cdn.ea.com" entry -- the documented per-level mitigation for this exact
+# gap). Sorting every wildcard base by string length, longest (deepest,
+# most specific) first, and emitting each base's own pair of entries
+# together, guarantees a deeper base's entries are always checked before a
+# shallower base's catch-all could shadow them -- verified with a
+# three-level nested simulation before being written here.
+#
+# Internal-only relay/listener ports below are not operator-configurable:
+# pure internal wiring between this container's own nginx processes, all
+# bound to 127.0.0.1 only. Keep these literals in sync with
+# conf.d/https.conf's two `listen` lines (8444 via the relay, 8445 plain for
+# the Compose healthcheck) and deploy/prod/docker-compose.yml's healthcheck
+# if ever changed.
+# ────────────────────────────────────────────────────────────────────────────
+SSL_DISPATCH_MAP_FILE="/etc/nginx/stream.d/01-ssl-dispatch.conf"
+SSL_DISPATCH_MITM_RELAY_PORT=9445
+SSL_DISPATCH_PASSTHROUGH_RELAY_PORT=9446
+SSL_MITM_INTERNAL_PORT=8444
+
+if [ "${SSL_ENABLED}" = "1" ]; then
+    declare -a _wildcard_bases=("${_EXTRA_WILDCARD_BASES[@]}")
+    for _root in "${_UNIQUE_DOMAINS[@]}"; do
+        [[ -n "${_ROOT_HAS_WILDCARD_ENTRY[$_root]+set}" ]] && _wildcard_bases+=("$_root")
+    done
+    declare -a _sorted_wildcard_bases=()
+    if [ "${#_wildcard_bases[@]}" -gt 0 ]; then
+        mapfile -t _sorted_wildcard_bases < <(
+            printf '%s\n' "${_wildcard_bases[@]}" | awk '{ print length, $0 }' | sort -rn -k1,1 | cut -d' ' -f2-
+        )
+    fi
+
+    {
+        echo "# Auto-generated by entrypoint — do not edit"
+        echo "map \$ssl_preread_server_name \$ssl_dispatch_backend {"
+        for domain in "${_UNIQUE_DOMAINS[@]}"; do
+            # Bare root itself always goes to MITM (its own cert's bare
+            # DNS: SAN entry). Its "one label below" regex is skipped here
+            # when the root is ALSO wildcard-flagged -- that pair is
+            # emitted together with its "two or more labels" counterpart in
+            # the sorted-bases loop below instead, to avoid a duplicate map
+            # key (nginx rejects those outright at "nginx -t" time).
+            printf "    %-45s 127.0.0.1:%s;\n" "$domain" "$SSL_DISPATCH_MITM_RELAY_PORT"
+            if [[ -z "${_ROOT_HAS_WILDCARD_ENTRY[$domain]+set}" ]]; then
+                one_level_key="\"~^[^.]+\\.$(_regex_escape_domain "$domain")\$\""
+                printf "    %-45s 127.0.0.1:%s;\n" "$one_level_key" "$SSL_DISPATCH_MITM_RELAY_PORT"
+            fi
+        done
+        for domain in "${_EXTRA_EXACT_HOSTS[@]}"; do
+            printf "    %-45s 127.0.0.1:%s;\n" "$domain" "$SSL_DISPATCH_MITM_RELAY_PORT"
+        done
+        for domain in "${_sorted_wildcard_bases[@]}"; do
+            escaped="$(_regex_escape_domain "$domain")"
+            one_level_key="\"~^[^.]+\\.${escaped}\$\""
+            deeper_key="\"~^.+\\.${escaped}\$\""
+            printf "    %-45s 127.0.0.1:%s;\n" "$one_level_key" "$SSL_DISPATCH_MITM_RELAY_PORT"
+            printf "    %-45s 127.0.0.1:%s;\n" "$deeper_key" "$SSL_DISPATCH_PASSTHROUGH_RELAY_PORT"
+        done
+        if [ "$PROXY_SECURITY_MODE" = "strict" ]; then
+            echo "    default 127.0.0.1:9;"
+        else
+            printf "    default 127.0.0.1:%s;\n" "$SSL_DISPATCH_PASSTHROUGH_RELAY_PORT"
+        fi
+        echo "}"
+        echo ""
+        echo "server {"
+        echo "    listen 443;"
+        echo "    listen [::]:443;"
+        echo "    ssl_preread on;"
+        echo "    proxy_pass \$ssl_dispatch_backend;"
+        echo "    proxy_protocol on;"
+        echo "    proxy_connect_timeout 30s;"
+        echo "    proxy_timeout        3600s;"
+        echo "}"
+        echo ""
+        echo "server {"
+        printf "    listen 127.0.0.1:%s proxy_protocol;\n" "$SSL_DISPATCH_MITM_RELAY_PORT"
+        echo "    set_real_ip_from 127.0.0.1;"
+        echo "    proxy_protocol on;"
+        printf "    proxy_pass 127.0.0.1:%s;\n" "$SSL_MITM_INTERNAL_PORT"
+        echo "    proxy_connect_timeout 30s;"
+        echo "    proxy_timeout        3600s;"
+        echo "}"
+        echo ""
+        echo "server {"
+        printf "    listen 127.0.0.1:%s proxy_protocol;\n" "$SSL_DISPATCH_PASSTHROUGH_RELAY_PORT"
+        echo "    set_real_ip_from 127.0.0.1;"
+        echo "    ssl_preread on;"
+        echo "    proxy_pass \$ssl_preread_server_name:443;"
+        echo "    proxy_connect_timeout 30s;"
+        echo "    proxy_timeout        3600s;"
+        echo "}"
+    } > "$SSL_DISPATCH_MAP_FILE"
+else
+    rm -f "$SSL_DISPATCH_MAP_FILE"
+fi
+
+# ────────────────────────────────────────────────────────────────────────────
 # 3. Remove https.conf when SSL mode is disabled
 #    (Docker routes IP_SSL:443→container:443 and IP_STANDARD:443→container:8443,
 #    so https.conf can safely listen on 0.0.0.0:443 — only SSL clients reach it)
+#    Since #1276/#1322: IP_SSL:443 now reaches the stream-level SNI dispatch
+#    listener above instead, which itself only exists when SSL_ENABLED=1 --
+#    see "2a." above.
 # ────────────────────────────────────────────────────────────────────────────
 if [ "${SSL_ENABLED}" = "0" ]; then
     rm -f /etc/nginx/conf.d/https.conf

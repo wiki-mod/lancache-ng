@@ -121,21 +121,58 @@ handshake() {
         "$build_tools_image" bash -c \
         "timeout 10 openssl s_client -connect ${container}:443 -servername ${sni} -CAfile /ca.crt -verify_hostname ${sni} -verify_return_error < /dev/null 2>&1" || true)"
 
-    if [[ "$expect" == "ok" ]]; then
-        if ! grep -q '^Verify return code: 0 (ok)' <<<"$out"; then
-            echo "::error::Expected a successful, hostname-verified TLS handshake for SNI '$sni' against $container, but it did not succeed. Full openssl output:" >&2
-            echo "$out" >&2
-            return 1
-        fi
-        echo "OK: SNI '$sni' against $container handshakes and verifies cleanly (chain + hostname)."
-    else
-        if ! grep -q 'hostname mismatch' <<<"$out"; then
-            echo "::error::Expected SNI '$sni' against $container to fail with a hostname mismatch (documenting the known single-label wildcard SAN limitation), but it did not. Full openssl output:" >&2
-            echo "$out" >&2
-            return 1
-        fi
-        echo "EXPECTED MISMATCH: SNI '$sni' against $container correctly fails hostname verification (RFC 6125 single-label wildcard SAN limitation)."
+    if [[ "$expect" != "ok" ]]; then
+        echo "::error::handshake() only supports expect=ok now -- see dispatch_routes_to_passthrough() for the depth>1 case." >&2
+        return 1
     fi
+    if ! grep -q '^Verify return code: 0 (ok)' <<<"$out"; then
+        echo "::error::Expected a successful, hostname-verified TLS handshake for SNI '$sni' against $container, but it did not succeed. Full openssl output:" >&2
+        echo "$out" >&2
+        return 1
+    fi
+    echo "OK: SNI '$sni' against $container handshakes and verifies cleanly (chain + hostname)."
+}
+
+# dispatch_routes_to_passthrough <container> <sni>
+# Since #1276/#1322's stream-level SNI depth-dispatch fix, a depth>1 SNI
+# below a leading-dot entry is no longer expected to reach this MITM cert
+# path at all (previously this script asserted a live "hostname mismatch"
+# handshake here, documenting the pre-fix behavior). It's now routed to the
+# passthrough relay instead (services/proxy/entrypoint.sh's "2a."), which
+# has no live backend in THIS script's synthetic fixtures -- verified here
+# via the generated dispatch map's own content instead of a live handshake
+# (a live, real-backend proof of the passthrough path itself lives in
+# scripts/proxy-ssl-mode-two-relay-dispatch-simulation.sh). Fails loudly if
+# the map does not route <sni> to the passthrough relay port (9446).
+dispatch_routes_to_passthrough() {
+    local container="$1" sni="$2"
+    local map
+    map="$(docker exec "$container" cat /etc/nginx/stream.d/01-ssl-dispatch.conf)"
+    local matched_port=""
+    # Deliberately default IFS here (word-splitting into "pattern port"),
+    # NOT "IFS= read" -- this reads two whitespace-separated fields per
+    # line, not one whole-line value; "IFS=" would leave $port always empty
+    # (confirmed live: an earlier version of this helper used "IFS= read"
+    # copied from a different read idiom elsewhere in this codebase, and
+    # silently never matched anything as a result).
+    while read -r pattern port; do
+        [[ -z "$pattern" ]] && continue
+        # Strip the map's own quoting/anchoring to get a plain grep -P regex.
+        local bare="${pattern#\"}"
+        bare="${bare%\"}"
+        bare="${bare#\~}"
+        if echo "$sni" | grep -Pq "$bare"; then
+            matched_port="$port"
+            break
+        fi
+    done < <(grep -oE '"[^"]+"[[:space:]]+127\.0\.0\.1:[0-9]+' <<<"$map" | sed -E 's/^"([^"]+)"[[:space:]]+127\.0\.0\.1:([0-9]+)/\1 \2/')
+
+    if [[ "$matched_port" != "9446" ]]; then
+        echo "::error::Expected SNI '$sni' to route to the passthrough relay (127.0.0.1:9446) in the generated dispatch map, but matched port '${matched_port:-<none>}'. Full map:" >&2
+        echo "$map" >&2
+        return 1
+    fi
+    echo "OK: SNI '$sni' routes to the passthrough relay (127.0.0.1:9446) in the generated dispatch map -- no static cert covers this depth, so it correctly no longer reaches this MITM path at all (fixed depth>1 connectivity gap, #1276/#1322)."
 }
 
 # wait_for_tls <container>
@@ -190,8 +227,8 @@ echo "OK: deep wildcard cert subject is the fixed placeholder ($default_subject)
 echo "== depth-1 SNI (one label below the leading-dot entry) must handshake and verify cleanly =="
 handshake "$container_a" "x.deep.example.com" "ok" "$work_dir/ca-a.crt"
 
-echo "== depth-2 SNI (two labels below the leading-dot entry) must currently fail hostname verification (documented RFC 6125 limitation, not a bug this PR introduces) =="
-handshake "$container_a" "a.b.deep.example.com" "mismatch" "$work_dir/ca-a.crt"
+echo "== depth-2 SNI (two labels below the leading-dot entry) is routed to the passthrough relay, not this MITM cert path (fixed connectivity gap, #1276/#1322 -- previously reached this path anyway with a mismatched cert) =="
+dispatch_routes_to_passthrough "$container_a" "a.b.deep.example.com"
 
 docker rm -f "$container_a" >/dev/null 2>&1
 
@@ -203,7 +240,7 @@ docker cp "$container_b:/etc/nginx/ssl/ca/ca.crt" "$work_dir/ca-b.crt"
 echo "== depth-2 SNI now succeeds once the operator lists that specific deeper level explicitly (the real, working mitigation path) =="
 handshake "$container_b" "a.b.deep.example.com" "ok" "$work_dir/ca-b.crt"
 
-echo "== depth-3 SNI still fails -- confirms the limitation is inherent to single-label X.509 wildcard matching (RFC 6125), not something one extra cdn-domains.txt entry permanently closes =="
-handshake "$container_b" "c.a.b.deep.example.com" "mismatch" "$work_dir/ca-b.crt"
+echo "== depth-3 SNI is routed to the passthrough relay -- confirms the single-label X.509 wildcard limitation (RFC 6125) is inherent and not something one extra cdn-domains.txt entry permanently closes, but also confirms it no longer breaks the connection outright (#1276/#1322) =="
+dispatch_routes_to_passthrough "$container_b" "c.a.b.deep.example.com"
 
-echo "proxy-deep-wildcard-tls-simulation passed: strict-mode wildcard-base routing, fixed placeholder CN, real depth-1 TLS handshake through the generated cert-selection map, and the documented depth>1 limitation (and its working per-entry mitigation) all verified against a real proxy image and real nginx."
+echo "proxy-deep-wildcard-tls-simulation passed: strict-mode wildcard-base routing, fixed placeholder CN, real depth-1 TLS handshakes through the generated cert-selection map (including the per-entry mitigation path), and correct passthrough-relay dispatch for every depth beyond what a static cert can cover -- all verified against a real proxy image and real nginx."
