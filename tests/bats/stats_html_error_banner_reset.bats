@@ -21,7 +21,7 @@ STATS_HTML="services/ui/src/templates/stats.html"
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    cd "$repo_root"
+    cd "$repo_root" || exit
 }
 
 @test "stats.html declares errorShown as a mutable flag starting false" {

@@ -19,7 +19,7 @@ DASHBOARD_HTML="services/ui/src/templates/dashboard.html"
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    cd "$repo_root"
+    cd "$repo_root" || exit
 }
 
 @test "dashboard.html labels the Recent requests tile's source only when syslog_enabled" {
