@@ -190,6 +190,15 @@ if [ "$(id -u)" = "0" ]; then
     if secret_is_placeholder "$_ui_pdns_cfg"; then _ui_pdns_cfg=""; fi
     _ui_resolve_or_die PDNS_API_KEY pdns-api-key "$_ui_pdns_cfg" lancache_gen_hex32
 
+    # Bug hunt #849, observability.md finding #3: NETDATA_ALARM_TOKEN gates
+    # POST /api/netdata-alarms (routes/netdata_alarms.rs). Resolved against
+    # the same netdata-alarm-token shared file the netdata container's
+    # compose command block resolves (deploy/*/docker-compose.yml), so both
+    # sides agree on one value without either hardcoding it.
+    _ui_netdata_alarm_cfg="${NETDATA_ALARM_TOKEN:-}"
+    if secret_is_placeholder "$_ui_netdata_alarm_cfg"; then _ui_netdata_alarm_cfg=""; fi
+    _ui_resolve_or_die NETDATA_ALARM_TOKEN netdata-alarm-token "$_ui_netdata_alarm_cfg" lancache_gen_hex32
+
     # DHCP_API_TOKEN mirrors the shared KEA_CTRL_TOKEN (the compose default already
     # falls DHCP_API_TOKEN back to KEA_CTRL_TOKEN); resolve it against the same
     # kea-ctrl-token shared file the dhcp container uses. An explicit non-placeholder

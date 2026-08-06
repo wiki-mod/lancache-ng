@@ -738,6 +738,21 @@ one) rather than being a given.
   (green/yellow/red) plus a cache-disk usage indicator, persistently visible
   in the dashboard's "Service health" card, live-polled every 10 seconds
   (issue #870; see the "Status" note under Watchdog above)
+- Netdata alarm forwarding (bug hunt #849, `docs/bug-hunt/observability.md`
+  finding #3): the `netdata` container's own `health.d` alarms (disk usage,
+  CPU, memory, ...) previously had no notification integration or Admin UI
+  surface of their own. The `netdata:` service's compose command block now
+  configures Netdata's `custom_sender()` alarm-notify mechanism to POST each
+  alarm event to the Admin UI's `POST /api/netdata-alarms`
+  (`services/ui/src/routes/netdata_alarms.rs`), gated by a shared
+  `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern, same as
+  `PDNS_API_KEY`). The dashboard's "Netdata alarms" card
+  (`services/ui/src/netdata_alarms.rs`) shows the most recent alarms
+  server-rendered, not live-polled — an alarm is a discrete event, not a
+  continuously-changing gauge. This forwards alarm *events* only; Netdata's
+  full metrics dashboard (port 19999) remains unpublished, so deep
+  investigation of a forwarded alarm still needs direct Netdata access (see
+  `docs/threat-model.md`'s T9 for the residual-risk framing).
 
 ## Admin UI
 

@@ -147,6 +147,19 @@ pub struct Config {
     // comment for why dns-ssl isn't wired up here yet.
     pub dns_rollback_url: String,
     pub pdns_api_key: String,
+    // Shared secret (issue #858) gating POST /api/netdata-alarms (bug hunt
+    // #849, observability.md finding #3) -- see
+    // routes/netdata_alarms.rs::alarm_token_is_valid for the constant-time
+    // comparison and fail-closed-on-empty behavior this value feeds, and
+    // deploy/*/docker-compose.yml's netdata service for how the netdata
+    // container resolves the identical value.
+    pub netdata_alarm_token: String,
+    // Where netdata_alarms::append_alarm/read_alarms persist the received
+    // alarm history. Defaults into the ui service's existing `ui-data`
+    // volume (already mounted at /data, see deploy/*/docker-compose.yml's
+    // ui service) rather than a new named volume -- AG-WF-013: no new state
+    // surface needed when an existing mount already covers it.
+    pub netdata_alarms_file: String,
     pub nats_url: String,
     // Issue #866: nats_url above is correct for every *internal* NATS client
     // in this deployment -- this container's own connection (main.rs),
@@ -369,6 +382,8 @@ impl fmt::Debug for Config {
             .field("pdns_rec_url", &self.pdns_rec_url)
             .field("dns_rollback_url", &self.dns_rollback_url)
             .field("pdns_api_key", &"***REDACTED***")
+            .field("netdata_alarm_token", &"***REDACTED***")
+            .field("netdata_alarms_file", &self.netdata_alarms_file)
             .field("nats_url", &self.nats_url)
             .field("nats_bind_ip", &self.nats_bind_ip)
             .field("nats_advertise_url", &self.nats_advertise_url)
@@ -858,6 +873,8 @@ impl Config {
             pdns_rec_url: env_str("PDNS_REC_URL", "http://dns-standard:8082"),
             dns_rollback_url: env_str("DNS_ROLLBACK_URL", "http://dns-standard:8083"),
             pdns_api_key: env_str("PDNS_API_KEY", ""),
+            netdata_alarm_token: env_str("NETDATA_ALARM_TOKEN", ""),
+            netdata_alarms_file: env_str("NETDATA_ALARMS_FILE", "/data/netdata-alarms.json"),
             nats_url: env_str("NATS_URL", "nats://nats:4222"),
             // Issue #866: no defaults for either -- an unset value must mean
             // "not configured", not a placeholder that could quietly stand

@@ -11,6 +11,7 @@ pub mod dhcp;
 pub mod dns_snapshots;
 pub mod domains;
 pub mod logs;
+pub mod netdata_alarms;
 pub mod netdata_proxy;
 pub mod ntp;
 pub mod secondaries;
