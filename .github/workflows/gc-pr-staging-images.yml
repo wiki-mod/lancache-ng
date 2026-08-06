@@ -190,3 +190,4 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash scripts/gc-pr-staging-images.sh
+

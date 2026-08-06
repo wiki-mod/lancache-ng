@@ -45,7 +45,17 @@ repo="wiki-mod/lancache-ng"
 # touching them still gets a staging tag pushed (see #626's build-job
 # change), so they need reaping too. build-tools is included: full-setup-
 # validate's client-simulation step pulls it at the PR staging tag as well.
-services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
+# syslog added while this PR was in progress (merged in from current_dev,
+# #1428/#1431's fluent-bit+syslog-ng combined container): it is a real entry
+# in build-push.yml's own build/build-arm64 matrix like every other service
+# here, so scripts/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY
+# entry for this file (equal to the FULL canonical set, not a subset) would
+# fail this file the moment syslog landed in the matrix without this array
+# following it -- this is that follow-along update, done as part of merging
+# current_dev's own unrelated syslog-matrix-array fix (which had updated the
+# OLD inline copy of this array, in .github/workflows/gc-pr-staging-images.
+# yml itself, before this PR moved it here) into this branch.
+services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
 
 # Bounded, PER-SERVICE (not global) reaper cap: a single global cap shared
 # across services in a fixed iteration order would let the first service in
