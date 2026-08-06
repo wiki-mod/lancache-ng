@@ -82,6 +82,67 @@ STUB
     [ "$(cat "$nginx_conf")" = "BROKEN config" ]
 }
 
+# The real entrypoint.sh call site passes multiple candidate files
+# (PROXY_CANDIDATE_FILES: nginx.conf, proxy-params.conf, the ssl-map, the
+# stream-targets map, and the stream client ACL -- five as of bug-hunt #849's
+# N1 fix), but every test above this point exercises the function with only
+# ONE. This left the multi-file "incomplete snapshot" rejection branch
+# (kgs_snapshot_apply's own "missing at least one candidate file" check)
+# completely untested for the proxy adapter (bug-hunt #849, finding #9's
+# first sub-part).
+@test "a snapshot missing a candidate file (taken before it existed) is rejected during rollback, falling back to an earlier complete snapshot" {
+    params_conf="$live_dir/proxy-params.conf"
+
+    # Snapshot 1: only nginx_conf existed as a candidate at this point (the
+    # real-world shape this mirrors: an older entrypoint.sh version before a
+    # new generated file was added to PROXY_CANDIDATE_FILES).
+    printf 'OK nginx v1\n' > "$nginx_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf"
+    [ "$status" -eq 0 ]
+
+    # Snapshot 2: both files now exist and are both valid -- the current,
+    # complete candidate set.
+    printf 'OK nginx v2\n' > "$nginx_conf"
+    printf 'OK params v2\n' > "$params_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
+    [ "$status" -eq 0 ]
+
+    run kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR"
+    [ "$status" -eq 0 ]
+    [ "$(echo "$output" | wc -l)" -eq 2 ]
+
+    # Both files now go invalid -- rollback must skip snapshot 1 (missing
+    # proxy-params.conf entirely) and select snapshot 2 instead.
+    printf 'BROKEN nginx v3\n' > "$nginx_conf"
+    printf 'BROKEN params v3\n' > "$params_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"rejected known-good snapshot"*"incomplete (missing at least one candidate file)"* ]]
+    [[ "$output" == *"[known-good-snapshot][proxy][SELECT]"* ]]
+
+    [ "$(cat "$nginx_conf")" = "OK nginx v2" ]
+    [ "$(cat "$params_conf")" = "OK params v2" ]
+}
+
+# Contrast case: when the ONLY existing snapshot is incomplete and no
+# earlier complete one exists to fall back to, rollback must refuse to
+# start rather than silently mixing a stale complete file with a newly
+# rolled-back-but-still-missing one.
+@test "an incomplete snapshot with no complete alternative refuses to start" {
+    params_conf="$live_dir/proxy-params.conf"
+
+    printf 'OK nginx v1\n' > "$nginx_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf"
+    [ "$status" -eq 0 ]
+
+    printf 'BROKEN nginx v2\n' > "$nginx_conf"
+    printf 'BROKEN params v2\n' > "$params_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"rejected known-good snapshot"*"incomplete (missing at least one candidate file)"* ]]
+    [[ "$output" == *"no known-good nginx config snapshot is available"* ]]
+}
+
 @test "retention keeps only KEEP_KNOWN_GOOD_CONFIGS snapshots across repeated valid starts" {
     KEEP_KNOWN_GOOD_CONFIGS=2
     for i in 1 2 3 4; do

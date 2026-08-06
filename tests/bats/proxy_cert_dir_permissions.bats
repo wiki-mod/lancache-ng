@@ -1,0 +1,104 @@
+#!/usr/bin/env bats
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Regression tests for services/proxy/entrypoint.sh's _ensure_ca_cert() and
+# _harden_cert_dir(): the ca.key chmod 600 hardening (#1031) and the
+# CERT_DIR chgrp/chmod 2750 hardening. Neither had any test coverage before
+# this file -- #1031's own chmod fix landed with nothing guarding it against
+# a future accidental deletion (bug-hunt #849, finding #9's second
+# sub-part). Uses the real functions (extracted via
+# tests/bats/helpers/proxy-cert-dir-permissions-helpers.sh), a real `openssl
+# req` call, and real `stat`/`chmod`/`chgrp` -- not a reimplementation.
+
+bats_require_minimum_version 1.5.0
+
+setup() {
+    repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    helper_file="$BATS_TEST_TMPDIR/proxy-cert-dir-permissions-helpers.sh"
+
+    # shellcheck source=tests/bats/helpers/proxy-cert-dir-permissions-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/proxy-cert-dir-permissions-helpers.sh"
+    load_proxy_cert_dir_permissions_helpers "$repo_root" "$helper_file"
+
+    CA_DIR="$BATS_TEST_TMPDIR/ca"
+    CERT_DIR="$BATS_TEST_TMPDIR/certs"
+    export CA_DIR CERT_DIR
+}
+
+@test "_ensure_ca_cert generates a fresh CA with a private key that is not world/group-readable" {
+    run _ensure_ca_cert
+    [ "$status" -eq 0 ]
+    [ -f "$CA_DIR/ca.key" ]
+    [ -f "$CA_DIR/ca.crt" ]
+
+    mode="$(stat -c '%a' "$CA_DIR/ca.key")"
+    [ "$mode" = "600" ]
+}
+
+# openssl's own umask-following default (644) is the exact regression #1031
+# fixed once -- this proves the fix is a real chmod, not merely that SOME
+# mode ended up on the file.
+@test "_ensure_ca_cert's ca.key is not left at openssl's umask-following default (644)" {
+    _ensure_ca_cert
+    mode="$(stat -c '%a' "$CA_DIR/ca.key")"
+    [ "$mode" != "644" ]
+}
+
+# Idempotence: a second call against an already-generated CA must be a
+# silent no-op (the real entrypoint calls this unconditionally on every
+# boot, not just first-time setup) and must not touch the existing key's
+# mode a second time either.
+@test "_ensure_ca_cert does nothing when the CA already exists" {
+    _ensure_ca_cert
+    first_key_mtime="$(stat -c '%Y' "$CA_DIR/ca.key")"
+
+    run _ensure_ca_cert
+    [ "$status" -eq 0 ]
+
+    second_key_mtime="$(stat -c '%Y' "$CA_DIR/ca.key")"
+    [ "$first_key_mtime" = "$second_key_mtime" ]
+    mode="$(stat -c '%a' "$CA_DIR/ca.key")"
+    [ "$mode" = "600" ]
+}
+
+@test "_harden_cert_dir creates CERT_DIR with mode 2750 (setgid, owner rwx, group rx, no other access)" {
+    # Use the current process's own real GID: chgrp only needs a group that
+    # actually exists on this host, not specifically the real "nginx" worker
+    # user this runs as in the container -- the mode bits this test checks
+    # are independent of which group was requested.
+    local test_group
+    test_group="$(id -g)"
+
+    run _harden_cert_dir "$test_group"
+    [ "$status" -eq 0 ]
+    [ -d "$CERT_DIR" ]
+
+    mode="$(stat -c '%a' "$CERT_DIR")"
+    [ "$mode" = "2750" ]
+}
+
+@test "_harden_cert_dir chgrps CERT_DIR to the requested group" {
+    local test_group
+    test_group="$(id -g)"
+
+    _harden_cert_dir "$test_group"
+
+    actual_gid="$(stat -c '%g' "$CERT_DIR")"
+    [ "$actual_gid" = "$test_group" ]
+}
+
+# Idempotence, same reasoning as _ensure_ca_cert above: the real entrypoint
+# calls this unconditionally on every boot, and a pre-existing CERT_DIR full
+# of already-issued wildcard certs must not lose its contents.
+@test "_harden_cert_dir is safe to call again against an already-hardened, populated CERT_DIR" {
+    local test_group
+    test_group="$(id -g)"
+    _harden_cert_dir "$test_group"
+    printf 'fake cert bytes' > "$CERT_DIR/example.com.crt"
+
+    run _harden_cert_dir "$test_group"
+    [ "$status" -eq 0 ]
+    [ -f "$CERT_DIR/example.com.crt" ]
+    mode="$(stat -c '%a' "$CERT_DIR")"
+    [ "$mode" = "2750" ]
+}
