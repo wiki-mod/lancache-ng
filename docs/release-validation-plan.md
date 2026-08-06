@@ -177,8 +177,12 @@ as proof of it:**
   `dns_rust_quality`/`ui_rust_quality`, `dns_test`/`ui_test`/`watchdog_test`,
   `dns_cargo_audit`/`ui_cargo_audit`, `shellcheck`, `file-headers`, `validate-compose`
   (incl. the VEX-drift guard), `pr-tracking-metadata-check`, and `container-scan` live.
-- `full-setup-validate.yml` (11 jobs incl. `full-setup-sims` composing the reusable
-  `full-setup-sims.yml`) is **`workflow_dispatch`-only** — it does not run
+- `full-setup-validate.yml` (4 top-level jobs — `full-setup-sims`,
+  `dhcp-proxy-pxe-simulation`, `dhcp-relay-flow-simulation`,
+  `dhcp-kea-ctrl-agent-mutation-simulation`, confirmed directly 2026-08-05, correcting
+  a prior "11 jobs" count that was already stale — `full-setup-sims` itself composes
+  the reusable `full-setup-sims.yml`, which carries a further 12 jobs) is
+  **`workflow_dispatch`-only** — it does not run
   automatically on any PR; confirmed directly (2026-07-24): its `on:` block has no
   `pull_request` trigger at all.
 - `full-setup-deep-validate.yml`'s `pull_request` trigger **does** include
@@ -208,16 +212,19 @@ as proof of it:**
 | Subsystem | What to check | How to check it for real | Pass/fail |
 |---|---|---|---|
 | **DHCP — Kea** | `dhcp_kea_config_generation.bats`/`dhcp_lease_flow_parsing.bats` pass, AND the real Kea Control Agent lease flow works | `bats tests/bats/dhcp_kea_config_generation.bats tests/bats/dhcp_lease_flow_parsing.bats` (build-tools container) for config-gen; `full-setup-validate.yml`'s `dhcp-kea-lease-flow-simulation` job (or `gh workflow run`) for a real DHCPDISCOVER→DHCPACK cycle against Kea, asserting a real lease was granted from the configured pool, not just that the container started | Fail if the bats config-gen tests fail, or if the lease-flow simulation does not show a granted IP from the correct pool |
+| **DHCP — Kea Admin UI mutation + rollback** (added 2026-08-05, issue #1391 audit — previously wired into CI but never referenced in this document) | A static reservation added via the Admin UI (`POST /dhcp/static/add`, issue #634) genuinely affects a subsequent real lease request; the Admin UI's own Kea-rollback route (issue #837) genuinely restores Kea to an earlier real snapshot | `full-setup-validate.yml`'s `dhcp-kea-ctrl-agent-mutation-simulation` job (`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) for the UI-driven mutation proof; `full-setup-deep-validate.yml`'s `dhcp-kea-ui-rollback-simulation` job (`scripts/dhcp-kea-ui-rollback-simulation.sh`) for the UI-driven rollback proof — both already CI-wired, reuse rather than re-derive | Fail if the mutation isn't reflected in a subsequent real lease, or if the post-rollback Kea state doesn't match the earlier snapshot |
 | **DHCP — dnsmasq ProxyDHCP** | `dhcp_proxy_known_good_snapshot.bats`/`dhcp_proxy_optional_directives.bats` pass; PXE-relevant options actually get injected | Same bats files; `full-setup-validate.yml`'s `dhcp-proxy-pxe-simulation` job for a real PXE client boot-option probe | Fail if bats fail or the PXE simulation doesn't observe the expected boot options on the wire |
 | **DHCP — dnsmasq relay** (new, PR #1117) | `dnsmasq-relay` mode genuinely **relays** (not just injects options) between two network segments | `bash scripts/dhcp-relay-flow-simulation.sh` (build-tools container / real Docker host) — this is the exact script #1117 used: two isolated bridges (client-net, server-net), a real `dhclient` DISCOVER on the client-net side, confirms the upstream DHCP server on the separate server-net received the request via the relay's `giaddr` and answered with a lease from the *client subnet's* pool. `tests/bats/setup_dhcp_mode.bats` for the mode-selection/config-render unit coverage | Fail unless the granted lease's subnet matches the client-side pool specifically (proves `giaddr` routing worked, not a coincidental same-subnet fallback) |
 | **DNS — PowerDNS zones/RPZ** | Real DNS resolution (recursor + authoritative), zone writes propagate, RPZ wildcard coverage is correct | `dig` against `dns-standard`/`dns-ssl` for a known CDN domain and a known `.lan` record — `ping`/`ss` are explicitly **not** acceptable substitutes (`AG-VAL-019`/`AG-VAL-020`). `tests/bats/dns_zone_generation.bats`, `dns_known_good_snapshot.bats`, `dns_config_snapshot_idempotence.bats` | Fail if `dig` doesn't return the expected record, or any DNS bats file fails |
 | **DNS — reset-to-known-good** (new, PR #1152) | `setup.sh reset-to-last-known-good-config dns <zone>` genuinely rolls a live PowerDNS zone back | `bash scripts/setup-reset-dns-config-simulation.sh` (real full-setup stack: makes two real UI-driven zone writes, each producing a real snapshot, then runs the actual CLI against the earlier snapshot, confirms via a real `dig` query that the record content actually reverted). Note from #1152 itself: this script's own real run required two environment-only deviations at the time (a locally built `dns` image; a patched healthcheck probe domain, both because of the unrelated, since-fixed #1150 bug) — when running it again, confirm no deviation is needed anymore before treating a clean run as fully representative | Fail unless the post-rollback `dig` result matches the earlier snapshot's content exactly, and the CLI genuinely used the in-container `PDNS_API_KEY` (the script deliberately seeds a wrong host-side key as a regression guard for this) |
 | **NATS — secondary registration/rotation/removal** | Per-secondary credential isolation; rotation invalidates the old credential; removal actually blocks | `bash scripts/nats-secondary-auth-callout-simulation.sh` against a real `nats-server` + a real `nats-subscriber` built from the branch under test | Fail if an old credential still authenticates after rotation, or a removed secondary can still connect |
+| **NATS — Admin UI DNS-sync propagation** (added 2026-08-05, issue #1391 audit — previously wired into CI but never referenced in this document, and a genuinely different NATS function than secondary-lifecycle) | A DNS entry created via the Admin UI is really propagated end-to-end: UI → NATS → `nats-subscriber` → PowerDNS, and is genuinely resolvable, not just accepted by the UI | `full-setup-sims.yml`'s `ui-nats-dns-integration-simulation` job (`scripts/ui-nats-dns-integration-simulation.sh`, issue #400) — creates a real entry via the Admin UI, confirms it lands in PowerDNS via a real `dig`, then removes it and confirms removal propagates too — already CI-wired, reuse rather than re-derive | Fail if the entry never resolves via `dig` after creation, or still resolves after removal |
 | **NATS — active disconnect on remove/rotate** (new, PR #1172) | A secondary already connected *at the exact moment* of removal/rotation is force-disconnected within seconds, not left connected until its next reconnect (up to 90 days under the old JWT TTL) | The same `nats-secondary-auth-callout-simulation.sh`, extended in #1172: hold a real `nats-subscriber` connection open, confirm it's live via `nats-server`'s own `connz` HTTP monitor endpoint, remove/rotate that secondary from the Admin UI **while still connected**, then **poll `connz` until the connection actually disappears** — the HTTP 200 from the removal API call is not the proof; the connection's disappearance from `connz` is | Fail if `connz` still lists the connection after a reasonable poll window, or if an unrelated secondary's connection is also kicked (over-broad `CONNZ` filter) |
 | **NATS — xkey encryption** (new, PR #1168) | The auth-callout request/response is genuinely encrypted on the wire, not just configured | The packet-capture phase `nats-secondary-auth-callout-simulation.sh` gained in #1168: capture real `nats-server`↔Admin-UI traffic, assert the sealed-box `xkv1` marker is present AND the JWT's own literal base64 header marker is **absent** (checking for the raw password substring is **not sufficient** — the payload is always base64-JWT-encoded regardless of encryption, so a naive substring check "passes" unconditionally; #1168's own methodology note documents this exact false-positive trap). Run once with `xkey:` configured (must show encrypted) and once with it removed as a negative control (must show the plaintext marker) — a check that can't fail is not a check | Fail if the plaintext JWT header marker appears in a run where `xkey` is configured, or if the negative-control run does *not* show it (proves the assertion methodology itself still discriminates) |
 | **Admin UI — cache-resize** (new, PR #1174) | A submitted resize genuinely changes what nginx enforces, not just what the dashboard displays | Submit a resize via the UI/API, wait for the ~5-minute `lancache-converge.service` tick, then `docker exec <proxy container> nginx -T 2\>&1 \| grep proxy_cache_path` and confirm the rendered `max_size=` value actually changed to the new target — a `200 OK` from the form or an unchanged dashboard number is **not** proof. On `deploy/quickstart` this reaches the real proxy; on a manual `deploy/prod` checkout it does **not** (documented gap in #1174 — the `ui` container's own display updates but `config/prod/proxy.env` is untouched) — validate against the deployment profile actually in use and do not assume `deploy/prod` behaves like `deploy/quickstart` here | Fail if `nginx -T`'s rendered `max_size` doesn't match the submitted value on quickstart; on `deploy/prod`, confirm this known-misleading-display gap is still documented, not silently "fixed" by an unrelated change without updating this plan |
 | **Watchdog — dashboard health card** (new, PR #1165) | The dashboard's color indicators reflect real, live container health — not a frozen or fabricated state | Stop a monitored container (`docker stop lancache-dns-ssl`), wait one `watchdog.sh` cycle (default 30s), `curl http://<ui>/api/watchdog-status` and confirm the entry flips to `red`/`unhealthy`; restart it and confirm it flips back to `green`. Confirm a deliberately stale/missing `status.json` renders `Stale`/`Unavailable`, not a silently frozen last-known color | Fail if the API/dashboard doesn't reflect a real state transition within roughly one `CHECK_INTERVAL` |
 | **Watchdog — NATS monitoring** (new, PR #1167) | A hung (not crashed) `nats` container gets detected and restarted | `docker kill --signal=STOP lancache-nats` from **outside** the container's PID namespace (an in-container `kill -STOP 1` is a no-op — PID 1 ignores unhandled stop/kill signals from within its own namespace, confirmed live in #1167), wait 3× `CHECK_INTERVAL`, confirm watchdog logs `RESTARTING lancache-nats` and `docker inspect --format='{{.State.StartedAt}}'` shows a genuinely new start time | Fail if no restart occurs after 3 consecutive unhealthy reads, or if `StartedAt` is unchanged (a restart request that silently failed) |
+| **Watchdog — hang-simulation technique for multi-process monitored services** (corrected, issue #1391, 2026-08-05) | The row above's technique is **only valid for a genuinely single-process container** (`nats`). Confirmed live during the 2026-08-02 pass (see this document's own `docs/validation-state.json` record): `docker kill --signal=STOP <container>` only ever signals PID 1 inside the container's PID namespace. For `proxy` (nginx master + 8 worker processes + cache manager/loader) this stops only the master; the workers stay `S` (sleeping) and keep serving requests throughout (confirmed via `/proc/<pid>/status`), so the container's own healthcheck genuinely stays green and this technique cannot produce the hang it claims to test for any multi-process monitored service. **Corrected 2026-08-05 (this row previously prescribed `docker pause`, which was itself found on re-check, per an advisor review, to prove the wrong thing — see the two empirical results below, both required before this row was finalized):** the correct fix is **`docker top <container> -o pid` then `kill -STOP` every listed PID from outside the container (root/`sudo`, not `docker exec` for this part — an in-container, same-namespace signal to a sibling process would also work but was not the tested path here)**, not `docker pause`. | `docker inspect --format='{{.State.Health.Status}}'`/`{{.State.Health.FailingStreak}}` after stopping every PID, then `{{json .State.Health.Log}}` to confirm a real failing probe (not just a state-machine short-circuit) ran. **Both techniques verified empirically 2026-08-05** (isolated `nginx:alpine` container, own healthcheck, Docker Engine 29.6.1, self-hosted runner — real multi-process container: 1 master + 7 workers, confirmed via `docker top`): (1) **`docker pause` reproduced 2/2 but proves the wrong thing** — flips `.State.Health.Status` to `unhealthy` within one poll cycle, but `FailingStreak` stays `0` and `.State.Health.Log` gains no new entry; Docker's own pause-handling short-circuits health-checking entirely (a healthcheck `exec` cannot even start in a paused container's frozen cgroup) and stamps `unhealthy` from container *state*, not from a completed failing probe. This only proves "watchdog restarts a container Docker has already flagged unhealthy by other means" — already proven by the existing `docker stop`/crash coverage — and does **not** touch the actual open question, issue #1391's own wording: "it remains genuinely unknown whether Watchdog would detect a real full nginx hang." (2) **Multi-PID `SIGSTOP` closes that actual gap.** `docker top`-listed PIDs confirmed `State: T (stopped)` via `/proc/<pid>/status` after signalling every one (not just PID 1) from the host. Because `SIGSTOP` suspends existing processes without freezing the container's cgroup, Docker can still schedule a *new* healthcheck exec — which genuinely attempts to connect, genuinely cannot get a response (every worker able to `accept()`/serve is stopped), and genuinely times out at the configured `--health-timeout`: two consecutive real failed probes were recorded (`ExitCode: 1`, empty `Output`, ~2.0s duration matching the configured client timeout), `FailingStreak` reached `2`, and `Status` became `unhealthy` through this real timeout path — the same code path and timing character a real in-process hang would produce, unlike `docker pause`'s instant, probe-free flip. `SIGCONT` on every PID correctly restored `healthy`. Use multi-PID `SIGSTOP`/`SIGCONT` as the prescribed technique for `proxy`/`dns-standard`/`dns-ssl`; `docker pause` remains documented above only as a distinct, faster check for "does watchdog act on Docker's own unhealthy determination," not a hang-detection proof | Fail if `.State.Health.FailingStreak` does not increase via a real timed-out probe (`ExitCode` non-zero from an actual command run, not merely `Status` changing) within a few `CHECK_INTERVAL`-equivalent poll cycles after multi-PID-stopping a monitored service, or if a subsequent live pass against the real `proxy`/`dns-standard`/`dns-ssl` images does not show a genuine watchdog-triggered restart (new `StartedAt`) using this technique |
 | **Edition-2024 build (PR #1179)** | All three Rust crates actually build/test/lint clean on the real target (Linux, build-tools container) — not just a Windows-side `cargo check` | For each of `services/ui`, `services/dns/nats-subscriber`, `tools/pxe-client-probe`, inside the build-tools container: `cargo fmt --manifest-path <crate>/Cargo.toml -- --check`, `cargo check --locked --all-targets --manifest-path <crate>/Cargo.toml`, `cargo clippy --locked --all-targets --manifest-path <crate>/Cargo.toml -- -D warnings`, `cargo test --locked --manifest-path <crate>/Cargo.toml`. A **Windows-authored** `cargo check` result is not acceptable evidence per `.github/AGENTS.md`'s build-tools-container contract — the Windows host cannot build Rust for this project's Linux/Docker targets at all | Fail on any non-zero exit from any of the four commands for any of the three crates, or if the check ran outside the pinned build-tools container |
 | **SBOM/VEX generation (PR #1194)** | `scripts/generate-vex.sh`'s output matches the committed `vex.openvex.json` byte-for-byte, and the drift guard actually fails when it should | `bash scripts/check-vex-drift.sh` (must report in-sync); `bash scripts/generate-vex.sh \| jq empty` (must be valid JSON); as a negative control, mutate `.trivyignore.yaml` in a scratch copy and re-run the drift guard, confirming it exits non-zero with a clear diff (already proven once, 2026-07-24 — reuse this exact reusable check going forward rather than re-deriving it) | Fail if the drift guard passes on a real mismatch (the negative control), or if it reports drift on an untouched checkout |
 | **Fixture key-drift guard (PR #1199)** | The bats guard actually catches a reintroduced historical `.env`-key gap, not just that it parses | `bats tests/bats/setup_update_idempotence.bats` (guard test runs first, must pass on a clean checkout). As a negative control, remove one known-required key (e.g. `NTP_ENABLED`) from `write_converged_env_fixture()` in a scratch copy and re-run — must fail naming that exact key (already proven once, 2026-07-24 — reuse this exact check) | Fail if the guard doesn't name the specific missing key on the negative control, or passes when a key truly is missing |
@@ -249,6 +256,49 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
 
 ### 1. Bring-up
 
+- **Real `setup.sh install` bring-up is the correct starting point for `deploy/quickstart`,
+  not a direct `docker compose up` (confirmed real bug, issue #1391, 2026-08-05).**
+  `install_quickstart_compose_assets()` (`setup.sh:1595-1621`) is what actually populates
+  `deploy/quickstart/scripts/docker-socket-proxy.sh` and
+  `deploy/quickstart/scripts/lib/shared-secret-bootstrap.sh` — a path a plain `git clone`
+  does not carry at all (`deploy/quickstart/` only tracks `.env` and
+  `docker-compose.yml`). Confirmed live in the 2026-08-02 pass and re-confirmed by static
+  audit: without that step, Docker's own bind-mount auto-vivification silently creates an
+  **empty directory** at that path instead of failing, which breaks `docker-socket-proxy`
+  (its own `entrypoint:` *is* the missing file) and `nats` (which sources the missing file
+  to generate its own config) — both crash-loop. **The `docker compose up` command itself
+  still exits 0** — the failure only shows up later as a crash-looping container, so a
+  validator relying on the `up` exit code alone will not see it; check `docker compose
+  ps`/`docker inspect --format='{{.State.Health.Status}}'` per container instead. This is
+  `deploy/quickstart`-specific: `deploy/prod` reaches the same two files via a path
+  (`../../scripts/...`) that already exists in a real checkout, so it does not break this
+  way. `deploy/quickstart/docker-compose.yml`'s own header comment documents a "manual"
+  bring-up path with no warning about this trap — do not follow it verbatim for a Part B
+  pass.
+
+  **Recommended real bring-up sequence (documented here, not yet executed live as part of
+  this pass — see Coverage Assessment):**
+  1. On a real Linux host with Docker + Compose v2 and `expect` installed, derive the
+     current real prompt sequence with `bash setup.sh list-prompts <answers-file>`
+     (introspective — no root or Docker required, `setup.sh:3617-3621`/`6030-6047`).
+  2. Feed that sequence into the same `expect`-based driving mechanism
+     `scripts/setup-cli-simulation.sh` already uses in CI (`build_expect_prompt_block`,
+     that script's own lines ~237-316) to run `bash setup.sh` for real (`install` is the
+     default action with no subcommand, `setup.sh:3607-3609` — a real install run needs
+     root, `setup.sh:6160-6161` enforces `[[ "$(id -u)" = "0" ]]`). Set
+     `LANCACHE_IMAGE_CHANNEL`/`LANCACHE_IMAGE_TAG` only as a per-command env prefix on this
+     one invocation, never exported process-wide, so it cannot leak into a later
+     update/migration phase that should read the channel back from the written `.env`.
+     Prefer a non-loopback `IP_STANDARD` (e.g. `127.0.0.2`) to avoid port contention with
+     other work on a shared runner (the same reasoning `scripts/setup-cli-simulation.sh`
+     already documents for itself).
+  3. Expect `Stack started` as the success marker (`Failed to pull required container
+     images` as the documented failure case).
+  4. Only then run this section's remaining bring-up checks (`docker compose ps` health,
+     etc.) against the resulting `<install_dir>` — this is the point where a real Part B
+     pass would confirm `install_quickstart_compose_assets()` actually ran and
+     `docker-socket-proxy`/`nats` are healthy, in direct contrast to the broken direct
+     `docker compose up` path described above.
 - **Profile choice**: `deploy/quickstart/docker-compose.yml` for
   the profile that most closely matches what `setup.sh install` actually produces for
   an operator (this is also the only profile the Admin UI's cache-resize convergence
@@ -316,21 +366,62 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
 - **Standard mode**: `dig @<IP_STANDARD> steamcontent.com` (or any
   configured CDN domain) resolves to the proxy's IP. Confirm the TLS handshake for
   that domain is **passthrough** (no interception) — `openssl s_client -connect
-  <proxy>:8443 -servername steamcontent.com` and confirm the presented certificate is
-  the real CDN's own cert, not this project's CA.
+  <proxy>:443 -servername steamcontent.com` and confirm the presented certificate is
+  the real CDN's own cert, not this project's CA. **Port correction (2026-08-05,
+  issue #1391):** a prior version of this document named `:8443` here — that is
+  only the container-**internal** listener port; every real deployment profile maps
+  it to the standard HTTPS port externally (`deploy/quickstart/docker-compose.yml`
+  and `deploy/prod/docker-compose.yml` both publish `${IP_STANDARD}:443:8443`,
+  confirmed directly against both files, 2026-08-05) — `:443` is what an operator or
+  validator actually connects to from outside the container.
 - **SSL/MITM mode**: same `dig` against the SSL DNS instance; `openssl s_client
-  -connect <proxy>:443 -servername steamcontent.com -CAfile certs/ca.crt` and confirm
-  the presented certificate **is** signed by the project's own CA (proves
-  interception is actually happening, not merely configured).
+  -connect <proxy>:443 -servername steamcontent.com -CAfile
+  deploy/<profile>/certs/ca.crt` and confirm the presented certificate **is** signed
+  by the project's own CA (proves interception is actually happening, not merely
+  configured). **CA-path correction (2026-08-05, issue #1391):** a prior version of
+  this document referenced a bare `certs/ca.crt`, which does not exist at the repo
+  root. Confirmed directly (2026-08-05): every deployment profile's proxy service
+  mounts `./certs:/etc/nginx/ssl/ca` (relative to the profile's own
+  `docker-compose.yml`, per this document's own `AG-VAL-010` note on Compose `.env`/
+  path resolution), and the CA is generated into that same directory on first start
+  — so the real path, run from the repo root, is `deploy/<profile>/certs/ca.crt`
+  (e.g. `deploy/quickstart/certs/ca.crt` for a quickstart bring-up), never a
+  repo-root `certs/ca.crt`. Using the wrong path fails `openssl verify`/`s_client`
+  with a misleading error that looks like broken interception but is only a wrong
+  path.
 - `ping`/`ss` alone are not acceptable substitutes for either check (`AG-VAL-019`/
   `AG-VAL-020`) — a real query/response or a real TLS handshake is required.
+- **Wildcard/subdomain scope semantics (open gap, not yet closed by this pass —
+  issue #1391):** the checks above only ever resolve one literal domain per mode;
+  they never prove `AG-OP-015`'s scope rule (a leading-dot `cdn-domains.txt` entry is
+  an explicit wildcard scope, not equivalent to the root domain) against the live
+  resolver itself. Note this is narrower than it first looks: the **proxy** layer's
+  half of this same rule (which cert/backend gets selected once a request already
+  arrived) already has real, negative-controlled, handshake-level proof —
+  `scripts/proxy-deep-wildcard-tls-simulation.sh` and
+  `scripts/proxy-standard-mode-sni-routing-simulation.sh` (both wired into
+  `full-setup-sims.yml`, see issues #1272/#1297). What remains genuinely untested is
+  the **DNS** layer specifically: does `dig` against a wildcard-only (`.example.com`)
+  scope's bare root correctly *not* resolve to the proxy (RPZ should not match it),
+  while a subdomain of it (`sub.example.com`) correctly *does*? A live pass still
+  needs to pick one wildcard-only and one bare-exact entry from
+  `services/dns/cdn-domains.txt` (or a scratch entry) and `dig` all three of: the
+  wildcard scope's own bare root, a subdomain under it, and an unrelated
+  non-matching domain — asserting the first does not resolve to the proxy unless
+  also separately listed, the second does, and the third does not. Not run as part
+  of this pass; tracked for the live-stack follow-up milestone.
 
 ### 3. DHCP — all three modes
 
 - **Kea**: real DHCPDISCOVER→DHCPOFFER→DHCPREQUEST→DHCPACK cycle via
   `dhcp-kea-lease-flow-simulation` (or its underlying script run directly), confirm a
   real lease was granted from the configured pool and is visible via Kea's Control
-  Agent API.
+  Agent API. Also run **`dhcp-kea-ctrl-agent-mutation-simulation`** (a static
+  reservation added via the Admin UI genuinely affects a subsequent real lease) and
+  **`dhcp-kea-ui-rollback-simulation`** (the Admin UI's own Kea-rollback route
+  genuinely restores an earlier real snapshot) — added to this document 2026-08-05
+  (issue #1391 audit); both already existed and were CI-wired, just never referenced
+  here. See Part A's new row for the exact mechanism.
 - **dnsmasq ProxyDHCP**: real PXE boot-option probe via
   `dhcp-proxy-pxe-simulation`/`tools/pxe-client-probe` (the Rust PXE probe rewritten
   in PR #1159), confirm the expected boot filename/next-server options are actually
@@ -387,6 +478,12 @@ negative control). See Part A's NATS rows for the specific pass/fail criteria on
 sub-mechanism — this section is the "run it as one real end-to-end pass" framing,
 Part A is the "what does each individual claim need to prove" framing.
 
+Also run `scripts/ui-nats-dns-integration-simulation.sh` (added to this document
+2026-08-05, issue #1391 audit — already existed and was CI-wired, just never
+referenced here) — a genuinely different NATS function than the secondary-lifecycle
+script above: proves the Admin UI → NATS → `nats-subscriber` → PowerDNS DNS-sync
+propagation path end-to-end via a real `dig`, both for creation and removal.
+
 ### 6. Admin UI — reachability, dashboard, and today's new controls
 
 - Reachability: `curl -u <user>:<pass> http://<ui host>:<port>/` (or confirm the
@@ -408,9 +505,24 @@ Part A is the "what does each individual claim need to prove" framing.
   `ui`/`dhcp`, no meaningful healthcheck defined for `dhcp-proxy`/`netdata`, no fixed
   `container_name` for `syslog`). Do not treat an unmonitored service in this list as
   a regression — check `docs/architecture-ng.md`'s table before filing anything.
-- For each monitored service, repeat the hung-not-crashed proof pattern from Part A's
-  NATS-monitoring row (external `SIGSTOP`, not an in-container one) and confirm a
-  genuine restart (new `StartedAt`).
+- For `nats` (the only single-process monitored service), repeat the hung-not-crashed
+  proof pattern from Part A's NATS-monitoring row (external `SIGSTOP`, not an
+  in-container one) and confirm a genuine restart (new `StartedAt`).
+- **For `proxy`, `dns-standard`, and `dns-ssl` (multi-process containers), use
+  `docker top <container> -o pid` then `kill -STOP` every listed PID from outside
+  the container (root/`sudo`), instead of `--signal=STOP` on the container** — see
+  Part A's "hang-simulation technique for multi-process monitored services" row
+  (corrected, issue #1391, 2026-08-05) for why `--signal=STOP` cannot produce a
+  real hang on these services, and for the empirical evidence that this
+  multi-PID technique produces a genuine, timeout-based failing probe where
+  `docker pause` (considered and rejected — see that row) does not. **Not yet
+  re-run against the real running stack as of this pass** (tracked as a
+  live-stack follow-up, issue #1391): `dns-standard` was previously tested via
+  `docker stop` (a crash, not a hang) and `dns-ssl` was not tested at all in the
+  2026-08-02 pass; both, plus `proxy`, need a real pass with this technique
+  against the actual images, confirming a real `FailingStreak` increase from a
+  timed-out probe (not just a `Status` flip) and a genuine watchdog-triggered
+  restart (new `StartedAt`).
 - Known open, non-blocking gap (#1166, surfaced during #1167's own live validation):
   `restart_container()`'s `CURL_MAX_TIME` (default 5s) can be shorter than Docker's
   own restart grace period (10s) for a container slow to respond to SIGTERM, producing
@@ -422,7 +534,8 @@ Part A is the "what does each individual claim need to prove" framing.
 
 ### 8. Central logging / syslog forwarding
 
-- If the optional `logging` profile is enabled: confirm real log lines from a
+- The `logging` profile is on by default since issue #1343 (a real opt-out remains
+  via `LOGGING_ENABLED=0`, not an opt-in feature) — confirm real log lines from a
   monitored service actually arrive at the `syslog-ng`/fluent-bit target, not just
   that the containers are up. `syslog-forwarding-simulation` (part of
   `full-setup-deep-validate.yml`) is the reusable proof for this — invoke it directly
@@ -433,6 +546,14 @@ Part A is the "what does each individual claim need to prove" framing.
   the binary is intact, not that the tailing pipeline actually works — validate the
   pipeline directly (a real log line arriving at the target), don't trust the
   healthcheck alone.
+- **Standing check (AG-VAL-029, added by issue #1343):** `scripts/setup-cli-simulation.sh`'s
+  Phase 1 now asserts, after a default fresh install (every wizard prompt answered
+  with its default), that `.env` contains `LOGGING_ENABLED=1`, that `COMPOSE_PROFILES`
+  includes `logging`, and that the real `syslog`/`syslog-ng` containers are actually
+  running — guarding against a regression back to the bug this issue fixed (central
+  logging silently never starting on a normal install). This runs as part of the same
+  CI job the rest of this section already points at (`setup-cli-simulation` in
+  `full-setup-sims.yml`), not a new standalone check.
 
 ### 9. Resource-Leak / Cleanup Pass (standing check, run every release)
 
@@ -450,6 +571,68 @@ triggered the removal/rotation/restart returned success.
 | `docker compose down -v` genuinely removes every container and named volume for the stack | `docker ps -a --filter "name=lancache"` and `docker volume ls --filter "name=lancache"` immediately after teardown — both must return empty | Fail if any lancache-prefixed container or volume remains |
 | A resized/rotated proxy container (cache-resize, PR #1174) doesn't leave the old container running alongside the new one | `docker ps --filter "name=lancache-proxy"` immediately after a convergence-triggered recreate — exactly one container, with a `StartedAt` matching the recreate, not two | Fail if more than one `lancache-proxy` container is running, or the old one's `StartedAt` is unchanged (recreate didn't actually happen) |
 | No file-descriptor exhaustion from repeated watchdog restart cycles over a longer soak | `docker exec <container> ls /proc/1/fd \| wc -l` sampled before and after several forced restart cycles of the same service — should return to a stable baseline, not grow monotonically | Fail (flag for investigation) if FD count trends upward across cycles rather than stabilizing |
+
+### 10. NTP — clock discipline (added 2026-08-05, issue #1391)
+
+**Correction to this document's own prior gap-framing:** `ntp` did **not** have "zero
+validation coverage, ever" — `scripts/ntp-cap-sys-time-simulation.sh` already exists
+and is wired into `full-setup-deep-validate.yml`'s `ntp-cap-sys-time-simulation` job,
+which forces a real clock skew against a running `chrony` container and proves it
+disciplines back to a synchronised state (`Stratum > 0`, `Leap status: Normal`) on a
+real runner — that is real evidence, just never a **Part B** (stack) pass, and never
+referenced anywhere in this document until now. `docs/validation-state.json`'s
+`subsystem_validation.ntp` entry is still genuinely `null`, and this document's own
+Validation State Tracking policy treats Part A and Part B as independently tracked —
+a CI proof does not, by itself, satisfy a Part B stack-validation claim.
+
+- Reuse `scripts/ntp-cap-sys-time-simulation.sh` directly against the live stack
+  under validation (not a synthetic/CI-only fixture) — the same script, run against
+  the actual `ntp` container brought up as part of this Part B pass, rather than
+  re-deriving a new check.
+- Confirm `CAP_SYS_TIME` is genuinely required and scoped no wider than necessary:
+  cross-reference against PR #1413 (`security(ntp): least-privilege hardening for
+  chrony`, open as of 2026-08-05) if that PR has since merged, since it changes the
+  exact capability/seccomp posture this scenario forces skew against.
+- **Not yet run as part of this pass** (tracked as a live-stack follow-up, issue
+  #1391): a real Part B execution of this script against a live-brought-up stack,
+  with the result recorded in `docs/validation-state.json`'s `ntp` entry — this
+  document only records that the reusable proof exists and names it, per this
+  section's own "Coverage Assessment" discipline of being honest about what remains
+  open.
+
+### 11. `setup.sh update` (self-update) — live scenario (added 2026-08-05, issue #1391)
+
+**Confirmed gap:** Part A's `setup-cli-simulation.sh` only exercises the `.env`-migration
+*logic* (Phase 2/2b); no Part B scenario has ever brought up a real stack and run a real
+`setup.sh update` against it. The real mechanism was traced in full against current
+`current_dev` code (`cmd_update()`/`perform_stack_update_flow()`, `setup.sh:4139-4207`):
+pause the convergence timer, re-run the asset-population step
+(`install_quickstart_compose_assets()` — an update also refreshes these assets, not just a
+fresh install), take a pre-update rollback backup (`cmd_backup --config`), migrate `.env`
+and re-validate the Compose config, `docker compose pull`, re-validate again, then apply
+the update in a fixed order (`apply_stack_update_ordered()`, `setup.sh:4080-4131`): every
+non-UI service first with a 180s health gate, then `ui` last with a 120s gate. Any failure
+anywhere in this sequence triggers an automatic `rollback_stack_update()`
+(`setup.sh:4050-4068`) that restores the pre-update backup. **Confirmed by direct code
+reading: no `docker compose down -v`/`--volumes` appears anywhere in this entire
+update/rollback path** — only `up -d --remove-orphans` — so named volumes and bind mounts
+are never destroyed by this flow's own design.
+
+**Recommended live scenario (documented here, not yet executed — see Coverage
+Assessment):**
+1. Bring up a real stack via the `setup.sh install` sequence in `### 1` above.
+2. Record each service's image digest (`docker inspect <image> --format
+   '{{.Id}}'`) and `StartedAt` before updating.
+3. Run `bash setup.sh update` for real against this stack.
+4. Confirm the image digest actually changed for at least one updated service (proves a
+   real `docker compose pull`, not a no-op), and that `StartedAt` genuinely advanced for
+   each recreated container (proves a real recreate, not just a reported success).
+5. Confirm the cache directory's contents and the `ui-data`/watchdog-status volumes are
+   unchanged after the update (proves the no-`-v` guarantee holds in practice, not just in
+   the code being read).
+6. As a negative control: force a health-gate failure partway through (e.g. a deliberately
+   broken image tag for one non-UI service) and confirm `rollback_stack_update()` actually
+   fires and restores the pre-update state — a check that can't fail is not a check.
 
 ---
 
@@ -620,10 +803,21 @@ explicit pass:**
   domain) due to the since-fixed #1150 bug — the *unmodified* real CI path for this
   script has never actually completed clean; confirm that on the next run rather than
   assuming it now works unmodified.
-- **Kea/PDNS/NATS config-writer idempotence** is still manual-review-only per
-  `.github/AGENTS.md`'s own enforcement matrix (`AG-OP-006`/`AG-OP-007` row) — only
+- **Corrected 2026-08-05 (issue #1391 audit) — this entry was itself stale.** A prior
+  version claimed "Kea/PDNS/NATS config-writer idempotence is still manual-review-only
+  per `.github/AGENTS.md`'s own enforcement matrix (`AG-OP-006`/`AG-OP-007` row) — only
   the `.env`-migration path and watchdog's restart-counter convergence have real
-  repeat-run fixture coverage.
+  repeat-run fixture coverage." `AGENTS.md`'s own `AG-OP-006` row (corrected in PR
+  #1409, 2026-08-05) already states this wording was stale: Kea/PDNS/NATS/dhcp-proxy
+  config-writers are covered by dedicated repeat-run bats tests (delivered by #640,
+  enforced project-wide by `scripts/check-idempotence-test-coverage.sh`) —
+  e.g. `tests/bats/nats_conf_entrypoint_idempotence.bats`,
+  `tests/bats/dhcp_proxy_known_good_snapshot.bats`. This document had not been
+  synced with that correction until now — a small, concrete instance of exactly the
+  drift class issue #1391's proposed `AG-VAL-033` rule is meant to prevent going
+  forward. (Also note: the enforcement matrix itself lives in the repo-root
+  `AGENTS.md`, not `.github/AGENTS.md` — the latter is a 9-line pointer to the
+  former; a prior version of this bullet cited the wrong file.)
 - **This document's own Validation State Tracking mechanism** (`docs/validation-
   state.json`) is brand new as of this PR — it starts with every field `null` and has
   not yet been exercised by a real validation pass. The first real run against it is
@@ -643,6 +837,28 @@ explicit pass:**
   follow-up actually switches the entrypoint, these findings describe an unused,
   parallel implementation, not validated production behavior; re-check this PR's
   merge status before adding a Standing check row for it.
+- **Five gaps confirmed by this audit pass (2026-08-05, issue #1391),
+  corrected/documented here (in some cases with a concrete, code-verified recommended
+  sequence) but NOT yet closed by a live run** — tracked explicitly as a follow-up
+  milestone, not silently left implicit: (1) the multi-PID-`SIGSTOP`
+  hang-simulation-technique fix for `proxy`/`dns-standard`/`dns-ssl` (Part A/B
+  Watchdog rows above — corrected from an earlier, rejected `docker pause` version of
+  this same fix, see those rows for both empirical results) is verified against a
+  synthetic multi-process `nginx:alpine` Docker healthcheck mechanism, not yet against
+  the real `proxy`/`dns-standard`/`dns-ssl` images nor a real watchdog-observed
+  restart; (2) the `ntp` Part B scenario (§10 above) names the
+  reusable script but has not itself been run against a live-brought-up stack, and
+  `docs/validation-state.json`'s `ntp` entry remains `null`; (3) the DNS
+  wildcard-scope live `dig` proof (§2 above) is specified but not executed; (4) the
+  real `setup.sh install` bring-up sequence (§1 above) has a concrete, code-verified
+  recommended procedure (reusing `scripts/setup-cli-simulation.sh`'s own `expect`
+  mechanism) but has not itself been executed as part of this pass; (5) the
+  `setup.sh update` live scenario (§11 above) likewise has a concrete, code-verified
+  procedure (including the negative-control rollback test) but has not been executed.
+  Each of these needs a real running stack and real evidence, not reasoning, before it
+  can be recorded as closed — see issue #1391 for the full remaining scope and the
+  explicit decision to split this into a separate live-stack milestone rather than
+  compress it into this pass.
 
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently

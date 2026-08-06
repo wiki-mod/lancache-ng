@@ -81,13 +81,16 @@
 # once and only repeats on invalid input, it never skips the prompt
 # entirely, unlike an `if`/`case` branch that can be skipped outright based
 # on an earlier answer. Confirmed by manual trace against setup.sh as of
-# this script's introduction: exactly 11 prompts are unconditional (Server
+# this script's introduction: exactly 11 prompts were unconditional (Server
 # IP, Enable SSL mode?, Directory, Cache directory, Cache size, Cache RAM
 # buffer, Enable scheduled automatic updates?, DHCP mode, Enable
-# LanCache-NG-NTP?, Protect Admin-UI with password?, Start now?) and both
-# current simulation scripts already answer all 11 -- see this script's own
-# bats coverage (tests/bats/check_setup_prompt_drift.bats) for fixtures that
-# exercise the classifier directly rather than relying on that trace alone.
+# LanCache-NG-NTP?, Protect Admin-UI with password?, Start now?); issue
+# #1343 added a 12th, "Enable central logging?" (between the NTP and
+# Admin-UI-password prompts), and both current simulation scripts answer all
+# 12 via their introspection-driven expect_prompt sequences (see
+# scripts/lib/setup-wizard-introspect.sh) -- see this script's own bats
+# coverage (tests/bats/check_setup_prompt_drift.bats) for fixtures that
+# exercise the classifier directly rather than relying on this trace alone.
 #
 # This line-classification approach is deliberately NOT a generic bash
 # parser: it assumes one control-flow keyword per physical line (confirmed

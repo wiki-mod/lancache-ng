@@ -80,12 +80,16 @@ issues close.
 
 - **IPv6 for the PowerDNS Recursor** (#851): deliberately deferred as low
   priority; full dual-stack support already exists elsewhere in the stack
-  (see `CLAUDE.md`'s IPv6 notes), but the recursor's own IPv6 listener is not
-  currently planned work.
+  (see `AGENTS.md`'s `## CDN Domains, First-time Setup, IPv6` section — **corrected
+  2026-08-05, issue #1391 doc-sweep audit**: this used to point at `CLAUDE.md`'s IPv6
+  notes, which moved into `AGENTS.md` on 2026-07-31 per `CLAUDE.md`'s own current
+  text), but the recursor's own IPv6 listener is not currently planned work.
 - **A parallel `deploy/dev/` environment**: deliberately retired (#766, v0.3.0)
-  and not coming back — see `CLAUDE.md`'s "No Separate Dev Environment" for
-  why an earlier version of this project's own tooling mistakenly grew one
-  and why that was undone.
+  and not coming back — see `AGENTS.md`'s `AG-KD-008` (**corrected 2026-08-05, issue
+  #1391 doc-sweep audit**: this used to point at `CLAUDE.md`'s "No Separate Dev
+  Environment" section, which also moved into `AGENTS.md` on 2026-07-31) for why an
+  earlier version of this project's own tooling mistakenly grew one and why that was
+  undone.
 - **A major-version (`1.0.0`) bump**: `AGENTS.md`'s `AG-GH-018` is explicit
   that this stays a deliberate, manual maintainer decision, never an
   automatic side effect of any automation this roadmap's release-automation
