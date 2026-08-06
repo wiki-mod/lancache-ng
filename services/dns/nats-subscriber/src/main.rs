@@ -679,6 +679,26 @@ async fn handle_message(
     HandleOutcome::Ack
 }
 
+// dns_record_patch_url <zone>
+// Bug-hunt finding N1 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+// handle_dns_record() used to interpolate a DNS record's zone name into
+// this URL path raw. It happened to work in practice because every real
+// caller today always sends the zone without a trailing dot already, but
+// nothing enforced that -- a future producer of this NATS message (or a
+// malformed/redelivered message) sending the zone-file form with a
+// trailing dot (e.g. "lan.") would silently 404 against PowerDNS's API,
+// which drops that dot in its own zone-id convention (see
+// zone_snapshots::zone_api_id()'s own doc comment, already relied on by
+// maybe_snapshot_zone() above and rollback_listener.rs's known-good-
+// snapshot code). Split into its own pure function so this contract is
+// directly unit-testable without needing a real HTTP call.
+fn dns_record_patch_url(zone: &str) -> String {
+    format!(
+        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
+        zone_snapshots::zone_api_id(zone)
+    )
+}
+
 async fn handle_dns_record(
     msg: &async_nats::jetstream::Message,
     pdns_api_key: &str,
@@ -753,19 +773,40 @@ async fn handle_dns_record(
         return true;
     }
 
-    let url = format!(
-        "http://127.0.0.1:8081/api/v1/servers/localhost/zones/{}",
-        record.zone
-    );
+    let url = dns_record_patch_url(&record.zone);
 
-    // #68 fix: use shared client instead of creating new one
-    let result = http_client
-        .patch(&url)
-        .header("X-API-Key", pdns_api_key)
-        .header("Content-Type", "application/json")
-        .body(payload)
-        .send()
-        .await;
+    // Bug-hunt finding #5 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+    // `snapshot_ctx.lock` was already held around every snapshot-taking
+    // operation (this file's `maybe_snapshot_zone` above, and
+    // `rollback_listener.rs`'s rollback handler) specifically so those two
+    // never interleave with each other -- but this live NATS-driven write
+    // path never participated in that same lock at all. That left a real
+    // TOCTOU window: `rollback_listener.rs`'s rollback handler reads the
+    // zone's current state, computes a revert-to-known-good PATCH from it,
+    // and only *then* takes the lock to apply that PATCH -- if this live
+    // write landed in between the read and the lock, the rollback's patch
+    // was computed from data that was already stale, and applying it could
+    // silently undo this concurrent legitimate write without either side
+    // ever knowing. Taking the same lock here for the live PATCH itself
+    // closes that window: a rollback in progress (which now also holds
+    // this lock across its own read+diff+apply, see rollback_listener.rs)
+    // and a live write can no longer interleave in either direction.
+    // Scoped tightly around just the PATCH send: `maybe_snapshot_zone`
+    // below re-acquires this same non-reentrant tokio::sync::Mutex itself,
+    // so the guard must be dropped before reaching that call or every
+    // successful write would deadlock against its own post-write snapshot.
+    let result = {
+        let _snapshot_guard = snapshot_ctx.lock.lock().await;
+
+        // #68 fix: use shared client instead of creating new one
+        http_client
+            .patch(&url)
+            .header("X-API-Key", pdns_api_key)
+            .header("Content-Type", "application/json")
+            .body(payload)
+            .send()
+            .await
+    };
 
     match result {
         Ok(resp) => {
@@ -988,6 +1029,27 @@ mod tests {
     // need the same treatment.
     use nats_subscriber::RRset;
 
+    // Bug-hunt finding N1 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+    // the PATCH URL must always use PowerDNS's dot-stripped zone-id
+    // convention, regardless of which form the zone name arrives in on the
+    // NATS message -- a regression here would silently 404 every DNS write
+    // for any zone sent with a trailing dot.
+    #[test]
+    fn dns_record_patch_url_strips_trailing_dot_regardless_of_input_form() {
+        assert_eq!(
+            dns_record_patch_url("lan"),
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan"
+        );
+        assert_eq!(
+            dns_record_patch_url("lan."),
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/lan"
+        );
+        assert_eq!(
+            dns_record_patch_url("1.168.192.in-addr.arpa."),
+            "http://127.0.0.1:8081/api/v1/servers/localhost/zones/1.168.192.in-addr.arpa"
+        );
+    }
+
     // PDNS GET /zones/{zone} responses do NOT include changetype.
     // This test guards against regressions where changetype becomes
     // a required field again, which would break the reconciler.
@@ -1121,10 +1183,22 @@ mod tests {
         assert!(result.err().unwrap().contains("unknown action"));
     }
 
-    // REPLACE must succeed even when TTL is None, allowing PowerDNS to preserve
-    // the existing record's TTL when updating only its content.
+    // Bug-hunt finding #7 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+    // this test's own previous comment claimed a REPLACE with no TTL
+    // "allows PowerDNS to preserve the existing record's TTL when updating
+    // only its content" and asserted `rrset.ttl.is_none()` -- but PowerDNS's
+    // own Authoritative HTTP API docs (doc.powerdns.com/authoritative/
+    // http-api/zone.html) list `ttl` as a *required* rrset member, with the
+    // only documented exception being DELETE, not REPLACE. That prior claim
+    // was never verified against PowerDNS's real documented contract
+    // (AG-VAL-023) and was a live landmine: `RRset.ttl` is
+    // `skip_serializing_if = "Option::is_none"`, so a `None` ttl here used
+    // to produce a PATCH body PowerDNS would very likely reject for a
+    // required field. REPLACE must still succeed when the caller omits TTL
+    // (that part of the original intent was fine), but it must now fall
+    // back to a real default rather than omitting the field outright.
     #[test]
-    fn dns_record_to_zone_update_replace_without_ttl() {
+    fn dns_record_to_zone_update_replace_without_ttl_defaults_instead_of_omitting() {
         let record = DNSRecord {
             action: "replace".to_string(),
             zone: "lan".to_string(),
@@ -1141,7 +1215,7 @@ mod tests {
         let update = dns_record_to_zone_update(&record).expect("must succeed");
         let rrset = &update.rrsets[0];
         assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
-        assert!(rrset.ttl.is_none());
+        assert_eq!(rrset.ttl, Some(300), "a REPLACE rrset must always carry a real TTL -- PowerDNS documents it as a required field, not optional-for-REPLACE");
         assert!(rrset.records.is_some());
     }
 

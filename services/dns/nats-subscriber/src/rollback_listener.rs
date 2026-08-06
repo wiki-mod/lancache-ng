@@ -53,9 +53,14 @@ pub struct RollbackState {
     pub snapshot_base_dir: PathBuf,
     pub keep_n: u32,
     // Shared with the periodic zone-snapshot watcher and the NATS consumer
-    // loop's post-PATCH snapshot trigger (main.rs), so a rollback in
-    // progress and an unrelated snapshot-creation tick for the same zone
-    // never interleave -- see the module doc comment on why that matters.
+    // loop's post-PATCH snapshot trigger AND its live-write PATCH itself
+    // (main.rs), so a rollback in progress never interleaves with an
+    // unrelated snapshot-creation tick for the same zone, and -- since
+    // bug-hunt finding #5's fix (docs/bug-hunt/dns.md, re-verified
+    // 2026-08-06) -- never interleaves with a concurrent live DNS record
+    // write either, closing a TOCTOU window where a rollback could
+    // compute its revert-to-known-good patch from already-stale data and
+    // silently undo a legitimate concurrent write.
     pub snapshot_lock: Arc<Mutex<()>>,
     pub js: jetstream::Context,
 }
@@ -137,17 +142,82 @@ async fn list_snapshots_handler(
 // not build) automatically revert the already-applied change. It is logged
 // as a REJECT and surfaced in the response body so an operator knows to
 // inspect the zone by hand.
+// Bug-hunt finding #16 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+// `.output()` blocks until the child exits with no timeout at all -- a
+// stuck `pdnsutil check-zone` (e.g. a wedged/locked PowerDNS auth database,
+// the exact failure class the known-good-snapshot rollback mechanism exists
+// to recover from) would hang the calling `tokio::task::spawn_blocking`
+// thread forever, silently consuming a blocking-pool slot per stuck call
+// with no operator-visible symptom beyond the rollback response itself
+// never completing. `std::process::Command` has no built-in timeout, so
+// this polls `try_wait()` on a manually spawned child instead of adding a
+// new crate dependency (Rule-Ref: AG-REL-001) for one call site. 10s
+// mirrors this file's own reqwest client timeout convention
+// (nats-subscriber/src/main.rs's `.timeout(Duration::from_secs(10))`) --
+// `check-zone` is a local, in-process AXFR-free validation pass over an
+// already-loaded zone, not a network call, so 10s is generous rather than
+// tight for the real, expected case.
+const CHECK_ZONE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
 fn run_check_zone(zone: &str) -> bool {
     match std::process::Command::new("pdnsutil")
         .args(["--config-dir=/etc/pdns/auth", "check-zone", zone])
-        .output()
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
     {
-        Ok(output) => output.status.success(),
+        Ok(child) => wait_with_timeout(
+            child,
+            CHECK_ZONE_TIMEOUT,
+            &format!("pdnsutil check-zone for {zone}"),
+        ),
         Err(e) => {
             eprintln!(
                 "[known-good-snapshot][dns][WARNING] failed to run pdnsutil check-zone for {zone}: {e}"
             );
             false
+        }
+    }
+}
+
+// wait_with_timeout <child> <timeout> <description_for_log>
+// Polls an already-spawned child for exit, killing it and returning `false`
+// if it hasn't exited by the deadline. Split out from run_check_zone() so
+// the actual timeout/kill mechanism (the part bug-hunt finding #16 is
+// about) can be exercised directly in tests against a real, controllable
+// child process, without needing to fake the `pdnsutil` binary itself on
+// PATH.
+fn wait_with_timeout(
+    mut child: std::process::Child,
+    timeout: std::time::Duration,
+    description: &str,
+) -> bool {
+    let deadline = std::time::Instant::now() + timeout;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return status.success(),
+            Ok(None) => {
+                if std::time::Instant::now() >= deadline {
+                    eprintln!(
+                        "[known-good-snapshot][dns][WARNING] {description} did not finish within {timeout:?}, killing it and treating the check as failed"
+                    );
+                    // Best-effort: the process may have already exited in
+                    // the race between try_wait() and here, or already be
+                    // gone -- either way there's nothing further to clean
+                    // up on this path, and returning `false` (check failed)
+                    // is the safe verdict for an unverifiable zone.
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return false;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => {
+                eprintln!(
+                    "[known-good-snapshot][dns][WARNING] failed to poll {description}: {e}"
+                );
+                return false;
+            }
         }
     }
 }
@@ -336,6 +406,23 @@ async fn rollback_handler(
         }
     };
 
+    // Bug-hunt finding #5 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+    // this used to be acquired much later, right before applying the patch
+    // -- after already reading the zone's current state and computing the
+    // revert-to-known-good diff from it below. That left a real TOCTOU
+    // window: a live NATS-driven write (main.rs's handle_dns_record, which
+    // now also takes this same lock around its own PATCH, see that file)
+    // landing between the read here and the old, later lock acquisition
+    // meant this handler could compute its patch from data that was
+    // already stale by the time it actually applied it, silently
+    // reverting a legitimate concurrent write neither side would ever
+    // notice happened. Taking the lock before the read instead makes the
+    // whole read+diff+apply+confirm+republish sequence atomic with respect
+    // to a live write, not just with respect to another concurrent
+    // rollback/snapshot (see the `snapshot_lock` field doc comment on
+    // `RollbackState` for that original, narrower purpose this extends).
+    let _guard = state.snapshot_lock.lock().await;
+
     let zone_api_id = zone_snapshots::zone_api_id(&zone);
     let get_url = format!("http://127.0.0.1:8081/api/v1/servers/localhost/zones/{zone_api_id}");
     let current_resp = match state
@@ -384,10 +471,9 @@ async fn rollback_handler(
         .map(Vec::len)
         .unwrap_or(0);
 
-    // Held across the whole apply+confirm+republish sequence: see the
-    // `snapshot_lock` field doc comment on `RollbackState`.
-    let _guard = state.snapshot_lock.lock().await;
-
+    // `_guard` (acquired above, before the current-state read) is still
+    // held here -- it stays in scope for the rest of this function, across
+    // the whole read+diff+apply+confirm+republish sequence.
     if patch_len > 0 {
         let patch_url =
             format!("http://127.0.0.1:8081/api/v1/servers/localhost/zones/{zone_api_id}");
@@ -748,5 +834,86 @@ mod tests {
         let body = rollback_response_body(&changed, true, false, &changed);
         assert_eq!(body["flush_ok"], json!(false));
         assert_eq!(body["flush_failed_names"], json!(changed));
+    }
+
+    // Bug-hunt finding #16 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+    // these exercise wait_with_timeout() directly against a real, spawned
+    // `sh` child (not the `pdnsutil` binary itself, which isn't guaranteed
+    // present in a plain `cargo test` environment) -- proving the actual
+    // timeout/kill mechanism the fix adds, not a reimplementation of it.
+
+    // The common, expected case: a process that exits well within the
+    // timeout must report its real exit status, not be treated as timed out.
+    #[test]
+    fn wait_with_timeout_returns_true_for_a_fast_successful_process() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("sh must be available to run this test");
+        assert!(wait_with_timeout(
+            child,
+            std::time::Duration::from_secs(5),
+            "test"
+        ));
+    }
+
+    // A process that exits quickly but with a real failure status must
+    // still be reported as failed, not conflated with a timeout.
+    #[test]
+    fn wait_with_timeout_returns_false_for_a_fast_failing_process() {
+        let child = std::process::Command::new("sh")
+            .args(["-c", "exit 1"])
+            .spawn()
+            .expect("sh must be available to run this test");
+        assert!(!wait_with_timeout(
+            child,
+            std::time::Duration::from_secs(5),
+            "test"
+        ));
+    }
+
+    // This is the actual regression case finding #16 is about: before this
+    // fix, a hung child (e.g. a wedged pdnsutil against a locked PowerDNS
+    // database) would block the caller forever. A short timeout here proves
+    // the function returns `false` promptly instead of hanging, and that
+    // the child is actually killed rather than left running.
+    #[test]
+    fn wait_with_timeout_kills_and_returns_false_for_a_process_that_never_exits() {
+        let mut child = std::process::Command::new("sh")
+            .args(["-c", "sleep 60"])
+            .spawn()
+            .expect("sh must be available to run this test");
+        let pid = child.id();
+
+        let started = std::time::Instant::now();
+        // Reuse the same child handle wait_with_timeout will kill, but keep
+        // our own copy of the pid (taken above) so this test can still
+        // verify the process is really gone afterward, since
+        // wait_with_timeout() consumes `child` by value.
+        let timed_out_result = wait_with_timeout(child, std::time::Duration::from_millis(100), "test");
+        let elapsed = started.elapsed();
+
+        assert!(!timed_out_result);
+        // Generous upper bound: the real timeout is 100ms plus at most one
+        // 20ms poll interval: this asserts it returned promptly rather than
+        // waiting anywhere near the 60s the child's own sleep would take if
+        // it were never actually killed.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "wait_with_timeout took {elapsed:?}, expected well under 5s -- the timeout/kill path did not work"
+        );
+
+        // Confirm the process is actually gone, not merely abandoned still
+        // running in the background: on Unix, sending signal 0 to a dead
+        // pid fails with ESRCH, which `kill -0` surfaces as a non-zero exit.
+        #[cfg(unix)]
+        {
+            let still_alive = std::process::Command::new("kill")
+                .args(["-0", &pid.to_string()])
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            assert!(!still_alive, "child pid {pid} is still running after wait_with_timeout was supposed to kill it");
+        }
     }
 }
