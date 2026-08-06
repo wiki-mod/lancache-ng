@@ -40,9 +40,13 @@ pub const DEFAULT_NETDATA_CONTENT_TYPE: &str = "application/json";
 /// `format=` the caller requested, so the proxy does not need to duplicate
 /// its own format-to-mime-type table and keep it in sync. Only falls back to
 /// the fixed JSON default when Netdata's response is missing the header
-/// entirely (defensive; not currently observed in practice) or the header
-/// value isn't valid header-value text (defensive against a malformed or
-/// adversarial upstream).
+/// entirely, or sends it present-but-blank (defensive; neither currently
+/// observed in practice). This function does not itself validate that the
+/// header value is well-formed header-value text -- the caller
+/// (`routes/netdata_proxy.rs::proxy`) already discards a non-UTF8/invalid
+/// upstream Content-Type via `HeaderValue::to_str().ok()` before this
+/// function ever sees it, so by the time a `Some(value)` reaches here it is
+/// already known-valid ASCII.
 pub fn resolve_proxy_content_type(upstream_content_type: Option<&str>) -> String {
     match upstream_content_type {
         Some(value) if !value.trim().is_empty() => value.to_string(),
