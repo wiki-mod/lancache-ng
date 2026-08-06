@@ -15,22 +15,32 @@
 # above is now closed for BOTH call sites. `deploy/quickstart/docker-compose.yml`
 # now derives every `container_name:` from `${LANCACHE_CONTAINER_SUFFIX:-}`,
 # and `setup-cli-simulation.sh` / `syslog-forwarding-simulation.sh` each
-# export a per-run suffix (and per-run `COMPOSE_PROJECT_NAME`, and per-run
-# loopback IPs via `sim_ip_octet()`), so two concurrent runs on the same
-# runner host no longer share a literal container name, project name, or
-# `127.0.x.y` address by construction. That does NOT make this lock
-# redundant, for two separate reasons found while verifying the above:
-#   1. Both scripts derive their per-run "uniqueness" (container suffix, IP
-#      octet, and -- in syslog-forwarding-simulation.sh's case -- the
-#      172.29.<octet>.0/25 DHCP bridge subnets in its own
-#      dhcp-test-override.yml) from a `cksum ... % 200` hash of a run-scoped
-#      string. That is a ~200-value space: with the double-digit-concurrency
-#      levels this repo's runner-host topology can produce, a same-host
-#      octet collision between two unrelated runs is a real, non-negligible
-#      probability (birthday-bound), not a theoretical edge case. When two
-#      runs collide on octet, they collide on IP AND on DHCP subnet
-#      simultaneously, and this lock is the only thing left standing between
-#      that collision and either run corrupting the other's compose state.
+# export a per-run suffix and a per-run `COMPOSE_PROJECT_NAME`.
+# `setup-cli-simulation.sh` also derives per-run loopback IPs via its own
+# `sim_ip_octet()`; `syslog-forwarding-simulation.sh` derives its own
+# separate `octet` (from `run_key`, not `sim_ip_octet()`) for its DHCP
+# bridge subnets instead. So two concurrent runs on the same runner host no
+# longer share a literal container name or project name by construction,
+# and setup-cli-simulation.sh runs no longer share a loopback IP either.
+# That does NOT make this lock redundant, for two separate reasons found
+# while verifying the above:
+#   1. Each script derives its own per-run "uniqueness" from a
+#      `cksum ... % 200` hash of a run-scoped string -- setup-cli-simulation.sh
+#      for its `IP_STANDARD`/`IP_SSL` loopback pair, syslog-forwarding-simulation.sh
+#      (independently) for its `172.29.<octet>.0/25` DHCP bridge subnets in
+#      its own dhcp-test-override.yml. Each is a ~200-value space on its own.
+#      With the double-digit-concurrency levels this repo's runner-host
+#      topology can produce, a same-host octet collision between two
+#      concurrent runs of the SAME script is a real, non-negligible
+#      probability (birthday-bound), not a theoretical edge case -- two
+#      colliding setup-cli-simulation.sh runs would bind the same loopback
+#      IP; two colliding syslog-forwarding-simulation.sh runs would bring up
+#      the same DHCP bridge subnet. (The two scripts hash different
+#      run-scoped strings into non-overlapping address families, 127.0.x.y
+#      vs. 172.29.x.y/25, so a cross-script collision between the two is not
+#      a real risk -- only same-script concurrency is.) This lock is the
+#      only thing left standing between either same-script collision and
+#      one run corrupting the other's compose state.
 #   2. syslog-forwarding-simulation.sh's override files
 #      (logging-test-override.yml, dhcp-test-override.yml) are regenerated
 #      per run and layered over the base compose file with `-f`; a stray
