@@ -189,18 +189,6 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
-      # services/proxy/public_suffix_list.dat (bug-hunt #849, finding #9's
-      # third sub-part): tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
-      # _registrable_domain's PSL-driven derivation runs against the exact
-      # rule shapes upstream ships (compound-label suffixes like co.uk,
-      # exception rules like !city.kawasaki.jp), not a hand-written
-      # fixture. Without this entry, a PR touching only this data file
-      # (e.g. a PSL vendoring update) would not already match any other
-      # path above and so would never run that suite. Found by
-      # scripts/check-bats-path-filter-coverage.sh's own existence-
-      # filtered dependency scan against the real repo tree.
-      - "services/proxy/public_suffix_list.dat"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
       # services/watchdog/retention.sh (#842, 2026-08-01): the three
@@ -215,6 +203,23 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
+      # services/proxy/public_suffix_list.dat (bug-hunt #849, finding #9's
+      # third sub-part): tests/bats/proxy_registrable_domain.bats points
+      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # _registrable_domain's PSL-driven derivation runs against the exact
+      # rule shapes upstream ships (compound-label suffixes like co.uk,
+      # exception rules like !city.kawasaki.jp), not a hand-written
+      # fixture. Without this entry, a PR touching only this data file
+      # (e.g. a PSL vendoring update) would not already match any other
+      # path above and so would never run that suite. Found by
+      # scripts/check-bats-path-filter-coverage.sh's own existence-
+      # filtered dependency scan against the real repo tree. Deliberately
+      # anchored here (after watchdog/retention.sh), not right after
+      # services/proxy/entrypoint.sh above, so this addition doesn't land
+      # on the identical anchor line as a sibling bug-hunt #849 PR's own
+      # unrelated addition there and force an avoidable merge conflict
+      # between two sibling PRs from the same pass.
+      - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       - "deploy/prod/docker-compose.yml"
@@ -285,18 +290,6 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
-      # services/proxy/public_suffix_list.dat (bug-hunt #849, finding #9's
-      # third sub-part): tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
-      # _registrable_domain's PSL-driven derivation runs against the exact
-      # rule shapes upstream ships (compound-label suffixes like co.uk,
-      # exception rules like !city.kawasaki.jp), not a hand-written
-      # fixture. Without this entry, a PR touching only this data file
-      # (e.g. a PSL vendoring update) would not already match any other
-      # path above and so would never run that suite. Found by
-      # scripts/check-bats-path-filter-coverage.sh's own existence-
-      # filtered dependency scan against the real repo tree.
-      - "services/proxy/public_suffix_list.dat"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
       # services/watchdog/retention.sh (#842, 2026-08-01): the three
@@ -311,6 +304,23 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
+      # services/proxy/public_suffix_list.dat (bug-hunt #849, finding #9's
+      # third sub-part): tests/bats/proxy_registrable_domain.bats points
+      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # _registrable_domain's PSL-driven derivation runs against the exact
+      # rule shapes upstream ships (compound-label suffixes like co.uk,
+      # exception rules like !city.kawasaki.jp), not a hand-written
+      # fixture. Without this entry, a PR touching only this data file
+      # (e.g. a PSL vendoring update) would not already match any other
+      # path above and so would never run that suite. Found by
+      # scripts/check-bats-path-filter-coverage.sh's own existence-
+      # filtered dependency scan against the real repo tree. Deliberately
+      # anchored here (after watchdog/retention.sh), not right after
+      # services/proxy/entrypoint.sh above, so this addition doesn't land
+      # on the identical anchor line as a sibling bug-hunt #849 PR's own
+      # unrelated addition there and force an avoidable merge conflict
+      # between two sibling PRs from the same pass.
+      - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       - "deploy/prod/docker-compose.yml"
