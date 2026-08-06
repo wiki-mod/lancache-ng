@@ -422,6 +422,56 @@ pub fn resolve_cache_dir(
     Ok(DEFAULT_CACHE_DIR.to_string())
 }
 
+/// Fixed container names for issue #842's five alert-only services (`ui`,
+/// `dhcp`, `dhcp-proxy`, `netdata`, `syslog`). Deliberately NOT
+/// sourced from a `CONTAINER_*` env var override, unlike `ContainerNames`'s
+/// four restart-capable fields above -- same reasoning as
+/// `ContainerNames::docker_socket_proxy`: these five are never restarted (see
+/// `main.rs`'s alert-only loop), so there is no `resolve_container_names`-style
+/// fatal-mismatch check to apply, and no compose file, the Admin UI's
+/// `docker_client.rs`, or `scripts/docker-socket-proxy.sh`'s allowlist
+/// support renaming any of them either.
+///
+/// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
+/// with issue #842/#849 introducing this list): `syslog` (fluent-bit) and
+/// `syslog-ng` used to be two separate containers, each with its own fixed
+/// name here (`CONTAINER_SYSLOG`, `CONTAINER_SYSLOG_NG`). They are now ONE
+/// combined container under `CONTAINER_SYSLOG` alone -- the
+/// `CONTAINER_SYSLOG_NG` constant ("lancache-syslog-ng") was removed rather
+/// than kept as unused dead code, since no compose file will ever start a
+/// container by that name again; keeping it would misleadingly imply
+/// syslog-ng is still independently monitorable.
+pub const CONTAINER_UI: &str = "lancache-ui";
+pub const CONTAINER_NETDATA: &str = "lancache-netdata";
+pub const CONTAINER_DHCP: &str = "lancache-dhcp";
+pub const CONTAINER_DHCP_PROXY: &str = "lancache-dhcp-proxy";
+pub const CONTAINER_SYSLOG: &str = "lancache-syslog";
+
+/// Resolves which (if any) DHCP container should be alert-only-monitored,
+/// mirroring `setup.sh`'s own `DHCP_MODE` semantics (see that script's
+/// `compose_profiles_for_runtime` and its `is_valid_dhcp_mode` enumeration):
+/// `"kea"` activates the `dhcp` Compose profile/container (Kea), while
+/// `"dnsmasq-proxy"` and `"dnsmasq-relay"` both activate the `dhcp-proxy`
+/// Compose profile/container (dnsmasq, in either ProxyDHCP-only or full
+/// relay mode -- issue #844) -- the two DHCP_MODE values never activate both
+/// containers at once, so at most one of `dhcp`/`dhcp-proxy` is ever
+/// monitored. `"disabled"` (the documented default) and any unrecognized
+/// value both resolve to `None`: an unrecognized `DHCP_MODE` is exactly the
+/// kind of already-fail-closed-elsewhere condition (`setup.sh` itself
+/// rejects it before ever writing `.env`) this function should not guess
+/// past -- alert-only monitoring for a container that was never actually
+/// provisioned would just manufacture a permanent, misleading "unreachable"
+/// alarm out of a service that was never supposed to be running (the same
+/// failure mode `ContainerNames::dns_ssl`'s `SSL_ENABLED=0` -> `None`
+/// omission already avoids for the restart-capable services).
+pub fn dhcp_alert_container(dhcp_mode: &str) -> Option<&'static str> {
+    match dhcp_mode {
+        "kea" => Some(CONTAINER_DHCP),
+        "dnsmasq-proxy" | "dnsmasq-relay" => Some(CONTAINER_DHCP_PROXY),
+        _ => None,
+    }
+}
+
 /// One entry in the data-driven service table the main loop iterates over
 /// -- this is the typed per-service definition (health-check kind,
 /// restart policy, startup grace period) the maintainer's own rewrite
@@ -706,6 +756,31 @@ mod tests {
         assert!(resolve_container_names(None, Some("renamed"), None, None, true).is_err());
         assert!(resolve_container_names(None, None, Some("renamed"), None, true).is_err());
         assert!(resolve_container_names(None, None, None, Some("renamed"), true).is_err());
+    }
+
+    #[test]
+    // Pins DHCP_MODE's three-way mapping (issue #842): "kea" monitors the
+    // Kea container, either dnsmasq mode monitors dhcp-proxy instead, and
+    // "disabled" (or anything unrecognized) monitors neither -- mirroring
+    // setup.sh's own is_valid_dhcp_mode()/compose_profiles_for_runtime()
+    // semantics rather than inventing a separate contract for watchdog.
+    fn dhcp_alert_container_maps_each_mode_correctly() {
+        assert_eq!(dhcp_alert_container("kea"), Some(CONTAINER_DHCP));
+        assert_eq!(
+            dhcp_alert_container("dnsmasq-proxy"),
+            Some(CONTAINER_DHCP_PROXY)
+        );
+        assert_eq!(
+            dhcp_alert_container("dnsmasq-relay"),
+            Some(CONTAINER_DHCP_PROXY)
+        );
+        assert_eq!(dhcp_alert_container("disabled"), None);
+        // An unrecognized value must fail closed to "not monitored", not
+        // guess at either container -- setup.sh itself already rejects an
+        // invalid DHCP_MODE before it can reach a running install, so this
+        // is a defense-in-depth default, not the primary validation path.
+        assert_eq!(dhcp_alert_container("bogus"), None);
+        assert_eq!(dhcp_alert_container(""), None);
     }
 
     #[test]

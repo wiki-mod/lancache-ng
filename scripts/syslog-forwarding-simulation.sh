@@ -328,7 +328,13 @@ fi
 # whole pipeline even though `cut` itself succeeds and yields the same empty
 # output either way, so the trailing `|| true` neutralizes only that expected
 # no-match case instead of turning it into an unrelated fatal error.
-current_profiles="$(grep '^COMPOSE_PROFILES=' "$install_dir/.env" | head -1 | cut -d= -f2- || true)"
+# grep runs to completion into a variable first (the `|| true` above still
+# covers its own no-match case), then `head -1` reads that captured
+# variable via a here-string instead of a live pipe from grep -- a live
+# `grep ... | head -1` pipe can SIGPIPE grep if .env ever has more than one
+# matching line (issue #1377's repo-wide pipefail/SIGPIPE audit).
+compose_profiles_line="$(grep '^COMPOSE_PROFILES=' "$install_dir/.env" || true)"
+current_profiles="$(head -1 <<<"$compose_profiles_line" | cut -d= -f2-)"
 case ",${current_profiles}," in
     *,logging,*) ;;
     *)
@@ -820,10 +826,16 @@ if [[ "$dhcp_lease_obtained" -ne 1 ]]; then
     exit 1
 fi
 
-if ! dhcp_offered_address="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases" | head -1 | cut -d' ' -f2)"; then
+# A dhclient lease file can accumulate more than one "lease {...}" block
+# across renewals, so grep runs to completion into a variable first, and
+# `head -1` reads it via a here-string -- a live `grep | head -1` pipe
+# could SIGPIPE grep once there is more than one fixed-address line (issue
+# #1377's repo-wide pipefail/SIGPIPE audit).
+if ! fixed_address_lines="$(grep -oE 'fixed-address [0-9.]+' "$work_dir/shared/dhcp-client.leases")"; then
     echo "::error::Could not parse the offered address out of the real dhclient lease file." >&2
     exit 1
 fi
+dhcp_offered_address="$(head -1 <<<"$fixed_address_lines" | cut -d' ' -f2)"
 [[ -n "$dhcp_offered_address" ]] || { echo "::error::dhclient's lease file had no fixed-address field." >&2; exit 1; }
 echo "Real lease obtained: $dhcp_offered_address (Kea's own DHCP4_LEASE_ALLOC log line names this address verbatim)."
 # Marker is "lease <address> has been allocated" (Kea's own DHCP4_LEASE_ALLOC

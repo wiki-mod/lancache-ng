@@ -17,6 +17,42 @@ use lancache_watchdog::docker_client::DockerProxyClient;
 use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
 use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 
+/// Issue #842's five alert-only monitored services (never restarted -- see
+/// `lib.rs`'s module doc comment and [`HealthReading::is_alert_ok`]'s own
+/// doc comment for why). Built once at startup from [`Settings`] rather
+/// than re-derived every loop iteration, since `DHCP_MODE`/`SYSLOG_ENABLED`
+/// never change for the lifetime of this process.
+///
+/// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
+/// with issue #842/#849 introducing this function): `syslog` (fluent-bit)
+/// and `syslog-ng` used to be two separate containers, both alert-only
+/// monitored under their own fixed names (`CONTAINER_SYSLOG`,
+/// `CONTAINER_SYSLOG_NG`). They are now ONE combined container
+/// (`services/syslog/`) under the single container name `CONTAINER_SYSLOG`
+/// -- `CONTAINER_SYSLOG_NG` ("lancache-syslog-ng") no longer names any real
+/// container this stack ever starts, so pushing it here would make every
+/// health check against it fail closed permanently (container not found),
+/// a false alert for a container that was never supposed to exist by
+/// design, not a real outage. Only `CONTAINER_SYSLOG` is pushed now; the
+/// combined container's own dual-process healthcheck
+/// (`services/syslog/healthcheck.sh`) is what actually proves fluent-bit
+/// AND syslog-ng are both alive inside it, one level below what this
+/// per-container Docker-API check can see.
+fn resolve_alert_only_targets(dhcp_mode: &str, syslog_enabled: bool) -> Vec<&'static str> {
+    // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
+    // profile (unlike dhcp/dhcp-proxy/syslog below), so both are
+    // always monitored, matching how proxy/dns-standard/nats are always
+    // monitored among the four restart-capable services above.
+    let mut targets = vec![config::CONTAINER_UI, config::CONTAINER_NETDATA];
+    if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
+        targets.push(dhcp_container);
+    }
+    if syslog_enabled {
+        targets.push(config::CONTAINER_SYSLOG);
+    }
+    targets
+}
+
 // Matches watchdog.sh's log()/log_err(): "[watchdog] HH:MM:SS msg". Kept as
 // this exact shape (rather than switching to a structured `tracing`
 // format) so operators grepping existing `docker logs lancache-watchdog`
@@ -58,6 +94,14 @@ struct Settings {
     status_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
+    // Issue #842: gates which of the five alert-only services (see
+    // resolve_alert_only_targets()) are actually deployed. Read once here
+    // (not re-read per loop iteration) since neither knob can change for
+    // the lifetime of this process -- an operator changing DHCP_MODE or
+    // SYSLOG_ENABLED requires a `setup.sh update` + container recreate,
+    // which restarts this process anyway.
+    dhcp_mode: String,
+    syslog_enabled: bool,
 }
 
 fn load_settings() -> Settings {
@@ -155,6 +199,24 @@ fn load_settings() -> Settings {
         }
     };
 
+    // DHCP_MODE (issue #842): defaults to "disabled", matching setup.sh's
+    // own `append_env_key_if_missing DHCP_MODE "disabled"` -- an install
+    // that never set this at all (or a value setup.sh itself would already
+    // have rejected) must not accidentally start alert-only-monitoring a
+    // DHCP container that was never provisioned. See
+    // config::dhcp_alert_container()'s own doc comment for why an
+    // unrecognized value also falls back to "monitor neither", not a guess.
+    let dhcp_mode = env("DHCP_MODE").unwrap_or_else(|| "disabled".to_string());
+
+    // SYSLOG_ENABLED (issue #842): same env var and same default (false)
+    // retention.sh already uses for its own syslog-ng retention gate --
+    // reusing it here rather than inventing a second toggle keeps one
+    // enable/disable knob for the whole central-logging feature rather than
+    // two that could drift (the exact class of bug #877 already fixed once
+    // for SYSLOG_ENABLED's truthy-parsing between the Admin UI and
+    // watchdog.sh).
+    let syslog_enabled = config::resolve_bool(env("SYSLOG_ENABLED").as_deref(), false);
+
     Settings {
         docker_proxy_url,
         check_interval,
@@ -166,6 +228,8 @@ fn load_settings() -> Settings {
         status_file,
         cache_dir,
         container_names,
+        dhcp_mode,
+        syslog_enabled,
     }
 }
 
@@ -213,8 +277,25 @@ async fn main() {
         .collect();
     let mut docker_proxy_alert_counter = AlertCounter::default();
 
+    // Issue #842: ui/dhcp/dhcp-proxy/netdata/syslog (the last one combining
+    // fluent-bit+syslog-ng since the consolidation PR, 2026-08), alert-only
+    // (never restarted -- see resolve_alert_only_targets()'s own doc
+    // comment and lib.rs's module doc comment for why). A separate
+    // AlertCounter per container, keyed the same way failure_counters is
+    // above, so a persistently-down alert-only service keeps climbing
+    // (never resets on some arbitrary threshold the way a restart-capable
+    // FailureCounter would) -- see HealthReading::is_alert_ok's own doc
+    // comment for the reasoning behind reusing AlertCounter's semantics
+    // here instead of FailureCounter's.
+    let alert_only_targets =
+        resolve_alert_only_targets(&settings.dhcp_mode, settings.syslog_enabled);
+    let mut alert_only_counters: HashMap<&'static str, AlertCounter> = alert_only_targets
+        .iter()
+        .map(|name| (*name, AlertCounter::default()))
+        .collect();
+
     log(&format!(
-        "Watchdog started. Monitoring: {} (SSL_ENABLED={}); alert-only probe: {}",
+        "Watchdog started. Monitoring: {} (SSL_ENABLED={}); alert-only probe: {}; alert-only monitored: {}",
         monitored
             .iter()
             .map(|s| s.container_name.as_str())
@@ -226,6 +307,11 @@ async fn main() {
             0
         },
         settings.container_names.docker_socket_proxy,
+        if alert_only_targets.is_empty() {
+            "none".to_string()
+        } else {
+            alert_only_targets.join(" ")
+        },
     ));
     log(&format!(
         "Cache directory: {}",
@@ -308,6 +394,31 @@ async fn main() {
             docker_proxy_name.to_string(),
             ServiceHealth::from_reading(&docker_proxy_reading, docker_proxy_alert_counter.0),
         );
+
+        // Issue #842: the five alert-only services resolved at startup (see
+        // resolve_alert_only_targets()). Same per-container Docker-API
+        // inspect as the restart-capable services above (get_health()), but
+        // driven through AlertCounter/is_alert_ok() instead of
+        // FailureCounter/Action -- never restarted, matching the
+        // docker-socket-proxy probe's own alert-only shape immediately
+        // above, generalized from one hardcoded container to a list.
+        for name in &alert_only_targets {
+            let reading = client.get_health(name, settings.curl_max_time).await;
+            let counter = alert_only_counters
+                .get_mut(name)
+                .expect("every alert-only target has a counter");
+            match counter.record(reading.is_alert_ok()) {
+                AlertAction::None => {}
+                AlertAction::Recovered => log(&format!("RECOVERED {name}")),
+                AlertAction::Unreachable { count } => log(&format!(
+                    "UNHEALTHY {name} ({count} consecutive failures) -- alert only, watchdog does not restart this service (issue #842)"
+                )),
+            }
+            services_status.insert(
+                name.to_string(),
+                ServiceHealth::from_reading(&reading, counter.0),
+            );
+        }
 
         let disk_cache = status::disk_info(
             &settings.cache_dir,

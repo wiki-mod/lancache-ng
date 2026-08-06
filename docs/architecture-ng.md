@@ -248,13 +248,32 @@ non-restart-capable `probe_docker_socket_proxy` check each cycle against
 `docker-socket-proxy` itself -- see the dedicated bullet below for why this
 is alert-only rather than part of the auto-restart list above.
 
-Kea, syslog-ng, fluent-bit, `ui`, `dhcp-proxy`, `ntp`, `netdata`, and
-`docker-socket-proxy` all have a real Docker healthcheck too (so
-`docker inspect`/`docker compose ps` and CI's own wait-for-healthy scripts
-can see it), but the watchdog daemon does not poll or restart any of those
-eight itself (issue #842's per-service decision, not an oversight; #1169
-only added the missing healthchecks themselves, it deliberately did not
-widen watchdog's own monitored-service list -- see #842):
+Kea, `syslog` (the combined fluent-bit + syslog-ng container, since the
+syslog+fluent-bit consolidation PR, 2026-08 -- previously two separate
+healthchecked containers, `syslog-ng` and `syslog`/fluent-bit), `ui`,
+`dhcp-proxy`, `ntp`, `netdata`, and `docker-socket-proxy` all have a real
+Docker healthcheck too (so `docker inspect`/`docker compose ps` and CI's
+own wait-for-healthy scripts can see it). As of issue #842/#849
+(2026-08-05, before the consolidation combined `syslog`/`syslog-ng` into
+one container and one monitored target), five of these seven --
+`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, and `syslog` (fluent-bit +
+syslog-ng combined) -- are now **alert-only monitored** by
+`services/watchdog/src/main.rs`'s `resolve_alert_only_targets()`/
+`HealthReading::is_alert_ok()` in the Rust rewrite (never auto-restarted --
+see the maintainer's own #842 scope note on why blind auto-restart is not
+obviously the right recovery mechanism for every additional service).
+**This coverage is not live yet**: `services/watchdog/Dockerfile`'s
+`ENTRYPOINT` (and every `deploy/*/docker-compose.yml`'s `watchdog` service
+`command:` override) still runs the legacy `watchdog.sh`, which has no
+knowledge of these five at all -- see that crate's `lib.rs` module doc
+comment for exactly why the `ENTRYPOINT` swap is a separate, larger,
+not-yet-attempted follow-up (no Rust builder stage exists in the Dockerfile
+today). `ntp` (chrony) and `docker-socket-proxy` remain the only two of the
+seven with neither restart nor alert-only coverage in either
+implementation -- `docker-socket-proxy` for the chicken-and-egg reason its
+own bullet below explains (unchanged by this update); `ntp` simply wasn't
+named in #842's checklist and was deliberately left alone rather than
+added speculatively.
 
 - **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
   adding either to watchdog's blind restart-on-unhealthy loop would need the
@@ -264,10 +283,13 @@ widen watchdog's own monitored-service list -- see #842):
   consistency" section: nothing currently calls the Docker API to manage it
   by name), and `dhcp` is only allowlisted for `start`/`stop`
   (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
-  Widening that allowlist is a security-relevant architectural change in its
-  own right, not a side effect of extending a monitored-container list, so
-  #842 left both out of scope for a follow-up PR to decide deliberately
-  rather than as a byproduct of this change.
+  Widening that allowlist for *restart* is a security-relevant architectural
+  change in its own right, not a side effect of extending a monitored-
+  container list, so #842 left both out of scope for a follow-up PR to
+  decide deliberately rather than as a byproduct of this change (the
+  narrower *inspect-only* allowlist widening needed for the new alert-only
+  monitoring below, added by issue #842/#849, is a different, already-landed
+  grant -- it does not touch `safe_service_restart` for either).
 - **`dhcp-proxy` (dnsmasq), `ntp` (chrony), and `netdata`**: all three now
   have a real Docker `healthcheck:` block (#1169; previously
   `get_health()` would have read `.State.Health.Status` as absent ("none")
@@ -279,12 +301,15 @@ widen watchdog's own monitored-service list -- see #842):
 - **`syslog` (combined fluent-bit + syslog-ng)**: not in watchdog's
   polled/auto-restarted container list (a separate, deliberate scoping
   question, same as the previous two-container era) even though it now has
-  an explicit `container_name: lancache-syslog` (added by the syslog+
-  fluent-bit consolidation PR, 2026-08 -- the previous fluent-bit-only
-  `syslog` service had none, and this note's older wording describing that
-  gap is now stale). Its own healthcheck (`services/syslog/healthcheck.sh`)
-  checks both processes independently, a real improvement over the previous
-  two containers' respective `fluent-bit -V` (binary-integrity only) and
+  an explicit `container_name: lancache-syslog` (added independently by both
+  issue #842/#849's alert-only monitoring work and the syslog+fluent-bit
+  consolidation PR, 2026-08 -- the previous fluent-bit-only `syslog` service
+  had none, and #842/#849 additionally gave the previous separate
+  `syslog-ng` service one too, `lancache-syslog-ng`, which no longer exists
+  as a distinct container once the two combine into this one). Its own
+  healthcheck (`services/syslog/healthcheck.sh`) checks both processes
+  independently, a real improvement over the previous two containers'
+  respective `fluent-bit -V` (binary-integrity only) and
   `syslog-ng-ctl healthcheck` checks. Gated behind the
   `logging` Compose profile -- on by default since issue #1343 for every
   `setup.sh`-managed install (fresh wizard installs default the "Enable
@@ -296,6 +321,37 @@ widen watchdog's own monitored-service list -- see #842):
   manual `deploy/prod` install that never runs `setup.sh` still starts with
   `logging` off, same as its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles --
   see `deploy/prod/.env`'s own comment on this profile.
+
+**Alert-only monitoring's own allowlist precondition (issue #842/#849,
+2026-08-05):** before any of `ui`/`dhcp` (Kea)/`dhcp-proxy`/`netdata`/
+`syslog` could be alert-only monitored at all (the five, see above), each
+needed *inspect-only* Docker-API access through
+`scripts/docker-socket-proxy.sh`'s allowlist -- `ui`/`netdata`/`syslog` had
+no `safe_container_inspect`/`lancache_container` entry whatsoever before
+this work (the same "Operator-visible consistency" boundary
+`docs/naming-conventions.md` already documented for `ui`, updated alongside
+this one); `dhcp`/`dhcp-proxy` already had inspect access (added earlier for
+the Admin UI's own `dhcp.rs`/`dhcp_proxy.rs` status reads). This widening is
+inspect-only and separate from the `safe_service_restart` allowlist
+discussed per-service above -- alert-only monitoring never calls
+`restart_container`, so restart-capability for any of the five remains its
+own, separately-scoped future decision, not a byproduct of this change.
+**Watchdog's alert-only monitoring of `syslog` is gated by a second,
+separate flag, `SYSLOG_ENABLED`** (`resolve_bool`, default `false`) -- the
+same pre-existing double-opt-in `retention.sh` already used for its own
+syslog-pruning engine (see `deploy/prod/.env`'s "DOUBLE opt-in" comment),
+reused here for consistency rather than introduced fresh. **Known gap
+surfaced by reconciling this section with issue #1343's landing (not
+present when issue #842/#849 was originally written):** since
+`LOGGING_ENABLED` now defaults to `1`, a fresh default install runs the
+`syslog` container out of the box, but watchdog will *not* alert-monitor it
+unless an operator also separately sets `SYSLOG_ENABLED=true` -- these two
+flags are independent, and nothing today converges `SYSLOG_ENABLED` to
+follow `LOGGING_ENABLED`'s default. Whether `resolve_alert_only_targets()`
+should instead key off actual container liveness (or off `LOGGING_ENABLED`
+directly) rather than the separate double-opt-in flag is an open follow-up
+question, not decided or changed here -- posted as a structured decision on
+#842.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
@@ -374,6 +430,77 @@ Since issue #1170 Part 1, the `services` map also includes an entry for
 `docker-socket-proxy` itself (alert-only -- see its dedicated bullet above);
 the dashboard renders it through the same generic per-service loop as every
 other entry, with no template or route changes needed for it specifically.
+
+### Known benign startup/log messages (issue #849 item 8)
+
+Four log lines observed during real field testing (#1068 item 8) that read
+as alarming out of context but are expected, documented behavior once traced
+to their actual source -- collected here rather than left as unexplained
+"is this a problem?" notes:
+
+- **`Reconciler: published 0 records`** (`services/dns/nats-subscriber/src/main.rs`'s
+  `reconciler()`): a periodic (every 60s) full-resync pass that queries
+  PowerDNS's `lan.` zone via its REST API and re-publishes every non-SOA/NS
+  record over NATS, independent of the event-driven immediate-publish path
+  used when a record actually changes. **Expected** whenever the `lan.` zone
+  genuinely has no non-SOA/NS records yet -- a fresh install before any
+  DHCP-DDNS client has registered, an install with DHCP-DDNS disabled
+  entirely (`DHCP_DDNS_ENABLED=false`, the default -- see `config/prod/dhcp.env`),
+  or any deployment that legitimately has zero dynamically-registered LAN
+  hosts. **Would be a real problem** only if DHCP-DDNS is enabled with active
+  leases and this line persists anyway -- that would point at a PowerDNS
+  API-connectivity or zone-content issue worth investigating directly (e.g.
+  `pdns_control` / the zone's REST endpoint), not this reconciler's own logic.
+- **`pdns_server is ready (attempt 2)`** (`services/dns/entrypoint.sh`): after
+  starting the PowerDNS authoritative server (`run_auth &`) in the
+  background, the entrypoint polls `pdns_control rping` (a real control-socket
+  RPC, not a bare network ping -- satisfies AG-VAL-018's "real query/response
+  probe" requirement) up to 10 times, 0.5s apart, before starting the
+  recursor, so the recursor's own startup never races ahead of the auth
+  server's control socket becoming responsive. `attempt 2` simply means the
+  auth server took slightly over 0.5s (one extra poll cycle) to finish
+  initializing after being forked -- a normal, self-resolving startup
+  ordering delay, not a retry-after-failure or a bug. Any single-digit
+  attempt count here is unremarkable; only exhausting all 10 attempts (the
+  `WARNING: pdns_server did not respond to ping` line) would indicate a real
+  problem.
+- **NATS connection-refused-then-retry on `lancache-ui` startup**
+  (`services/ui/src/main.rs`'s `connect_nats_with_retry()`): the Admin UI's
+  `main()` awaits this function -- with a 1s-to-30s capped exponential
+  backoff loop that treats "not yet reachable" as its normal steady state --
+  *before* binding its own HTTP listener at all. Since Compose starts `ui`
+  and `nats` concurrently (no blocking `depends_on: condition:
+  service_healthy` between them), a connection-refused during `ui`'s first
+  few seconds while `nats-server` is still initializing is an expected,
+  self-resolving start-order race, confirmed harmless by design (the same
+  reasoning already documented on `services/ui/src/nats_auth_callout.rs`'s
+  own unconditional reconnect loop, which treats "connection dropped, retry"
+  as its permanent steady state, not just a startup-only condition).
+- **netdata: permission-denied on `/host/proc/<pid>/io` for nginx, and a
+  missing `/etc/netdata/scripts.d`** -- two distinct findings bundled in the
+  original report:
+  - The permission-denied error is **already fixed** (PR #1125, `pid: host`
+    in `deploy/*/docker-compose.yml`'s `netdata:` service, plus
+    `cap_add: SYS_PTRACE` and `security_opt: apparmor:unconfined`): without
+    `pid: host`, netdata's own PID namespace is merely a sibling of, not an
+    ancestor of, the host's, so the kernel's `ptrace_may_access` check for a
+    process outside netdata's own container fails with `Permission denied`
+    regardless of `SYS_PTRACE` -- this is netdata's own documented
+    requirement for `apps.plugin` to read other containers' `/proc/<pid>`
+    entries, not a project-specific workaround.
+  - The missing `/etc/netdata/scripts.d` message is **netdata's own,
+    harmless, expected behavior for an unused optional collector**, verified
+    against netdata's own documentation (AG-VAL-023) rather than assumed:
+    `scripts.d.plugin` is a real, separate netdata external plugin that runs
+    Nagios-compatible/custom scripts, configured via `scripts.d/nagios.conf`
+    under that directory. This project configures no custom Nagios-style
+    scripts anywhere, so the directory is legitimately absent, and netdata
+    logs this the same way it reports any other optional, unconfigured
+    external plugin at startup -- informational, not an error, and not
+    something this project's `netdata:` service needs to create or mount. An
+    operator who wants to silence the message specifically (not required for
+    correct operation) can disable `scripts.d.plugin` in netdata's own
+    `netdata.conf` `[plugins]` section.
 
 ## syslog-ng
 

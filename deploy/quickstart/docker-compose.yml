@@ -63,7 +63,12 @@ services:
       - "${IP_SSL:-127.0.0.1}:80:80"
       - "${IP_SSL:-127.0.0.1}:443:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1/healthz >/dev/null; }"]
+      # Since #1276/#1322: see deploy/prod/docker-compose.yml's matching
+      # comment -- container port 443 is now the stream-level SNI dispatch
+      # listener, which has no SNI to route on for an IP-literal curl target.
+      # Retargeted at conf.d/https.conf's dedicated, non-PROXY-protocol
+      # healthcheck port (8445) instead.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -461,6 +466,18 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
+      # Central log receiver destination (previously the separate
+      # `syslog-ng` service's own mount, and briefly ALSO a second,
+      # independent mount on a different balabit/syslog-ng container in
+      # current_dev's #1420, merged concurrently with this PR -- that whole
+      # second service is superseded by this one combined container, not
+      # merged alongside it). This is a named volume (not a bind mount, see
+      # deploy/prod/docker-compose.yml's own comment for why prod differs
+      # here) -- Docker's own image-content inheritance for a fresh named
+      # volume already gives it this Dockerfile's build-time chown to uid
+      # 10001, so quickstart never hits the root:root ownership problem
+      # prod's bind mount needs setup.sh/the data-loss detector to guard
+      # against.
       - logs-syslog-ng:/var/log/lancache-syslog-ng
     # Real dual-process check (services/syslog/healthcheck.sh): verifies
     # fluent-bit AND syslog-ng independently and only reports healthy when
@@ -659,6 +676,13 @@ services:
       - CONTAINER_DNS_SSL=lancache-dns-ssl
       - CONTAINER_NATS=lancache-nats
       - SSL_ENABLED=${SSL_ENABLED:-0}
+      # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
+      # deploy/prod/docker-compose.yml's identical addition -- currently
+      # unused by watchdog.sh (the bash entrypoint this ENTRYPOINT still
+      # runs), read only by the Rust crate's resolve_alert_only_targets()
+      # once that becomes this service's actual ENTRYPOINT.
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see

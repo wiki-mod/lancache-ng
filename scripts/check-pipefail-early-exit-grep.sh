@@ -16,35 +16,41 @@
 # `rustc -vV | grep -qE ...` -- fixed in the same PR by capturing each
 # producer's output into a variable first. A near-identical shape (`git log |
 # tail | head -n 50`) was independently found and fixed the same session in
-# PR #1371's find_built_ancestor(), and a proposed AGENTS.md rule for the
-# general failure class (AG-VAL-030) was posted on PR #1374 for maintainer
-# review per AG-WF-025 -- this script is the separate, already-required
-# AG-VAL-029 standing check for the confirmed incident, independent of
-# whether that governance rule proposal is adopted.
+# PR #1371's find_built_ancestor(). A proposed AGENTS.md rule for the
+# general failure class was posted on PR #1374 for maintainer review per
+# AG-WF-025 (originally drafted as AG-VAL-030, since claimed by an unrelated
+# rule; landed as AG-VAL-032 via issue #1377, which also widened this
+# script's own scope repo-wide) -- this script is the separate,
+# already-required AG-VAL-029 standing check for the confirmed incident,
+# independent of that governance rule.
 #
-# SCOPE, DELIBERATELY NARROW -- read before extending this list:
-# this only scans `tools/build-tools/Dockerfile`, the exact file the
-# confirmed incident occurred in. An earlier version of this script scanned
-# every shell script under scripts/ and tools/ too, and found 41 preexisting
-# instances of the same raw pattern across the codebase (e.g.
-# `scripts/check-file-headers.sh`, `scripts/check-netdata-curl-pin.sh`,
-# `scripts/setup-cli-simulation.sh`, and others) -- each would need
-# individual review to determine whether it is a real latent SIGPIPE risk
-# (most looked low-risk on inspection: a `printf`/single small-string
-# producer piped into `grep -q`/`head`, which in practice rarely writes
-# enough to fill a pipe buffer before the consumer's read completes, unlike
-# `rustc -vV`'s multi-line, larger output) or already provably safe. Fixing
-# or reviewing all 41 in this PR would be a large, disproportionate scope
-# expansion for a musl-toolchain/network-verification change with no
-# reported incident in any of those 41 locations, and risks introducing real
-# regressions into unrelated, currently-working scripts under mechanical
-# pattern-matching pressure. This is a genuine, not-yet-closed gap -- tracked
-# in issue #1377 (repo-wide review of the 41 findings) and as a named
-# follow-up in docs/release-validation-plan.md's Coverage Assessment section,
-# not silently dropped. Widening this script's scan_files back to the
-# repo-wide set (see git history on this file for the exact prior version) is
-# the concrete next step for that follow-up, once each finding in #1377 has
-# been triaged.
+# SCOPE: repo-wide, per issue #1377 -- every tracked shell script under
+# scripts/** and tools/**, plus setup.sh (the production installer). This
+# was originally scoped to only `tools/build-tools/Dockerfile` (the exact
+# file the confirmed incident occurred in) because a first wide scan found
+# 41 preexisting instances of the same raw pattern across the codebase with
+# none individually reviewed yet, and fixing or reviewing all of them in
+# that PR (#1374) would have been a disproportionate scope expansion for an
+# unrelated musl-toolchain/network-verification change. Issue #1377 tracked
+# that gap explicitly and did the actual per-location triage: a fresh scan
+# at #1377's own audit time found 56 locations (the codebase had drifted
+# since the original 41 were listed -- some were already fixed by
+# unrelated changes, `setup.sh` had grown new instances), each reviewed
+# individually. Every genuine SIGPIPE risk (a live pipe from a producer
+# that could still be writing when an early-exiting consumer decides it has
+# enough -- proven empirically on a real runner, not just reasoned about:
+# even `seq 1 200000 | head -1` reproducibly exits 141 under `pipefail`) was
+# fixed by capturing the producer's output into a variable first and
+# feeding the consumer via a here-string, eliminating the live pipe
+# entirely. The remaining handful are marked `# pipefail-safe: <reason>`
+# because they are backed by a hard tool contract for single-line or
+# self-limiting output (`docker inspect --format` on one field of one
+# container, `docker ps -q --filter name=^X$`, `find ... -print -quit`, and
+# one Docker HEALTHCHECK `CMD-SHELL` line that runs under the container's
+# own `/bin/sh -c` on every tick, a different execution context that never
+# inherits the calling script's own `pipefail`) -- not because the output
+# happens to be small or the producer happens to be fast, both of which the
+# same empirical proof showed are not reliable safety signals on their own.
 #
 # WHAT THIS DOES NOT DO: this is a deliberately cheap, grep-based heuristic
 # (matching this project's existing check-build-tools-smoke-coverage.sh
@@ -58,8 +64,38 @@ set -euo pipefail
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$repo_root"
 
-# Deliberately narrow scope -- see this file's own header comment for why.
-scan_files=("tools/build-tools/Dockerfile")
+# Repo-wide, per issue #1377 -- see this file's own header comment above.
+# Discovered via `git ls-files` (not `find`) so this only ever scans
+# tracked, committed scripts, and so a new script added under scripts/ or
+# tools/ is automatically covered without needing this list hand-maintained
+# -- the exact kind of drift that let the original narrow scope (a single
+# hardcoded path) go unnoticed for as long as it did.
+#
+# Captured via a plain assignment first (not `mapfile -t scan_files < <(git
+# ls-files ...)` directly), specifically so `git ls-files`'s own exit status
+# is checked explicitly: a process substitution's failure does not
+# propagate through `mapfile`, so a broken discovery (no git work tree
+# here, or `git` itself missing) would otherwise silently leave scan_files
+# empty, the scan loop below would iterate zero times, and the script would
+# report a false "OK" with exit 0 -- a check that can never fail is not a
+# check, per AG-VAL-002/AG-VAL-015. This is deliberately distinct from a
+# valid git work tree that genuinely has zero tracked files matching these
+# patterns (e.g. a bats fixture repo with only an untracked scratch file):
+# that is a legitimate empty scan, not a discovery failure, and must still
+# report OK.
+if ! tracked_scan_files="$(git ls-files -- \
+  'scripts/*.sh' 'scripts/**/*.sh' \
+  'tools/*.sh' 'tools/**/*.sh' \
+  'tools/*/Dockerfile*' \
+  'setup.sh')"; then
+  printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Not treating this as a clean pass.\n' "$repo_root" >&2
+  exit 1
+fi
+
+scan_files=()
+if [ -n "$tracked_scan_files" ]; then
+  mapfile -t scan_files < <(sort <<<"$tracked_scan_files")
+fi
 
 # Early-exiting-consumer patterns, matched immediately after a live pipe
 # (`|`, not `||`): grep with -q or -m<N> (any short-option cluster containing
@@ -111,8 +147,8 @@ for file in "${scan_files[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-pipefail-early-exit-grep: %d finding(s). See AGENTS.md AG-VAL-029 / the AG-VAL-030 rule proposal on PR #1374 for the full failure-class writeup.\n' "$failures" >&2
+  printf '::error::check-pipefail-early-exit-grep: %d finding(s). See AGENTS.md AG-VAL-029/AG-VAL-032 for the full failure-class writeup.\n' "$failures" >&2
   exit 1
 fi
 
-printf 'check-pipefail-early-exit-grep: OK (no early-exiting consumer piped from a live producer found in tools/build-tools/Dockerfile).\n'
+printf 'check-pipefail-early-exit-grep: OK (no early-exiting consumer piped from a live producer found across %d scanned scripts/Dockerfiles).\n' "${#scan_files[@]}"

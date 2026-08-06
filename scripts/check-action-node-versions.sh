@@ -245,8 +245,15 @@ fetch_external_action_yaml() {
     # line of a genuinely successful attempt's own output -- extracting from
     # that exact line to the end recovers the real answer regardless of how
     # much earlier-attempt noise precedes it.
-    if printf '%s\n' "$result" | grep -qx 'OK'; then
-      printf '%s\n' "$result" | sed -n '/^OK$/,$p'
+    # Here-string, not a `producer | grep -q` pipe: $result can be several
+    # attempts' output stacked together (see the comment above), and a live
+    # pipe feeding grep -qx/sed -n could let the underlying data race an
+    # early-exiting consumer under this file's own `set -o pipefail` (see
+    # AGENTS.md's pipefail/SIGPIPE-early-exit rule and issue #1377's
+    # repo-wide audit) -- a here-string has no second writer process at all,
+    # so it cannot SIGPIPE regardless of how large $result gets.
+    if grep -qx 'OK' <<<"$result"; then
+      sed -n '/^OK$/,$p' <<<"$result"
       return 0
     fi
     last_line="$(printf '%s\n' "$result" | tail -1)"

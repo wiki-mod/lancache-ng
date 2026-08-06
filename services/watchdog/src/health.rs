@@ -101,6 +101,42 @@ impl HealthReading {
             Self::Starting | Self::None | Self::Unreachable | Self::Other(_) => "yellow",
         }
     }
+
+    /// Collapses a reading into the simple "is this alert-only service okay
+    /// right now" boolean [`AlertCounter`] needs (issue #842: `ui`, `dhcp`,
+    /// `dhcp-proxy`, `netdata`, `syslog`, `syslog-ng` -- monitored for
+    /// dashboard visibility only, never auto-restarted; see `main.rs`'s own
+    /// alert-only loop for why these six never go through
+    /// [`FailureCounter`]/[`Action::Restart`] at all). `Healthy` and
+    /// `Starting` are both "not currently a problem", matching how
+    /// [`FailureCounter::record`] already treats `Starting` as inert rather
+    /// than alarm-worthy. `None` (no Docker `HEALTHCHECK` configured, but
+    /// the container inspect itself succeeded) is also treated as okay --
+    /// confirmed against every one of these six services' actual compose
+    /// definitions before writing this: all six (`ui`'s `/health` curl
+    /// probe, `dhcp`'s Kea control-API check, `dhcp-proxy`'s `dnsmasq
+    /// --test`, `netdata`'s REST-API curl probe, `syslog`'s `fluent-bit
+    /// -V`, `syslog-ng`'s `syslog-ng-ctl healthcheck`) already have a real
+    /// `healthcheck:` block, so `None` is not actually reachable for any of
+    /// them in practice -- but treating it as "okay" rather than "alarm" is
+    /// still the right default if that ever changes (a missing healthcheck
+    /// is a documentation/compose gap to fix, not something this alert-only
+    /// probe should misrepresent as a live service outage). `Unreachable`
+    /// (container doesn't exist, or docker-socket-proxy rejected/couldn't
+    /// answer the inspect call) and `Unhealthy` are the only two "something
+    /// is actually wrong" cases -- for a service this function is called on
+    /// at all, its container is expected to exist (callers only add a
+    /// profile-gated service, e.g. `dhcp`/`dhcp-proxy`/`syslog`/
+    /// `syslog-ng`, to the alert-only set once its enabling env var already
+    /// confirms it should be deployed), so `Unreachable` here means "should
+    /// be running and isn't", not "legitimately not deployed". `Other` is
+    /// never produced by a real Docker health string (see this enum's own
+    /// doc comment) but is treated as alarm-worthy on the cautious
+    /// assumption that an unrecognized value is more likely a real problem
+    /// than a benign one.
+    pub fn is_alert_ok(&self) -> bool {
+        matches!(self, Self::Healthy | Self::Starting | Self::None)
+    }
 }
 
 /// Per-service consecutive-failure counter driving watchdog.sh's
@@ -332,6 +368,20 @@ mod tests {
             Action::Recovered
         );
         assert_eq!(counter.0, 0);
+    }
+
+    #[test]
+    // Pins is_alert_ok()'s exact classification for issue #842's six
+    // alert-only services: Healthy/Starting/None are "not a problem" (the
+    // same three states FailureCounter already treats as either healthy or
+    // inert), while Unhealthy/Unreachable/Other are alarm-worthy.
+    fn is_alert_ok_matches_documented_classification() {
+        assert!(HealthReading::Healthy.is_alert_ok());
+        assert!(HealthReading::Starting.is_alert_ok());
+        assert!(HealthReading::None.is_alert_ok());
+        assert!(!HealthReading::Unhealthy.is_alert_ok());
+        assert!(!HealthReading::Unreachable.is_alert_ok());
+        assert!(!HealthReading::Other("huh".into()).is_alert_ok());
     }
 
     #[test]
