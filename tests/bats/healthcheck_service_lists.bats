@@ -140,17 +140,27 @@ extract_services_with_healthcheck() {
     [[ " $hc " == *" netdata "* ]] || fail "setup-cli-simulation.sh's services_with_healthcheck ('$hc') no longer includes netdata"
 }
 
-@test "syslog-forwarding-simulation.sh includes docker-socket-proxy, dhcp-proxy, syslog, and syslog-ng in services_with_healthcheck (regression guard, #1169)" {
+@test "syslog-forwarding-simulation.sh includes docker-socket-proxy, dhcp-proxy, and syslog in services_with_healthcheck (regression guard, #1169)" {
     # docker-socket-proxy and dhcp-proxy gained a real Docker HEALTHCHECK
     # under #1169 (neither had one before). syslog and syslog-ng have had a
     # real Docker HEALTHCHECK since issue #633 (predating #1169) but were
     # incorrectly grouped with docker-socket-proxy as having "genuinely none"
     # in this file's own comment -- #1169 corrected that stale claim too.
+    #
+    # UPDATED (syslog+fluent-bit consolidation PR, 2026-08): `syslog` and
+    # `syslog-ng` used to be two separate services, each independently
+    # listed here; they are now ONE combined container/service (`syslog`),
+    # with one HEALTHCHECK that internally verifies both processes (see
+    # services/syslog/healthcheck.sh) -- `syslog-ng` dropped from this
+    # test's own expected-membership list since it is no longer a Compose
+    # service name at all, matching syslog-forwarding-simulation.sh's own
+    # updated services_with_healthcheck list.
     hc="$(extract_services_with_healthcheck "$repo_root/scripts/syslog-forwarding-simulation.sh")"
     [ -n "$hc" ] || fail "syslog-forwarding-simulation.sh: services_with_healthcheck not found"
-    for svc in docker-socket-proxy dhcp-proxy syslog syslog-ng; do
+    for svc in docker-socket-proxy dhcp-proxy syslog; do
         [[ " $hc " == *" $svc "* ]] || fail "syslog-forwarding-simulation.sh's services_with_healthcheck ('$hc') no longer includes $svc"
     done
+    [[ " $hc " != *" syslog-ng "* ]] || fail "syslog-forwarding-simulation.sh's services_with_healthcheck ('$hc') still lists syslog-ng as a separate service, but the syslog+fluent-bit consolidation merged it into the single 'syslog' entry"
 }
 
 @test "setup-cli-simulation.sh's smaller services_with_healthcheck list stays intentional (sanity: still a subset of all_services)" {

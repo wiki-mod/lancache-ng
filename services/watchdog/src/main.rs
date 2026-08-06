@@ -17,14 +17,30 @@ use lancache_watchdog::docker_client::DockerProxyClient;
 use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
 use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 
-/// Issue #842's six alert-only monitored services (never restarted -- see
+/// Issue #842's five alert-only monitored services (never restarted -- see
 /// `lib.rs`'s module doc comment and [`HealthReading::is_alert_ok`]'s own
 /// doc comment for why). Built once at startup from [`Settings`] rather
 /// than re-derived every loop iteration, since `DHCP_MODE`/`SYSLOG_ENABLED`
 /// never change for the lifetime of this process.
+///
+/// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
+/// with issue #842/#849 introducing this function): `syslog` (fluent-bit)
+/// and `syslog-ng` used to be two separate containers, both alert-only
+/// monitored under their own fixed names (`CONTAINER_SYSLOG`,
+/// `CONTAINER_SYSLOG_NG`). They are now ONE combined container
+/// (`services/syslog/`) under the single container name `CONTAINER_SYSLOG`
+/// -- `CONTAINER_SYSLOG_NG` ("lancache-syslog-ng") no longer names any real
+/// container this stack ever starts, so pushing it here would make every
+/// health check against it fail closed permanently (container not found),
+/// a false alert for a container that was never supposed to exist by
+/// design, not a real outage. Only `CONTAINER_SYSLOG` is pushed now; the
+/// combined container's own dual-process healthcheck
+/// (`services/syslog/healthcheck.sh`) is what actually proves fluent-bit
+/// AND syslog-ng are both alive inside it, one level below what this
+/// per-container Docker-API check can see.
 fn resolve_alert_only_targets(dhcp_mode: &str, syslog_enabled: bool) -> Vec<&'static str> {
     // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
-    // profile (unlike dhcp/dhcp-proxy/syslog/syslog-ng below), so both are
+    // profile (unlike dhcp/dhcp-proxy/syslog below), so both are
     // always monitored, matching how proxy/dns-standard/nats are always
     // monitored among the four restart-capable services above.
     let mut targets = vec![config::CONTAINER_UI, config::CONTAINER_NETDATA];
@@ -33,7 +49,6 @@ fn resolve_alert_only_targets(dhcp_mode: &str, syslog_enabled: bool) -> Vec<&'st
     }
     if syslog_enabled {
         targets.push(config::CONTAINER_SYSLOG);
-        targets.push(config::CONTAINER_SYSLOG_NG);
     }
     targets
 }
@@ -79,7 +94,7 @@ struct Settings {
     status_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
-    // Issue #842: gates which of the six alert-only services (see
+    // Issue #842: gates which of the five alert-only services (see
     // resolve_alert_only_targets()) are actually deployed. Read once here
     // (not re-read per loop iteration) since neither knob can change for
     // the lifetime of this process -- an operator changing DHCP_MODE or
@@ -262,7 +277,8 @@ async fn main() {
         .collect();
     let mut docker_proxy_alert_counter = AlertCounter::default();
 
-    // Issue #842: ui/dhcp/dhcp-proxy/netdata/syslog/syslog-ng, alert-only
+    // Issue #842: ui/dhcp/dhcp-proxy/netdata/syslog (the last one combining
+    // fluent-bit+syslog-ng since the consolidation PR, 2026-08), alert-only
     // (never restarted -- see resolve_alert_only_targets()'s own doc
     // comment and lib.rs's module doc comment for why). A separate
     // AlertCounter per container, keyed the same way failure_counters is
@@ -379,7 +395,7 @@ async fn main() {
             ServiceHealth::from_reading(&docker_proxy_reading, docker_proxy_alert_counter.0),
         );
 
-        // Issue #842: the six alert-only services resolved at startup (see
+        // Issue #842: the five alert-only services resolved at startup (see
         // resolve_alert_only_targets()). Same per-container Docker-API
         // inspect as the restart-capable services above (get_health()), but
         // driven through AlertCounter/is_alert_ok() instead of

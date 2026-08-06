@@ -69,7 +69,7 @@ tooling_names=$(collect_names tooling)
 metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
-runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui)
+runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui syslog)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
   require_manifest_platform "$image" linux/amd64
@@ -81,7 +81,14 @@ require_manifest_platform build-tools linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
 require_manifest_platform stack linux/arm64
-for image in docker-socket-proxy nats fluent-bit syslog-ng netdata busybox; do
+# fluent-bit and syslog-ng are deliberately NOT checked here anymore (moved
+# to the `legacy:` section, see release/stack-images.yml): the syslog+
+# fluent-bit consolidation PR replaced both separate third-party-pinned
+# images with one first-party `syslog` image (added to runtime_images
+# above) that bundles fluent-bit's own exact pinned binary and Alpine's own
+# stable-repo syslog-ng package internally -- neither is pulled as its own
+# top-level image anymore.
+for image in docker-socket-proxy nats netdata busybox; do
   require_name "$external_names" "$image" external
 done
 
@@ -92,6 +99,7 @@ for dockerfile in \
   services/dhcp/Dockerfile \
   services/dhcp-proxy/Dockerfile \
   services/ui/Dockerfile \
+  services/syslog/Dockerfile \
   tools/build-tools/Dockerfile
 do
   require_file "$dockerfile"

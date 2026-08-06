@@ -97,7 +97,14 @@ Documented exceptions:
 Rule: lowercase, hyphen-separated, one word per logical responsibility —
 `proxy`, `dns-standard`, `dns-ssl`, `dhcp`, `dhcp-proxy`, `dhcp-probe`,
 `ntp`, `nats`, `docker-socket-proxy`, `watchdog`, `ui`, `netdata`, `syslog`.
-These names are also the DNS aliases used for
+This list never carried a separate `syslog-ng` entry even while a real
+`syslog-ng` Compose service existed (issue #453/#633 through the
+syslog+fluent-bit consolidation PR) -- a pre-existing documentation gap this
+project never revisited, not a deliberate decision. The consolidation
+merging `syslog` (fluent-bit) and `syslog-ng` into one combined-container
+`syslog` service genuinely closes that gap rather than papering over it:
+this list is now accurate again by construction, since there is only one
+logical central-logging service left to name. These names are also the DNS aliases used for
 service-to-service HTTP calls inside a Compose network (see "Two separate
 name namespaces" above). They must be identical across `deploy/prod`
 and `deploy/quickstart` for the same logical service — a
@@ -128,7 +135,10 @@ the Docker socket proxy currently allowlists:
    `docker-socket-proxy`, `watchdog`, `ui`, and `netdata` were not allowlist
    targets (nothing called the Docker API to manage them by name) -- this
    is **no longer true for `ui`/`netdata`**: issue #842/#849 (2026-08-05)
-   added both, plus `syslog`/`syslog-ng`, to `safe_container_inspect`/
+   added both, plus `syslog` (at the time, two separate services/containers,
+   `syslog` and `syslog-ng`, each added individually; the syslog+fluent-bit
+   consolidation PR merged concurrently reduced that to the one `syslog`
+   name that remains), to `safe_container_inspect`/
    `lancache_container` (inspect-only, for watchdog's Rust rewrite's
    alert-only monitoring -- see `docs/architecture-ng.md`'s "Auto-restart"
    section for the full list and reasoning). `docker-socket-proxy` and

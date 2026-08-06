@@ -422,21 +422,30 @@ pub fn resolve_cache_dir(
     Ok(DEFAULT_CACHE_DIR.to_string())
 }
 
-/// Fixed container names for issue #842's six alert-only services (`ui`,
-/// `dhcp`, `dhcp-proxy`, `netdata`, `syslog`, `syslog-ng`). Deliberately NOT
+/// Fixed container names for issue #842's five alert-only services (`ui`,
+/// `dhcp`, `dhcp-proxy`, `netdata`, `syslog`). Deliberately NOT
 /// sourced from a `CONTAINER_*` env var override, unlike `ContainerNames`'s
 /// four restart-capable fields above -- same reasoning as
-/// `ContainerNames::docker_socket_proxy`: these six are never restarted (see
+/// `ContainerNames::docker_socket_proxy`: these five are never restarted (see
 /// `main.rs`'s alert-only loop), so there is no `resolve_container_names`-style
 /// fatal-mismatch check to apply, and no compose file, the Admin UI's
 /// `docker_client.rs`, or `scripts/docker-socket-proxy.sh`'s allowlist
 /// support renaming any of them either.
+///
+/// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
+/// with issue #842/#849 introducing this list): `syslog` (fluent-bit) and
+/// `syslog-ng` used to be two separate containers, each with its own fixed
+/// name here (`CONTAINER_SYSLOG`, `CONTAINER_SYSLOG_NG`). They are now ONE
+/// combined container under `CONTAINER_SYSLOG` alone -- the
+/// `CONTAINER_SYSLOG_NG` constant ("lancache-syslog-ng") was removed rather
+/// than kept as unused dead code, since no compose file will ever start a
+/// container by that name again; keeping it would misleadingly imply
+/// syslog-ng is still independently monitorable.
 pub const CONTAINER_UI: &str = "lancache-ui";
 pub const CONTAINER_NETDATA: &str = "lancache-netdata";
 pub const CONTAINER_DHCP: &str = "lancache-dhcp";
 pub const CONTAINER_DHCP_PROXY: &str = "lancache-dhcp-proxy";
 pub const CONTAINER_SYSLOG: &str = "lancache-syslog";
-pub const CONTAINER_SYSLOG_NG: &str = "lancache-syslog-ng";
 
 /// Resolves which (if any) DHCP container should be alert-only-monitored,
 /// mirroring `setup.sh`'s own `DHCP_MODE` semantics (see that script's

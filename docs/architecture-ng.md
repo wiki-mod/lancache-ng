@@ -20,7 +20,7 @@ document.
 | Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
 | Watchdog | on | — | Health checks, auto-restart, purge cron |
-| syslog-ng | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to it (#453) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
+| syslog (fluent-bit + syslog-ng, combined) | on (`logging` Compose profile, default-enabled since #1343; real opt-out via `LOGGING_ENABLED=0`) | — | Central log receiver; fluent-bit forwards logs from every wired service to syslog-ng inside the same container (#453, combined into one image 2026-08) — see the syslog-ng section's full logging matrix below, not just proxy access logs |
 | Admin UI | on | — | Axum/Rust, Tera, Tailwind, separate port |
 | Cache Warmer | not implemented | — | **Design-only, not shipped**: no `services/` code, no Compose service, nothing runnable exists yet under this name. See [docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the current proactive cache-warming design plan and its open maintainer decisions. Do not treat this row as an existing on/off feature until that design actually lands. |
 
@@ -299,7 +299,7 @@ watchdog daemon.
 - Kea: REST API ping
 - nats: HTTP probe against nats-server's own monitor endpoint (`http_port: 8222` set in the compose-generated boot config, checked via `wget` against `/healthz` -- nats:2-alpine ships BusyBox's wget/nc but no curl, verified empirically)
 - ui: HTTP request on `/health` (`services/ui/src/main.rs`'s shallow liveness route, checked via `curl`, present in the image)
-- syslog-ng: `syslog-ng-ctl healthcheck` (when the `logging` profile is active); fluent-bit: `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build)
+- syslog (combined fluent-bit + syslog-ng, when the `logging` profile is active): `services/syslog/healthcheck.sh` checks BOTH processes independently -- `syslog-ng-ctl stats` against the real control socket for syslog-ng, `pgrep -f` against fluent-bit's own bundled-interpreter cmdline for fluent-bit (its `/proc/<pid>/comm` stays `ld-linux-x86-64` for its whole lifetime, confirmed live, since it is invoked through an explicit dynamic-linker interpreter argument rather than the kernel's normal PT_INTERP path -- `pgrep -x fluent-bit` would never match) -- and only reports healthy when both are, additionally writing a structured per-process status file
 - dhcp-proxy (dnsmasq): liveness + config-integrity, not a functional DHCP probe (#1169) -- dnsmasq has no REST/control-socket API and this config disables DNS entirely (`port=0`), so a query/response probe like PowerDNS's isn't possible, and synthesizing a real DHCPDISCOVER every interval would inject genuine broadcast LAN traffic as a healthcheck side effect. Checks that PID 1 is still `dnsmasq` (the entrypoint execs it directly, no wrapper shell) and that `dnsmasq --test` still validates the on-disk config
 - ntp (chrony): real query/response probe via `chronyc tracking` against chronyd's own command socket (#1169) -- a genuine round-trip, not a bare port-listen check, but deliberately does not require an already-synchronised stratum, since "alive but not yet synced" is a legitimate transient state during `start_period` or an upstream network blip
 - netdata: HTTP probe against its own REST API, `GET /api/v1/info` (#1169), matching the check `deploy/full-setup/docker-compose.yml`'s validation stack already used for the same pinned image
@@ -330,12 +330,16 @@ non-restart-capable `probe_docker_socket_proxy` check each cycle against
 `docker-socket-proxy` itself -- see the dedicated bullet below for why this
 is alert-only rather than part of the auto-restart list above.
 
-Kea, syslog-ng, fluent-bit, `ui`, `dhcp-proxy`, `ntp`, `netdata`, and
-`docker-socket-proxy` all have a real Docker healthcheck too (so
-`docker inspect`/`docker compose ps` and CI's own wait-for-healthy scripts
-can see it). As of issue #842/#849 (2026-08-05), six of these eight --
-`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, `syslog` (fluent-bit), and
-`syslog-ng` -- are now **alert-only monitored** by
+Kea, `syslog` (the combined fluent-bit + syslog-ng container, since the
+syslog+fluent-bit consolidation PR, 2026-08 -- previously two separate
+healthchecked containers, `syslog-ng` and `syslog`/fluent-bit), `ui`,
+`dhcp-proxy`, `ntp`, `netdata`, and `docker-socket-proxy` all have a real
+Docker healthcheck too (so `docker inspect`/`docker compose ps` and CI's
+own wait-for-healthy scripts can see it). As of issue #842/#849
+(2026-08-05, before the consolidation combined `syslog`/`syslog-ng` into
+one container and one monitored target), five of these seven --
+`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, and `syslog` (fluent-bit +
+syslog-ng combined) -- are now **alert-only monitored** by
 `services/watchdog/src/main.rs`'s `resolve_alert_only_targets()`/
 `HealthReading::is_alert_ok()` in the Rust rewrite (never auto-restarted --
 see the maintainer's own #842 scope note on why blind auto-restart is not
@@ -343,60 +347,93 @@ obviously the right recovery mechanism for every additional service).
 **This coverage is not live yet**: `services/watchdog/Dockerfile`'s
 `ENTRYPOINT` (and every `deploy/*/docker-compose.yml`'s `watchdog` service
 `command:` override) still runs the legacy `watchdog.sh`, which has no
-knowledge of these six at all -- see that crate's `lib.rs` module doc
+knowledge of these five at all -- see that crate's `lib.rs` module doc
 comment for exactly why the `ENTRYPOINT` swap is a separate, larger,
 not-yet-attempted follow-up (no Rust builder stage exists in the Dockerfile
 today). `ntp` (chrony) and `docker-socket-proxy` remain the only two of the
-eight with neither restart nor alert-only coverage in either
+seven with neither restart nor alert-only coverage in either
 implementation -- `docker-socket-proxy` for the chicken-and-egg reason its
 own bullet below explains (unchanged by this update); `ntp` simply wasn't
 named in #842's checklist and was deliberately left alone rather than
 added speculatively.
 
-- **`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, `syslog`, `syslog-ng`**: all
-  six needed `scripts/docker-socket-proxy.sh`'s allowlist widened before
-  alert-only monitoring was possible at all -- `ui`/`netdata`/`syslog`/
-  `syslog-ng` had no `safe_container_inspect`/`lancache_container` entry
-  whatsoever before #842/#849 (a deliberate boundary previously documented
-  in `docs/naming-conventions.md`'s "Operator-visible consistency" section:
-  nothing called the Docker API to manage `ui` by name -- that section is
-  updated alongside this one); `dhcp`/`dhcp-proxy` already had inspect
-  access (added for the Admin UI's own `dhcp.rs`/`dhcp_proxy.rs` status
-  reads) but, same as before this change, still only `start`/`stop`
-  (`safe_dhcp_action`), never `restart` -- watchdog's alert-only monitoring
-  needs inspect only, so this PR does not touch `safe_service_restart` for
-  any of the six; restart-capability for any of them remains its own,
-  separately-scoped future decision, not a byproduct of this change.
-  `syslog` (fluent-bit) and `syslog-ng` additionally needed a fixed
-  `container_name:` added in `deploy/prod/docker-compose.yml` (`syslog-ng`
-  also in `deploy/quickstart/docker-compose.yml` -- `syslog` already had one
-  there) before either could be addressed by a stable Docker-API path at
-  all. Their *containers'* existence is gated by the `logging` Compose
-  profile, controlled by `LOGGING_ENABLED` -- **on by default since issue
-  #1343** for every `setup.sh`-managed install (fresh wizard installs default
-  the "Enable central logging?" prompt to `Y`, and `setup.sh update`
-  converges an existing install toward `LOGGING_ENABLED=1` if the key was
-  never set; a real, operator-controllable opt-out remains via
-  `LOGGING_ENABLED=0` in `.env` or the Admin UI). A from-scratch manual
-  `deploy/prod` install that never runs `setup.sh` still starts with
+- **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
+  adding either to watchdog's blind restart-on-unhealthy loop would need the
+  Docker socket proxy's allowlist (`scripts/docker-socket-proxy.sh`) widened
+  first -- `ui` has no allowlist entry at all today (a deliberate boundary
+  documented in `docs/naming-conventions.md`'s "Operator-visible
+  consistency" section: nothing currently calls the Docker API to manage it
+  by name), and `dhcp` is only allowlisted for `start`/`stop`
+  (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
+  Widening that allowlist for *restart* is a security-relevant architectural
+  change in its own right, not a side effect of extending a monitored-
+  container list, so #842 left both out of scope for a follow-up PR to
+  decide deliberately rather than as a byproduct of this change (the
+  narrower *inspect-only* allowlist widening needed for the new alert-only
+  monitoring below, added by issue #842/#849, is a different, already-landed
+  grant -- it does not touch `safe_service_restart` for either).
+- **`dhcp-proxy` (dnsmasq), `ntp` (chrony), and `netdata`**: all three now
+  have a real Docker `healthcheck:` block (#1169; previously
+  `get_health()` would have read `.State.Health.Status` as absent ("none")
+  for all three, so adding any of them to the monitored list before #1169
+  would have been a silent no-op, not real coverage). Whether to actually
+  add them to watchdog's polled/auto-restarted list is still its own
+  separate scoping question (#842), deliberately not decided as a byproduct
+  of #1169 landing their healthchecks.
+- **`syslog` (combined fluent-bit + syslog-ng)**: not in watchdog's
+  polled/auto-restarted container list (a separate, deliberate scoping
+  question, same as the previous two-container era) even though it now has
+  an explicit `container_name: lancache-syslog` (added independently by both
+  issue #842/#849's alert-only monitoring work and the syslog+fluent-bit
+  consolidation PR, 2026-08 -- the previous fluent-bit-only `syslog` service
+  had none, and #842/#849 additionally gave the previous separate
+  `syslog-ng` service one too, `lancache-syslog-ng`, which no longer exists
+  as a distinct container once the two combine into this one). Its own
+  healthcheck (`services/syslog/healthcheck.sh`) checks both processes
+  independently, a real improvement over the previous two containers'
+  respective `fluent-bit -V` (binary-integrity only) and
+  `syslog-ng-ctl healthcheck` checks. Gated behind the
+  `logging` Compose profile -- on by default since issue #1343 for every
+  `setup.sh`-managed install (fresh wizard installs default the "Enable
+  central logging?" prompt to `Y`, and `setup.sh update` converges an
+  existing install toward `LOGGING_ENABLED=1` if the key was never set; a
+  real, operator-controllable opt-out remains via `LOGGING_ENABLED=0` in
+  `.env` or the Admin UI, for genuinely storage-constrained installs), not
+  the off-by-default state this section previously described. A from-scratch
+  manual `deploy/prod` install that never runs `setup.sh` still starts with
   `logging` off, same as its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles --
   see `deploy/prod/.env`'s own comment on this profile.
-  **This PR's own watchdog alert-only monitoring of `syslog`/`syslog-ng` is
-  gated by a second, separate flag, `SYSLOG_ENABLED`** (`resolve_bool`,
-  default `false`) -- the same pre-existing double-opt-in `retention.sh`
-  already used for its own syslog-pruning engine (see `deploy/prod/.env`'s
-  "DOUBLE opt-in" comment), reused here for consistency rather than
-  introduced fresh. **Known gap surfaced by reconciling this section with
-  issue #1343's landing (not present when this PR was originally written):**
-  since `LOGGING_ENABLED` now defaults to `1`, a fresh default install runs
-  the `syslog`/`syslog-ng` containers out of the box, but watchdog will
-  *not* alert-monitor them unless an operator also separately sets
-  `SYSLOG_ENABLED=true` -- these two flags are independent, and nothing
-  today converges `SYSLOG_ENABLED` to follow `LOGGING_ENABLED`'s default.
-  Whether `resolve_alert_only_targets()` should instead key off actual
-  container liveness (or off `LOGGING_ENABLED` directly) rather than the
-  separate double-opt-in flag is an open follow-up question, not decided or
-  changed here -- posted as a structured decision on #842.
+
+**Alert-only monitoring's own allowlist precondition (issue #842/#849,
+2026-08-05):** before any of `ui`/`dhcp` (Kea)/`dhcp-proxy`/`netdata`/
+`syslog` could be alert-only monitored at all (the five, see above), each
+needed *inspect-only* Docker-API access through
+`scripts/docker-socket-proxy.sh`'s allowlist -- `ui`/`netdata`/`syslog` had
+no `safe_container_inspect`/`lancache_container` entry whatsoever before
+this work (the same "Operator-visible consistency" boundary
+`docs/naming-conventions.md` already documented for `ui`, updated alongside
+this one); `dhcp`/`dhcp-proxy` already had inspect access (added earlier for
+the Admin UI's own `dhcp.rs`/`dhcp_proxy.rs` status reads). This widening is
+inspect-only and separate from the `safe_service_restart` allowlist
+discussed per-service above -- alert-only monitoring never calls
+`restart_container`, so restart-capability for any of the five remains its
+own, separately-scoped future decision, not a byproduct of this change.
+**Watchdog's alert-only monitoring of `syslog` is gated by a second,
+separate flag, `SYSLOG_ENABLED`** (`resolve_bool`, default `false`) -- the
+same pre-existing double-opt-in `retention.sh` already used for its own
+syslog-pruning engine (see `deploy/prod/.env`'s "DOUBLE opt-in" comment),
+reused here for consistency rather than introduced fresh. **Known gap
+surfaced by reconciling this section with issue #1343's landing (not
+present when issue #842/#849 was originally written):** since
+`LOGGING_ENABLED` now defaults to `1`, a fresh default install runs the
+`syslog` container out of the box, but watchdog will *not* alert-monitor it
+unless an operator also separately sets `SYSLOG_ENABLED=true` -- these two
+flags are independent, and nothing today converges `SYSLOG_ENABLED` to
+follow `LOGGING_ENABLED`'s default. Whether `resolve_alert_only_targets()`
+should instead key off actual container liveness (or off `LOGGING_ENABLED`
+directly) rather than the separate double-opt-in flag is an open follow-up
+question, not decided or changed here -- posted as a structured decision on
+#842.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
@@ -549,23 +586,27 @@ to their actual source -- collected here rather than left as unexplained
 
 ## syslog-ng
 
-Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `dev`, `prod`, and `quickstart` alike. `fluent-bit` (the `syslog` service) is the collector/forwarder: it tails every wired service's log file(s) (see the matrix below) and fans each one out to a forward to `syslog-ng` over TCP/601 (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`); the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job in dev). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`.
+Central log receiver for the stack (#453), opt-in via `docker compose --profile logging up -d` in `prod` and `quickstart` alike. Since the syslog+fluent-bit consolidation PR (2026-08), `syslog-ng` and `fluent-bit` (the `syslog` service) run as two supervised processes inside ONE container (`services/syslog/`) instead of two separate ones -- a deliberate maintainer decision to accept crash-coupling and a single Docker HEALTHCHECK slot (mitigated by the real dual-process check described below) in exchange for one image to build/scan/patch instead of two. `fluent-bit` tails every wired service's log file(s) (see the matrix below) and forwards each one to `syslog-ng` over `127.0.0.1:6601` (RFC 5424, plain LF framing, `network()` source with `flags(syslog-protocol)`) -- a loopback connection within the shared container network namespace, not a Compose service-to-service hop anymore; the proxy/nginx access log additionally gets a second, local plain-text copy (used by Netdata's `web_log` job). `syslog-ng` writes received logs per-source, per-day under `/var/log/lancache-syslog-ng/<host>/<YYYYMMDD>.log`. Port 6601 (not the original 601) is deliberate: 601 is a privileged port (confirmed live -- `/proc/sys/net/ipv4/ip_unprivileged_port_start` defaults to 1024 on a real runner) and this container's `syslog-ng` runs as a non-root uid with no `CAP_NET_BIND_SERVICE` grant; 601 was never published to the host or documented as an external contract, so the renumbering has no external impact.
 
 **Currently implemented:**
-- Size-bounded rotation: an active log file is rotated once it exceeds `SYSLOG_MAX_FILE_MB` (default 100), then `syslog-ng` is signaled (`SIGHUP`) to reopen the (recreated) destination file.
+- Size-bounded rotation: an active log file is rotated once it exceeds `SYSLOG_MAX_FILE_MB` (default 100), then `syslog-ng` is signaled (`SIGHUP`, same-uid so no added capability is needed) to reopen the (recreated) destination file. The rotation loop compares real file byte sizes via `stat -c%s`, not `find -size +100M` (GNU-only syntax that silently never matches on Alpine's `find`, confirmed live -- a real portability bug the consolidation PR's own POC caught and fixed).
 - Compression: rotated files are compressed with `zstd -T0` at `SYSLOG_COMPRESSION_LEVEL` (default 19); falls back to `gzip` if `zstd` cannot be installed at container start (e.g. no network egress).
-- Config for both `syslog` and `syslog-ng` is generated at container start (CLI flags for fluent-bit, an inline heredoc for syslog-ng) rather than bind-mounted, so `quickstart` — which has no local repo checkout — runs the identical pipeline as `dev`/`prod`.
+- Config for both fluent-bit and syslog-ng is a static file baked into the combined image at build time (`services/syslog/fluent-bit.conf`, `services/syslog/syslog-ng.conf`) -- nothing in either varies per deployment, so unlike the previous CLI-flag/inline-heredoc approach there is nothing to generate at container start.
 - Every service in the matrix below is wired end to end except `dhcp-probe` (one-shot diagnostic, see its row for why that's a deliberate N/A, not a gap).
 - Per-service wiring mechanism varies by what the underlying daemon actually supports (#633): a native dual stdout+file option where one exists (Kea's `output-options` array), a `tee` of the daemon's own stdout into a file where no such option exists (PowerDNS has no file-log directive on Linux at all; nats-server and dnsmasq each support only one log destination at a time, not both simultaneously), or a second application-level logging layer (the Admin UI's `tracing-subscriber` setup). Every one of these choices is a documented, deliberate trade-off recorded in the matrix's Notes column, not an oversight.
 - Storage-budget retention: `services/watchdog/retention.sh`'s `maybe_prune_syslog()` (since #842; opt-in via `SYSLOG_ENABLED=true`, `--profile logging`) enforces an overall storage budget on top of syslog-ng's own fixed-threshold rotation above. Age-based deletion runs first (`SYSLOG_RETENTION_DAYS`, default 30); if the tree under `SYSLOG_LOG_ROOT` is still over `SYSLOG_MAX_GB` (default 10) afterward, the oldest remaining files are deleted next — regardless of age — until back under budget. Size budget takes priority over the retention-days floor. Rate-limited via its own stamp file (once per day), same pattern as the cache purge above; `SYSLOG_LOG_ROOT` is validated (`realpath -m` + expected-prefix check) before any scan, same as `CACHE_DIR`.
-- Fluent-bit self-log rotation (#1236): `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (since #842) bounds `/data/fluent-bit.log` (the `syslog` service's own operational log, see the logging matrix row below) on the `syslog-data` volume, which neither of the two mechanisms above touches. Deliberately has no `SYSLOG_ENABLED` gate (unlike the two engines above) and is not rate-limited by a daily stamp — checked every retention-daemon cycle instead, since a single-file `stat` is cheap and the growth this guards against is fast (confirmed empirically: roughly one line/second during a real syslog-ng outage). Once the file exceeds `FLUENT_BIT_SELFLOG_MAX_MB` (default 20), it copies the file aside (compressed with `zstd` when available), then truncates the live file in place ("copytruncate" — confirmed safe against the pinned fluent-bit image on a real runner: its `-l`/`--log_file` writes append-only, so an external truncate produces no data corruption or gaps) rather than renaming it away, since fluent-bit's `-l` has no signal- or rename-based reopen support at all (confirmed via its own `--help` output, AG-VAL-023). Rotated backups are themselves capped at `FLUENT_BIT_SELFLOG_MAX_ROTATIONS` (default 5, oldest deleted first), so total disk usage stays bounded regardless of how long an outage lasts.
-- `syslog` (fluent-bit) has a `healthcheck` block (`fluent-bit -V`, binary-integrity only -- see the logging matrix table below for why a real liveness probe isn't possible with the pinned image), matching `syslog-ng`'s existing block shape.
+- Fluent-bit self-log rotation (#1236): `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (since #842) bounds `/data/fluent-bit.log` (the combined container's own `fluent-bit` operational log, see the logging matrix row below) on the `syslog-data` volume, which neither of the two mechanisms above touches.
+- **Least-privilege capability posture** (new in the consolidation PR): the combined container runs entirely as fixed non-root uid 10001 (not root, unlike the previous two separate images), with exactly one added capability -- `DAC_READ_SEARCH` -- so fluent-bit can read today's root:root 0640 producer logs it doesn't own. Verified live to be sufficient for fluent-bit's read-only access pattern, narrower than a `DAC_OVERRIDE` grant would be. The fluent-bit interpreter binary carries a matching `setcap` file capability baked into the image; running this image without the matching `cap_add: [DAC_READ_SEARCH]` fails closed at exec, not silently. Producer logs themselves are not yet made group-readable for a fully-zero-capability posture -- tracked as a separate, real follow-up (see this PR's own body).
+- **Silent-data-loss detection** (new in the consolidation PR): a periodic detector compares syslog-ng's own "processed" stats counter (`syslog-ng-ctl stats`) against real bytes landing on disk under `SYSLOG_NG_LOG_ROOT`, alerting (and surfacing via a structured healthcheck status field) if syslog-ng believes it delivered messages that never actually reached disk -- e.g. a bind-mounted log-root directory left root-owned instead of chowned to uid 10001. `setup.sh` pre-creates and chowns this directory on fresh install specifically to avoid the condition; this detector is the defense-in-depth backstop for an installation that predates that fix or has its permissions changed later.
+- **Real dual-process healthcheck**: `services/syslog/healthcheck.sh` checks fluent-bit AND syslog-ng independently (not just "is the container running") and only reports healthy when both are, writing a structured per-process status file (including the data-loss alert flag above) for a future Admin UI/watchdog integration -- the granularity fix for the two-container era's single "one process, one Docker HEALTHCHECK slot" limitation.
 - `scripts/check-logging-matrix.sh`, run in CI's `validate-compose` job, fails if a Compose service has no row in the logging matrix table below, or if a row names a service that no longer exists.
 - Admin UI log reading from the central path: `services/ui/src/syslog_client.rs` (opt-in via `SYSLOG_ENABLED=true`, same 4-variable contract watchdog's retention engine uses) reads `/logs` and a dashboard tile from `SYSLOG_LOG_ROOT` directly, transparently decompressing rotated `.zst`/`.gz` files, instead of the `STANDARD_LOG`/`SSL_LOG` direct-nginx-read path. Disabled installs keep the old direct-nginx-read behavior unchanged.
 
-**Not implemented yet (no open tracking issue as of this writing — #633, which used to be cited here, closed 2026-07-13 once its own four listed sub-items landed; these two were never actually part of that list):**
+**Not implemented yet:**
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
+- Fully zero-added-capability posture for the combined container: needs every producer log this project controls to be group-readable by gid 10001, a real, separate cross-service change tracked in issue #1427.
+- CI/release-pipeline wiring for the new first-party `syslog` image (build matrix, multi-arch publish, Trivy scan registration) -- tracked in issue #1428; `release/stack-images.yml` already declares the image, but `.github/workflows/build-push.yml` does not yet build/push it.
 
 **Logging matrix** (maintained here per #453's requirement; kept up to date as more services are wired):
 
@@ -583,8 +624,7 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 | netdata | Via fluent-bit → syslog-ng | The pinned netdata image ships its default `/var/log/netdata/*.log` paths as symlinks to `/dev/stdout`/`/dev/stderr` (nothing for fluent-bit to tail), so — same "no local repo checkout to bind-mount a config file from" constraint as `syslog`/`syslog-ng` below — an inline `entrypoint` override writes a `netdata.conf` that redirects the `[logs]` `collector`/`daemon`/`health` sources to real files at `/var/log/netdata/*.file.log`, then `exec`s the image's own `/usr/sbin/run.sh`; that path is mounted onto the `netdata-logs` volume, which fluent-bit tails read-only. `access`/`debug` stay on their stdout defaults (high-rate/empty). netdata v2 has no separate `error` log key — error-level events land in `daemon`/`collector` |
 | dhcp-probe | Not applicable | One-shot diagnostic helper (`restart: "no"`), started and stopped on demand by the Admin UI for a single probe run — no persistent process or log stream to route |
 | ntp | Not yet wired (local container stdout + `/var/log/chrony` file only) | chronyd's own `log` directive (see `services/ntp/chrony.conf`) writes `tracking`/`measurements`/`statistics` to `/var/log/chrony` alongside its normal stdout, but the `ntp-logs` volume is not yet tailed by fluent-bit into the central pipeline — a known, deliberately deferred follow-up, same class as the two "Not implemented yet" items above |
-| fluent-bit (`syslog`) | Via fluent-bit → syslog-ng (self-log, #864) | `-l /data/fluent-bit.log` redirects fluent-bit's own operational log (startup, tail-input errors, forwarding failures) into a file instead of `docker logs`, which a dedicated tail input (`tag=fluent-bit.selflog`) re-ingests and forwards — same single-destination trade-off already documented for dnsmasq/nats-server (`docker logs` on this container goes quiet while the `logging` profile is active); healthcheck is `fluent-bit -V` (binary-integrity only -- the pinned image ships no shell/wget/curl, so a real liveness probe isn't possible without a custom image build). **Fixed (#1236)**: during a real syslog-ng outage, fluent-bit's own retry logging (roughly one line/second at the default 5s flush interval) used to feed back into the very tail input forwarding it, growing this file unboundedly for the outage's duration — neither syslog-ng's own rotation nor watchdog's `maybe_prune_syslog` covered it (both operate on the syslog-ng output tree, not this container's own `/data` volume). `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (moved out of `watchdog.sh` by #842) now bounds it directly (see the "syslog-ng" section above for the full mechanism); see the syslog `command:` block's own comment in `deploy/prod`/`deploy/quickstart` for the in-place detail. |
-| syslog-ng | Local container stdout only | Healthcheck via `syslog-ng-ctl healthcheck`; no self-log forwarding to itself (would be redundant) |
+| fluent-bit + syslog-ng (`syslog`, combined container since the consolidation PR) | Via fluent-bit → syslog-ng (self-log, #864) | `Log_File /data/fluent-bit.log` (static `services/syslog/fluent-bit.conf`, not a CLI flag since the consolidation) redirects fluent-bit's own operational log (startup, tail-input errors, forwarding failures) into a file instead of `docker logs`, which a dedicated tail input (`tag=fluent-bit.selflog`) re-ingests and forwards — same single-destination trade-off already documented for dnsmasq/nats-server (`docker logs` on this container goes quiet while the `logging` profile is active). **Fixed (#1236)**: during a real syslog-ng outage, fluent-bit's own retry logging (roughly one line/second at the default 5s flush interval) used to feed back into the very tail input forwarding it, growing this file unboundedly for the outage's duration — neither syslog-ng's own rotation nor watchdog's `maybe_prune_syslog` covered it (both operate on the syslog-ng output tree, not this container's own `/data` volume). `services/watchdog/retention.sh`'s `maybe_rotate_fluent_bit_selflog()` (moved out of `watchdog.sh` by #842) now bounds it directly (see the "syslog-ng" section above for the full mechanism); see `services/syslog/entrypoint.sh`'s own comment for the in-place detail. syslog-ng itself has no self-log forwarding of its own (would be redundant, since it lives in the same container and its own stdout is already `docker logs` on this same container). A NEW pipeline stage since the consolidation: the silent-data-loss detector's own alert log (`data-loss-detector.syslog` tag) IS forwarded through fluent-bit, surfacing a detected silent-write-failure condition through the same Admin UI `/logs` view as every other source (with one caveat: if syslog-ng's own destination write is what's actually broken, the alert message itself can be lost the same way -- the structured healthcheck status file's `data_loss_alert_active` field is the cause-independent channel for that specific case). |
 | docker-socket-proxy | Not applicable | Third-party pinned image (`tecnativa/docker-socket-proxy`); only Docker's own stdout logging driver applies, there is no application log stream of our own to forward |
 
 ## Cache Warming
