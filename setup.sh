@@ -2878,6 +2878,13 @@ migrate_env_for_update() {
     ensure_secret_env_key KEA_CTRL_TOKEN "$env_file" hex32
     ensure_secret_env_key DDNS_TSIG_KEY "$env_file" base64_32
     ensure_secret_env_key PDNS_API_KEY "$env_file" hex32
+    # Bug hunt #849, observability.md finding #3: shared token gating
+    # POST /api/netdata-alarms (services/ui/src/routes/netdata_alarms.rs).
+    # Same generate-or-preserve treatment as PDNS_API_KEY above -- the
+    # netdata/ui containers' own shared-secret-bootstrap (#858) fallback
+    # only self-heals a value left empty/placeholder here, it does not
+    # replace this proactive generation step.
+    ensure_secret_env_key NETDATA_ALARM_TOKEN "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_UI_USER "lancache-ui" "$env_file"
     ensure_secret_env_key NATS_UI_PASSWORD "$env_file" hex32
     set_env_key_if_empty_or_missing NATS_DNS_WRITER_USER "lancache-dns-writer" "$env_file"
@@ -4690,6 +4697,7 @@ logbundle_secret_env_keys() {
         KEA_CTRL_TOKEN \
         DDNS_TSIG_KEY \
         PDNS_API_KEY \
+        NETDATA_ALARM_TOKEN \
         NATS_UI_PASSWORD \
         NATS_DNS_WRITER_PASSWORD \
         NATS_DNS_REPLICA_PASSWORD \
@@ -6914,6 +6922,9 @@ assert_resolved_image_tag_platform_supported "$LANCACHE_IMAGE_REGISTRY" "$LANCAC
 KEA_CTRL_TOKEN=$(get_or_generate_secret KEA_CTRL_TOKEN "$env_file" hex32)
 DDNS_TSIG_KEY=$(get_or_generate_secret DDNS_TSIG_KEY "$env_file" base64_32)
 PDNS_API_KEY=$(get_or_generate_secret PDNS_API_KEY "$env_file" hex32)
+# Bug hunt #849, observability.md finding #3: shared token gating
+# POST /api/netdata-alarms (services/ui/src/routes/netdata_alarms.rs).
+NETDATA_ALARM_TOKEN=$(get_or_generate_secret NETDATA_ALARM_TOKEN "$env_file" hex32)
 NATS_UI_USER=$(get_env_var NATS_UI_USER "$env_file")
 NATS_UI_USER="${NATS_UI_USER:-lancache-ui}"
 NATS_UI_PASSWORD=$(get_or_generate_secret NATS_UI_PASSWORD "$env_file" hex32)
@@ -7104,6 +7115,12 @@ DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
 # ── PowerDNS API ───────────────────────────────────────────────────────────────
 # API key for PowerDNS Authoritative + Recursor (generated, do not change)
 PDNS_API_KEY=${PDNS_API_KEY}
+
+# ── Netdata alarm forwarding ────────────────────────────────────────────────────
+# Shared token for Netdata's alarm-notify.sh to authenticate to the Admin
+# UI's POST /api/netdata-alarms webhook (bug hunt #849, observability.md
+# finding #3; generated, do not change)
+NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
 
 # ── NATS (DNS-record sync bus) ─────────────────────────────────────────────────
 # UI NATS role (generated, do not change)

@@ -1456,9 +1456,14 @@ services:
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
     volumes:
       # Shared-secret bootstrap (#858): same two mounts as the nats service
-      # above, needed here for the identical reason -- netdata's image has no
-      # entrypoint.sh of its own to embed a byte-identical copy into, so the
-      # canonical library is sourced inline from the command block above.
+      # above, needed here for the identical reason -- this service runs the
+      # pinned upstream `netdata/netdata` image (see the `image:` line
+      # below), which has no entrypoint.sh of its own to embed a byte-
+      # identical copy into, so the canonical library is sourced inline from
+      # the command block above instead. `services/netdata/entrypoint.sh` is
+      # a separate, evaluated-but-not-adopted first-party build (issue
+      # #1304/#815, PR #1352) -- no deploy profile actually runs that image
+      # today, so it is not a byte-identical-copy target here either.
       - shared-secrets:/var/lib/lancache-secrets
       - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata

@@ -1211,8 +1211,12 @@ services:
         exec /usr/sbin/run.sh
     volumes:
       # Shared-secret bootstrap (#858): same two mounts as the nats service
-      # above, needed here for the identical reason -- netdata's image has no
-      # entrypoint.sh of its own to embed a byte-identical copy into.
+      # above, needed here for the identical reason -- this service runs the
+      # pinned upstream `netdata/netdata` image (see the `image:` line
+      # below), which has no entrypoint.sh of its own to embed a byte-
+      # identical copy into. `services/netdata/entrypoint.sh` is a separate,
+      # evaluated-but-not-adopted first-party build (issue #1304/#815, PR
+      # #1352) -- no deploy profile actually runs that image today.
       - shared-secrets:/var/lib/lancache-secrets
       - ./scripts/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata
