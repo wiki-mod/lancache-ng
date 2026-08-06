@@ -317,6 +317,14 @@ sentence previously claimed the Admin UI had no route reading that file at
 all -- stale since issue #870 added one, corrected here while updating the
 adjacent docker-socket-proxy bullet below for issue #1170).
 
+These four `CONTAINER_*` variables exist only as a fail-loud consistency
+check, not a real renaming mechanism: `watchdog.sh` rejects any value that
+does not match the fixed default and exits at startup (issue #849 bug-hunt
+finding #5). Running more than one lancache-ng stack on the same host is a
+deliberate non-goal, not an unfinished feature -- see the fail-loud
+messages' own comments in `watchdog.sh` for the full reasoning and the
+pointer to open a feature request for a genuine multi-stack-per-host need.
+
 Since issue #1170 Part 1, `watchdog.sh` also runs a separate,
 non-restart-capable `probe_docker_socket_proxy` check each cycle against
 `docker-socket-proxy` itself -- see the dedicated bullet below for why this
