@@ -790,7 +790,7 @@ impl Config {
         let proxy_ssl_url = env_or("PROXY_SSL_URL", proxy_standard_url.clone());
         let proxy_ssl_service = env_or("PROXY_SSL_SERVICE", proxy_service.clone());
         let ssl_enabled = env_bool("SSL_ENABLED", true);
-        let cache_max_gb = resolve_cache_max_gb();
+        let cache_max_gb = resolve_cache_max_gb()?;
         let standard_ip = env_str("STANDARD_IP", "192.168.234.10");
         let ssl_ip = env_str("SSL_IP", "192.168.234.11");
         let dhcp_mode = env_dhcp_mode("DHCP_MODE", env_bool("DHCP_ENABLED", false));
@@ -973,11 +973,23 @@ impl Config {
 fn derive_lancache_image_channel(tag: &str) -> String {
     if tag == "dev" || tag == "nightly" || tag == "latest" {
         tag.to_string()
-    } else if tag.starts_with("sha-") || tag.starts_with('v') {
+    } else if tag.starts_with("sha-") || is_v_prefixed_release_tag(tag) {
         "pinned".to_string()
     } else {
         "latest".to_string()
     }
+}
+
+// A real `vX.Y.Z` release tag (see docs/release-versioning.md's tag
+// grammar) always has an ASCII digit immediately after the `v`. A bare
+// `tag.starts_with('v')` check would also match a custom, non-release tag
+// that merely happens to start with the letter "v" (e.g. "very-custom",
+// "vnext", "vendor-build") and misreport it to the Admin UI as an
+// immutable pinned release when it is nothing of the sort.
+fn is_v_prefixed_release_tag(tag: &str) -> bool {
+    tag.strip_prefix('v')
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| c.is_ascii_digit())
 }
 
 fn env_str(key: &str, default: &str) -> String {
@@ -1016,31 +1028,48 @@ fn resolve_cache_dir() -> String {
 
 // Keep CACHE_MAX_GB canonical while tolerating matching legacy values on old
 // installs. Diverging legacy size keys only matter when CACHE_MAX_GB is absent.
-fn resolve_cache_max_gb() -> f64 {
-    if let Some(cache_max_gb) = env::var("CACHE_MAX_GB")
-        .ok()
-        .and_then(|value| value.parse::<f64>().ok())
-    {
-        return cache_max_gb;
+//
+// Fail-closed on a malformed value instead of silently defaulting: an
+// earlier revision treated "set but unparseable" (e.g. CACHE_MAX_GB=abc)
+// the same as "unset", which would silently discard an operator's real
+// (if typo'd) cache-size setting and start with the 50.0 default instead
+// -- indistinguishable from a working config until someone notices the
+// cache is the wrong size. Every branch below therefore surfaces a parse
+// failure as an `Err` (mirrors `env_u64`'s existing fail-closed pattern
+// elsewhere in this file), never a silent fallback.
+fn resolve_cache_max_gb() -> Result<f64, String> {
+    if let Ok(raw) = env::var("CACHE_MAX_GB") {
+        return raw
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("CACHE_MAX_GB must be a number of gigabytes, got {raw:?}"));
     }
 
     match (
         env::var("STANDARD_CACHE_MAX_GB").ok(),
         env::var("SSL_CACHE_MAX_GB").ok(),
     ) {
-        (Some(standard), Some(ssl)) => {
-            let standard: f64 = standard.parse().unwrap_or(50.0);
-            let ssl: f64 = ssl.parse().unwrap_or(standard);
+        (Some(standard_raw), Some(ssl_raw)) => {
+            let standard: f64 = standard_raw.trim().parse().map_err(|_| {
+                format!("STANDARD_CACHE_MAX_GB must be a number of gigabytes, got {standard_raw:?}")
+            })?;
+            let ssl: f64 = ssl_raw.trim().parse().map_err(|_| {
+                format!("SSL_CACHE_MAX_GB must be a number of gigabytes, got {ssl_raw:?}")
+            })?;
             if (standard - ssl).abs() > f64::EPSILON {
-                panic!(
-                    "STANDARD_CACHE_MAX_GB and SSL_CACHE_MAX_GB differ without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
-                );
+                return Err(format!(
+                    "STANDARD_CACHE_MAX_GB ({standard}) and SSL_CACHE_MAX_GB ({ssl}) differ without CACHE_MAX_GB; set CACHE_MAX_GB to one shared cache size."
+                ));
             }
-            standard
+            Ok(standard)
         }
-        (Some(standard), None) => standard.parse().unwrap_or(50.0),
-        (None, Some(ssl)) => ssl.parse().unwrap_or(50.0),
-        (None, None) => 50.0,
+        (Some(standard_raw), None) => standard_raw.trim().parse().map_err(|_| {
+            format!("STANDARD_CACHE_MAX_GB must be a number of gigabytes, got {standard_raw:?}")
+        }),
+        (None, Some(ssl_raw)) => ssl_raw.trim().parse().map_err(|_| {
+            format!("SSL_CACHE_MAX_GB must be a number of gigabytes, got {ssl_raw:?}")
+        }),
+        (None, None) => Ok(50.0),
     }
 }
 
@@ -1542,8 +1571,12 @@ mod tests {
 
     // Guards the deliberate fail-closed design: when the two legacy
     // STANDARD_CACHE_MAX_GB/SSL_CACHE_MAX_GB values disagree and no canonical
-    // CACHE_MAX_GB resolves the ambiguity, resolve_cache_max_gb() must panic
-    // rather than silently picking one of the two conflicting sizes.
+    // CACHE_MAX_GB resolves the ambiguity, Config::from_env() must return an
+    // `Err` rather than silently picking one of the two conflicting sizes.
+    // (Previously asserted via std::panic::catch_unwind because
+    // resolve_cache_max_gb() used to panic directly; it now returns a
+    // Result like every other fail-closed parser in this file, so a plain
+    // unwrap_err() is the correct assertion.)
     #[test]
     fn mismatched_legacy_cache_limits_fail_closed() {
         let _guard = env_test_lock().lock().unwrap();
@@ -1558,7 +1591,7 @@ mod tests {
             env::set_var("SSL_CACHE_MAX_GB", "99");
         }
 
-        let result = std::panic::catch_unwind(Config::from_env);
+        let err = Config::from_env().unwrap_err();
 
         unsafe {
             env::remove_var("STANDARD_CACHE_MAX_GB");
@@ -1567,7 +1600,67 @@ mod tests {
             env::remove_var("SSL_CACHE_MAX_GB");
         }
 
-        assert!(result.is_err());
+        assert!(err.contains("STANDARD_CACHE_MAX_GB") && err.contains("SSL_CACHE_MAX_GB"));
+    }
+
+    // Finding #1 (docs/bug-hunt/ui-core.md, issue #849): a malformed
+    // CACHE_MAX_GB must fail startup instead of being silently treated as
+    // "unset" and falling through to the legacy keys or the 50.0 default --
+    // an operator's real (if typo'd) cache-size setting must never be
+    // discarded without any signal that anything went wrong.
+    #[test]
+    fn malformed_cache_max_gb_fails_closed_instead_of_silently_defaulting() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        unsafe {
+            env::set_var("CACHE_MAX_GB", "not-a-number");
+        }
+        unsafe {
+            env::remove_var("STANDARD_CACHE_MAX_GB");
+        }
+        unsafe {
+            env::remove_var("SSL_CACHE_MAX_GB");
+        }
+
+        let err = Config::from_env().unwrap_err();
+
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+        }
+
+        assert_eq!(
+            err,
+            "CACHE_MAX_GB must be a number of gigabytes, got \"not-a-number\""
+        );
+    }
+
+    // Same fail-closed requirement for the legacy single-key path (only one
+    // of STANDARD_CACHE_MAX_GB/SSL_CACHE_MAX_GB set, CACHE_MAX_GB absent):
+    // a malformed legacy value must not silently become the 50.0 default.
+    #[test]
+    fn malformed_legacy_cache_max_gb_fails_closed() {
+        let _guard = env_test_lock().lock().unwrap();
+
+        unsafe {
+            env::remove_var("CACHE_MAX_GB");
+        }
+        unsafe {
+            env::set_var("STANDARD_CACHE_MAX_GB", "eighty-eight");
+        }
+        unsafe {
+            env::remove_var("SSL_CACHE_MAX_GB");
+        }
+
+        let err = Config::from_env().unwrap_err();
+
+        unsafe {
+            env::remove_var("STANDARD_CACHE_MAX_GB");
+        }
+
+        assert_eq!(
+            err,
+            "STANDARD_CACHE_MAX_GB must be a number of gigabytes, got \"eighty-eight\""
+        );
     }
 
     // Unlike the other numeric env parsers in this file (env_u32_clamped,
@@ -2400,6 +2493,23 @@ mod tests {
         // fell through to "latest".)
         assert_eq!(derive_lancache_image_channel("custom-tag"), "latest");
         assert_eq!(derive_lancache_image_channel("main"), "latest");
+    }
+
+    // Finding #2 (docs/bug-hunt/ui-core.md, issue #849): a bare
+    // `tag.starts_with('v')` check used to classify any tag starting with
+    // the letter "v" as a pinned release, even one with no version number
+    // at all -- misreporting a custom mutable tag as immutable in the
+    // Admin UI. A real vX.Y.Z tag always has a digit immediately after the
+    // "v"; this locks that narrower, correct boundary.
+    #[test]
+    fn derive_lancache_image_channel_v_prefix_requires_a_following_digit() {
+        assert_eq!(derive_lancache_image_channel("very-custom-tag"), "latest");
+        assert_eq!(derive_lancache_image_channel("vnext"), "latest");
+        assert_eq!(derive_lancache_image_channel("vendor-build"), "latest");
+        // A bare "v" with nothing after it has no digit to check either.
+        assert_eq!(derive_lancache_image_channel("v"), "latest");
+        // Still correctly recognizes real release tags.
+        assert_eq!(derive_lancache_image_channel("v2.0.0"), "pinned");
     }
 
     // Issue #866: register_secondary must never hand a remote secondary the

@@ -140,14 +140,36 @@ pub fn list_snapshot_ids(snapshot_root: &Path) -> io::Result<Vec<String>> {
     Ok(ids)
 }
 
+// Finding #7 (docs/bug-hunt/ui-core.md, issue #849) defense-in-depth guard:
+// every real snapshot id `new_snapshot_id` ever produces is a purely
+// numeric, fixed-width nanosecond-since-epoch string (see that function's
+// doc comment). `read_snapshot`'s own doc comment already documents that
+// its one real caller (`routes/dhcp.rs::rollback_kea_snapshot`) checks
+// membership against `list_snapshot_ids` before calling this -- but that
+// check lives entirely in the caller, so a future caller that skips it, or
+// gets it subtly wrong in a refactor, would let an attacker- or
+// config-controlled `id` (e.g. `"../../../etc/passwd"`) be joined directly
+// onto `snapshot_root` with no guard at all inside this module. Rejecting
+// anything that is not purely numeric here means that failure mode is
+// blocked at the source, independent of what any caller does.
+fn is_safe_snapshot_id(id: &str) -> bool {
+    !id.is_empty() && id.chars().all(|c| c.is_ascii_digit())
+}
+
 /// Reads and parses a previously created snapshot's config back into a
 /// `Value`. Callers must only pass an `id` obtained from
 /// `list_snapshot_ids` for the same `snapshot_root` (see
 /// `routes/dhcp.rs::rollback_kea_snapshot`, which checks membership before
-/// calling this) -- that membership check is this module's path-traversal
-/// guard, since an unchecked id would otherwise be joined directly onto
-/// `snapshot_root`.
+/// calling this) -- that membership check is the primary path-traversal
+/// guard. `is_safe_snapshot_id` above is this function's own independent,
+/// defense-in-depth backstop for the same class of risk, not a
+/// replacement for the caller's check.
 pub fn read_snapshot(snapshot_root: &Path, id: &str) -> Result<Value, KeaSnapshotError> {
+    if !is_safe_snapshot_id(id) {
+        return Err(snapshot_err(format!(
+            "rejected known-good snapshot id {id:?}: must be a purely numeric snapshot id"
+        )));
+    }
     let path = snapshot_root.join(id).join(SNAPSHOT_FILE_NAME);
     let raw = fs::read_to_string(&path)
         .map_err(|e| snapshot_err(format!("cannot read known-good snapshot {id}: {e}")))?;
@@ -403,5 +425,33 @@ mod tests {
         fs::create_dir_all(&root).unwrap();
         assert!(read_snapshot(&root, "does-not-exist").is_err());
         let _ = fs::remove_dir_all(&root);
+    }
+
+    // Finding #7 (docs/bug-hunt/ui-core.md, issue #849): read_snapshot must
+    // reject a non-numeric id outright as its own defense-in-depth
+    // path-traversal guard, independent of whether a caller's own
+    // list_snapshot_ids membership check ran at all. A file placed exactly
+    // where a traversal would land proves this is not merely "the file
+    // doesn't exist" -- if the guard were missing, this read would succeed.
+    #[test]
+    fn read_snapshot_rejects_path_traversal_id_even_when_target_exists() {
+        let root = temp_dir("kea-snapshots-traversal");
+        fs::create_dir_all(&root).unwrap();
+        let secret_dir = root
+            .parent()
+            .unwrap()
+            .join("kea-snapshots-traversal-secret");
+        fs::create_dir_all(&secret_dir).unwrap();
+        fs::write(secret_dir.join(SNAPSHOT_FILE_NAME), b"{\"Dhcp4\":{}}").unwrap();
+
+        let traversal_id = "../kea-snapshots-traversal-secret";
+        assert!(read_snapshot(&root, traversal_id).is_err());
+        // Also reject non-numeric ids that contain no traversal at all --
+        // the guard is "digits only", not merely "no dot-dot".
+        assert!(read_snapshot(&root, "not-numeric").is_err());
+        assert!(read_snapshot(&root, "").is_err());
+
+        let _ = fs::remove_dir_all(&root);
+        let _ = fs::remove_dir_all(&secret_dir);
     }
 }
