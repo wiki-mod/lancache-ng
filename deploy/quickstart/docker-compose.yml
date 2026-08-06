@@ -27,12 +27,37 @@ name: lancache-ng
 # near-duplicate copy of that same config -- it was never aliased anywhere
 # (dead weight that could silently drift from the real script with no
 # functional effect) and has been removed.
+#
+# LANCACHE_CONTAINER_SUFFIX (issue #1415): every container_name: below is
+# `lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`. Left unset (the
+# default, and the only supported value for a real single-host install --
+# see docs/naming-conventions.md and issue #849 finding #5 for why these 14
+# names are otherwise fixed by design), every name resolves to the plain
+# `lancache-<service>` literal, so scripts/docker-socket-proxy.sh's HAProxy allowlist,
+# services/watchdog/watchdog.sh's CONTAINER_* FATAL guard, and
+# services/ui/src/docker_client.rs's hardcoded match arms all keep working
+# unchanged. This variable exists ONLY so CI can run more than one
+# concurrent quickstart-compose stack on the same physical runner host
+# (several runner instances can share one Docker daemon -- see #1415):
+# COMPOSE_PROJECT_NAME already gives each CI run its own unique value, but
+# an explicit container_name: overrides Compose's own project-name-based
+# isolation entirely, which is exactly what let two concurrent CI runs
+# collide on the identical fixed name despite already having distinct
+# project names. Setting this suffix to something derived from that same
+# per-run uniqueness (see scripts/setup-cli-simulation.sh's
+# sim_compose_project_name()) restores real per-run isolation without
+# touching the fixed-name contract real installs depend on. The
+# docker-socket-proxy and watchdog services below also receive this same
+# variable so their own name-matching logic (an HAProxy allowlist regex,
+# and a fail-loud CONTAINER_* comparison) can generalize their otherwise-
+# hardcoded expectations to the exact suffixed name actually in use for
+# that run, without depending on the general Compose CI-name pattern.
 
 services:
 
   # ── Unified proxy (standard + SSL mode in one container) ─────────────────
   proxy:
-    container_name: lancache-proxy
+    container_name: lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/proxy:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - CACHE_MAX_SIZE=${CACHE_MAX_SIZE}
@@ -79,7 +104,7 @@ services:
       options: {max-size: "10m", max-file: "3"}
 
   nats:
-    container_name: lancache-nats
+    container_name: lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     # Boot-time job (idempotent, safely re-run on every start/restart):
     # regenerate ONLY this container's own static half of the config --
@@ -420,7 +445,7 @@ services:
   # a volume created by an older image version, or reused across an
   # upgrade Docker does not re-populate).
   syslog:
-    container_name: lancache-syslog
+    container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
     # Least-privilege posture, empirically determined (see Dockerfile's own
@@ -499,7 +524,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   dns-standard:
-    container_name: lancache-dns-standard
+    container_name: lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${IP_STANDARD}
@@ -553,7 +578,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
   dns-ssl:
     profiles: [ssl]
-    container_name: lancache-dns-ssl
+    container_name: lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dns:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - PROXY_IP=${IP_SSL}
@@ -609,11 +634,17 @@ services:
   # toggles with a deny-by-default allowlist for named lancache-ng containers.
   # It is isolated on docker-api so other services cannot reach the proxy API.
   docker-socket-proxy:
-    container_name: lancache-docker-socket-proxy
+    container_name: lancache-docker-socket-proxy${LANCACHE_CONTAINER_SUFFIX:-}
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
     entrypoint: ["/usr/local/bin/lancache-docker-socket-proxy.sh"]
     command: []
     stdin_open: true
+    environment:
+      # Issue #1415: lets the entrypoint narrow its own generated HAProxy
+      # allowlist to the exact suffixed container names actually running
+      # for this compose project, instead of only the fixed defaults. See
+      # this file's own top-of-file LANCACHE_CONTAINER_SUFFIX comment.
+      - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - ./scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
@@ -641,7 +672,7 @@ services:
       options: {max-size: "5m", max-file: "2"}
 
   watchdog:
-    container_name: lancache-watchdog
+    container_name: lancache-watchdog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     # Central logging pipeline (#633): watchdog.sh writes only to stdout
     # (its log() function, see services/watchdog/watchdog.sh) and is never
@@ -671,10 +702,20 @@ services:
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
       - CACHE_DIR=/var/cache/lancache
-      - CONTAINER_PROXY=lancache-proxy
-      - CONTAINER_DNS_STANDARD=lancache-dns-standard
-      - CONTAINER_DNS_SSL=lancache-dns-ssl
-      - CONTAINER_NATS=lancache-nats
+      # Issue #1415: these four (and the bare LANCACHE_CONTAINER_SUFFIX
+      # below) let watchdog's own FATAL guard (see watchdog.sh's
+      # C_PROXY/C_DNS_STD/C_DNS_SSL/C_NATS checks) recompute the container
+      # names it expects using the SAME suffix this project actually
+      # started its containers with, instead of only ever accepting the
+      # bare literal default. Left unset (real installs), every value here
+      # is byte-identical to the literal default watchdog.sh already falls
+      # back to on its own, so this is a no-op for the documented
+      # single-stack-per-host design (#849 finding #5).
+      - CONTAINER_PROXY=lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}
+      - CONTAINER_DNS_STANDARD=lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX:-}
+      - CONTAINER_DNS_SSL=lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX:-}
+      - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
+      - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
       # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
       # deploy/prod/docker-compose.yml's identical addition. DHCP_MODE is
@@ -727,7 +768,7 @@ services:
   # one profile but not the other; the mechanism and the evidence behind it
   # are identical across every deployment profile.
   retention:
-    container_name: lancache-retention
+    container_name: lancache-retention${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
     entrypoint: ["/retention-entrypoint.sh"]
     network_mode: none
@@ -768,7 +809,7 @@ services:
   # Full DHCP mode with Control Agent API. Active only with COMPOSE_PROFILES=dhcp-kea.
   dhcp:
     profiles: [dhcp-kea]
-    container_name: lancache-dhcp
+    container_name: lancache-dhcp${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp:${LANCACHE_IMAGE_TAG:-latest}
     environment:
       - DHCP_DNS_PRIMARY=${IP_STANDARD}
@@ -831,7 +872,7 @@ services:
   # Proxy mode keeps an existing router DHCP server and serves proxy-DHCP/PXE clients.
   dhcp-proxy:
     profiles: [dhcp-proxy]
-    container_name: lancache-dhcp-proxy
+    container_name: lancache-dhcp-proxy${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/dhcp-proxy:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ui-data:/data:ro
@@ -904,7 +945,7 @@ services:
   # clients on UDP/123. Opt-in like dhcp/dhcp-proxy above.
   ntp:
     profiles: [ntp]
-    container_name: lancache-ntp
+    container_name: lancache-ntp${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ntp:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       - ui-data:/data:ro
@@ -980,7 +1021,7 @@ services:
   # capability class already used for the NATS and proxy-ssl reload flows,
   # not generic container creation.
   dhcp-probe:
-    container_name: lancache-dhcp-probe
+    container_name: lancache-dhcp-probe${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     entrypoint: ["/usr/local/bin/lancache-ui", "--dhcp-probe"]
     network_mode: host
@@ -992,7 +1033,7 @@ services:
   # UI_BIND_IP=127.0.0.1 to restrict access to the host. Direct Docker socket mount
   # removed; Docker operations are proxied through the isolated docker-api network.
   ui:
-    container_name: lancache-ui
+    container_name: lancache-ui${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
       # Shared-secret bootstrap (#858): the UI entrypoint (running as root before
@@ -1130,7 +1171,7 @@ services:
 
   # ── Netdata (system metrics) ───────────────────────────────────────────────
   netdata:
-    container_name: lancache-netdata
+    container_name: lancache-netdata${LANCACHE_CONTAINER_SUFFIX:-}
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata
     # pid: host: required by netdata's own official Docker documentation for
