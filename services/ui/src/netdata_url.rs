@@ -52,7 +52,21 @@ pub fn build_netdata_url(
     }
 
     if !params.is_empty() {
-        url.query_pairs_mut().extend_pairs(params.iter());
+        // Finding #8 (docs/bug-hunt/ui-routes.md, issue #849): `params` is a
+        // `HashMap`, whose iteration order is randomized per-process (a
+        // different random hash seed each run, by design, to resist
+        // hash-flooding attacks) -- a bare `.iter()` here produced a
+        // nondeterministic query-parameter order in the upstream Netdata
+        // URL across otherwise-identical requests. Netdata itself doesn't
+        // care about parameter order, but nondeterministic output makes
+        // this function's own behavior harder to reason about and test
+        // (e.g. asserting an exact query string, or comparing two "same
+        // request" URLs byte-for-byte) for no benefit. Sorting by key
+        // first makes the output reproducible without changing which
+        // parameters are sent or their values.
+        let mut sorted_params: Vec<(&String, &String)> = params.iter().collect();
+        sorted_params.sort_by_key(|(key, _)| key.as_str());
+        url.query_pairs_mut().extend_pairs(sorted_params);
     }
 
     Ok(url)
@@ -93,6 +107,37 @@ mod tests {
         assert_eq!(pairs.get("points"), Some(&"60".to_string()));
         assert_eq!(pairs.get("group"), Some(&"average".to_string()));
         assert_eq!(pairs.get("format"), Some(&"json".to_string()));
+    }
+
+    // Finding #8 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
+    // this test locks in. Building the same URL from the same input twice
+    // must produce byte-identical query-string ordering -- a `HashMap`'s
+    // own iteration order is randomized per-process, so this would fail
+    // intermittently before the fix (sorting by key) whenever the process's
+    // random hash seed happened to order these four keys differently across
+    // the two calls in the same test run.
+    #[test]
+    fn query_param_order_is_deterministic_across_repeated_calls() {
+        let p = params(&[
+            ("chart", "system.cpu"),
+            ("points", "60"),
+            ("group", "average"),
+            ("format", "json"),
+        ]);
+
+        let first = build_netdata_url("http://netdata:19999", "data", &p)
+            .expect("data endpoint should be allowed");
+        let second = build_netdata_url("http://netdata:19999", "data", &p)
+            .expect("data endpoint should be allowed");
+
+        assert_eq!(first.as_str(), second.as_str());
+        // Also locks the exact expected order (alphabetical by key), not
+        // just "the same as itself" -- a real regression test, not a
+        // tautology.
+        assert_eq!(
+            first.query(),
+            Some("chart=system.cpu&format=json&group=average&points=60")
+        );
     }
 
     // URL builder must properly percent-encode special characters in query parameter names and values to prevent injection attacks.
