@@ -125,12 +125,24 @@ fn parse_zone_snapshot_summaries(snapshots: &Value) -> Vec<ZoneSnapshotSummary> 
 /// republish) happens there -- this handler's only responsibilities are
 /// CSRF verification (this project's own per-session token, unrelated to
 /// the listener's own `X-API-Key` requirement) and relaying the result.
-/// Non-2xx/network failures are logged and still redirect back to
-/// `/domains` (matching `add_lan_record`/`remove_lan_record`'s own
-/// fire-and-log-don't-fail-the-request treatment of a downstream NATS/PDNS
-/// error) -- the rendered snapshot list on the next page load reflects
-/// whatever actually happened, rather than this route trying to duplicate
-/// the listener's own success/failure judgment in a second place.
+///
+/// Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): this used to always
+/// redirect to a plain `/domains` regardless of outcome, logging a non-2xx
+/// response or a network failure server-side but giving the operator no
+/// visible signal on the page itself that the rollback they just clicked
+/// never actually happened. Now reuses `domains.rs`'s existing
+/// `?error=<code>` banner mechanism (`domains_page_error_message`) for that
+/// specific case -- the same mechanism `add_dns`'s own validation-failure
+/// redirect already uses, just not previously wired up here. Deliberately
+/// scoped to the two *hard* failure cases only (non-2xx status, or the
+/// request never reaching `nats-subscriber` at all): the softer case just
+/// below (a 2xx response whose body reports `flush_ok: false` or
+/// `zone_check_passed: false` -- the rollback itself was applied, but a
+/// downstream step degraded) still only logs, matching this module's own
+/// original reasoning that a single fixed banner code cannot usefully
+/// distinguish "rollback failed entirely" from "rollback applied, cache
+/// flush partially failed" without a real per-request detail channel this
+/// UI does not have yet.
 pub async fn rollback_zone_snapshot(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -148,6 +160,12 @@ pub async fn rollback_zone_snapshot(
         .body(payload)
         .send()
         .await;
+
+    // Finding #10: tracks whether the rollback request itself reached
+    // nats-subscriber and was accepted (2xx) -- the redirect target below
+    // depends on this, separate from the softer flush_ok/zone_check_passed
+    // nuance handled entirely within the success arm's own logging.
+    let rollback_request_succeeded = matches!(&result, Ok(resp) if resp.status().is_success());
 
     match result {
         Ok(resp) if resp.status().is_success() => {
@@ -218,12 +236,41 @@ pub async fn rollback_zone_snapshot(
         }
     }
 
-    Ok(Redirect::to("/domains"))
+    Ok(Redirect::to(zone_rollback_redirect_location(
+        rollback_request_succeeded,
+    )))
+}
+
+// Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): the actual
+// success/failure redirect decision, pulled out as a pure function so it
+// has a unit test independent of a live nats-subscriber connection (which
+// the surrounding handler cannot practically be tested against without a
+// mock HTTP server this codebase does not otherwise use).
+fn zone_rollback_redirect_location(succeeded: bool) -> &'static str {
+    if succeeded {
+        "/domains"
+    } else {
+        "/domains?error=zone_rollback_failed"
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
+    // this test locks in -- a failed rollback must redirect with the
+    // error-banner query parameter, not the plain success URL, so the
+    // operator gets a visible signal instead of a silent, misleadingly
+    // "successful"-looking redirect.
+    #[test]
+    fn zone_rollback_redirect_location_signals_failure_via_query_param() {
+        assert_eq!(zone_rollback_redirect_location(true), "/domains");
+        assert_eq!(
+            zone_rollback_redirect_location(false),
+            "/domains?error=zone_rollback_failed"
+        );
+    }
 
     // Snapshots missing the "id" field must be silently skipped so a partially-malformed response degrades gracefully instead of losing all snapshots.
     #[test]

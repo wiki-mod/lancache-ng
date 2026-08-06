@@ -115,6 +115,18 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              -- this toggle would have no effect. Configure DDNS_TSIG_KEY first (see \
              docs/threat-model.md), then try again.",
         ),
+        // Finding #10 (docs/bug-hunt/ui-routes.md, issue #849):
+        // routes/dns_snapshots.rs::rollback_zone_snapshot uses this same
+        // mechanism for the specific case where the rollback request either
+        // never reached nats-subscriber, or was rejected outright (non-2xx)
+        // -- see that function's own doc comment for why a softer partial
+        // failure (rollback applied, post-rollback cache-flush degraded)
+        // still only logs server-side rather than using this banner too.
+        "zone_rollback_failed" => Some(
+            "The zone rollback did not complete: the request to nats-subscriber either failed \
+             to reach it or was rejected. No known-good snapshot was applied. Check the DNS \
+             service logs for the exact reason, then try again.",
+        ),
         _ => None,
     }
 }
@@ -1784,6 +1796,10 @@ mod tests {
                  wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\")."
             )
         );
+        // Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): the new code
+        // rollback_zone_snapshot uses must resolve to a real, fixed message
+        // too, following the same allowlist contract as every other code.
+        assert!(domains_page_error_message("zone_rollback_failed").is_some());
         assert_eq!(domains_page_error_message("unknown_code"), None);
         assert_eq!(domains_page_error_message(""), None);
         assert_eq!(

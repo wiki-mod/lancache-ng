@@ -47,7 +47,30 @@ pub fn render(templates: &Tera, name: &str, ctx: &Context, dev_mode: bool) -> Ht
 }
 
 pub fn insert_csrf_token(ctx: &mut Context, headers: &HeaderMap) {
-    let token = crate::session::csrf_header_value(headers).unwrap_or("");
+    let token = crate::session::csrf_header_value(headers).unwrap_or_else(|| {
+        // Finding #1 (docs/bug-hunt/ui-routes.md, issue #849): every real
+        // page handler this is called from sits behind the `basic_auth`
+        // middleware, which always sets the internal CSRF header for a
+        // valid session before routing to any handler -- reaching this
+        // function with no header present means that invariant broke
+        // somewhere upstream, not a normal "no session yet" state this
+        // function should quietly tolerate. A real session's own
+        // csrf_token is always 32 random bytes (session::issue_session_at),
+        // never empty, so the previous silent `.unwrap_or("")` could only
+        // ever become exploitable if some other bug also let a session's
+        // csrf_token become empty -- but silently embedding "" here with
+        // zero diagnostic meant that combination would go unnoticed until
+        // actually exploited. Logging loudly turns a theoretical
+        // defense-in-depth gap into an observable failure instead.
+        tracing::error!(
+            "insert_csrf_token: no session CSRF header present on this request; \
+             the basic_auth middleware should have set one before reaching this \
+             handler. Embedding an empty CSRF token, which only passes \
+             verify_csrf_token/verify_csrf_header if the session's own token is \
+             also empty (never true for a real, correctly-issued session)."
+        );
+        ""
+    });
     ctx.insert("csrf_token", token);
 }
 
@@ -162,5 +185,25 @@ mod tests {
         );
         assert!(verify_csrf_token(&headers, "session-token-b").is_err());
         assert!(verify_csrf_header(&headers).is_err());
+    }
+
+    // Finding #1 (docs/bug-hunt/ui-routes.md, issue #849): reaching
+    // insert_csrf_token with no session CSRF header present (an invariant
+    // violation this function cannot itself repair) must still insert an
+    // empty context value rather than panicking or leaving the template
+    // variable undefined -- Tera errors on an undefined variable, so
+    // degrading gracefully here still matters even though this is now a
+    // logged, loud failure rather than a silent one. Locks the unchanged
+    // behavior of the actual fallback value; the added tracing::error! call
+    // itself has no return value to assert on directly.
+    #[test]
+    fn insert_csrf_token_degrades_to_empty_value_without_a_session_header() {
+        let empty_headers = HeaderMap::new();
+        let mut ctx = Context::new();
+        insert_csrf_token(&mut ctx, &empty_headers);
+        assert_eq!(
+            ctx.get("csrf_token").and_then(|value| value.as_str()),
+            Some("")
+        );
     }
 }
