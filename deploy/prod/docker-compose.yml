@@ -1411,10 +1411,11 @@ services:
         # The resolved token is written to its own file, read back by
         # custom_sender() at alarm-fire time, rather than interpolated
         # directly into the health_alarm_notify.conf heredoc below: this
-        # heredoc already needs every literal `$` doubled for Compose's own
-        # YAML-level ${...}/$VAR interpolation (see this file's other heredocs
-        # for the same pattern), and embedding a live secret value into that
-        # heredoc would also leak it into `docker inspect`'s recorded command.
+        # heredoc already needs every literal dollar sign doubled for
+        # Compose's own YAML-level interpolation (see this file's other
+        # heredocs for the same pattern), and embedding a live secret value
+        # into that heredoc would also leak it into `docker inspect`'s
+        # recorded command.
         umask 077
         printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
         chmod 0600 /etc/netdata/.netdata-alarm-token
