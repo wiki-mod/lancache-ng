@@ -13,6 +13,7 @@ This matrix maps the hard rules defined below to how they are currently enforced
 | Rule ID | Rule Name | Current Enforcement |
 |---------|-----------|-------------------|
 | AG-CC-002 | Chat/session/thinking language German, code language English | Manual review (session transcript / code review) |
+| AG-CC-003 | Agent-dispatch language (recursive through the full agent hierarchy) | Manual review (dispatch prompt / agent report inspection) |
 | AG-CDN-001 | `services/dns/cdn-domains.txt` (or the Admin UI) is the only file to maintain for adding a CDN domain | Manual review (repo inspection — no second domain file exists) |
 | AG-CI-001 | Runner baseline: assume no tools | Manual review (workflow inspection) |
 | AG-CI-002 | Runner tier routing | Manual review (runner labels inspection) |
@@ -212,6 +213,7 @@ This matrix maps the hard rules defined below to how they are currently enforced
 
 **[AG-GH-001]** All GitHub content — issues, pull requests, commit messages, code comments, and documentation — must be written in **English**. (CLAUDE.md's `AG-GOV-002` retired 2026-07-30: merged here, an exact duplicate. Not reused per AG-WF-016.)
 **[AG-CC-002]** Chat/session/thinking language with the maintainer: German. Code language (everything committed to the repository): English — this is what AG-GH-001 above enforces for GitHub content specifically; AG-CC-002 additionally covers in-session chat and visible reasoning/thinking, which AG-GH-001 does not reach.
+**[AG-CC-003]** Agent-dispatch language, extending AG-CC-002 recursively through the full agent hierarchy: this extends to every dispatched agent and every agent it in turn spawns, at any depth of nesting — the instructional prose in an agent-dispatch prompt (Agent()/SendMessage/Workflow agent() calls) and an agent's own report/status text back to its dispatcher are mandatorily required to be German; a dispatched agent that spawns its own sub-agents must and is obligated to apply this same split to those sub-agents' prompts and reports, and must explicitly instruct them to do the same for any further nesting. Only literal quoted material stays English: code, error/log output, file paths, commit messages, and any content that is or becomes GitHub content (issue/PR bodies, comments) per AG-GH-001 — never translate those, and never let their presence justify writing the surrounding instructional prose in English either.
 
 ## Source of Truth and Conflict Resolution
 
