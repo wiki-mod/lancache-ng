@@ -58,6 +58,7 @@ setup() {
     # otherwise use. No GH_TOKEN needs to be set for this: main()'s own
     # `: "${GH_TOKEN:?...}"` line is inside main()'s body, which the guard
     # never invokes here, so it is simply never evaluated during sourcing.
+    # shellcheck source=scripts/gc-pr-staging-images.sh
     source "$repo_root/scripts/gc-pr-staging-images.sh"
 }
 
@@ -265,6 +266,8 @@ setup() {
     }
     export -f gh
     export call_log
+    # shellcheck disable=SC2034 # passed by name to gcps_pr_lookup_state,
+    # which populates it via nameref
     declare -A cache=()
     gcps_pr_lookup_state 55 wiki-mod/lancache-ng cache >/dev/null
     gcps_pr_lookup_state 55 wiki-mod/lancache-ng cache >/dev/null
@@ -381,28 +384,25 @@ VERSIONS_JSON
 
     process_service proxy
 
+    # shellcheck disable=SC2154 # set as a global by the sourced
+    # process_service()
     [ "$deleted" -eq 0 ]
+    # shellcheck disable=SC2154 # see $deleted comment above
     [ "$kept" -eq 4 ]
+    # shellcheck disable=SC2154 # see $deleted comment above
     [ "$had_errors" -eq 0 ]
     [ ! -s "$delete_log" ]
 }
 
-# Added 2026-08-06 per a second advisor() checkpoint, called specifically
-# because this branch had just merged in current_dev's unrelated addition of
-# a new "syslog" service (#1428/#1431) to build-push.yml's build matrix
-# while this PR was open -- that merge's own commit message says "scaffold:
-# image not yet built", which raised the question of what process_service()
-# does for a canonical service with no GHCR package at all yet. Live-checked
-# (2026-08-06): `gh api` against a genuinely nonexistent package exits
-# non-zero and writes "gh: Package not found. (HTTP 404)" to STDERR (the raw
-# JSON error body goes to stdout instead, confirmed by capturing both
-# streams separately) -- this test reproduces exactly that shape via the
-# mock below. Before this fix, ANY 404 here was indistinguishable from a
-# real listing failure and set had_errors=1, which would fail the entire
-# workflow run the moment a new service lands in the build matrix ahead of
-# its first real image push -- confirmed the pre-extraction inline workflow
-# had the identical defect, so this is a fix to an inherited bug, not a
-# regression newly introduced by the extraction.
+# A canonical service can appear in build-push.yml's build matrix before its
+# first image is ever pushed to GHCR (freshly scaffolded, not yet built):
+# `gh api` against a genuinely nonexistent package exits non-zero and writes
+# "gh: Package not found. (HTTP 404)" to STDERR (the raw JSON error body
+# goes to stdout instead, confirmed by capturing both streams separately) --
+# this test reproduces exactly that shape via the mock below. A 404 listing
+# a service's own package means "nothing to reap yet", not a listing
+# failure: conflating the two sets had_errors=1 and fails the entire
+# workflow run for any service that has not had its first real image push.
 @test "process_service: a 404 listing a service's own package (no images published yet) is not an error" {
     gh() {
         if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
@@ -430,7 +430,9 @@ VERSIONS_JSON
 
     # Instant retries -- this test asserts on ghcr_retry exhausting its
     # attempts, not on the real backoff delay.
+    # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
     GHCR_RETRY_BACKOFF_SECONDS=0
+    # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
     GHCR_RETRY_MAX_ATTEMPTS=2
 
     delete_log="$BATS_TEST_TMPDIR/deletes2"
@@ -621,6 +623,8 @@ VERSIONS_JSON
     # healthy, unremarkable run once it happens this pervasively.
     [ "$deleted" -eq 0 ]
     [ "$kept" -eq 3 ]
+    # shellcheck disable=SC2154 # set as a global by the sourced
+    # process_service()
     [ "$pr_lookup_failures" -eq 3 ]
     # 3 >= the threshold of 2 configured above.
     [ "$pr_lookup_failures" -ge "$max_pr_lookup_failures" ]
@@ -632,6 +636,7 @@ VERSIONS_JSON
     # "${services[@]}"` loop would otherwise process all 8 real services
     # against the same mocked gh(), inflating the count to 24 for no
     # additional coverage value.
+    # shellcheck disable=SC2034 # read by main() in the sourced script
     services=(proxy)
     max_pr_lookup_failures=2
     GH_TOKEN="unused-but-required-by-main"
