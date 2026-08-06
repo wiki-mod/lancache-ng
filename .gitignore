@@ -41,6 +41,12 @@ Thumbs.db
 # Rust build artifacts
 services/ui/target/
 services/dns/nats-subscriber/target/
+# Issue #1415: found missing while running a local, non-authoritative
+# `cargo check`/`test`/`clippy` sanity pass against services/watchdog's
+# Rust crate (the real, CI-authoritative validation still runs inside the
+# build-tools container per AG-VAL-016) -- this entry was simply never
+# added when watchdog gained its own Cargo.toml.
+services/watchdog/target/
 
 # Editor
 *.swp
