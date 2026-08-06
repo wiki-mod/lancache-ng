@@ -246,7 +246,13 @@ cleanup() {
         # directly if the profile-aware `down` above somehow still left
         # either running, so a partial/unexpected compose failure can never
         # leak a real container onto a shared self-hosted runner host.
-        docker rm -f lancache-dhcp lancache-dhcp-proxy >/dev/null 2>&1 || true
+        # Issue #1415: these two names now carry this run's own
+        # LANCACHE_CONTAINER_SUFFIX (set near the top of this script, still
+        # in scope here since this function is defined and called within
+        # the same shell, never a subshell) -- the bare literal would
+        # silently no-op against the real (suffixed) container and leave it
+        # running, defeating this exact safety net.
+        docker rm -f "lancache-dhcp${LANCACHE_CONTAINER_SUFFIX:-}" "lancache-dhcp-proxy${LANCACHE_CONTAINER_SUFFIX:-}" >/dev/null 2>&1 || true
     fi
     rm -rf "$work_dir"
     exit "$status"
@@ -383,11 +389,22 @@ grep -qF 'logging' "$install_dir/.env" \
 # `CHECK_INTERVAL` on a scratch copy of this compose file left every other
 # base-declared watchdog environment key intact in `docker compose config`'s
 # resolved output. Re-declaring the full list here is therefore redundant
-# but harmless (the values match the base file's own), left as-is rather
-# than rewritten, since removing it is unrelated to #864's actual scope --
-# see this issue's PR for the same finding flagged as a possible
-# cross-cutting correction for other scripts/comments in this repo that may
-# rely on the same now-disproven assumption.
+# but harmless as long as every re-declared value keeps matching the base
+# file's own -- left as-is rather than removed, since removing it is
+# unrelated to #864's actual scope. Issue #1415 found this assumption
+# violated for real: CONTAINER_PROXY/CONTAINER_DNS_STANDARD/
+# CONTAINER_DNS_SSL below had been hardcoded to their bare, unsuffixed
+# literals from before deploy/quickstart/docker-compose.yml's base watchdog
+# service gained `${LANCACHE_CONTAINER_SUFFIX:-}` -- this override, applied
+# via `-f` AFTER the base file, then WON that per-key merge with the stale
+# bare value, silently undoing the base file's suffix and making watchdog
+# FATAL in this exact job (confirmed live: `CONTAINER_PROXY=lancache-proxy
+# is not supported (expected 'lancache-proxy-syslog-e2e-...')`). Fixed by
+# escaping the `${LANCACHE_CONTAINER_SUFFIX:-}` reference (`\$` below) so it
+# passes through this heredoc literally, the same way SSL_ENABLED/
+# SYSLOG_ENABLED/etc. already do -- resolved by `docker compose` itself at
+# parse time, using the SAME shell-exported LANCACHE_CONTAINER_SUFFIX this
+# script sets earlier, not by this script's own heredoc expansion.
 cat > "$work_dir/logging-test-override.yml" <<EOF
 services:
   watchdog:
@@ -399,9 +416,9 @@ services:
       - DISK_ALARM_PCT=95
       - CACHE_VALID_DAYS=365
       - CACHE_DIR=/var/cache/lancache
-      - CONTAINER_PROXY=lancache-proxy
-      - CONTAINER_DNS_STANDARD=lancache-dns-standard
-      - CONTAINER_DNS_SSL=lancache-dns-ssl
+      - CONTAINER_PROXY=lancache-proxy\${LANCACHE_CONTAINER_SUFFIX:-}
+      - CONTAINER_DNS_STANDARD=lancache-dns-standard\${LANCACHE_CONTAINER_SUFFIX:-}
+      - CONTAINER_DNS_SSL=lancache-dns-ssl\${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=\${SSL_ENABLED:-0}
       - SYSLOG_ENABLED=\${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=\${SYSLOG_MAX_GB:-10}
