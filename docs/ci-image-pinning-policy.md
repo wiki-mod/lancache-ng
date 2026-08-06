@@ -112,7 +112,12 @@ container's entrypoint, so this base-image decision stays unaffected either
 way). `services/ui` landed its own migration in a sibling PR while this
 document's `services/proxy` update was still in flight -- confirmed live
 against `services/ui/Dockerfile`'s current `FROM` line rather than assumed.
-Every first-party runtime image is now on Alpine except `tools/build-tools`
+`services/syslog` (the combined fluent-bit + syslog-ng central logging
+service, #1431/#1433) is on Alpine too, but was never part of #815's
+migration set above -- it was born on Alpine from its first commit, so it
+gets its own inventory row below rather than being folded into the
+staged-migration list. Every first-party runtime image is now on Alpine
+except `tools/build-tools`
 (Rule-Ref: AG-KD-009 in `AGENTS.md`, a deliberate, separately-decided
 exception, not an oversight). This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
@@ -134,6 +139,7 @@ undocumented per-Dockerfile fallback logic.
 - `services/ntp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
 - `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
 - `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
+- `services/syslog/Dockerfile`: `FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, and to 3.20 rather than 3.24, because Alpine's stable 3.20 repo is the only release confirmed to package `syslog-ng` at the version this Dockerfile's own header comment records testing against -- see that file for the full version rationale)
 
 **Status**: ✅ All runtime base images are pinned.
 

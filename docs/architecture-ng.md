@@ -607,7 +607,6 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
 - Fully zero-added-capability posture for the combined container: needs every producer log this project controls to be group-readable by gid 10001, a real, separate cross-service change tracked in issue #1427.
-- CI/release-pipeline wiring for the new first-party `syslog` image (build matrix, multi-arch publish, Trivy scan registration) -- tracked in issue #1428; `release/stack-images.yml` already declares the image, but `.github/workflows/build-push.yml` does not yet build/push it.
 
 **Logging matrix** (maintained here per #453's requirement; kept up to date as more services are wired):
 
