@@ -161,6 +161,27 @@ while (( SECONDS < deadline )); do
         docker logs "$container_name" >&2
         exit 1
     fi
+    # Issue #1296's CAP_SYS_TIME graceful-degradation fix (entrypoint.sh's
+    # clock_control_available()) means chronyd no longer crashes when this
+    # restriction applies -- it silently steps down to `-x` (never step or
+    # slew) instead. That is the CORRECT behavior for a real nested/LXC
+    # deployment, but it would be exactly the WRONG behavior for THIS job:
+    # confirmed live that chrony's own `chronyc tracking` reports a fully
+    # converged `Stratum > 0` / `Leap status: Normal` under `-x` within
+    # about 15 seconds even against a real, deliberately forced clock skew
+    # -- that reflects chrony's SOURCE-tracking convergence, not whether it
+    # ever actually corrected this container's own system clock. Without
+    # this check, this job's real pass condition below (stratum/leap-status
+    # only) would false-pass on a `-x`-degraded run and silently stop being
+    # the one place in this project's CI that proves genuine clock-stepping
+    # -- exactly the failure class this job exists to catch. Matches the
+    # literal warning text entrypoint.sh prints (kept in sync deliberately;
+    # update both together if that wording ever changes).
+    if grep -qi "this environment denies CAP_SYS_TIME for real clock stepping" <<<"$ntp_log"; then
+        echo "::error::chronyd started in CAP_SYS_TIME-degraded mode (-x, never step/slew) on this GitHub-hosted runner -- this runner no longer grants real CAP_SYS_TIME, or the ntp image/entrypoint changed in a way that broke this. This job exists specifically to prove genuine clock-stepping under a real forced skew; a degraded-mode run can still report Stratum>0/Leap status Normal from source-tracking alone without ever having corrected this container's own clock, so it must fail here rather than be judged by that check alone. See #1296." >&2
+        docker logs "$container_name" >&2
+        exit 1
+    fi
     # `docker inspect --format` on one field of one container always
     # produces exactly one line, so grep -qx's early exit has nothing else
     # to cut off (issue #1377's repo-wide pipefail/SIGPIPE audit).
