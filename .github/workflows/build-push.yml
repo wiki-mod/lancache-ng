@@ -378,8 +378,9 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
-        run: bash scripts/check-compose-healthchecks.sh
+      # Extracted into a composite action (issue #1095 dedup finding): this job and
+      # compose-healthchecks-hosted below used to carry the identical step twice.
+      - uses: ./.github/actions/compose-healthchecks-check
 
   pr-template-check:
     name: PR template validation
@@ -859,8 +860,8 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Check every deploy/*/docker-compose.yml service has a healthcheck
-        run: bash scripts/check-compose-healthchecks.sh
+      # Same composite action as the self-hosted compose-healthchecks job above.
+      - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
     # Cheap repository hygiene gate (issue #601). .gitattributes already normalizes line
