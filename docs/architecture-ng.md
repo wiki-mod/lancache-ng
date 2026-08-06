@@ -15,7 +15,7 @@ document.
 
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
-| nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
+| nginx (proxy) | on | — | Mainline from nginx.org, Alpine base (issue #815) |
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
 | Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
@@ -26,7 +26,8 @@ document.
 
 ## nginx
 
-Mainline from nginx.org (not Debian package). Base: `debian:13-slim`.
+Mainline from nginx.org (never the base OS's own distro package). Base: `alpine:3.24`
+(migrated from `debian:13-slim` as part of issue #815's Alpine push).
 
 **Performance configuration:**
 
