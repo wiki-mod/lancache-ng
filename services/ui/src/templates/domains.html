@@ -347,6 +347,10 @@
           damit auch Randfälle ab (z. B. eine zukünftige Zone ohne eigene TSIG-Zuordnung).
           <strong>Löst einen Neustart von dns-standard und dns-ssl aus</strong> (kein Live-Reload,
           PowerDNS liest diese Einstellung nur beim Start).
+          <strong class="text-amber-400">Während dieses Neustarts beantworten beide DNS-Instanzen
+          kurzzeitig keine Anfragen</strong> -- für alle Geräte im LAN, nicht nur für DNS-Updates,
+          typischerweise wenige Sekunden pro Instanz. Nicht während laufender Downloads/Spiel-Updates
+          umschalten, wenn das vermeidbar ist.
         </p>
       </div>
 

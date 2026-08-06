@@ -464,6 +464,20 @@ pub async fn toggle_dnsupdate_require_tsig(
     // than reporting the whole toggle as failed, since the marker write
     // (the actual persisted intent) already succeeded and a manual restart
     // later will still pick it up correctly.
+    //
+    // KNOWN LIMITATION (flagged during this feature's own real-container
+    // testing, not yet fixed here): these two restarts are issued
+    // sequentially with no health-wait in between. `restart_service`'s
+    // await only resolves once Docker's API reports the restart accepted,
+    // not once PowerDNS is actually answering queries again (entrypoint.sh
+    // needs several more seconds after process start for zone
+    // creation/RPZ regen) -- so there is a real window where dns-standard
+    // and dns-ssl can both be simultaneously unable to answer DNS for every
+    // LAN client, not just for DNS UPDATE. No wait-for-healthy helper
+    // exists anywhere else in this codebase yet to reuse, so adding one
+    // here would be new shared infrastructure, not a one-line fix -- left
+    // for a maintainer decision on priority rather than expanding this
+    // PR's scope unilaterally.
     if let Err(e) =
         docker_client::restart_service(&state.docker, &state.config.dns_standard_service).await
     {
