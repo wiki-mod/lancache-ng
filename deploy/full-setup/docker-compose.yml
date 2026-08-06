@@ -589,6 +589,21 @@ services:
         set -e
         printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
         chmod 0600 /etc/netdata/.netdata-alarm-token
+        # Live-verified 2026-08-06 (PR #1444 real-alarm check): netdata's own
+        # daemon -- and therefore alarm-notify.sh and this file's
+        # custom_sender() -- runs as the image's unprivileged `netdata`
+        # user (uid 201), never as root, once past this root-context setup
+        # script. Without this chown, the token file stays root:root/0600
+        # from the printf above, so the real health-engine-triggered
+        # alarm-notify.sh process gets "Permission denied" reading it,
+        # `cat ... 2>/dev/null` silently swallows that into an empty
+        # string, and every real (non-manually-triggered) alarm silently
+        # fails Admin UI auth with 401 -- confirmed by instrumenting this
+        # exact custom_sender() body and observing token_len=0 on a real
+        # health.d-fired alarm, versus a correct non-empty token when the
+        # same file is read via a root shell (e.g. `docker exec`), which is
+        # why naive manual testing as root does not catch this.
+        chown netdata:netdata /etc/netdata/.netdata-alarm-token
         cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
         # shellcheck disable=SC2154
         # name/chart/host/status/old_status/value_string/units/info/
