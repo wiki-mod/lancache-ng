@@ -422,7 +422,8 @@ for sim in "${sim_scripts[@]}"; do
         haystack="${pair#*$'\t'}"
         covered=0
         for grep_pattern in "${grep_patterns[@]}"; do
-            if printf '%s' "$haystack" | grep -Eq -- "$grep_pattern"; then
+            # Here-string, not a live pipe into grep -q -- issue #1377.
+            if grep -Eq -- "$grep_pattern" <<<"$haystack"; then
                 covered=1
                 break
             fi
@@ -439,7 +440,8 @@ for sim in "${sim_scripts[@]}"; do
         grep_pattern="${grep_patterns[$i]}"
         matched=0
         for haystack in "${all_prompts[@]}"; do
-            if printf '%s' "$haystack" | grep -Eq -- "$grep_pattern"; then
+            # Here-string, not a live pipe into grep -q -- issue #1377.
+            if grep -Eq -- "$grep_pattern" <<<"$haystack"; then
                 matched=1
                 break
             fi

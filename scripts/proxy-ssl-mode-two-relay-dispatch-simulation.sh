@@ -127,8 +127,16 @@ docker run -d --name "$backend_two_container" --network "$network_name" --networ
 wait_for_tcp() {
     local container="$1" port="$2"
     local deadline=$((SECONDS + 60))
+    local container_running_state
     while (( SECONDS < deadline )); do
-        if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
+        # Captured into a variable first, then grep applied via here-string,
+        # rather than `docker inspect ... | grep -q true`: eliminates the
+        # live producer/early-exiting-consumer pipe entirely (issue #1377's
+        # repo-wide pipefail/SIGPIPE audit, AG-VAL-032 -- caught as a fresh
+        # instance after this script itself landed via PR #1411, later than
+        # the original audit pass).
+        container_running_state="$(docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null || true)"
+        if ! grep -q true <<<"$container_running_state"; then
             echo "::error::$container is not running (crashed during startup). Logs:" >&2
             docker logs "$container" 2>&1 | tail -60 >&2
             return 1
