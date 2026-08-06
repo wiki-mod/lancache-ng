@@ -11,6 +11,40 @@
 # same containers, regardless of which workflow run or PR triggered either
 # one.
 #
+# UPDATE (issue #1415, 2026-08): the container-name collision described
+# above is now closed for BOTH call sites. `deploy/quickstart/docker-compose.yml`
+# now derives every `container_name:` from `${LANCACHE_CONTAINER_SUFFIX:-}`,
+# and `setup-cli-simulation.sh` / `syslog-forwarding-simulation.sh` each
+# export a per-run suffix (and per-run `COMPOSE_PROJECT_NAME`, and per-run
+# loopback IPs via `sim_ip_octet()`), so two concurrent runs on the same
+# runner host no longer share a literal container name, project name, or
+# `127.0.x.y` address by construction. That does NOT make this lock
+# redundant, for two separate reasons found while verifying the above:
+#   1. Both scripts derive their per-run "uniqueness" (container suffix, IP
+#      octet, and -- in syslog-forwarding-simulation.sh's case -- the
+#      172.29.<octet>.0/25 DHCP bridge subnets in its own
+#      dhcp-test-override.yml) from a `cksum ... % 200` hash of a run-scoped
+#      string. That is a ~200-value space: with the double-digit-concurrency
+#      levels this repo's runner-host topology can produce, a same-host
+#      octet collision between two unrelated runs is a real, non-negligible
+#      probability (birthday-bound), not a theoretical edge case. When two
+#      runs collide on octet, they collide on IP AND on DHCP subnet
+#      simultaneously, and this lock is the only thing left standing between
+#      that collision and either run corrupting the other's compose state.
+#   2. syslog-forwarding-simulation.sh's override files
+#      (logging-test-override.yml, dhcp-test-override.yml) are regenerated
+#      per run and layered over the base compose file with `-f`; a stray
+#      unsuffixed/unparameterized literal reintroduced in a future edit to
+#      either override (this already happened once for
+#      logging-test-override.yml's `CONTAINER_PROXY=lancache-proxy` line,
+#      which clobbered the suffixed base value and crash-looped watchdog in
+#      CI) would silently reopen the exact collision this lock guards
+#      against, for as long as it takes someone to notice. The lock is cheap
+#      insurance against that class of regression recurring undetected.
+# Net: keep this lock. Revisit only if/when the octet space is widened (or
+# replaced with a collision-proof allocator) AND override-file drift is
+# mechanically checked, not just reasoned about here.
+#
 # HISTORY THIS FILE REPLACES: `setup-cli-simulation.sh`'s job
 # (full-setup-deep-validate.yml, full-setup-validate.yml) and
 # `syslog-forwarding-simulation.sh`'s job (full-setup-deep-validate.yml)
