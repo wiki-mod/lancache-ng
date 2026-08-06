@@ -639,6 +639,8 @@ VERSIONS_JSON
     # shellcheck disable=SC2034 # read by main() in the sourced script
     services=(proxy)
     max_pr_lookup_failures=2
+    # shellcheck disable=SC2034 # read by main()'s own required-var guard in
+    # the sourced script
     GH_TOKEN="unused-but-required-by-main"
 
     gh() {

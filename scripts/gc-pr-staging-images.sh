@@ -94,9 +94,10 @@ now_epoch="$(date -u +%s)"
 # happens automatically via gcps_pr_lookup_state's nameref parameter.
 # shellcheck disable=SC2034 # it IS used -- passed by bare name (not "$pr_state_cache")
 # to gcps_pr_lookup_state below, which binds it via `local -n cache_ref=...`.
-# shellcheck runs per-file (see build-push.yml's shellcheck job: `xargs shellcheck`,
-# no -x), so it never sees scripts/lib/gc-pr-staging-images.sh's nameref
-# consumer and can't trace this indirect-by-name usage across the source boundary.
+# The check runs per-file (see build-push.yml's shellcheck job: `xargs
+# shellcheck`, no -x), so it never sees scripts/lib/gc-pr-staging-images.sh's
+# nameref consumer and can't trace this indirect-by-name usage across the
+# source boundary.
 declare -A pr_state_cache=()
 
 # A single ambiguous PR-state lookup (LOOKUP_FAILED) is deliberately safe
