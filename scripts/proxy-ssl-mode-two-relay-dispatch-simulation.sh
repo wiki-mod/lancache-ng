@@ -29,12 +29,31 @@
 # picked showed up as 127.0.0.1, not the real client, regardless of what
 # was configured on the relay alone.
 #
-# Includes a real negative control: builds a proxy image from the merge-base
-# with this branch's base branch (this fix not yet applied, however many
-# commits or merges this branch has picked up since) and proves live that
-# the exact same depth-2 SNI gets served a real, CA-verifiable but
-# hostname-mismatched certificate there -- this test would have caught the
-# original bug, not just documented its absence after the fact.
+# This script deliberately does NOT bake a live negative control (building
+# an old pre-fix commit and proving it reproduces the original bug) into
+# this permanent, standing CI job -- neither sibling simulation in this
+# directory (proxy-standard-mode-sni-routing-simulation.sh,
+# proxy-deep-wildcard-tls-simulation.sh) does that either, and for the same
+# reason: once this fix is merged into the base branch, EVERY future PR's
+# checkout has the fix as part of its own inherited history, so there is no
+# longer a stable, branch-independent "pre-fix" commit to compute on demand
+# (a `git merge-base HEAD origin/<base>` against a moving base-branch tip
+# that already contains the fix resolves to whatever ancestor two unrelated
+# branches happen to share -- not a defined pre-fix state, and in practice
+# produced three different, unpredictable failure modes across three real
+# CI runs instead of one stable pre-fix behavior). The negative control
+# for this fix was instead performed once, live, by hand, against a real
+# pre-fix checkout on the runner, with full openssl output recorded in
+# issue #1276's own comment thread -- matching how this project has proven
+# every prior fix in this same family. What this script keeps permanently
+# asserting is the fix's own current, positive behavior: the dispatch map
+# content itself (regex-anchored, not nginx "hostnames" mode), the depth-1
+# MITM handshake, and -- as the strongest ongoing regression guard -- the
+# depth-2 handshake reaching the real, distinct backend-two-real certificate
+# (a pre-fix build could never produce that subject for this SNI; it would
+# either fail the handshake outright or return this proxy's own generated
+# cert instead, either of which the assertion below already treats as a
+# failure).
 #
 # Fake-origin/network-alias mechanism, RFC 2606-reserved test domain, and
 # Docker embedded-DNS resolver technique all mirror
@@ -50,11 +69,9 @@ build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 run_id="$(date +%s)-$$"
 network_name="proxy-two-relay-sim-${run_id}"
 proxy_image="proxy-two-relay-sim:fixture-${run_id}"
-before_image="proxy-two-relay-sim:before-${run_id}"
 backend_one_container="proxy-two-relay-sim-one-${run_id}"
 backend_two_container="proxy-two-relay-sim-two-${run_id}"
 proxy_container="proxy-two-relay-sim-proxy-${run_id}"
-before_container="proxy-two-relay-sim-before-${run_id}"
 client_allow_container="proxy-two-relay-sim-allow-${run_id}"
 client_deny_container="proxy-two-relay-sim-deny-${run_id}"
 work_dir="$repo_root/.proxy-two-relay-sim-tmp-${run_id}"
@@ -62,9 +79,9 @@ work_dir="$repo_root/.proxy-two-relay-sim-tmp-${run_id}"
 cleanup() {
     local status=$?
     docker rm -f "$backend_one_container" "$backend_two_container" "$proxy_container" \
-        "$before_container" "$client_allow_container" "$client_deny_container" >/dev/null 2>&1 || true
+        "$client_allow_container" "$client_deny_container" >/dev/null 2>&1 || true
     docker network rm "$network_name" >/dev/null 2>&1 || true
-    docker rmi "$proxy_image" "$before_image" >/dev/null 2>&1 || true
+    docker rmi "$proxy_image" >/dev/null 2>&1 || true
     rm -rf "$work_dir"
     exit "$status"
 }
@@ -90,36 +107,6 @@ docker run --rm -v "$work_dir:/certs" -w /certs "$build_tools_image" bash -c \
 
 echo "== Building the real proxy image (this fix applied) =="
 docker build -q -t "$proxy_image" --build-context "dns-domains=$work_dir/fixture" services/proxy >/dev/null
-
-echo "== Building the negative-control proxy image (this fix NOT applied, from the branch point where it diverged from ${BASE_BRANCH:-current_dev}) =="
-# Plain "HEAD^" (first parent) is NOT a reliable "pre-fix" reference: it
-# only means that on a linear, single-commit branch. A merge commit's first
-# parent can be anything (whichever side was checked out first) -- e.g.
-# merging the target branch's own later commits into this PR branch
-# produces a HEAD whose first parent already contains this fix, so
-# "HEAD^" would build an image that ALSO has the fix applied, silently
-# defeating the negative control instead of failing loudly (confirmed
-# live: this produced a real backend-two-real cert instead of either a
-# hostname-mismatch OR a build/checkout error, which is a materially
-# different, easy-to-miss silent-defeat failure mode). The actual
-# pre-fix reference this negative control needs is well-defined
-# regardless of merge topology: the merge-base between HEAD and the PR's
-# own base branch, which by definition predates every commit this PR
-# (this branch) has added, however many merges or extra commits it
-# picked up along the way.
-base_branch="${BASE_BRANCH:-current_dev}"
-# --depth=1000, not a plain (possibly shallow-respecting) fetch: this job's
-# own checkout step may be shallow (fetch-depth: 2, only enough for this
-# script's OWN commit history), which is not automatically enough depth to
-# reach a real common ancestor with a separately-fetched base-branch ref --
-# 1000 is comfortably past how many commits any single PR branch or
-# in-flight current_dev delta is expected to need for merge-base purposes.
-git fetch --quiet --depth=1000 origin "$base_branch" 2>/dev/null || true
-before_ref="$(git merge-base HEAD "origin/${base_branch}" 2>/dev/null)" \
-    || before_ref="$(git rev-parse HEAD^ 2>/dev/null)" \
-    || before_ref="$(git rev-parse HEAD)" # last-resort fallback: first commit in a shallow, remote-less history
-git worktree add -q --detach "$work_dir/before-checkout" "$before_ref"
-docker build -q -t "$before_image" --build-context "dns-domains=$work_dir/fixture" "$work_dir/before-checkout/services/proxy" >/dev/null
 
 docker network create --subnet 172.29.77.0/24 "$network_name" >/dev/null
 
@@ -255,31 +242,4 @@ if docker exec "$proxy_container" curl -ksf --max-time 5 https://127.0.0.1:8444/
 fi
 echo "OK: healthcheck port 8445 works; 8444 correctly requires a real PROXY protocol preamble (curl alone cannot reach it, confirming port 8445 is genuinely needed, not redundant)."
 
-echo "== Negative control: the SAME depth-2 SNI against the pre-fix image must get a mismatched LOCAL cert (the original #1322 bug), not real backend content =="
-docker run -d --name "$before_container" --network "$network_name" \
-    -e IP_STANDARD=10.10.10.10 -e IP_SSL=10.10.10.12 -e SSL_ENABLED=1 -e PROXY_SECURITY_MODE=strict \
-    -e NGINX_UPSTREAM_RESOLVER="127.0.0.11:53" \
-    -e CACHE_MAX_SIZE=1g -e CACHE_MEM_MB=64 -e CACHE_SLICE_SIZE=1m \
-    -e CACHE_VALID_HIT=1d -e CACHE_VALID_ANY=1m -e CACHE_INACTIVE=1d \
-    "$before_image" >/dev/null
-wait_for_tcp "$before_container" 443
-# Each proxy container generates its OWN independent CA at first boot (no
-# shared volume between the "after" and "before" containers) -- reusing the
-# "after" container's ca.crt here would fail with "unable to get local
-# issuer certificate" regardless of hostname matching, which is a
-# different, misleading failure mode from the actual bug this negative
-# control needs to reproduce. Fetch the "before" container's own CA
-# instead, exactly as the real client-facing setup docs require per
-# container.
-before_ca="$(docker exec "$before_container" cat /etc/nginx/ssl/ca/ca.crt)"
-printf '%s' "$before_ca" > "$work_dir/before-ca.crt"
-before_out="$(docker run --rm --network "$network_name" -v "$work_dir/before-ca.crt:/ca.crt:ro" "$build_tools_image" bash -c \
-    "timeout 10 openssl s_client -connect ${before_container}:443 -servername two.levels.example.net -CAfile /ca.crt -verify_hostname two.levels.example.net -verify_return_error < /dev/null 2>&1" || true)"
-if ! grep -q 'hostname mismatch' <<<"$before_out"; then
-    echo "::error::Expected the PRE-FIX image to reproduce the original bug (a hostname-mismatched local cert for depth-2 SNI) as a negative control, but it did not. This means either the 'before' checkout is not actually pre-fix, or something else changed. Full openssl output:" >&2
-    echo "$before_out" >&2
-    exit 1
-fi
-echo "OK: negative control confirms the pre-fix image reproduces the original bug live (hostname mismatch against our own CA for the identical depth-2 SNI) -- proving this test actually detects the bug this PR fixes, not just documenting its absence."
-
-echo "proxy-ssl-mode-two-relay-dispatch-simulation passed: regex-anchored depth dispatch correctly separates MITM-covered from passthrough-only SNI (including the root-level leading-dot case), the symmetric two-relay design preserves the real client IP end to end for \$lancache_client_allowed and access logging, the dedicated healthcheck port works while the PROXY-protocol-only internal port correctly rejects a plain connection, and a live negative control against the pre-fix image confirms this test detects the original bug."
+echo "proxy-ssl-mode-two-relay-dispatch-simulation passed: regex-anchored depth dispatch correctly separates MITM-covered from passthrough-only SNI (including the root-level leading-dot case), the symmetric two-relay design preserves the real client IP end to end for \$lancache_client_allowed and access logging, and the dedicated healthcheck port works while the PROXY-protocol-only internal port correctly rejects a plain connection."
