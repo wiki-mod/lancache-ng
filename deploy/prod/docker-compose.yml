@@ -285,18 +285,26 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): watchdog.env is a static,
-    # non-templated file (see its own header), so these two top-level .env
-    # values -- which do vary per install -- are passed the same way the
-    # `retention` service below already passes SYSLOG_ENABLED for its own
-    # syslog-ng retention gate. Neither var is read by watchdog.sh (the bash
-    # entrypoint this ENTRYPOINT still runs); the Rust crate's own
-    # resolve_alert_only_targets() reads both, currently unused until that
-    # crate becomes this service's actual ENTRYPOINT (see
-    # services/watchdog/src/lib.rs's module doc comment).
+    # DHCP_MODE/SYSLOG_ENABLED/NTP_ENABLED (issue #842/#849/#1296):
+    # watchdog.env is a static, non-templated file (see its own header), so
+    # these top-level .env values -- which do vary per install -- are
+    # passed the same way the `retention` service below already passes
+    # SYSLOG_ENABLED for its own syslog-ng retention gate.
+    # DHCP_MODE/SYSLOG_ENABLED are still NOT read by watchdog.sh (the bash
+    # entrypoint this ENTRYPOINT actually runs) -- only the Rust crate's
+    # own resolve_alert_only_targets() reads them, currently unused until
+    # that crate becomes this service's actual ENTRYPOINT (see
+    # services/watchdog/src/lib.rs's module doc comment). NTP_ENABLED is
+    # DIFFERENT (issue #1296): watchdog.sh itself now reads it directly
+    # (see that script's own C_NTP/check_alert_only() comments) to decide
+    # whether to alert-only-monitor `ntp` at all -- this is the first of
+    # issue #842's originally-proposed alert-only services to actually take
+    # effect in the live bash entrypoint, not just the not-yet-wired-up
+    # Rust scaffold.
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
@@ -715,7 +723,24 @@ services:
       # flap this healthcheck unhealthy for that reason alone. Verified live:
       # a freshly started, not-yet-synchronised chronyd still returns a
       # "Reference ID" line immediately.
-      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      #
+      # Second statement (issue #1296, maintainer decision): if
+      # entrypoint.sh detected a CAP_SYS_TIME denial at startup (a nested/
+      # LXC host, `-x` degraded mode), it wrote the reason into
+      # /run/ntp-cap-sys-time-degraded. Echoing it back here, every single
+      # run (not just once at container start), makes it part of Docker's
+      # own `.State.Health.Log` -- `services/watchdog/src/docker_client.rs`
+      # reads that same field (already fetched for the Status check, no
+      # extra request) and reports a genuinely distinct amber "Degraded"
+      # dashboard state instead of a plain healthy dot, exactly what the
+      # maintainer asked this container to surface instead of silently
+      # reporting healthy while never disciplining the clock. Still exits 0
+      # overall (a real, deliberate degraded mode is not "broken" -- see
+      # HealthReading::Degraded's own doc comment for why this must not be
+      # Docker-"unhealthy" either): the `DEGRADED: ` line is additional
+      # information layered onto a still-successful probe, not a new
+      # failure condition.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
       retries: 3

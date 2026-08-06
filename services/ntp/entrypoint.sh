@@ -409,10 +409,37 @@ clock_control_available() {
 # CAP_SYS_TIME gets full clock discipline back on the container's next
 # restart, same as any other environment-dependent startup decision this
 # entrypoint already makes.
+# Fixed path/content the compose healthcheck (see deploy/prod and
+# deploy/quickstart's docker-compose.yml `ntp` service) reads on EVERY run,
+# not just once: a maintainer explicitly rejected reporting plain Docker-
+# "healthy" for this condition (issue #1296) -- a container that is
+# genuinely running and answering NTP queries must never be confused with
+# a broken/needs-restart one (there is no fourth Docker health state to
+# express that distinction directly), but the reduced-guarantee condition
+# itself must stay visible for as long as it applies, not scroll away as a
+# one-time startup log line. Writing the reason text into this file (once,
+# here) and having the healthcheck `cat` it back verbatim keeps the exact
+# wording defined in exactly one place -- entrypoint.sh and the compose
+# YAML's healthcheck test string would otherwise duplicate this sentence
+# and could silently drift apart. `services/watchdog/src/docker_client.rs`
+# reads this same text back out of Docker's own `.State.Health.Log` (part
+# of the container-inspect response it already fetches) to produce a
+# genuinely distinct `HealthReading::Degraded` -- see that module's
+# `degraded_reason_from_health_log()` for the `DEGRADED: ` prefix
+# convention this file's content feeds into. /run is a fresh tmpfs per
+# container start (same reasoning as /run/chrony above), so this must be
+# (re)written every start, not just once at image build time, and a
+# restart onto a host that now grants CAP_SYS_TIME correctly stops writing
+# it and reverts to plain healthy.
+NTP_DEGRADED_MARKER=/run/ntp-cap-sys-time-degraded
+rm -f "$NTP_DEGRADED_MARKER"
+
 if clock_control_available; then
     echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
 else
+    _ntp_degraded_reason="CAP_SYS_TIME denied -- clock not disciplined (issue #1296)"
     echo "WARNING: this environment denies CAP_SYS_TIME for real clock stepping even though it was requested (commonly a nested/LXC container host -- see issue #1296). Starting LanCache-NG-NTP (chronyd) in degraded mode: it will track upstream servers ($NTP_UPSTREAM_SERVERS) and answer LAN NTP queries, but will NOT discipline this host's own system clock. Move this container to a host that grants real CAP_SYS_TIME to restore full clock discipline." >&2
+    printf '%s\n' "$_ntp_degraded_reason" > "$NTP_DEGRADED_MARKER"
     NTP_CHRONYD_FLAGS+=(-x)
 fi
 exec chronyd -n -f "$NTP_RUNTIME_CONF" "${NTP_CHRONYD_FLAGS[@]}"
