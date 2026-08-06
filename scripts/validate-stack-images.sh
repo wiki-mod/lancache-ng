@@ -124,6 +124,32 @@ require_grep "image: ${first_party_ref}/watchdog:\\$\\{LANCACHE_IMAGE_TAG:-lates
 require_grep "image: ${first_party_ref}/ui:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/quickstart/docker-compose.yml \
   'quickstart compose must use registry/prefix/tag variables for ui'
+# dhcp/dhcp-proxy/ntp/syslog all define a real service in
+# deploy/quickstart/docker-compose.yml (confirmed 2026-08-06 by reading that
+# file directly), same as the four checked above, but had no check here --
+# release/stack-images.yml's own dhcp/dhcp-proxy/ntp `compose:` lists were
+# separately found missing the quickstart entry entirely (issue #849
+# dhcp-proxy.md finding #12) and fixed alongside this; syslog's manifest
+# entry already listed quickstart correctly, it just had no check. Unlike
+# the prod-level loop above (over runtime_images, already generalized),
+# this quickstart list stays one require_grep per service rather than a
+# blanket loop: not every runtime image is actually deployed by the
+# quickstart profile (dns's own two prod instances collapse to a single
+# dns-standard/dns-ssl pair there, for example), so a loop over
+# runtime_images would need its own per-service exclusion list to stay
+# correct -- no cheaper than the explicit list this already is.
+require_grep "image: ${first_party_ref}/dhcp:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
+  deploy/quickstart/docker-compose.yml \
+  'quickstart compose must use registry/prefix/tag variables for dhcp'
+require_grep "image: ${first_party_ref}/dhcp-proxy:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
+  deploy/quickstart/docker-compose.yml \
+  'quickstart compose must use registry/prefix/tag variables for dhcp-proxy'
+require_grep "image: ${first_party_ref}/ntp:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
+  deploy/quickstart/docker-compose.yml \
+  'quickstart compose must use registry/prefix/tag variables for ntp'
+require_grep "image: ${first_party_ref}/syslog:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
+  deploy/quickstart/docker-compose.yml \
+  'quickstart compose must use registry/prefix/tag variables for syslog'
 require_grep "image: ${first_party_ref}/dns:\\$\\{LANCACHE_IMAGE_TAG:-latest\\}" \
   deploy/secondary/docker-compose.yml \
   'secondary compose must use registry/prefix/tag variables for dns'
