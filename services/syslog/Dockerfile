@@ -66,8 +66,20 @@ RUN apk add --no-cache \
     # (see syslog-ng.conf's own header comment for what this replaces).
     && addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache lancache \
-    && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit \
-    && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit
+    && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data \
+    && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data
+# `/data` (fluent-bit's storage.path/DB/log root, see fluent-bit.conf) is a
+# NAMED volume in deploy/*/docker-compose.yml (syslog-data:/data), not a bind
+# mount. Docker initializes a fresh named volume's content from whatever
+# already exists at that path in the image at first mount -- if the path is
+# absent from the image (as it was before this fix), Docker instead creates
+# an empty root:root directory, which the non-root `lancache` USER below
+# cannot write into. Real, reproduced failure: fluent-bit's storage engine
+# fails to initialize ("cannot initialize root path /data/flb-storage"),
+# which this container's fail-fast supervisor treats as fatal and tears the
+# whole container down. Creating and chowning `/data` here (like the other
+# internal, non-bind-mount paths above) means Docker copies this
+# already-chowned empty directory into the volume on first creation.
 # `/var/log/lancache-syslog-ng` above is the image's OWN copy of this path,
 # chowned here so a fresh named-volume mount would inherit it -- in real
 # deployments this path is always a BIND MOUNT (SYSLOG_NG_LOG_DIR), which
