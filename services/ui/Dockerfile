@@ -4,8 +4,9 @@
 # Rust binary against the shared build-tools image, opportunistically
 # accelerating the build with sccache and/or distcc when the corresponding
 # BuildKit secrets are present (falling back to a plain local build
-# otherwise). The runtime stage is a minimal Debian image that only carries
-# the compiled binary, its Tera templates, and the entrypoint script.
+# otherwise). The runtime stage is a minimal Alpine image (issue #815) that
+# only carries the compiled binary, its Tera templates, and the entrypoint
+# script.
 
 # Intentional ARG default (overridable at build time via --build-arg).
 # Actual digest pinning for release builds is tracked in issue #508.
@@ -15,6 +16,20 @@ FROM ${BUILD_TOOLS_IMAGE} AS builder
 # The shared build-tools image already carries the Rust toolchain, sccache,
 # distcc, distcc-pump, and the supporting Debian packages. Keep this stage
 # lean and fail closed if the contract is not met.
+#
+# musl cross-compilation target (issue #815): the runtime stage below now
+# runs on an Alpine (musl) base, so this binary must be musl-linked, not the
+# glibc-linked binary a plain build-tools-image build would produce.
+# tools/build-tools/Dockerfile (#815, PR #1374) already added musl-tools/
+# musl-dev and a rustup target matching this image's own host architecture
+# (x86_64-unknown-linux-musl on amd64, aarch64-unknown-linux-musl on arm64)
+# -- the native-arch target only, no separate cross-linker needed. Resolving
+# the target via `dpkg --print-architecture` into a file mirrors the exact
+# pattern services/dns/Dockerfile's nats-subscriber builder already
+# established for the identical problem, rather than inventing a new one --
+# see that file's own comments for the full empirical verification history.
+# Written to /tmp/musl-target (not a shell variable) because Docker RUN
+# layers do not share shell state; every later RUN in this stage re-reads it.
 #
 # Everything below builds a custom distcc wrapper. It exists because
 # distcc-pump preprocesses every `#include` locally before sending the job to
@@ -31,6 +46,13 @@ RUN set -eu; \
     for tool in cargo rustc rustup rustfmt clippy-driver sccache distcc distcc-pump python3 pkg-config; do \
       command -v "$tool" >/dev/null; \
     done; \
+    command -v musl-gcc >/dev/null; \
+    case "$(dpkg --print-architecture)" in \
+      amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
+      *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
+    esac; \
+    rustup target list --installed | grep -qx "$(cat /tmp/musl-target)"; \
     distcc_bin="$(command -v distcc)"; \
     distcc_real_bin="/usr/local/bin/distcc-real"; \
     cp "$distcc_bin" "$distcc_real_bin"; \
@@ -124,6 +146,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
+    musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     original_path="$PATH"; \
     configure_sccache() { \
@@ -228,7 +251,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -248,7 +271,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -260,7 +283,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -291,7 +314,7 @@ COPY src ./src
 # disable_distcc, resolve_distcc_wrapper_dir, resolve_cargo_jobs, run_cargo_build), this
 # time building the real sources instead of the throwaway `fn main() {}` stub.
 #
-# `cargo clean -p lancache-ui --release` (issue: `lancache_ui::kea_response_parse`/
+# `cargo clean -p lancache-ui --release --target "$musl_target"` (issue: `lancache_ui::kea_response_parse`/
 # `lancache_ui::netdata_url` unresolved-import failures on every build): COPY
 # preserves each file's original mtime from the build context (the runner's
 # git checkout), not "now". Those checkout mtimes are consistently OLDER than
@@ -308,17 +331,24 @@ COPY src ./src
 # lib rlib -- exactly the `E0432` failure this fixes), and
 # `find src -type f -exec touch {} +` (works, but relies on Cargo's mtime
 # comparison remaining the deciding factor, which is an implementation detail
-# rather than a documented contract). `cargo clean -p lancache-ui --release`
-# instead removes this package's own previously-built lib/bin artifacts
-# unconditionally -- Cargo then has no stale rlib to fall back to regardless
-# of mtimes, so it must recompile `lib.rs` and its modules for real. `-p` scopes
+# rather than a documented contract). `cargo clean -p lancache-ui --release
+# --target "$musl_target"` instead removes this package's own previously-built
+# lib/bin artifacts unconditionally -- Cargo then has no stale rlib to fall
+# back to regardless of mtimes, so it must recompile `lib.rs` and its modules
+# for real. The explicit `--target` here matters for the same reason it
+# matters on every `cargo build` call in this stage (issue #815): without it,
+# `cargo clean` would only touch `target/release/` (the host-triple default),
+# never `target/${musl_target}/release/` where this musl-targeted build's
+# real artifacts actually live, silently defeating the whole point of this
+# workaround for the cross-compiled target. `-p` scopes
 # the clean to this package only, leaving every dependency's cached rlib in
-# `target/release/deps/` untouched, so the pre-cache stage's whole point
-# (skip recompiling third-party crates) is preserved.
+# `target/${musl_target}/release/deps/` untouched, so the pre-cache stage's
+# whole point (skip recompiling third-party crates) is preserved.
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
     set -eu; \
+    musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
     original_path="$PATH"; \
     configure_sccache() { \
@@ -423,7 +453,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
     run_cargo_build() { \
       cargo_log="$(mktemp)"; \
       cargo_status_file="$(mktemp)"; \
-      { set +e; cargo build -j "$cargo_jobs" --release --locked 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
+      { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$cargo_status_file"; set -e; } | tee "$cargo_log"; \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
@@ -443,7 +473,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] distcc build path unavailable; retrying with normal local C compiler." >&2; \
-        if cargo build -j "$cargo_jobs" --release --locked; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
           echo "[INFO] normal local C compiler fallback completed." >&2; \
           rm -f "$cargo_log"; \
           return 0; \
@@ -455,7 +485,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
         echo "[INFO] sccache build path unavailable; retrying with sccache disabled." >&2; \
         rm -f "$cargo_log"; \
-        if cargo build -j "$cargo_jobs" --release --locked; then \
+        if cargo build -j "$cargo_jobs" --release --locked --target "$musl_target"; then \
           echo "[INFO] sccache-disabled fallback completed." >&2; \
           return 0; \
         fi; \
@@ -468,75 +498,52 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_sccache; \
     configure_distcc; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
-    cargo clean -p lancache-ui --release \
-    && run_cargo_build
+    cargo clean -p lancache-ui --release --target "$musl_target" \
+    && run_cargo_build \
+    && cp "target/${musl_target}/release/lancache-ui" /build/lancache-ui-out
 
 # ── Runtime image ──────────────────────────────────────────────────────────────
-FROM mirror.gcr.io/library/debian:trixie-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+# Alpine base (issue #815): replaces the prior debian:trixie-slim final
+# stage. Same pinned alpine:3.24 digest already used by services/dhcp,
+# services/dhcp-proxy, services/watchdog, services/ntp, and services/dns.
+FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
 
-# trixie-backports is the standard package source for this image (maintainer
-# decision, 2026-07-30) -- not scoped to any specific package: `Package: *` at
-# Pin-Priority 500 (tied with the regular trixie archive) applies project-wide
-# to every Debian-based image, so ordinary version-comparison rules pick
-# whichever archive has the newer version for ANY package installed below.
-# `apt-get dist-upgrade` then `apt-get full-upgrade` are both run deliberately
-# (a maintainer decision to keep both explicit, even though modern apt treats
-# `full-upgrade` as the same operation `dist-upgrade` performs) so any package
-# backports has already patched gets picked up on every rebuild.
-#
-# The pin selector below MUST use `a=stable-backports`, not `a=trixie-backports`:
-# APT's `a=`/release-Archive selector matches the Release file's `Suite:`
-# field, and trixie-backports' own Release file declares `Suite: stable-backports`
-# / `Codename: trixie-backports` -- the two are not interchangeable. See
-# services/proxy/Dockerfile's identical pin comment for the incident that
-# established this (a first version used `a=trixie-backports` and silently
-# never matched anything).
-#
-# This final stage's own base image (`debian:trixie-slim`) resolves to the
-# exact same digest as services/proxy/Dockerfile's `debian:13-slim` (both
-# aliases of the same underlying image). Issue #1304's own acceptance
-# criteria explicitly call out confirming services/ui's curl sourcing
-# (affected or not) before assuming the proxy's finding generalizes here --
-# CONFIRMED (2026-07-30) via a real, controlled before/after Trivy scan
-# (`--severity HIGH,CRITICAL --scanners vuln`) of this exact image built on
-# both plain trixie and trixie-backports: 37 HIGH/CRITICAL findings on
-# both, byte-for-byte identical CVE ID sets. curl
-# specifically carries the same unfixed 7 HIGH CVE IDs either way
-# (CVE-2026-12064, -8286, -8927, -8932, -9079, -9080, -9545 -- `libcurl4t64`
-# moved 8.14.1-2+deb13u4 -> 8.21.0-2~bpo13+1 at the time of that scan;
-# every other installed package here had no newer backports version, so
-# stayed on plain trixie). Do not re-assert either way without re-running
-# that scan, since curl's CVE set is a moving target (see issue #1304 for
-# the full history and the proxy image's matching result).
-RUN set -eu; \
-    export DEBIAN_FRONTEND=noninteractive; \
-    echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
-    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
-    && apt-get update \
-    && apt-get dist-upgrade -y \
-    && apt-get full-upgrade -y \
-    && apt-get install -y --no-install-recommends \
+# Package translations from the prior debian:trixie-slim stage (verified live
+# against a real alpine:3.24 container, per issue #815's own instruction to
+# check rather than assume a substitute is needed):
+#   - locales/locale-gen/LANG=en_US.UTF-8 dropped entirely, not replaced:
+#     grepped services/ui/src (the whole crate) and docker-entrypoint.sh for
+#     any LANG/LC_ALL/locale/setlocale dependency -- none found. musl has no
+#     glibc-style locale-data system, and nothing in this service's actual
+#     behavior (Tera template rendering, JSON/log output) depends on real
+#     glibc locale data, matching the identical conclusion services/dns's own
+#     migration already reached for the same block.
+#   - coreutils and util-linux are both kept (not translated -- Alpine ships
+#     both under the same package names). coreutils provides base64/od/mktemp
+#     for docker-entrypoint.sh's shared-secret bootstrap; util-linux provides
+#     `setpriv`, which that same script uses for its root-to-lancache
+#     privilege drop (`setpriv --reuid=lancache --regid=lancache
+#     --init-groups`) -- confirmed live that Alpine's util-linux package ships
+#     setpriv with identical --init-groups behavior to Debian's.
+#   - ca-certificates, curl, nano, lsof, ripgrep: unchanged package names,
+#     confirmed present on Alpine.
+RUN apk add --no-cache \
     ca-certificates \
     coreutils \
     curl \
-    locales \
     util-linux \
     nano \
     lsof \
-    ripgrep \
-    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-    && locale-gen \
-    && rm -rf /var/lib/apt/lists/*
+    ripgrep
 
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
 # nano/lsof/ripgrep: in-container troubleshooting tools -- see
 # services/proxy/Dockerfile's identical comment for the full rationale.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 
-COPY --from=builder /build/target/release/lancache-ui /usr/local/bin/lancache-ui
+COPY --from=builder /build/lancache-ui-out /usr/local/bin/lancache-ui
 COPY src/templates /templates
 COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # The former dhcp-probe.sh (nmap + isc-dhcp-client) is retired by issue
@@ -544,21 +551,43 @@ COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
 # with `--dhcp-probe` (see deploy/*/docker-compose.yml's dhcp-probe
 # service `entrypoint:`), so no separate script needs to be copied in.
 
-# `--groups adm`: the UI process drops privileges to this unprivileged user
-# (see docker-entrypoint.sh's `setpriv --reuid=lancache ... --init-groups`),
-# but the dashboard/log-viewer must still READ the proxy's nginx access log,
-# mounted read-only at /var/log/nginx (proxy-logs volume). nginx writes that
-# log as mode 0640 owned by its own runtime user and group `adm` -- the Debian
-# convention for granting log-read access. Without adm membership, uid 10001 is
-# neither the owner nor in the file's group, so every File::open on the log
-# fails with EACCES. That error is swallowed (parse_log_tail returns an empty
-# Vec, get_log_stats skips the unreadable file), so the Admin UI silently shows
+# `adm` supplementary group: the UI process drops privileges to this
+# unprivileged user (see docker-entrypoint.sh's `setpriv --reuid=lancache
+# ... --init-groups`), but the dashboard/log-viewer must still READ the
+# proxy's nginx access log, mounted read-only at /var/log/nginx
+# (proxy-logs volume). nginx writes that log as mode 0640 owned by its own
+# runtime user and group `adm` -- the Debian convention for granting
+# log-read access. Without adm membership, uid 10001 is neither the owner
+# nor in the file's group, so every File::open on the log fails with
+# EACCES. That error is swallowed (parse_log_tail returns an empty Vec,
+# get_log_stats skips the unreadable file), so the Admin UI silently shows
 # an empty log viewer, 0% cache-hit-ratio, and empty "Recent requests" even
-# though caching is demonstrably working at the nginx level (issue #1068 item 6).
-# `--init-groups` in the entrypoint is what carries this supplementary group
-# through the privilege drop; a bare `setpriv --regid` alone would not.
-RUN groupadd --system --gid 10001 lancache \
-    && useradd --uid 10001 --gid lancache --groups adm --home-dir /nonexistent --shell /usr/sbin/nologin lancache \
+# though caching is demonstrably working at the nginx level (issue #1068
+# item 6). `--init-groups` in the entrypoint is what carries this
+# supplementary group through the privilege drop; a bare `setpriv --regid`
+# alone would not.
+#
+# This group membership works across services/proxy's own base-OS choice
+# (Debian today, independently migrating to Alpine separately, issue #815)
+# because POSIX file-permission checks are GID-based, not name-based, and
+# `adm` resolves to the identical GID 4 on both Debian and Alpine (confirmed
+# live: Debian trixie's real running proxy image owns
+# /var/log/nginx/access.log as `nginx:adm` at GID 4; alpine:3.24's own
+# pre-defined `/etc/group` entry is also `adm:x:4:root,daemon`) -- no
+# GID mismatch regardless of which OS services/proxy itself ends up on.
+#
+# Alpine's base image ships no GNU-shadow-style `groupadd`/`useradd`
+# (confirmed live: neither binary exists on a bare alpine:3.24 container).
+# BusyBox's own `addgroup`/`adduser` applets cover user/primary-group
+# creation, but neither supports a `--groups`-style multiple-supplementary-
+# group flag at creation time (confirmed via their own --help output) --
+# supplementary membership is added afterward via addgroup's two-argument
+# `addgroup USER GROUP` form instead, matching services/watchdog's
+# already-established addgroup/adduser convention for this exact account
+# (uid/gid 10001, same fixed identity reused project-wide).
+RUN addgroup -g 10001 lancache \
+    && adduser -D -H -u 10001 -G lancache -s /sbin/nologin lancache \
+    && addgroup lancache adm \
     && mkdir -p /data /etc/nats \
     && chown -R lancache:lancache /data /etc/nats \
     && chmod +x /usr/local/bin/docker-entrypoint.sh
