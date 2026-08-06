@@ -21,45 +21,37 @@ dnsupdate=yes
 allow-dnsupdate-from=${DDNS_ALLOW_FROM}
 # Requires PowerDNS 5.0+ (available since this project's Alpine migration,
 # issue #815 -- the prior Debian-based image's pdns-server 4.9.x predated
-# this setting entirely). Fixed baseline value here, always "no": an
-# operator-controlled Admin UI toggle (issue #815 follow-up) can flip this
-# to "yes" via entrypoint.sh's conditional post-processing of this rendered
-# file (render_template_atomic's extra_sed parameter, see the "Generate
-# Authoritative Config" section) -- but only when a real DDNS_TSIG_KEY is
-# actually configured; entrypoint.sh ignores the toggle otherwise rather
-# than locking every DNS UPDATE out (including legitimately signed ones)
-# with no key to validate against. Kept as an explicit, always-present line
-# (not conditionally emitted/omitted) so the sed substitution above has a
-# stable, single-known-value line to match -- this also documents in the
-# rendered file itself, visibly, that the setting exists and what its
-# current value is, rather than it being invisible-by-default.
+# this setting entirely). Permanently "no" -- NOT operator-controlled.
 #
-# HONEST SCOPE NOTE, confirmed by real testing (nsupdate against a live
-# 5.1.3 pdns_server, both toggle states, both signed and unsigned packets):
-# for every zone this project actually manages (DDNS_UPDATE_ZONES in
-# entrypoint.sh), toggling this setting produces NO observable behavior
-# change in the common case. Whenever a real DDNS_TSIG_KEY exists --
-# essentially always, since resolve_shared_secret's shared-secret-bootstrap
-# auto-generates one on first boot even without an explicit operator value
-# -- configure_ddns_tsig() already sets per-zone `TSIG-ALLOW-DNSUPDATE`
-# metadata naming that key, and PowerDNS's own documented behavior for that
-# metadata is "if any TSIG keys are listed ... one of them is required for
-# updates" REGARDLESS of this global setting. Confirmed live: an unsigned
-# nsupdate against "lan." was REFUSED ("TSIG key required, but packet does
-# not contain key") with this setting at "no", identically to "yes"; a
-# correctly-signed update succeeded in both states. This setting's real,
-# narrow value is defense-in-depth for a case the per-zone metadata does NOT
-# cover: a future zone (or a partially-failed configure_ddns_tsig() run,
-# e.g. TSIG import succeeding but one zone's set-meta call failing) that has
-# DNS UPDATE enabled without ever receiving TSIG-ALLOW-DNSUPDATE metadata of
-# its own. It is not, contrary to how the setting is sometimes described
-# upstream and in this project's own earlier design discussion, the primary
-# mechanism preventing unsigned updates to this project's actual zones --
-# that job is already done by the per-zone metadata above, and (for the
-# genuinely-no-key-at-all edge case) by the separate DDNS_ALLOW_FROM-to-
-# loopback narrowing further up in entrypoint.sh. Documented accurately here
-# so a future reader does not mistake enabling this toggle for closing a
-# currently-open hole that this project's zones do not actually have.
+# HISTORY (issue #815 follow-up, two designs): the first design put an
+# Admin UI toggle directly on THIS line, flipping it to "yes". Real
+# nsupdate testing then proved that toggle a no-op in the common case:
+# whenever a real DDNS_TSIG_KEY exists (essentially always, since
+# resolve_shared_secret's shared-secret-bootstrap auto-generates one on
+# first boot even without an explicit operator value), configure_ddns_tsig()
+# in entrypoint.sh already sets per-zone `TSIG-ALLOW-DNSUPDATE` metadata
+# naming that key, and PowerDNS's own documented behavior for that metadata
+# is "if any TSIG keys are listed ... one of them is required for updates"
+# REGARDLESS of this global setting. Confirmed live: an unsigned nsupdate
+# against "lan." was REFUSED ("TSIG key required, but packet does not
+# contain key") with this line at "no", identically to "yes". Maintainer
+# correction: since the real, observable control point is the per-zone
+# metadata, not this line, the operator-facing toggle now lives there
+# instead -- see entrypoint.sh's DDNS_ALLOW_UNSIGNED_MARKER and
+# configure_ddns_tsig() -- letting an operator explicitly RELAX the
+# already-active per-zone enforcement (accept unsigned updates) rather than
+# switch on a global setting that was never the actual enforcement point.
+# This line stays a fixed "no" rather than operator-toggleable, trading away
+# one narrow theoretical benefit the earlier design had: forcing this to
+# "yes" would have been extra defense-in-depth for a zone that somehow never
+# received its own TSIG-ALLOW-DNSUPDATE metadata (a future zone type, or a
+# partially-failed configure_ddns_tsig() run where TSIG import succeeds but
+# one zone's set-meta call fails) -- not a case this project has ever hit,
+# and not independently tested here (this line's effect on a metadata-less
+# zone specifically was not part of this feature's live-tested proof, only
+# its no-op effect on zones that DO have metadata). Keeping exactly one real,
+# operator-facing enforcement control point (the per-zone metadata) rather
+# than two settings that mostly overlap was judged the clearer design.
 dnsupdate-require-tsig=no
 
 # The LAN/reverse zones created below (pdnsutil create-zone, entrypoint.sh's

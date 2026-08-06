@@ -222,7 +222,15 @@ DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 # still helps for a zone that somehow never got its own TSIG-ALLOW-DNSUPDATE
 # metadata, e.g. a future zone type or a partially-failed
 # configure_ddns_tsig() run), not the primary mechanism actually preventing
-# unsigned updates to this project's real zones today. So the fix here is still on the
+# unsigned updates to this project's real zones today. STATUS update (2026-08-06,
+# maintainer correction): since a toggle for the global setting had no
+# observable effect, it was replaced with the inverse -- an Admin UI toggle
+# that explicitly RELAXES the per-zone metadata enforcement described above
+# (DDNS_ALLOW_UNSIGNED_MARKER, see this file's own comment on that constant
+# and configure_ddns_tsig()'s body). That is the toggle with a real,
+# observable effect; the global `dnsupdate-require-tsig` setting is no
+# longer operator-controlled at all and stays permanently "no" (see
+# pdns.conf.template's own header comment). So the fix here is still on the
 # other side of the same equation: when DDNS_TSIG_KEY is empty (the shipped
 # default until an operator generates one) or still a placeholder, there is
 # no real auth control for DDNS at all, so allow-dnsupdate-from must not be
@@ -277,18 +285,37 @@ DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config
 DNS_ROLLBACK_LISTEN_ADDR="${DNS_ROLLBACK_LISTEN_ADDR:-0.0.0.0:8083}"
 RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
 PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
-# dnsupdate-require-tsig Admin UI toggle (issue #815 follow-up). Same shared
-# state directory the AAAA-filter marker below uses (mounted identically
-# into the ui/dns-standard/dns-ssl containers) -- defined here as its own
-# constant, ahead of section 2's config generation, because this marker must
-# be read BEFORE pdns.conf is rendered (a static config value baked in at
-# startup), unlike the AAAA filter's own marker, which recursor.lua reads
-# live per-query and so only needs to exist by the time PowerDNS itself
-# starts. Deliberately not reusing/renaming AAAA_FILTER_STATE_DIR (defined
-# further below, in its own historical section) to avoid touching that
-# working legacy-migration code for an unrelated feature.
+# DDNS "allow unsigned updates" Admin UI toggle (issue #815 follow-up,
+# SUPERSEDES an earlier design of this same feature). The earlier design
+# added a toggle that turned the global `dnsupdate-require-tsig` setting ON,
+# framed as closing an open hole; real nsupdate testing then proved that
+# framing wrong -- configure_ddns_tsig() below already sets per-zone
+# TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY exists (which
+# is essentially always), and PowerDNS enforces TSIG for those zones off
+# that metadata alone, regardless of the global setting. That made the old
+# toggle a no-op in the common case: turning it "on" changed nothing
+# observable. Maintainer correction: invert the toggle so it has a real,
+# observable effect -- let an operator explicitly RELAX the enforcement
+# that is already active by default, not switch on enforcement that was
+# already active. Same shared state directory the AAAA-filter marker below
+# uses (mounted identically into the ui/dns-standard/dns-ssl containers) --
+# defined here as its own constant, ahead of section 2's config generation,
+# because this marker must be read BEFORE configure_ddns_tsig() runs later
+# in this script (zone metadata is set at startup, not live), unlike the
+# AAAA filter's own marker, which recursor.lua reads live per-query.
+# Deliberately not reusing/renaming AAAA_FILTER_STATE_DIR (defined further
+# below, in its own historical section) to avoid touching that working
+# legacy-migration code for an unrelated feature. Deliberately a NEW marker
+# filename, not a repurposed old one: reusing the old
+# "dnsupdate-require-tsig-enabled" filename with inverted meaning would
+# silently flip any pre-existing deployment that had the old (harmless,
+# no-op) toggle turned on into one that now accepts unsigned updates after
+# an image upgrade -- a real, silent security regression. A new filename
+# guarantees an upgrade never inherits an old marker's state under a new
+# meaning; every deployment starts this feature at its safe default (marker
+# absent -> TSIG still enforced, unchanged from today's actual behavior).
 DNS_STATE_DIR="/var/lib/powerdns-state"
-DNSUPDATE_REQUIRE_TSIG_MARKER="${DNS_STATE_DIR}/dnsupdate-require-tsig-enabled"
+DDNS_ALLOW_UNSIGNED_MARKER="${DNS_STATE_DIR}/ddns-allow-unsigned-updates"
 # Central logging pipeline (#633): PowerDNS has no native "log to file"
 # config directive on Linux -- confirmed against the upstream docs/mailing
 # list, both pdns_server and pdns_recursor only ever write to stdout/stderr
@@ -735,11 +762,31 @@ configure_ddns_tsig() {
     pdnsutil --config-dir=/etc/pdns/auth import-tsig-key \
         "$DDNS_TSIG_NAME" "$DDNS_TSIG_ALGORITHM" "$DDNS_TSIG_KEY" >/dev/null
 
-    for zone in "${DDNS_UPDATE_ZONES[@]}"; do
-        pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" TSIG-ALLOW-DNSUPDATE "$DDNS_TSIG_NAME" >/dev/null
-    done
-
-    echo "[lancache-dns] Configured TSIG-authenticated DDNS updates for LAN zones."
+    # DDNS_ALLOW_UNSIGNED_MARKER (Admin UI "allow unsigned updates" toggle,
+    # issue #815 follow-up) decides which state TSIG-ALLOW-DNSUPDATE ends up
+    # in below -- and this decision is made EVERY start, unconditionally
+    # setting the metadata to the marker's current state rather than only
+    # ever setting it once, specifically so toggling the marker off after it
+    # was on actually restores enforcement on the next restart instead of
+    # leaving a stale cleared value in place from an earlier boot.
+    if [ -f "$DDNS_ALLOW_UNSIGNED_MARKER" ]; then
+        echo "[lancache-dns] WARNING: DDNS TSIG enforcement relaxed via Admin UI toggle -- unsigned DNS UPDATE packets from hosts allowed by DDNS_ALLOW_FROM will now be ACCEPTED for LAN/reverse zones. This is a real reduction in security, not a no-op; disable the toggle to restore signature enforcement."
+        for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+            # pdnsutil set-meta with no VALUE argument clears that metadata
+            # kind entirely for the zone (confirmed against a real pdns_server
+            # 5.1.3 container, not assumed from docs alone -- see this
+            # feature's PR for the live-tested proof). An empty/absent
+            # TSIG-ALLOW-DNSUPDATE means PowerDNS falls back to
+            # allow-dnsupdate-from's IP-based ACL alone for that zone, with no
+            # signature requirement.
+            pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" TSIG-ALLOW-DNSUPDATE >/dev/null
+        done
+    else
+        for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+            pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" TSIG-ALLOW-DNSUPDATE "$DDNS_TSIG_NAME" >/dev/null
+        done
+        echo "[lancache-dns] Configured TSIG-authenticated DDNS updates for LAN zones."
+    fi
 }
 
 # render_template_atomic <variables> <template> <target> [extra_sed_script]
@@ -975,27 +1022,18 @@ _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable names.
-# dnsupdate-require-tsig Admin UI toggle (issue #815 follow-up, this
-# project's own PowerDNS 5.x migration): the marker alone is not sufficient
-# authorization to flip this on. If an operator enables the toggle (or a
-# stale marker survives) while no real DDNS_TSIG_KEY is configured, honoring
-# it would reject EVERY DNS UPDATE, including legitimately signed ones from
-# Kea's DHCP-DDNS daemon, since there would be no key to validate signatures
-# against -- a self-inflicted DDNS outage disguised as a security hardening
-# step. Fail closed on the safe side: ignore the marker (loudly, via a
-# WARNING) rather than actually locking DDNS out entirely, mirroring the
-# existing DDNS_ALLOW_FROM-narrowing fail-safe further above for the same
-# underlying "no real TSIG key" condition.
-auth_extra_sed=""
-if [ -f "$DNSUPDATE_REQUIRE_TSIG_MARKER" ]; then
-    if [ -n "$DDNS_TSIG_KEY" ]; then
-        echo "[lancache-dns] dnsupdate-require-tsig enabled via Admin UI toggle."
-        auth_extra_sed='s/^dnsupdate-require-tsig=no$/dnsupdate-require-tsig=yes/'
-    else
-        echo "[lancache-dns] WARNING: dnsupdate-require-tsig was requested via the Admin UI toggle, but no real DDNS_TSIG_KEY is configured -- ignoring the request and leaving DNS UPDATE TSIG-optional. Configure DDNS_TSIG_KEY first, then re-enable the toggle." >&2
-    fi
-fi
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" "$auth_extra_sed"
+# dnsupdate-require-tsig has no operator-controlled toggle anymore (issue
+# #815 follow-up, SUPERSEDES an earlier design that flipped this global
+# setting from an Admin UI marker): real testing proved that setting a no-op
+# in the common case, since PowerDNS enforces TSIG off per-zone
+# TSIG-ALLOW-DNSUPDATE metadata alone, independent of this global value (see
+# this file's own DDNS_ALLOW_UNSIGNED_MARKER comment above and this
+# template's header comment for the full history). The real, observable
+# control point is that per-zone metadata, set unconditionally every start
+# by configure_ddns_tsig() below based on DDNS_ALLOW_UNSIGNED_MARKER -- so
+# this line is passed no extra_sed and always renders the template's own
+# static "no" value.
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" ""
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then

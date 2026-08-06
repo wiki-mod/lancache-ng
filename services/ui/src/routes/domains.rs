@@ -39,8 +39,18 @@ pub struct AaaaFilterForm {
     pub enabled: Option<String>,
 }
 
+// Superseded design note: this used to be DnsupdateRequireTsigForm, driving
+// a toggle that turned PowerDNS's global `dnsupdate-require-tsig` setting
+// ON. Real nsupdate testing proved that toggle a no-op in the common case
+// (see services/dns/pdns.conf.template's header comment for the full
+// history) -- PowerDNS already enforces TSIG per-zone via
+// TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY exists, which
+// is essentially always. Maintainer correction: invert the toggle so it has
+// a real, observable effect -- let an operator explicitly relax that
+// already-active enforcement instead of switching on a setting that was
+// never the actual enforcement point.
 #[derive(Deserialize)]
-pub struct DnsupdateRequireTsigForm {
+pub struct DdnsAllowUnsignedForm {
     pub csrf_token: String,
     #[serde(default)]
     pub enabled: Option<String>,
@@ -99,11 +109,11 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              top-level domain (e.g. \"steamcontent.com\", not \"com\"). A leading \".\" for a \
              wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\").",
         ),
-        "dnsupdate_tsig_no_key" => Some(
-            "dnsupdate-require-tsig was not enabled: no real DDNS_TSIG_KEY is currently \
-             configured. Enabling this setting without a TSIG key would reject every DNS \
-             UPDATE, including legitimately signed ones -- configure DDNS_TSIG_KEY first \
-             (see docs/threat-model.md), then try again.",
+        "ddns_allow_unsigned_no_key" => Some(
+            "Allowing unsigned DNS updates was not enabled: no real DDNS_TSIG_KEY is currently \
+             configured, so no zone actually has TSIG-based update enforcement to relax yet \
+             -- this toggle would have no effect. Configure DDNS_TSIG_KEY first (see \
+             docs/threat-model.md), then try again.",
         ),
         _ => None,
     }
@@ -121,7 +131,7 @@ pub async fn domains_page(
     // Kea-DDNS-auto-created; they are indistinguishable in PowerDNS).
     let ptr_records = fetch_ptr_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
-    let dnsupdate_require_tsig_enabled = is_dnsupdate_require_tsig_enabled(&state).await;
+    let ddns_unsigned_updates_allowed = is_ddns_unsigned_updates_allowed(&state).await;
     let ddns_tsig_key_configured = real_ddns_tsig_key_configured(&state);
     // #628: zone/record known-good snapshot rollback -- see
     // routes/dns_snapshots.rs's module doc comment for why this is a thin
@@ -135,8 +145,8 @@ pub async fn domains_page(
     ctx.insert("ptr_records", &ptr_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
     ctx.insert(
-        "dnsupdate_require_tsig_enabled",
-        &dnsupdate_require_tsig_enabled,
+        "ddns_unsigned_updates_allowed",
+        &ddns_unsigned_updates_allowed,
     );
     ctx.insert("ddns_tsig_key_configured", &ddns_tsig_key_configured);
     ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
@@ -403,50 +413,52 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
-// toggle_dnsupdate_require_tsig: unlike toggle_aaaa_filter above, this
-// setting is a static pdns.conf startup directive (PowerDNS only reads
-// dnsupdate-require-tsig once, at process start -- there is no Lua hook or
-// REST API call that changes it live), so this handler must actually
-// restart both DNS instances for the change to take effect, not just write
-// a marker file a running process happens to poll. Issue #815 follow-up
-// (the PowerDNS version this project ships only gained this setting in the
-// Alpine/5.x migration -- see services/dns/pdns.conf.template's own header
-// comment). That same comment also records an honest, real-tested finding:
-// for this project's actual zones, this global setting is defense-in-depth
-// layered on top of protection PowerDNS's per-zone TSIG-ALLOW-DNSUPDATE
-// metadata already provides whenever a real DDNS_TSIG_KEY exists (which is
-// essentially always) -- not the primary mechanism preventing unsigned
-// updates. Still real, still worth exposing (a maintainer decision, not an
-// implementation shortcut), just not the "closes an open hole" framing an
-// earlier design discussion assumed before this was actually tested.
-pub async fn toggle_dnsupdate_require_tsig(
+// toggle_ddns_allow_unsigned_updates (issue #815 follow-up, SUPERSEDES an
+// earlier design named toggle_dnsupdate_require_tsig): that earlier toggle
+// turned PowerDNS's global `dnsupdate-require-tsig` setting ON, framed as
+// closing an open hole. Real nsupdate testing then proved that framing
+// wrong -- configure_ddns_tsig() in services/dns/entrypoint.sh already sets
+// per-zone TSIG-ALLOW-DNSUPDATE metadata whenever a real DDNS_TSIG_KEY
+// exists (essentially always), and PowerDNS enforces TSIG for those zones
+// off that metadata alone, independent of the global setting. So the old
+// toggle changed nothing observable in the common case (see
+// services/dns/pdns.conf.template's header comment for the full history).
+// Maintainer correction: invert the toggle so it has a real, observable
+// effect. TSIG enforcement is ALREADY ACTIVE BY DEFAULT (today, unchanged);
+// this toggle lets an operator explicitly RELAX it -- accept unsigned DNS
+// UPDATE packets for the LAN/reverse zones this project manages. Unlike
+// toggle_aaaa_filter above, this is still a static pdns.conf-adjacent
+// startup action (configure_ddns_tsig() runs its pdnsutil set-meta calls
+// once at process start, not on a live hook), so this handler must still
+// actually restart both DNS instances for the change to take effect.
+pub async fn toggle_ddns_allow_unsigned_updates(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-    Form(form): Form<DnsupdateRequireTsigForm>,
+    Form(form): Form<DdnsAllowUnsignedForm>,
 ) -> Result<Redirect, axum::http::StatusCode> {
     crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
     let enable = form.enabled.as_deref() == Some("1");
 
-    // Fail closed on the safe side, in the UI too (entrypoint.sh has its own
-    // independent copy of this same check -- defense in depth, not
-    // duplication for its own sake, since a marker file surviving from
-    // before DDNS_TSIG_KEY was ever configured must still be caught at
-    // startup even if it somehow bypassed this route). Enabling this
-    // setting with no real TSIG key configured would reject EVERY DNS
-    // UPDATE, including legitimately signed ones from Kea's DHCP-DDNS
-    // daemon -- a self-inflicted DDNS outage, not a hardening step.
+    // Not a security fail-closed gate anymore (there is no dangerous state
+    // to guard against here the way the old design's "reject every update"
+    // risk was) -- purely informational, in the UI too (entrypoint.sh has
+    // its own independent copy of this same check): if no real
+    // DDNS_TSIG_KEY exists, TSIG-ALLOW-DNSUPDATE was never set on any zone
+    // in the first place, so there is nothing for this toggle to relax, and
+    // silently accepting the click would leave an operator believing they
+    // changed something that has no effect either way.
     if enable && !real_ddns_tsig_key_configured(&state) {
-        return Ok(Redirect::to("/domains?error=dnsupdate_tsig_no_key"));
+        return Ok(Redirect::to("/domains?error=ddns_allow_unsigned_no_key"));
     }
 
     let mut failed_paths = Vec::new();
-    for marker_path in dnsupdate_require_tsig_marker_paths(&state) {
+    for marker_path in ddns_allow_unsigned_marker_paths(&state) {
         if let Err(e) = set_aaaa_filter_marker(&marker_path, enable) {
             tracing::error!(
                 path = %marker_path.display(),
                 enabled = enable,
                 error = %e,
-                "dnsupdate-require-tsig toggle failed"
+                "ddns-allow-unsigned-updates toggle failed"
             );
             failed_paths.push(marker_path);
         }
@@ -456,14 +468,15 @@ pub async fn toggle_dnsupdate_require_tsig(
         return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
     }
 
-    // The marker write alone changes nothing until pdns.conf is
-    // re-rendered, which only happens at container start -- restart both
-    // instances so the operator's toggle click actually takes effect
-    // immediately, rather than silently waiting for some unrelated future
-    // restart. Best-effort: log and continue on a restart failure rather
-    // than reporting the whole toggle as failed, since the marker write
-    // (the actual persisted intent) already succeeded and a manual restart
-    // later will still pick it up correctly.
+    // The marker write alone changes nothing until configure_ddns_tsig()
+    // re-runs its pdnsutil set-meta calls, which only happens at container
+    // start -- restart both instances so the operator's toggle click
+    // actually takes effect immediately, rather than silently waiting for
+    // some unrelated future restart. Best-effort: log and continue on a
+    // restart failure rather than reporting the whole toggle as failed,
+    // since the marker write (the actual persisted intent) already
+    // succeeded and a manual restart later will still pick it up
+    // correctly.
     //
     // KNOWN LIMITATION (flagged during this feature's own real-container
     // testing, not yet fixed here): these two restarts are issued
@@ -488,7 +501,7 @@ pub async fn toggle_dnsupdate_require_tsig(
         // future failure here is actually diagnosable from the log line
         // alone instead of needing RUST_LOG=debug plus a live repro.
         tracing::error!(
-            "Restart dns-standard for dnsupdate-require-tsig toggle failed: {:#}",
+            "Restart dns-standard for ddns-allow-unsigned-updates toggle failed: {:#}",
             e
         );
     }
@@ -496,7 +509,7 @@ pub async fn toggle_dnsupdate_require_tsig(
         docker_client::restart_service(&state.docker, &state.config.dns_ssl_service).await
     {
         tracing::error!(
-            "Restart dns-ssl for dnsupdate-require-tsig toggle failed: {:#}",
+            "Restart dns-ssl for ddns-allow-unsigned-updates toggle failed: {:#}",
             e
         );
     }
@@ -598,16 +611,25 @@ fn aaaa_filter_enabled_at(path: &Path) -> bool {
     fs::metadata(path).is_ok()
 }
 
-async fn is_dnsupdate_require_tsig_enabled(state: &AppState) -> bool {
-    dnsupdate_require_tsig_marker_paths(state)
+async fn is_ddns_unsigned_updates_allowed(state: &AppState) -> bool {
+    ddns_allow_unsigned_marker_paths(state)
         .into_iter()
         .any(|path| aaaa_filter_enabled_at(&path))
 }
 
-fn dnsupdate_require_tsig_marker_paths(state: &AppState) -> [PathBuf; 2] {
+// Deliberately a NEW marker filename ("ddns-allow-unsigned-updates"), not a
+// repurposed "dnsupdate-require-tsig-enabled" -- see
+// services/dns/entrypoint.sh's DDNS_ALLOW_UNSIGNED_MARKER comment for why:
+// reusing the old filename with inverted meaning would silently flip any
+// pre-existing deployment that had the old (harmless, no-op) toggle turned
+// on into one that now accepts unsigned updates after an image upgrade, a
+// real, silent security regression. A new filename guarantees every
+// deployment starts this feature at its safe default (marker absent -> TSIG
+// still enforced, unchanged from today's actual behavior).
+fn ddns_allow_unsigned_marker_paths(state: &AppState) -> [PathBuf; 2] {
     [
-        Path::new(&state.config.dns_standard_state_dir).join("dnsupdate-require-tsig-enabled"),
-        Path::new(&state.config.dns_ssl_state_dir).join("dnsupdate-require-tsig-enabled"),
+        Path::new(&state.config.dns_standard_state_dir).join("ddns-allow-unsigned-updates"),
+        Path::new(&state.config.dns_ssl_state_dir).join("ddns-allow-unsigned-updates"),
     ]
 }
 

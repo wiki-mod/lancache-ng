@@ -1053,8 +1053,8 @@ async fn main() -> Result<()> {
             post(routes::domains::toggle_aaaa_filter),
         )
         .route(
-            "/domains/dnsupdate-require-tsig",
-            post(routes::domains::toggle_dnsupdate_require_tsig),
+            "/domains/ddns-allow-unsigned-updates",
+            post(routes::domains::toggle_ddns_allow_unsigned_updates),
         )
         .route(
             "/domains/zones/rollback",
