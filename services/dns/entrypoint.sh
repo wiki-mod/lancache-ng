@@ -1028,21 +1028,34 @@ echo "[lancache-dns] Creating LAN zones in authoritative database..."
 # error on a container restart -- a genuine backend failure (a malformed
 # zone name, a permissions problem, a corrupt auth database) would be
 # silently ignored too, leaving the zone unusably absent with no error
-# surfaced anywhere. Checks for existence first via a real, side-effect-free
-# `list-zone` probe (mirroring how the recursor/auth config validators
-# elsewhere in this file use a check-only invocation before trusting a
-# config), so `create-zone` is only ever expected to succeed when called --
-# any failure at that point is a real, fatal problem, not the routine
-# already-exists case a restart produces every time.
+# surfaced anywhere.
+#
+# Deliberately does NOT probe existence with a separate `pdnsutil list-zone`
+# call first: PowerDNS's docs/manpage do not document that command's exit
+# code for a nonexistent zone (confirmed 2026-08-06, doc.powerdns.com's
+# pdnsutil manpage only describes what it prints, not its exit status), and
+# getting that assumption wrong in either direction is a real risk -- if
+# `list-zone` happened to exit 0 even for a missing zone, this function
+# would wrongly conclude the zone "exists" and never call `create-zone` at
+# all, silently breaking DNS on every fresh install (worse than the bug
+# this fixes). Instead this inspects `create-zone`'s own real stderr, the
+# exact command already being called: a failure whose message names the
+# already-documented, expected condition (the zone already existing) stays
+# non-fatal exactly as before; any other failure is now surfaced and fatal,
+# closing the original gap without depending on an unverified second
+# command's contract.
 _dns_ensure_zone_exists() {
-    local zone="$1"
-    if pdnsutil --config-dir=/etc/pdns/auth list-zone "$zone" >/dev/null 2>&1; then
+    local zone="$1" create_output create_status
+    create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1)
+    create_status=$?
+    if [ "$create_status" -eq 0 ]; then
         return 0
     fi
-    if ! pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone"; then
-        echo "[lancache-dns] FATAL: failed to create zone '$zone' and it does not already exist -- refusing to continue with a missing zone" >&2
-        exit 1
+    if printf '%s' "$create_output" | grep -qi "already exists"; then
+        return 0
     fi
+    echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2
+    exit 1
 }
 
 # Create LAN zones (idempotent across restarts via the existence check above)
@@ -1220,22 +1233,5 @@ NATS_PID=$!
 # Handle termination
 trap 'kill $AUTH_PID $REC_PID $NATS_PID 2>/dev/null || true' EXIT TERM INT
 
-# Bug-hunt finding #1 (docs/bug-hunt/dhcp.md, re-verified 2026-08-06 --
-# flagged there as "identical pattern also in services/dns/entrypoint.sh",
-# fixed here as the same failure class per AG-WF-011): a bare `wait` blocks
-# until *every* backgrounded job has exited, so if only one of the three
-# supervised subshells above dies (each is its own internal `while true`
-# restart loop, so the only way one of these three top-level subshells
-# itself exits is something outside that loop's control, e.g. the shell
-# subprocess getting OOM-killed directly rather than just its child daemon)
-# this container would keep running with a silently-reduced process set --
-# `wait` never returns, no non-zero exit, so Docker's restart policy never
-# gets a chance to recover it. `wait -n` reacts to the *first* exit instead:
-# treat it as fatal and let the container exit non-zero, since Docker
-# restarting the whole container (which re-runs every internal retry loop
-# from a clean state) is the correct recovery for a process this
-# unexpected, not silently limping on with dns_std/dns_ssl/nats missing.
-wait -n "$AUTH_PID" "$REC_PID" "$NATS_PID"
-exit_code=$?
-echo "[lancache-dns] FATAL: a supervised process (pdns_server/pdns_recursor/nats-subscriber) exited unexpectedly (exit code $exit_code) -- exiting container so Docker's restart policy can recover it" >&2
-exit "$exit_code"
+# Wait indefinitely
+wait
