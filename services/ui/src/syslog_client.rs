@@ -56,6 +56,17 @@ pub struct SyslogHostStats {
     // files/size_bytes/days above are metadata/filename-only and stay cheap
     // regardless of retained volume.
     pub days: u64,
+    // #849 bug-hunt finding observability.md#13: this whole struct was
+    // already computed by get_syslog_stats() on every dashboard render, but
+    // dashboard.html only ever rendered the aggregate hosts.len()/
+    // total_files -- the per-host breakdown was discarded despite already
+    // being available, a textbook instance of this project's own Feature
+    // Completeness rule (backend capability exists, UI doesn't expose it).
+    // Human-readable size, reusing nginx_client's own format_bytes() rather
+    // than duplicating a second byte-formatting implementation that could
+    // drift from it -- computed once here so the template does not need
+    // Tera-side arithmetic on a raw byte count.
+    pub size_human: String,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -323,6 +334,7 @@ pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
         }
 
         host_stats.days = days.len() as u64;
+        host_stats.size_human = crate::nginx_client::format_bytes(host_stats.size_bytes);
         stats.total_files += host_stats.files;
         stats.total_size_bytes += host_stats.size_bytes;
         stats.hosts.push(host_stats);
@@ -955,6 +967,16 @@ mod tests {
             .expect("hostA present");
         assert_eq!(host_a.files, 2);
         assert_eq!(host_a.days, 2);
+        // #849 observability.md#13: size_human must be a non-empty, real
+        // formatted string (not the Default-derived empty String a struct
+        // literal without this field would silently produce), proving the
+        // new field is actually populated by get_syslog_stats, not just
+        // present in the struct definition.
+        assert!(!host_a.size_human.is_empty());
+        assert_eq!(
+            host_a.size_human,
+            crate::nginx_client::format_bytes(host_a.size_bytes)
+        );
 
         let host_b = stats
             .hosts
@@ -963,6 +985,7 @@ mod tests {
             .expect("hostB present");
         assert_eq!(host_b.files, 1);
         assert_eq!(host_b.days, 1);
+        assert!(!host_b.size_human.is_empty());
 
         fs::remove_dir_all(root).expect("cleanup");
     }
