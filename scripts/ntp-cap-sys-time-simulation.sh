@@ -353,7 +353,8 @@ run_capability_denied_scenario() {
     # of NTP time" -- chrony's exact wording has varied across versions
     # (confirmed live: 4.5 here prints "wrong by"), so this matches loosely
     # on the number itself rather than the surrounding words.
-    offset_seconds="$(grep -oE '[0-9]+\.[0-9]+' <<<"$offset_line" | head -1)"
+    offset_matches="$(grep -oE '[0-9]+\.[0-9]+' <<<"$offset_line")"
+    offset_seconds="$(head -1 <<<"$offset_matches")"
     if [[ -z "$offset_seconds" ]]; then
         echo "::error::could not extract a numeric offset from: $offset_line" >&2
         exit 1
