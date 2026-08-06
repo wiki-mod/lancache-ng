@@ -312,20 +312,53 @@ pub struct ContainerNames {
 /// same fail-loud diagnostic watchdog.sh's `log_err "FATAL: ..."` lines
 /// produce, for the first mismatch found, in the same check order the bash
 /// uses (proxy, dns-standard, dns-ssl if enabled, nats).
+///
+/// `container_suffix` mirrors `watchdog.sh`'s `LANCACHE_CONTAINER_SUFFIX`
+/// (issue #1415): each `DEFAULT_*` below is compared against the operator
+/// override with this same suffix appended, not the bare literal, so a
+/// CI-only quickstart-compose run that gave every one of this project's
+/// containers a shared, coordinated suffix is still recognized as
+/// consistent. This is NOT a relaxation of the single-stack-per-host
+/// design (#849 finding #5): `container_suffix` is empty for every real
+/// install (nothing sets `LANCACHE_CONTAINER_SUFFIX` outside CI), which
+/// makes this function's behavior byte-identical to before this parameter
+/// existed, and any override that doesn't carry the exact suffix this
+/// process itself was given still hits the `Err` path below. NOTE: this
+/// Rust path is not yet watchdog's live entrypoint (`watchdog.sh` still
+/// is, per its own Dockerfile `ENTRYPOINT`) -- kept in lockstep here only
+/// so the eventual bash-to-Rust cutover does not silently regress this
+/// guard.
 pub fn resolve_container_names(
     proxy_override: Option<&str>,
     dns_standard_override: Option<&str>,
     dns_ssl_override: Option<&str>,
     nats_override: Option<&str>,
     ssl_enabled: bool,
+    container_suffix: Option<&str>,
 ) -> Result<ContainerNames, String> {
+    // Deliberately mirrors watchdog.sh's own two-variable split exactly:
+    // an ABSENT override falls back to the bare, unsuffixed literal (this
+    // process has no way to know a suffix belongs in its own fallback --
+    // the real compose wiring always passes CONTAINER_* explicitly instead
+    // of relying on this fallback whenever a suffix is active), while the
+    // comparison target is the suffixed "expected" value. Collapsing these
+    // into one suffixed default (as an earlier version of this function
+    // did) would silently accept an absent override as "correct" even
+    // when LANCACHE_CONTAINER_SUFFIX was set but CONTAINER_PROXY was not
+    // -- exactly the half-wired-caller mistake this guard exists to catch
+    // (caught by resolve_container_names_rejects_mismatched_suffix below).
     const DEFAULT_PROXY: &str = "lancache-proxy";
     const DEFAULT_DNS_STANDARD: &str = "lancache-dns-standard";
     const DEFAULT_DNS_SSL: &str = "lancache-dns-ssl";
     const DEFAULT_NATS: &str = "lancache-nats";
+    let container_suffix = non_empty(container_suffix).unwrap_or("");
+    let expected_proxy = format!("{DEFAULT_PROXY}{container_suffix}");
+    let expected_dns_standard = format!("{DEFAULT_DNS_STANDARD}{container_suffix}");
+    let expected_dns_ssl = format!("{DEFAULT_DNS_SSL}{container_suffix}");
+    let expected_nats = format!("{DEFAULT_NATS}{container_suffix}");
 
     // Empty overrides (e.g. CONTAINER_PROXY= set but blank) must resolve
-    // to the default, not be compared against it as a literal empty
+    // to the bare default, not be compared against it as a literal empty
     // string -- see non_empty()'s own doc comment for why an empty env
     // value is not the same thing as "operator explicitly renamed this."
     let proxy_override = non_empty(proxy_override);
@@ -334,26 +367,26 @@ pub fn resolve_container_names(
     let nats_override = non_empty(nats_override);
 
     let proxy = proxy_override.unwrap_or(DEFAULT_PROXY).to_string();
-    if proxy != DEFAULT_PROXY {
+    if proxy != expected_proxy {
         return Err(format!(
-            "FATAL: CONTAINER_PROXY={proxy} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{DEFAULT_PROXY}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
+            "FATAL: CONTAINER_PROXY={proxy} is not supported (expected '{expected_proxy}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_proxy}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
         ));
     }
 
     let dns_standard = dns_standard_override
         .unwrap_or(DEFAULT_DNS_STANDARD)
         .to_string();
-    if dns_standard != DEFAULT_DNS_STANDARD {
+    if dns_standard != expected_dns_standard {
         return Err(format!(
-            "FATAL: CONTAINER_DNS_STANDARD={dns_standard} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{DEFAULT_DNS_STANDARD}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_STANDARD to the default."
+            "FATAL: CONTAINER_DNS_STANDARD={dns_standard} is not supported (expected '{expected_dns_standard}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_dns_standard}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_STANDARD to the default."
         ));
     }
 
     let dns_ssl = if ssl_enabled {
         let dns_ssl = dns_ssl_override.unwrap_or(DEFAULT_DNS_SSL).to_string();
-        if dns_ssl != DEFAULT_DNS_SSL {
+        if dns_ssl != expected_dns_ssl {
             return Err(format!(
-                "FATAL: CONTAINER_DNS_SSL={dns_ssl} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{DEFAULT_DNS_SSL}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
+                "FATAL: CONTAINER_DNS_SSL={dns_ssl} is not supported (expected '{expected_dns_ssl}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_dns_ssl}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
             ));
         }
         Some(dns_ssl)
@@ -362,9 +395,9 @@ pub fn resolve_container_names(
     };
 
     let nats = nats_override.unwrap_or(DEFAULT_NATS).to_string();
-    if nats != DEFAULT_NATS {
+    if nats != expected_nats {
         return Err(format!(
-            "FATAL: CONTAINER_NATS={nats} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{DEFAULT_NATS}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_NATS to the default."
+            "FATAL: CONTAINER_NATS={nats} is not supported (expected '{expected_nats}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_nats}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_NATS to the default."
         ));
     }
 
@@ -708,7 +741,7 @@ mod tests {
     // constant that has no override at all (see ContainerNames's own field
     // doc comment for why it's deliberately not sourced from an env var).
     fn resolve_container_names_defaults_when_unset() {
-        let names = resolve_container_names(None, None, None, None, true).unwrap();
+        let names = resolve_container_names(None, None, None, None, true, None).unwrap();
         assert_eq!(names.proxy, "lancache-proxy");
         assert_eq!(names.dns_standard, "lancache-dns-standard");
         assert_eq!(names.dns_ssl.as_deref(), Some("lancache-dns-ssl"));
@@ -725,7 +758,8 @@ mod tests {
     // accidentally blank env value a fatal startup error instead of the
     // no-op bash's `${CONTAINER_PROXY:-lancache-proxy}` would produce.
     fn resolve_container_names_treats_empty_overrides_as_unset() {
-        let names = resolve_container_names(Some(""), Some(""), Some(""), Some(""), true).unwrap();
+        let names =
+            resolve_container_names(Some(""), Some(""), Some(""), Some(""), true, None).unwrap();
         assert_eq!(names.proxy, "lancache-proxy");
         assert_eq!(names.dns_standard, "lancache-dns-standard");
         assert_eq!(names.dns_ssl.as_deref(), Some("lancache-dns-ssl"));
@@ -736,13 +770,14 @@ mod tests {
     // SSL_ENABLED=0 must omit dns_ssl entirely (None), matching
     // status.json's own omission of the dns-ssl key when SSL mode is off.
     fn resolve_container_names_omits_dns_ssl_when_disabled() {
-        let names = resolve_container_names(None, None, None, None, false).unwrap();
+        let names = resolve_container_names(None, None, None, None, false, None).unwrap();
         assert_eq!(names.dns_ssl, None);
         // An override is not even validated when SSL is off, matching the
         // bash's `if [ "$SSL_ENABLED" = "1" ] && [ "$C_DNS_SSL" != ... ]`
         // short-circuit -- a mismatched override on a disabled service must
         // not fail closed for a service that isn't running at all.
-        let names = resolve_container_names(None, None, Some("renamed"), None, false).unwrap();
+        let names =
+            resolve_container_names(None, None, Some("renamed"), None, false, None).unwrap();
         assert_eq!(names.dns_ssl, None);
     }
 
@@ -752,10 +787,48 @@ mod tests {
     // silently accepting it would just make health checks and restarts
     // silently fail instead of erroring loudly at startup.
     fn resolve_container_names_rejects_renamed_containers() {
-        assert!(resolve_container_names(Some("renamed"), None, None, None, true).is_err());
-        assert!(resolve_container_names(None, Some("renamed"), None, None, true).is_err());
-        assert!(resolve_container_names(None, None, Some("renamed"), None, true).is_err());
-        assert!(resolve_container_names(None, None, None, Some("renamed"), true).is_err());
+        assert!(resolve_container_names(Some("renamed"), None, None, None, true, None).is_err());
+        assert!(resolve_container_names(None, Some("renamed"), None, None, true, None).is_err());
+        assert!(resolve_container_names(None, None, Some("renamed"), None, true, None).is_err());
+        assert!(resolve_container_names(None, None, None, Some("renamed"), true, None).is_err());
+    }
+
+    #[test]
+    // Issue #1415: a coordinated LANCACHE_CONTAINER_SUFFIX, with every
+    // CONTAINER_* override carrying that same suffix, must resolve
+    // successfully to the suffixed names -- not FATAL as an unrelated
+    // rename would. Mirrors watchdog.sh's own bats coverage for the same
+    // scenario.
+    fn resolve_container_names_accepts_coordinated_suffix() {
+        let names = resolve_container_names(
+            Some("lancache-proxyci7x9q"),
+            Some("lancache-dns-standardci7x9q"),
+            Some("lancache-dns-sslci7x9q"),
+            Some("lancache-natsci7x9q"),
+            true,
+            Some("ci7x9q"),
+        )
+        .unwrap();
+        assert_eq!(names.proxy, "lancache-proxyci7x9q");
+        assert_eq!(names.dns_standard, "lancache-dns-standardci7x9q");
+        assert_eq!(names.dns_ssl.as_deref(), Some("lancache-dns-sslci7x9q"));
+        assert_eq!(names.nats, "lancache-natsci7x9q");
+    }
+
+    #[test]
+    // The suffix must not become a general escape hatch: a suffix set
+    // without the matching CONTAINER_* override (or vice versa) is exactly
+    // the "renamed one container, not the whole coordinated set" case
+    // finding #5's guard exists to catch, and must still FATAL.
+    fn resolve_container_names_rejects_mismatched_suffix() {
+        // Suffix set, but CONTAINER_PROXY left at the bare (unsuffixed) default.
+        assert!(resolve_container_names(None, None, None, None, true, Some("ci7x9q")).is_err());
+        // CONTAINER_PROXY carries a suffix, but LANCACHE_CONTAINER_SUFFIX was
+        // never set (the mirror-image mistake).
+        assert!(
+            resolve_container_names(Some("lancache-proxyci7x9q"), None, None, None, true, None)
+                .is_err()
+        );
     }
 
     #[test]

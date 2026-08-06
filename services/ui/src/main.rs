@@ -959,8 +959,55 @@ async fn main() -> Result<()> {
 
     // Write initial nats.conf with auth tokens and restart NATS so it picks up
     // the shared config without requiring Docker exec.
-    if let Err(e) = routes::secondaries::reload_nats_conf(&state).await {
-        tracing::warn!("Could not reload initial nats.conf: {}", e);
+    //
+    // Bug-hunt finding E (docs/bug-hunt/nats.md, re-verified 2026-08-06):
+    // this used to be a single attempt with a `tracing::warn!` and no
+    // retry -- a transient failure here (the Docker socket briefly
+    // unavailable during stack startup, a slow NATS container not yet
+    // ready to accept a restart) permanently left NATS running with
+    // whatever config was baked into the image/volume at container build
+    // time, silently missing this run's actual secondary auth tokens,
+    // with zero operator-visible signal beyond one log line easy to miss
+    // among normal startup noise. Retries a bounded number of times with a
+    // short backoff before giving up -- long enough to ride out the
+    // transient startup-ordering failures this is actually meant to catch,
+    // short enough not to meaningfully delay the rest of this process's own
+    // startup if NATS is genuinely unreachable for a real reason. Not
+    // escalated to a fatal exit: NATS itself continuing to run with a
+    // stale-but-still-functional config is a real (if degraded) outcome,
+    // not the same class of "must not silently limp on" failure the DNS
+    // container's supervised-process exit (services/dns/entrypoint.sh)
+    // guards -- but the final failure is now logged at `error`, not `warn`,
+    // since exhausting every retry is a genuine operator-actionable event.
+    const NATS_CONF_RELOAD_MAX_ATTEMPTS: u32 = 3;
+    const NATS_CONF_RELOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    let mut last_err = None;
+    for attempt in 1..=NATS_CONF_RELOAD_MAX_ATTEMPTS {
+        match routes::secondaries::reload_nats_conf(&state).await {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Could not reload initial nats.conf (attempt {}/{}): {}",
+                    attempt,
+                    NATS_CONF_RELOAD_MAX_ATTEMPTS,
+                    e
+                );
+                last_err = Some(e);
+                if attempt < NATS_CONF_RELOAD_MAX_ATTEMPTS {
+                    tokio::time::sleep(NATS_CONF_RELOAD_RETRY_DELAY).await;
+                }
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        tracing::error!(
+            "Failed to reload initial nats.conf after {} attempts -- NATS is running with whatever config it already had, which may not include this run's secondary auth tokens: {}",
+            NATS_CONF_RELOAD_MAX_ATTEMPTS,
+            e
+        );
     }
 
     // Runs for the lifetime of the process: answers every NATS auth-callout
@@ -1051,6 +1098,10 @@ async fn main() -> Result<()> {
         .route(
             "/domains/aaaa-filter",
             post(routes::domains::toggle_aaaa_filter),
+        )
+        .route(
+            "/domains/ddns-allow-unsigned-updates",
+            post(routes::domains::toggle_ddns_allow_unsigned_updates),
         )
         .route(
             "/domains/zones/rollback",
