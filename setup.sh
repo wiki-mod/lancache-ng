@@ -349,10 +349,19 @@ validate_ui_session_ttl_seconds() {
 }
 
 # Centralize runtime profile calculation so install and update cannot drift:
-# SSL, Kea DHCP, dnsmasq proxy mode, and LanCache-NG-NTP are represented once
-# in COMPOSE_PROFILES while unrelated profiles are preserved.
+# SSL, Kea DHCP, dnsmasq proxy mode, LanCache-NG-NTP, and central logging are
+# represented once in COMPOSE_PROFILES while unrelated profiles are preserved.
+#
+# logging_enabled defaults to "1" (issue #1343), unlike every other profile
+# flag here, which defaults to "0"/disabled -- central logging is meant to be
+# on by default with a real, working opt-out (LOGGING_ENABLED=0 in .env, or
+# "n" at the install wizard's logging prompt), not an opt-in feature like SSL/
+# DHCP/NTP. A caller that omits this argument entirely (there should be none
+# left after this change, but a future call site addition might forget it)
+# fails safe toward "still enabled" rather than silently regressing to the
+# exact bug this issue exists to fix.
 compose_profiles_for_runtime() {
-    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}"
+    local existing="${1:-}" ssl_enabled="${2:-0}" dhcp_mode="${3:-disabled}" ntp_enabled="${4:-0}" logging_enabled="${5:-1}"
     local profile result="" trimmed
 
     IFS=',' read -r -a profiles <<< "$existing"
@@ -360,7 +369,7 @@ compose_profiles_for_runtime() {
         trimmed="${profile#"${profile%%[![:space:]]*}"}"
         trimmed="${trimmed%"${trimmed##*[![:space:]]}"}"
         case "$trimmed" in
-            ""|ssl|dhcp-kea|dhcp-proxy|ntp) continue ;;
+            ""|ssl|dhcp-kea|dhcp-proxy|ntp|logging) continue ;;
         esac
         case ",$result," in
             *",$trimmed,"*) ;;
@@ -394,6 +403,11 @@ compose_profiles_for_runtime() {
     if [[ "$ntp_enabled" = "1" ]]; then
         [[ -n "$result" ]] && result+=","
         result+="ntp"
+    fi
+
+    if [[ "$logging_enabled" = "1" ]]; then
+        [[ -n "$result" ]] && result+=","
+        result+="logging"
     fi
 
     printf '%s\n' "$result"
@@ -2551,7 +2565,7 @@ migrate_env_for_update() {
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
-    local ntp_data_default ntp_data_dir ntp_enabled
+    local ntp_data_default ntp_data_dir ntp_enabled logging_enabled
     local pdns_filter_state_default pdns_filter_state_dir pdns_ssl_default pdns_ssl_dir pdns_standard_default pdns_standard_dir
     local state_dir state_root_default ui_session_ttl
     local legacy_cache_std legacy_cache_ssl existing_image_tag
@@ -2722,6 +2736,17 @@ migrate_env_for_update() {
     ntp_data_dir="$ntp_data_default"
     set_optional_env_path_override_if_needed NTP_DATA_DIR "$ntp_data_dir" "$ntp_data_default" "$env_file"
 
+    # Central logging (issue #1343): unlike DHCP/NTP above, this default is
+    # "1" (enabled), not "0" -- a pre-existing install that has never touched
+    # LOGGING_ENABLED gets converged to the now-correct always-on-by-default
+    # behavior on its next `setup.sh update`, exactly as this issue requires
+    # (AG-OP-007: converge old/incomplete installations toward the current
+    # expected state). An operator who has already explicitly set
+    # LOGGING_ENABLED=0 keeps that choice (AG-OP-009: preserve existing
+    # non-empty local values) -- this helper writes the default value only
+    # when the key is absent, never overwriting a real prior value.
+    append_env_key_if_missing LOGGING_ENABLED "1" "$env_file"
+
     compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
     dhcp_enabled=$(get_env_var DHCP_ENABLED "$env_file")
     dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
@@ -2863,9 +2888,10 @@ migrate_env_for_update() {
     ensure_secret_env_key SECONDARY_REGISTRATION_TOKEN "$env_file" hex32
 
     ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
+    logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
     append_env_key_if_missing COMPOSE_PROFILES "" "$env_file"
     set_env_key COMPOSE_PROFILES \
-        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled")" \
+        "$(compose_profiles_for_runtime "$compose_profiles" "$(get_env_var SSL_ENABLED "$env_file")" "$dhcp_mode" "$ntp_enabled" "$logging_enabled")" \
         "$env_file"
 
     # UI auth stays a user choice. A configured username must have a real
@@ -4401,6 +4427,7 @@ cmd_converge_reconcile() {
     local ui_channel ui_auto_update current_channel current_auto_update
     local ui_cache_max_gb current_cache_max_gb
     local ui_dhcp_mode current_dhcp_mode current_compose_profiles new_compose_profiles current_ssl_enabled
+    local current_ntp_enabled ui_logging_enabled current_logging_enabled
 
     install_dir=$(realpath -m "$install_dir")
     # A converge tick can fire before the very first install completes (the
@@ -4456,11 +4483,42 @@ cmd_converge_reconcile() {
         if [[ "$ui_dhcp_mode" != "$current_dhcp_mode" ]]; then
             current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
             current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+            # Must read the real current NTP_ENABLED and LOGGING_ENABLED
+            # values here rather than relying on compose_profiles_for_runtime's
+            # own parameter defaults ("0" for ntp_enabled): omitting either
+            # argument on this DHCP-mode-change tick would silently strip that
+            # profile from COMPOSE_PROFILES even though nothing about it
+            # changed -- e.g. an operator with LanCache-NG-NTP already enabled
+            # would lose the NTP container on the next `docker compose up`
+            # convergence, purely as a side effect of a DHCP mode change.
+            current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
+            current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
             new_compose_profiles=$(compose_profiles_for_runtime \
-                "$current_compose_profiles" "$current_ssl_enabled" "$ui_dhcp_mode")
+                "$current_compose_profiles" "$current_ssl_enabled" "$ui_dhcp_mode" "$current_ntp_enabled" "$current_logging_enabled")
             set_env_key DHCP_MODE "$ui_dhcp_mode" "$env_file"
             set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
             print_ok "DHCP mode updated from Admin UI: ${current_dhcp_mode:-<unset>} -> $ui_dhcp_mode (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
+        fi
+    fi
+
+    # Central logging (issue #1343): same fold-into-convergence pattern as
+    # DHCP_MODE above -- LOGGING_ENABLED has a real Compose-profile side
+    # effect (the `syslog`/`syslog-ng` services are profile-gated), so an
+    # Admin UI toggle must reach COMPOSE_PROFILES here, not just the
+    # ui-settings volume.
+    ui_logging_enabled=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "LOGGING_ENABLED")
+    if [[ "$ui_logging_enabled" = "0" || "$ui_logging_enabled" = "1" ]]; then
+        current_logging_enabled=$(get_env_var LOGGING_ENABLED "$env_file")
+        if [[ "$ui_logging_enabled" != "$current_logging_enabled" ]]; then
+            current_compose_profiles=$(get_env_var COMPOSE_PROFILES "$env_file")
+            current_ssl_enabled=$(get_env_var SSL_ENABLED "$env_file")
+            current_dhcp_mode=$(get_env_var DHCP_MODE "$env_file")
+            current_ntp_enabled=$(get_env_var NTP_ENABLED "$env_file")
+            new_compose_profiles=$(compose_profiles_for_runtime \
+                "$current_compose_profiles" "$current_ssl_enabled" "$current_dhcp_mode" "$current_ntp_enabled" "$ui_logging_enabled")
+            set_env_key LOGGING_ENABLED "$ui_logging_enabled" "$env_file"
+            set_env_key COMPOSE_PROFILES "$new_compose_profiles" "$env_file"
+            print_ok "Central logging updated from Admin UI: ${current_logging_enabled:-<unset>} -> $ui_logging_enabled (COMPOSE_PROFILES: ${current_compose_profiles:-<none>} -> ${new_compose_profiles:-<none>})"
         fi
     fi
 
@@ -4580,7 +4638,9 @@ cmd_debug() {
 # ── create-logs-for-issue subcommand ──────────────────────────────────────────
 # #762: bundles the diagnostic state a maintainer needs to triage a bug
 # report into one compressed, secret-redacted archive, so a non-technical
-# operator (this project's actual audience per CLAUDE.md) can attach one
+# operator (this project's actual audience per AGENTS.md's project description --
+# corrected 2026-08-05, issue #1391 doc-sweep audit: CLAUDE.md no longer carries
+# this content as of 2026-07-31) can attach one
 # file to a GitHub issue instead of manually running and pasting a series of
 # commands. Read-only like cmd_debug above: this never repairs, restarts, or
 # rewrites anything, it only collects and redacts.
@@ -6656,7 +6716,43 @@ else
     print_ok "LanCache-NG-NTP skipped — can be enabled later from the Admin UI"
 fi
 
-COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED")"
+# ── 7c. Central logging ───────────────────────────────────────────────────────
+# Issue #1343: central logging (syslog-ng + Fluent Bit, #453) was always meant
+# to be a core, on-by-default feature -- the maintainer confirmed directly
+# that it should be "always on" in intent -- but this wizard never asked
+# about it at all, and the underlying Compose services carry `profiles:
+# [logging]`, so a standard install never actually started them. Corrected
+# design (maintainer decision after the initial "fully non-optional" framing
+# was reconsidered): keep a real, working opt-out for genuinely
+# storage-constrained installs, but default it to enabled -- the opposite
+# default from SSL/DHCP/NTP above, which all default to OFF because they are
+# genuinely opt-in features. A separate, Admin-UI-configurable log-verbosity
+# control was considered while implementing this (per-service severity
+# filtering, e.g. "only forward nginx WARN+") but deliberately NOT built here:
+# fluent-bit's pipeline currently forwards every tailed line verbatim with no
+# severity filter anywhere, nginx's access.log has no severity field to filter
+# on at all, and a fluent-bit `-l`/Log_Level flag only controls fluent-bit's
+# OWN diagnostic verbosity, not what it forwards -- wiring that flag to a UI
+# control would have shipped a setting that does not do what its label says.
+# See the #1343 issue thread for the decision list this was flagged back to
+# the maintainer as, rather than silently building or silently dropping it.
+print_step "Central logging"
+
+printf "  Central logging (syslog-ng + Fluent Bit) collects and forwards logs from\n"
+printf "  every service into one place for easier troubleshooting -- a core,\n"
+printf "  on-by-default feature. Disable only for genuinely storage-constrained\n"
+printf "  installs.\n"
+printf "  Default: enabled.\n\n"
+
+if confirm "Enable central logging? [Y/n]" "Y"; then
+    LOGGING_ENABLED=1
+    print_ok "Central logging enabled — adjust verbosity from the Admin UI's logging settings"
+else
+    LOGGING_ENABLED=0
+    print_warn "Central logging disabled — re-enable later via LOGGING_ENABLED=1 in .env (or the Admin UI) and rerun setup.sh update"
+fi
+
+COMPOSE_PROFILES="$(compose_profiles_for_runtime "$COMPOSE_PROFILES" "$SSL_ENABLED" "$DHCP_MODE" "$NTP_ENABLED" "$LOGGING_ENABLED")"
 
 # ── 8. Admin-UI access control ────────────────────────────────────────────────
 print_step "Admin-UI access control"
@@ -6807,6 +6903,7 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
     "NTP_ENABLED=${NTP_ENABLED}" \
     "NTP_DATA_DIR=${NTP_DATA_DIR}" \
+    "LOGGING_ENABLED=${LOGGING_ENABLED}" \
     "KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}" \
     "DDNS_TSIG_KEY=${DDNS_TSIG_KEY}" \
     "PDNS_API_KEY=${PDNS_API_KEY}" \
@@ -6851,8 +6948,10 @@ CACHE_VALID_ANY=1m
 CACHE_INACTIVE=365d
 
 # Real upstream DNS for nginx origin lookups. Do not set this to a LanCache DNS/proxy IP.
-# Includes both IPv4 and IPv6 Google Public DNS (see CLAUDE.md for the
-# dual-stack rationale); IPv6 literals are bracketed because nginx's
+# Includes both IPv4 and IPv6 Google Public DNS (see AGENTS.md's project description
+# and AG-IPV6-001 for the dual-stack rationale -- corrected 2026-08-05, issue #1391
+# doc-sweep audit: this used to cite CLAUDE.md, which no longer carries this content
+# as of 2026-07-31); IPv6 literals are bracketed because nginx's
 # \`resolver\` directive requires brackets around IPv6 nameservers. (Backticks
 # escaped: this whole heredoc is deliberately unquoted so ${IP_STANDARD} etc.
 # below interpolate -- an unescaped backtick here is real command
@@ -6914,6 +7013,14 @@ DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
 NTP_ENABLED=${NTP_ENABLED}
 NTP_DATA_DIR=${NTP_DATA_DIR}
 
+# ── Central logging ────────────────────────────────────────────────────────────
+# Issue #1343: on by default (unlike SSL/DHCP/NTP above) -- central logging
+# was always meant to be a core, always-available feature. Set to 0 here for
+# a genuinely storage-constrained install; this controls whether the
+# syslog-ng/fluent-bit containers are created at all (see the \`logging\`
+# Compose profile).
+LOGGING_ENABLED=${LOGGING_ENABLED}
+
 # Kea Control Agent/API token shared by DHCP and Admin UI. Keep secret.
 KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
 
@@ -6950,7 +7057,14 @@ NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD}
 SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
 
 # ── Profiles ───────────────────────────────────────────────────────────────────
-# ssl = SSL mode active; empty = disabled
+# Comma-separated Compose profiles, kept in sync by compose_profiles_for_runtime()
+# on every install/update/Admin-UI-driven change -- do not hand-edit without
+# also updating the matching *_ENABLED/DHCP_MODE key above, since the next
+# convergence tick recomputes this value from those keys, not the other way
+# around. Recognized values: ssl (SSL mode), dhcp-kea (Kea DHCP), dhcp-proxy
+# (dnsmasq ProxyDHCP/relay), ntp (LanCache-NG-NTP), logging (syslog-ng/
+# fluent-bit central logging, on by default per issue #1343). Empty = only the
+# always-on core services.
 COMPOSE_PROFILES=${COMPOSE_PROFILES}
 
 # ── Scheduled automatic updates ─────────────────────────────────────────────────
@@ -7136,6 +7250,11 @@ if [[ "$NTP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"
 else
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "disabled"
+fi
+if [[ "$LOGGING_ENABLED" = "1" ]]; then
+    printf "  %-26s %s\n" "Central logging:" "enabled"
+else
+    printf "  %-26s %s\n" "Central logging:" "disabled"
 fi
 if [[ "$AUTO_UPDATE_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "Scheduled updates:"        "enabled (ordered, health-gated, daily)"

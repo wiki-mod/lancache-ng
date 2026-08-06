@@ -353,7 +353,9 @@ Two concrete findings from this:
    in that list. A PR could merge into `master` even if that workflow failed,
    was cancelled, or never ran.
 2. **`v0.2.0`** — the branch this bug-hunt sweep itself is based on, and
-   (per project convention/CLAUDE.md's Dev-Ordner-retirement notes) the
+   (per project convention/`AGENTS.md`'s `AG-KD-008` -- corrected 2026-08-05,
+   issue #1391 doc-sweep audit: this used to cite `CLAUDE.md`'s dev-folder-
+   retirement notes, which moved to `AGENTS.md` on 2026-07-31) the
    actual current working/target branch for PRs — has **no branch protection
    configured at all** (`404 Branch not protected`). None of `setup.sh`'s CI
    gates (`shellcheck`, the `setup_*.bats` suite, `full-setup-deep-validate`)

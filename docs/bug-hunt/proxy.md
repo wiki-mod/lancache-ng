@@ -116,8 +116,10 @@ Because the dev env file ships this variable **non-empty**, the generated
 IPv4 ranges — there is no IPv6 range in the list at all. Both `http.conf`
 and `https.conf`'s `location /` gate on `$lancache_client_allowed = 0` →
 `return 403;`. Since `nginx.conf`/`https.conf`/the stream block all listen
-on `[::]` as well as `0.0.0.0` (full dual-stack, per CLAUDE.md's headline
-feature), a real IPv6 LAN client's `$remote_addr` will not match any of the
+on `[::]` as well as `0.0.0.0` (full dual-stack, per `AGENTS.md`'s project
+description and `AG-IPV6-001` -- corrected 2026-08-05, issue #1391 doc-sweep
+audit: this used to cite `CLAUDE.md`'s headline feature, which moved to
+`AGENTS.md` on 2026-07-31), a real IPv6 LAN client's `$remote_addr` will not match any of the
 three IPv4 CIDRs and gets a 403 by default in the shipped dev configuration.
 
 `prod`'s default (`config/prod/proxy.env`) ships `PROXY_ALLOWED_CLIENT_CIDRS=`
