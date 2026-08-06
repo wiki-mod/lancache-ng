@@ -391,20 +391,32 @@ echo "Fresh install produced a valid .env and a healthy running stack."
 # tests/bats/setup_update_idempotence.bats and similar), but that the real
 # setup.sh CLI, run exactly the way an operator would run it, produces a
 # running syslog-ng/fluent-bit pair with no extra flag or manual .env edit.
+#
+# UPDATED (syslog+fluent-bit consolidation PR, 2026-08): `syslog` and
+# `syslog-ng` used to be two separate Compose services/containers; they are
+# now ONE combined container (`services/syslog/`) under the single Compose
+# service name `syslog`. This used to be a `for logging_service in syslog
+# syslog-ng; do ... done` loop checking both names; with only one name left
+# to check, it is now flattened to plain straight-line code -- a
+# single-iteration `for` loop over one fixed word is dead weight ShellCheck
+# correctly flags as SC2043 (confirmed live: a real CI shellcheck run failed
+# on exactly this after the consolidation, not a hypothetical lint concern).
+# Still proves the same real-world fact this check exists for (central
+# logging actually running, not just `compose_profiles_for_runtime()`
+# computing the right string).
 grep -qF 'LOGGING_ENABLED=1' "$install_dir/.env" \
     || { echo "::error::.env is missing LOGGING_ENABLED=1 after a default fresh install -- central logging should be on by default (issue #1343)." >&2; exit 1; }
 grep -qF 'logging' <(grep '^COMPOSE_PROFILES=' "$install_dir/.env") \
     || { echo "::error::.env's COMPOSE_PROFILES does not include 'logging' after a default fresh install (issue #1343)." >&2; exit 1; }
 logging_compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" --env-file "$install_dir/.env")
-for logging_service in syslog syslog-ng; do
-    logging_cid="$("${logging_compose[@]}" ps -q "$logging_service")"
-    [[ -n "$logging_cid" ]] \
-        || { echo "::error::$logging_service has no running container after a default fresh install -- central logging's Compose profile should be active unconditionally (issue #1343)." >&2; "${logging_compose[@]}" ps; exit 1; }
-    logging_state="$(docker inspect --format '{{.State.Status}}' "$logging_cid")"
-    [[ "$logging_state" = "running" ]] \
-        || { echo "::error::$logging_service container exists but is not running (state: $logging_state) after a default fresh install (issue #1343)." >&2; exit 1; }
-done
-echo "Central logging (syslog, syslog-ng) started unconditionally on a default fresh install, as issue #1343 requires."
+logging_service="syslog"
+logging_cid="$("${logging_compose[@]}" ps -q "$logging_service")"
+[[ -n "$logging_cid" ]] \
+    || { echo "::error::$logging_service has no running container after a default fresh install -- central logging's Compose profile should be active unconditionally (issue #1343)." >&2; "${logging_compose[@]}" ps; exit 1; }
+logging_state="$(docker inspect --format '{{.State.Status}}' "$logging_cid")"
+[[ "$logging_state" = "running" ]] \
+    || { echo "::error::$logging_service container exists but is not running (state: $logging_state) after a default fresh install (issue #1343)." >&2; exit 1; }
+echo "Central logging (combined syslog+fluent-bit container) started unconditionally on a default fresh install, as issue #1343 requires."
 
 echo "== Phase 2: update/migration against a deliberately old-format .env =="
 

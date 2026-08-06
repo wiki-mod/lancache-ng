@@ -114,6 +114,15 @@ runtime:
     compose:
       - deploy/prod/docker-compose.yml
       - deploy/quickstart/docker-compose.yml
+  - name: syslog
+    image: ghcr.io/wiki-mod/lancache-ng/syslog
+    source: services/syslog/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    compose:
+      - deploy/prod/docker-compose.yml
+      - deploy/quickstart/docker-compose.yml
 tooling:
   - name: build-tools
     image: ghcr.io/wiki-mod/lancache-ng/build-tools
@@ -138,6 +147,26 @@ legacy:
     status: retired
     replacement: proxy
     note: The unified proxy image replaced the old split proxy-standard package.
+  - name: fluent-bit
+    status: retired
+    replacement: syslog
+    note: >-
+      The previously separate, third-party-pinned fluent-bit image
+      (cr.fluentbit.io/fluent/fluent-bit:3.2.10) is now bundled into this
+      project's own first-party syslog image (services/syslog/Dockerfile),
+      which copies this exact same pinned binary plus its full glibc shared
+      library closure into a stable Alpine base rather than depending on
+      Alpine's unpinnable edge/testing package. No external pull of this
+      image happens anymore.
+  - name: syslog-ng
+    status: retired
+    replacement: syslog
+    note: >-
+      The previously separate, third-party-pinned syslog-ng image
+      (balabit/syslog-ng:latest) is replaced by Alpine's own stable-repo
+      syslog-ng package (4.7.1-r1 on Alpine 3.20), bundled into this
+      project's own first-party syslog image (services/syslog/Dockerfile)
+      alongside fluent-bit. No external pull of this image happens anymore.
 external:
   - name: docker-socket-proxy
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476
@@ -147,18 +176,6 @@ external:
       - deploy/quickstart/docker-compose.yml
   - name: nats
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
-    policy: digest-pinned
-    compose:
-      - deploy/prod/docker-compose.yml
-      - deploy/quickstart/docker-compose.yml
-  - name: fluent-bit
-    image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
-    policy: digest-pinned
-    compose:
-      - deploy/prod/docker-compose.yml
-      - deploy/quickstart/docker-compose.yml
-  - name: syslog-ng
-    image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
     policy: digest-pinned
     compose:
       - deploy/prod/docker-compose.yml

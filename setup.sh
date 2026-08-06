@@ -7173,6 +7173,42 @@ if [[ "$NTP_ENABLED" = "1" && -n "$NTP_DATA_DIR" ]]; then
     mkdir -p "$NTP_DATA_DIR"
     print_ok "NTP data:       $NTP_DATA_DIR"
 fi
+if [[ "$LOGGING_ENABLED" = "1" ]]; then
+    # Real, reproduced bug this pre-creation step fixes (see the combined
+    # `syslog` container's own data-loss-detector.sh header for the full
+    # finding): a bind-mounted host directory that does not already exist
+    # before first container start is auto-created by Docker as root:root
+    # 0755, which the non-root (uid 10001) syslog-ng process in the combined
+    # container cannot write its own per-host subdirectories into --
+    # silently, with `syslog-ng-ctl stats` still reporting messages as
+    # "processed" even though zero bytes reach disk. Pre-creating and
+    # chowning this path here, mirroring $CACHE_DIR's existing pattern
+    # above, is the fix at the deployment-tooling layer; the combined
+    # container's own periodic detector is the defense-in-depth backstop for
+    # an install that predates this fix or has its permissions changed
+    # later (e.g. by a manual `chown` mistake, or a restore from a backup
+    # taken with different ownership).
+    #
+    # Idempotence (AG-OP-006/013): `mkdir -p` and `chown` are both naturally
+    # idempotent -- re-running this block against an already-correct
+    # directory changes nothing and does not error. `${SYSLOG_NG_LOG_DIR:-}`
+    # honors an operator override the same way deploy/*/docker-compose.yml's
+    # own `${SYSLOG_NG_LOG_DIR:-...}` fallback does, so a customized path is
+    # preserved rather than silently redirected to the computed default
+    # (AG-OP-009).
+    syslog_ng_log_dir="${SYSLOG_NG_LOG_DIR:-$(production_state_root_default "$INSTALL_DIR")/syslog-ng}"
+    mkdir -p "$syslog_ng_log_dir"
+    if chown 10001:10001 "$syslog_ng_log_dir" 2>/dev/null; then
+        print_ok "Syslog-ng log root: $syslog_ng_log_dir (owned by uid 10001)"
+    else
+        # Non-fatal: this host may not grant setup.sh's own invoking user
+        # permission to chown (e.g. running unprivileged against an existing
+        # directory owned by someone else already). The combined container's
+        # data-loss detector still catches the resulting silent-write
+        # failure at runtime rather than this install failing closed here.
+        print_warn "Could not chown $syslog_ng_log_dir to uid 10001 -- the combined syslog container may not be able to write logs there. See docs/architecture-ng.md's syslog-ng section, or chown it manually before starting the stack."
+    fi
+fi
 
 # ── 11. Installing systemd watchdog ───────────────────────────────────────────
 # The systemd service owns boot startup; the timer is a convergence guard that

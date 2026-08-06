@@ -463,8 +463,8 @@ EOF
 compose=(docker compose --project-directory "$install_dir" -f "$install_dir/docker-compose.yml" -f "$work_dir/logging-test-override.yml" -f "$work_dir/dhcp-test-override.yml" --env-file "$install_dir/.env")
 
 echo "== Phase 3: bringing the stack up (ssl + logging + dhcp-kea + dhcp-proxy profiles) =="
-"${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng dhcp dhcp-proxy
-"${compose[@]}" --profile ssl --profile logging --profile dhcp-kea --profile dhcp-proxy up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog syslog-ng dhcp dhcp-proxy
+"${compose[@]}" pull --quiet proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog dhcp dhcp-proxy
+"${compose[@]}" --profile ssl --profile logging --profile dhcp-kea --profile dhcp-proxy up -d proxy dns-standard dns-ssl docker-socket-proxy watchdog nats ui netdata syslog dhcp dhcp-proxy
 
 # nats and ui are back in this list: deploy/quickstart/docker-compose.yml now
 # defines a real Docker HEALTHCHECK for both (nats: http_port 8222 + a wget
@@ -501,18 +501,24 @@ echo "== Phase 3: bringing the stack up (ssl + logging + dhcp-kea + dhcp-proxy p
 # liveness/config-integrity check for dhcp-proxy, since dnsmasq has no
 # HTTP/control-socket API and this config disables DNS entirely). Neither had
 # any Docker healthcheck before #1169.
-# syslog and syslog-ng ALSO join this list under #1169 -- correcting a
-# pre-existing, unrelated inaccuracy in this file rather than something #1169
-# itself introduced: both have had a real healthcheck since issue #633
-# (`fluent-bit -V` / `syslog-ng-ctl healthcheck`, see
-# docs/architecture-ng.md's "syslog-ng" section), well before #1169 existed.
-# This script's own comment previously (incorrectly) grouped them with
-# docker-socket-proxy as services that "genuinely have none" -- #1169's
-# ground-truth compose-file audit caught the same stale claim in issue
-# #1169's own description and in docs/architecture-ng.md's now-updated
-# healthcheck list, so it is fixed here too rather than left as the one
-# place still asserting it.
-services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp docker-socket-proxy dhcp-proxy syslog syslog-ng"
+# syslog joined this list under #1169 -- correcting a pre-existing,
+# unrelated inaccuracy in this file rather than something #1169 itself
+# introduced: it has had a real healthcheck since issue #633, well before
+# #1169 existed. This script's own comment previously (incorrectly) grouped
+# it with docker-socket-proxy as a service that "genuinely has none" --
+# #1169's ground-truth compose-file audit caught the same stale claim.
+#
+# UPDATED (syslog+fluent-bit consolidation PR, 2026-08): `syslog` and
+# `syslog-ng` used to be two separate Compose services, each with its own
+# healthcheck (`fluent-bit -V` / `syslog-ng-ctl healthcheck` respectively,
+# both entries in this list). They are now ONE combined container
+# (`services/syslog/`) with ONE Compose service name (`syslog`) and ONE
+# Docker HEALTHCHECK slot -- but that single check
+# (`services/syslog/healthcheck.sh`) verifies both underlying processes
+# independently and only reports healthy when both are, so this script's
+# per-service health-wait loop still gets the same real, non-degraded
+# coverage it always did, just through one list entry instead of two.
+services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata dhcp docker-socket-proxy dhcp-proxy syslog"
 all_services="$services_with_healthcheck"
 
 deadline=$((SECONDS + 120))

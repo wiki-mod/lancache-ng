@@ -46,6 +46,16 @@ is_excluded() {
         # Vendored third-party data file (Mozilla Public Suffix List) —
         # already carries its own upstream MPL-2.0 header.
         services/proxy/public_suffix_list.dat) return 0 ;;
+        # Vendored third-party file (PowerDNS Authoritative Server's own
+        # gsqlite3 backend schema, GPL-licensed upstream, not lancache-ng's
+        # own AGPL source) — issue #815's services/dns Alpine migration.
+        # Unlike public_suffix_list.dat above, the upstream file itself
+        # carries no header at all, so this one keeps a plain provenance
+        # comment (fetch source, why it's vendored) instead of either a
+        # lancache-ng project header or an SPDX line that would misattribute
+        # the license of literally-copied upstream content — see the file's
+        # own comment block for the full reasoning.
+        services/dns/schema.sqlite3.sql) return 0 ;;
         # cargo-fuzz seed corpus fixtures (issue #1252): raw bytes libFuzzer
         # feeds directly to the harness under test (JSON in this repo's
         # current targets, but this exclusion is by directory, not

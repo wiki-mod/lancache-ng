@@ -285,6 +285,18 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
+    # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): watchdog.env is a static,
+    # non-templated file (see its own header), so these two top-level .env
+    # values -- which do vary per install -- are passed the same way the
+    # `retention` service below already passes SYSLOG_ENABLED for its own
+    # syslog-ng retention gate. Neither var is read by watchdog.sh (the bash
+    # entrypoint this ENTRYPOINT still runs); the Rust crate's own
+    # resolve_alert_only_targets() reads both, currently unused until that
+    # crate becomes this service's actual ENTRYPOINT (see
+    # services/watchdog/src/lib.rs's module doc comment).
+    environment:
+      - DHCP_MODE=${DHCP_MODE:-disabled}
+      - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
@@ -337,29 +349,31 @@ services:
   #     on a real runner: nginx creates proxy-cache entries as
   #     `www-data:www-data`, mode 0700/0600 (no group/other bits at all,
   #     hardcoded by nginx itself -- confirmed even a process umask set
-  #     before nginx starts has zero effect on this); syslog-ng's own output
-  #     tree is root-owned, `dir-perm(0750)` (already `chgrp`'d to this same
-  #     gid 10001 for the Admin UI's READ-ONLY access, but group has no
-  #     WRITE bit, so that existing sharing does not extend to deletion);
-  #     fluent-bit's self-log is root-owned by that pinned image's own
-  #     default (`Config.User: "0"`, confirmed via `docker inspect`), a
-  #     third-party image whose Dockerfile this project does not control.
-  #     No single UID/GID choice satisfies all three (verified: matching
-  #     nginx's own www-data UID would solve only the cache path; the other
-  #     two are blocked by a different owner/permission scheme each,
-  #     regardless of which identity retention runs as) -- DAC_OVERRIDE is
-  #     the one mechanism that uniformly covers all three without touching
-  #     proxy/syslog-ng/fluent-bit's own configuration or images. (An
-  #     alternative -- unifying every service's UID and adjusting
-  #     syslog-ng's dir-perm plus fluent-bit's own compose `user:` to avoid
-  #     needing any capability at all -- was seriously evaluated and
-  #     rejected for this PR: it is not more secure (Docker's real isolation
-  #     boundary is the mount namespace, not matching UID numbers across
-  #     independently-isolated containers), but it touches three other
-  #     services' configuration, including a confirmed real side effect on
-  #     the Admin UI's nginx-log-reading path via the `adm` group, none of
-  #     which belongs in a PR scoped to retention.sh's own execution
-  #     environment. Worth its own future discussion, not built here.)
+  #     before nginx starts has zero effect on this). This is still the
+  #     binding reason DAC_OVERRIDE is kept, unchanged by the syslog
+  #     consolidation below.
+  #
+  #     CORRECTED (syslog+fluent-bit consolidation PR, 2026-08): this
+  #     comment previously also named syslog-ng's own output tree (then
+  #     root-owned, `dir-perm(0750)`, `chgrp`'d to gid 10001 for the Admin
+  #     UI's read-only access) and fluent-bit's self-log (then root-owned by
+  #     the separate pinned third-party fluent-bit image's own default) as
+  #     two more targets DAC_OVERRIDE was needed for. Both are now natively
+  #     owned by uid 10001 instead: the combined `syslog` service below runs
+  #     entirely as that fixed non-root uid (see its own Dockerfile), so
+  #     everything it writes -- the syslog-ng output tree AND its own
+  #     fluent-bit self-log -- is already uid-10001-owned by construction,
+  #     with no root-then-chgrp step needed at all. retention.sh's own
+  #     uid-10001 identity (after its setpriv drop, see below) can now
+  #     delete/truncate both without DAC_OVERRIDE -- only the nginx
+  #     cache-entries case above still requires it. Narrowing retention.sh's
+  #     own `cap_add` list to drop DAC_OVERRIDE (replacing it with the
+  #     already-narrower DAC_READ_SEARCH the syslog consolidation itself
+  #     uses, or another equally-scoped grant, whichever proves sufficient
+  #     for the deletion side too) is real follow-up work this PR does not
+  #     attempt -- it touches a different service's own entrypoint/
+  #     capability posture and needs the same live-verified methodology this
+  #     PR applied to `syslog`, not a re-derivation from this comment alone.
   #   - SETUID, SETGID, SETPCAP: needed ONLY transiently, for
   #     retention-entrypoint.sh's own root-to-`lancache`(10001) privilege
   #     drop via `setpriv` -- confirmed empirically (`/proc/self/status`
@@ -1057,613 +1071,70 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── Log collector (#453; optional, start with: docker compose --profile logging up -d) ──
-  # Tails the proxy access log into two independent pipelines: a local
-  # plain-text file and a forward to the central syslog-ng receiver below.
-  # Config is passed as CLI flags because this image ships no shell at all
-  # (distroless-style), and because quickstart has no local repo checkout to
-  # bind-mount a config file from -- CLI flags are the one delivery mechanism
-  # that works identically across dev/prod/quickstart.
+  # ── Central logging: syslog + fluent-bit combined container (issue #453/#633
+  # baseline superseded here; see this PR for the full rationale) ───────────
+  # Replaces the previous two separate services (`syslog` = fluent-bit
+  # collector/forwarder, `syslog-ng` = central receiver) with ONE container
+  # running both -- a deliberate maintainer decision to accept crash-coupling
+  # and a single Docker HEALTHCHECK slot (mitigated below by a real
+  # dual-process check + structured status file) in exchange for one image
+  # to build/scan/patch instead of two. See services/syslog/Dockerfile's own
+  # header for the full real-vs-POC comparison this PR ran on a self-hosted
+  # runner: the exact pinned fluent-bit binary bundled with its glibc closure
+  # into a stable (non-edge) Alpine base, the two privileged-port/capability
+  # findings that contradicted the original POC's assumptions, and the
+  # `set -eu`/`wait -n` errexit bug this PR's own verification caught and
+  # fixed. `profiles: [logging]` is unchanged from before (issue #1343:
+  # on by default for setup.sh-managed installs, still off by default for a
+  # from-scratch manual deploy/prod install, matching ntp/dhcp-kea/
+  # dhcp-proxy's sibling profile-gating convention).
   syslog:
-    image: cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562
+    # container_name (issue #842/#849, merged from current_dev's #1420):
+    # watchdog's Rust rewrite needs a stable, predictable Docker API path
+    # (/containers/<name>/json) to add this service to its alert-only
+    # monitored set -- without a fixed name, Compose's auto-generated one
+    # (<project>-syslog-1) would depend on the project name/directory and
+    # break the moment either changes. #1420 added this same fixed name to
+    # BOTH the old separate `syslog` (fluent-bit) and `syslog-ng` services;
+    # this consolidation PR's single combined service keeps exactly one of
+    # those two names (`lancache-syslog`) -- see this PR's report/services/
+    # watchdog/src/main.rs's updated resolve_alert_only_targets() for why
+    # `lancache-syslog-ng` is no longer a separate monitored target at all
+    # (that container no longer exists once these two services become one).
+    container_name: lancache-syslog
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    command:
-      # -H/-P enable fluent-bit's built-in HTTP monitoring server (default
-      # bind 0.0.0.0, no separate --listen flag exists -- confirmed via
-      # `fluent-bit --help` and a live `/api/v1/health` probe) for operator
-      # visibility (e.g. Netdata scraping); NOT the healthcheck mechanism
-      # below, which cannot reach it (see the healthcheck block's comment).
-      - -H
-      - -P
-      - "2020"
-      - -f
-      - "5"
-      - -b
-      - /data/flb-storage
-      # Self-log (issue #864): fluent-bit's own operational log (startup,
-      # tail-input errors, forwarding failures) was previously visible only
-      # via `docker logs` on this container -- nothing surfaced a fluent-bit
-      # crash-loop or misconfiguration once the `logging` profile started
-      # silently swallowing it into this stack. `-l`/`--log_file` (confirmed
-      # against the pinned image via `docker run ... fluent-bit --help`,
-      # per AG-VAL-023 -- not assumed) redirects ALL of fluent-bit's own
-      # stdout logging into this file instead of `docker logs`; the tail
-      # input near the end of this command (tag=fluent-bit.selflog)
-      # re-ingests exactly that file and forwards it to syslog-ng, the same
-      # single-destination trade-off already documented for dnsmasq/
-      # nats-server in the logging matrix (`docker logs` goes quiet). Healthy
-      # steady state produces a fixed, small number of startup lines with no
-      # growth (confirmed empirically -- fluent-bit's default Log_Level,
-      # info, does not log per-line tail-read activity, only startup/error/
-      # state-change events).
-      #
-      # FIXED (#1236): while syslog-ng is unreachable, fluent-bit logs its
-      # own connection/flush retries at roughly one line per second (real
-      # measured rate, 5s flush interval), and since this file is itself
-      # tailed by the self-log input above, those retry lines feed back into
-      # the same output that is already failing, compounding the growth for
-      # as long as the outage lasts -- a real outage-driven amplification,
-      # not merely theoretical. Neither syslog-ng's own size-based rotation
-      # (`SYSLOG_MAX_FILE_MB`) nor watchdog's `maybe_prune_syslog`
-      # (`SYSLOG_MAX_GB`/`SYSLOG_RETENTION_DAYS`) bound this file: both
-      # operate on syslog-ng's own output tree (`logs-syslog-ng`), not on
-      # this container's own `/data` (`syslog-data`) volume. Fixed by a
-      # third watchdog function, `maybe_rotate_fluent_bit_selflog()`
-      # (`FLUENT_BIT_SELFLOG_MAX_MB`/`FLUENT_BIT_SELFLOG_MAX_ROTATIONS`, see
-      # the `watchdog` service below and watchdog.sh's own comment for the
-      # full mechanism and why it deliberately has no `SYSLOG_ENABLED`
-      # gate): fluent-bit's own `--help` documents no native rotation option
-      # for `-l` at all (confirmed against the pinned image, AG-VAL-023), so
-      # watchdog copies this file aside (preserving its content -- nothing
-      # an operator needs during the outage is dropped) and truncates it in
-      # place once it exceeds budget, checked every watchdog cycle rather
-      # than the daily rate limit `maybe_prune_syslog()` uses.
-      - -l
-      - /data/fluent-bit.log
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/nginx/access.log
-      - -p
-      - tag=nginx.file
-      - -p
-      - db=/data/flb-proxy-file.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/nginx/access.log
-      - -p
-      - tag=nginx.syslog
-      - -p
-      - db=/data/flb-proxy-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -F
-      - record_modifier
-      - -m
-      - nginx.syslog
-      - -p
-      - record=host lancache-proxy
-      - -p
-      - record=ident nginx-access
-      - -o
-      - file
-      - -m
-      - nginx.file
-      - -p
-      - path=/var/log/lancache
-      - -p
-      - file=nginx-proxy.log
-      - -p
-      - format=template
-      - -p
-      - template={log}
-      - -o
-      - syslog
-      - -m
-      - nginx.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      # Proxy remainder (#633): nginx's error.log and stream.log (SNI
-      # passthrough logging, standard mode) get the identical dual-pipeline
-      # treatment as access.log above -- one local-file copy, one syslog-ng
-      # forward -- just with their own path/tag/db/record values so their
-      # tail offsets and fluent-bit routing never collide with access.log's.
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/nginx/error.log
-      - -p
-      - tag=nginx-error.file
-      - -p
-      - db=/data/flb-proxy-error-file.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/nginx/error.log
-      - -p
-      - tag=nginx-error.syslog
-      - -p
-      - db=/data/flb-proxy-error-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/nginx/stream.log
-      - -p
-      - tag=nginx-stream.file
-      - -p
-      - db=/data/flb-proxy-stream-file.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/nginx/stream.log
-      - -p
-      - tag=nginx-stream.syslog
-      - -p
-      - db=/data/flb-proxy-stream-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -F
-      - record_modifier
-      - -m
-      - nginx-error.syslog
-      - -p
-      - record=host lancache-proxy
-      - -p
-      - record=ident nginx-error
-      - -F
-      - record_modifier
-      - -m
-      - nginx-stream.syslog
-      - -p
-      - record=host lancache-proxy
-      - -p
-      - record=ident nginx-stream
-      - -o
-      - file
-      - -m
-      - nginx-error.file
-      - -p
-      - path=/var/log/lancache
-      - -p
-      - file=nginx-proxy-error.log
-      - -p
-      - format=template
-      - -p
-      - template={log}
-      - -o
-      - syslog
-      - -m
-      - nginx-error.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - file
-      - -m
-      - nginx-stream.file
-      - -p
-      - path=/var/log/lancache
-      - -p
-      - file=nginx-proxy-stream.log
-      - -p
-      - format=template
-      - -p
-      - template={log}
-      - -o
-      - syslog
-      - -m
-      - nginx-stream.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      # Remaining logging-matrix services (#633): one syslog-only
-      # pipeline per service (no local plain-text copy -- that side of the
-      # dual pipeline exists above only because Netdata's web_log module
-      # parses nginx's specific access-log format; none of these services
-      # have an equivalent local consumer). Each tail input uses a glob so
-      # a service with more than one log file (e.g. dns-standard's separate
-      # pdns_server/pdns_recursor files) is picked up by a single input block.
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-dns-standard/*.log
-      - -p
-      - tag=dns-standard.syslog
-      - -p
-      - db=/data/flb-dns-standard-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-dns-ssl/*.log
-      - -p
-      - tag=dns-ssl.syslog
-      - -p
-      - db=/data/flb-dns-ssl-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/kea/*.log
-      - -p
-      - tag=dhcp.syslog
-      - -p
-      - db=/data/flb-dhcp-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-dhcp-proxy/*.log
-      - -p
-      - tag=dhcp-proxy.syslog
-      - -p
-      - db=/data/flb-dhcp-proxy-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-ui/*.log
-      - -p
-      - tag=ui.syslog
-      - -p
-      - db=/data/flb-ui-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-watchdog/*.log
-      - -p
-      - tag=watchdog.syslog
-      - -p
-      - db=/data/flb-watchdog-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-nats/*.log
-      - -p
-      - tag=nats.syslog
-      - -p
-      - db=/data/flb-nats-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/var/log/lancache-netdata/*.log
-      - -p
-      - tag=netdata.syslog
-      - -p
-      - db=/data/flb-netdata-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -F
-      - record_modifier
-      - -m
-      - dns-standard.syslog
-      - -p
-      - record=host lancache-dns-standard
-      - -p
-      - record=ident pdns
-      - -F
-      - record_modifier
-      - -m
-      - dns-ssl.syslog
-      - -p
-      - record=host lancache-dns-ssl
-      - -p
-      - record=ident pdns
-      - -F
-      - record_modifier
-      - -m
-      - dhcp.syslog
-      - -p
-      - record=host lancache-dhcp
-      - -p
-      - record=ident kea-dhcp4
-      - -F
-      - record_modifier
-      - -m
-      - dhcp-proxy.syslog
-      - -p
-      - record=host lancache-dhcp-proxy
-      - -p
-      - record=ident dnsmasq
-      - -F
-      - record_modifier
-      - -m
-      - ui.syslog
-      - -p
-      - record=host lancache-ui
-      - -p
-      - record=ident lancache-ui
-      - -F
-      - record_modifier
-      - -m
-      - watchdog.syslog
-      - -p
-      - record=host lancache-watchdog
-      - -p
-      - record=ident watchdog
-      - -F
-      - record_modifier
-      - -m
-      - nats.syslog
-      - -p
-      - record=host lancache-nats
-      - -p
-      - record=ident nats-server
-      - -F
-      - record_modifier
-      - -m
-      - netdata.syslog
-      - -p
-      - record=host lancache-netdata
-      - -p
-      - record=ident netdata
-      - -o
-      - syslog
-      - -m
-      - dns-standard.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - dns-ssl.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - dhcp.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - dhcp-proxy.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - ui.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - watchdog.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - nats.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      - -o
-      - syslog
-      - -m
-      - netdata.syslog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
-      # fluent-bit's own self-log (issue #864, see the -l flag's comment
-      # above): syslog-only, same "remaining logging-matrix services"
-      # pattern as dhcp/dhcp-proxy/ui/watchdog/nats/netdata above (no local
-      # plain-text copy).
-      - -i
-      - tail
-      - -p
-      - read_from_head=on
-      - -p
-      - path=/data/fluent-bit.log
-      - -p
-      - tag=fluent-bit.selflog
-      - -p
-      - db=/data/flb-selflog-syslog.db
-      - -p
-      - skip_long_lines=on
-      - -F
-      - record_modifier
-      - -m
-      - fluent-bit.selflog
-      - -p
-      - record=host lancache-syslog
-      - -p
-      - record=ident fluent-bit
-      - -o
-      - syslog
-      - -m
-      - fluent-bit.selflog
-      - -p
-      - host=syslog-ng
-      - -p
-      - port=601
-      - -p
-      - mode=tcp
-      - -p
-      - syslog_format=rfc5424
-      - -p
-      - syslog_hostname_key=host
-      - -p
-      - syslog_appname_key=ident
-      - -p
-      - syslog_message_key=log
+    # Least-privilege posture, empirically determined (see Dockerfile's own
+    # extensive comment for the full methodology and the two dead-end
+    # designs -- a runtime su-exec privilege drop, and plain
+    # `cap_add: DAC_READ_SEARCH` alone -- this PR tried and disproved before
+    # arriving here): the whole container runs as fixed non-root uid 10001
+    # (Dockerfile USER), with exactly ONE added capability so fluent-bit can
+    # read today's root:root 0640 producer logs it doesn't own.
+    # DAC_READ_SEARCH (read-only bypass) is narrower than the POC's own
+    # proposed CAP_DAC_OVERRIDE (read+write bypass) -- verified live that the
+    # narrower capability is sufficient for fluent-bit's actual access
+    # pattern. HARD INVARIANT (verified live): the fluent-bit interpreter
+    # binary carries a matching `setcap` file capability baked into the
+    # image, so running this exact image WITHOUT `cap_add: [DAC_READ_SEARCH]`
+    # fails closed at exec (not a silent capability downgrade) -- never
+    # remove one side of this pair without the other.
+    cap_drop:
+      - ALL
+    cap_add:
+      - DAC_READ_SEARCH
+    environment:
+      - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
+      - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
+      - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
+      # Mandatory silent-data-loss hardening (this PR's task requirement,
+      # not optional): entrypoint.sh's detector loop compares syslog-ng's own
+      # "processed" stats counter against real bytes landing under
+      # SYSLOG_NG_LOG_DIR every this-many seconds -- see
+      # services/syslog/data-loss-detector.sh's header for the real,
+      # reproduced bug this guards against and the live verification that it
+      # both fires on the broken case and stays silent on the healthy one.
+      - DATA_LOSS_CHECK_INTERVAL_SECONDS=${DATA_LOSS_CHECK_INTERVAL_SECONDS:-60}
     volumes:
       - proxy-logs:/var/log/nginx:ro
       - logs:/var/log/lancache
@@ -1676,122 +1147,30 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
-    # Cannot mirror syslog-ng's `syslog-ng-ctl healthcheck` shape exactly:
-    # this image ships no shell and no wget/curl (see the `command:` comment
-    # above), so neither a CMD-SHELL script nor an HTTP probe against the
-    # monitoring port above can run *inside* the container. `fluent-bit -V`
-    # is the one self-contained exec-form check available -- it only proves
-    # the binary is intact and executable, not that the live pipeline is
-    # healthy (weaker than syslog-ng's check by necessity, not by choice).
-    healthcheck:
-      test: ["CMD", "/fluent-bit/bin/fluent-bit", "-V"]
-      interval: 30s
-      timeout: 5s
-      retries: 3
-      start_period: 20s
-    depends_on:
-      - syslog-ng
-    restart: always
-    logging:
-      driver: json-file
-      options:
-        max-size: "5m"
-        max-file: "2"
-
-  # ── Central log receiver (#453; optional, start with: docker compose --profile logging up -d) ──
-  # Receives forwarded logs from the `syslog` (fluent-bit) service above over
-  # TCP/601 (RFC 5424, plain LF framing -- what fluent-bit's syslog output
-  # sends by default) and writes them per-source, per-day under
-  # logs-syslog-ng. Config and the rotation/compression loop are generated
-  # inline for the same reason as fluent-bit above.
-  syslog-ng:
-    image: balabit/syslog-ng:latest@sha256:78ad81d617f83e46bf6fa9f45d5c437a841464be5e1cddfda2745e01e87dd335
-    profiles: [logging]
-    entrypoint: ["/bin/bash", "-c"]
-    command:
-      - |
-        set -e
-        mkdir -p /etc/syslog-ng
-        cat > /etc/syslog-ng/syslog-ng.conf <<'EOF'
-        @version: 4.8
-
-        options {
-            time-reap(30);
-            mark-freq(10);
-            keep-hostname(yes);
-            create-dirs(yes);
-            dir-perm(0750);
-            perm(0640);
-            # This container runs as root (no user() drop configured), so
-            # files/dirs it creates default to root:root -- the 0750/0640
-            # perms above then leave zero access for the Admin UI's
-            # unprivileged `lancache` user (uid/gid 10001, pinned in
-            # services/ui/Dockerfile): not owner, not in root's group, and
-            # "other" has no bits. Chgrp'ing to that same fixed gid lets the
-            # existing perm bits' group-read allowance actually reach the
-            # UI's read-only mount (this file's `ui.volumes`
-            # SYSLOG_NG_LOG_DIR entry) without loosening perms to
-            # world-readable. syslog-ng accepts a bare numeric gid here, no
-            # "lancache" group needs to exist in this image's /etc/group
-            # (see PR #758 review). The bind-mount root itself
-            # (SYSLOG_NG_LOG_DIR) isn't created by syslog-ng -- Docker
-            # auto-creates a missing bind-mount host dir as root:root 0755,
-            # which already grants "other" the r-x needed to traverse into
-            # it, so only the per-host subdirs/files below need this fix.
-            dir-group(10001);
-            group(10001);
-        };
-
-        source s_forwarders {
-            network(transport(tcp) port(601) flags(syslog-protocol));
-        };
-
-        destination d_lancache {
-            file(
-                "/var/log/lancache-syslog-ng/$${HOST}/$${YEAR}$${MONTH}$${DAY}.log"
-                template("$$ISODATE $$HOST $$PROGRAM: $$MSGONLY\n")
-                create-dirs(yes)
-            );
-        };
-
-        log { source(s_forwarders); destination(d_lancache); };
-        EOF
-        # Size-bounded rotation + zstd high-compression (#453): every
-        # SYSLOG_NG_ROTATE_INTERVAL_SECONDS, rotate any active log file once it
-        # exceeds SYSLOG_MAX_FILE_MB, signal syslog-ng to reopen the (now
-        # recreated) destination file, then compress the rotated file with
-        # zstd -T0 (all cores) at SYSLOG_COMPRESSION_LEVEL. Falls back to gzip
-        # if zstd cannot be installed (e.g. no network egress at startup), so
-        # rotation/compression degrades gracefully instead of failing hard.
-        # This is a fixed-threshold baseline, not the full SYSLOG_MAX_GB /
-        # SYSLOG_RETENTION_DAYS size-priority budget engine -- see follow-up #633.
-        (
-          if ! command -v zstd >/dev/null 2>&1; then
-            apt-get update -qq && apt-get install -y --no-install-recommends zstd >/dev/null 2>&1 || true
-          fi
-          while true; do
-            sleep "$${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}"
-            find /var/log/lancache-syslog-ng -type f -name '*.log' -size +"$${SYSLOG_MAX_FILE_MB:-100}"M 2>/dev/null | while read -r f; do
-              ts="$$(date -u +%Y%m%dT%H%M%SZ)"
-              mv "$$f" "$${f}.$${ts}"
-              kill -HUP 1 2>/dev/null || true
-              if command -v zstd >/dev/null 2>&1; then
-                zstd -q -T0 "-$${SYSLOG_COMPRESSION_LEVEL:-19}" --rm "$${f}.$${ts}" 2>/dev/null || true
-              else
-                gzip "$${f}.$${ts}" 2>/dev/null || true
-              fi
-            done
-          done
-        ) &
-        exec /usr/local/bin/entrypoint.sh
-    environment:
-      - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
-      - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
-      - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
-    volumes:
+      # Central log receiver destination (previously the separate
+      # `syslog-ng` service's own mount, and briefly ALSO a second,
+      # independent mount on a different balabit/syslog-ng container in
+      # current_dev's #1420, merged concurrently with this PR -- that whole
+      # second service is superseded by this one combined container, not
+      # merged alongside it). Bind-mounted, not a named volume -- Docker
+      # auto-creates a missing host directory as root:root 0755, which the
+      # non-root (uid 10001) syslog-ng process in this container cannot
+      # write its own per-host subdirectories into. setup.sh pre-creates and
+      # chowns this path on fresh install specifically to avoid that (see
+      # setup.sh's own comment); the data-loss detector above is the
+      # defense-in-depth backstop for an install that predates that fix or
+      # has its permissions changed later.
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
+    # Real dual-process check (services/syslog/healthcheck.sh): verifies
+    # fluent-bit AND syslog-ng independently and only reports healthy when
+    # both are, writing a structured per-process status file (including
+    # data_loss_alert_active) for a future Admin UI/watchdog integration --
+    # the granularity fix for the POC's own documented "one Docker
+    # HEALTHCHECK slot for two processes" gap. Already declared as this
+    # image's own Dockerfile HEALTHCHECK; redeclared here explicitly to
+    # match this compose file's existing per-service convention.
     healthcheck:
-      test: ["CMD-SHELL", "syslog-ng-ctl healthcheck --timeout 5"]
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1975,11 +1354,14 @@ services:
     # Central logging pipeline (#633, #847): this netdata build's own log
     # paths under /var/log/netdata (access/collector/daemon/health/...) are
     # symlinks to /dev/stdout|stderr, not real files -- nothing for
-    # fluent-bit to tail. Same "no local repo checkout to bind-mount a
-    # config file from" constraint the syslog/syslog-ng services already
-    # solve by generating their config inline (quickstart's install_dir has
-    # no services/ directory -- see setup.sh's install_quickstart_compose_
-    # assets()), so this entrypoint override writes a netdata.conf that
+    # fluent-bit to tail. quickstart's install_dir has no services/
+    # directory (see setup.sh's install_quickstart_compose_assets()), so
+    # unlike the combined `syslog` service above (whose fluent-bit.conf/
+    # syslog-ng.conf are baked into its own image, not bind-mounted from a
+    # repo checkout), netdata still needs its config generated inline here
+    # rather than bind-mounted, since its image is third-party and has no
+    # equivalent baked-in config of its own. This entrypoint override writes
+    # a netdata.conf that
     # redirects daemon/health to real files under
     # /var/log/netdata/*.file.log, then execs the image's own entrypoint.
     # netdata-logs shares that path with fluent-bit, which tails those real

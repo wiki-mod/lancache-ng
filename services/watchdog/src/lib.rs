@@ -6,7 +6,7 @@
 //! should become a real Rust service -- this crate is that rewrite,
 //! currently covering only part of watchdog.sh's responsibilities.
 //!
-//! ## Scope (as of this writing, 2026-08-01)
+//! ## Scope (as of this writing, 2026-08-05)
 //!
 //! `watchdog.sh` is 952 lines with six distinct responsibilities. This
 //! crate currently ports three of them, all pure state/data-flow with no
@@ -24,6 +24,31 @@
 //!    writing it.
 //! 3. `probe_docker_socket_proxy()`'s alert-only reachability probe (see
 //!    [`health::AlertCounter`]) -- also a `status.json` key, same reasoning.
+//! 4. Issue #842's five alert-only monitored services -- `ui`, `dhcp`
+//!    (when `DHCP_MODE=kea`), `dhcp-proxy` (when `DHCP_MODE=dnsmasq-proxy`/
+//!    `dnsmasq-relay`), `netdata`, `syslog` (when `SYSLOG_ENABLED` is
+//!    truthy; the combined fluent-bit+syslog-ng container since the
+//!    syslog+fluent-bit consolidation PR, 2026-08 -- #842 originally listed
+//!    `syslog` and `syslog-ng` as two separate monitored targets, merged
+//!    into this one entry now that they are one container, see
+//!    `main.rs`'s `resolve_alert_only_targets()` and `config.rs`'s
+//!    `CONTAINER_SYSLOG` doc comment for the concurrent-merge history) --
+//!    added here first, in this crate, rather than in `watchdog.sh`
+//!    directly: this scaffold was already the designated home for #842's
+//!    remaining monitored-service work (see the `ENTRYPOINT` note below),
+//!    and this crate's typed
+//!    [`health::HealthReading`]/[`health::AlertCounter`] machinery already
+//!    generalizes cleanly to "one more per-container inspect, alert-only,
+//!    never restarted" without inventing a fifth ad hoc bash variable.
+//!    Unlike the four restart-capable services above, none of these five are
+//!    ever passed to [`docker_client::DockerProxyClient::restart`] -- see
+//!    `main.rs`'s alert-only loop and [`health::HealthReading::is_alert_ok`]'s
+//!    own doc comment for why (the maintainer's own #842 scope note
+//!    explicitly flagged that blind auto-restart is not obviously the right
+//!    recovery mechanism for every additional service, e.g. a mid-startup
+//!    restart of a dependency can make a dependent service's own reconnect
+//!    logic worse, not better -- alert-only visibility is the safe default
+//!    until a per-service restart decision is deliberately made).
 //!
 //! **Deliberately NOT ported**: `maybe_purge()` (daily cache-age purge),
 //! `maybe_prune_syslog()` (daily syslog-ng retention), and
@@ -41,6 +66,15 @@
 //! The `ENTRYPOINT` swap remains a separate, not-yet-made maintainer
 //! decision for other reasons (this crate's own remaining scope, and
 //! full-stack validation), not because of the file-retention passes above.
+//! Concretely, as of this writing, this Dockerfile has no Rust builder
+//! stage at all (confirmed directly: `services/watchdog/Dockerfile` only
+//! `COPY`s the three shell scripts, never compiles anything from
+//! `Cargo.toml`), and `deploy/*/docker-compose.yml`'s `watchdog` service
+//! overrides the Dockerfile's `ENTRYPOINT` with its own `command:` (a bash
+//! wrapper that explicitly execs `/watchdog.sh` for the central-logging tee)
+//! -- so the swap is a real builder-stage-plus-compose-command change, not a
+//! one-line edit, tracked as its own follow-up rather than attempted in the
+//! same pass that added service #4 above.
 //!
 //! Also deliberately unchanged from today: no live startup-grace-period
 //! timer. `check_and_maybe_restart()` in the bash always publishes the raw

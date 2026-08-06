@@ -41,8 +41,24 @@ frontend dockerfrontend
     acl safe_ping path,url_dec -m reg -i ^(/v[0-9.]+)?/_ping$
     acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
     acl docker_container_path path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/
-    acl lancache_container path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp)(/|$)
-    acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp)/json$
+    # ui/netdata/syslog (issue #842/#849): added to the master
+    # allowlist and to safe_container_inspect only, NOT to
+    # safe_service_restart below -- watchdog's Rust rewrite monitors these
+    # three for dashboard visibility (alert-only, see
+    # services/watchdog/src/main.rs's resolve_alert_only_targets()) but
+    # never restarts them, so no restart grant belongs here for any of the
+    # three (mirrors how lancache-dhcp/lancache-dhcp-proxy already have
+    # inspect access without a restart grant -- see safe_dhcp_action below
+    # for why those two use start/stop instead).
+    # UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged
+    # concurrently with #842/#849 which originally added BOTH
+    # lancache-syslog and lancache-syslog-ng here as two separate entries):
+    # syslog (fluent-bit) and syslog-ng are now one combined container under
+    # the single name lancache-syslog -- lancache-syslog-ng removed from both
+    # regexes below rather than left as permanently-unmatchable dead weight,
+    # since no compose file will ever start a container by that name again.
+    acl lancache_container path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp|lancache-ui|lancache-netdata|lancache-syslog)(/|$)
+    acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-dhcp|lancache-dhcp-proxy|lancache-dhcp-probe|lancache-nats|lancache-ntp|lancache-ui|lancache-netdata|lancache-syslog)/json$
     acl safe_container_logs path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/logs$
     acl safe_service_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart$
     acl safe_dhcp_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-dhcp|lancache-dhcp-proxy)/(start|stop)$
