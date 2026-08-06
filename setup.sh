@@ -2801,12 +2801,23 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "" "$env_file"
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
+    # Issue #705: PXE boot-pointer fields -- previously only reachable by
+    # hand-editing config/prod/dhcp-proxy.env directly (issue #849
+    # dhcp-proxy.md finding #2), so an existing install upgrading via
+    # `setup.sh update` needs these keys converged in just like the #450
+    # fields above, not just newly-generated installs.
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_SERVER "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "" "$env_file"
     dhcp_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$env_file")
     dhcp_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$env_file")
     dhcp_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$env_file")
     dhcp_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$env_file")
     dhcp_proxy_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$env_file")
     dhcp_proxy_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$env_file")
+    dhcp_proxy_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$env_file")
+    dhcp_proxy_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$env_file")
+    dhcp_proxy_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$env_file")
 
     case "$dhcp_mode" in
         dnsmasq-proxy)
@@ -2842,6 +2853,12 @@ migrate_env_for_update() {
                 || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace or commas."
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
+            [[ -z "$dhcp_proxy_pxe_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_pxe_boot_server" \
+                || die "DHCP_PROXY_PXE_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
+            [[ -z "$dhcp_proxy_pxe_boot_filename_bios" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_bios" \
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace or commas."
+            [[ -z "$dhcp_proxy_pxe_boot_filename_uefi" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_uefi" \
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace or commas."
             ;;
         dnsmasq-relay)
             # Issue #844: relay mode forwards to an upstream server and injects
@@ -2872,6 +2889,9 @@ migrate_env_for_update() {
     set_env_key DHCP_PROXY_DOMAIN "$dhcp_proxy_domain" "$env_file"
     set_env_key DHCP_PROXY_BOOT_FILENAME "$dhcp_proxy_boot_filename" "$env_file"
     set_env_key DHCP_PROXY_BOOT_SERVER "$dhcp_proxy_boot_server" "$env_file"
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "$dhcp_proxy_pxe_boot_server" "$env_file"
+    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$env_file"
+    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -6737,6 +6757,12 @@ DHCP_PROXY_DOMAIN=""
 DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
 DHCP_PROXY_CUSTOM_OPTIONS=""
+# Issue #705: PXE boot-pointer (`pxe-service`) fields, separate from the
+# #450 fields above -- previously only reachable by hand-editing
+# config/prod/dhcp-proxy.env directly (issue #849 dhcp-proxy.md finding #2).
+DHCP_PROXY_PXE_BOOT_SERVER=""
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
+DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
 
 if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
@@ -6894,6 +6920,62 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         fi
 
         print_ok "Additional dnsmasq relay/proxy options configured. Custom safe options (DHCP_PROXY_CUSTOM_OPTIONS) can be added later from the Admin UI DHCP page."
+    fi
+
+    # Issue #705: PXE boot-pointer support (`pxe-service`), kept as its own
+    # separate opt-in gate rather than folded into the #450 options block
+    # above -- entrypoint.sh's own investigation (see
+    # _dhcp_proxy_render_pxe_service_directives's header comment) found this
+    # is a real behavior change, not just another optional field: dnsmasq's
+    # ProxyDHCP mode does not reply to ANY DHCPDISCOVER at all until at
+    # least one `pxe-service` directive exists, so turning this on makes an
+    # installation that previously never replied start replying to every
+    # PXE-tagged client on the segment. That deserves its own explicit,
+    # separately-worded confirmation, not a field buried in a generic
+    # "additional options" prompt. lancache-ng only points at an operator's
+    # EXISTING external PXE/TFTP boot server -- it never hosts boot files
+    # itself (docs/dhcp-modes.md).
+    print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/dhcp-modes.md."
+    if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
+        ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER"
+        while true; do
+            DHCP_PROXY_PXE_BOOT_SERVER="$REPLY"
+            [[ -z "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && break
+            is_valid_ipv4 "$DHCP_PROXY_PXE_BOOT_SERVER" && break
+            print_error "Invalid IPv4 address: $DHCP_PROXY_PXE_BOOT_SERVER"
+            ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" ""
+        done
+
+        if [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]]; then
+            ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+            while true; do
+                DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="$REPLY"
+                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && break
+                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && break
+                print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+                ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" ""
+            done
+
+            ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
+            while true; do
+                DHCP_PROXY_PXE_BOOT_FILENAME_UEFI="$REPLY"
+                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && break
+                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" && break
+                print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
+                ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" ""
+            done
+
+            if [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]]; then
+                # Matches entrypoint.sh's own fail-safe: a boot server alone
+                # renders no pxe-service directive at all (just a WARNING on
+                # every start), so reset it here rather than persist a
+                # permanently-incomplete, warning-generating config.
+                print_warn "No BIOS or UEFI boot filename set; PXE boot-pointer support will remain inactive."
+                DHCP_PROXY_PXE_BOOT_SERVER=""
+            else
+                print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
+            fi
+        fi
     fi
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
@@ -7133,6 +7215,9 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
     "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
+    "DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}" \
+    "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}" \
+    "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}" \
     "NTP_ENABLED=${NTP_ENABLED}" \
     "NTP_DATA_DIR=${NTP_DATA_DIR}" \
     "LOGGING_ENABLED=${LOGGING_ENABLED}" \
@@ -7237,6 +7322,12 @@ DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}
 DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
 DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
 DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
+# Issue #705: PXE boot-pointer (\`pxe-service\`) fields, empty by default.
+# See docs/dhcp-modes.md and services/dhcp-proxy/entrypoint.sh's own
+# _dhcp_proxy_render_pxe_service_directives for the full opt-in rationale.
+DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}
+DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}
 
 # ── LanCache-NG-NTP ────────────────────────────────────────────────────────────
 # Enable/disable, upstream server list, and the DHCP auto-populate toggle are
@@ -7513,6 +7604,14 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
+    # DHCP_PROXY_BOOT_SERVER was missing from this summary even before the
+    # PXE boot-pointer fields below were added (found while adding those,
+    # AG-WF-011 same-failure-class fix: an operator-set value invisible in
+    # the install summary looks unconfigured even when it isn't).
+    [[ -n "$DHCP_PROXY_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot server:" "$DHCP_PROXY_BOOT_SERVER"
+    [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot-pointer server:" "$DHCP_PROXY_PXE_BOOT_SERVER"
+    [[ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && printf "  %-26s %s\n" "  PXE boot-pointer (BIOS):" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+    [[ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && printf "  %-26s %s\n" "  PXE boot-pointer (UEFI):" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
 fi
 if [[ "$NTP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"

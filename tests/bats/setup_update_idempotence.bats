@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Repeat-run idempotence fixture tests for migrate_env_for_update(), the real
@@ -38,7 +39,9 @@ setup() {
 # `docker pull` a channel pointer image. Includes DHCP_PROXY_INTERFACE/
 # DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
-# (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
+# (#450), DHCP_PROXY_PXE_BOOT_SERVER/DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/
+# DHCP_PROXY_PXE_BOOT_FILENAME_UEFI (#705, issue #849 dhcp-proxy.md finding
+# #2), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
 # NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583),
 # NATS_SYS_USER/NATS_SYS_PASSWORD (#681), AUTO_UPDATE_ENABLED (#819),
 # NTP_ENABLED (#1082, LanCache-NG-NTP), DHCP_RELAY_LOCAL_ADDR (#844,
@@ -125,6 +128,9 @@ write_converged_env_fixture() {
         'DHCP_PROXY_BOOT_FILENAME=' \
         'DHCP_PROXY_BOOT_SERVER=' \
         'DHCP_PROXY_CUSTOM_OPTIONS=' \
+        'DHCP_PROXY_PXE_BOOT_SERVER=' \
+        'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=' \
+        'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' \
         'KEA_CTRL_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
         'DDNS_TSIG_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
         'PDNS_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
