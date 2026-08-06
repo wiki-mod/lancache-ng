@@ -431,15 +431,26 @@ clock_control_available() {
 # (re)written every start, not just once at image build time, and a
 # restart onto a host that now grants CAP_SYS_TIME correctly stops writing
 # it and reverts to plain healthy.
+# `|| true` on both the removal and the write below is deliberate: this
+# marker is a visibility nice-to-have consumed by the healthcheck/watchdog,
+# not something chronyd itself needs to function. Under `set -e` (see top of
+# this file), an unguarded failure here -- e.g. a future compose change that
+# makes /run read-only, or any other environment this file's own author did
+# not anticipate -- would kill the entrypoint before it ever reaches `exec
+# chronyd` below, turning a real, deliberate degraded-but-running mode into
+# an outright crash-loop: exactly the failure this whole mechanism exists to
+# avoid. Losing only the marker (falling back to the pre-#1296-rework
+# behavior of a silent, undisciplined-but-"healthy" clock) is a strictly
+# better failure mode than losing the container.
 NTP_DEGRADED_MARKER=/run/ntp-cap-sys-time-degraded
-rm -f "$NTP_DEGRADED_MARKER"
+rm -f "$NTP_DEGRADED_MARKER" || true
 
 if clock_control_available; then
     echo "Starting LanCache-NG-NTP (chronyd) with upstream servers: $NTP_UPSTREAM_SERVERS"
 else
     _ntp_degraded_reason="CAP_SYS_TIME denied -- clock not disciplined (issue #1296)"
     echo "WARNING: this environment denies CAP_SYS_TIME for real clock stepping even though it was requested (commonly a nested/LXC container host -- see issue #1296). Starting LanCache-NG-NTP (chronyd) in degraded mode: it will track upstream servers ($NTP_UPSTREAM_SERVERS) and answer LAN NTP queries, but will NOT discipline this host's own system clock. Move this container to a host that grants real CAP_SYS_TIME to restore full clock discipline." >&2
-    printf '%s\n' "$_ntp_degraded_reason" > "$NTP_DEGRADED_MARKER"
+    printf '%s\n' "$_ntp_degraded_reason" > "$NTP_DEGRADED_MARKER" || echo "WARNING: could not write $NTP_DEGRADED_MARKER -- the degraded healthcheck marker will be unavailable, but continuing in degraded mode regardless (see comment above)." >&2
     NTP_CHRONYD_FLAGS+=(-x)
 fi
 exec chronyd -n -f "$NTP_RUNTIME_CONF" "${NTP_CHRONYD_FLAGS[@]}"
