@@ -45,4 +45,22 @@ load_proxy_registrable_domain_helpers() {
 
     # shellcheck disable=SC1090
     source "$helper_file"
+
+    # -g is required here, same reason as
+    # tests/bats/helpers/proxy-collect-domain-rows-helpers.sh's own detailed
+    # comment on this exact pattern: this function itself is one level of
+    # function nesting deeper than that file's setup(), so the awk-extracted
+    # `declare -A _PSL_RULES=()` (etc.) lines the `source` above just ran
+    # scope to THIS function, not to the caller -- they are destroyed the
+    # moment this function returns. Without -g, the next real assignment
+    # inside _load_public_suffix_list() implicitly creates a plain (non-
+    # associative) global instead, and `_PSL_RULES["$rule"]=1` for a
+    # non-numeric key like "com.ac" then fails with bash's "invalid
+    # arithmetic operator" (confirmed live: this exact failure was hit and
+    # fixed while writing this helper, not merely reasoned about). Declaring
+    # the empty maps again here, after sourcing, makes them real globals the
+    # caller's later _load_public_suffix_list call can actually populate.
+    declare -Ag _PSL_RULES=()
+    declare -Ag _PSL_WILDCARDS=()
+    declare -Ag _PSL_EXCEPTIONS=()
 }

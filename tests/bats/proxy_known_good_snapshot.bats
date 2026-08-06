@@ -93,26 +93,31 @@ STUB
 @test "a snapshot missing a candidate file (taken before it existed) is rejected during rollback, falling back to an earlier complete snapshot" {
     params_conf="$live_dir/proxy-params.conf"
 
-    # Snapshot 1: only nginx_conf existed as a candidate at this point (the
-    # real-world shape this mirrors: an older entrypoint.sh version before a
-    # new generated file was added to PROXY_CANDIDATE_FILES).
+    # Snapshot 1 (older): both files valid -- a complete two-file candidate
+    # set, matching today's real PROXY_CANDIDATE_FILES shape.
     printf 'OK nginx v1\n' > "$nginx_conf"
-    run _proxy_validate_snapshot_or_rollback "$nginx_conf"
+    printf 'OK params v1\n' > "$params_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
     [ "$status" -eq 0 ]
 
-    # Snapshot 2: both files now exist and are both valid -- the current,
-    # complete candidate set.
+    # Snapshot 2 (newer): only nginx_conf is passed as a candidate this
+    # time -- the real-world shape this mirrors is a snapshot taken while
+    # temporarily validating with a narrower candidate list than today's
+    # (e.g. mid-upgrade, or a future generated file not present yet); the
+    # completeness check itself is agnostic to WHY a snapshot has fewer
+    # files, it only cares whether every file today's call needs is present.
     printf 'OK nginx v2\n' > "$nginx_conf"
-    printf 'OK params v2\n' > "$params_conf"
-    run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
+    run _proxy_validate_snapshot_or_rollback "$nginx_conf"
     [ "$status" -eq 0 ]
 
     run kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | wc -l)" -eq 2 ]
 
-    # Both files now go invalid -- rollback must skip snapshot 1 (missing
-    # proxy-params.conf entirely) and select snapshot 2 instead.
+    # Both files now go invalid, validated against today's full two-file
+    # candidate list -- rollback tries the newest snapshot (2) first, must
+    # reject it as incomplete (missing proxy-params.conf entirely), then
+    # fall back to snapshot 1, which has both files.
     printf 'BROKEN nginx v3\n' > "$nginx_conf"
     printf 'BROKEN params v3\n' > "$params_conf"
     run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
@@ -120,8 +125,8 @@ STUB
     [[ "$output" == *"rejected known-good snapshot"*"incomplete (missing at least one candidate file)"* ]]
     [[ "$output" == *"[known-good-snapshot][proxy][SELECT]"* ]]
 
-    [ "$(cat "$nginx_conf")" = "OK nginx v2" ]
-    [ "$(cat "$params_conf")" = "OK params v2" ]
+    [ "$(cat "$nginx_conf")" = "OK nginx v1" ]
+    [ "$(cat "$params_conf")" = "OK params v1" ]
 }
 
 # Contrast case: when the ONLY existing snapshot is incomplete and no
