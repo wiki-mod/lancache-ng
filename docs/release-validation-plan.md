@@ -636,23 +636,26 @@ a CI proof does not, by itself, satisfy a Part B stack-validation claim.
 ### 11. `setup.sh update` (self-update) — live scenario (added 2026-08-05, issue #1391)
 
 **Confirmed gap:** Part A's `setup-cli-simulation.sh` only exercises the `.env`-migration
-*logic* (Phase 2/2b); no Part B scenario has ever brought up a real stack and run a real
-`setup.sh update` against it. The real mechanism was traced in full against current
-`current_dev` code (`cmd_update()`/`perform_stack_update_flow()`, `setup.sh:4139-4207`):
+*logic* (Phase 2/2b); no Part B scenario had ever brought up a real stack and run a real
+`setup.sh update` against it, until §12 below closed part of that gap for real
+(2026-08-05/2026-08-06, issue #1391) — see that section for what is now actually
+executed rather than merely recommended. The real mechanism was traced in full against
+current `current_dev` code (`cmd_update()`/`perform_stack_update_flow()`):
 pause the convergence timer, re-run the asset-population step
 (`install_quickstart_compose_assets()` — an update also refreshes these assets, not just a
 fresh install), take a pre-update rollback backup (`cmd_backup --config`), migrate `.env`
 and re-validate the Compose config, `docker compose pull`, re-validate again, then apply
-the update in a fixed order (`apply_stack_update_ordered()`, `setup.sh:4080-4131`): every
+the update in a fixed order (`apply_stack_update_ordered()`): every
 non-UI service first with a 180s health gate, then `ui` last with a 120s gate. Any failure
 anywhere in this sequence triggers an automatic `rollback_stack_update()`
-(`setup.sh:4050-4068`) that restores the pre-update backup. **Confirmed by direct code
+that restores the pre-update backup. **Confirmed by direct code
 reading: no `docker compose down -v`/`--volumes` appears anywhere in this entire
 update/rollback path** — only `up -d --remove-orphans` — so named volumes and bind mounts
 are never destroyed by this flow's own design.
 
-**Recommended live scenario (documented here, not yet executed — see Coverage
-Assessment):**
+**Recommended live scenario (documented here; step 6's rollback negative control is now
+executed for real — see §12 below — the remaining steps are not yet executed, see
+Coverage Assessment):**
 1. Bring up a real stack via the `setup.sh install` sequence in `### 1` above.
 2. Record each service's image digest (`docker inspect <image> --format
    '{{.Id}}'`) and `StartedAt` before updating.
@@ -666,6 +669,89 @@ Assessment):**
 6. As a negative control: force a health-gate failure partway through (e.g. a deliberately
    broken image tag for one non-UI service) and confirm `rollback_stack_update()` actually
    fires and restores the pre-update state — a check that can't fail is not a check.
+   **Executed for real, 2026-08-05/2026-08-06, issue #1391 — see §12 below**: a
+   deliberately-injected real regression (`docker-compose.override.yml` breaking a
+   previously-healthy service's own healthcheck) reproduced this exact negative
+   control end-to-end, including the actual `rollback_stack_update()` fire and a
+   confirmed restore.
+
+### 12. Update health gate — pre-existing failure baseline (not a regression)
+
+Concrete, already-executed proof of part of §11 above — specifically its step 6
+negative control (force a health-gate failure, confirm `rollback_stack_update()`
+fires) — plus a second, real regression this fix's own live testing found and
+closed that §11's original recommendation did not anticipate: the gate used to
+fail (and roll back) on **any** currently-unhealthy service, not only a genuine
+regression caused by the update itself.
+
+Real incident (issue #1391, post-merge verification pass, 2026-08-05): `setup.sh
+update`'s post-update health gate (`wait_for_stack_health`/
+`apply_stack_update_ordered`) used to fail on **any** currently-unhealthy non-UI
+service, with no way to distinguish "this service regressed because of what the
+update just changed" from "this service was already broken before the update
+started, for a reason unrelated to the update." Reproduced twice, deterministically,
+end-to-end on a live running stack: a real install with `ntp` enabled came up with
+`ntp` permanently crash-looping (a known, already-tracked environment limitation —
+issue #1296, this project's self-hosted LXC runners withhold real `CAP_SYS_TIME`
+clock-adjustment from nested Docker containers) while every other service was
+healthy; running `setup.sh update` against that stack rolled the **entire stack**
+back both times, purely because of `ntp`, even though nothing the update changed was
+responsible for `ntp`'s failure. Real-world consequence: an operator whose
+environment can't make an opt-in service healthy (`ntp`, or similarly `dhcp`/
+`dhcp-proxy`) could never again apply **any** update — including unrelated security
+fixes to `proxy`/`dns`/`ui` — without first manually disabling the broken optional
+service, and nothing in the failure output told them which service was actually
+blocking the gate.
+
+Fixed by `capture_stack_health_baseline()`, called from `perform_stack_update_flow`
+right after `_UPDATE_ENV_FILE`/`_UPDATE_COMPOSE_FILES` are set up — **before**
+`sync_repo_to_default_branch`, `install_quickstart_compose_assets`, or
+`cmd_backup --config` run, not merely before `apply_stack_update_ordered` recreates
+a container. **This placement is itself a real finding from live testing, worth
+recording so a future validator does not reintroduce the same subtlety**: an
+earlier version of this fix captured the baseline later, inside
+`apply_stack_update_ordered`, and looked correct under bats' fake-`docker` unit
+coverage — but a real end-to-end reproduction caught it being too late in practice.
+`cmd_backup --config`'s own "stop the whole stack for a consistent backup, then
+restart it" cycle already restarts every container using whatever compose/script
+content `sync_repo_to_default_branch`/`install_quickstart_compose_assets` just
+refreshed (by design — see the latter's own comment about copied quickstart
+installs using current container wiring "during the whole update"). A compose-level
+regression (e.g. a changed healthcheck) therefore already gets baked into a real
+container recreate during *that* restart, before the later capture point could ever
+see the true pre-update state — confirmed live when a deliberately-injected `nats`
+regression (forcing its real, previously-passing healthcheck to always fail via a
+`docker-compose.override.yml`) was wrongly classified as "pre-existing" instead of a
+regression on the first live verification pass, and correctly caught only after
+moving the capture to this earlier point.
+`capture_stack_health_baseline` samples each named service's health
+`_UPDATE_HEALTH_BASELINE_SAMPLES` times, a few seconds apart, and only records it as
+baseline-healthy if every sample agrees — a single sample is not reliable against a
+genuinely crash-looping container, whose Docker-reported state can transiently read
+"running"/"healthy" for an instant between one restart attempt and the next crash a
+few seconds later. `wait_for_stack_health` then fails the gate only when a service
+that **was** baseline-healthy (or has no baseline at all — a brand-new service the
+update itself introduces, or a fresh install with no prior state to compare
+against) is unhealthy afterward; a service already unhealthy before the update is
+not blocked on, and is named explicitly in a `print_warn` rather than silently
+ignored. A real regression (healthy → unhealthy) still fails the gate and still
+triggers `rollback_stack_update` exactly as before — this scenario's whole point is
+narrowing the failure condition to genuine regressions, not weakening the gate
+itself.
+
+| What to check | How to check it for real | Pass/fail |
+|---|---|---|
+| An update against a stack with an opt-in service already unhealthy pre-update (e.g. `ntp` crash-looping per issue #1296) no longer rolls back | Bring up a real stack with `ntp` enabled on an LXC-hosted runner (or any environment where it's known to crash-loop), confirm it stays unhealthy, then run a real `setup.sh update` against the stack and confirm it completes and reports `Proceeding despite service(s) unhealthy before this update started too: ntp` rather than rolling back | Fail if the update still rolls back solely because of the pre-existing, unrelated `ntp` failure |
+| A genuine regression (a service healthy before the update, unhealthy after) still rolls the stack back | Bring up a real stack with every non-UI service healthy, drop in a `docker-compose.override.yml` that makes one previously-healthy service (not `proxy`/`dns`, to keep `verify_stack_functional_health`'s functional probe out of the result) fail its healthcheck/command on recreate, run `setup.sh update`, confirm it reports `Service(s) regressed from healthy to unhealthy during this update: <service>` and rolls back via `rollback_stack_update` | Fail if the update proceeds despite the real regression, or the rollback does not restore the pre-update backup |
+| `tests/bats/setup_update_health_baseline.bats` (deterministic, fake-`docker`/`dc_update`, no real Docker daemon needed) | `bats tests/bats/setup_update_health_baseline.bats` (build-tools container) — covers both directions above plus the flapping-single-sample false-positive guard and the no-baseline/fresh-install fail-closed default | Fail if any of the 9 cases fail |
+
+Not yet covered by this scenario (recorded honestly rather than silently assumed):
+whether an operator-facing override flag (e.g. `setup.sh update
+--ignore-unhealthy=<service>`) should exist for a baseline-unhealthy service that is
+NOT opt-in/profile-gated, and whether the update should warn more loudly (beyond the
+`print_warn` line above) when it proceeds with a known-broken service still present —
+both remain open questions for issue #1391's still-deferred systematic Part B
+rewrite, not resolved by this scenario.
 
 ---
 
@@ -889,9 +975,13 @@ explicit pass:**
   real `setup.sh install` bring-up sequence (§1 above) has a concrete, code-verified
   recommended procedure (reusing `scripts/setup-cli-simulation.sh`'s own `expect`
   mechanism) but has not itself been executed as part of this pass; (5) the
-  `setup.sh update` live scenario (§11 above) likewise has a concrete, code-verified
-  procedure (including the negative-control rollback test) but has not been executed.
-  Each of these needs a real running stack and real evidence, not reasoning, before it
+  `setup.sh update` live scenario (§11 above) has a concrete, code-verified
+  procedure; its step 6 negative-control rollback test (and, going beyond what §11's
+  original steps anticipated, the new pre-existing-failure-forgiveness behavior
+  documented in §12) **has since been executed for real** (2026-08-05/2026-08-06,
+  issue #1391's health-gate fix) — steps 1-5 (digest/`StartedAt`/cache-content checks
+  across a normal, non-failing update) remain not yet executed. Each of the still-open
+  items above needs a real running stack and real evidence, not reasoning, before it
   can be recorded as closed — see issue #1391 for the full remaining scope and the
   explicit decision to split this into a separate live-stack milestone rather than
   compress it into this pass.
