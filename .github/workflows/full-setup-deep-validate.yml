@@ -136,6 +136,7 @@ jobs:
       dhcp: ${{ steps.plan.outputs.dhcp }}
       dhcp_proxy: ${{ steps.plan.outputs.dhcp_proxy }}
       ntp: ${{ steps.plan.outputs.ntp }}
+      syslog: ${{ steps.plan.outputs.syslog }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -238,6 +239,12 @@ jobs:
           # touches services/ntp/ must be treated as touched here too,
           # rather than silently backfilled from the base commit.
           NTP_TOUCHED: ${{ needs.plan.outputs.ntp }}
+          # #1428: syslog joins the touched map the same way ntp did in
+          # #1296 -- ensure-pr-staging-images.sh now includes syslog in
+          # full_setup_services, so a PR that actually touches
+          # services/syslog/ must be treated as touched here too, rather
+          # than silently backfilled from the base commit.
+          SYSLOG_TOUCHED: ${{ needs.plan.outputs.syslog }}
           # #808/#1254/#1255: this PR's own base commit. Needed both to prove
           # the back-fill source image was actually built from it (or later)
           # before backfilling an untouched service, AND (since #1254/#1255)

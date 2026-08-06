@@ -3,10 +3,10 @@
 #
 # Per-service change detection for the full-setup DEEP validation gate
 # (#715). Emits `key=value` lines (proxy/dns_image/ui/watchdog/dhcp/
-# dhcp_proxy/ntp/build_tools/deploy/scripts/setup_runtime/workflow/docs_only/
-# should_run) describing what a PR actually changed, so the deep suite can
-# (a) decide whether to run at all and (b) drive the same fail-closed
-# staging-tag guard build-push.yml uses.
+# dhcp_proxy/ntp/syslog/build_tools/deploy/scripts/setup_runtime/workflow/
+# docs_only/should_run) describing what a PR actually changed, so the deep
+# suite can (a) decide whether to run at all and (b) drive the same
+# fail-closed staging-tag guard build-push.yml uses.
 #
 # ntp (#1296, 2026-07-30): added alongside dhcp/dhcp_proxy so a PR that
 # actually touches services/ntp/ is correctly treated as "touched" by
@@ -15,6 +15,10 @@
 # class dhcp/dhcp_proxy were fixed for in #1305. See that script's own
 # full_setup_services=(...) comment for why ntp itself now belongs in the
 # full-setup service list.
+#
+# syslog (#1428, 2026-08): added the same way, for the same reason, once the
+# combined fluent-bit+syslog-ng first-party image (services/syslog/) joined
+# the build matrix.
 #
 # SOURCE OF TRUTH NOTE: the path-to-service rules mirror the classifier
 # build-push.yml's `detect-changes` job runs. As of #819 that job no longer
@@ -236,6 +240,13 @@ emit() {
     output_bool "dhcp" touches_prefix "services/dhcp/"
     output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
     output_bool "ntp" touches_prefix "services/ntp/"
+    # syslog (issue #1428): mirrors classify-image-impact.sh's own new
+    # syslog output (see SOURCE OF TRUTH NOTE above) -- needed so
+    # ensure-pr-staging-images.sh's fail-closed guard can tell a PR that
+    # actually touched services/syslog/ apart from one that did not,
+    # instead of always falling through to its untouched-service backfill
+    # path for this service.
+    output_bool "syslog" touches_prefix "services/syslog/"
     output_bool "build_tools" touches_prefix "tools/build-tools/"
     output_bool "deploy" touches_prefix "deploy/"
     # `scripts`/`setup_runtime` deliberately stay a blunt, unnarrowed
