@@ -91,13 +91,13 @@ now_epoch="$(date -u +%s)"
 # repo-wide, so a state looked up while processing "proxy" is still valid
 # while processing "dns" moments later) -- kept as a plain top-level
 # associative array (not per-service) so this exact cross-service reuse
-# happens automatically via gcps_pr_lookup_state's nameref parameter.
-# shellcheck disable=SC2034 # it IS used -- passed by bare name (not "$pr_state_cache")
-# to gcps_pr_lookup_state below, which binds it via `local -n cache_ref=...`.
-# The check runs per-file (see build-push.yml's shellcheck job: `xargs
-# shellcheck`, no -x), so it never sees scripts/lib/gc-pr-staging-images.sh's
-# nameref consumer and can't trace this indirect-by-name usage across the
+# happens automatically via gcps_pr_lookup_state's nameref parameter. It IS
+# used -- passed by bare name (not "$pr_state_cache") to gcps_pr_lookup_state
+# below, which binds it via `local -n cache_ref=...`. build-push.yml's static
+# analysis job runs per-file with no cross-file (-x) mode, so it never sees
+# that indirect-by-name consumer and can't trace this usage across the
 # source boundary.
+# shellcheck disable=SC2034
 declare -A pr_state_cache=()
 
 # A single ambiguous PR-state lookup (LOOKUP_FAILED) is deliberately safe
@@ -590,11 +590,12 @@ process_service() {
 # at the bottom of this file is what decides whether main ever actually
 # runs.
 main() {
-  # No apostrophes or single quotes in this message (shellcheck SC1011):
-  # shellcheck misparses an apostrophe inside a ${var:?message} expansion as
-  # opening a single-quoted string, which then desyncs on the next real
-  # quote character it meets -- this message was rewritten to avoid both, not
-  # just to silence the warning; the actual bash behavior was never affected.
+  # No apostrophes or single quotes in this message (shellcheck SC1011): an
+  # apostrophe inside a ${var:?message} expansion gets misparsed by static
+  # analysis as opening a single-quoted string, which then desyncs on the
+  # next real quote character it meets -- this message was rewritten to
+  # avoid both, not just to silence the warning; the actual bash behavior
+  # was never affected.
   : "${GH_TOKEN:?GH_TOKEN (the GHCR_PACKAGE_DELETE_PAT secret configured on this repository) is required -- see the calling workflow, specifically its Check for GHCR deletion credentials step, which must gate whether this script ever runs.}"
 
   # AG-CI-001: self-hosted runners (this job runs on lancache-light, not
