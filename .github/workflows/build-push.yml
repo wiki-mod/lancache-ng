@@ -201,6 +201,7 @@ jobs:
       dhcp: ${{ steps.filter.outputs.dhcp }}
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
       ntp: ${{ steps.filter.outputs.ntp }}
+      syslog: ${{ steps.filter.outputs.syslog }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       workflow: ${{ steps.filter.outputs.workflow }}
@@ -5114,6 +5115,13 @@ jobs:
             platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: syslog
+            context: services/syslog
+            build_contexts: ""
+            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
+            platform: linux/amd64
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5169,6 +5177,13 @@ jobs:
             context: services/ntp
             build_contexts: ""
             description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+            platform: linux/arm64
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: syslog
+            context: services/syslog
+            build_contexts: ""
+            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
             platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -6110,6 +6125,10 @@ jobs:
             context: services/ntp
             build_contexts: ""
             description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+          - service: syslog
+            context: services/syslog
+            build_contexts: ""
+            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -6160,6 +6179,7 @@ jobs:
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
+              syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -6180,7 +6200,11 @@ jobs:
             # with a hand-rolled copy of this exact same three-part verification, built
             # independently and in parallel with this job before the duplication was noticed;
             # folding it into the shared allowlist removes that copy instead of keeping two
-            # implementations of the same check in sync by hand.
+            # implementations of the same check in sync by hand. syslog (issue #1428) is NOT
+            # allowlisted here -- widening Step 4's reuse allowlist is a separate, maintainer-
+            # gated decision (see #1095); the `*) reuse="false"` fallback below already gives
+            # syslog the same safe default every not-yet-allowlisted service gets: always a
+            # real rebuild, never a silent retag.
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
               dns) reuse="$REUSE_DNS" ;;
@@ -6954,6 +6978,10 @@ jobs:
             context: services/ntp
             build_contexts: ""
             description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+          - service: syslog
+            context: services/syslog
+            build_contexts: ""
+            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -6999,6 +7027,7 @@ jobs:
               dhcp) should_build="${{ needs['detect-changes'].outputs.dhcp }}" ;;
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
+              syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -7013,7 +7042,9 @@ jobs:
             # Mirrors build's own (the amd64 leg) identical branch here -- see that job's comment
             # for the full Step 4/#1095 rationale, including why build-tools (issue #1290) is
             # folded into this same allowlisted case statement instead of keeping its own
-            # separate hand-rolled copy of the same verification. Both legs must agree on
+            # separate hand-rolled copy of the same verification (and why syslog, issue #1428,
+            # is deliberately NOT added to this allowlist -- same reasoning as build's own copy).
+            # Both legs must agree on
             # should-build for the same commit: build-arm64's own "Retag unchanged service
             # image" step below only produces the linux/arm64 leg when this resolves to false,
             # exactly mirroring what build produces for linux/amd64 -- both read the SAME
@@ -7417,7 +7448,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
 
@@ -7525,7 +7556,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -7892,7 +7923,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
@@ -8412,7 +8443,12 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools stack
+          # syslog (issue #1428) added here explicitly: this SERVICES scalar is a
+          # plain space-separated env value, not a services=(...) bash array, so
+          # scripts/check-workflow-service-lists.sh's regex-based guard cannot see
+          # or enforce it -- missing it here would silently drop syslog from this
+          # release job's platform-coverage verification with no CI signal at all.
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -8449,7 +8485,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
