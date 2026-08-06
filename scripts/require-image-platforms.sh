@@ -48,7 +48,9 @@ fi
   || fail "$image did not expose any usable platform metadata."
 
 for expected in $(printf '%s\n' "$required_platforms" | tr ',' ' '); do
-  if ! printf '%s\n' "$discovered_platforms" | grep -Eq "^${expected}(/.*)?$"; then
+  # Here-string, not a live pipe into grep -q -- $discovered_platforms can
+  # list several platforms (issue #1377's repo-wide pipefail/SIGPIPE audit).
+  if ! grep -Eq "^${expected}(/.*)?$" <<<"$discovered_platforms"; then
     fail "$image is missing required platform $expected; discovered: ${discovered_platforms//$'\n'/, }"
   fi
 done
