@@ -487,19 +487,28 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 
 ## Cache Warming
 
-Separate container (`services/warmer`) with `steamcmd`.
+**Corrected 2026-08-05 (issue #1391 doc-sweep audit): this section previously described Cache
+Warming in the present tense as an already-shipped feature, contradicting this document's own
+services table above ("Cache Warmer | not implemented ... Design-only, not shipped: no
+`services/` code, no Compose service, nothing runnable exists yet under this name"), which is
+the accurate statement — confirmed directly against the real tree (`services/warmer/` does not
+exist; no `warmer`/`steamcmd` service in any `deploy/*/docker-compose.yml`).** The design below
+describes the current *plan*, not a shipped capability — see
+[docs/design-steam-prefill.md](design-steam-prefill.md) (issue #816, overlapping #871) for the
+authoritative, up-to-date design discussion and its open maintainer decisions before relying on
+any detail here.
 
-**Workflow:**
+**Planned workflow** (not yet implemented — design-only):
 1. User enters Steam app ID
 2. `steamcmd` fetches depot manifest (anonymous for F2P, optional with account for paid games)
 3. Chunk URLs fetched through local proxy → cached
 4. Progress displayed live in Admin UI (total chunks / completed / MB/s)
 
-**Steam account:** optional via env var (`STEAM_USER`, `STEAM_PASS`) — never in repo, never in image.
+**Steam account:** planned to be optional via env var (`STEAM_USER`, `STEAM_PASS`) — never in repo, never in image.
 
-**Tracking:** which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
+**Tracking:** planned: which app IDs were warmed + which CDN URLs belong to them → basis for targeted purging.
 
-Epic / GOG: not supported.
+Epic / GOG: not planned to be supported.
 
 ## Cache Retention & Cleanup
 
