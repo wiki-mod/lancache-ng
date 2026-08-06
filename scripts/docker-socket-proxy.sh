@@ -83,4 +83,49 @@ frontend dockerfrontend
     default_backend dockerbackend
 EOF
 
+# Issue #1415: LANCACHE_CONTAINER_SUFFIX (default empty; only ever set by CI
+# -- see deploy/quickstart/docker-compose.yml's own top-of-file comment for
+# why) widens the allowlist generated above, at container startup, to also
+# accept THIS run's actual suffixed container names. This only ever touches
+# the GENERATED /tmp file below, never this script's own checked-in source
+# text above: build-push.yml's "socket_proxy_script" step and
+# scripts/check-naming-consistency.sh both grep this script's static source
+# for the exact literal fixed names, so leaving that text untouched keeps
+# both checks passing unchanged regardless of whether a suffix is active.
+LANCACHE_CONTAINER_SUFFIX="${LANCACHE_CONTAINER_SUFFIX:-}"
+if [ -n "$LANCACHE_CONTAINER_SUFFIX" ]; then
+    # Fail closed (AG-OP-008/AG-VAL-002): reject anything but a plain
+    # alphanumeric/hyphen token before it ever reaches a sed replacement
+    # string -- an unexpected value here must not be able to inject sed or
+    # HAProxy regex metacharacters into the generated allowlist.
+    case "$LANCACHE_CONTAINER_SUFFIX" in
+        *[!A-Za-z0-9-]*)
+            echo "FATAL: LANCACHE_CONTAINER_SUFFIX='$LANCACHE_CONTAINER_SUFFIX' contains characters other than [A-Za-z0-9-]; refusing to generate a socket-proxy allowlist that could be corrupted by it." >&2
+            exit 1
+            ;;
+    esac
+    # Each pattern below is anchored with a trailing \([^-]\) capture, so a
+    # shorter name (e.g. lancache-dhcp) can never match inside a longer one
+    # that starts with it (e.g. lancache-dhcp-proxy): the character right
+    # after "dhcp" there is a literal "-", which [^-] rejects. This makes
+    # every substitution mutually exclusive by construction, so the order
+    # below (kept longest-first for readability only) does not affect
+    # correctness. Covers every one of the 11 names the allowlist's own acl
+    # lines above reference; watchdog/docker-socket-proxy/retention are
+    # deliberately absent, matching the allowlist's own documented scope.
+    sed -i \
+        -e "s/lancache-dhcp-proxy\([^-]\)/lancache-dhcp-proxy${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-dhcp-probe\([^-]\)/lancache-dhcp-probe${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-dhcp\([^-]\)/lancache-dhcp${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-dns-standard\([^-]\)/lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-dns-ssl\([^-]\)/lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-proxy\([^-]\)/lancache-proxy${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-nats\([^-]\)/lancache-nats${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-ntp\([^-]\)/lancache-ntp${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-ui\([^-]\)/lancache-ui${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-netdata\([^-]\)/lancache-netdata${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        -e "s/lancache-syslog\([^-]\)/lancache-syslog${LANCACHE_CONTAINER_SUFFIX}\1/g" \
+        /tmp/lancache-haproxy.cfg
+fi
+
 exec haproxy -f /tmp/lancache-haproxy.cfg
