@@ -337,3 +337,87 @@ make_log_file() {
         return 1
     }
 }
+
+# #849 bug-hunt finding observability.md#21: before this fix, the
+# still-over-budget branch stamped $now unconditionally -- identical to the
+# converged/success branch -- so the top-of-function 86400s rate-limit gate
+# made the very retry the WARNING log line promises wait up to a full 24h,
+# even though syslog-ng could rotate today's active (currently protected)
+# file and make it prunable within minutes. Today's file alone exceeding the
+# budget guarantees the size pass ends still-over-budget no matter what else
+# it prunes, deterministically exercising that branch.
+@test "maybe_prune_syslog still-exceeded branch back-dates the stamp for a short retry instead of a full 24h" {
+    local today; today="$(date -u +%Y%m%d).log"
+    local active_path="$log_root/hostA/$today"
+    truncate -s 2000M "$active_path"
+    touch -d "-1 hours" "$active_path"
+
+    local before; before=$(date +%s)
+    SYSLOG_MAX_GB=1 maybe_prune_syslog
+    local after; after=$(date +%s)
+
+    [ -f "$SYSLOG_PRUNE_STAMP" ]
+    local stamp; stamp=$(cat "$SYSLOG_PRUNE_STAMP")
+    # Default SYSLOG_PRUNE_RETRY_COOLDOWN is 3600s -- the stamp must be
+    # back-dated by (86400 - 3600) seconds from "now", not equal to "now"
+    # itself (which is what the pre-fix behavior produced and this test
+    # would catch as a regression: a bare `$stamp == $now` would fail the
+    # upper-bound assertion below by roughly 82800 seconds).
+    local expected_min=$(( before - 86400 + 3600 ))
+    local expected_max=$(( after - 86400 + 3600 ))
+    [ "$stamp" -ge "$expected_min" ]
+    [ "$stamp" -le "$expected_max" ]
+}
+
+# Complements the test above: the ordinary converged path must be completely
+# unaffected by the still-exceeded branch's back-dating logic -- a fresh,
+# full-strength $now stamp, exactly as before this fix.
+@test "maybe_prune_syslog stamps the full current time when the size budget converges" {
+    make_log_file old.log 1 40
+
+    local before; before=$(date +%s)
+    maybe_prune_syslog
+    local after; after=$(date +%s)
+
+    local stamp; stamp=$(cat "$SYSLOG_PRUNE_STAMP")
+    [ "$stamp" -ge "$before" ]
+    [ "$stamp" -le "$after" ]
+}
+
+# SYSLOG_PRUNE_RETRY_COOLDOWN is operator-configurable (mirrors every other
+# numeric knob's own env-var override convention in this file), and clamped
+# to the normal 86400s cadence as an upper bound so this branch can never
+# retry LESS often than the already-converged success path above.
+@test "maybe_prune_syslog honors a custom SYSLOG_PRUNE_RETRY_COOLDOWN when still over budget" {
+    local today; today="$(date -u +%Y%m%d).log"
+    local active_path="$log_root/hostA/$today"
+    truncate -s 2000M "$active_path"
+    touch -d "-1 hours" "$active_path"
+
+    local before; before=$(date +%s)
+    SYSLOG_MAX_GB=1 SYSLOG_PRUNE_RETRY_COOLDOWN=120 maybe_prune_syslog
+    local after; after=$(date +%s)
+
+    local stamp; stamp=$(cat "$SYSLOG_PRUNE_STAMP")
+    local expected_min=$(( before - 86400 + 120 ))
+    local expected_max=$(( after - 86400 + 120 ))
+    [ "$stamp" -ge "$expected_min" ]
+    [ "$stamp" -le "$expected_max" ]
+}
+
+@test "maybe_prune_syslog clamps a SYSLOG_PRUNE_RETRY_COOLDOWN above 86400 to 86400 instead of retrying slower than success" {
+    local today; today="$(date -u +%Y%m%d).log"
+    local active_path="$log_root/hostA/$today"
+    truncate -s 2000M "$active_path"
+    touch -d "-1 hours" "$active_path"
+
+    local before; before=$(date +%s)
+    SYSLOG_MAX_GB=1 SYSLOG_PRUNE_RETRY_COOLDOWN=999999 maybe_prune_syslog
+    local after; after=$(date +%s)
+
+    local stamp; stamp=$(cat "$SYSLOG_PRUNE_STAMP")
+    # Clamped to 86400 means "back-dated by (86400 - 86400) == 0", i.e. the
+    # same as a fresh $now stamp.
+    [ "$stamp" -ge "$before" ]
+    [ "$stamp" -le "$after" ]
+}

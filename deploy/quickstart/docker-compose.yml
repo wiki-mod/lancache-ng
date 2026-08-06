@@ -1160,13 +1160,21 @@ services:
         # services/ directory to bind-mount services/syslog/netdata-web_log.conf
         # from (same constraint as netdata.conf itself, above), so the job
         # config is generated inline instead. Keep this content byte-identical
-        # to services/syslog/netdata-web_log.conf if that file ever changes.
+        # to services/syslog/netdata-web_log.conf if that file ever changes
+        # -- now mechanically enforced by scripts/check-logging-matrix.sh
+        # (#849 bug-hunt finding observability.md#16), since this exact drift
+        # already happened silently once: this heredoc still carried a
+        # `log_type: nginx` field that services/syslog/netdata-web_log.conf's
+        # own header explains was removed 2026-07-31 for causing a real
+        # "check failed: failed to create parser" job failure -- prod (which
+        # bind-mounts the real file directly) got that fix automatically;
+        # quickstart's independent inline copy did not, silently regressing
+        # this collector for every quickstart install until this fix.
         mkdir -p /etc/netdata/go.d
         cat > /etc/netdata/go.d/web_log.conf <<'CONF'
         jobs:
           - name: nginx_proxy
             path: /var/log/lancache/nginx-proxy.log
-            log_type: nginx
         CONF
         exec /usr/sbin/run.sh
     volumes:
