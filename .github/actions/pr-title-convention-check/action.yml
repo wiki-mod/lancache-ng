@@ -51,6 +51,7 @@ runs:
         # yet. Set the PR_TITLE_LINT_MODE repository variable to "block" once ready for full
         # enforcement, with no code change needed.
         PR_TITLE_LINT_MODE: ${{ inputs.pr-title-lint-mode }}
+        BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
       run: |
         set -euo pipefail
         pr_title="$(cat /tmp/pr-title-live.txt)"
@@ -62,5 +63,5 @@ runs:
           -e PR_DRAFT \
           -e PR_AUTHOR \
           -e PR_TITLE_LINT_MODE \
-          "${{ inputs.build-tools-image }}" \
+          "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
           bash scripts/check-pr-title-convention.sh

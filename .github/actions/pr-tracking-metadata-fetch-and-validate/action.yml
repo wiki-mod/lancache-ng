@@ -67,6 +67,7 @@ runs:
         # with the right explanation instead of implying the secret is
         # simply unconfigured -- see check-pr-tracking-metadata.sh.
         PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
+        BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
       run: |
         set -euo pipefail
         # PR_LABELS_JSON now names a live-fetched file (mounted below),
@@ -85,5 +86,5 @@ runs:
           -e REPO \
           -e GH_TOKEN \
           -e PR_IS_FORK \
-          "${{ inputs.build-tools-image }}" \
+          "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
           bash scripts/check-pr-tracking-metadata.sh
