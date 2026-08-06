@@ -35,7 +35,11 @@ runs:
       # genuinely had labels and a milestone set was reported as having
       # neither). Fetched live via `gh pr view` on the runner instead, then
       # threaded into the container the same way the event-derived values
-      # used to be.
+      # used to be. Uses `github.token`, not `secrets.GITHUB_TOKEN` as both original jobs
+      # had it: a composite action cannot resolve `secrets.*` directly, and GitHub's own
+      # docs state `github.token` is "functionally equivalent to the GITHUB_TOKEN secret"
+      # -- read-only access to the PR is all this call needs, which the default scope
+      # covers either way.
       id: live-metadata
       shell: bash
       env:

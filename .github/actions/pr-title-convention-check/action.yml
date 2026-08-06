@@ -28,6 +28,10 @@ runs:
       # declared event types) can leave that snapshot stale (same class of bug found and
       # fixed in pr-template-check and pr-tracking-metadata-check, 2026-07-16). A live `gh
       # pr view` fetch is always current regardless of why/when this job runs.
+      # Uses `github.token`, not `secrets.GITHUB_TOKEN` as both original jobs had it: a
+      # composite action cannot resolve `secrets.*` directly, and GitHub's own docs state
+      # `github.token` is "functionally equivalent to the GITHUB_TOKEN secret" -- read-only
+      # access to the PR is all this call needs, which the default scope covers either way.
       id: live-title
       shell: bash
       env:

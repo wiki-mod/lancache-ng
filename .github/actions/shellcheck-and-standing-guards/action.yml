@@ -64,7 +64,11 @@ runs:
       # resolve each pinned action's own action.yml -- runs inside the
       # build-tools container per AG-VAL-016 (curl must not be a host-local
       # tool). GH_TOKEN just raises the API rate limit; this also works fine
-      # unauthenticated at this repo's current pin count.
+      # unauthenticated at this repo's current pin count. Uses `github.token`
+      # here, not `secrets.GITHUB_TOKEN` as both original jobs had it: a
+      # composite action cannot resolve `secrets.*` directly, and GitHub's own
+      # docs state `github.token` is "functionally equivalent to the
+      # GITHUB_TOKEN secret" -- a documented equivalence, not an approximation.
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
