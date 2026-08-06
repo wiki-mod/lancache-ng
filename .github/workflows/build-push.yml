@@ -548,62 +548,18 @@ jobs:
             exit 0
           fi
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
-      - name: Fetch current labels/milestone live
-        # Same class of bug found and fixed in pr-template-check (2026-07-16):
-        # github.event.pull_request.labels/.milestone is a snapshot taken when
-        # THIS event fired, and can go stale (confirmed live: a PR that
-        # genuinely had labels and a milestone set was reported as having
-        # neither). Fetched live via `gh pr view` on the runner instead, then
-        # threaded into the container the same way the event-derived values
-        # used to be.
-        id: live-metadata
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
-          milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
-          {
-            echo "labels_file=/tmp/pr-labels-live.json"
-            echo "milestone_title=$milestone_title"
-          } >> "$GITHUB_OUTPUT"
-      - name: Validate labels, milestone, and project-board placement
-        env:
-          PR_LABELS_JSON: ${{ steps.live-metadata.outputs.labels_file }}
-          PR_MILESTONE_TITLE: ${{ steps.live-metadata.outputs.milestone_title }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          # GitHub does not pass repository secrets (other than the
-          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
-          # forked repository, so GH_TOKEN above is empty for every external
-          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
-          # Telling the script whether this run is from a fork lets it warn
-          # with the right explanation instead of implying the secret is
-          # simply unconfigured -- see check-pr-tracking-metadata.sh.
-          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-        run: |
-          set -euo pipefail
-          # PR_LABELS_JSON now names a live-fetched file (mounted below),
-          # not an inline JSON string -- read its content before handing it
-          # to the container as an env var, same shape the script always
-          # expected.
-          labels_json="$(cat "$PR_LABELS_JSON")"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_LABELS_JSON="$labels_json" \
-            -e PR_MILESTONE_TITLE \
-            -e PR_DRAFT \
-            -e PR_NUMBER \
-            -e REPO \
-            -e GH_TOKEN \
-            -e PR_IS_FORK \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-tracking-metadata.sh
+
+      # Two of this job's remaining steps extracted into a composite action (issue #1095
+      # duplication finding): this job and pr-tracking-metadata-check-hosted below used to
+      # carry these two steps as identical duplicated text. "Auto-assign Dependabot PR
+      # milestone" above deliberately stays here rather than moving into the composite
+      # action -- see .github/actions/pr-tracking-metadata-fetch-and-validate's own
+      # comment for why (its warning-path run: text genuinely differs between the two
+      # jobs, not just job-level metadata).
+      - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
   pr-tracking-metadata-check-hosted:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
@@ -663,54 +619,17 @@ jobs:
             exit 0
           fi
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
-      - name: Fetch current labels/milestone live
-        # See the primary pr-tracking-metadata-check job's identical step for
-        # why this fetches live via `gh pr view` instead of trusting
-        # github.event.pull_request.labels/.milestone.
-        id: live-metadata
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json labels -q '.labels' > /tmp/pr-labels-live.json
-          milestone_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json milestone -q '.milestone.title // ""')"
-          {
-            echo "labels_file=/tmp/pr-labels-live.json"
-            echo "milestone_title=$milestone_title"
-          } >> "$GITHUB_OUTPUT"
-      - name: Validate labels, milestone, and project-board placement
-        env:
-          PR_LABELS_JSON: ${{ steps.live-metadata.outputs.labels_file }}
-          PR_MILESTONE_TITLE: ${{ steps.live-metadata.outputs.milestone_title }}
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          REPO: ${{ github.repository }}
-          GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
-          # GitHub does not pass repository secrets (other than the
-          # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
-          # forked repository, so GH_TOKEN above is empty for every external
-          # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
-          # Telling the script whether this run is from a fork lets it warn
-          # with the right explanation instead of implying the secret is
-          # simply unconfigured -- see check-pr-tracking-metadata.sh.
-          PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
-        run: |
-          set -euo pipefail
-          labels_json="$(cat "$PR_LABELS_JSON")"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_LABELS_JSON="$labels_json" \
-            -e PR_MILESTONE_TITLE \
-            -e PR_DRAFT \
-            -e PR_NUMBER \
-            -e REPO \
-            -e GH_TOKEN \
-            -e PR_IS_FORK \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-tracking-metadata.sh
+
+      # Same composite action as the self-hosted pr-tracking-metadata-check job above --
+      # see .github/actions/pr-tracking-metadata-fetch-and-validate for the full
+      # rationale on the two steps it runs (and why "Auto-assign Dependabot PR
+      # milestone" above stays duplicated instead of moving into it). This fallback job
+      # has no `needs:` of its own, so BUILD_TOOLS_IMAGE comes from "Select build-tools
+      # image" above instead of a shared job needs-output.
+      - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
   pr-title-convention-check:
     # Enforces AGENTS.md AG-GH-018: a PR title must follow this repo's Conventional-Commit
@@ -736,47 +655,15 @@ jobs:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Fetch current PR title live
-        # Same class of bug found and fixed in pr-template-check and
-        # pr-tracking-metadata-check (2026-07-16): github.event.pull_request
-        # .title is a snapshot taken when THIS event fired, and an edited
-        # title (without a new commit, which does not retrigger this
-        # workflow's declared event types) can leave that snapshot stale.
-        # A live `gh pr view` fetch is always current regardless of why/when
-        # this job runs.
-        id: live-title
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
-      - name: Validate PR title convention
-        env:
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          # Dependabot's own PR author identity -- see
-          # check-pr-title-convention.sh's dependabot[bot] exemption.
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          # Grace-period switch (see check-pr-title-convention.sh's header): unset (the default)
-          # currently means "warn", per the maintainer's 2026-07-23 decision on #850 -- a
-          # transitional grace period, not a permanent downgrade; a warn result is still a real
-          # AG-GH-018 violation that must be fixed before merge, it just does not hard-block CI
-          # yet. Set this optional repository variable to "block" once ready for full
-          # enforcement, with no code change needed.
-          PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
-        run: |
-          set -euo pipefail
-          pr_title="$(cat /tmp/pr-title-live.txt)"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_TITLE="$pr_title" \
-            -e PR_DRAFT \
-            -e PR_AUTHOR \
-            -e PR_TITLE_LINT_MODE \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-title-convention.sh
+
+      # Step content extracted into a composite action (issue #1095 duplication
+      # finding): this job and pr-title-convention-check-hosted below used to carry
+      # the identical steps twice. Job-level scheduling (needs/if/permissions) stays
+      # here -- a composite action cannot express those.
+      - uses: ./.github/actions/pr-title-convention-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          pr-title-lint-mode: ${{ vars.PR_TITLE_LINT_MODE }}
 
   pr-title-convention-check-hosted:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
@@ -806,35 +693,16 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      - name: Fetch current PR title live
-        # See the primary pr-title-convention-check job's identical step for
-        # why this fetches live via `gh pr view` instead of trusting
-        # github.event.pull_request.title.
-        id: live-title
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          set -euo pipefail
-          gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title > /tmp/pr-title-live.txt
-      - name: Validate PR title convention
-        env:
-          PR_DRAFT: ${{ github.event.pull_request.draft }}
-          PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-          PR_TITLE_LINT_MODE: ${{ vars.PR_TITLE_LINT_MODE }}
-        run: |
-          set -euo pipefail
-          pr_title="$(cat /tmp/pr-title-live.txt)"
-          docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            -e PR_TITLE="$pr_title" \
-            -e PR_DRAFT \
-            -e PR_AUTHOR \
-            -e PR_TITLE_LINT_MODE \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-pr-title-convention.sh
+
+      # Same composite action as the self-hosted pr-title-convention-check job above --
+      # see .github/actions/pr-title-convention-check for the full rationale. This
+      # fallback job has no `needs:`/permissions of its own beyond what's declared above,
+      # so BUILD_TOOLS_IMAGE comes from "Select build-tools image" above instead of a
+      # shared job needs-output.
+      - uses: ./.github/actions/pr-title-convention-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+          pr-title-lint-mode: ${{ vars.PR_TITLE_LINT_MODE }}
 
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
