@@ -900,6 +900,32 @@ omitted):**
   same PR can still resolve `github.sha`/the image tag to a superseded commit while
   the workflow reports success for the newer one). No dedicated tracking issue
   exists yet for the root cause itself.
+- **`proxy-ssl-mode-two-relay-dispatch-simulation.sh`'s negative control is a
+  documented, deliberate exception, not silently omitted (issue #1276/#1322,
+  2026-08-05).** This job's real positive-path assertions (dispatch-map content,
+  real depth-1 MITM handshake, real depth-2 passthrough handshake reaching the
+  actual distinct `backend-two-real` certificate, client-IP preservation,
+  healthcheck ports) are a committed, repeatable CI check, same as every other
+  entry in this document's "Well-covered" list above. What is deliberately NOT
+  automated is a live negative control (rebuilding a "pre-fix" proxy image and
+  asserting it reproduces the original hostname-mismatch bug): an earlier
+  version of this script computed a `git merge-base` against the base branch at
+  runtime to find that pre-fix reference, and it worked correctly only while the
+  fix lived solely on its own PR branch. Once that fix merged into `current_dev`,
+  the same computation had no stable, branch-independent pre-fix commit left to
+  find — it produced three different, unpredictable TLS errors across three
+  real CI runs on PRs unrelated to this fix (confirmed on #1425). This is a
+  structural limitation, not a resourcing gap: there is no git-history-relative
+  reference point that means "before this fix" once the fix is part of the base
+  branch's own history, for any future PR that inherits this permanently-running
+  test. The negative control was instead performed once, live, by hand, with
+  full `openssl s_client` output recorded in issue #1276's own comment thread —
+  matching how this project has proven every prior fix in this same family
+  (neither `proxy-standard-mode-sni-routing-simulation.sh` nor
+  `proxy-deep-wildcard-tls-simulation.sh` bakes a live negative control into its
+  permanently-running script either). The depth-2 real-backend-certificate
+  assertion that remains in the committed script carries the ongoing regression
+  signal: a pre-fix build cannot produce that certificate for that SNI at all.
 
 ---
 
