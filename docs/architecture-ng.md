@@ -251,47 +251,70 @@ is alert-only rather than part of the auto-restart list above.
 Kea, syslog-ng, fluent-bit, `ui`, `dhcp-proxy`, `ntp`, `netdata`, and
 `docker-socket-proxy` all have a real Docker healthcheck too (so
 `docker inspect`/`docker compose ps` and CI's own wait-for-healthy scripts
-can see it), but the watchdog daemon does not poll or restart any of those
-eight itself (issue #842's per-service decision, not an oversight; #1169
-only added the missing healthchecks themselves, it deliberately did not
-widen watchdog's own monitored-service list -- see #842):
+can see it). As of issue #842/#849 (2026-08-05), six of these eight --
+`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, `syslog` (fluent-bit), and
+`syslog-ng` -- are now **alert-only monitored** by
+`services/watchdog/src/main.rs`'s `resolve_alert_only_targets()`/
+`HealthReading::is_alert_ok()` in the Rust rewrite (never auto-restarted --
+see the maintainer's own #842 scope note on why blind auto-restart is not
+obviously the right recovery mechanism for every additional service).
+**This coverage is not live yet**: `services/watchdog/Dockerfile`'s
+`ENTRYPOINT` (and every `deploy/*/docker-compose.yml`'s `watchdog` service
+`command:` override) still runs the legacy `watchdog.sh`, which has no
+knowledge of these six at all -- see that crate's `lib.rs` module doc
+comment for exactly why the `ENTRYPOINT` swap is a separate, larger,
+not-yet-attempted follow-up (no Rust builder stage exists in the Dockerfile
+today). `ntp` (chrony) and `docker-socket-proxy` remain the only two of the
+eight with neither restart nor alert-only coverage in either
+implementation -- `docker-socket-proxy` for the chicken-and-egg reason its
+own bullet below explains (unchanged by this update); `ntp` simply wasn't
+named in #842's checklist and was deliberately left alone rather than
+added speculatively.
 
-- **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
-  adding either to watchdog's blind restart-on-unhealthy loop would need the
-  Docker socket proxy's allowlist (`scripts/docker-socket-proxy.sh`) widened
-  first -- `ui` has no allowlist entry at all today (a deliberate boundary
-  documented in `docs/naming-conventions.md`'s "Operator-visible
-  consistency" section: nothing currently calls the Docker API to manage it
-  by name), and `dhcp` is only allowlisted for `start`/`stop`
-  (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
-  Widening that allowlist is a security-relevant architectural change in its
-  own right, not a side effect of extending a monitored-container list, so
-  #842 left both out of scope for a follow-up PR to decide deliberately
-  rather than as a byproduct of this change.
-- **`dhcp-proxy` (dnsmasq), `ntp` (chrony), and `netdata`**: all three now
-  have a real Docker `healthcheck:` block (#1169; previously
-  `get_health()` would have read `.State.Health.Status` as absent ("none")
-  for all three, so adding any of them to the monitored list before #1169
-  would have been a silent no-op, not real coverage). Whether to actually
-  add them to watchdog's polled/auto-restarted list is still its own
-  separate scoping question (#842), deliberately not decided as a byproduct
-  of #1169 landing their healthchecks.
-- **`syslog` (fluent-bit) and `syslog-ng`**: `syslog` has no `container_name:`
-  set in any Compose file at all (Compose auto-generates one), so it cannot
-  be addressed by a fixed name the way every other allowlisted/monitored
-  container is; its own healthcheck (`fluent-bit -V`) only proves the binary
-  is intact, not that the tailing pipeline actually works (see the compose
-  comment next to that healthcheck). Both are also gated behind the
-  `logging` Compose profile -- on by default since issue #1343 for every
-  `setup.sh`-managed install (fresh wizard installs default the "Enable
-  central logging?" prompt to `Y`, and `setup.sh update` converges an
-  existing install toward `LOGGING_ENABLED=1` if the key was never set; a
-  real, operator-controllable opt-out remains via `LOGGING_ENABLED=0` in
-  `.env` or the Admin UI, for genuinely storage-constrained installs), not
-  the off-by-default state this section previously described. A from-scratch
-  manual `deploy/prod` install that never runs `setup.sh` still starts with
+- **`ui`, `dhcp` (Kea), `dhcp-proxy`, `netdata`, `syslog`, `syslog-ng`**: all
+  six needed `scripts/docker-socket-proxy.sh`'s allowlist widened before
+  alert-only monitoring was possible at all -- `ui`/`netdata`/`syslog`/
+  `syslog-ng` had no `safe_container_inspect`/`lancache_container` entry
+  whatsoever before #842/#849 (a deliberate boundary previously documented
+  in `docs/naming-conventions.md`'s "Operator-visible consistency" section:
+  nothing called the Docker API to manage `ui` by name -- that section is
+  updated alongside this one); `dhcp`/`dhcp-proxy` already had inspect
+  access (added for the Admin UI's own `dhcp.rs`/`dhcp_proxy.rs` status
+  reads) but, same as before this change, still only `start`/`stop`
+  (`safe_dhcp_action`), never `restart` -- watchdog's alert-only monitoring
+  needs inspect only, so this PR does not touch `safe_service_restart` for
+  any of the six; restart-capability for any of them remains its own,
+  separately-scoped future decision, not a byproduct of this change.
+  `syslog` (fluent-bit) and `syslog-ng` additionally needed a fixed
+  `container_name:` added in `deploy/prod/docker-compose.yml` (`syslog-ng`
+  also in `deploy/quickstart/docker-compose.yml` -- `syslog` already had one
+  there) before either could be addressed by a stable Docker-API path at
+  all. Their *containers'* existence is gated by the `logging` Compose
+  profile, controlled by `LOGGING_ENABLED` -- **on by default since issue
+  #1343** for every `setup.sh`-managed install (fresh wizard installs default
+  the "Enable central logging?" prompt to `Y`, and `setup.sh update`
+  converges an existing install toward `LOGGING_ENABLED=1` if the key was
+  never set; a real, operator-controllable opt-out remains via
+  `LOGGING_ENABLED=0` in `.env` or the Admin UI). A from-scratch manual
+  `deploy/prod` install that never runs `setup.sh` still starts with
   `logging` off, same as its `dhcp-kea`/`dhcp-proxy`/`ntp` sibling profiles --
   see `deploy/prod/.env`'s own comment on this profile.
+  **This PR's own watchdog alert-only monitoring of `syslog`/`syslog-ng` is
+  gated by a second, separate flag, `SYSLOG_ENABLED`** (`resolve_bool`,
+  default `false`) -- the same pre-existing double-opt-in `retention.sh`
+  already used for its own syslog-pruning engine (see `deploy/prod/.env`'s
+  "DOUBLE opt-in" comment), reused here for consistency rather than
+  introduced fresh. **Known gap surfaced by reconciling this section with
+  issue #1343's landing (not present when this PR was originally written):**
+  since `LOGGING_ENABLED` now defaults to `1`, a fresh default install runs
+  the `syslog`/`syslog-ng` containers out of the box, but watchdog will
+  *not* alert-monitor them unless an operator also separately sets
+  `SYSLOG_ENABLED=true` -- these two flags are independent, and nothing
+  today converges `SYSLOG_ENABLED` to follow `LOGGING_ENABLED`'s default.
+  Whether `resolve_alert_only_targets()` should instead key off actual
+  container liveness (or off `LOGGING_ENABLED` directly) rather than the
+  separate double-opt-in flag is an open follow-up question, not decided or
+  changed here -- posted as a structured decision on #842.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
