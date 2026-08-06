@@ -180,11 +180,19 @@ pub fn parse_nginx_time_local(time_local: &str) -> Option<i64> {
     let second: i64 = time_parts.next()?.parse().ok()?;
 
     // UTC offset like "+0200" or "-0500" (nginx's default $time_local
-    // format always includes one, with no ':' separator).
+    // format always includes one, with no ':' separator). `len() != 5`
+    // only guards the *byte* length, not char boundaries -- a bare
+    // `&offset[0..1]` byte-slice would panic if the first character were
+    // multi-byte UTF-8 (impossible from a real nginx log, but this parser
+    // also runs on directly client-influenced input via `logs.rs`'s
+    // request handling, so it must degrade to `None` instead of panicking
+    // on any malformed input, not just the ones a real nginx would ever
+    // produce). `get(0..1)` returns `None` instead of panicking in that
+    // case, same as the `get(1..3)`/`get(3..5)` calls below already do.
     if offset.len() != 5 {
         return None;
     }
-    let sign: i64 = match &offset[0..1] {
+    let sign: i64 = match offset.get(0..1)? {
         "+" => 1,
         "-" => -1,
         _ => return None,
@@ -849,6 +857,23 @@ mod tests {
         assert_eq!(parse_nginx_time_local("not a timestamp"), None);
         assert_eq!(parse_nginx_time_local("10/Xyz/2026:13:55:36 +0200"), None);
         assert_eq!(parse_nginx_time_local("10/Aug/2026:13:55:36 +2"), None);
+    }
+
+    // Regression test: the sign check used to be a bare `&offset[0..1]`
+    // byte-slice, which panics (not just returns `None`) if the offset's
+    // first character is multi-byte UTF-8, since `offset.len() != 5` only
+    // guards byte length, not char boundaries. "é020" is exactly 5 bytes
+    // ('é' encodes to 2 bytes, followed by 3 ASCII digits), so the old
+    // length guard would have let this reach the panicking slice at byte
+    // index 1, which falls inside 'é''s 2-byte encoding. No real nginx log
+    // ever produces a non-ASCII offset, but this parser must not be able
+    // to crash the process on any input shape, only ever return `None`.
+    #[test]
+    fn parse_nginx_time_local_rejects_multibyte_offset_without_panicking() {
+        assert_eq!(
+            parse_nginx_time_local("10/Aug/2026:13:55:36 \u{e9}020"),
+            None
+        );
     }
 
     // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
