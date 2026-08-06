@@ -44,9 +44,19 @@ end
 
 function maintenance()
     if suppressed_count > 0 then
+        -- `pdns.loglevels.Warning`, not `.Info`: PowerDNS's own
+        -- lua-scripting docs only confirm `.Warning` exists (it's the one
+        -- used in their own reference example) -- the full `loglevels`
+        -- member list is not documented anywhere this project could verify
+        -- (confirmed 2026-08-06), and guessing at an unconfirmed enum
+        -- member here would risk a hard Lua error inside the live DNS
+        -- resolution path if it doesn't actually exist. This message is
+        -- genuinely operator-relevant (confirms the filter is doing
+        -- something), so `.Warning` is also a reasonable severity choice
+        -- on its own merits, not just the safe fallback.
         pdnslog(
             "[lancache-dns][filter-aaaa] suppressed " .. suppressed_count .. " AAAA response(s) since last report",
-            pdns.loglevels.Info
+            pdns.loglevels.Warning
         )
         suppressed_count = 0
     end
