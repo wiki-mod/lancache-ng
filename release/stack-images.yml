@@ -89,6 +89,12 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
+      # deploy/quickstart/docker-compose.yml defines a `dhcp` service too
+      # (confirmed 2026-08-06, issue #849 dhcp-proxy.md finding #12) --
+      # this entry was never updated when the quickstart profile grew a
+      # Kea/dnsmasq-proxy DHCP path of its own, so scripts/validate-stack-
+      # images.sh had nothing to check it against.
+      - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
     source: services/dhcp-proxy/Dockerfile
@@ -97,6 +103,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
+      # Same gap as dhcp above (issue #849 dhcp-proxy.md finding #12).
+      - deploy/quickstart/docker-compose.yml
   - name: ntp
     image: ghcr.io/wiki-mod/lancache-ng/ntp
     source: services/ntp/Dockerfile
@@ -105,6 +113,10 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
+      # Same gap as dhcp/dhcp-proxy above, found while fixing those two
+      # (AG-WF-011: same failure class, same file) -- deploy/quickstart/
+      # docker-compose.yml defines an `ntp` service too.
+      - deploy/quickstart/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
     source: services/ui/Dockerfile

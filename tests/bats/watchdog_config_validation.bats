@@ -243,3 +243,47 @@ setup() {
         bash "$repo_root/services/watchdog/watchdog.sh"
     [ "$status" -eq 124 ]
 }
+
+# Issue #1415: LANCACHE_CONTAINER_SUFFIX lets a CI-only quickstart-compose
+# run give every container a coordinated, non-default suffix without
+# tripping the FATAL guards above -- as long as CONTAINER_* is set to the
+# SAME suffixed name deploy/quickstart/docker-compose.yml derives for that
+# run. This must reach the main loop exactly like the all-defaults case
+# above, not just avoid a crash for the wrong reason.
+@test "watchdog.sh reaches the main loop when CONTAINER_* and LANCACHE_CONTAINER_SUFFIX agree on the same coordinated suffix" {
+    run timeout 2 env LANCACHE_CONTAINER_SUFFIX=ci7x9q \
+        CONTAINER_PROXY=lancache-proxyci7x9q \
+        CONTAINER_DNS_STANDARD=lancache-dns-standardci7x9q \
+        CONTAINER_DNS_SSL=lancache-dns-sslci7x9q \
+        SSL_ENABLED=1 \
+        CONTAINER_NATS=lancache-natsci7x9q \
+        DOCKER_PROXY_URL="http://127.0.0.1:1" \
+        STATUS_FILE="$BATS_TEST_TMPDIR/sub-status.json" CACHE_DIR="$BATS_TEST_TMPDIR/sub-nonexistent-cache" \
+        bash "$repo_root/services/watchdog/watchdog.sh"
+    [ "$status" -eq 124 ]
+}
+
+# The suffix mechanism must not turn into a general escape hatch: an
+# operator setting LANCACHE_CONTAINER_SUFFIX without updating CONTAINER_*
+# to match (or vice versa) is exactly the "renamed one container, not the
+# whole coordinated set" case #849 finding #5's fail-loud guard exists to
+# catch -- it must still FATAL, not silently proceed against the wrong name.
+@test "watchdog.sh still FATALs when LANCACHE_CONTAINER_SUFFIX is set but CONTAINER_PROXY was not updated to match it" {
+    run timeout 5 env LANCACHE_CONTAINER_SUFFIX=ci7x9q DOCKER_PROXY_URL="http://127.0.0.1:1" \
+        STATUS_FILE="$BATS_TEST_TMPDIR/sub-status.json" CACHE_DIR="$BATS_TEST_TMPDIR/sub-nonexistent-cache" \
+        bash "$repo_root/services/watchdog/watchdog.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CONTAINER_PROXY=lancache-proxy is not supported (expected 'lancache-proxyci7x9q')"* ]]
+}
+
+# The mirror image of the previous test: CONTAINER_PROXY already carries a
+# suffix, but LANCACHE_CONTAINER_SUFFIX itself was left unset (e.g. a
+# partially-wired caller) -- must FATAL against the bare-default
+# expectation, not against whatever suffix CONTAINER_PROXY happens to carry.
+@test "watchdog.sh still FATALs when CONTAINER_PROXY carries a suffix but LANCACHE_CONTAINER_SUFFIX was not set" {
+    run timeout 5 env CONTAINER_PROXY=lancache-proxyci7x9q DOCKER_PROXY_URL="http://127.0.0.1:1" \
+        STATUS_FILE="$BATS_TEST_TMPDIR/sub-status.json" CACHE_DIR="$BATS_TEST_TMPDIR/sub-nonexistent-cache" \
+        bash "$repo_root/services/watchdog/watchdog.sh"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"CONTAINER_PROXY=lancache-proxyci7x9q is not supported (expected 'lancache-proxy')"* ]]
+}
