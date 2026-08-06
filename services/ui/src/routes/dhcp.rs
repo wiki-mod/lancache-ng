@@ -1805,8 +1805,15 @@ pub async fn add_subnet(
     headers: HeaderMap,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let lease_time = validate_dhcp_form(DhcpFormValidation {
         subnet: &form.subnet,
         pool_start: &form.pool_start,
@@ -1882,8 +1889,15 @@ pub async fn update_subnet(
     headers: HeaderMap,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let lease_time = validate_dhcp_form(DhcpFormValidation {
         subnet: &form.subnet,
         pool_start: &form.pool_start,
@@ -1953,8 +1967,15 @@ pub async fn remove_subnet(
     headers: HeaderMap,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -1985,8 +2006,15 @@ pub async fn add_subnet_option(
     headers: HeaderMap,
     Form(form): Form<AddSubnetOptionForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let key = parse_custom_option_key(&form.code).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
@@ -2026,8 +2054,15 @@ pub async fn remove_subnet_option(
     headers: HeaderMap,
     Form(form): Form<RemoveSubnetOptionForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let key = parse_custom_option_key(&form.code).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
@@ -2061,8 +2096,15 @@ pub async fn add_reservation(
     headers: HeaderMap,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
@@ -2136,8 +2178,15 @@ pub async fn remove_reservation(
     headers: HeaderMap,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     // Issue #947: mirrors add_reservation/release_lease, which both validate
     // their own identifier field before use. Harmless as a no-op today (a
     // malformed MAC simply matches nothing in remove_reservation_entry's
@@ -2173,8 +2222,15 @@ pub async fn release_lease(
     headers: HeaderMap,
     Form(form): Form<ReleaseLeaseForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     if !is_valid_ip(&form.ip) {
         return Err(DhcpError::new(
             StatusCode::BAD_REQUEST,
@@ -2244,8 +2300,15 @@ pub async fn update_dhcp_ddns(
     headers: HeaderMap,
     Form(form): Form<DdnsToggleForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let enabled = parse_bool_flag(&form.enabled);
 
     kea_config_modify(&state, move |config| {
@@ -2460,8 +2523,15 @@ pub async fn rollback_kea_snapshot(
     headers: HeaderMap,
     Form(form): Form<RollbackKeaSnapshotForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Finding #23 (docs/bug-hunt/ui-routes.md, issue #849): CSRF
+    // verification now runs before require_kea_mode, not after -- checking
+    // request integrity first, before any state-dependent business logic
+    // (including a state check that itself reveals whether Kea mode is
+    // currently active), is the more defensive ordering. This is a
+    // reordering only: neither check's own behavior changed, and a request
+    // that fails either check still fails the same way it did before.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
 
     let snapshot_root = PathBuf::from(&state.config.kea_config_snapshot_dir);
     let known_ids = kea_snapshots::list_snapshot_ids(&snapshot_root).map_err(|e| {
