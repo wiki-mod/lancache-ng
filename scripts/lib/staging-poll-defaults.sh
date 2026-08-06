@@ -22,6 +22,9 @@
 # directly, instead of sourcing the whole caller script (which runs its own
 # top-level staging-check flow immediately on load) or actually waiting out a
 # real 3600s poll to observe the value.
+# shellcheck disable=SC2034 # both set here for the caller (ensure-pr-staging-images.sh,
+# which sources this file) to read after calling this function -- shellcheck
+# analyzes this file in isolation and cannot see that cross-file use.
 staging_poll_set_defaults_for_workflow_changed() {
     local workflow_changed_flag="$1"
     if [[ "$workflow_changed_flag" == "true" ]]; then
