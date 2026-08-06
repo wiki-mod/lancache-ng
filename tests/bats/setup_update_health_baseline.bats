@@ -35,6 +35,24 @@ setup() {
     source "$BATS_TEST_DIRNAME/helpers/setup-functional-health-helpers.sh"
     load_setup_functional_health_helpers "$repo_root" "$helper_file"
 
+    # The captured setup.sh range's own `declare -A _UPDATE_HEALTH_BASELINE=()`
+    # (see setup.sh's "update / auto-update shared internals" section) runs as
+    # part of the `source` call above -- but that `source` executes inside
+    # THIS function (bats' own setup()), so a plain `declare` without `-g`
+    # scopes the array LOCAL to setup() and it evaporates the moment setup()
+    # returns. A later plain reassignment in the @test body / in
+    # capture_stack_health_baseline itself would then create a fresh, un-
+    # declared global that bash defaults to an INDEXED array -- silently
+    # turning `_UPDATE_HEALTH_BASELINE[ntp]="0"` into an arithmetic-subscript
+    # assignment (unset bareword "ntp" evaluates to 0), colliding with
+    # `_UPDATE_HEALTH_BASELINE[proxy]="1"` at the very same index 0. Only
+    # matters for this test harness's re-use of `source`-inside-a-function;
+    # setup.sh's own real top-level `source`/execution never hits this, since
+    # it is never itself inside a function. Re-declaring with an explicit
+    # `-g` here forces true global+associative scope regardless of the
+    # function context the sourcing happened in, closing the gap for good.
+    declare -gA _UPDATE_HEALTH_BASELINE=()
+
     # verify_stack_functional_health's own curl/dig probes are covered by
     # setup_functional_health_gate.bats; stubbed out here to a plain success
     # so these tests isolate the per-container baseline/regression logic.
@@ -49,12 +67,14 @@ setup() {
     declare -gA FAKE_STATUS=()          # container id -> running | exited | restarting
     declare -gA FAKE_RESTART_POLICY=()  # container id -> no | always
     declare -gA FAKE_EXIT_CODE=()       # container id -> exit code string
-    # Per-service call counter, used by the "flaky single sample" test to
-    # return a different reading on successive calls -- simulating a
+    # Per-service scripted health sequence, used by the "flaky single sample"
+    # test to return a different reading on successive calls -- simulating a
     # container's real state changing between capture_stack_health_baseline's
     # own samples, exactly like a genuinely crash-looping container would.
+    # The position within the sequence is tracked via a file under
+    # BATS_TEST_TMPDIR (see the fake docker() function below), not a bash
+    # variable -- a subshell-persistence requirement, not a style choice.
     declare -gA FAKE_HEALTH_SEQUENCE=() # service -> space-separated sequence of health readings, consumed one per call
-    declare -gA FAKE_CALL_COUNT=()
 
     # Speed up capture_stack_health_baseline's own multi-sample wait and
     # wait_for_stack_health's poll interval so these tests run in a second or
@@ -79,6 +99,16 @@ setup() {
     # service listed in FAKE_HEALTH_SEQUENCE consumes one reading per call
     # (simulating a flapping container); everything else reads a fixed value
     # from the FAKE_* tables above.
+    #
+    # The per-service call counter is a FILE under BATS_TEST_TMPDIR, not a
+    # bash associative-array entry: service_container_is_healthy invokes this
+    # function via `health=$(docker inspect ...)` -- a command substitution,
+    # which forks a subshell. Any in-memory variable this function mutated
+    # (including an associative-array element) would be a copy-on-write
+    # change local to that subshell and silently discarded the moment it
+    # exits, so a would-be counter would read back as 0 forever no matter how
+    # many samples ran. A real file's content survives past the subshell
+    # exit, since it is a genuine filesystem side effect, not process memory.
     docker() {
         [[ "$1" = "inspect" ]] || return 0
         local fmt="$3" cid="$4" svc_for_cid=""
@@ -91,8 +121,10 @@ setup() {
                 if [[ -n "${FAKE_HEALTH_SEQUENCE[$svc_for_cid]-}" ]]; then
                     local -a sequence
                     read -ra sequence <<< "${FAKE_HEALTH_SEQUENCE[$svc_for_cid]}"
-                    local idx="${FAKE_CALL_COUNT[$svc_for_cid]:-0}"
-                    FAKE_CALL_COUNT["$svc_for_cid"]=$(( idx + 1 ))
+                    local count_file="$BATS_TEST_TMPDIR/callcount-$svc_for_cid"
+                    local idx=0
+                    [[ -f "$count_file" ]] && idx=$(<"$count_file")
+                    printf '%s' "$(( idx + 1 ))" > "$count_file"
                     # Once the scripted sequence is exhausted, keep returning
                     # its last entry rather than reading an unset index as
                     # empty (which would misrepresent "no healthcheck

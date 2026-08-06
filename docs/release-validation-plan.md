@@ -451,6 +451,77 @@ triggered the removal/rotation/restart returned success.
 | A resized/rotated proxy container (cache-resize, PR #1174) doesn't leave the old container running alongside the new one | `docker ps --filter "name=lancache-proxy"` immediately after a convergence-triggered recreate — exactly one container, with a `StartedAt` matching the recreate, not two | Fail if more than one `lancache-proxy` container is running, or the old one's `StartedAt` is unchanged (recreate didn't actually happen) |
 | No file-descriptor exhaustion from repeated watchdog restart cycles over a longer soak | `docker exec <container> ls /proc/1/fd \| wc -l` sampled before and after several forced restart cycles of the same service — should return to a stable baseline, not grow monotonically | Fail (flag for investigation) if FD count trends upward across cycles rather than stabilizing |
 
+### 10. Update health gate — pre-existing failure baseline (not a regression)
+
+Real incident (issue #1391, post-merge verification pass, 2026-08-05): `setup.sh
+update`'s post-update health gate (`wait_for_stack_health`/
+`apply_stack_update_ordered`) used to fail on **any** currently-unhealthy non-UI
+service, with no way to distinguish "this service regressed because of what the
+update just changed" from "this service was already broken before the update
+started, for a reason unrelated to the update." Reproduced twice, deterministically,
+end-to-end on a live running stack: a real install with `ntp` enabled came up with
+`ntp` permanently crash-looping (a known, already-tracked environment limitation —
+issue #1296, this project's self-hosted LXC runners withhold real `CAP_SYS_TIME`
+clock-adjustment from nested Docker containers) while every other service was
+healthy; running `setup.sh update` against that stack rolled the **entire stack**
+back both times, purely because of `ntp`, even though nothing the update changed was
+responsible for `ntp`'s failure. Real-world consequence: an operator whose
+environment can't make an opt-in service healthy (`ntp`, or similarly `dhcp`/
+`dhcp-proxy`) could never again apply **any** update — including unrelated security
+fixes to `proxy`/`dns`/`ui` — without first manually disabling the broken optional
+service, and nothing in the failure output told them which service was actually
+blocking the gate.
+
+Fixed by `capture_stack_health_baseline()`, called from `perform_stack_update_flow`
+right after `_UPDATE_ENV_FILE`/`_UPDATE_COMPOSE_FILES` are set up — **before**
+`sync_repo_to_default_branch`, `install_quickstart_compose_assets`, or
+`cmd_backup --config` run, not merely before `apply_stack_update_ordered` recreates
+a container. **This placement is itself a real finding from live testing, worth
+recording so a future validator does not reintroduce the same subtlety**: an
+earlier version of this fix captured the baseline later, inside
+`apply_stack_update_ordered`, and looked correct under bats' fake-`docker` unit
+coverage — but a real end-to-end reproduction caught it being too late in practice.
+`cmd_backup --config`'s own "stop the whole stack for a consistent backup, then
+restart it" cycle already restarts every container using whatever compose/script
+content `sync_repo_to_default_branch`/`install_quickstart_compose_assets` just
+refreshed (by design — see the latter's own comment about copied quickstart
+installs using current container wiring "during the whole update"). A compose-level
+regression (e.g. a changed healthcheck) therefore already gets baked into a real
+container recreate during *that* restart, before the later capture point could ever
+see the true pre-update state — confirmed live when a deliberately-injected `nats`
+regression (forcing its real, previously-passing healthcheck to always fail via a
+`docker-compose.override.yml`) was wrongly classified as "pre-existing" instead of a
+regression on the first live verification pass, and correctly caught only after
+moving the capture to this earlier point.
+`capture_stack_health_baseline` samples each named service's health
+`_UPDATE_HEALTH_BASELINE_SAMPLES` times, a few seconds apart, and only records it as
+baseline-healthy if every sample agrees — a single sample is not reliable against a
+genuinely crash-looping container, whose Docker-reported state can transiently read
+"running"/"healthy" for an instant between one restart attempt and the next crash a
+few seconds later. `wait_for_stack_health` then fails the gate only when a service
+that **was** baseline-healthy (or has no baseline at all — a brand-new service the
+update itself introduces, or a fresh install with no prior state to compare
+against) is unhealthy afterward; a service already unhealthy before the update is
+not blocked on, and is named explicitly in a `print_warn` rather than silently
+ignored. A real regression (healthy → unhealthy) still fails the gate and still
+triggers `rollback_stack_update` exactly as before — this scenario's whole point is
+narrowing the failure condition to genuine regressions, not weakening the gate
+itself.
+
+| What to check | How to check it for real | Pass/fail |
+|---|---|---|
+| An update against a stack with an opt-in service already unhealthy pre-update (e.g. `ntp` crash-looping per issue #1296) no longer rolls back | Bring up a real stack with `ntp` enabled on an LXC-hosted runner (or any environment where it's known to crash-loop), confirm it stays unhealthy, then run a real `setup.sh update` against the stack and confirm it completes and reports `Proceeding despite service(s) unhealthy before this update started too: ntp` rather than rolling back | Fail if the update still rolls back solely because of the pre-existing, unrelated `ntp` failure |
+| A genuine regression (a service healthy before the update, unhealthy after) still rolls the stack back | Bring up a real stack with every non-UI service healthy, drop in a `docker-compose.override.yml` that makes one previously-healthy service (not `proxy`/`dns`, to keep `verify_stack_functional_health`'s functional probe out of the result) fail its healthcheck/command on recreate, run `setup.sh update`, confirm it reports `Service(s) regressed from healthy to unhealthy during this update: <service>` and rolls back via `rollback_stack_update` | Fail if the update proceeds despite the real regression, or the rollback does not restore the pre-update backup |
+| `tests/bats/setup_update_health_baseline.bats` (deterministic, fake-`docker`/`dc_update`, no real Docker daemon needed) | `bats tests/bats/setup_update_health_baseline.bats` (build-tools container) — covers both directions above plus the flapping-single-sample false-positive guard and the no-baseline/fresh-install fail-closed default | Fail if any of the 9 cases fail |
+
+Not yet covered by this scenario (recorded honestly rather than silently assumed):
+whether an operator-facing override flag (e.g. `setup.sh update
+--ignore-unhealthy=<service>`) should exist for a baseline-unhealthy service that is
+NOT opt-in/profile-gated, and whether the update should warn more loudly (beyond the
+`print_warn` line above) when it proceeds with a known-broken service still present —
+both remain open questions for issue #1391's still-deferred systematic Part B
+rewrite, not resolved by this scenario.
+
 ---
 
 ## Current Known Feature-Specific Checks (dated 2026-07-24 — prune/update every release)

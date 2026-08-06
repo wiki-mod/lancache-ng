@@ -3874,12 +3874,16 @@ EOF
 _UPDATE_ENV_FILE=""
 _UPDATE_COMPOSE_FILES=()
 # Pre-update per-service health snapshot (service name -> "1" healthy / "0"
-# unhealthy), populated once by capture_stack_health_baseline right before
-# apply_stack_update_ordered recreates anything, and read by
-# wait_for_stack_health afterward so the post-update gate can fail on a real
-# regression (healthy -> unhealthy) instead of on any currently-unhealthy
-# service regardless of whether the update caused it. See both functions'
-# own header comments for the full rationale (issue #1391).
+# unhealthy), populated once by capture_stack_health_baseline near the very
+# top of perform_stack_update_flow -- before sync_repo_to_default_branch,
+# install_quickstart_compose_assets, or cmd_backup run, since all three can
+# already mutate a running container before apply_stack_update_ordered is
+# ever reached (see capture_stack_health_baseline's own header comment for
+# why that specific placement matters) -- and read by wait_for_stack_health
+# afterward so the post-update gate can fail on a real regression (healthy
+# -> unhealthy) instead of on any currently-unhealthy service regardless of
+# whether the update caused it. See both functions' own header comments for
+# the full rationale (issue #1391).
 declare -A _UPDATE_HEALTH_BASELINE=()
 
 # `docker compose` pre-loaded with the current update flow's env-file and
@@ -4212,15 +4216,14 @@ apply_stack_update_ordered() {
     (( ${#non_ui_services[@]} > 0 )) \
         || die "No non-UI services found in this compose configuration; refusing to apply an update that cannot guarantee UI-last ordering."
 
-    # Must run before the very first container gets recreated below: this is
-    # the last point at which "the current containers" still means "the
-    # pre-update containers" (see capture_stack_health_baseline's own header
-    # comment). Baselines every service, including "ui", in one call so both
-    # wait_for_stack_health invocations further down (non-UI, then UI) share
-    # the same pre-update snapshot.
-    print_step "Capturing pre-update health baseline"
-    capture_stack_health_baseline "${all_services[@]}"
-
+    # _UPDATE_HEALTH_BASELINE is already populated by this point --
+    # perform_stack_update_flow calls capture_stack_health_baseline itself,
+    # before this function ever runs (see that call site's own comment for
+    # why it must happen that early: cmd_backup --config's own stack
+    # stop/restart cycle, a few steps before this function is reached, can
+    # already apply a compose-level regression to a real running container,
+    # so capturing the baseline here -- merely before THIS function's own
+    # first recreate -- would be too late to see the true pre-update state).
     print_step "Starting non-UI services"
     if ! dc_update up -d --remove-orphans "${non_ui_services[@]}"; then
         print_error "Failed to start non-UI services."
@@ -4281,6 +4284,38 @@ perform_stack_update_flow() {
     if nats_secondary_override_active_for_install_dir "$install_dir" "$_UPDATE_ENV_FILE"; then
         print_ok "NATS_BIND_IP is set; keeping the remote-secondary NATS override active for this update"
     fi
+
+    # Must run here -- before sync_repo_to_default_branch,
+    # install_quickstart_compose_assets, or cmd_backup do anything -- not
+    # merely before apply_stack_update_ordered recreates a container, which
+    # is where an earlier version of this baseline capture lived. Real,
+    # live reproduction on issue #1391 (2026-08-05) found that placement too
+    # late: cmd_backup --config's own "stop the stack for a consistent
+    # backup, then restart it" cycle (a few steps below) already restarts
+    # every container using whatever compose/script content
+    # sync_repo_to_default_branch/install_quickstart_compose_assets just
+    # refreshed -- by design, per install_quickstart_compose_assets' own
+    # comment ("so even copied installs use the current container wiring
+    # during the whole update"). A compose-level regression (a changed
+    # healthcheck, env var, volume, etc.) therefore already gets baked into
+    # a real container recreate during THAT restart, before
+    # apply_stack_update_ordered or its old baseline-capture call point ever
+    # ran -- so that later capture point could only ever see the
+    # already-regressed state and would misclassify a real regression as
+    # "pre-existing," exactly the failure mode this whole mechanism exists
+    # to avoid. Capturing here, before any of those steps run, is the actual
+    # last point at which "the current containers" still means "the
+    # pre-update containers" for every mutation this flow performs, not just
+    # the container-recreate ones inside apply_stack_update_ordered.
+    # dc_update config --services is safe to call this early: it only reads
+    # whichever compose files already exist on disk right now (which is
+    # exactly the pre-update set this baseline needs), and does not depend
+    # on anything sync_repo_to_default_branch/install_quickstart_compose_assets
+    # might add or change later.
+    print_step "Capturing pre-update health baseline"
+    local -a _update_baseline_services
+    mapfile -t _update_baseline_services < <(dc_update config --services)
+    capture_stack_health_baseline "${_update_baseline_services[@]}"
 
     UPDATE_CONVERGENCE_PAUSED=0
     UPDATE_CONVERGENCE_COMPLETED=0
