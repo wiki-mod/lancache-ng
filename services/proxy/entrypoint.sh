@@ -1235,6 +1235,29 @@ if [ "${SSL_ENABLED}" = "0" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
+# 3a. Generate the static /healthz response body (bug-hunt #849, finding #11)
+#
+# conf.d/http.conf and conf.d/https.conf's own "location = /healthz" blocks
+# deliberately serve this via a real content-phase file handler (`alias`),
+# NOT a bare `return 200 "ok\n";` -- confirmed live during this fix's own
+# review (2026-08-06/07): `return` is an ngx_http_rewrite_module directive
+# that runs in nginx's rewrite phase, which executes BEFORE the access
+# phase where `allow`/`deny` are evaluated. A location combining `deny all;`
+# with a bare `return` in the SAME location therefore never enforces that
+# deny at all -- reproduced on a stock, unmodified nginx:1.27-alpine image
+# (not something specific to this project's own build): a bare
+# `deny all;` alone correctly returns 403, the identical `deny all;`
+# alongside `return 200 "...";` in one location returns 200 regardless of
+# source address. Serving the body via `alias` to a real file instead uses
+# ngx_http_static_module's content-phase handler, which runs AFTER the
+# access phase and was confirmed live to correctly enforce the ACL in both
+# directions (403 for a denied source, 200 with the real body for an
+# allowed one). See docs/release-validation-plan.md's Standing checks row
+# for the full differential-container reproduction.
+# ────────────────────────────────────────────────────────────────────────────
+printf 'ok\n' > /etc/nginx/lancache-healthz-body.txt
+
+# ────────────────────────────────────────────────────────────────────────────
 # 4. Render nginx.conf and proxy-params from templates
 # ────────────────────────────────────────────────────────────────────────────
 envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_MIN_FREE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \

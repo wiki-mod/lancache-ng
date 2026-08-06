@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression guard for bug-hunt #849 findings #11 (/healthz had no access
@@ -17,6 +18,32 @@
 # (deploy/prod's own healthcheck already exercises /healthz successfully on
 # every real deployment, which is the closest existing live coverage for the
 # "did we break the healthcheck" half of this change).
+#
+# IMPORTANT, found live during this fix's own review (2026-08-06/07): an
+# EARLIER version of this same finding #11 fix served /healthz via a bare
+# `return 200 "ok\n";` in the same location as the `allow`/`deny` ACL --
+# every assertion in this file still passed against that version, because
+# they only check the ACL text is PRESENT, never that nginx actually
+# enforces it. A real differential live-container test (two real `proxy`
+# containers, one queried from a genuinely excluded source IP on a
+# dedicated Docker network, per docs/release-validation-plan.md's Standing
+# checks row for finding #11) proved that version's ACL was a complete
+# no-op: ANY source got 200, including a source outside both allowed
+# CIDRs. Root cause: `return` is an ngx_http_rewrite_module directive that
+# runs in nginx's rewrite phase, which executes BEFORE the access phase
+# `allow`/`deny` are evaluated in -- confirmed in isolation on a stock,
+# unmodified nginx:1.27-alpine image (not specific to this project's own
+# build): a bare `deny all;` alone correctly returns 403; the identical
+# `deny all;` alongside a `return` in the same location returns 200
+# regardless of source. The fix (this file's current version) serves the
+# body via `alias` to a real file instead (entrypoint.sh's own "3a."
+# generates it at startup) -- `alias` uses ngx_http_static_module's
+# content-phase handler, which runs AFTER the access phase and was
+# confirmed live to enforce the ACL correctly in both directions. The two
+# tests below guard specifically against reintroducing the `return`+`deny`
+# shape in either file, since that is the one part of this regression a
+# static grep-based check CAN catch cheaply and reliably, even without a
+# live nginx harness.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -57,6 +84,18 @@ _healthz_block() {
     [ -n "$deny_line" ]
     [ -n "$last_allow_line" ]
     [ "$deny_line" -gt "$last_allow_line" ]
+}
+
+@test "http.conf's /healthz block serves its body via alias (content phase), not a bare return (rewrite phase, bypasses the ACL above -- confirmed live)" {
+    block="$(_healthz_block "$http_conf")"
+    [[ "$block" == *'alias /etc/nginx/lancache-healthz-body.txt;'* ]]
+    [[ "$block" != *'return '* ]]
+}
+
+@test "https.conf's /healthz block serves its body via alias too, not a bare return" {
+    block="$(_healthz_block "$https_conf")"
+    [[ "$block" == *'alias /etc/nginx/lancache-healthz-body.txt;'* ]]
+    [[ "$block" != *'return '* ]]
 }
 
 @test "proxy-params.conf hides Cache-Control and Expires from the client" {
