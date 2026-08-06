@@ -401,22 +401,23 @@ jobs:
     # and symmetric two-relay client-IP fix (issue #1276/#1322): regex-
     # anchored depth dispatch (MITM-covered vs passthrough-only SNI), real
     # client-IP preservation through the two internal relays for
-    # PROXY_ALLOWED_CLIENT_CIDRS/access logging, the dedicated healthcheck
-    # port, and a live negative control against this PR's own pre-fix state.
-    # See scripts/proxy-ssl-mode-two-relay-dispatch-simulation.sh's own
-    # header for the full mechanism. `fetch-depth: 2` here is only a
-    # reasonable minimum for the checkout step itself -- the negative
-    # control's actual "which commit is pre-fix" resolution does its own
-    # `git fetch --depth=1000` of the base branch and computes a real
-    # merge-base at runtime (not a plain `HEAD^`, which is not a reliable
-    # pre-fix reference once any merge commit is involved: a merge commit's
-    # first parent can be either side, so `HEAD^` can resolve to a commit
-    # that already has the fix applied, silently building a "before" image
-    # that isn't actually before anything). Chained
-    # after proxy-standard-mode-sni-routing-simulation for the same
+    # PROXY_ALLOWED_CLIENT_CIDRS/access logging, and the dedicated
+    # healthcheck port. See scripts/proxy-ssl-mode-two-relay-dispatch-
+    # simulation.sh's own header for the full mechanism, including why this
+    # job deliberately does NOT rebuild a "pre-fix" image from git history on
+    # every run: once this fix is part of the base branch, every other PR's
+    # checkout already contains it, so there is no longer a stable,
+    # branch-independent pre-fix commit to compute (an earlier version of
+    # this job tried a runtime `git merge-base` for that purpose and it
+    # produced three different, unpredictable TLS errors across three real
+    # runs depending purely on which unrelated PR branch triggered it --
+    # the negative control that matters was performed once, live, by hand,
+    # and is recorded in issue #1276). No checkout `fetch-depth` override is
+    # needed here for that reason; the default shallow checkout is enough.
+    # Chained after proxy-standard-mode-sni-routing-simulation for the same
     # AG-CI-017 BuildKit-content-store contention reasoning every job in
     # this file already documents -- this job also builds its own throwaway
-    # proxy images (two of them, current + pre-fix) on the same runner pool.
+    # proxy image on the same runner pool.
     name: Proxy SSL-mode two-relay dispatch simulation
     needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
     if: >-
@@ -428,8 +429,6 @@ jobs:
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 2
       - name: Resolve build-tools image
         # See ssl-mitm-cache-simulation's identical step above for why a
         # same-PR build-tools change prefers the confirmed PR staging tag.
