@@ -113,8 +113,10 @@ protects *from the operator*. It is called out again in "Out of scope".
 ## Architecture in scope (for context)
 
 Threats below reference these mechanisms. This is a summary, not the
-authoritative description — see `CLAUDE.md` and the per-component sources in the
-inventory table.
+authoritative description — see `AGENTS.md`'s `## Architecture` section and the
+per-component sources in the inventory table (**corrected 2026-08-05, issue
+#1391 doc-sweep audit**: this used to cite `CLAUDE.md`, which no longer carries
+architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
 
 - **DNS spoofing** — PowerDNS (authoritative + recursor + a NATS subscriber) in
   one container. At startup `services/dns/entrypoint.sh` builds an **RPZ zone**
@@ -753,8 +755,10 @@ This is the repeatable process the currency markers depend on. Run it before
 tagging each release, then update the top marker and the
 [component currency inventory](#component-currency-inventory).
 
-1. **Diff the architecture since the last reviewed release.** Read `CLAUDE.md`
-   and diff the sources listed in the inventory table:
+1. **Diff the architecture since the last reviewed release.** Read `AGENTS.md`'s
+   `## Architecture` section (corrected 2026-08-05, issue #1391 doc-sweep audit
+   — this used to say `CLAUDE.md`, which moved this content to `AGENTS.md` on
+   2026-07-31) and diff the sources listed in the inventory table:
    - `services/dns/entrypoint.sh`, `services/dns/cdn-domains.txt`
    - `services/proxy/entrypoint.sh`, `services/proxy/conf.d/*.conf`
    - `services/ui/src/config.rs`, `services/ui/src/main.rs`

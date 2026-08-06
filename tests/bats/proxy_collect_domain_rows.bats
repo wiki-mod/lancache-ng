@@ -236,6 +236,52 @@ setup() {
     [ "${#_EXTRA_EXACT_HOSTS[@]}" -eq 1 ]
 }
 
+# _ROOT_HAS_WILDCARD_ENTRY (issue #1276/#1322): a root-level leading-dot
+# entry (domain == root, e.g. ".steamcontent.com") needs no extra cert --
+# the test above already confirms _EXTRA_WILDCARD_BASES stays empty for this
+# shape -- but the SSL-mode stream dispatch map (services/proxy/entrypoint.sh's
+# "2a.") still needs to know this root is itself a leading-dot entry, since
+# DNS still spoofs arbitrary depth below it (not just the one label the
+# root's own wildcard cert covers).
+@test "_collect_domain_rows flags a root-level leading-dot entry in _ROOT_HAS_WILDCARD_ENTRY" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.steamcontent.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ -n "${_ROOT_HAS_WILDCARD_ENTRY[steamcontent.com]+set}" ]
+}
+
+@test "_collect_domain_rows does NOT flag a bare root-level entry in _ROOT_HAS_WILDCARD_ENTRY" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' 'steamcontent.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ -z "${_ROOT_HAS_WILDCARD_ENTRY[steamcontent.com]+set}" ]
+}
+
+@test "_collect_domain_rows does NOT flag the root when only a deeper leading-dot entry exists (that's _EXTRA_WILDCARD_BASES' own case, not this one)" {
+    _registrable_domain() { [ "$1" = "cdn.ea.com" ] && printf 'ea.com' || printf '%s' "$1"; }
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.cdn.ea.com' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ -z "${_ROOT_HAS_WILDCARD_ENTRY[ea.com]+set}" ]
+    [ "${#_EXTRA_WILDCARD_BASES[@]}" -eq 1 ]
+}
+
+@test "_collect_domain_rows can flag _ROOT_HAS_WILDCARD_ENTRY for one root while a different root stays unflagged (mixed file)" {
+    domains_file="$BATS_TEST_TMPDIR/domains.txt"
+    printf '%s\n' '.steamcontent.com' 'example.org' > "$domains_file"
+
+    _collect_domain_rows "$domains_file"
+
+    [ -n "${_ROOT_HAS_WILDCARD_ENTRY[steamcontent.com]+set}" ]
+    [ -z "${_ROOT_HAS_WILDCARD_ENTRY[example.org]+set}" ]
+}
+
 @test "_collect_domain_rows collects only enabled entries from a mixed file" {
     domains_file="$BATS_TEST_TMPDIR/domains.txt"
     {

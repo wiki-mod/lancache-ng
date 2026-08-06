@@ -73,8 +73,10 @@ findings that overlap with it are still listed (for completeness) with a note.
    };
    move || nginx_client::parse_log_tail(&path, 10)
    ```
-   When the logs differ (a supported, documented configuration -- see CLAUDE.md's "Two-Mode /
-   Two-IP Architecture", each mode gets its own proxy service), this always reads only
+   When the logs differ (a supported, documented configuration -- see `AGENTS.md`'s "Two-Mode /
+   Two-IP Architecture" section, each mode gets its own proxy service -- corrected 2026-08-05,
+   issue #1391 doc-sweep audit: this used to cite `CLAUDE.md`, which moved this section to
+   `AGENTS.md` on 2026-07-31), this always reads only
    `ssl_log` and never reads `standard_log` at all. Any standard-mode (HTTP passthrough / no-CA)
    client traffic is completely invisible in the dashboard's "recent activity" section in that
    configuration, even though `get_log_stats`/`logs.rs`'s own `/logs` page correctly read and
