@@ -590,6 +590,16 @@ services:
         printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
         chmod 0600 /etc/netdata/.netdata-alarm-token
         cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
+        # shellcheck disable=SC2154
+        # name/chart/host/status/old_status/value_string/units/info/
+        # unique_id/alarm_id/event_id/when/duration below are populated by
+        # Netdata's own alarm-notify.sh before it sources this file's
+        # custom_sender() -- never assigned in this fragment itself. See
+        # deploy/prod/docker-compose.yml's matching heredoc for the full
+        # explanation.
+        # shellcheck disable=SC2034
+        # SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM are read by Netdata's own
+        # alarm-notify.sh AFTER sourcing this file, not used within it.
         SEND_CUSTOM="YES"
         DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
         _lancache_json_escape() {
