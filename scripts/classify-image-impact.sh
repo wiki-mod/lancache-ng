@@ -178,6 +178,10 @@ output_bool "watchdog" touches_prefix "services/watchdog/"
 output_bool "dhcp" touches_prefix "services/dhcp/"
 output_bool "dhcp_proxy" touches_prefix "services/dhcp-proxy/"
 output_bool "ntp" touches_prefix "services/ntp/"
+# syslog (issue #1428): the combined fluent-bit+syslog-ng first-party image
+# introduced by the syslog+fluent-bit consolidation PR (services/syslog/),
+# wired into the build matrix by #1428 itself.
+output_bool "syslog" touches_prefix "services/syslog/"
 
 # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the image at
 # build time (the dns-domains named build context), so a domain-list-only change

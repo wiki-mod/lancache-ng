@@ -299,7 +299,18 @@ ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
 # yet. This is the same "add it here too the day one does" reasoning this
 # comment previously applied to dhcp/dhcp-proxy, now exercised for ntp
 # instead of left as a standing exclusion.
-full_setup_services=(proxy dns watchdog ui build-tools dhcp dhcp-proxy ntp)
+#
+# syslog (#1428, 2026-08): joins this list the same way ntp did above, once
+# the combined fluent-bit+syslog-ng first-party image (services/syslog/)
+# became a real build-matrix service with its own PR staging tag to ensure.
+# scripts/syslog-forwarding-simulation.sh already pulls/starts/health-waits on
+# the single `syslog` Compose service (updated by the same consolidation PR
+# this issue follows up on), so this is a real consumer, not a name added
+# with nothing exercising it -- see check-workflow-service-lists.sh's
+# FULL_SETUP_EXACT_EXCLUSIONS comment for why this array must equal the
+# canonical build-matrix set exactly (no exclusions left) rather than a
+# subset.
+full_setup_services=(proxy dns watchdog ui build-tools dhcp dhcp-proxy ntp syslog)
 
 declare -A touched_map=(
     [proxy]="${PROXY_TOUCHED:-false}"
@@ -310,14 +321,16 @@ declare -A touched_map=(
     [dhcp]="${DHCP_TOUCHED:-false}"
     [dhcp-proxy]="${DHCP_PROXY_TOUCHED:-false}"
     [ntp]="${NTP_TOUCHED:-false}"
+    [syslog]="${SYSLOG_TOUCHED:-false}"
 )
 
 # Maps this file's own matrix-service names to scripts/classify-image-impact.sh's
 # output keys, for saf_resolve_untouched_backfill_source's service-scoped
-# check below -- the two naming schemes differ for 3 of 8 services (dns vs
+# check below -- the two naming schemes differ for 3 of 9 services (dns vs
 # dns_image, dhcp-proxy vs dhcp_proxy, build-tools vs build_tools), same
 # mapping build-push.yml's own decide_one() call sites already hand-pass
-# per service (see that job's "determine push reuse scope" step).
+# per service (see that job's "determine push reuse scope" step). syslog
+# needs no renaming: classify-image-impact.sh's own output key is "syslog" too.
 declare -A classify_key_map=(
     [proxy]="proxy"
     [dns]="dns_image"
@@ -327,6 +340,7 @@ declare -A classify_key_map=(
     [dhcp]="dhcp"
     [dhcp-proxy]="dhcp_proxy"
     [ntp]="ntp"
+    [syslog]="syslog"
 )
 
 # Indirection so tests can stub the registry probe without a real daemon.
