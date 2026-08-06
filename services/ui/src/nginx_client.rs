@@ -145,6 +145,120 @@ pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
         .collect()
 }
 
+// Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): parses nginx's fixed
+// $time_local format (e.g. "10/Aug/2026:13:55:36 +0200") into Unix epoch
+// seconds, so two log entries from different source files can be compared
+// by real timestamp instead of by which file/source they happened to come
+// from. Deliberately hand-parsed rather than adding a date/time crate as a
+// new direct dependency: the format nginx emits here is fixed by this
+// project's own log_format directive (see log_regex's doc comment above),
+// not arbitrary user input, so a small parser covers every real case
+// without pulling in general calendar/timezone-database machinery this
+// narrow use has no need for -- matching this project's own stated
+// preference for avoiding exactly that (see kea_snapshots.rs's module doc
+// on why it avoids a chrono/date dependency for its own fixed-format id).
+pub fn parse_nginx_time_local(time_local: &str) -> Option<i64> {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+
+    // Splits "10/Aug/2026:13:55:36 +0200" into date-time and UTC-offset
+    // halves at the last space, then the date-time half at its first colon
+    // (the only colon before the time-of-day's own colons).
+    let (date_time, offset) = time_local.rsplit_once(' ')?;
+    let (date, time) = date_time.split_once(':')?;
+
+    let mut date_parts = date.split('/');
+    let day: i64 = date_parts.next()?.parse().ok()?;
+    let month_str = date_parts.next()?;
+    let year: i64 = date_parts.next()?.parse().ok()?;
+    let month = MONTHS.iter().position(|m| *m == month_str)? as i64 + 1;
+
+    let mut time_parts = time.split(':');
+    let hour: i64 = time_parts.next()?.parse().ok()?;
+    let minute: i64 = time_parts.next()?.parse().ok()?;
+    let second: i64 = time_parts.next()?.parse().ok()?;
+
+    // UTC offset like "+0200" or "-0500" (nginx's default $time_local
+    // format always includes one, with no ':' separator).
+    if offset.len() != 5 {
+        return None;
+    }
+    let sign: i64 = match &offset[0..1] {
+        "+" => 1,
+        "-" => -1,
+        _ => return None,
+    };
+    let offset_hours: i64 = offset.get(1..3)?.parse().ok()?;
+    let offset_minutes: i64 = offset.get(3..5)?.parse().ok()?;
+    let offset_seconds = sign * (offset_hours * 3600 + offset_minutes * 60);
+
+    let days_since_epoch = days_from_civil(year, month, day)?;
+    let local_seconds = days_since_epoch * 86_400 + hour * 3600 + minute * 60 + second;
+    Some(local_seconds - offset_seconds)
+}
+
+// Howard Hinnant's well-known `days_from_civil` algorithm: converts a
+// proleptic-Gregorian calendar date into the number of days since the Unix
+// epoch (1970-01-01), correctly handling leap years (including the
+// divisible-by-100-but-not-400 case) without a lookup table. This exact
+// formula is what every mainstream date/time library (chrono included)
+// implements for the same conversion -- not something invented for this
+// codebase, just reproduced directly since pulling in a full date crate
+// for this one conversion is more than this fixed-format parser needs.
+fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
+    if !(1..=12).contains(&month) || !(1..=31).contains(&day) {
+        return None;
+    }
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let year_of_era = y - era * 400;
+    let month_index = (month + 9) % 12; // Mar=0 .. Feb=11
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    Some(era * 146_097 + day_of_era - 719_468)
+}
+
+// Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug fix
+// this function closes. Merges two per-source log-entry lists (each
+// already in file order -- oldest first, per parse_log_tail's own
+// documented contract) into one combined list ordered oldest-first by real
+// timestamp, instead of naively concatenating one source's entire block
+// before the other's (which is what routes/logs.rs's
+// `standard_logs.into_iter().chain(ssl_logs).collect()` used to do,
+// silently misordering the result whenever the two sources' time ranges
+// interleave -- the normal case for two nginx instances logging
+// concurrently). A classic merge-sort-style merge (linear in the combined
+// length) is sufficient since each input is already individually sorted.
+// An entry whose $time_local fails to parse is treated as timestamp 0
+// (sorts first) -- parse_log_line only ever produces entries via
+// log_regex's own capture group, so a genuinely unparseable timestamp here
+// would mean nginx's own log_format changed shape underneath this parser,
+// not something expected in routine operation.
+pub fn merge_log_entries_chronologically(a: Vec<LogEntry>, b: Vec<LogEntry>) -> Vec<LogEntry> {
+    let mut merged = Vec::with_capacity(a.len() + b.len());
+    let mut a_iter = a.into_iter().peekable();
+    let mut b_iter = b.into_iter().peekable();
+
+    loop {
+        match (a_iter.peek(), b_iter.peek()) {
+            (Some(a_entry), Some(b_entry)) => {
+                let a_ts = parse_nginx_time_local(&a_entry.time).unwrap_or(0);
+                let b_ts = parse_nginx_time_local(&b_entry.time).unwrap_or(0);
+                if a_ts <= b_ts {
+                    merged.push(a_iter.next().expect("peeked Some"));
+                } else {
+                    merged.push(b_iter.next().expect("peeked Some"));
+                }
+            }
+            (Some(_), None) => merged.push(a_iter.next().expect("peeked Some")),
+            (None, Some(_)) => merged.push(b_iter.next().expect("peeked Some")),
+            (None, None) => break,
+        }
+    }
+    merged
+}
+
 // Returns up to `limit` complete lines from the end of `file`, in file
 // order (oldest of the returned lines first). Never reads more of the file
 // than necessary: it seeks to EOF and pulls `TAIL_CHUNK_SIZE` chunks
@@ -695,6 +809,90 @@ mod tests {
         assert_eq!(stats.misses, 0);
 
         fs::remove_file(path).expect("remove temp log");
+    }
+
+    // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): locks the exact
+    // conversion for a real nginx $time_local sample, including the UTC
+    // offset arithmetic (the value nginx would emit for a proxy configured
+    // with TZ=Europe/Berlin in August, UTC+2).
+    #[test]
+    fn parse_nginx_time_local_converts_a_real_sample_correctly() {
+        // 2026-08-10T13:55:36+02:00 == 2026-08-10T11:55:36Z.
+        // Computed independently via `date -u -d '2026-08-10T11:55:36Z' +%s`
+        // (cross-checked against Python's datetime.timestamp()).
+        let expected = 1786362936;
+        assert_eq!(
+            parse_nginx_time_local("10/Aug/2026:13:55:36 +0200"),
+            Some(expected)
+        );
+    }
+
+    // A UTC (+0000) sample and a negative-offset sample must both resolve
+    // correctly -- proving the sign handling isn't only tested for the
+    // positive-offset case above.
+    #[test]
+    fn parse_nginx_time_local_handles_utc_and_negative_offsets() {
+        let utc = parse_nginx_time_local("01/Jan/2026:00:00:00 +0000").unwrap();
+        let behind_utc = parse_nginx_time_local("31/Dec/2025:19:00:00 -0500").unwrap();
+        // 2025-12-31T19:00:00-05:00 == 2026-01-01T00:00:00Z, i.e. the exact
+        // same instant as the UTC sample above.
+        assert_eq!(utc, behind_utc);
+    }
+
+    // Malformed/unexpected input must return None, never panic -- this
+    // parser only ever receives log_regex's own capture group in practice,
+    // but a defensive caller must be able to treat a parse failure as "put
+    // this entry first" (timestamp 0) rather than crashing.
+    #[test]
+    fn parse_nginx_time_local_rejects_malformed_input() {
+        assert_eq!(parse_nginx_time_local(""), None);
+        assert_eq!(parse_nginx_time_local("not a timestamp"), None);
+        assert_eq!(parse_nginx_time_local("10/Xyz/2026:13:55:36 +0200"), None);
+        assert_eq!(parse_nginx_time_local("10/Aug/2026:13:55:36 +2"), None);
+    }
+
+    // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
+    // fix this test locks in. Two interleaved sources must come out
+    // genuinely merged by timestamp, not as two contiguous blocks -- the
+    // exact failure shape `standard_logs.into_iter().chain(ssl_logs)` had.
+    #[test]
+    fn merge_log_entries_chronologically_interleaves_by_real_timestamp() {
+        fn entry(time: &str, host: &str) -> LogEntry {
+            LogEntry {
+                ip: "192.0.2.1".to_string(),
+                time: time.to_string(),
+                method: "GET".to_string(),
+                path: "/".to_string(),
+                host: host.to_string(),
+                status: 200,
+                bytes_human: "1.0 KiB".to_string(),
+                cache_status: "HIT".to_string(),
+                source: String::new(),
+            }
+        }
+
+        // Standard: 12:00, 12:02, 12:04 (already chronological, per source)
+        let standard = vec![
+            entry("10/Aug/2026:12:00:00 +0000", "standard-a"),
+            entry("10/Aug/2026:12:02:00 +0000", "standard-b"),
+            entry("10/Aug/2026:12:04:00 +0000", "standard-c"),
+        ];
+        // SSL: 12:01, 12:03 -- interleaves with Standard's timestamps above,
+        // rather than falling entirely before or after them.
+        let ssl = vec![
+            entry("10/Aug/2026:12:01:00 +0000", "ssl-a"),
+            entry("10/Aug/2026:12:03:00 +0000", "ssl-b"),
+        ];
+
+        let merged = merge_log_entries_chronologically(standard, ssl);
+        let hosts: Vec<&str> = merged.iter().map(|e| e.host.as_str()).collect();
+        // A naive `.chain()` would produce either
+        // [standard-a,b,c, ssl-a,b] or [ssl-a,b, standard-a,b,c] --
+        // neither matches the real, interleaved timestamp order below.
+        assert_eq!(
+            hosts,
+            vec!["standard-a", "ssl-a", "standard-b", "ssl-b", "standard-c"]
+        );
     }
 
     // Unique temp-file path per test, mirroring `shared_log_path_is_counted_once`'s

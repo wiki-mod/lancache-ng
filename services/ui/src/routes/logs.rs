@@ -118,7 +118,16 @@ pub async fn logs_page(
             entry.source = "SSL".to_string();
         }
 
-        standard_logs.into_iter().chain(ssl_logs).collect()
+        // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): a plain
+        // `.chain()` put every Standard entry before every SSL entry (or
+        // vice versa, depending on iteration order) regardless of their
+        // real timestamps -- after the `.reverse()` below, that means one
+        // source's entire block always displayed before the other's,
+        // rather than the two interleaving by actual recency. Both inputs
+        // are already individually chronological (parse_log_tail's own
+        // contract), so a real merge by parsed timestamp is a strict
+        // correctness fix, not a behavior change for either source alone.
+        nginx_client::merge_log_entries_chronologically(standard_logs, ssl_logs)
     };
 
     // Show most recent first
