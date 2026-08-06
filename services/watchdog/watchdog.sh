@@ -90,6 +90,23 @@ fi
 # checks silently return "unreachable" and restarts silently 403 through the
 # proxy, not actually support renaming end-to-end. Fail loudly at startup
 # instead of pretending the knob works.
+#
+# This is a deliberate design boundary, not an unfinished feature (maintainer
+# decision, #849 bug-hunt finding #5): running more than one lancache-ng
+# stack on the same host is not a supported or intended deployment shape.
+# These four fixed container names (matching the fixed `container_name:`
+# values in every `deploy/*/docker-compose.yml`) are exactly what makes a
+# single-stack-per-host install unambiguous and predictable for
+# docker-socket-proxy's allowlist, the Admin UI, and this script alike --
+# renaming any of them to run a second, co-located stack would need all
+# three of those layers to support a configurable name simultaneously, a
+# real project-wide multi-stack architecture change, not a small env-var
+# fix here. An operator who genuinely needs multiple lancache-ng stacks on
+# one host (e.g. a real multi-tenant or staging-alongside-production case,
+# not merely wanting different container names for cosmetic reasons) should
+# open a feature request describing that concrete need in detail --
+# reverting `CONTAINER_*` to the documented defaults is the correct
+# workaround today, not renaming them.
 C_PROXY="${CONTAINER_PROXY:-lancache-proxy}"
 C_DNS_STD="${CONTAINER_DNS_STANDARD:-lancache-dns-standard}"
 if [ "$SSL_ENABLED" = "1" ]; then
@@ -136,19 +153,19 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 C_DOCKER_PROXY="lancache-docker-socket-proxy"
 
 if [ "$C_PROXY" != "lancache-proxy" ]; then
-    log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-proxy'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
+    log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported. Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-proxy' for exactly that reason. Revert CONTAINER_PROXY to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 if [ "$C_DNS_STD" != "lancache-dns-standard" ]; then
-    log_err "FATAL: CONTAINER_DNS_STANDARD=${C_DNS_STD} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-dns-standard'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_STANDARD to the default."
+    log_err "FATAL: CONTAINER_DNS_STANDARD=${C_DNS_STD} is not supported. Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-dns-standard' for exactly that reason. Revert CONTAINER_DNS_STANDARD to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 if [ "$SSL_ENABLED" = "1" ] && [ "$C_DNS_SSL" != "lancache-dns-ssl" ]; then
-    log_err "FATAL: CONTAINER_DNS_SSL=${C_DNS_SSL} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-dns-ssl'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
+    log_err "FATAL: CONTAINER_DNS_SSL=${C_DNS_SSL} is not supported. Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-dns-ssl' for exactly that reason. Revert CONTAINER_DNS_SSL to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 if [ "$C_NATS" != "lancache-nats" ]; then
-    log_err "FATAL: CONTAINER_NATS=${C_NATS} is not supported. scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name 'lancache-nats'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_NATS to the default."
+    log_err "FATAL: CONTAINER_NATS=${C_NATS} is not supported. Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-nats' for exactly that reason. Revert CONTAINER_NATS to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 
