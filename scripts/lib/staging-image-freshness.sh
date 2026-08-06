@@ -107,16 +107,130 @@
 # `--raw`'s JSON is parsed with grep/sed against the narrow, verified shape
 # above (a top-level "manifests" array vs. a top-level "config" object)
 # instead.
+
+# _sif_inspect_failure_is_confirmed_absence <stderr_text>
 #
+# Classifies a failed `docker buildx imagetools inspect` invocation's own
+# stderr text as either "the registry positively confirmed no such
+# manifest/tag/digest exists" (returns 0) or "everything else" (returns 1 --
+# network/DNS/TLS timeout, a stalled connection, a 5xx, a rate limit, an auth
+# failure, or any other shape this hasn't seen yet). Added 2026-08-06 after a
+# live root-cause read of sif_image_revision's own callers: every real
+# occurrence found in this project's own CI logs (grepped across several
+# days of full-setup-deep-validate.yml runs) that hit the "no readable
+# label" branch below turned out to be a genuine absence -- never a
+# confirmed transient registry failure -- but the code had no way to know
+# that because the ORIGINAL version of sif_image_revision discarded the
+# registry call's own stderr outright (`2>/dev/null`) before this function
+# existed. That is the actual reason the two cases used to look identical:
+# not a real API limitation, but this file throwing away the one signal that
+# already distinguishes them. `docker buildx imagetools inspect` (backed by
+# BuildKit's own registry client) reports a missing manifest/tag/digest as
+# "manifest unknown" (the distribution-spec error code name, verified against
+# docker/buildx's own issue tracker and multiple independent troubleshooting
+# writeups for this exact command) or a plain "not found" -- both are
+# registry-level, not connection-level, so they only ever appear once a
+# response was actually received and parsed, unlike a timeout/DNS/TLS/5xx
+# failure, which reports its own distinct wording (e.g. "context deadline
+# exceeded", "connection refused", "i/o timeout", "500 Internal Server
+# Error"). Deliberately conservative: text this hasn't seen before falls
+# through to "everything else" (return 1, the ORIGINAL ambiguous wording)
+# rather than being guessed as either -- this is a diagnostic-accuracy
+# improvement for the common case, not a claim that every failure shape is
+# now enumerated; matches this project's own posture elsewhere for a
+# similarly single-purpose classifier (saf_query_run_count's own header
+# documents the same "specific known failure text -> permanent, everything
+# else -> retry" split for HTTP 401/404).
+#
+# `-i`: registries and BuildKit versions have been observed to vary the exact
+# capitalization ("Manifest Unknown" from some proxying registries per the
+# search evidence gathered while writing this). Here-string, not a live pipe
+# (issue #1377's own repo-wide SIGPIPE audit) -- moot for `grep -q` against an
+# already-captured variable, but kept for consistency with every other
+# grep-against-captured-text call in this file.
+_sif_inspect_failure_is_confirmed_absence() {
+  local stderr_text="$1"
+  # `name[ _]unknown`: the distribution-spec error CODE is NAME_UNKNOWN
+  # (underscore, all-caps), but a human-readable message wrapping it can
+  # render the same words space-separated -- match both rather than only the
+  # shape this project has actually observed so far.
+  grep -qi 'manifest unknown\|not found\|no such manifest\|name[ _]unknown' <<<"$stderr_text"
+}
+
+# _sif_inspect <args...>
+#
+# Internal helper: runs `docker buildx imagetools inspect "$@"`, capturing
+# stdout on success and, on failure, classifying the call's own stderr via
+# _sif_inspect_failure_is_confirmed_absence above. Echoes stdout on success
+# (return 0). On failure, echoes nothing and returns 2 for a confirmed
+# absence, 1 for everything else -- sif_image_revision below propagates
+# whichever of these two its own failing call produced, so a caller several
+# frames up (sif_wait_for_fresh_base_image) can tell the two cases apart in
+# its own log line instead of always printing the same both-cases-at-once
+# wording.
+#
+# stderr is captured to a scratch file, not a variable via a second `2>&1`
+# command substitution: mixing stdout and stderr into one stream would lose
+# which bytes were which, and this function's contract requires stdout
+# (the manifest JSON / label value) to stay exactly what it was before this
+# change -- untouched by whatever the registry wrote to stderr. `mktemp`
+# failing (a full/read-only $TMPDIR) degrades to the pre-existing
+# "everything else" classification rather than aborting -- the classification
+# is a diagnostic nicety, never a reason to fail a call that would otherwise
+# have succeeded or to change which exit code a genuine inspect failure
+# already produced.
+_sif_inspect() {
+  local err_file stdout_output inspect_status
+  err_file="$(mktemp 2>/dev/null)" || err_file=""
+  if [[ -n "$err_file" ]]; then
+    stdout_output="$(docker buildx imagetools inspect "$@" 2>"$err_file")"
+    inspect_status=$?
+  else
+    stdout_output="$(docker buildx imagetools inspect "$@" 2>/dev/null)"
+    inspect_status=$?
+  fi
+  if (( inspect_status == 0 )); then
+    [[ -n "$err_file" ]] && rm -f "$err_file"
+    printf '%s\n' "$stdout_output"
+    return 0
+  fi
+  local err_text=""
+  if [[ -n "$err_file" ]]; then
+    err_text="$(cat "$err_file" 2>/dev/null)"
+    rm -f "$err_file"
+  fi
+  if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
+    return 2
+  fi
+  return 1
+}
+
 # Indirection so tests (and callers without a real registry) can stub this.
+#
+# Return codes on failure (the STAGING_IMAGE_REVISION_CMD stub path always
+# returns 1 -- it has no real registry stderr to classify, and every existing
+# test/caller of that hook already only checks "zero vs non-zero", so this
+# does not change its contract): 1 means the underlying registry call failed
+# for a reason that is NOT confirmed to be "does not exist" (network/timeout/
+# rate-limit/auth/an unrecognized error shape) -- the original, ambiguous
+# case. 2 means the registry positively reported no such manifest/tag/digest
+# exists (see _sif_inspect_failure_is_confirmed_absence above) -- confirmed
+# absence, not a registry hiccup. Both are still simply "non-zero" to any
+# existing caller that only checks success/failure (e.g. push-reuse.sh's own
+# push_reuse_decide, which never needed this distinction); only
+# sif_wait_for_fresh_base_image below reads the specific code.
 sif_image_revision() {
   local image="${1:?sif_image_revision: image is required}"
   local revision
   if [[ -n "${STAGING_IMAGE_REVISION_CMD:-}" ]]; then
     revision="$("$STAGING_IMAGE_REVISION_CMD" "$image")" || return 1
   else
-    local raw target digest digest_lines
-    raw="$(docker buildx imagetools inspect "$image" --raw 2>/dev/null)" || return 1
+    local raw target digest digest_lines raw_status
+    raw="$(_sif_inspect "$image" --raw)"
+    raw_status=$?
+    if (( raw_status != 0 )); then
+      return "$raw_status"
+    fi
     target="$image"
     # Here-strings, not live pipes: $raw is a manifest-list JSON blob that
     # can carry several platform entries, and a live `producer | grep -q`
@@ -134,14 +248,22 @@ sif_image_revision() {
       # always the tag separator and safe to strip this way.
       target="${image%:*}@${digest}"
     fi
-    revision="$(docker buildx imagetools inspect "$target" \
-      --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}' 2>/dev/null)" || return 1
+    local format_status
+    revision="$(_sif_inspect "$target" --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')"
+    format_status=$?
+    if (( format_status != 0 )); then
+      return "$format_status"
+    fi
   fi
   # A missing label renders as the literal string "<no value>" in a Go
   # template (index on a nil/short map doesn't error, it just yields the
   # zero value) rather than failing the command -- treat that the same as
   # "no label at all" instead of accidentally treating the literal text
-  # "<no value>" as a commit SHA.
+  # "<no value>" as a commit SHA. This is a different case from "the image
+  # doesn't exist" (the manifest/config WAS read successfully; it simply
+  # never carried this label -- e.g. an image predating docker/metadata-
+  # action's revision label being added), so it deliberately keeps returning
+  # the original ambiguous 1, not the new confirmed-absence 2.
   if [[ -z "$revision" || "$revision" == "<no value>" ]]; then
     return 1
   fi
@@ -217,6 +339,17 @@ sif_is_ancestor_or_equal() {
 # not-yet-fetched (status 3 from sif_is_ancestor_or_equal) is treated the
 # same as ordinary staleness here, not as a hard failure -- see that
 # function's own comment for why the two must not be conflated.
+#
+# The per-poll "no readable label yet" log line (in the loop body below)
+# distinguishes a confirmed-absent manifest/tag/digest from every other
+# registry-call failure -- see sif_image_revision/_sif_inspect's own headers
+# for the classification and why every real occurrence checked in this
+# project's own CI logs (2026-08-06 root-cause pass) turned out to be the
+# former. This function's own RETURN CODE contract is unchanged by that
+# (still a plain 1 at the hard ceiling regardless of which case applied):
+# the classification is a diagnostic improvement for whoever reads the job
+# log while it is still running, not a new caller-visible outcome, so no
+# caller needed updating.
 #
 # <allow_reverse_ancestry> (optional, any non-empty value means "true";
 # default off -- unset/empty preserves the exact pre-existing behavior for
@@ -320,7 +453,30 @@ sif_wait_for_fresh_base_image() {
         echo "$service_label base image ($base_image) was built from commit $revision, which predates base commit $base_sha (elapsed $((SECONDS - start_time))s)." >&2
       fi
     else
-      echo "$service_label base image ($base_image) has no readable org.opencontainers.image.revision label yet (elapsed $((SECONDS - start_time))s) -- either it does not exist at all yet (e.g. first build ever for this channel) or the registry call failed transiently." >&2
+      # $? here is sif_image_revision's own real exit status: entering this
+      # `else` branch is the very next thing that happens after the failed
+      # assignment above, with nothing in between that could have changed it.
+      # 2 vs. "anything else" is the confirmed-absence classification
+      # sif_image_revision/_sif_inspect propagate (see those functions' own
+      # headers). Distinguishing the two here matters because a repeating
+      # "no readable label yet" line across many poll intervals in a live job
+      # log reads as one undifferentiated case to whoever is watching it,
+      # when it can actually be either "genuinely does not exist" or "the
+      # registry call itself failed" -- two very different things to act on.
+      # `docker buildx imagetools inspect`'s own stderr is the one signal
+      # that tells them apart, and _sif_inspect only classifies it (rather
+      # than discarding it outright) for the confirmed-absence shape; every
+      # other failure text still falls through to the fallback wording below
+      # for revision_status 1, since THAT case's own ambiguity is genuine: a
+      # network/DNS/TLS/5xx/rate-limit failure really does look the same,
+      # from this function's vantage point, as an image that simply has not
+      # been pushed yet moments before this exact poll.
+      local revision_status=$?
+      if (( revision_status == 2 )); then
+        echo "$service_label base image ($base_image) has no matching manifest/tag/digest in the registry yet (elapsed $((SECONDS - start_time))s) -- confirmed absent: the registry itself reported no such manifest (not a connection/timeout/auth failure), most likely because it has not been built or retagged for this commit yet (e.g. first build ever for this channel, or a Step 4 push-reuse-eligible service whose per-commit tag for this exact commit was never written)." >&2
+      else
+        echo "$service_label base image ($base_image) has no readable org.opencontainers.image.revision label yet (elapsed $((SECONDS - start_time))s) -- the registry call itself failed (network/timeout/rate-limit/auth, or an error shape this check does not yet recognize as a confirmed absence), not a positively confirmed absence; retrying." >&2
+      fi
     fi
 
     if (( SECONDS >= hard_deadline )); then

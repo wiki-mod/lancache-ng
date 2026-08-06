@@ -276,3 +276,84 @@ STUB
     [ "$status" -eq 1 ]
     printf '%s\n' "$output" | grep -q "never became fresh enough"
 }
+
+# --- Real docker-inspect-error-classification coverage (2026-08-06) --------
+#
+# Every test above drives sif_image_revision through its
+# STAGING_IMAGE_REVISION_CMD stub hook, which never goes anywhere near the
+# real `docker buildx imagetools inspect`/_sif_inspect code path this fix
+# actually changed -- a regression in the real branch would pass every test
+# above unnoticed. These tests instead put a FAKE `docker` executable ahead
+# of the real one on PATH (no real registry, no real docker daemon -- this
+# project's own "no local Windows testing" rule and AG-CI-001's "assume no
+# tools" both still hold; only a disposable shell script is exercised) so
+# _sif_inspect's own `docker buildx imagetools inspect ... 2>"$err_file"`
+# invocation and _sif_inspect_failure_is_confirmed_absence's classification
+# of that captured stderr both run for real.
+fake_docker_returning_stderr() {
+    # Writes a fake `docker` that fails `buildx imagetools inspect` with the
+    # given stderr text, and prepends its directory to PATH (kept exported,
+    # since PATH already carries the export attribute in this shell, so the
+    # reassignment below is visible to the `docker` lookup any later command
+    # substitution inside sif_image_revision/_sif_inspect performs).
+    local stderr_text="$1"
+    local fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin_dir"
+    cat > "$fake_bin_dir/docker" <<STUB
+#!/usr/bin/env bash
+echo "$stderr_text" >&2
+exit 1
+STUB
+    chmod +x "$fake_bin_dir/docker"
+    PATH="$fake_bin_dir:$PATH"
+}
+
+@test "_sif_inspect_failure_is_confirmed_absence: classifies known absence-signature text" {
+    run _sif_inspect_failure_is_confirmed_absence "Error response from daemon: manifest unknown"
+    [ "$status" -eq 0 ]
+    run _sif_inspect_failure_is_confirmed_absence "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee: not found"
+    [ "$status" -eq 0 ]
+    run _sif_inspect_failure_is_confirmed_absence "NAME_UNKNOWN: repository name not known to registry"
+    [ "$status" -eq 0 ]
+}
+
+@test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a network/timeout-shaped error as absence" {
+    run _sif_inspect_failure_is_confirmed_absence "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
+    [ "$status" -eq 1 ]
+    run _sif_inspect_failure_is_confirmed_absence "dial tcp: lookup ghcr.io: connection refused"
+    [ "$status" -eq 1 ]
+    run _sif_inspect_failure_is_confirmed_absence "unexpected status from HEAD request: 500 Internal Server Error"
+    [ "$status" -eq 1 ]
+}
+
+@test "sif_image_revision (real docker branch, no stub): a confirmed-absence registry error returns status 2" {
+    fake_docker_returning_stderr "Error response from daemon: manifest unknown"
+    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
+    [ "$status" -eq 2 ]
+    [ -z "$output" ]
+}
+
+@test "sif_image_revision (real docker branch, no stub): an unrecognized/transient registry error returns status 1 (unchanged ambiguous case)" {
+    fake_docker_returning_stderr "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
+    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "sif_wait_for_fresh_base_image (real docker branch): a confirmed-absence failure is reported as confirmed absent, not the old ambiguous wording" {
+    fake_docker_returning_stderr "Error response from daemon: manifest unknown"
+    run sif_wait_for_fresh_base_image "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" "$c2" "build-tools" 1 2 1
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "confirmed absent"
+    # Must NOT print the old both-cases-conflated wording alongside the new
+    # one -- proves the branch was actually replaced, not merely appended to.
+    ! printf '%s\n' "$output" | grep -q "or the registry call failed transiently"
+}
+
+@test "sif_wait_for_fresh_base_image (real docker branch): a transient-shaped failure is reported as a registry call failure, not confirmed absent" {
+    fake_docker_returning_stderr "dial tcp: lookup ghcr.io: connection refused"
+    run sif_wait_for_fresh_base_image "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" "$c2" "build-tools" 1 2 1
+    [ "$status" -eq 1 ]
+    printf '%s\n' "$output" | grep -q "the registry call itself failed"
+    ! printf '%s\n' "$output" | grep -q "confirmed absent"
+}
