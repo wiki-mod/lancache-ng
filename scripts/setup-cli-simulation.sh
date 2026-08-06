@@ -141,6 +141,32 @@ sim_container_name_suffix() {
     printf -- '-sim-%s\n' "$(basename "$1" | tr 'A-Z.' 'a-z-')"
 }
 
+# Issue #1415 (maintainer decision, option b): this script used to hardcode
+# IP_STANDARD=127.0.0.2 (comment below this function's old location
+# explained THAT choice was itself a fix for 127.0.0.1 contention -- see the
+# preserved history in the retry loop's own comment further down) and never
+# set IP_SSL at all, falling back to deploy/quickstart/docker-compose.yml's
+# own shared `${IP_SSL:-127.0.0.1}` default. Both are fixed, shared values:
+# two concurrent runs of this same script on the same physical runner host
+# (already established as a real scenario for this compose file -- see the
+# LANCACHE_CONTAINER_SUFFIX comments above) would still collide binding the
+# identical host IP:port pairs, independent of and unfixed by
+# COMPOSE_PROJECT_NAME/LANCACHE_CONTAINER_SUFFIX already being unique.
+# Mirrors scripts/syslog-forwarding-simulation.sh's own established pattern
+# (127.0.<octet>.2/.3, loopback range 127.0.0.0/8 routes locally with no
+# real interface needed) exactly, including deriving the octet from a
+# `cksum` of a per-run-unique token via `% 200 + 10` (keeps the octet in a
+# small, fixed range while avoiding the low, sometimes-special-cased 0/1
+# values some tooling assumes) -- except the input token here is this
+# script's own already-proven-unique install_dir basename (the same value
+# sim_compose_project_name()/sim_container_name_suffix() above already use),
+# not GITHUB_RUN_ID/GITHUB_RUN_ATTEMPT/$$, so every one of this run's three
+# derived identifiers (project name, container suffix, IP octet) traces back
+# to the exact same source and stays trivially correlatable in logs.
+sim_ip_octet() {
+    printf '%s' "$(( $(basename "$1" | cksum | cut -d' ' -f1) % 200 + 10 ))"
+}
+
 mkdir -p "$repo_root/.setup-cli-simulation-tmp"
 # Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
 # aborts the whole script silently the instant `cmd` fails -- errexit fires
@@ -170,6 +196,28 @@ if ! LANCACHE_CONTAINER_SUFFIX="$(sim_container_name_suffix "$install_dir")"; th
     exit 1
 fi
 export LANCACHE_CONTAINER_SUFFIX
+# Issue #1415 (option b): see sim_ip_octet()'s own comment above.
+if ! ip_octet="$(sim_ip_octet "$install_dir")"; then
+    echo "::error::Could not derive a unique IP octet from install_dir ($install_dir)." >&2
+    exit 1
+fi
+ip_standard="127.0.${ip_octet}.2"
+ip_ssl="127.0.${ip_octet}.3"
+# Exported (not only typed into the wizard reply below): deploy/quickstart/
+# docker-compose.yml's `proxy` service is not profile-gated and always
+# publishes ports bound to BOTH ${IP_STANDARD} and ${IP_SSL:-127.0.0.1} --
+# the latter unconditionally, even when this script's own fresh-install
+# reply sequence leaves SSL mode disabled (so setup.sh's wizard never asks
+# for or writes an SSL IP into .env at all). Exporting both here, rather
+# than relying solely on whatever the wizard happens to write, means every
+# `docker compose` invocation later in this script resolves both
+# consistently to this run's own unique addresses (shell-exported variables
+# take priority over `--env-file` for Compose's `${VAR}` interpolation) --
+# closing the same fixed-127.0.0.1 collision axis for IP_SSL that switching
+# IP_STANDARD off its own historical fixed value (see the retry loop's
+# comment further below) already closed for the standard address.
+export IP_STANDARD="$ip_standard"
+export IP_SSL="$ip_ssl"
 
 cleanup() {
     local status=$?
@@ -289,7 +337,7 @@ run_fresh_install_expect() {
         LANCACHE_IMAGE_CHANNEL="$fresh_install_image_channel" \
         LANCACHE_IMAGE_TAG="$fresh_install_image_tag" \
         build_expect_prompt_block "$repo_root/setup.sh" "$answers_file" \
-            "127.0.0.2" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
+            "$ip_standard" "" "$install_dir" "" "" "" "" "" "" "" "" "" ""
     )"; then
         echo "::error::Could not derive the fresh-install expect_prompt sequence from 'setup.sh list-prompts' (issue #1176). See the error above for which prompt/reply count mismatched." >&2
         return 1
@@ -359,12 +407,17 @@ EXPECT_SCRIPT
 # 127.0.0.1:443 repeatedly, with no lingering container or bound port
 # visible on the runner moments later -- not a stuck leftover from one
 # specific job, just contention over the one address every other host-bound
-# stack on this runner also defaults to. The real fix is IP_STANDARD =
-# 127.0.0.2 above (loopback range is 127.0.0.0/8, so any 127.x.x.x address
-# routes locally without needing a real interface) instead of 127.0.0.1,
-# giving this simulation its own address nothing else on the runner
-# specifically targets. This retry loop stays as a second line of defense
-# in case something else ever binds 127.0.0.2 too, mirroring the existing
+# stack on this runner also defaults to. The original fix moved off the
+# shared 127.0.0.1 onto a fixed IP_STANDARD=127.0.0.2 (loopback range
+# 127.0.0.0/8 routes locally without needing a real interface); issue #1415
+# (option b) found that fixed replacement address was itself still shared
+# across every concurrent run of this same script, so it is now this run's
+# own sim_ip_octet()-derived address instead (see that function's comment
+# above) -- giving this simulation an address nothing else on the runner,
+# including another concurrent copy of itself, specifically targets. This
+# retry loop stays as a second line of defense in case two runs' derived
+# octets ever collide anyway (a `cksum` collision, or some other process
+# entirely binding the same address), mirroring the existing
 # retry-on-transient-GHCR-403 pattern already used elsewhere in this
 # project's CI.
 fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
@@ -406,6 +459,19 @@ while true; do
             exit 1
         fi
         export LANCACHE_CONTAINER_SUFFIX
+        # Issue #1415 (option b): same lockstep reasoning as
+        # LANCACHE_CONTAINER_SUFFIX above -- a retry that kept the OLD
+        # octet would re-attempt on the exact address that (maybe) just
+        # lost a port-allocation race, defeating the point of retrying at
+        # all with a fresh, differently-derived address.
+        if ! ip_octet="$(sim_ip_octet "$install_dir")"; then
+            echo "::error::Could not derive a unique IP octet from install_dir ($install_dir) for retry attempt $attempt." >&2
+            exit 1
+        fi
+        ip_standard="127.0.${ip_octet}.2"
+        ip_ssl="127.0.${ip_octet}.3"
+        export IP_STANDARD="$ip_standard"
+        export IP_SSL="$ip_ssl"
         fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
         attempt=$((attempt + 1))
         sleep 10
@@ -417,8 +483,11 @@ done
 
 [[ -f "$install_dir/.env" ]] \
     || { echo "::error::Fresh install did not produce $install_dir/.env." >&2; exit 1; }
-grep -qF 'IP_STANDARD=127.0.0.2' "$install_dir/.env" \
-    || { echo "::error::.env is missing the expected IP_STANDARD value." >&2; exit 1; }
+# Issue #1415 (option b): asserts against this run's own derived address,
+# not a hardcoded 127.0.0.2 -- a leftover literal here would always fail
+# once IP_STANDARD stopped being a fixed value.
+grep -qF "IP_STANDARD=${ip_standard}" "$install_dir/.env" \
+    || { echo "::error::.env is missing the expected IP_STANDARD value ($ip_standard)." >&2; exit 1; }
 grep -qF 'UI_AUTH_USER=admin' "$install_dir/.env" \
     || { echo "::error::.env is missing the expected UI_AUTH_USER value." >&2; exit 1; }
 wait_for_stack_healthy
