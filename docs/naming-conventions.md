@@ -167,6 +167,60 @@ the Docker socket proxy currently allowlists:
 `/etc/hostname` value, unrelated to the Docker-level container name) — this
 predates this change and is now consistent with its new `container_name:`.
 
+#### `LANCACHE_CONTAINER_SUFFIX` (quickstart only, issue #1415)
+
+Every `container_name:` in `deploy/quickstart/docker-compose.yml` (only —
+`deploy/prod` is unaffected) is actually
+`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`. This does **not**
+relax the "explicit, fixed `container_name:` for every service" rule
+above: `LANCACHE_CONTAINER_SUFFIX` is unset for every real single-host
+install, which makes every name byte-identical to before this variable
+existed, and there is no supported way for an operator to set it — the
+existing `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_DNS_SSL`/
+`CONTAINER_NATS` overrides already FATAL if they don't resolve to exactly
+`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}` for whatever suffix
+watchdog itself was given, so a mismatched or ad-hoc rename is rejected
+exactly as before (issue #849 finding #5's single-stack-per-host design is
+unchanged).
+
+The variable exists only so CI can start more than one quickstart-compose
+stack concurrently on the same physical self-hosted runner host (several
+runner instances can share one Docker daemon). `COMPOSE_PROJECT_NAME`
+already gives each CI run a unique value (`scripts/setup-cli-simulation.sh`'s
+`sim_compose_project_name()`), but an explicit `container_name:` overrides
+Compose's own project-name-based isolation entirely — that mismatch is
+exactly what let two CI runs with distinct project names collide on the
+identical fixed container name (issue #1415). A CI caller that wants
+isolated container names must derive `LANCACHE_CONTAINER_SUFFIX` from that
+same per-run uniqueness and export it before driving this compose file.
+
+Three consumers besides the compose file itself must agree on the suffix
+actually in effect for a given run, or the mismatch FATALs/denies exactly
+as an unrelated rename would:
+
+1. `scripts/docker-socket-proxy.sh` reads `LANCACHE_CONTAINER_SUFFIX` at
+   container startup and appends it to every name in its own generated
+   HAProxy allowlist (a runtime transform of the *generated* config, never
+   of this script's own checked-in source — see that script's own comment
+   for why, and `scripts/check-naming-consistency.sh`'s matching
+   quickstart-specific literal-suffix expectation).
+2. `services/watchdog/watchdog.sh` must receive the same
+   `LANCACHE_CONTAINER_SUFFIX`, plus `CONTAINER_PROXY`/etc. already carrying
+   that suffix, so its FATAL guard's "expected" value and the container
+   names it actually probes both agree with reality.
+3. `services/watchdog/src/config.rs` — the not-yet-live Rust rewrite of the
+   same guard — mirrors this for the eventual `watchdog.sh` → Rust cutover,
+   even though it isn't the running entrypoint today (see its own module
+   doc comment).
+
+`services/ui/src/docker_client.rs`'s `container_name_for_service()` is
+**deliberately not wired to this suffix**: no CI simulation drives the
+Admin UI's Docker-API-backed restart/start/stop routes today (verified by
+grepping every `scripts/*-simulation.sh` for a call into those routes), and
+a real production install never sets a suffix, so there is no reachable
+path where this gap could produce incorrect behavior. Revisit this if a
+future simulation starts exercising those routes.
+
 ### Docker volumes
 
 Rule for new volumes: lowercase, hyphen-separated, named for what they hold,
@@ -304,7 +358,8 @@ it.
 |---|---|---|
 | Compose project name | `deploy/{prod,quickstart}/docker-compose.yml` `name:` | — |
 | Compose service names | `deploy/{prod,quickstart}/docker-compose.yml` service keys | `services/ui/src/config.rs` (`*_SERVICE` defaults), `deploy/{prod,quickstart}/docker-compose.yml` env values that build internal URLs |
-| Container names | `deploy/{prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` (`CONTAINER_*` defaults), `config/prod/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
+| Container names | `deploy/{prod,quickstart}/docker-compose.yml` `container_name:` | `scripts/docker-socket-proxy.sh` (allowlist), `services/ui/src/docker_client.rs` (`container_name_for_service`), `services/watchdog/watchdog.sh` and `services/watchdog/src/config.rs` (`CONTAINER_*` defaults/guard), `config/prod/watchdog.env` and `deploy/quickstart/docker-compose.yml` (`CONTAINER_*` overrides) |
+| `LANCACHE_CONTAINER_SUFFIX` (quickstart only) | `deploy/quickstart/docker-compose.yml` `container_name:`/environment entries | `scripts/docker-socket-proxy.sh` (runtime allowlist suffix), `services/watchdog/watchdog.sh` (guard), `scripts/check-naming-consistency.sh` (quickstart-specific literal-suffix check) — see "`LANCACHE_CONTAINER_SUFFIX` (quickstart only, issue #1415)" above |
 | Docker volumes | `deploy/{prod,quickstart}/docker-compose.yml` `volumes:` top-level block | Service-level `volumes:` mount lists in the same files |
 | Host bind-mount directories | `docs/backup-restore.md`, `docs/how-to-change-ip.md` | `deploy/prod/docker-compose.yml`, `setup.sh` |
 | GHCR image/package names | `release/stack-images.yml` | `docs/release-versioning.md`, both Compose files' `image:` lines |
