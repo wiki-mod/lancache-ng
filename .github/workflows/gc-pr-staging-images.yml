@@ -154,10 +154,31 @@ jobs:
       # actually runs), matching AG-CI-002's "route lightweight static
       # checks to the light runner tier" intent -- this job has no other use
       # for the rest of the repository tree.
+      #
+      # `ref` is pinned to the default branch deliberately, not left to
+      # default to `github.ref`: for this job's actual trigger,
+      # `pull_request: closed`, `github.ref` resolves to
+      # `refs/pull/<N>/merge` -- a ref GitHub does NOT maintain once a PR is
+      # closed WITHOUT merging, so an unpinned checkout could fail outright
+      # on exactly that path and silently stop the whole reap job from
+      # running for every closed-unmerged PR. Pinning to the default branch
+      # also means this privileged, GHCR_PACKAGE_DELETE_PAT-wielding script
+      # always runs the reviewed, already-merged version -- never a version
+      # edited on the PR branch that triggered the run -- which matters
+      # because `pull_request` (unlike `pull_request_target`) normally
+      # checks out the PR's own head; an unpinned ref here would let any
+      # branch that touches this file redefine what a privileged deletion
+      # job does to GHCR before that change is ever reviewed. The
+      # consequence to be aware of: edits to this script only take effect
+      # for closed-PR sweeps (and the `schedule:`/`workflow_dispatch:`
+      # triggers below) after they land on the default branch -- consistent
+      # with this file's own AG-CI-018 note above about `schedule:` already
+      # only ever running the default-branch copy.
       - name: Checkout gc-pr-staging-images.sh and its lib
         if: steps.creds.outputs.have-pat == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: |
             scripts/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
