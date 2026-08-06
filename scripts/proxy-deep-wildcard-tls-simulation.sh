@@ -161,7 +161,12 @@ dispatch_routes_to_passthrough() {
         local bare="${pattern#\"}"
         bare="${bare%\"}"
         bare="${bare#\~}"
-        if echo "$sni" | grep -Pq "$bare"; then
+        # Here-string, not `echo "$sni" | grep -Pq ...`: eliminates the live
+        # producer/early-exiting-consumer pipe entirely (issue #1377's
+        # repo-wide pipefail/SIGPIPE audit, AG-VAL-032 -- caught as a fresh
+        # instance after this script itself landed via PR #1411, later than
+        # the original audit pass).
+        if grep -Pq "$bare" <<<"$sni"; then
             matched_port="$port"
             break
         fi
