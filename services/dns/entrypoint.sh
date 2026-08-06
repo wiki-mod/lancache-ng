@@ -207,14 +207,22 @@ DDNS_TSIG_ALGORITHM="${DDNS_TSIG_ALGORITHM:-hmac-sha256}"
 # which bumped this image's pdns-server from Debian trixie's 4.9.16 to
 # Alpine 5.0.5): this image's pdns-server no longer predates that setting
 # (added upstream in PowerDNS 5.0.0) the way the prior Debian-based image
-# did -- the reason this workaround was written no longer holds. Enabling
-# `dnsupdate-require-tsig=yes` globally was deliberately NOT done as part of
-# that migration: it is a real DDNS-auth security-posture change (not an
-# OS/package-currency one), and interacting correctly with every zone this
-# entrypoint creates needs its own explicit verification and maintainer
-# sign-off, not a silent add-on to an unrelated base-image PR. Flagged as an
-# explicit follow-up decision in that PR/issue rather than implemented here.
-# So the fix here is still on the
+# did. STATUS update (2026-08-06, issue #815 follow-up): `dnsupdate-require-
+# tsig` is now exposed as an Admin UI toggle (pdns.conf.template's own
+# header comment on the `dnsupdate-require-tsig=no` line has the full
+# writeup), default off per maintainer decision. Real testing while building
+# that toggle found this paragraph's own premise was already stale even
+# before the toggle existed: whenever DDNS_TSIG_KEY is real (essentially
+# always, per resolve_shared_secret's auto-generation below),
+# configure_ddns_tsig() already sets per-zone TSIG-ALLOW-DNSUPDATE metadata,
+# which PowerDNS already treats as "TSIG required for this zone" on its own
+# -- confirmed live, an unsigned nsupdate against "lan." is REFUSED
+# identically whether the new global setting is "yes" or "no". So the
+# `dnsupdate-require-tsig=yes` global toggle is real defense-in-depth (it
+# still helps for a zone that somehow never got its own TSIG-ALLOW-DNSUPDATE
+# metadata, e.g. a future zone type or a partially-failed
+# configure_ddns_tsig() run), not the primary mechanism actually preventing
+# unsigned updates to this project's real zones today. So the fix here is still on the
 # other side of the same equation: when DDNS_TSIG_KEY is empty (the shipped
 # default until an operator generates one) or still a placeholder, there is
 # no real auth control for DDNS at all, so allow-dnsupdate-from must not be
@@ -269,6 +277,18 @@ DNS_CONFIG_SNAPSHOT_DIR="${DNS_CONFIG_SNAPSHOT_DIR:-/var/lib/lancache-dns/config
 DNS_ROLLBACK_LISTEN_ADDR="${DNS_ROLLBACK_LISTEN_ADDR:-0.0.0.0:8083}"
 RECURSOR_CONF_FILE="/etc/pdns/recursor.conf"
 PDNS_AUTH_CONF_FILE="/etc/pdns/auth/pdns.conf"
+# dnsupdate-require-tsig Admin UI toggle (issue #815 follow-up). Same shared
+# state directory the AAAA-filter marker below uses (mounted identically
+# into the ui/dns-standard/dns-ssl containers) -- defined here as its own
+# constant, ahead of section 2's config generation, because this marker must
+# be read BEFORE pdns.conf is rendered (a static config value baked in at
+# startup), unlike the AAAA filter's own marker, which recursor.lua reads
+# live per-query and so only needs to exist by the time PowerDNS itself
+# starts. Deliberately not reusing/renaming AAAA_FILTER_STATE_DIR (defined
+# further below, in its own historical section) to avoid touching that
+# working legacy-migration code for an unrelated feature.
+DNS_STATE_DIR="/var/lib/powerdns-state"
+DNSUPDATE_REQUIRE_TSIG_MARKER="${DNS_STATE_DIR}/dnsupdate-require-tsig-enabled"
 # Central logging pipeline (#633): PowerDNS has no native "log to file"
 # config directive on Linux -- confirmed against the upstream docs/mailing
 # list, both pdns_server and pdns_recursor only ever write to stdout/stderr
@@ -722,9 +742,22 @@ configure_ddns_tsig() {
     echo "[lancache-dns] Configured TSIG-authenticated DDNS updates for LAN zones."
 }
 
+# render_template_atomic <variables> <template> <target> [extra_sed_script]
+# The optional 4th parameter is an arbitrary sed script applied to the
+# rendered output as a post-processing step, for a setting envsubst's plain
+# value-substitution can't express (a config line whose PRESENCE, not just
+# its value, depends on a boolean). Originally special-cased to only the
+# recursor's LOG_QUERIES toggle (a single hardcoded loglevel sed); the
+# dnsupdate-require-tsig toggle (issue #815 follow-up) needed the identical
+# mechanism for a different file/setting, so this parameter was generalized
+# to accept any sed script rather than adding a second, differently-named
+# single-purpose boolean parameter for the same underlying pattern. Callers
+# build their own conditional sed expression and pass "" when no
+# post-processing is needed (see the recursor.conf/pdns.conf call sites
+# below for both shapes).
 render_template_atomic() {
     local variables="$1" template="$2" target="$3"
-    local enable_query_logging="${4:-0}"
+    local extra_sed="${4:-}"
     local target_dir target_name tmp
 
     target_dir=$(dirname "$target")
@@ -740,8 +773,8 @@ render_template_atomic() {
         echo "[lancache-dns] FATAL: failed to render $target_name"
         exit 1
     fi
-    if [ "$enable_query_logging" = "1" ]; then
-        sed -i 's/^  loglevel: 3$/  loglevel: 6/' "$tmp"
+    if [ -n "$extra_sed" ]; then
+        sed -i "$extra_sed" "$tmp"
     fi
 
     if ! mv "$tmp" "$target"; then
@@ -932,13 +965,37 @@ echo "[lancache-dns] Generating recursor.conf..."
 if [ "$LOG_QUERIES" = "1" ]; then
     echo "[lancache-dns] Enabling query logging..."
 fi
-render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$LOG_QUERIES"
+recursor_extra_sed=""
+if [ "$LOG_QUERIES" = "1" ]; then
+    recursor_extra_sed='s/^  loglevel: 3$/  loglevel: 6/'
+fi
+render_template_atomic '${PDNS_API_KEY}' /etc/pdns/recursor.conf.template "$RECURSOR_CONF_FILE" "$recursor_extra_sed"
 _dns_recursor_validate_snapshot_or_rollback "$RECURSOR_CONF_FILE" || _dns_enter_rescue_mode "recursor"
 
 # ── 2. Generate Authoritative Config ─────────────────────────────────────────
 echo "[lancache-dns] Generating pdns.conf..."
 # shellcheck disable=SC2016 # envsubst needs the literal variable names.
-render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE"
+# dnsupdate-require-tsig Admin UI toggle (issue #815 follow-up, this
+# project's own PowerDNS 5.x migration): the marker alone is not sufficient
+# authorization to flip this on. If an operator enables the toggle (or a
+# stale marker survives) while no real DDNS_TSIG_KEY is configured, honoring
+# it would reject EVERY DNS UPDATE, including legitimately signed ones from
+# Kea's DHCP-DDNS daemon, since there would be no key to validate signatures
+# against -- a self-inflicted DDNS outage disguised as a security hardening
+# step. Fail closed on the safe side: ignore the marker (loudly, via a
+# WARNING) rather than actually locking DDNS out entirely, mirroring the
+# existing DDNS_ALLOW_FROM-narrowing fail-safe further above for the same
+# underlying "no real TSIG key" condition.
+auth_extra_sed=""
+if [ -f "$DNSUPDATE_REQUIRE_TSIG_MARKER" ]; then
+    if [ -n "$DDNS_TSIG_KEY" ]; then
+        echo "[lancache-dns] dnsupdate-require-tsig enabled via Admin UI toggle."
+        auth_extra_sed='s/^dnsupdate-require-tsig=no$/dnsupdate-require-tsig=yes/'
+    else
+        echo "[lancache-dns] WARNING: dnsupdate-require-tsig was requested via the Admin UI toggle, but no real DDNS_TSIG_KEY is configured -- ignoring the request and leaving DNS UPDATE TSIG-optional. Configure DDNS_TSIG_KEY first, then re-enable the toggle." >&2
+    fi
+fi
+render_template_atomic '${PDNS_API_KEY}:${DDNS_ALLOW_FROM}:${PDNS_LOCAL_ADDRESS}' /etc/pdns/auth/pdns.conf.template "$PDNS_AUTH_CONF_FILE" "$auth_extra_sed"
 
 # ── 3. Initialize SQLite Database ────────────────────────────────────────────
 if [ ! -f /var/lib/powerdns/pdns.sqlite3 ]; then

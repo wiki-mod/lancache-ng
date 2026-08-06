@@ -40,6 +40,13 @@ pub struct AaaaFilterForm {
 }
 
 #[derive(Deserialize)]
+pub struct DnsupdateRequireTsigForm {
+    pub csrf_token: String,
+    #[serde(default)]
+    pub enabled: Option<String>,
+}
+
+#[derive(Deserialize)]
 pub struct ToggleDomainForm {
     pub csrf_token: String,
     // The canonical (envelope-free) domain form, e.g. "steamcontent.com" or
@@ -92,6 +99,12 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              top-level domain (e.g. \"steamcontent.com\", not \"com\"). A leading \".\" for a \
              wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\").",
         ),
+        "dnsupdate_tsig_no_key" => Some(
+            "dnsupdate-require-tsig was not enabled: no real DDNS_TSIG_KEY is currently \
+             configured. Enabling this setting without a TSIG key would reject every DNS \
+             UPDATE, including legitimately signed ones -- configure DDNS_TSIG_KEY first \
+             (see docs/threat-model.md), then try again.",
+        ),
         _ => None,
     }
 }
@@ -108,6 +121,8 @@ pub async fn domains_page(
     // Kea-DDNS-auto-created; they are indistinguishable in PowerDNS).
     let ptr_records = fetch_ptr_records(&state).await;
     let aaaa_filter_enabled = is_aaaa_filter_enabled(&state).await;
+    let dnsupdate_require_tsig_enabled = is_dnsupdate_require_tsig_enabled(&state).await;
+    let ddns_tsig_key_configured = real_ddns_tsig_key_configured(&state);
     // #628: zone/record known-good snapshot rollback -- see
     // routes/dns_snapshots.rs's module doc comment for why this is a thin
     // HTTP call to nats-subscriber's own listener, not logic living here.
@@ -119,6 +134,11 @@ pub async fn domains_page(
     ctx.insert("lan_records", &lan_records);
     ctx.insert("ptr_records", &ptr_records);
     ctx.insert("aaaa_filter_enabled", &aaaa_filter_enabled);
+    ctx.insert(
+        "dnsupdate_require_tsig_enabled",
+        &dnsupdate_require_tsig_enabled,
+    );
+    ctx.insert("ddns_tsig_key_configured", &ddns_tsig_key_configured);
     ctx.insert("zone_snapshot_groups", &zone_snapshot_groups);
     ctx.insert(
         "domain_error_message",
@@ -383,6 +403,87 @@ pub async fn toggle_aaaa_filter(
     Ok(Redirect::to("/domains"))
 }
 
+// toggle_dnsupdate_require_tsig: unlike toggle_aaaa_filter above, this
+// setting is a static pdns.conf startup directive (PowerDNS only reads
+// dnsupdate-require-tsig once, at process start -- there is no Lua hook or
+// REST API call that changes it live), so this handler must actually
+// restart both DNS instances for the change to take effect, not just write
+// a marker file a running process happens to poll. Issue #815 follow-up
+// (the PowerDNS version this project ships only gained this setting in the
+// Alpine/5.x migration -- see services/dns/pdns.conf.template's own header
+// comment). That same comment also records an honest, real-tested finding:
+// for this project's actual zones, this global setting is defense-in-depth
+// layered on top of protection PowerDNS's per-zone TSIG-ALLOW-DNSUPDATE
+// metadata already provides whenever a real DDNS_TSIG_KEY exists (which is
+// essentially always) -- not the primary mechanism preventing unsigned
+// updates. Still real, still worth exposing (a maintainer decision, not an
+// implementation shortcut), just not the "closes an open hole" framing an
+// earlier design discussion assumed before this was actually tested.
+pub async fn toggle_dnsupdate_require_tsig(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+    Form(form): Form<DnsupdateRequireTsigForm>,
+) -> Result<Redirect, axum::http::StatusCode> {
+    crate::routes::verify_csrf_token(&headers, &form.csrf_token)?;
+    let enable = form.enabled.as_deref() == Some("1");
+
+    // Fail closed on the safe side, in the UI too (entrypoint.sh has its own
+    // independent copy of this same check -- defense in depth, not
+    // duplication for its own sake, since a marker file surviving from
+    // before DDNS_TSIG_KEY was ever configured must still be caught at
+    // startup even if it somehow bypassed this route). Enabling this
+    // setting with no real TSIG key configured would reject EVERY DNS
+    // UPDATE, including legitimately signed ones from Kea's DHCP-DDNS
+    // daemon -- a self-inflicted DDNS outage, not a hardening step.
+    if enable && !real_ddns_tsig_key_configured(&state) {
+        return Ok(Redirect::to("/domains?error=dnsupdate_tsig_no_key"));
+    }
+
+    let mut failed_paths = Vec::new();
+    for marker_path in dnsupdate_require_tsig_marker_paths(&state) {
+        if let Err(e) = set_aaaa_filter_marker(&marker_path, enable) {
+            tracing::error!(
+                path = %marker_path.display(),
+                enabled = enable,
+                error = %e,
+                "dnsupdate-require-tsig toggle failed"
+            );
+            failed_paths.push(marker_path);
+        }
+    }
+
+    if !failed_paths.is_empty() {
+        return Err(axum::http::StatusCode::INTERNAL_SERVER_ERROR);
+    }
+
+    // The marker write alone changes nothing until pdns.conf is
+    // re-rendered, which only happens at container start -- restart both
+    // instances so the operator's toggle click actually takes effect
+    // immediately, rather than silently waiting for some unrelated future
+    // restart. Best-effort: log and continue on a restart failure rather
+    // than reporting the whole toggle as failed, since the marker write
+    // (the actual persisted intent) already succeeded and a manual restart
+    // later will still pick it up correctly.
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.dns_standard_service).await
+    {
+        tracing::error!(
+            "Restart dns-standard for dnsupdate-require-tsig toggle failed: {}",
+            e
+        );
+    }
+    if let Err(e) =
+        docker_client::restart_service(&state.docker, &state.config.dns_ssl_service).await
+    {
+        tracing::error!(
+            "Restart dns-ssl for dnsupdate-require-tsig toggle failed: {}",
+            e
+        );
+    }
+
+    Ok(Redirect::to("/domains"))
+}
+
 async fn flush_recursor_cache(state: &AppState, domain: &str) {
     // PowerDNS Recursor's cache/flush endpoint requires a `domain` query
     // parameter and only flushes an exact name match, not a subtree --
@@ -475,6 +576,38 @@ fn set_aaaa_filter_marker(path: &Path, enabled: bool) -> std::io::Result<()> {
 
 fn aaaa_filter_enabled_at(path: &Path) -> bool {
     fs::metadata(path).is_ok()
+}
+
+async fn is_dnsupdate_require_tsig_enabled(state: &AppState) -> bool {
+    dnsupdate_require_tsig_marker_paths(state)
+        .into_iter()
+        .any(|path| aaaa_filter_enabled_at(&path))
+}
+
+fn dnsupdate_require_tsig_marker_paths(state: &AppState) -> [PathBuf; 2] {
+    [
+        Path::new(&state.config.dns_standard_state_dir).join("dnsupdate-require-tsig-enabled"),
+        Path::new(&state.config.dns_ssl_state_dir).join("dnsupdate-require-tsig-enabled"),
+    ]
+}
+
+// True only when a real (non-empty) DDNS_TSIG_KEY has actually been
+// persisted to the shared-secrets volume by entrypoint.sh's
+// shared-secret-bootstrap library (file "ddns-tsig-key"). Reading the
+// file's own presence/content, not an env var, because the UI process never
+// receives DDNS_TSIG_KEY itself (it isn't one of this container's own
+// secrets) -- the shared-secrets volume is the only place both the DNS
+// containers (writers/generators) and this UI (reader) agree on the current
+// real value's existence without the UI needing the plaintext secret at
+// all. Deliberately does not attempt full placeholder-string detection
+// (Rule-Ref: secret_is_placeholder's three independently-maintained
+// copies, issue #967): resolve_shared_secret only ever persists a real,
+// generated-or-operator-supplied value to this file, never a checked-in
+// placeholder literal, so a non-empty file here is already a strong enough
+// signal for this specific gate.
+fn real_ddns_tsig_key_configured(state: &AppState) -> bool {
+    let path = Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key");
+    fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false)
 }
 
 const MIN_TTL: u32 = 1;

@@ -327,6 +327,64 @@
       </p>
     </section>
 
+    {# dnsupdate-require-tsig toggle (issue #815 follow-up). Unlike the
+       AAAA-filter panel above, this is a static PowerDNS startup setting,
+       not a live Lua hook -- saving it restarts both dns-standard and
+       dns-ssl for real, and it can only be enabled once a real DDNS_TSIG_KEY
+       is configured (ddns_tsig_key_configured, computed server-side by
+       reading the shared-secrets volume; never trust a client-supplied
+       value for this gate). Default is off, matching the maintainer
+       decision to ship this as an opt-in hardening feature rather than a
+       global default flip. #}
+    <section data-dns-panel="settings" class="card flex flex-col gap-4 hidden">
+      <div>
+        <h2 class="font-semibold text-slate-200">DNS Update: TSIG erzwingen</h2>
+        <p class="text-xs text-slate-500 mt-0.5">
+          Zusätzliche Absicherung auf globaler Ebene: PowerDNS verlangt bereits heute eine
+          gültige TSIG-Signatur für DNS-Updates an die von diesem Projekt verwalteten Zonen
+          (LAN/Reverse-Zonen), sobald ein echter DDNS-Schlüssel konfiguriert ist -- das ist
+          praktisch immer der Fall. Diese Einstellung erzwingt TSIG zusätzlich global und deckt
+          damit auch Randfälle ab (z. B. eine zukünftige Zone ohne eigene TSIG-Zuordnung).
+          <strong>Löst einen Neustart von dns-standard und dns-ssl aus</strong> (kein Live-Reload,
+          PowerDNS liest diese Einstellung nur beim Start).
+        </p>
+      </div>
+
+      {% if not ddns_tsig_key_configured %}
+      <p class="text-xs text-amber-400">
+        Kein DDNS_TSIG_KEY konfiguriert -- diese Einstellung kann erst aktiviert werden, sobald
+        ein echter TSIG-Schlüssel vorhanden ist (wird beim ersten Start von dns-standard
+        automatisch erzeugt, siehe docs/threat-model.md).
+      </p>
+      {% endif %}
+
+      <form action="/domains/dnsupdate-require-tsig" method="post" class="flex items-center gap-4">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="flex items-center gap-2">
+          <input type="checkbox" id="dnsupdate-tsig-enabled" name="enabled" value="1"
+                 {% if dnsupdate_require_tsig_enabled %}checked{% endif %}
+                 {% if not ddns_tsig_key_configured %}disabled{% endif %}
+                 class="w-5 h-5 rounded border-slate-600 bg-slate-700 text-blue-600 focus:ring-2 focus:ring-blue-500 cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed">
+          <label for="dnsupdate-tsig-enabled" class="text-sm text-slate-300 cursor-pointer">
+            TSIG für DNS-Updates erzwingen
+          </label>
+        </div>
+        <button type="submit"
+                {% if not ddns_tsig_key_configured %}disabled{% endif %}
+                class="bg-blue-600 hover:bg-blue-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-blue-600">
+          Speichern &amp; DNS neu starten
+        </button>
+      </form>
+
+      <p class="text-xs text-slate-500">
+        {% if dnsupdate_require_tsig_enabled %}
+        Status: <span class="text-green-400 font-semibold">Aktiviert</span>
+        {% else %}
+        Status: <span class="text-slate-400">Deaktiviert (Standard)</span>
+        {% endif %}
+      </p>
+    </section>
+
     {# Zone/record known-good snapshot rollback (#628). Populated by
        routes/dns_snapshots.rs::fetch_zone_snapshot_groups, a thin HTTP call
        to nats-subscriber's own listener -- the actual snapshot storage/
