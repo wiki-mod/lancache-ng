@@ -540,20 +540,51 @@ propagation path end-to-end via a real `dig`, both for creation and removal.
   that the containers are up. `syslog-forwarding-simulation` (part of
   `full-setup-deep-validate.yml`) is the reusable proof for this — invoke it directly
   or via `gh workflow run` rather than re-deriving a new check.
-- Confirm the healthcheck limitation this project has already documented for itself
-  (`AG-VAL-023`'s netdata precedent, and `syslog`'s own compose-file comment): a
-  binary-presence healthcheck (`fluent-bit -V`, `syslog-ng-ctl healthcheck`) proves
-  the binary is intact, not that the tailing pipeline actually works — validate the
-  pipeline directly (a real log line arriving at the target), don't trust the
-  healthcheck alone.
+- **UPDATED (syslog+fluent-bit consolidation PR, 2026-08):** `syslog` and
+  `syslog-ng` are no longer two separate containers -- they are one combined
+  container (`services/syslog/`) running both processes, under the single
+  Compose service name `syslog`. Its healthcheck
+  (`services/syslog/healthcheck.sh`) is no longer a binary-presence-only
+  check: it verifies fluent-bit AND syslog-ng independently (a real
+  `syslog-ng-ctl stats` probe against the control socket, plus a
+  cmdline-based process check for fluent-bit) and only reports healthy when
+  both are, writing a structured status file
+  (`/var/lib/lancache-syslog-data/health-status.json`, including a
+  `data_loss_alert_active` field). Still validate the pipeline directly (a
+  real log line arriving at the target) in addition to trusting this
+  healthcheck, per `AG-VAL-023`'s netdata precedent -- a real check on top of
+  a real check is the point, not a contradiction.
 - **Standing check (AG-VAL-029, added by issue #1343):** `scripts/setup-cli-simulation.sh`'s
   Phase 1 now asserts, after a default fresh install (every wizard prompt answered
   with its default), that `.env` contains `LOGGING_ENABLED=1`, that `COMPOSE_PROFILES`
-  includes `logging`, and that the real `syslog`/`syslog-ng` containers are actually
+  includes `logging`, and that the real `syslog` container (the combined
+  fluent-bit+syslog-ng container since the consolidation PR above) is actually
   running — guarding against a regression back to the bug this issue fixed (central
   logging silently never starting on a normal install). This runs as part of the same
   CI job the rest of this section already points at (`setup-cli-simulation` in
   `full-setup-sims.yml`), not a new standalone check.
+- **Standing check (AG-VAL-029, added by the syslog+fluent-bit consolidation
+  PR, 2026-08 -- real confirmed bug):** the combined `syslog` container ships
+  a periodic silent-data-loss detector (`services/syslog/data-loss-detector.sh`,
+  invoked from `entrypoint.sh`'s detector loop) comparing syslog-ng's own
+  "processed" stats counter against real bytes landing on disk under the
+  syslog-ng log root. This guards against a real, live-reproduced bug: a
+  bind-mounted log-root directory left root-owned (Docker's own default when
+  the host directory does not already exist before first container start)
+  silently swallows every message a non-root syslog-ng receives --
+  `syslog-ng-ctl stats` still increments its `processed` counter and
+  syslog-ng logs no error at all, while zero bytes ever reach disk. Verified
+  live on a self-hosted runner (see the PR body for the exact reproduction
+  commands): the detector correctly fires (`processed_delta=1
+  bytes_delta=0`, non-zero exit) against the broken condition and stays
+  silent (`bytes_delta=71`, exit 0) against a matched, correctly-owned
+  control run delivering the same message. `setup.sh` also now pre-creates
+  and chowns this directory on fresh install specifically to prevent the
+  condition from occurring in the first place (see setup.sh's own "Creating
+  directories" step); this detector is the defense-in-depth backstop for an
+  install that predates that fix, skipped the fix (e.g. a from-scratch
+  manual deploy without running setup.sh), or has its permissions changed
+  later.
 
 ### 9. Resource-Leak / Cleanup Pass (standing check, run every release)
 
