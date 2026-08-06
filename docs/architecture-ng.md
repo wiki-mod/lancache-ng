@@ -56,7 +56,8 @@ dashboard's resize control, issue #1069 part 3):**
 | Variable | Default | Description |
 |---|---|---|
 | `CACHE_MAX_SIZE` | `50g` | Max cache size — the Admin UI dashboard's resize control re-validates a requested size against real free disk space at `CACHE_DIR` (same buffer-scaled safety check as the setup-time prompt, issue #1069) before persisting it for the host convergence tick to apply |
-| `CACHE_MEM_MB` | `200` | keys_zone size (1MB ≈ 8,000 keys) |
+| `CACHE_MEM_MB` | `512` | keys_zone size (1MB ≈ 8,000 keys, nginx's own documented rule of thumb — see "Cache tuning review" below for the sizing math; previously documented here as `200`, which never matched the real shipped default in `config/prod/proxy.env`/`deploy/quickstart/.env`/`setup.sh`, all `512` since this variable was introduced 2026-06-18/19) |
+| `CACHE_MIN_FREE` | `1g` | Free-disk-space floor (bug-hunt #849 item 11) — the cache manager evicts LRU entries once free space at `CACHE_DIR`'s filesystem drops below this, independent of and in addition to `CACHE_MAX_SIZE` |
 | `CACHE_SLICE_SIZE` | `8m` | Slice size: `4m/8m/16m/32m/64m/128m/256m/512m` |
 | `CACHE_VALID_HIT` | `365d` | Validity duration for 200/206/301/302 |
 | `CACHE_VALID_ANY` | `1m` | Validity duration for everything else |
@@ -70,7 +71,80 @@ proxy_set_header    Range $slice_range;
 proxy_cache_valid   206 $CACHE_VALID_HIT;
 ```
 
-**Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage.
+**Note:** `max_size` is not a hard limit — cache can exceed it with crashed workers. Watchdog monitors actual disk usage. `min_free` (see above) is an nginx-native backstop for the more common case (no crash, just an operator-chosen `CACHE_MAX_SIZE` that doesn't leave enough real headroom on a shared filesystem) — it does not cover the crashed-worker case either, since it is enforced by the same cache-manager process `max_size` already relies on.
+
+### Cache tuning review (bug-hunt #849/#1068 item 11)
+
+`proxy_cache_lock on` (see `services/proxy/proxy-params.conf`) was already in
+place before this review — only one worker fetches a given cache-miss URL at
+a time, with a 2h `proxy_cache_lock_timeout` for large in-flight game
+downloads (see `AGENTS.md`'s `AG-KD-006`). No change needed there.
+
+The rest of `proxy_cache_path`'s tuning knobs beyond `max_size`/`min_free`
+(`manager_files`, `manager_threshold`, `manager_sleep`, `loader_files`,
+`loader_threshold`, `loader_sleep`) are all still at nginx's untouched
+defaults (`100` files / `200ms` / `50ms` for both the manager and loader).
+Whether these need raising for a given deployment depends on two things this
+project's own install base varies on enormously and that this documentation
+cannot know in advance: how many cache files/slices actually accumulate, and
+how fast the host's disk can service metadata operations. Rather than invent
+a number, here is the reasoning and the exact commands to derive one for a
+real host:
+
+- **`keys_zone` sizing.** Every cached byte range is one key (see the slice
+  module above), so the number of keys a fully-populated cache holds is
+  `CACHE_MAX_SIZE / CACHE_SLICE_SIZE`, not the number of distinct files —
+  a single large game update sliced into `CACHE_SLICE_SIZE` chunks
+  contributes one key per chunk. Using nginx's own ~8,000-keys-per-MB rule
+  of thumb, the keys_zone memory a fully-populated cache needs is
+  approximately:
+  ```text
+  keys_zone_MB ≈ (CACHE_MAX_SIZE_bytes / CACHE_SLICE_SIZE_bytes) / 8000
+  ```
+  At the shipped defaults (`CACHE_MAX_SIZE=50g`, `CACHE_SLICE_SIZE=8m`) that
+  is `(50*1024/8)/8000 ≈ 0.8 MB` — the shipped `CACHE_MEM_MB=512` default
+  covers roughly `512*8000*8m ≈ 32 TB` of fully-populated cache before
+  running out of key-metadata space, i.e. comfortable headroom for any
+  `CACHE_MAX_SIZE` a home/LAN deployment is realistically likely to set. An
+  operator scaling `CACHE_MAX_SIZE` well past that point (a large multi-site
+  or ISP-scale deployment) should recompute `keys_zone_MB` with the formula
+  above rather than assume the shipped default still has headroom.
+- **Cache-loader throughput after a restart.** The cache loader (which
+  re-indexes on-disk cache entries into the keys_zone at nginx startup)
+  processes at most `loader_files` (default `100`) entries or runs for at
+  most `loader_threshold` (default `200ms`) per iteration, whichever comes
+  first, then sleeps `loader_sleep` (default `50ms`) before the next
+  iteration. At the disk-bound worst case (each iteration hits its `200ms`
+  threshold), that is a ceiling of `100 files / 250ms ≈ 400 files/sec`;
+  actual throughput on a fast disk that finishes each 100-file batch well
+  under the threshold can be higher (bounded instead by `loader_sleep`
+  alone, `100 files / 50ms = 2000 files/sec`). For a cache holding `N` slice
+  files, full re-indexing after a restart therefore takes somewhere between
+  `N/2000` and `N/400` seconds — on a slow/loaded disk or with a very large
+  `N`, this can be minutes, during which requests for not-yet-reloaded
+  entries are treated as cache misses. To find your own real `N` and decide
+  whether to raise `loader_files`/`loader_threshold`, run this against a
+  live deployment's actual cache directory:
+  ```bash
+  find "$CACHE_DIR" -type f | wc -l
+  ```
+  (`$CACHE_DIR` is the host path bind-mounted to `/var/cache/nginx/lancache`
+  via the `proxy-cache` named volume's `driver_opts.device` — see
+  `deploy/prod/docker-compose.yml`'s top-level `volumes:` block, or
+  `deploy/quickstart/docker-compose.yml`'s direct `${CACHE_DIR}:...` bind
+  mount, for the exact wiring in use on a given deployment profile.) The same
+  `manager_files`/`manager_threshold`/`manager_sleep` throttle governs the
+  cache **manager** (LRU/`min_free` eviction during normal operation, not
+  just at startup) — a deployment with a very large `N` and a cache that
+  stays near `CACHE_MAX_SIZE`/`CACHE_MIN_FREE` continuously may see eviction
+  lag behind ingestion under the same defaults, for the same reason. No
+  change is made to any of these defaults in this pass: this project's real
+  install base spans everything from small home hardware to larger LAN
+  setups, and a single hardcoded replacement value would be exactly as
+  unverified for most of that range as the untouched nginx default is —
+  raise `manager_files`/`loader_files` (and their paired `_threshold`
+  values) only after measuring `N` and disk latency on the actual target
+  host, not preemptively.
 
 ## PowerDNS
 
