@@ -115,14 +115,17 @@ sif_image_revision() {
   if [[ -n "${STAGING_IMAGE_REVISION_CMD:-}" ]]; then
     revision="$("$STAGING_IMAGE_REVISION_CMD" "$image")" || return 1
   else
-    local raw target digest
+    local raw target digest digest_lines
     raw="$(docker buildx imagetools inspect "$image" --raw 2>/dev/null)" || return 1
     target="$image"
-    if printf '%s' "$raw" | grep -q '"manifests"[[:space:]]*:'; then
-      digest="$(printf '%s' "$raw" \
-        | grep -o '"digest"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]\{64\}"' \
-        | head -1 \
-        | sed -E 's/.*"(sha256:[0-9a-f]+)"/\1/')"
+    # Here-strings, not live pipes: $raw is a manifest-list JSON blob that
+    # can carry several platform entries, and a live `producer | grep -q`
+    # or `grep -o | head -1` pipe can SIGPIPE the producer once there is
+    # more matching output than the consumer reads (issue #1377's
+    # repo-wide pipefail/SIGPIPE audit).
+    if grep -q '"manifests"[[:space:]]*:' <<<"$raw"; then
+      digest_lines="$(grep -o '"digest"[[:space:]]*:[[:space:]]*"sha256:[0-9a-f]\{64\}"' <<<"$raw")"
+      digest="$(head -1 <<<"$digest_lines" | sed -E 's/.*"(sha256:[0-9a-f]+)"/\1/')"
       if [[ -z "$digest" ]]; then
         return 1
       fi
