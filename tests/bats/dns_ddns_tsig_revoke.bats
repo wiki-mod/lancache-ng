@@ -21,8 +21,11 @@ setup() {
     source "$BATS_TEST_DIRNAME/helpers/dns-ddns-tsig-helpers.sh"
     load_dns_ddns_tsig_helpers "$repo_root" "$BATS_TEST_TMPDIR/dns-ddns-tsig-helpers-extracted.sh"
 
+    # shellcheck disable=SC2034 # read by configure_ddns_tsig(), sourced dynamically via load_dns_ddns_tsig_helpers() -- invisible to shellcheck's static analysis
     DDNS_TSIG_NAME="lancache-ddns-key"
+    # shellcheck disable=SC2034 # read by configure_ddns_tsig(), sourced dynamically via load_dns_ddns_tsig_helpers() -- invisible to shellcheck's static analysis
     DDNS_TSIG_ALGORITHM="hmac-sha256"
+    # shellcheck disable=SC2034 # read by configure_ddns_tsig(), sourced dynamically via load_dns_ddns_tsig_helpers() -- invisible to shellcheck's static analysis
     DDNS_UPDATE_ZONES=("lan" "1.168.192.in-addr.arpa")
 
     pdnsutil_calls="$BATS_TEST_TMPDIR/pdnsutil-calls.log"
@@ -80,6 +83,7 @@ pdnsutil() {
 }
 
 @test "a placeholder DDNS_TSIG_KEY is still rejected as fatal (no regression)" {
+    # shellcheck disable=SC2034 # read by configure_ddns_tsig(), sourced dynamically via load_dns_ddns_tsig_helpers() -- invisible to shellcheck's static analysis
     DDNS_TSIG_KEY="CHANGE_ME"
     run configure_ddns_tsig
 
