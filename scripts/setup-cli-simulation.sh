@@ -116,6 +116,31 @@ sim_compose_project_name() {
     printf 'lancache-ng-sim-%s\n' "$(basename "$1" | tr 'A-Z.' 'a-z-')"
 }
 
+# Issue #1415: deploy/quickstart/docker-compose.yml's `container_name:`
+# fields (unlike `name: lancache-ng` above) are NOT overridden by
+# COMPOSE_PROJECT_NAME at all -- an explicit `container_name:` always wins,
+# regardless of project name, so two concurrent runs of this same script on
+# the same physical runner host (several self-hosted runner instances can
+# share one Docker daemon) still collided on the identical fixed container
+# name even though sim_compose_project_name() above already gave each run
+# its own project. LANCACHE_CONTAINER_SUFFIX closes that gap by feeding an
+# equally-unique value into every container_name: (see that compose file's
+# own top-of-file comment). Deliberately derived from the SAME install_dir
+# random component sim_compose_project_name() already uses, rather than a
+# second independent randomness source (e.g. a fresh $RANDOM/mktemp call)
+# -- one already-proven-unique-per-run value is enough, and reusing it keeps
+# the project name and the container-name suffix trivially traceable to
+# the same run when reading logs or `docker ps` output. Prefixed with `-`
+# so the resulting names read as `lancache-proxy-sim-<token>`, not a
+# run-together `lancache-proxysimtm4ljy`. A real end-user install is
+# unaffected: this function, like sim_compose_project_name() above, is only
+# ever called by this simulation script -- LANCACHE_CONTAINER_SUFFIX stays
+# unset for a real install, keeping every container_name: at its documented
+# fixed value (issue #849 finding #5).
+sim_container_name_suffix() {
+    printf -- '-sim-%s\n' "$(basename "$1" | tr 'A-Z.' 'a-z-')"
+}
+
 mkdir -p "$repo_root/.setup-cli-simulation-tmp"
 # Under `set -euo pipefail`, a bare `var="$(cmd)"` with no adjacent check
 # aborts the whole script silently the instant `cmd` fails -- errexit fires
@@ -139,6 +164,12 @@ if ! COMPOSE_PROJECT_NAME="$(sim_compose_project_name "$install_dir")"; then
     exit 1
 fi
 export COMPOSE_PROJECT_NAME
+# Issue #1415: see sim_container_name_suffix()'s own comment above.
+if ! LANCACHE_CONTAINER_SUFFIX="$(sim_container_name_suffix "$install_dir")"; then
+    echo "::error::Could not derive a unique LANCACHE_CONTAINER_SUFFIX from install_dir ($install_dir)." >&2
+    exit 1
+fi
+export LANCACHE_CONTAINER_SUFFIX
 
 cleanup() {
     local status=$?
@@ -365,6 +396,16 @@ while true; do
             exit 1
         fi
         export COMPOSE_PROJECT_NAME
+        # Issue #1415: must move in lockstep with COMPOSE_PROJECT_NAME above --
+        # leaving the OLD suffix exported here would mix a stale suffix with
+        # the new project name, and every container_name: would still resolve
+        # against whatever the OLD install_dir's random token was, not this
+        # retry's own.
+        if ! LANCACHE_CONTAINER_SUFFIX="$(sim_container_name_suffix "$install_dir")"; then
+            echo "::error::Could not derive a unique LANCACHE_CONTAINER_SUFFIX from install_dir ($install_dir) for retry attempt $attempt." >&2
+            exit 1
+        fi
+        export LANCACHE_CONTAINER_SUFFIX
         fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
         attempt=$((attempt + 1))
         sleep 10

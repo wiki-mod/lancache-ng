@@ -144,6 +144,26 @@ fi
 export COMPOSE_PROJECT_NAME="$compose_project"
 network_name="${compose_project}_default"
 
+# Issue #1415: this script drives the SAME deploy/quickstart/docker-compose.yml
+# setup-cli-simulation.sh does, deliberately CONCURRENTLY with it within the
+# same PR's own CI run (see scripts/lib/quickstart-compose-lock.sh's own
+# header for why both jobs share one flock) -- so it needs the identical
+# per-run container-name isolation, not just its own distinct
+# COMPOSE_PROJECT_NAME/loopback IP above. Without this, two concurrent
+# instances of this script (or one of this script and one of
+# setup-cli-simulation.sh) would still collide on deploy/quickstart's fixed
+# container_name: values regardless of already having distinct project
+# names, exactly as issue #1415 describes. See that compose file's own
+# top-of-file LANCACHE_CONTAINER_SUFFIX comment.
+sim_container_name_suffix() {
+    printf -- '-syslog-e2e-%s\n' "$(basename "$1" | tr 'A-Z.' 'a-z-')"
+}
+if ! LANCACHE_CONTAINER_SUFFIX="$(sim_container_name_suffix "$install_dir")"; then
+    echo "::error::Failed to derive a sanitized LANCACHE_CONTAINER_SUFFIX from install_dir ($install_dir)." >&2
+    exit 1
+fi
+export LANCACHE_CONTAINER_SUFFIX
+
 # Unique per-run marker prefix. Deliberately alphanumeric-only (no special
 # characters): it flows through a domain-name validator (routes/domains.rs
 # rejects anything with '.'-less-than-2-labels, which is exactly the
