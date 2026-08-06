@@ -4750,6 +4750,15 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
+          # decision 2026-08-06): proxy/dhcp-proxy/watchdog/dhcp/syslog/ntp have no real
+          # compile/link step in their Dockerfiles (precompiled package install or a
+          # COPY --from an upstream image only, confirmed by direct inspection, not
+          # assumed from the service name) and measured well below dns/ui/build-tools in
+          # a real full-rebuild run -- see issue #1095's comment thread for the numbers.
+          # dns/ui (Rust via ${BUILD_TOOLS_IMAGE}) and build-tools (Go+Rust) stay heavy.
+          # watchdog is scoped to its CURRENT Dockerfile only: issue #842's planned Rust
+          # rewrite must trigger a fresh re-evaluation, not a grandfathered stay on light.
           - service: proxy
             context: services/proxy
             # cdn-domains.txt lives in services/dns/, outside this image's own
@@ -4759,7 +4768,7 @@ jobs:
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
             platform: linux/amd64
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
             context: services/dns
             build_contexts: ""
@@ -4774,35 +4783,35 @@ jobs:
             description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
             platform: linux/amd64
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp
             context: services/dhcp
             build_contexts: ""
             description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
             platform: linux/amd64
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
             platform: linux/amd64
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
             build_contexts: ""
             description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
             platform: linux/amd64
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: syslog
             context: services/syslog
             build_contexts: ""
             description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
             platform: linux/amd64
             platform_tag: amd64
-            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
             context: services/ui
             build_contexts: ""
@@ -5730,7 +5739,10 @@ jobs:
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Per-service runner selection (issue #1095, AG-CI-002 measured exception): mirrors
+    # container-scan's own `${{ fromJSON(matrix.runner) }}` pattern -- see this job's
+    # matrix comment above for which services route to light vs heavy and why.
+    runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 150
     # Job-level concurrency (#888, keyed per matrix service and per ref). CANONICAL
     # RATIONALE for this whole workflow's channel publish path -- container-scan/
@@ -5739,8 +5751,8 @@ jobs:
     #
     # cancel-in-progress is scoped to pull_request events ONLY (issue #979). On a PR, a
     # newer push to the same branch supersedes the older commit, so cancelling the older
-    # service build reclaims a scarce lancache-heavy slot (otherwise pinned for the full
-    # ~150-minute timeout) with no downside: a PR's own commits are never promoted to a
+    # service build reclaims a scarce self-hosted slot (heavy or light, per matrix.runner
+    # above -- otherwise pinned for the full ~150-minute timeout) with no downside: a PR's own commits are never promoted to a
     # channel, GHCR tag writes are atomic (a cancelled build leaves no corrupt or
     # partially-visible sha-* tag), and merge-manifests already requires
     # `needs.build.result == 'success'`, so a cancelled build cleanly stops the pipeline.
@@ -5782,6 +5794,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # Runner tiers below: same issue #1095 / AG-CI-002 measured exception as
+          # container-scan's matrix -- see that job's own comment for the full
+          # rationale (Dockerfile compile-graph evidence, measured build times,
+          # watchdog's #842-scoped non-permanence). Kept in sync manually with
+          # container-scan's copy, same convention as this job's own
+          # service_descriptions duplication elsewhere in this file.
           - service: proxy
             context: services/proxy
             # cdn-domains.txt lives in services/dns/, outside this image's own
@@ -5789,40 +5807,49 @@ jobs:
             # comment for why a named additional context is needed here.
             build_contexts: dns-domains=services/dns
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
             context: services/dns
             build_contexts: ""
             description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
             rust: true
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
             context: services/watchdog
             build_contexts: ""
             description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp
             context: services/dhcp
             build_contexts: ""
             description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
             build_contexts: ""
             description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
             build_contexts: ""
             description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: syslog
             context: services/syslog
             build_contexts: ""
             description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
+            runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
             context: services/ui
             build_contexts: ""
             description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
             rust: true
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: build-tools
             context: tools/build-tools
             build_contexts: ""
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
       - name: Checkout
