@@ -19,6 +19,40 @@ gsqlite3-database=/var/lib/powerdns/pdns.sqlite3
 
 dnsupdate=yes
 allow-dnsupdate-from=${DDNS_ALLOW_FROM}
+# Requires PowerDNS 5.0+ (available since this project's Alpine migration,
+# issue #815 -- the prior Debian-based image's pdns-server 4.9.x predated
+# this setting entirely). Permanently "no" -- NOT operator-controlled.
+#
+# HISTORY (issue #815 follow-up, two designs): the first design put an
+# Admin UI toggle directly on THIS line, flipping it to "yes". Real
+# nsupdate testing then proved that toggle a no-op in the common case:
+# whenever a real DDNS_TSIG_KEY exists (essentially always, since
+# resolve_shared_secret's shared-secret-bootstrap auto-generates one on
+# first boot even without an explicit operator value), configure_ddns_tsig()
+# in entrypoint.sh already sets per-zone `TSIG-ALLOW-DNSUPDATE` metadata
+# naming that key, and PowerDNS's own documented behavior for that metadata
+# is "if any TSIG keys are listed ... one of them is required for updates"
+# REGARDLESS of this global setting. Confirmed live: an unsigned nsupdate
+# against "lan." was REFUSED ("TSIG key required, but packet does not
+# contain key") with this line at "no", identically to "yes". Maintainer
+# correction: since the real, observable control point is the per-zone
+# metadata, not this line, the operator-facing toggle now lives there
+# instead -- see entrypoint.sh's DDNS_ALLOW_UNSIGNED_MARKER and
+# configure_ddns_tsig() -- letting an operator explicitly RELAX the
+# already-active per-zone enforcement (accept unsigned updates) rather than
+# switch on a global setting that was never the actual enforcement point.
+# This line stays a fixed "no" rather than operator-toggleable, trading away
+# one narrow theoretical benefit the earlier design had: forcing this to
+# "yes" would have been extra defense-in-depth for a zone that somehow never
+# received its own TSIG-ALLOW-DNSUPDATE metadata (a future zone type, or a
+# partially-failed configure_ddns_tsig() run where TSIG import succeeds but
+# one zone's set-meta call fails) -- not a case this project has ever hit,
+# and not independently tested here (this line's effect on a metadata-less
+# zone specifically was not part of this feature's live-tested proof, only
+# its no-op effect on zones that DO have metadata). Keeping exactly one real,
+# operator-facing enforcement control point (the per-zone metadata) rather
+# than two settings that mostly overlap was judged the clearer design.
+dnsupdate-require-tsig=no
 
 # The LAN/reverse zones created below (pdnsutil create-zone, entrypoint.sh's
 # "Create LAN Zones" step) get no explicit SOA at creation time, so without

@@ -102,6 +102,15 @@ pub struct Config {
     pub cache_dir: String,
     pub dns_standard_state_dir: String,
     pub dns_ssl_state_dir: String,
+    // dnsupdate-require-tsig Admin UI toggle (issue #815 follow-up): the
+    // shared-secrets volume (mounted read-only-in-practice into this
+    // container too, per deploy/prod/docker-compose.yml) is where
+    // entrypoint.sh's shared-secret-bootstrap library persists the
+    // first-writer-wins DDNS_TSIG_KEY (file name "ddns-tsig-key"). The UI
+    // checks this file's presence/non-emptiness before allowing the toggle
+    // on, so enabling it can never lock DNS UPDATE out entirely with no key
+    // configured to validate signatures against.
+    pub shared_secret_dir: String,
     pub proxy_standard_url: String,
     pub proxy_ssl_url: String,
     pub netdata_url: String,
@@ -323,6 +332,7 @@ impl fmt::Debug for Config {
             .field("cache_dir", &self.cache_dir)
             .field("dns_standard_state_dir", &self.dns_standard_state_dir)
             .field("dns_ssl_state_dir", &self.dns_ssl_state_dir)
+            .field("shared_secret_dir", &self.shared_secret_dir)
             .field("proxy_standard_url", &self.proxy_standard_url)
             .field("proxy_ssl_url", &self.proxy_ssl_url)
             .field("netdata_url", &self.netdata_url)
@@ -813,6 +823,11 @@ impl Config {
             cache_dir,
             dns_standard_state_dir: env_str("DNS_STANDARD_STATE_DIR", "/var/lib/powerdns-state"),
             dns_ssl_state_dir: env_str("DNS_SSL_STATE_DIR", "/var/lib/powerdns-state"),
+            // Matches entrypoint.sh's shared-secret-bootstrap library
+            // default (LANCACHE_SHARED_SECRET_DIR) exactly, so both sides
+            // agree on where "ddns-tsig-key" lives without a second env var
+            // most operators would never think to keep in sync.
+            shared_secret_dir: env_str("LANCACHE_SHARED_SECRET_DIR", "/var/lib/lancache-secrets"),
             proxy_standard_url,
             proxy_ssl_url,
             netdata_url: env_str("NETDATA_URL", "http://netdata:19999"),
