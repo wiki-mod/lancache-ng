@@ -161,8 +161,33 @@ process_service() {
   local versions_stderr
   versions_stderr="$(mktemp)"
   if ! versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>"$versions_stderr")"; then
-    echo "::error::Failed to list package versions for lancache-ng/${service}: $(cat "$versions_stderr")"
+    local list_error
+    list_error="$(cat "$versions_stderr")"
     rm -f "$versions_stderr"
+    # A real 404 here means the package itself does not exist yet -- e.g. a
+    # service that just joined build-push.yml's build matrix (see this
+    # file's own `services=(...)` comment: syslog, #1428/#1431) but has not
+    # had its first image pushed yet. Confirmed live (2026-08-06) this is a
+    # real, not merely hypothetical, transient state: `gh api` on a genuinely
+    # missing package exits non-zero and writes "gh: Package not found.
+    # (HTTP 404)" to stderr (the raw JSON error body itself goes to STDOUT,
+    # which is why this check reads $list_error -- the stderr capture --
+    # not $versions_json). This is NOT a reaper error: there is nothing to
+    # list, and nothing to reap, for a service with no images published yet
+    # -- it becomes real work again the moment the first image lands, with
+    # no code change needed. Treating it as `had_errors=1` (this function's
+    # ORIGINAL, inherited behavior -- confirmed the pre-extraction workflow's
+    # own inline copy had the exact same defect) would fail this workflow's
+    # every single run the moment any new service is added to the build
+    # matrix ahead of its first real push, for a reason that has nothing to
+    # do with GHCR_PACKAGE_DELETE_PAT, rate limits, or a real listing
+    # failure -- exactly the kind of spurious, confusing red build this
+    # project's own AG-CI-013/related rules exist to prevent.
+    if [[ "$list_error" == *"HTTP 404"* ]]; then
+      echo "::notice::lancache-ng/${service} has no GHCR package yet (HTTP 404 listing its versions) -- nothing to reap for a service with no images published. Not treated as an error."
+      return
+    fi
+    echo "::error::Failed to list package versions for lancache-ng/${service}: $list_error"
     had_errors=1
     return
   fi

@@ -387,6 +387,41 @@ VERSIONS_JSON
     [ ! -s "$delete_log" ]
 }
 
+# Added 2026-08-06 per a second advisor() checkpoint, called specifically
+# because this branch had just merged in current_dev's unrelated addition of
+# a new "syslog" service (#1428/#1431) to build-push.yml's build matrix
+# while this PR was open -- that merge's own commit message says "scaffold:
+# image not yet built", which raised the question of what process_service()
+# does for a canonical service with no GHCR package at all yet. Live-checked
+# (2026-08-06): `gh api` against a genuinely nonexistent package exits
+# non-zero and writes "gh: Package not found. (HTTP 404)" to STDERR (the raw
+# JSON error body goes to stdout instead, confirmed by capturing both
+# streams separately) -- this test reproduces exactly that shape via the
+# mock below. Before this fix, ANY 404 here was indistinguishable from a
+# real listing failure and set had_errors=1, which would fail the entire
+# workflow run the moment a new service lands in the build matrix ahead of
+# its first real image push -- confirmed the pre-extraction inline workflow
+# had the identical defect, so this is a fix to an inherited bug, not a
+# regression newly introduced by the extraction.
+@test "process_service: a 404 listing a service's own package (no images published yet) is not an error" {
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            echo '{"message":"Package not found.","documentation_url":"https://docs.github.com/rest/packages/packages#list-package-versions-for-a-package-owned-by-an-organization","status":"404"}'
+            echo "gh: Package not found. (HTTP 404)" >&2
+            return 1
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    process_service syslog
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 0 ]
+    [ "$had_errors" -eq 0 ]
+}
+
 @test "process_service: a manifest-fetch failure disables orphan classification for that service (fails closed)" {
     # See the previous test's comment: declared/assigned separately (SC2155).
     local index_digest plat_a
