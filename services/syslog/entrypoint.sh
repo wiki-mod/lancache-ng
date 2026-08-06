@@ -72,7 +72,17 @@ sleep 1
 # edge/testing repo, and this project's pinning discipline does not accept
 # that). Static config baked into the image (services/syslog/fluent-bit.conf,
 # a 1:1 port of the previous ~600-line CLI-flag pipeline).
-/opt/fluent-bit-glibc/lib/ld-linux-x86-64.so.2 \
+#
+# The interpreter's filename is architecture-dependent (ld-linux-x86-64.so.2
+# on amd64, ld-linux-aarch64.so.1 on arm64, confirmed live for both) -- this
+# was a real bug in this file's first version, which hardcoded the amd64
+# name and only ever ran on amd64 during this PR's own verification (see
+# this PR's report for that gap being named honestly). Read the discovered
+# name the Dockerfile's build-time RUN step wrote to
+# ld-interp-name (see Dockerfile's own comment on that step) instead of
+# hardcoding either arch's filename here.
+ld_interp="$(cat /opt/fluent-bit-glibc/ld-interp-name)"
+"/opt/fluent-bit-glibc/lib/$ld_interp" \
     --library-path /opt/fluent-bit-glibc/lib \
     /opt/fluent-bit-glibc/bin/fluent-bit -c /etc/fluent-bit/fluent-bit.conf &
 FLUENT_BIT_PID=$!

@@ -15,10 +15,13 @@
 # process is still running" implies both children are healthy.
 #
 # fluent-bit: `pgrep -f` against the full command line, NOT `pgrep -x
-# fluent-bit` -- confirmed live that /proc/<pid>/comm for this process stays
-# "ld-linux-x86-64" for its entire lifetime, never "fluent-bit", because
-# comm reflects the ORIGINAL execve() target. Since fluent-bit is invoked
-# through an EXPLICIT ld-linux-x86-64.so.2 interpreter argument (see
+# fluent-bit` -- confirmed live (on amd64; the same reasoning applies
+# unchanged on arm64, see Dockerfile/entrypoint.sh's arm64-portability
+# comments) that /proc/<pid>/comm for this process stays the bundled
+# ld-linux interpreter's own basename ("ld-linux-x86-64" on amd64,
+# "ld-linux-aarch64" on arm64) for its entire lifetime, never "fluent-bit",
+# because comm reflects the ORIGINAL execve() target. Since fluent-bit is
+# invoked through an EXPLICIT ld-linux interpreter argument (see
 # Dockerfile/entrypoint.sh's own comments on why: bundling fluent-bit's
 # glibc closure into Alpine), the kernel's execve() target really is the
 # interpreter, not fluent-bit itself -- ld.so manually loads and jumps to

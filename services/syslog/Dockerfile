@@ -26,8 +26,11 @@
 # along with its ENTIRE glibc shared-library closure (confirmed via `ldd`
 # against the real image: libc.so.6, libssl.so.3, libcurl.so.4, libgnutls,
 # libkrb5, ~35 libraries total), then exec it through that same bundled
-# ld-linux-x86-64.so.2 as an EXPLICIT interpreter argument
-# (`ld-linux-x86-64.so.2 --library-path <bundle> <binary>`), never through
+# dynamic-linker interpreter (ld-linux-x86-64.so.2 on amd64,
+# ld-linux-aarch64.so.1 on arm64 -- both confirmed live; see the COPY step
+# further down for exactly how the interpreter's arch-specific filename is
+# discovered rather than hardcoded) as an EXPLICIT interpreter argument
+# (`<ld-linux interpreter> --library-path <bundle> <binary>`), never through
 # the kernel's normal "read the ELF's own interpreter field" path (which
 # would look for that interpreter at its embedded absolute path, absent on
 # musl-based Alpine). This is not gcompat (a musl-side glibc syscall/ABI
@@ -79,9 +82,40 @@ RUN apk add --no-cache \
 # Copy the pinned fluent-bit binary and its full shared-library closure into
 # a private prefix -- never mixed into Alpine's own musl /usr/lib, so this
 # cannot affect or be affected by any Alpine-native library on the system.
+#
+# ── arm64 fix (2026-08-06, real bug found and confirmed by a separate
+# agent's #1428 CI run, then reproduced here independently before fixing) ──
+# The FIRST version of this Dockerfile hardcoded x86_64-linux-gnu in both
+# COPY source paths below and hardcoded ld-linux-x86-64.so.2 in this
+# Dockerfile's own setcap step and in entrypoint.sh's exec line. That is a
+# real amd64-only assumption this PR's own verification never caught,
+# because only amd64 was built and tested (see this PR's body/report for
+# that gap being named honestly). Confirmed live on a real arm64 build
+# (docker buildx --platform linux/arm64, self-hosted runner, QEMU-emulated
+# since this project's own arm64 CI lane uses native GitHub-hosted arm64
+# runners, not QEMU -- see docs/self-hosted-actions-runner.md -- but the
+# Dockerfile logic being tested is identical either way): the pinned
+# cr.fluentbit.io image's arm64 manifest (confirmed via `docker buildx
+# imagetools inspect` against the exact pinned digest below, which IS a
+# real multi-platform manifest list, not an amd64-only image mislabeled)
+# lays its glibc closure under lib/aarch64-linux-gnu/ and
+# usr/lib/aarch64-linux-gnu/, with lib/aarch64-linux-gnu/ld-linux-aarch64.so.1
+# as its interpreter -- neither name matches the old hardcoded x86_64
+# strings, so both old COPY lines failed closed with "not found" (verified:
+# this is the exact error the #1428 agent's CI run hit).
+#
+# Fix: glob the triplet directory name instead of hardcoding either arch's
+# name. Docker's COPY --from src pattern is matched via Go's
+# `filepath.Match` per path segment (not a shell glob, but `*` behaves
+# identically here: it matches any run of non-`/` characters within one
+# path segment), so `*-linux-gnu` matches x86_64-linux-gnu on amd64 AND
+# aarch64-linux-gnu on arm64 in the exact same Dockerfile, needing no
+# `ARG TARGETARCH` branch and no BuildKit-only `RUN --mount=type=bind`
+# feature. Confirmed live: both the amd64 rebuild (regression-checked, see
+# this PR's report) and a fresh arm64 build now copy successfully.
 COPY --from=fluent-bit-src /fluent-bit/bin/fluent-bit /opt/fluent-bit-glibc/bin/fluent-bit
-COPY --from=fluent-bit-src /lib/x86_64-linux-gnu/. /opt/fluent-bit-glibc/lib/
-COPY --from=fluent-bit-src /usr/lib/x86_64-linux-gnu/. /opt/fluent-bit-glibc/lib/
+COPY --from=fluent-bit-src /lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
+COPY --from=fluent-bit-src /usr/lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
 
 COPY fluent-bit.conf /etc/fluent-bit/fluent-bit.conf
 COPY syslog-ng.conf /etc/syslog-ng/syslog-ng.conf
@@ -90,7 +124,17 @@ COPY healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY data-loss-detector.sh /usr/local/bin/data-loss-detector.sh
 
 RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-loss-detector.sh \
-    && chmod +x /opt/fluent-bit-glibc/lib/ld-linux-x86-64.so.2 /opt/fluent-bit-glibc/bin/fluent-bit \
+    # Discover the dynamic-linker interpreter's real filename instead of
+    # hardcoding an arch (see the COPY step's own comment above for the
+    # arm64 bug this replaces: ld-linux-x86-64.so.2 on amd64,
+    # ld-linux-aarch64.so.1 on arm64, confirmed live for both). Fails the
+    # build loudly (empty glob -> `ls` exits non-zero -> `set -e` in this
+    # RUN's shell aborts) rather than silently proceeding with no
+    # interpreter at all, on any architecture this Dockerfile is ever built
+    # for.
+    && ld_interp="$(basename "$(ls /opt/fluent-bit-glibc/lib/ld-linux-*.so.* | head -n1)")" \
+    && echo "$ld_interp" > /opt/fluent-bit-glibc/ld-interp-name \
+    && chmod +x "/opt/fluent-bit-glibc/lib/$ld_interp" /opt/fluent-bit-glibc/bin/fluent-bit \
     && chown -R lancache:lancache /opt/fluent-bit-glibc \
     # ── Problem 2 continued: least-privilege capability posture, empirically
     # determined (same "prove it, never assume it" methodology this project
@@ -118,12 +162,17 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     # present in `CapBnd`) -- capabilities only reach a non-root process via
     # a FILE capability (setcap) on the exact binary the kernel executes.
     # Critically, that is NOT fluent-bit itself in this image: since
-    # fluent-bit is invoked through an explicit ld-linux-x86-64.so.2
-    # interpreter argument (Problem 1 above), the kernel's execve() target
-    # is the INTERPRETER, not fluent-bit -- setcap must go on
-    # ld-linux-x86-64.so.2, confirmed live (setcap on the fluent-bit binary
-    # itself had no effect; moving it to the interpreter fixed it
-    # immediately, same test, same file being read).
+    # fluent-bit is invoked through an explicit ld-linux interpreter argument
+    # (Problem 1 above), the kernel's execve() target is the INTERPRETER,
+    # not fluent-bit -- setcap must go on that interpreter (whichever
+    # arch-specific file it resolves to, see $ld_interp above), confirmed
+    # live on amd64 (setcap on the fluent-bit binary itself had no effect;
+    # moving it to the interpreter fixed it immediately, same test, same
+    # file being read). The arm64 portability fix (2026-08-06) makes this
+    # same setcap call arch-generic via $ld_interp (resolving to
+    # ld-linux-aarch64.so.1 on arm64 instead of a hardcoded amd64 name) --
+    # see this PR's report for whether the arm64 leg's setcap/read-access
+    # behavior was itself re-verified live, not just the build succeeding.
     #
     # CAP_DAC_READ_SEARCH (bypasses file READ and directory search/execute
     # permission checks only) is used here instead of the broader
@@ -149,7 +198,7 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     # capabilities. Every compose file and CI script that starts this
     # service must carry both `cap_drop: [ALL]` and
     # `cap_add: [DAC_READ_SEARCH]` together.
-    && setcap cap_dac_read_search+eip /opt/fluent-bit-glibc/lib/ld-linux-x86-64.so.2 \
+    && setcap cap_dac_read_search+eip "/opt/fluent-bit-glibc/lib/$ld_interp" \
     && apk del libcap
 
 USER lancache:lancache
