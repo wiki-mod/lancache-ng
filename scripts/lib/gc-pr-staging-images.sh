@@ -100,6 +100,19 @@ gcps_version_name_is_digest() {
 # has no children" apart from "we don't actually know" and treat the latter
 # as a reason to abort orphan classification for the whole service, the same
 # way it already does for an outright manifest-fetch failure.
+#
+# Deliberately does NOT handle GHCR/Buildx's OTHER attestation-association
+# convention, the `sha256-<64-hex>` fallback TAG scheme (an attestation
+# manifest naming its subject via its own tag string instead of a `subject`
+# field in its body) -- confirmed live (2026-08-06, real lancache-ng/proxy
+# package) that a manifest using this scheme has no `subject` field
+# whatsoever, so there is nothing in the JSON body this function receives
+# for it to find; the association only exists in that version's TAG, which
+# this function is never given (it only ever sees a manifest body). The
+# caller (scripts/gc-pr-staging-images.sh's process_service(), in its Pass 1
+# tag loop) handles that case itself, directly off the tag string, for
+# exactly this reason -- see its own comment at the `sha256-<hex>` tag-shape
+# check for the full live-verified rationale.
 gcps_extract_manifest_children() {
   local manifest_json="$1"
   local manifests_children subject_child

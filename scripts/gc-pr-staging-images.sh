@@ -82,6 +82,11 @@ now_epoch="$(date -u +%s)"
 # while processing "dns" moments later) -- kept as a plain top-level
 # associative array (not per-service) so this exact cross-service reuse
 # happens automatically via gcps_pr_lookup_state's nameref parameter.
+# shellcheck disable=SC2034 # it IS used -- passed by bare name (not "$pr_state_cache")
+# to gcps_pr_lookup_state below, which binds it via `local -n cache_ref=...`.
+# shellcheck runs per-file (see build-push.yml's shellcheck job: `xargs shellcheck`,
+# no -x), so it never sees scripts/lib/gc-pr-staging-images.sh's nameref
+# consumer and can't trace this indirect-by-name usage across the source boundary.
 declare -A pr_state_cache=()
 
 # A single ambiguous PR-state lookup (LOOKUP_FAILED) is deliberately safe
@@ -289,15 +294,67 @@ process_service() {
         # is a real published channel/source tag. Never delete it -- this
         # includes sha-<commit> tags specifically, for every deletion
         # mechanism this project runs, present and future, regardless of
-        # git-branch reachability: scripts/lib/staging-ancestor-fallback.sh's
-        # saf_resolve_untouched_backfill_source() can need an arbitrarily
-        # old per-commit sha-<commit> image as an untouched-service back-
-        # fill source whenever a PR's base commit itself was never directly
-        # built (e.g. a docs/governance-only base commit build-push.yml's own
-        # `paths-ignore` skipped) -- there is no way to predict in advance
-        # which past commit some future PR's base will need, so no
-        # sha-<commit> tag is ever a safe deletion target on age or branch-
-        # reachability grounds alone.
+        # git-branch reachability or age: scripts/lib/staging-ancestor-
+        # fallback.sh's saf_find_built_ancestor() (called from
+        # saf_resolve_untouched_backfill_source()) walks back from a PR's
+        # base commit looking for a usable sha-<commit> image, but only up to
+        # ancestor_search_depth commits deep -- NOT literally unbounded.
+        # ensure-pr-staging-images.sh defaults that depth to 50
+        # (STAGING_ANCESTOR_SEARCH_DEPTH), overridable via env var, so in
+        # today's default configuration a sha-<commit> tag more than 50
+        # commits behind some future PR's base could never actually be
+        # selected by this specific fallback. That bound does not make any
+        # sha-<commit> tag a safe deletion target from THIS reaper's side,
+        # for two reasons: (1) the depth is an env-var override, not a
+        # constant this script can assume stays 50 forever, and (2) even
+        # within the current bound, this reaper has no way to know in
+        # advance which past commit some future PR's base will land on, so
+        # it cannot tell "more than 50 commits back from every future PR"
+        # apart from "still within reach of the next one" -- the set of
+        # sha-<commit> tags is small (roughly one per commit actually built),
+        # so blanket-protecting all of them costs nothing worth trading for
+        # that fragile inference.
+        #
+        # `sha256-<64-hex>` specifically (found and verified live against
+        # this project's real lancache-ng/proxy package, 2026-08-06: 1107 of
+        # 3522 versions in that one service alone carry exactly this tag
+        # shape) is GHCR/Buildx's legacy referrers-fallback convention for an
+        # attestation manifest that associates itself with a subject purely
+        # via its OWN tag name, not via an OCI 1.1 `subject.digest` field in
+        # its manifest body -- confirmed empirically: fetching one of these
+        # tagged versions' manifests showed a plain image-index with no
+        # `subject` field anywhere in it, so gcps_extract_manifest_children()
+        # (which only ever reads `.manifests[]`/`.subject.digest` from an
+        # ALREADY-FETCHED manifest body) can never discover this relationship
+        # from either side of it -- not from the subject's manifest (which
+        # has no reason to list its own attestations) and not from the
+        # attestation's own manifest body (which, in this fallback scheme,
+        # never mentions the subject at all). The one and only place this
+        # association is recorded is the tag string itself. Also confirmed
+        # live: of a same-service sample of these targets, some resolve to a
+        # version that itself carries NO tag of its own (a bare, real
+        # single-platform image manifest, config+layers, not a leftover
+        # index) -- i.e. a version Pass 2 below would have no OTHER way to
+        # know is still referenced, and would misclassify as a genuine
+        # orphan. Extracting the target digest straight out of the tag
+        # string and adding it to children_digests (no extra API call
+        # needed -- this is pure string parsing on data already in hand)
+        # closes exactly that gap. This is deliberately ADDITIVE to, not a
+        # replacement for, `protected=1` below: the attestation version
+        # itself keeps its existing (already-safe) permanent protection
+        # unchanged -- seen live: 302 of the 1107 sampled targets no longer
+        # exist at all (already reaped some other way), meaning a real,
+        # already-growing, permanently-unreapable-by-this-script share of
+        # these tags is pure dead weight under this PR's logic. That is a
+        # known, deliberately out-of-scope completeness gap (reclaiming it
+        # would mean making an attestation version's own deletability
+        # depend on its subject's fate, a materially bigger and riskier
+        # change than this PR's mandate), not a safety gap -- flagged here,
+        # not silently left unexplained, and separate from the actual safety
+        # fix below.
+        if [[ "$tag" =~ ^sha256-([0-9a-f]{64})$ ]]; then
+          children_digests["sha256:${BASH_REMATCH[1]}"]=1
+        fi
         protected=1
         break
       fi
@@ -503,7 +560,12 @@ process_service() {
 # at the bottom of this file is what decides whether main ever actually
 # runs.
 main() {
-  : "${GH_TOKEN:?GH_TOKEN (the repository's GHCR_PACKAGE_DELETE_PAT secret) is required -- see the calling workflow's own 'Check for GHCR deletion credentials' step, which must gate whether this script ever runs.}"
+  # No apostrophes or single quotes in this message (shellcheck SC1011):
+  # shellcheck misparses an apostrophe inside a ${var:?message} expansion as
+  # opening a single-quoted string, which then desyncs on the next real
+  # quote character it meets -- this message was rewritten to avoid both, not
+  # just to silence the warning; the actual bash behavior was never affected.
+  : "${GH_TOKEN:?GH_TOKEN (the GHCR_PACKAGE_DELETE_PAT secret configured on this repository) is required -- see the calling workflow, specifically its Check for GHCR deletion credentials step, which must gate whether this script ever runs.}"
 
   # AG-CI-001: self-hosted runners (this job runs on lancache-light, not
   # inside the pinned build-tools container -- see the calling workflow's

@@ -316,10 +316,17 @@ setup() {
 # ---------------------------------------------------------------------------
 
 @test "process_service: an index's own platform+attestation children are protected, not deleted" {
-    local index_digest="sha256:$(printf '1%.0s' {1..64})"
-    local plat_a="sha256:$(printf '2%.0s' {1..64})"
-    local plat_b="sha256:$(printf '3%.0s' {1..64})"
-    local attest="sha256:$(printf '4%.0s' {1..64})"
+    # Declared and assigned on separate lines (shellcheck SC2155): a combined
+    # `local x="$(cmd)"` masks cmd's own exit status behind `local`'s always-0
+    # one, which matters in files sourced under `set -euo pipefail` like this
+    # suite's setup() -- these particular commands (printf/string-building)
+    # cannot actually fail, but the pattern is kept uniform so a later,
+    # fallible substitution copy-pasted from here inherits the safe form.
+    local index_digest plat_a plat_b attest
+    index_digest="sha256:$(printf '1%.0s' {1..64})"
+    plat_a="sha256:$(printf '2%.0s' {1..64})"
+    plat_b="sha256:$(printf '3%.0s' {1..64})"
+    attest="sha256:$(printf '4%.0s' {1..64})"
 
     delete_log="$BATS_TEST_TMPDIR/deletes"
     : > "$delete_log"
@@ -381,8 +388,10 @@ VERSIONS_JSON
 }
 
 @test "process_service: a manifest-fetch failure disables orphan classification for that service (fails closed)" {
-    local index_digest="sha256:$(printf '5%.0s' {1..64})"
-    local plat_a="sha256:$(printf '6%.0s' {1..64})"
+    # See the previous test's comment: declared/assigned separately (SC2155).
+    local index_digest plat_a
+    index_digest="sha256:$(printf '5%.0s' {1..64})"
+    plat_a="sha256:$(printf '6%.0s' {1..64})"
 
     # Instant retries -- this test asserts on ghcr_retry exhausting its
     # attempts, not on the real backoff delay.
@@ -435,6 +444,79 @@ VERSIONS_JSON
     [ "$deleted" -eq 0 ]
     [ ! -s "$delete_log" ]
     [ "$had_errors" -eq 1 ]
+}
+
+# Added 2026-08-06 per a peer review of this same PR: gcps_extract_manifest_
+# children() only reads `.manifests[]`/`.subject.digest` from an
+# already-fetched manifest BODY, so it can never discover GHCR/Buildx's other
+# attestation-association convention -- an attestation manifest naming its
+# subject purely via its own `sha256-<64-hex>` TAG, with no `subject` field
+# in its body at all. Live-verified against the real lancache-ng/proxy
+# package the same day: 1107 of 3522 real versions carry exactly this tag
+# shape, and a same-service sample included targets that were themselves
+# untagged, ordinary single-platform image manifests (real config+layers,
+# not leftover index debris) -- i.e. versions Pass 2 would have no other way
+# to know are still referenced, and would misclassify as genuine orphans.
+# This test reproduces that exact shape: $attested_orphan is untagged, old
+# enough to clear the age gate on its own, and NOT listed in $tagged_index's
+# own `.manifests[]` (proving it is not being saved by the pre-existing
+# index-children logic tested above) -- its only protection is
+# $attestation's `sha256-<hex of $attested_orphan>` tag.
+@test "process_service: an untagged version named only by another version's sha256-<hex> attestation TAG (not its manifest body) is protected" {
+    local tagged_index attestation attested_orphan
+    tagged_index="sha256:$(printf '7%.0s' {1..64})"
+    attestation="sha256:$(printf '8%.0s' {1..64})"
+    attested_orphan="sha256:$(printf '9%.0s' {1..64})"
+    local attested_orphan_hex
+    attested_orphan_hex="${attested_orphan#sha256:}"
+
+    delete_log="$BATS_TEST_TMPDIR/deletes3"
+    : > "$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            cat <<VERSIONS_JSON
+[
+  {"id":20,"name":"$tagged_index","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-cafe123"]}}},
+  {"id":21,"name":"$attestation","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha256-$attested_orphan_hex"]}}},
+  {"id":22,"name":"$attested_orphan","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":[]}}}
+]
+VERSIONS_JSON
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >> "$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    curl() {
+        local args="$*"
+        if [[ "$args" == *"ghcr.io/token"* ]]; then
+            printf '{"token":"faketoken"}\n'
+            return 0
+        fi
+        # Both tagged_index's and attestation's own manifest bodies are
+        # plain, childless manifests -- deliberately so, to isolate this
+        # test to the tag-string-based association only. Neither one's body
+        # mentions $attested_orphan anywhere; if this test passes, it is
+        # solely because of the tag-string parsing this fix adds, not
+        # because of the pre-existing `.manifests[]`/`.subject` extraction.
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+        return 0
+    }
+    export -f curl
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 3 ]
+    [ "$had_errors" -eq 0 ]
+    [ ! -s "$delete_log" ]
 }
 
 # ---------------------------------------------------------------------------
