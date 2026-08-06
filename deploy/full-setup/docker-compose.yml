@@ -246,8 +246,12 @@ services:
   # (SYSLOG_ENABLED unset -> false; FLUENT_BIT_SELFLOG_DIR's default target
   # does not exist in this stack -> skipped, logged, not fatal -- exactly the
   # fail-closed "missing directory" behavior validate_retention_dir()'s
-  # caller already handles for a real deployment where the `logging` profile
-  # is never enabled). `network_mode: none` needs no `validation`/
+  # caller already handles for the case where the `logging` profile is
+  # disabled -- since issue #1343, that is an explicit operator opt-out on a
+  # real prod/quickstart deployment (central logging is on by default there
+  # now), but this validation-only stack still never enables it at all, so
+  # the same disabled-path handling applies here either way). `network_mode:
+  # none` needs no `validation`/
   # `validation-api` network assignment (mutually exclusive with
   # `network_mode` regardless), matching prod/quickstart's identical choice.
   retention:
