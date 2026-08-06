@@ -467,8 +467,14 @@ pub async fn toggle_dnsupdate_require_tsig(
     if let Err(e) =
         docker_client::restart_service(&state.docker, &state.config.dns_standard_service).await
     {
+        // {:#} (anyhow's alternate Display), not {}: the bare context
+        // message alone ("Failed to restart 'dns-standard'") hid the real
+        // bollard/Docker-API cause during this feature's own real-container
+        // testing -- {:#} prints the full ": caused by: ..." chain so a
+        // future failure here is actually diagnosable from the log line
+        // alone instead of needing RUST_LOG=debug plus a live repro.
         tracing::error!(
-            "Restart dns-standard for dnsupdate-require-tsig toggle failed: {}",
+            "Restart dns-standard for dnsupdate-require-tsig toggle failed: {:#}",
             e
         );
     }
@@ -476,7 +482,7 @@ pub async fn toggle_dnsupdate_require_tsig(
         docker_client::restart_service(&state.docker, &state.config.dns_ssl_service).await
     {
         tracing::error!(
-            "Restart dns-ssl for dnsupdate-require-tsig toggle failed: {}",
+            "Restart dns-ssl for dnsupdate-require-tsig toggle failed: {:#}",
             e
         );
     }
@@ -606,8 +612,17 @@ fn dnsupdate_require_tsig_marker_paths(state: &AppState) -> [PathBuf; 2] {
 // placeholder literal, so a non-empty file here is already a strong enough
 // signal for this specific gate.
 fn real_ddns_tsig_key_configured(state: &AppState) -> bool {
-    let path = Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key");
-    fs::metadata(&path).map(|m| m.len() > 0).unwrap_or(false)
+    ddns_tsig_key_file_is_real(&Path::new(&state.config.shared_secret_dir).join("ddns-tsig-key"))
+}
+
+// Split out from real_ddns_tsig_key_configured so the three cases that
+// matter for this fail-closed gate (file absent, file present but empty --
+// resolve_shared_secret never writes an empty file itself, but a hand-crafted
+// or truncated volume could still produce one -- and file present with real
+// content) are each directly unit-testable without needing a full AppState
+// (Docker/NATS connections, Tera instance) just to check a metadata() call.
+fn ddns_tsig_key_file_is_real(path: &Path) -> bool {
+    fs::metadata(path).map(|m| m.len() > 0).unwrap_or(false)
 }
 
 const MIN_TTL: u32 = 1;
@@ -1848,6 +1863,43 @@ mod tests {
         let marker = temp_dir("aaaa-filter-missing").join("missing/aaaa-filter-enabled");
 
         assert!(set_aaaa_filter_marker(&marker, true).is_err());
+    }
+
+    // Covers the three cases that matter for the dnsupdate-require-tsig
+    // fail-closed gate (issue #815 follow-up, real-tested via a live
+    // container in the accompanying PR): no file at all (the common case --
+    // shared-secrets volume freshly created), a present-but-empty file (not
+    // something resolve_shared_secret itself ever writes, but a defensive
+    // case worth locking in since an empty file must NOT be mistaken for a
+    // configured key), and a real non-empty file. Real-container testing
+    // separately confirmed entrypoint.sh's independent shell-side copy of
+    // this same check (secret_is_placeholder / a genuinely unwritable
+    // shared-secrets mount) also fails closed; this test locks in the Rust
+    // side of the same defense-in-depth pair.
+    #[test]
+    fn ddns_tsig_key_file_is_real_covers_absent_empty_and_real() {
+        let dir = temp_dir("ddns-tsig-key-real-check");
+        fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ddns-tsig-key");
+
+        assert!(
+            !ddns_tsig_key_file_is_real(&path),
+            "a missing file must not be treated as a configured key"
+        );
+
+        fs::write(&path, "").unwrap();
+        assert!(
+            !ddns_tsig_key_file_is_real(&path),
+            "a present-but-empty file must not be treated as a configured key"
+        );
+
+        fs::write(&path, "dGhpcyBpcyBhIHJlYWwgYmFzZTY0IHRzaWcga2V5").unwrap();
+        assert!(
+            ddns_tsig_key_file_is_real(&path),
+            "a non-empty file must be treated as a configured key"
+        );
+
+        fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
