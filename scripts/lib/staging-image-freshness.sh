@@ -114,33 +114,42 @@
 # stderr text as either "the registry positively confirmed no such
 # manifest/tag/digest exists" (returns 0) or "everything else" (returns 1 --
 # network/DNS/TLS timeout, a stalled connection, a 5xx, a rate limit, an auth
-# failure, or any other shape this hasn't seen yet). Added 2026-08-06 after a
-# live root-cause read of sif_image_revision's own callers: every real
-# occurrence found in this project's own CI logs (grepped across several
-# days of full-setup-deep-validate.yml runs) that hit the "no readable
-# label" branch below turned out to be a genuine absence -- never a
-# confirmed transient registry failure -- but the code had no way to know
-# that because the ORIGINAL version of sif_image_revision discarded the
-# registry call's own stderr outright (`2>/dev/null`) before this function
-# existed. That is the actual reason the two cases used to look identical:
-# not a real API limitation, but this file throwing away the one signal that
-# already distinguishes them. `docker buildx imagetools inspect` (backed by
-# BuildKit's own registry client) reports a missing manifest/tag/digest as
-# "manifest unknown" (the distribution-spec error code name, verified against
+# failure, `docker` itself missing from PATH, or any other shape this hasn't
+# seen yet). `docker buildx imagetools inspect` (backed by BuildKit's own
+# registry client) reports a missing manifest/tag/digest as "manifest
+# unknown" (the distribution-spec error code name, verified against
 # docker/buildx's own issue tracker and multiple independent troubleshooting
-# writeups for this exact command) or a plain "not found" -- both are
+# writeups for this exact command) or "no such manifest" -- both
 # registry-level, not connection-level, so they only ever appear once a
 # response was actually received and parsed, unlike a timeout/DNS/TLS/5xx
 # failure, which reports its own distinct wording (e.g. "context deadline
 # exceeded", "connection refused", "i/o timeout", "500 Internal Server
-# Error"). Deliberately conservative: text this hasn't seen before falls
-# through to "everything else" (return 1, the ORIGINAL ambiguous wording)
-# rather than being guessed as either -- this is a diagnostic-accuracy
-# improvement for the common case, not a claim that every failure shape is
-# now enumerated; matches this project's own posture elsewhere for a
-# similarly single-purpose classifier (saf_query_run_count's own header
-# documents the same "specific known failure text -> permanent, everything
-# else -> retry" split for HTTP 401/404).
+# Error").
+#
+# Deliberately does NOT match a bare "not found": AG-CI-001 requires
+# assuming self-hosted runners do not provide project tooling, and
+# scripts/ensure-pr-staging-images.sh (one of this file's two real callers)
+# runs directly on a bare `lancache-light` runner, not inside the pinned
+# build-tools image -- so `docker` itself being absent from PATH is a real,
+# reachable failure mode here, and its shell-level error ("docker: command
+# not found" / "bash: docker: command not found") also contains the
+# substring "not found". Matching that as a confirmed registry absence would
+# have this function tell a job log the registry positively confirmed
+# something it was never even asked, which is a worse failure than the
+# original ambiguous wording this whole classifier exists to improve on.
+# Anchoring to "manifest"/"no such manifest"/NAME_UNKNOWN keeps the match
+# specific to an actual registry response instead of any shell-level
+# "not found" text.
+#
+# Deliberately conservative in the other direction too: text this hasn't
+# seen before falls through to "everything else" (return 1, the original
+# ambiguous wording) rather than being guessed as either -- this is a
+# diagnostic-accuracy improvement for the cases it CAN classify, not a claim
+# that every failure shape is now enumerated; matches this project's own
+# posture elsewhere for a similarly single-purpose classifier
+# (saf_query_run_count's own header documents the same "specific known
+# failure text -> permanent, everything else -> retry" split for HTTP
+# 401/404).
 #
 # `-i`: registries and BuildKit versions have been observed to vary the exact
 # capitalization ("Manifest Unknown" from some proxying registries per the
@@ -154,7 +163,7 @@ _sif_inspect_failure_is_confirmed_absence() {
   # (underscore, all-caps), but a human-readable message wrapping it can
   # render the same words space-separated -- match both rather than only the
   # shape this project has actually observed so far.
-  grep -qi 'manifest unknown\|not found\|no such manifest\|name[ _]unknown' <<<"$stderr_text"
+  grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown' <<<"$stderr_text"
 }
 
 # _sif_inspect <args...>
@@ -343,13 +352,23 @@ sif_is_ancestor_or_equal() {
 # The per-poll "no readable label yet" log line (in the loop body below)
 # distinguishes a confirmed-absent manifest/tag/digest from every other
 # registry-call failure -- see sif_image_revision/_sif_inspect's own headers
-# for the classification and why every real occurrence checked in this
-# project's own CI logs (2026-08-06 root-cause pass) turned out to be the
-# former. This function's own RETURN CODE contract is unchanged by that
-# (still a plain 1 at the hard ceiling regardless of which case applied):
-# the classification is a diagnostic improvement for whoever reads the job
-# log while it is still running, not a new caller-visible outcome, so no
-# caller needed updating.
+# for the classification itself. A 2026-08-06 root-cause pass across several
+# days of full-setup-deep-validate.yml logs found several real occurrences
+# of this branch whose OUTCOME could be reconstructed behaviourally (the
+# per-commit tag in question never existed for that commit at all, or a
+# later ancestor candidate resolved within seconds) -- every one of those was
+# consistent with a confirmed absence, none with a genuinely transient
+# registry failure. That is evidence about the cases this classifier can
+# now resolve, not a claim that a transient registry failure never happens
+# here: the PRE-EXISTING logs from before this classification existed never
+# recorded the registry's own error text at all (the whole reason this
+# function's message used to be unable to tell the two cases apart), so
+# whether any past occurrence of the OTHER case ever happened is genuinely
+# unknowable in retrospect. This function's own RETURN CODE contract is
+# unchanged by any of this (still a plain 1 at the hard ceiling regardless
+# of which case applied): the classification is a diagnostic improvement
+# for whoever reads the job log while it is still running, not a new
+# caller-visible outcome, so no caller needed updating.
 #
 # <allow_reverse_ancestry> (optional, any non-empty value means "true";
 # default off -- unset/empty preserves the exact pre-existing behavior for

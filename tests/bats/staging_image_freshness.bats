@@ -311,7 +311,7 @@ STUB
 @test "_sif_inspect_failure_is_confirmed_absence: classifies known absence-signature text" {
     run _sif_inspect_failure_is_confirmed_absence "Error response from daemon: manifest unknown"
     [ "$status" -eq 0 ]
-    run _sif_inspect_failure_is_confirmed_absence "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee: not found"
+    run _sif_inspect_failure_is_confirmed_absence "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee: no such manifest"
     [ "$status" -eq 0 ]
     run _sif_inspect_failure_is_confirmed_absence "NAME_UNKNOWN: repository name not known to registry"
     [ "$status" -eq 0 ]
@@ -323,6 +323,20 @@ STUB
     run _sif_inspect_failure_is_confirmed_absence "dial tcp: lookup ghcr.io: connection refused"
     [ "$status" -eq 1 ]
     run _sif_inspect_failure_is_confirmed_absence "unexpected status from HEAD request: 500 Internal Server Error"
+    [ "$status" -eq 1 ]
+}
+
+@test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a missing-docker-binary shell error as absence (AG-CI-001)" {
+    # A bare "not found" would also match "docker: command not found" / "bash:
+    # docker: command not found" -- exactly what a bare `lancache-light`
+    # runner without docker on PATH produces (scripts/ensure-pr-staging-images.sh,
+    # one of this file's two real callers, runs there directly, not inside the
+    # pinned build-tools image). Misclassifying that as a confirmed registry
+    # absence would report the registry as having confirmed something it was
+    # never even asked -- worse than the original ambiguous wording.
+    run _sif_inspect_failure_is_confirmed_absence "bash: docker: command not found"
+    [ "$status" -eq 1 ]
+    run _sif_inspect_failure_is_confirmed_absence "docker: command not found"
     [ "$status" -eq 1 ]
 }
 
