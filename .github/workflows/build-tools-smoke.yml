@@ -189,6 +189,17 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
+      # tests/bats/proxy_healthz_acl_and_hidden_headers.bats (bug-hunt #849,
+      # findings #11/#15) reads these three real config files directly via
+      # $repo_root -- without these entries, a PR touching only conf.d/
+      # http.conf, conf.d/https.conf, or proxy-params.conf (none of which
+      # entrypoint.sh's own path entry above covers) would never run that
+      # suite. Found while adding that test file, not by
+      # scripts/check-bats-path-filter-coverage.sh itself (added
+      # proactively, in the same pass that introduced the dependency).
+      - "services/proxy/conf.d/http.conf"
+      - "services/proxy/conf.d/https.conf"
+      - "services/proxy/proxy-params.conf"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
       # services/watchdog/retention.sh (#842, 2026-08-01): the three
@@ -273,6 +284,17 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
+      # tests/bats/proxy_healthz_acl_and_hidden_headers.bats (bug-hunt #849,
+      # findings #11/#15) reads these three real config files directly via
+      # $repo_root -- without these entries, a PR touching only conf.d/
+      # http.conf, conf.d/https.conf, or proxy-params.conf (none of which
+      # entrypoint.sh's own path entry above covers) would never run that
+      # suite. Found while adding that test file, not by
+      # scripts/check-bats-path-filter-coverage.sh itself (added
+      # proactively, in the same pass that introduced the dependency).
+      - "services/proxy/conf.d/http.conf"
+      - "services/proxy/conf.d/https.conf"
+      - "services/proxy/proxy-params.conf"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
       # services/watchdog/retention.sh (#842, 2026-08-01): the three
