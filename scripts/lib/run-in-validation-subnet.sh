@@ -86,9 +86,10 @@ while [[ "$next_attempt" -le "$max_attempts" ]]; do
         echo "::error::Could not lock a free validation subnet slot after $max_attempts attempts." >&2
         exit 1
     }
-    attempt="$(printf '%s\n' "$reservation" | sed -n 's/^attempt=//p')"
-    slot="$(printf '%s\n' "$reservation" | sed -n 's/^slot=//p')"
-    holder_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
+    # Here-strings, not `printf ... | sed -n` pipes (issue #1377).
+    attempt="$(sed -n 's/^attempt=//p' <<<"$reservation")"
+    slot="$(sed -n 's/^slot=//p' <<<"$reservation")"
+    holder_pid="$(sed -n 's/^holder_pid=//p' <<<"$reservation")"
 
     # Export the FULL VALIDATION_* set for THIS slot before the conflict
     # check, so validation_subnet_conflicts reads the correct

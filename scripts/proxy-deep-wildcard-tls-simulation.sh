@@ -161,7 +161,12 @@ dispatch_routes_to_passthrough() {
         local bare="${pattern#\"}"
         bare="${bare%\"}"
         bare="${bare#\~}"
-        if echo "$sni" | grep -Pq "$bare"; then
+        # Here-string, not `echo "$sni" | grep -Pq ...`: eliminates the live
+        # producer/early-exiting-consumer pipe entirely (issue #1377's
+        # repo-wide pipefail/SIGPIPE audit, AG-VAL-032 -- caught as a fresh
+        # instance after this script itself landed via PR #1411, later than
+        # the original audit pass).
+        if grep -Pq "$bare" <<<"$sni"; then
             matched_port="$port"
             break
         fi
@@ -184,7 +189,7 @@ wait_for_tls() {
     local container="$1"
     local deadline=$((SECONDS + 60))
     while (( SECONDS < deadline )); do
-        if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then
+        if ! docker inspect --format '{{.State.Running}}' "$container" 2>/dev/null | grep -q true; then # pipefail-safe: docker inspect --format on one field of one container always emits exactly one line (issue #1377)
             echo "::error::$container is not running (crashed during startup). Logs:" >&2
             docker logs "$container" 2>&1 | tail -60 >&2
             return 1
