@@ -57,9 +57,12 @@ if [ -z "$allowlist_line" ]; then
   allowlist_names=""
 else
   # The line looks like: ...containers/(lancache-a|lancache-b|...)(/|\$)
-  allowlist_names=$(printf '%s\n' "$allowlist_line" \
-    | grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' \
-    | head -n1 \
+  # Here-string feeds grep, and grep's own (single-match-by-construction,
+  # since there is only one such acl alternation group in the line) output
+  # is captured into a variable before `head -n1` ever sees it -- neither
+  # stage is a live pipe an early-exiting consumer could race (issue #1377).
+  allowlist_group="$(grep -oE '\(lancache-[a-z0-9-]+(\|lancache-[a-z0-9-]+)*\)' <<<"$allowlist_line")"
+  allowlist_names=$(head -n1 <<<"$allowlist_group" \
     | tr -d '()' \
     | tr '|' '\n' \
     | sort -u)
@@ -71,7 +74,8 @@ fi
 
 name_in_allowlist() {
   local name="$1"
-  printf '%s\n' "$allowlist_names" | grep -qxF "$name"
+  # Here-string, not a live pipe into grep -q (issue #1377).
+  grep -qxF "$name" <<<"$allowlist_names"
 }
 
 # --- Every allowlist name is a real container_name in every Compose file --
