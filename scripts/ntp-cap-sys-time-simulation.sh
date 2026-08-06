@@ -377,7 +377,19 @@ run_capability_denied_scenario() {
 echo "== Pulling $image (before any clock skew -- TLS to GHCR needs a real, valid clock) =="
 docker pull "$image"
 
-run_capability_granted_scenario
+# Scenario B (denied) MUST run before Scenario A (granted): Scenario A
+# deliberately skews this runner's real host clock forward by 300s as part
+# of ITS OWN proof, and that skew persists on the host for the rest of the
+# job (there is no "undo" step -- the point is to prove genuine correction
+# of a real, lasting error). Scenario B's own real external-client query
+# measures the served time against this same shared host clock; if it ran
+# after Scenario A, it would measure roughly the leftover 300s skew instead
+# of the small, genuine offset it exists to prove, and fail for a reason
+# that has nothing to do with what it is actually testing. Running Scenario
+# B first means its measurement happens while the host clock is still
+# accurate (its own real, unskewed baseline), fully independent of Scenario
+# A's later skew.
 run_capability_denied_scenario
+run_capability_granted_scenario
 
 echo "ntp-cap-sys-time-simulation passed: both scenarios confirmed -- $image genuinely disciplines a real forced clock skew when CAP_SYS_TIME is granted (Scenario A), and correctly degrades to a healthy, accurate-time-serving state with a real, reachable degraded status when CAP_SYS_TIME is denied (Scenario B)."
