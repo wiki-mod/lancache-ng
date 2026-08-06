@@ -53,7 +53,7 @@ restart every consumer of a shared env var, not just the DNS containers.
 |---|---|
 | `PDNS_API_KEY` | Authoritative + recursor REST API key (the Admin UI itself is a client of this API, not a manager of the setting) |
 | `DDNS_ALLOW_FROM` | CIDR allow-list for RFC 2136 dynamic updates |
-| `DDNS_TSIG_KEY` / `DDNS_TSIG_NAME` / `DDNS_TSIG_ALGORITHM` | TSIG key material and metadata re-applied to every DDNS-eligible zone on every start via `configure_ddns_tsig()` |
+| `DDNS_TSIG_KEY` / `DDNS_TSIG_NAME` / `DDNS_TSIG_ALGORITHM` | TSIG key material, imported on every start via `configure_ddns_tsig()`. The per-zone `TSIG-ALLOW-DNSUPDATE` metadata this key enables is **conditionally** re-applied every start, not unconditionally: `configure_ddns_tsig()` sets it (the default) or explicitly clears it, based on the `ddns-allow-unsigned-updates` Admin UI toggle described in 1b below — see that row for the real mechanism |
 | `LOG_QUERIES` | Query logging on/off |
 | `ROOT_ZONE_MIRROR` (`ENABLE_ROOT_MIRROR` in `docs/architecture-ng.md`) | AXFR root zone mirror |
 | `ENABLE_SECONDARY` / `NATS_BIND_IP` | **Not PowerDNS-native secondary/AXFR wiring — see 3a below.** `ENABLE_SECONDARY` is documentation-only narrative in `docs/architecture-ng.md` for when to include `deploy/prod/docker-compose.nats-secondary.yml`; no script reads it. `NATS_BIND_IP` is the one real env var here, consumed directly by that compose override to bind NATS to a trusted interface for the NATS-based secondary sync (3b) |
