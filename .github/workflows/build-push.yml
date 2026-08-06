@@ -1062,7 +1062,12 @@ jobs:
       # shellcheck-hosted below used to carry the identical steps twice. Job-level
       # scheduling (needs/if/concurrency/permissions, and the docs-only skip in this
       # job's own if: above) stays here -- a composite action cannot express those.
+      # timeout-minutes here, not inside the composite action: a composite-action step
+      # cannot carry timeout-minutes at all (see that action's own comment on its "Run
+      # ShellCheck and ActionLint" step) -- this restores the finer-grained per-step
+      # backstop the original inline step had, in the one place it can actually work.
       - uses: ./.github/actions/shellcheck-and-standing-guards
+        timeout-minutes: 15
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
@@ -1096,7 +1101,12 @@ jobs:
       # own (it must still run when self-hosted runners, and therefore validate-compose,
       # are unavailable), so BUILD_TOOLS_IMAGE comes from "Select build-tools image"
       # above instead of a shared job needs-output.
+      # timeout-minutes here, not inside the composite action: a composite-action step
+      # cannot carry timeout-minutes at all (see that action's own comment on its "Run
+      # ShellCheck and ActionLint" step) -- this restores the finer-grained per-step
+      # backstop the original inline step had, in the one place it can actually work.
       - uses: ./.github/actions/shellcheck-and-standing-guards
+        timeout-minutes: 15
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 

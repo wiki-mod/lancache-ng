@@ -15,8 +15,13 @@ inputs:
     required: true
   pr-title-lint-mode:
     description: >-
-      Caller's ${{ vars.PR_TITLE_LINT_MODE }} value, evaluated in the caller's own
-      context and threaded through as a plain input.
+      Caller's PR_TITLE_LINT_MODE repository variable value, evaluated in the caller's
+      own context and threaded through as a plain input. Written without the literal
+      double-brace expression syntax deliberately (real CI run, PR #1467, 2026-08-06):
+      GitHub's schema validator evaluates any `${{ ... }}` sequence anywhere in this
+      file, including inside a description string, and fails the whole action to load
+      on an unresolvable named-value like `vars` -- it is not inert prose to the parser
+      the way it looks to a human reader.
     required: false
     default: ""
 runs:

@@ -28,14 +28,20 @@ runs:
     # (containers seen alive 5-14h). The real guard is the INNER `timeout --kill-after=30
     # 300` around actionlint below: SIGTERM at 300s, then an UNIGNORABLE SIGKILL 30s later,
     # so even a deadlocked actionlint is force-killed from inside the container and the
-    # slot is freed fast (verified on-host: exit 137, container removed). Both calling
-    # jobs additionally set their own step-level `timeout-minutes: 15` as a coarse
-    # backstop, since a composite action step cannot override a caller-set timeout.
+    # slot is freed fast (verified on-host: exit 137, container removed).
+    #
+    # CORRECTED (real CI run, PR #1467, 2026-08-06): a composite action step does NOT
+    # support `timeout-minutes` at all -- GitHub's real schema validator rejects it
+    # outright ("Unexpected value 'timeout-minutes'"), failing the whole action to load.
+    # An earlier version of this comment claimed the opposite ("composite-action steps
+    # support timeout-minutes like any other step"); that was wrong and unverified when
+    # written, caught only by a real run neither `yaml.safe_load` nor a hand-written
+    # schema check could catch (actionlint doesn't scan .github/actions/**/action.yml
+    # in this project's CI either). The INNER `timeout --kill-after=30 300` guard inside
+    # the run: script below is therefore the ONLY hang-protection this step has; both
+    # calling jobs' own step-level `timeout-minutes: 15` (set where this action is
+    # invoked, a real job step, not a composite-action step) remains the coarse backstop.
     - name: Run ShellCheck and ActionLint
-      # Composite-action steps support timeout-minutes like any other step; kept as the
-      # same coarse per-step backstop both calling jobs' own job-level timeout used to
-      # imply, on top of the INNER `timeout --kill-after` guard below.
-      timeout-minutes: 15
       shell: bash
       run: |
         set -euo pipefail
