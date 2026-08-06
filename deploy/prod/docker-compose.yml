@@ -3,8 +3,12 @@
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# This is the only deployment profile -- see CLAUDE.md's "No Separate Dev
-# Environment" for why there is no parallel deploy/dev stack.
+# This is the only *production* deployment profile -- see AGENTS.md's AG-KD-008
+# for why there is no parallel deploy/dev stack (corrected 2026-08-05, issue #1391
+# doc-sweep audit: this used to cite CLAUDE.md's "No Separate Dev Environment"
+# section, which moved to AGENTS.md on 2026-07-31; deploy/quickstart/ and
+# deploy/full-setup/ are the other two real profiles that exist today, for
+# quickstart and CI-validation use respectively).
 
 name: lancache-ng
 
@@ -48,7 +52,15 @@ services:
       - "${IP_SSL}:80:80"
       - "${IP_SSL}:443:443"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1/healthz >/dev/null; }"]
+      # Since #1276/#1322: IP_SSL:443 (container port 443) now reaches the
+      # stream-level SNI dispatch listener (entrypoint.sh's "2a."), which has
+      # no SNI to route on for an IP-literal curl target and would forward
+      # into the passthrough branch instead of the actual HTTPS/MITM server --
+      # retargeted directly at conf.d/https.conf's dedicated, non-PROXY-
+      # protocol healthcheck port (8445) instead, which bypasses the dispatch
+      # listener entirely but still proves the same nginx worker and cert
+      # config are alive.
+      test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
       timeout: 5s
       retries: 3
