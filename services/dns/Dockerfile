@@ -201,13 +201,16 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # version bump rather than drifting independently.
 #
 # This is a real major-version jump for the authoritative server, not just a
-# base-image swap: pdns-server goes from Debian trixie's 4.9.16 to 5.1.3
-# (pdns-recursor's own jump, 5.2.11 -> 5.4.4, is a minor bump by comparison).
-# 5.1.3, not v3.24 stable's own 5.0.5, because of a real CVE finding -- see
-# the dedicated comment on the `apk add`/`@edge` step below for the full
-# reasoning; initial breaking-change verification below was performed
-# against stable's 5.0.5 before that finding, then re-confirmed against the
-# actually-shipped 5.1.3 build. Reviewed PowerDNS's own upgrade documentation for
+# base-image swap: pdns-server goes from Debian trixie's 4.9.16 to the 5.0.x
+# line (pdns-recursor's own jump, 5.2.11 -> 5.4.x, is a minor bump by
+# comparison). At migration time this was pinned to edge's 5.1.3 rather than
+# v3.24 stable's then-current 5.0.5, because of a real CVE finding -- see the
+# dedicated comment on the `apk add` step below for the full reasoning and
+# its since-resolved outcome (issue #1483): v3.24 stable has since caught up
+# past the CVE fix version, so this now installs the plain stable-channel
+# package again. Initial breaking-change verification below was performed
+# against stable's 5.0.5, then re-confirmed against edge's 5.1.3 while that
+# pin was active. Reviewed PowerDNS's own upgrade documentation for
 # breaking changes across that authoritative-server jump and verified each
 # concretely, not just from doc prose (2026-08-05, runner 192.168.1.229, real
 # `alpine:3.24` containers):
@@ -244,16 +247,21 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 #   - No LUA-record usage anywhere in this project's zone data (grepped),
 #     so 5.0's now-disabled-by-default `enable-lua-record-updates` is moot.
 #   - gsqlite3 schema: Alpine's pdns-backend-sqlite3 package ships no
-#     schema.sqlite3.sql file at all, on either the 5.0.5-r0 (v3.24 stable)
-#     or 5.1.3-r0 (edge, actually installed below) build (confirmed via
-#     `apk info -L` against both, unlike Debian's package) -- see
-#     schema.sqlite3.sql (vendored in this directory, fetched from
+#     schema.sqlite3.sql file at all, on either the 5.0.5-r0 (v3.24 stable,
+#     at the time) or 5.1.3-r0 (edge, actually installed at the time) build
+#     (confirmed via `apk info -L` against both, unlike Debian's package) --
+#     see schema.sqlite3.sql (vendored in this directory, fetched from
 #     PowerDNS's own upstream repo at tag auth-5.0.5) and entrypoint.sh's
 #     updated schema-lookup fallback below. Upstream's own migration-file
 #     chain confirms this base schema is unchanged since PowerDNS 4.7.0 --
 #     re-diffed byte-for-byte against the auth-5.1.3 tag's own copy too
 #     (identical) -- i.e. identical to what Debian trixie's 4.9.16 already
-#     used and to what the actually-shipped 5.1.3 package needs.
+#     used and to what the 5.1.3 package needed. Now that the `apk add` step
+#     below installs plain stable's 5.0.7-r0 instead (issue #1483), this
+#     stays valid: 5.0.7 is a patch release within the already-verified
+#     5.0.x line, and CI's real build (see that issue's PR) confirms
+#     schema.sqlite3.sql is still absent from the installed package and that
+#     entrypoint.sh's fallback still engages correctly.
 #
 # Package translations from the prior apt-get list (all confirmed live
 # against a real `alpine:3.24` container, not assumed from the apk package
@@ -313,57 +321,65 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # mechanism that tries to start a daemon during package installation, so
 # there is nothing for that workaround to guard against on this base.
 #
-# `pdns`/`pdns-backend-sqlite3` pinned to Alpine's `edge` branch specifically
-# (via the `@edge` repository-tag mechanism below), NOT plain v3.24 stable:
-# live-verified (2026-08-05) that pdns-server 5.0.5 -- the version v3.24
-# stable currently ships -- is directly named as an affected version of
-# CVE-2026-42005 (PowerDNS Security Advisory 2026-07: "insufficient input
-# validation of internal web server" / unbounded-memory-allocation DoS),
-# fixed upstream in 5.0.6/5.1.2. The advisory calls this "minimal relevance"
-# only for a deployment with the internal webserver disabled -- this
-# project's pdns.conf.template explicitly sets `webserver=yes` (the REST API
-# on port 8081 nats-subscriber and the Admin UI both depend on), so that
-# carve-out does not apply here; this is a real, LAN-reachable regression
-# risk, not a theoretical one. It is also a genuine regression specifically
-# introduced by this migration: the advisory's own "Fixed Versions" list
-# includes 4.9.16 -- the exact pdns-server version the prior Debian
-# trixie-based stage already ran -- so the Debian image was never vulnerable
-# to this CVE in the first place. v3.24 stable has not yet picked up a point
-# release with the fix (re-checked live against the real current package
-# index, not assumed stale from #815's original 2026-07-13/14 research
-# table); Alpine's `edge` branch already carries 5.1.3 (past the named fix
-# version 5.1.2), confirmed live. Pinned to an EXACT version on `edge`
-# (`pdns@edge=5.1.3-r0`, not a bare `pdns@edge`), deliberately, after
-# confirming apk's `name@tag=version` syntax actually resolves: a bare
-# `@edge` pin would trade the CVE regression for a reproducibility
-# regression instead (edge is a rolling, unversioned repo -- two builds of
-# the same commit could silently resolve different pdns versions with a
-# possible ABI mismatch against this image's other, stable-channel-sourced
-# libraries, e.g. boost/sqlite-libs/luajit). The exact-version pin gets both
-# properties: CVE-free today, and byte-for-byte reproducible across rebuilds
-# -- if `edge` ever drops this exact build (superseded by a newer point
-# release), `apk add` fails loudly at build time instead of silently
-# drifting to a different version, matching this project's own
-# fail-loud-not-silent-drift principle (Rule-Ref: AG-VAL-026). Pinning only
-# these two packages -- not the whole base image, and not
-# pdns-recursor-luajit, which resolves to the identical 5.4.4-r0 on both
-# channels and is not named in this advisory at all -- keeps edge-channel
-# exposure to the minimum needed to avoid shipping a known, fixed-upstream
-# DoS regression, while everything else in this image stays on the stable
-# v3.24 channel. Re-evaluate this pin once v3.24 stable itself picks up
-# 5.0.6 or later (track via `apk policy pdns` against the real v3.24 index,
-# or simply once a build starts failing because edge moved past 5.1.3-r0)
-# -- at that point the plain (non-`@edge`) package should be preferred again, mirroring how this
-# project already treats `trixie-backports` as a currency mechanism to drop
-# once the base channel catches up, not a permanent fixture.
-RUN printf '%s\n' \
-      '@edge https://dl-cdn.alpinelinux.org/alpine/edge/main' \
-      '@edge https://dl-cdn.alpinelinux.org/alpine/edge/community' \
-      >> /etc/apk/repositories \
-    && apk update \
-    && apk add --no-cache \
-    pdns@edge=5.1.3-r0 \
-    pdns-backend-sqlite3@edge=5.1.3-r0 \
+# `pdns`/`pdns-backend-sqlite3` CVE-2026-42005 pin history -- RESOLVED
+# 2026-08-07 (issue #1483), kept here rather than deleted so both the
+# original reasoning and the reasoning for dropping it again stay visible,
+# mirroring how this project treats `trixie-backports` as a currency
+# mechanism to drop once the base channel catches up, not a permanent
+# fixture that gets its history erased once it goes away.
+#
+# Original problem (2026-08-05): live-verified that pdns-server 5.0.5 --
+# the version v3.24 stable shipped at the time -- is directly named as an
+# affected version of CVE-2026-42005 (PowerDNS Security Advisory 2026-07:
+# "insufficient input validation of internal web server" /
+# unbounded-memory-allocation DoS), fixed upstream in 5.0.6/5.1.2. The
+# advisory calls this "minimal relevance" only for a deployment with the
+# internal webserver disabled -- this project's pdns.conf.template
+# explicitly sets `webserver=yes` (the REST API on port 8081
+# nats-subscriber and the Admin UI both depend on), so that carve-out did
+# not apply here; this was a real, LAN-reachable regression risk, not a
+# theoretical one, and a genuine regression introduced specifically by this
+# migration (the advisory's own "Fixed Versions" list includes 4.9.16, the
+# exact pdns-server version the prior Debian trixie-based stage already
+# ran, so the Debian image was never vulnerable to this CVE in the first
+# place). Since v3.24 stable had not yet picked up a point release with the
+# fix, this file pinned `pdns`/`pdns-backend-sqlite3` to an EXACT version on
+# Alpine's `edge` branch (`pdns@edge=5.1.3-r0`, not a bare `pdns@edge`),
+# which already carried 5.1.3 (past the named fix version 5.1.2):
+# deliberately exact-version rather than a bare `@edge` pin, so a rebuild
+# could not silently resolve a different, potentially ABI-mismatched edge
+# build against this image's other stable-channel-sourced libraries (e.g.
+# boost/sqlite-libs/luajit). Pinning only these two packages -- not the
+# whole base image, and not pdns-recursor-luajit, which resolves to the
+# identical version on both channels and was never named in this advisory
+# at all -- kept edge-channel exposure to the minimum needed.
+#
+# Resolution (2026-08-07, issue #1483): Alpine's `edge` repo rebuilt
+# `pdns`/`pdns-backend-sqlite3` to 5.1.4-r0 on 2026-08-06, superseding the
+# pinned 5.1.3-r0 build outright -- `edge` is a rolling repo that does not
+# keep old builds around, so the exact pin started failing `apk add` loudly
+# (`exit code: 2`), which is exactly this pin's own documented
+# fail-loud-not-silent-drift behavior (Rule-Ref: AG-VAL-026) firing as
+# designed, not a new or separate defect. Checked live against Alpine's
+# real package index (pkgs.alpinelinux.org, 2026-08-07): v3.24 stable now
+# ships `pdns`/`pdns-backend-sqlite3` at 5.0.7-r0, past the CVE-2026-42005
+# fix version (5.0.6) named above -- exactly the reevaluation trigger this
+# comment named from the start ("once v3.24 stable itself picks up 5.0.6 or
+# later ... the plain package should be preferred again"). The `@edge`
+# repository lines and the `@edge=...` pins are therefore dropped entirely
+# below: `pdns`/`pdns-backend-sqlite3` now resolve to the plain
+# stable-channel 5.0.7-r0 packages, closing the CVE without the rolling-repo
+# fragility that just broke every push/PR building this service.
+# `pdns-recursor-luajit` was re-confirmed live (2026-08-07) to resolve to
+# the identical version on both channels, so removing the edge repository
+# lines does not change which build of it gets installed. Re-evaluate again
+# (reintroduce an `@edge` pin, this time for a NEW CVE) only if a future
+# advisory affects a version still shipping in v3.24 stable at that time --
+# do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
+# will never need pinning again.
+RUN apk add --no-cache \
+    pdns \
+    pdns-backend-sqlite3 \
     pdns-recursor-luajit \
     bind-tools \
     sqlite \
