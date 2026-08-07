@@ -71,6 +71,17 @@ on:
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
+      # scripts/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
+      # reap/orphan-classification logic that used to live entirely inline in
+      # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
+      # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
+      # directly (`source "$repo_root/scripts/gc-pr-staging-images.sh"`) --
+      # without this entry, a PR touching only this script would not already
+      # match any other path above (it is not under scripts/lib/, which is
+      # already covered) and so would never run that suite. Found by
+      # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
+      # dependency scan against the real repo tree.
+      - "scripts/gc-pr-staging-images.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
       - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
@@ -255,6 +266,17 @@ on:
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
+      # scripts/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
+      # reap/orphan-classification logic that used to live entirely inline in
+      # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
+      # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
+      # directly (`source "$repo_root/scripts/gc-pr-staging-images.sh"`) --
+      # without this entry, a PR touching only this script would not already
+      # match any other path above (it is not under scripts/lib/, which is
+      # already covered) and so would never run that suite. Found by
+      # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
+      # dependency scan against the real repo tree.
+      - "scripts/gc-pr-staging-images.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
       - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"

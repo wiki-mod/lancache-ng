@@ -1,108 +1,106 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # nginx-based caching proxy image: unified standard (SNI passthrough) and
 # SSL/MITM (TLS-interception) mode, selected at runtime by entrypoint.sh.
-# Installs nginx from the nginx.org mainline repo (not Debian's own nginx
-# package). nginx.org's own package compiles the stream module (used by
-# standard mode's SNI passthrough, see nginx.conf's `stream {}` block) in
-# statically -- no separate module package and no `load_module` directive
-# are needed; see CLAUDE.md's "Key Design Decisions" for the full
-# explanation of why that differs from Debian's own nginx package.
-
-FROM mirror.gcr.io/library/debian:13-slim@sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd
+# Installs nginx from nginx.org's own mainline apk repo (not Alpine's own
+# `nginx` distro package, which lags a minor version behind). nginx.org's
+# own package compiles the stream module (used by standard mode's SNI
+# passthrough, see nginx.conf's `stream {}` block) in statically -- no
+# separate module package and no `load_module` directive are needed, on
+# Alpine exactly as on the prior Debian base; see AGENTS.md's "Key Design
+# Decisions" (AG-KD-007) for the full explanation.
+#
+# Alpine base (issue #815 Part B, staged Alpine migration for
+# proxy/ntp/watchdog/ui -- proxy picked up after ntp/dhcp/dhcp-proxy/dns/
+# watchdog had already landed). Confirmed live (2026-08-06) against a real
+# alpine:3.24 container: nginx.org publishes a full apk repository at
+# https://nginx.org/packages/{mainline,stable}/alpine/v<ver>/main with
+# identical version currency to its Debian apt repo (both mainline 1.31.3
+# at the time of this migration) -- `apk add nginx` after adding that repo
+# and its signing key resolves to `nginx/1.31.3-r1`, and `nginx -V` shows
+# `--with-stream --with-stream_ssl_preread_module` compiled in statically,
+# matching the Debian package exactly.
+FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
 
-# trixie-backports is the standard package source for this image (maintainer
-# decision, 2026-07-30) -- not scoped to curl alone: `Package: *` at
-# Pin-Priority 500 (tied with the regular trixie archive) applies project-wide
-# to every Debian-based image, so ordinary version-comparison rules pick
-# whichever archive has the newer version for ANY package, not just curl's
-# dependency closure. `apt-get dist-upgrade` then `apt-get full-upgrade` are
-# both run deliberately (a maintainer decision to keep both explicit, even
-# though modern apt treats `full-upgrade` as the same operation `dist-upgrade`
-# performs) so any package backports has already patched gets picked up on
-# every rebuild, not only curl.
+# `apk upgrade --no-cache` (before the package installs, same layer)
+# upgrades packages already baked into the alpine:3.24 base layer itself --
+# see services/dhcp-proxy/Dockerfile's matching comment for the fuller
+# rationale and live verification of this behavior.
 #
-# IMPORTANT, corrected 2026-07-30 after a real before/after Trivy scan: moving
-# curl onto backports (8.21.0 instead of plain trixie's 8.14.1-2+deb13u4) does
-# NOT reduce curl's own Trivy HIGH finding count. Both curl versions carry the
-# exact same 7 HIGH CVE IDs (CVE-2026-12064, -8286, -8927, -8932, -9079,
-# -9080, -9545; each `Status: affected`, `FixedVersion: None` in Trivy's DB) --
-# these were disclosed 2026-07-03, after 8.21.0 shipped, and have no fix
-# anywhere yet (not trixie, not backports, not sid). An earlier version of
-# this comment claimed backports "fixes all 7 of curl's CVEs," which was true
-# only for a different, earlier set of 7 CVE IDs that 8.21.0 itself did fix
-# relative to older curl releases -- it was never re-verified against a fresh
-# scan before being written down here. The residual risk and the maintainer
-# decision this leaves open (accept as-is, purge curl and migrate the
-# healthcheck off it, or something else) are tracked in issue #1304 -- do not
-# re-assert "fixes curl's CVEs" here without first re-running the same
-# before/after scan this comment is based on, since curl's actual CVE set is
-# a moving target. What backports still buys curl specifically, independent
-# of the HIGH-finding count: a newer curl in general (HTTP/3/QUIC support).
+# nginx.org's own Alpine apk repo is added the same way its own official
+# Docker images do it: fetch the RSA public key it signs its packages with
+# (https://nginx.org/keys/nginx_signing.rsa.pub -- a different key format
+# than the apt/gpg key the prior Debian stage used, but the same nginx.org
+# signing identity), then append a `@nginx`-tagged repository line pointing
+# at this Alpine version's mainline channel. The `@nginx` tag namespaces the
+# repo so `apk add nginx@nginx` explicitly resolves from it rather than
+# whatever plain `nginx` a future Alpine base version's own main/community
+# repos might also carry, keeping this pin unambiguous even if Alpine's own
+# distro nginx package version ever happens to converge with nginx.org's.
 #
-# The pin selector below MUST use `a=stable-backports`, not
-# `a=trixie-backports`: APT's `a=`/release-Archive selector matches the
-# Release file's `Suite:` field, and trixie-backports' own Release file
-# declares `Suite: stable-backports` / `Codename: trixie-backports` -- the
-# two are not interchangeable. A first version of this pin used
-# `a=trixie-backports` and silently never matched anything (apt-cache
-# policy still showed backports at its Debian-default priority 100),
-# so every "backports-sourced" package silently stayed on the vulnerable
-# plain-trixie version despite the pin file being present -- caught only by
-# building the image for real and checking the installed curl version
-# rather than trusting the Dockerfile comment.
-RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
-    && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
-    && apt-get update \
-    && apt-get dist-upgrade -y \
-    && apt-get full-upgrade -y \
-    && apt-get install -y --no-install-recommends \
-    gnupg \
-    curl \
-    ca-certificates \
-    && curl -fsSL https://nginx.org/keys/nginx_signing.key | gpg --dearmor -o /etc/apt/trusted.gpg.d/nginx.gpg \
-    && echo "deb http://nginx.org/packages/mainline/debian/ trixie nginx" > /etc/apt/sources.list.d/nginx.list \
-    && apt-get update && apt-get install -y --no-install-recommends \
-    nginx \
-    openssl \
-    gettext-base \
-    locales \
+# Package translations from the Debian stage (confirmed live against a real
+# alpine:3.24 container, 2026-08-06):
+#   - gettext-base -> gettext-envsubst: Alpine splits envsubst out of the
+#     base gettext package, matching every other already-migrated service.
+#   - locales/locale-gen/LANG=en_US.UTF-8 dropped entirely, not replaced:
+#     grepped entrypoint.sh, nginx.conf, proxy-params.conf, and conf.d/* for
+#     any LANG/LC_ALL/locale dependency -- none found. musl has no
+#     glibc-style locale-data system, and nothing this service actually does
+#     (nginx access/error log output, entrypoint.sh's own `sort`/string
+#     handling) depends on real glibc locale collation, so this block is
+#     purely cosmetic and safely droppable, per #815's own explicit
+#     instruction to check before assuming a substitute is needed.
+#   - findutils added: entrypoint.sh's kgs_list_snapshots() calls
+#     `find ... -printf '%f\n'`, a GNU-find-only flag BusyBox's own `find`
+#     applet does not support at all (confirmed live: `find: unrecognized:
+#     -printf`) -- the same BusyBox gap already hit and fixed for
+#     services/watchdog (#1346), services/dhcp/dhcp-proxy (#1347), and
+#     services/dns (#1425). Installing findutils (GNU find) fixes it with
+#     zero script changes.
+#   - coreutils added: BusyBox's own `date` applet silently produces an
+#     EMPTY nanosecond field for `date +%N` instead of erroring (confirmed
+#     live: real output was `20260806T120718.` -- a trailing dot with
+#     nothing after it), used both by kgs_new_snapshot_id() (snapshot-id
+#     uniqueness) and the CA serial-file first-init seed. Installing
+#     coreutils (GNU date) fixes both with zero script changes; also makes
+#     basename/dirname/sort consistently GNU-flavored (BusyBox's own
+#     versions of those already behaved correctly in this file's actual
+#     usage, verified live, so this is precautionary consistency rather
+#     than a second confirmed bug -- see this service's PR body for the
+#     full per-construct verification evidence).
+#   - bash added: entrypoint.sh's own `#!/bin/bash` shebang plus its use of
+#     `local`, indexed/associative arrays, `[[ ... ]]`, nameref parameters
+#     (`local -n`), and `${var,,}` lowercasing all require real bash --
+#     Alpine's base image has no bash by default, unlike Debian's.
+RUN apk upgrade --no-cache && \
+    apk add --no-cache curl ca-certificates openssl && \
+    curl -fsSL -o /etc/apk/keys/nginx_signing.rsa.pub https://nginx.org/keys/nginx_signing.rsa.pub && \
+    printf '%s\n' "@nginx https://nginx.org/packages/mainline/alpine/v$(cut -d. -f1,2 /etc/alpine-release)/main" >> /etc/apk/repositories && \
+    apk update && \
+    apk add --no-cache \
+    nginx@nginx \
+    findutils \
+    coreutils \
+    bash \
+    gettext-envsubst \
     nano \
     lsof \
-    ripgrep \
-    && echo "en_US.UTF-8 UTF-8" >> /etc/locale.gen \
-    && locale-gen \
-    # gnupg (which pulls in dirmngr/gpg/gpg-agent/gpgconf/gpgsm/gnupg-l10n)
-    # is needed ONLY to fetch and dearmor nginx.org's signing key above,
-    # before the apt source it authenticates even exists -- purged here, in
-    # the same layer it was installed in, so it never persists in any image
-    # layer. curl is KEPT: deploy/{prod,quickstart,full-setup}'s container
-    # healthcheck probes genuinely shell out to it at runtime (confirmed by
-    # docs/bug-hunt/proxy.md's own prior audit and
-    # docs/capability-inventory/SoT-proxy.md's Compose-wiring section) --
-    # purging it, as this PR's first two passes did, breaks every proxy
-    # healthcheck. curl is pulled from trixie-backports for a newer
-    # version (see this block's own pin-priority setup above) -- but per
-    # that comment's 2026-07-30 correction, this does NOT eliminate
-    # curl's Trivy HIGH findings, which persist unfixed regardless of
-    # curl version; see issue #1304 for the still-open maintainer
-    # decision on how to handle that residual risk.
-    # ca-certificates and openssl are also kept: both are genuinely needed
-    # at runtime for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's
-    # CA/cert generation via openssl, and the system trust store for
-    # whatever nginx itself needs).
-    && apt-get purge -y --auto-remove gnupg \
-    && rm -rf /var/lib/apt/lists/*
-
-ENV LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8
-# nano/lsof/ripgrep: in-container troubleshooting tools -- these images
-# otherwise ship no editor, no way to see which process holds an open
-# file/socket, and no fast recursive search, all real gaps when debugging a
-# live container via `docker exec`. EDITOR/VISUAL default to nano now that
-# it's actually present, matching common shell/tool expectations (git,
-# crontab -e, etc.) that read one of these instead of falling back to vi.
+    ripgrep
+# curl/ca-certificates/openssl are kept at runtime (not purged): curl is
+# genuinely shelled out to by deploy/{prod,quickstart,full-setup}'s proxy
+# container healthcheck (`deploy/prod/docker-compose.yml`'s `curl -sf
+# http://127.0.0.1/healthz ...` probe); ca-certificates and openssl are
+# needed for TLS (nginx's SSL-mode wildcard certs, entrypoint.sh's CA/cert
+# generation via openssl, and the system trust store for whatever nginx
+# itself needs) -- same rationale as the prior Debian stage, no gnupg-style
+# purge-after-use step is needed here since Alpine's apk signing-key
+# mechanism (a plain RSA public key file) never pulls in a temporary
+# package the way apt's gpg-based key import did.
+# nano/lsof/ripgrep: in-container troubleshooting tools -- see
+# services/dns/Dockerfile's identical comment for the full rationale.
 ENV EDITOR=nano
 ENV VISUAL=$EDITOR
 

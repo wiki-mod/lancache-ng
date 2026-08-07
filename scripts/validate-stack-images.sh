@@ -373,9 +373,12 @@ require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLA
 require_grep 'is missing required platform' \
   scripts/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
-require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{\{ matrix\.service \}\}-\$\{\{ matrix\.platform_tag \}\}-\$\{sanitized_ref\}"' \
-  .github/workflows/build-push.yml \
-  'container scans must use platform- and ref-specific Trivy cache directories (see #904 -- ref-parallel scans must never share a cache dir)'
+# container-scan's OWN per-run local-build cache dir (the same literal pattern this
+# check used to require) was removed along with the local-build branch it belonged to
+# (issue #1095 G8 fix): container-scan no longer builds or scans anything locally for a
+# changed service, so there is no cache dir left to key. The surviving check below (the
+# pushed-digest scan's cache dir, in build/build-arm64) still enforces #904's real
+# invariant for the one Trivy cache directory that still exists.
 require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-pushed-\$\{sanitized_ref\}"' \
   .github/workflows/build-push.yml \
   'the pushed per-service digest scan must use a service- and ref-specific Trivy cache directory too (see #904; widened from build-tools-only to every service by Step 3, issue #1095)'
