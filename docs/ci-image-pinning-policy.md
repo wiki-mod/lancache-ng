@@ -101,16 +101,25 @@ All GitHub Actions in the current set of workflows are already pinned to SHA dig
 All `FROM` directives in first-party Dockerfiles are pinned to explicit SHA-256 digests:
 
 The first-party runtime Dockerfiles intentionally use `mirror.gcr.io/library/*`
-as the pull source for their runtime bases (Debian for most services;
-`services/dhcp-proxy/Dockerfile` and `services/dhcp/Dockerfile` moved to an
-Alpine base as the first two stages of issue #815's staged Alpine migration,
-and `services/watchdog/Dockerfile` separately migrated to the same Alpine base
-(issue #815's own watchdog carve-out, revisited and approved 2026-07-31,
-independent of #842's Rust rewrite -- a scaffold now exists for that rewrite,
-see `services/watchdog/Cargo.toml`, but it is not yet built or used as this
-container's entrypoint, so this base-image decision stays unaffected either way)
--- `services/dns/Dockerfile` remains on Debian, that stage still open),
-including `services/ui/Dockerfile`. This is a
+as the pull source for their runtime bases. Base OS is mixed, not uniformly
+Debian, as issue #815's staged Alpine migration has progressed: `services/dhcp`,
+`services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`,
+`services/proxy`, and `services/ui` have all moved to the same pinned Alpine base
+(`services/watchdog`'s own carve-out, revisited and approved 2026-07-31, is
+independent of #842's Rust rewrite -- a scaffold now exists for that rewrite, see
+`services/watchdog/Cargo.toml`, but it is not yet built or used as this
+container's entrypoint, so this base-image decision stays unaffected either
+way). `services/ui` landed its own migration in a sibling PR while this
+document's `services/proxy` update was still in flight -- confirmed live
+against `services/ui/Dockerfile`'s current `FROM` line rather than assumed.
+`services/syslog` (the combined fluent-bit + syslog-ng central logging
+service, #1431/#1433) is on Alpine too, but was never part of #815's
+migration set above -- it was born on Alpine from its first commit, so it
+gets its own inventory row below rather than being folded into the
+staged-migration list. Every first-party runtime image is now on Alpine
+except `tools/build-tools`
+(Rule-Ref: AG-KD-009 in `AGENTS.md`, a deliberate, separately-decided
+exception, not an oversight). This is a
 project-wide cache decision, not a one-off oversight in the Admin UI image:
 the immutable digest is the supply-chain control, while `mirror.gcr.io` is the
 configured pull source for these public Docker Hub bases, whichever
@@ -123,12 +132,14 @@ Operators or CI runners that require Docker Hub as the source should configure
 that at the Docker daemon or build infrastructure layer, not by adding
 undocumented per-Dockerfile fallback logic.
 
-- `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/debian:13-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
-- `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
+- `services/proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815, staged Alpine migration)
+- `services/dns/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration; PowerDNS/recursor pinned to Alpine's `edge` branch specifically for a CVE fix, see `services/dns/Dockerfile`'s own comment)
 - `services/dhcp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — Kea second)
 - `services/dhcp-proxy/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration — dnsmasq-first)
-- `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/debian:trixie-slim@sha256:28de0877c2189802884ccd20f15ee41c203573bd87bb6b883f5f46362d24c5c2` ✅
+- `services/ntp/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine, issue #815, staged Alpine migration)
+- `services/ui/Dockerfile` (runtime stage): `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian trixie-slim to Alpine in a sibling PR, issue #815, staged Alpine migration)
 - `services/watchdog/Dockerfile`: `FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` ✅ (migrated from Debian 13-slim to Alpine, issue #815's watchdog carve-out, revisited/approved 2026-07-31 -- independent of #842's Rust rewrite, which now has a scaffold crate but is not yet built or used as this container's entrypoint)
+- `services/syslog/Dockerfile`: `FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc` ✅ (born on Alpine from its first commit, #1431/#1433 -- not part of issue #815's Debian-to-Alpine migration since it never ran on Debian; pinned directly to `alpine:3.20` rather than through `mirror.gcr.io`, and to 3.20 rather than 3.24, because Alpine's stable 3.20 repo is the only release confirmed to package `syslog-ng` at the version this Dockerfile's own header comment records testing against -- see that file for the full version rationale)
 
 **Status**: ✅ All runtime base images are pinned.
 

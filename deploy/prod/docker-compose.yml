@@ -347,9 +347,12 @@ services:
   #   - DAC_OVERRIDE: retention.sh deletes files it does not own, in
   #     directories it does not control the permissions of -- confirmed live
   #     on a real runner: nginx creates proxy-cache entries as
-  #     `www-data:www-data`, mode 0700/0600 (no group/other bits at all,
-  #     hardcoded by nginx itself -- confirmed even a process umask set
-  #     before nginx starts has zero effect on this). This is still the
+  #     `nginx:nginx` (re-confirmed 2026-08-06 on services/proxy's Alpine
+  #     base, issue #815 -- the owning username changed from Debian's
+  #     `www-data` to Alpine's `nginx`, but the underlying mode bits and
+  #     reasoning below are unchanged), mode 0700/0600 (no group/other bits
+  #     at all, hardcoded by nginx itself -- confirmed even a process umask
+  #     set before nginx starts has zero effect on this). This is still the
   #     binding reason DAC_OVERRIDE is kept, unchanged by the syslog
   #     consolidation below.
   #
