@@ -289,11 +289,16 @@ services:
     # non-templated file (see its own header), so these two top-level .env
     # values -- which do vary per install -- are passed the same way the
     # `retention` service below already passes SYSLOG_ENABLED for its own
-    # syslog-ng retention gate. Neither var is read by watchdog.sh (the bash
-    # entrypoint this ENTRYPOINT still runs); the Rust crate's own
-    # resolve_alert_only_targets() reads both, currently unused until that
-    # crate becomes this service's actual ENTRYPOINT (see
-    # services/watchdog/src/lib.rs's module doc comment).
+    # syslog-ng retention gate. DHCP_MODE is still read only by the Rust
+    # crate's own resolve_alert_only_targets() (services/watchdog/src/
+    # main.rs), currently unused until that crate becomes this service's
+    # actual ENTRYPOINT (see services/watchdog/src/lib.rs's module doc
+    # comment) -- but SYSLOG_ENABLED is no longer in that "unused until the
+    # Rust rewrite lands" bucket: bug-hunt finding observability.md#8
+    # (2026-08-06) ported the same alert-only syslog-container monitoring
+    # into watchdog.sh (the bash entrypoint this ENTRYPOINT still runs)
+    # directly, so this var is genuinely consumed today, not only staged for
+    # later.
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
@@ -318,8 +323,19 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
+    # #849 bug-hunt finding watchdog.md#14: docker-socket-proxy is the one
+    # dependency every get_health()/restart_container() call in watchdog.sh
+    # goes through -- the plain list form only waited for that container to
+    # *start*, not for HAProxy inside it to actually be accepting connections
+    # on :2375. Narrow/self-healing in practice (HAProxy binds well within a
+    # second, and a missed first cycle self-corrects via get_health()'s own
+    # "unreachable" fallback), but docker-socket-proxy has carried a real
+    # HTTP healthcheck since #1169 (see its own service block above), so
+    # there is no longer a reason not to wait for genuine readiness instead
+    # of a bare "container exists" signal.
     depends_on:
-      - docker-socket-proxy
+      docker-socket-proxy:
+        condition: service_healthy
     networks:
       - default
       - docker-api
@@ -1323,11 +1339,29 @@ services:
     networks:
       - default
       - docker-api
+      # #849 bug-hunt finding observability.md#20: needed to reach netdata
+      # (NETDATA_URL below) now that netdata no longer sits on `default` --
+      # see the netdata service's own comment for why.
+      - netdata-net
+    # #849 bug-hunt finding watchdog.md#14: matches the watchdog service's
+    # identical change above -- docker-socket-proxy has carried a real HTTP
+    # healthcheck since #1169, so the Admin UI (whose own Docker API calls,
+    # e.g. restart-service buttons, also go through it) waits for genuine
+    # readiness instead of a bare "container exists" signal. proxy/netdata/
+    # nats keep `service_started` -- the exact behavior the plain list form
+    # already had -- since none of the three has a startup-ordering
+    # dependency on the UI beyond "the container object exists," and
+    # Compose's map form requires every entry in one `depends_on:` block to
+    # use the same syntax (list and map entries cannot be mixed).
     depends_on:
-      - docker-socket-proxy
-      - proxy
-      - netdata
-      - nats
+      docker-socket-proxy:
+        condition: service_healthy
+      proxy:
+        condition: service_started
+      netdata:
+        condition: service_started
+      nats:
+        condition: service_started
     restart: always
     logging:
       driver: json-file
@@ -1417,6 +1451,23 @@ services:
       retries: 3
       start_period: 20s
     restart: always
+    # #849 bug-hunt finding observability.md#20: netdata never publishes a
+    # host port (grepped every deploy/*/docker-compose.yml for "19999" --
+    # only ever the internal NETDATA_URL env var or a container-local
+    # healthcheck). An explicit `networks:` entry below is required for
+    # netdata: leaving it unset would put netdata on the same implicit
+    # shared `default` network as every other real service (dns, proxy,
+    # dhcp, nats, ...), letting any one of them reach netdata's full,
+    # unauthenticated HTTP API (`/api/v1/alarms`, `/api/v1/allmetrics`,
+    # etc., not just the two endpoints the Admin UI's own proxy allowlist
+    # restricts its own outbound calls to) directly at
+    # http://netdata:19999. Only the Admin UI actually needs to reach
+    # netdata (NETDATA_URL below); scoping netdata to its own dedicated
+    # network -- not `internal: true`, since netdata's own image may still
+    # need outbound internet access for its own operation -- keeps every
+    # other lancache-ng container unable to resolve or reach it at all.
+    networks:
+      - netdata-net
     logging:
       driver: json-file
       options:
@@ -1426,6 +1477,11 @@ services:
 networks:
   docker-api:
     internal: true
+  # #849 bug-hunt finding observability.md#20: dedicated to netdata + the
+  # Admin UI (the only real caller, via NETDATA_URL) -- see the netdata
+  # service's own comment above for why this exists as a separate network
+  # rather than netdata staying on `default`.
+  netdata-net: {}
 
 volumes:
   # Shared handshake secrets (#858): persistent volume mounted into every
