@@ -1263,6 +1263,12 @@ services:
       - SSL_LOG=/var/log/nginx/access.log
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
+      # Shared-secret bootstrap (#858): the ui entrypoint resolves this from
+      # /var/lib/lancache-secrets/netdata-alarm-token to match the netdata
+      # service's own resolution above -- see routes/netdata_alarms.rs for
+      # what this token gates (POST /api/netdata-alarms, the forward channel
+      # for Netdata's health.d alarms, bug hunt #849 finding #3).
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
@@ -1409,8 +1415,116 @@ services:
         daemon = /var/log/netdata/daemon.file.log
         health = /var/log/netdata/health.file.log
         CONF
+        # Netdata alarm -> Admin UI forwarding (bug hunt #849, observability.md
+        # finding #3: Netdata's own health.d alarms had no notification
+        # integration or Admin UI surface). Netdata's alarm-notify.sh sources
+        # this repo's stock, huge health_alarm_notify.conf FIRST, then this
+        # user-config-dir override SECOND (verified against
+        # /usr/libexec/netdata/plugins.d/alarm-notify.sh's own sourcing order,
+        # ~line 519, against the pinned image below) -- a bash function
+        # definition simply gets replaced on the second `source`, so this
+        # override only has to define the SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM/
+        # custom_sender() integration point, not replicate the ~1362-line stock
+        # file. Shared-secret bootstrap (#858) resolves NETDATA_ALARM_TOKEN the
+        # same first-writer-wins way the nats service above resolves its own
+        # passwords, so this container and the ui container agree on one value
+        # without either side hardcoding it.
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        if secret_is_placeholder "$$NETDATA_ALARM_TOKEN"; then NETDATA_ALARM_TOKEN=""; fi
+        if ! NETDATA_ALARM_TOKEN="$$(resolve_shared_secret netdata-alarm-token "$$NETDATA_ALARM_TOKEN" lancache_gen_hex32)"; then
+          echo "[lancache-netdata] FATAL: NETDATA_ALARM_TOKEN is unset/placeholder and the shared-secrets volume is not writable, so no shared token could be generated." >&2
+          echo "[lancache-netdata] Mount the shared-secrets volume, or set NETDATA_ALARM_TOKEN to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        # The resolved token is written to its own file, read back by
+        # custom_sender() at alarm-fire time, rather than interpolated
+        # directly into the health_alarm_notify.conf heredoc below: this
+        # heredoc already needs every literal dollar sign doubled for
+        # Compose's own YAML-level interpolation (see this file's other
+        # heredocs for the same pattern), and embedding a live secret value
+        # into that heredoc would also leak it into `docker inspect`'s
+        # recorded command.
+        umask 077
+        printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
+        chmod 0600 /etc/netdata/.netdata-alarm-token
+        # Live-verified 2026-08-06 (PR #1444 real-alarm check, keep this
+        # block byte-identical to deploy/quickstart/docker-compose.yml's
+        # matching fragment): netdata's own daemon -- and therefore
+        # alarm-notify.sh and this file's custom_sender() -- runs as the
+        # image's unprivileged `netdata` user (uid 201), never as root,
+        # once past this root-context setup script. Without this chown,
+        # the token file stays root:root/0600 from the printf above, so the
+        # real health-engine-triggered alarm-notify.sh process gets
+        # "Permission denied" reading it, `cat ... 2>/dev/null` silently
+        # swallows that into an empty string, and every real
+        # (non-manually-triggered) alarm silently fails Admin UI auth with
+        # 401 -- confirmed by instrumenting this exact custom_sender() body
+        # and observing token_len=0 on a real health.d-fired alarm, versus
+        # a correct non-empty token when the same file is read via a root
+        # shell (e.g. `docker exec`), which is why naive manual testing as
+        # root does not catch this.
+        chown netdata:netdata /etc/netdata/.netdata-alarm-token
+        cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
+        # Minimal override -- sourced AFTER Netdata's own stock
+        # health_alarm_notify.conf (see the entrypoint comment above for the
+        # verified sourcing order). Only defines the custom_sender()
+        # integration point plus the two variables that activate it.
+        #
+        # shellcheck disable=SC2154
+        # name/chart/host/status/old_status/value_string/units/info/
+        # unique_id/alarm_id/event_id/when/duration below are populated by
+        # Netdata's own alarm-notify.sh before it sources this file's
+        # custom_sender() -- never assigned in this fragment itself. This
+        # whole heredoc is opaque to a shellcheck run against the compose
+        # file it lives in (a quoted heredoc body is not parsed as shell),
+        # so these directives only take effect if this content is ever
+        # extracted and linted standalone -- verified against a real
+        # extracted copy during this change's own validation, not assumed.
+        # shellcheck disable=SC2034
+        # SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM are read by Netdata's own
+        # alarm-notify.sh AFTER sourcing this file, not used within it.
+        SEND_CUSTOM="YES"
+        DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
+        # Escapes a value for safe embedding inside a JSON string: backslash
+        # first (so a later-escaped quote isn't double-escaped), then double
+        # quote, then strips newlines. Netdata's alarm fields (name/chart/
+        # host/value_string/units/info) are operator/collector-controlled
+        # strings, not guaranteed free of characters that would otherwise
+        # break this hand-built JSON payload.
+        _lancache_json_escape() {
+          printf '%s' "$$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+        custom_sender() {
+          local token
+          token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
+          # docurl is Netdata's own curl/wget-compatible HTTP helper, already
+          # available in the environment alarm-notify.sh runs custom_sender()
+          # in. Best-effort fire-and-forget: a failed/timed-out POST here must
+          # never make Netdata's own health engine misbehave, so stderr/stdout
+          # are discarded and the exit code is not checked.
+          docurl -s --max-time 15 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Netdata-Alarm-Token: $${token}" \
+            -d "{\"unique_id\":$${unique_id},\"alarm_id\":$${alarm_id},\"event_id\":$${event_id},\"when\":$${when},\"name\":\"$$(_lancache_json_escape "$${name}")\",\"chart\":\"$$(_lancache_json_escape "$${chart}")\",\"host\":\"$$(_lancache_json_escape "$${host}")\",\"status\":\"$$(_lancache_json_escape "$${status}")\",\"old_status\":\"$$(_lancache_json_escape "$${old_status}")\",\"value_string\":\"$$(_lancache_json_escape "$${value_string}")\",\"units\":\"$$(_lancache_json_escape "$${units}")\",\"info\":\"$$(_lancache_json_escape "$${info}")\",\"duration\":$${duration}}" \
+            "http://ui:8080/api/netdata-alarms" >/dev/null 2>&1
+        }
+        ALARMCONF
         exec /usr/sbin/run.sh
+    environment:
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
     volumes:
+      # Shared-secret bootstrap (#858): same two mounts as the nats service
+      # above, needed here for the identical reason -- this service runs the
+      # pinned upstream `netdata/netdata` image (see the `image:` line
+      # below), which has no entrypoint.sh of its own to embed a byte-
+      # identical copy into, so the canonical library is sourced inline from
+      # the command block above instead. `services/netdata/entrypoint.sh` is
+      # a separate, evaluated-but-not-adopted first-party build (issue
+      # #1304/#815, PR #1352) -- no deploy profile actually runs that image
+      # today, so it is not a byte-identical-copy target here either.
+      - shared-secrets:/var/lib/lancache-secrets
+      - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata
       - netdatacache:/var/cache/netdata

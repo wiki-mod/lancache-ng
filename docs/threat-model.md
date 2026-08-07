@@ -227,11 +227,28 @@ untrusted network · **Impact**: High
   routes (regression-tested).
 - Startup also fails closed if `SECONDARY_REGISTRATION_TOKEN` is empty (an empty
   token would authenticate any secondary; see T14).
+- `POST /api/netdata-alarms` (issue #849 observability.md finding #3's
+  alarm-forwarding webhook, `services/ui/src/routes/netdata_alarms.rs`) sits
+  outside the Basic Auth gate for the same reason `/api/secondary/register`
+  does (it is a machine-to-machine call with no browser session to attach
+  CSRF/cookie state to), but is not unauthenticated: it requires a matching
+  `X-Netdata-Alarm-Token` header, checked in constant time, and an
+  empty/unconfigured token on the Admin UI side rejects every request
+  rather than accepting them. This is a genuinely new write-capable network
+  endpoint on the Admin UI, not merely a restatement of an existing one —
+  worth naming explicitly because bug hunt finding #20 already established
+  that any container on the `lancache` Docker network can reach Netdata's
+  own REST API unauthenticated; without this token check, any container on
+  that same network could also inject fabricated alarms into the Admin UI
+  dashboard.
 
 **Residual risk**: Low, and entirely operator-controlled: it exists only if the
 operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
 LAN. The quickstart binds the UI to the LAN IP by default and documents
-`UI_BIND_IP=127.0.0.1` to restrict it further.
+`UI_BIND_IP=127.0.0.1` to restrict it further. Separately, `POST
+/api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
+not change finding #20's underlying fact that Netdata's own API (port 19999,
+internal-network-only) has no authentication of its own.
 
 ---
 
@@ -516,15 +533,27 @@ or saturating the proxy.
   watchdog-computed cache-disk yellow/red color is rendered live on the
   Admin UI dashboard's "Service health" card (`services/ui/src/
   watchdog_status.rs`), closing the visibility gap #849 observability
-  finding #3 identified. Netdata's own stock alarm templates still have no
-  notification integration or Admin UI surface of their own (its native
-  dashboard, port 19999, is never published to the host) -- that half of
-  this mitigation remains not operator-visible without direct `docker
-  exec`/Netdata-API access.
+  finding #3 identified. Netdata's own health.d alarms (disk usage, CPU,
+  memory, and every other stock alarm template it ships) are now also
+  forwarded: the `netdata` container's `custom_sender()` integration
+  (`deploy/*/docker-compose.yml`'s `netdata:` service command block) POSTs
+  each alarm event to the Admin UI's `POST /api/netdata-alarms`
+  (`services/ui/src/routes/netdata_alarms.rs`), gated by its own shared
+  `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern), and the
+  dashboard's "Netdata alarms" card renders the recent history
+  (`services/ui/src/netdata_alarms.rs`). This closes the remainder of #849
+  finding #3: an operator no longer needs direct `docker exec`/Netdata-API
+  access to learn that a health.d alarm fired. Netdata's own full metrics
+  dashboard (port 19999) is still never published to the host — this
+  integration forwards alarm *events*, not the underlying metrics browsing
+  UI, so an operator investigating the cause of a forwarded alarm in detail
+  still needs direct access to that port.
 
 **Residual risk**: Medium — there is no per-client request rate limiting by
-default; the operator must configure limits, and must still reach Netdata
-directly for its half of disk/resource monitoring.
+default; the operator must configure limits. Netdata's alarm events now
+reach the dashboard, but its full metrics UI (port 19999) remains
+unpublished, so deep investigation of a forwarded alarm still requires
+direct Netdata access.
 
 ---
 
