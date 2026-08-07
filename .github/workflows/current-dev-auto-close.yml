@@ -117,7 +117,36 @@ jobs:
             // an optional colon, then a same-repo `#123` reference. `Refs
             // #N` is intentionally NOT matched -- those are non-closing
             // references the PR author left open on purpose (see #1137).
-            const keywordPattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
+            //
+            // Negative lookbehind rejects a match preceded by a negation
+            // marker (not/never/cannot/n't), up to two filler words before
+            // the keyword -- e.g. "does not close #N", "won't fix #N",
+            // "This PR does not close #N". `n't` deliberately has no `\b`
+            // in front of it: it sits mid-word in a contraction ("doesn't",
+            // "won't"), and the word-character 's' immediately followed by
+            // word-character 'n' is not a `\b` position at all, so requiring
+            // one there would silently never match a real contraction.
+            // Confirmed live incident (2026-08-07): this workflow auto-
+            // closed issue #1095 when PR #1443 merged into current_dev,
+            // solely because its body's sentence "This PR does not close
+            // #1095" contains the substring "close #1095" -- the pattern had
+            // no negation awareness at all before this fix and matched that
+            // substring exactly like a real `Closes #1095`. Verified against
+            // the real PR #1443 body (produces zero matches with this fix,
+            // one false match without it) and a battery of synthetic
+            // positive/negative cases (still matches every real closing-
+            // keyword shape; no longer matches "does not close", "won't
+            // fix", "never closes", "cannot resolve", "doesn't close",
+            // "isn't going to fix"). This is a heuristic, not full NLP
+            // negation detection: a negation separated from the keyword by
+            // more than two filler words (e.g. "does not currently intend
+            // to fix #N") still matches, same residual gap the pattern
+            // always had for every other unanticipated phrasing -- PR
+            // authors should keep using the project's own `Refs #N`
+            // convention (see #1137) for any non-closing reference rather
+            // than relying on this heuristic to catch every possible way of
+            // saying "not this one."
+            const keywordPattern = /(?<!\b(?:not|never|cannot)\s+(?:\w+\s+){0,2}|n't\s+(?:\w+\s+){0,2})\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
             const issueNumbers = new Set();
             let match;
             while ((match = keywordPattern.exec(prBody)) !== null) {
