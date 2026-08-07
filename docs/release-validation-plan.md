@@ -987,6 +987,24 @@ explicit pass:**
   explicit decision to split this into a separate live-stack milestone rather than
   compress it into this pass.
 
+- **AG-VAL-034's GNU/BusyBox construct audit for Alpine-migrated services has no
+  standing mechanical check yet, despite recurring four times** (`services/watchdog`
+  #1346, `services/dhcp`/`dhcp-proxy` #1347, `services/dns` #1425, `services/proxy`
+  issue #815/this migration pass) — each occurrence was caught only by a human/agent
+  reading the entrypoint script line-by-line and cross-checking against a real
+  `alpine:3.24` container, exactly the standing-check gap `AG-VAL-029` exists to close.
+  `AG-VAL-034`'s own rule text already names the missing piece: "a mechanical guard
+  for `services/*/entrypoint.sh` against an Alpine final stage is proposed future
+  work, not yet built." Recorded here rather than silently deferred a fifth time: a
+  low-false-positive version would grep each Alpine-based service's `entrypoint.sh`
+  for the confirmed-recurring pattern shapes (`find[^|]*-printf`, `date[^|]*%N`,
+  `grep[^|]*-[a-zA-Z]*P\b`) and assert the corresponding fix package
+  (`findutils`/`coreutils`/`grep`) is present in that service's `Dockerfile` — the
+  same shape as `scripts/check-pipefail-early-exit-grep.sh`'s existing pattern/fix-package
+  cross-check. Not built in this pass; a future PR should add it as its own standing
+  check rather than relying on the fifth migration's agent to re-derive this list from
+  scratch again.
+
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
 omitted):**

@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Dedicated entrypoint for the standalone `retention` sidecar container
 # (#842 Teil 2, 2026-08-01). Was previously a generic wrapper that launched
@@ -24,9 +25,11 @@
 #
 # retention.sh must delete files it does not own, across three volumes this
 # service does not control the permissions of: nginx's proxy-cache entries
-# (confirmed live: nginx creates these `www-data:www-data`, mode 0700/0600 --
-# no group or "other" bits at all, hardcoded by nginx itself, not
-# configurable), syslog-ng's output tree (root-owned, `dir-perm(0750)` --
+# (confirmed live: nginx creates these `nginx:nginx` on services/proxy's
+# current Alpine base -- re-confirmed 2026-08-06, issue #815; the owning
+# username changed from Debian's `www-data` when that migration landed, but
+# the mode stays 0700/0600, no group or "other" bits at all, hardcoded by
+# nginx itself, not configurable), syslog-ng's output tree (root-owned, `dir-perm(0750)` --
 # already `chgrp`'d to this same gid 10001 for the Admin UI's READ-ONLY
 # access, but group has no WRITE bit, so that sharing does not extend to
 # deletion), and fluent-bit's own self-log (root-owned by that pinned
