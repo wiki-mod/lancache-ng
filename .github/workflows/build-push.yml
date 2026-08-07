@@ -4773,9 +4773,12 @@ jobs:
           # G8 fix (issue #1095): this job no longer builds anything, so `context`,
           # `build_contexts`, `description`, and `platform` (only ever consumed by the
           # now-removed throwaway-build step) are dropped from this matrix entirely --
-          # only `service`/`platform_tag`/`runner` are still read below. Runner tiers
-          # mirror build/build-arm64's own split (issue #1095, AG-CI-002 measured
-          # exception, maintainer decision 2026-08-06).
+          # only `service`/`platform_tag`/`runner` are still read below. Runner tiers are
+          # kept in sync manually with `build`'s own matrix (see that job's comment for
+          # the full light/heavy measured-cost rationale, AG-CI-002): the surviving
+          # "should-scan == false" branch's registry pull + Trivy scan still benefits
+          # from the same split as the real build, even though this job itself no longer
+          # builds anything to measure a compile cost for.
           - service: proxy
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -5296,12 +5299,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Runner tiers below: same issue #1095 / AG-CI-002 measured exception as
-          # container-scan's matrix -- see that job's own comment for the full
-          # rationale (Dockerfile compile-graph evidence, measured build times,
-          # watchdog's #842-scoped non-permanence). Kept in sync manually with
-          # container-scan's copy, same convention as this job's own
-          # service_descriptions duplication elsewhere in this file.
+          # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
+          # decision 2026-08-06) are this rule's canonical copy: proxy/dhcp-proxy/
+          # watchdog/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles
+          # (precompiled package install or a COPY --from an upstream image only,
+          # confirmed by direct inspection, not assumed from the service name) and
+          # measured well below dns/ui/build-tools in a real full-rebuild run -- see issue
+          # #1095's comment thread for the numbers. dns/ui (Rust via ${BUILD_TOOLS_IMAGE})
+          # and build-tools (Go+Rust) stay heavy. watchdog is scoped to its CURRENT
+          # Dockerfile only: issue #842's planned Rust rewrite must trigger a fresh
+          # re-evaluation, not a grandfathered stay on light. container-scan's own matrix
+          # mirrors this split (kept in sync manually) even though it no longer builds
+          # anything itself (G8 fix) -- see that job's own comment for why it still cares.
           - service: proxy
             context: services/proxy
             # cdn-domains.txt lives in services/dns/, outside this image's own
