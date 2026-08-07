@@ -478,7 +478,10 @@ struct KeaSnapshotSummary {
 // Kea is unreachable or a fetch fails, the affected tables render empty
 // instead of taking down the whole page (see the else-branch and the
 // `unwrap_or_default()` calls below).
-pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+pub async fn dhcp_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let mut ctx = Context::new();
     let dhcp_mode = state.config.effective_dhcp_mode();
     let dhcp_has_kea = dhcp_mode.is_kea();

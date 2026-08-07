@@ -6,7 +6,7 @@
 use crate::{AppState, docker_client};
 use axum::extract::{Form, Query, State};
 use axum::http::HeaderMap;
-use axum::response::{Html, Redirect};
+use axum::response::{IntoResponse, Redirect};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -123,7 +123,7 @@ pub async fn domains_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<DomainsPageQuery>,
-) -> Html<String> {
+) -> impl IntoResponse {
     let dns_domains = read_domain_entries(&state.config.cdn_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
