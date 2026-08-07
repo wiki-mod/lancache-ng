@@ -555,6 +555,58 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
 }
 
+@test "#1095 F-20: BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
+    # Discriminating test for the two allow_reverse_ancestry=true call sites
+    # F-20 added inside saf_resolve_untouched_backfill_source() (Step 1's
+    # fast path here, since every service is untouched by default per
+    # setup()'s docs-only fixture -- Step 2's normal-path call site carries
+    # the identical fix and reasoning, see that call site's own comment).
+    #
+    # Simulates the real push-reuse shape (#1095 Step 4): base_sha's own
+    # per-commit tag exists, but imagetools create copied the label from the
+    # older commit whose content it reused -- so the revision label reads
+    # older_sha, a genuine strict ancestor of base_sha, not base_sha itself.
+    # Only base_sha's own tag resolves to anything at all; every other tag
+    # (including any ancestor candidate's) reports "no image" -- this makes
+    # the pass/fail outcome unambiguous: if allow_reverse_ancestry is not
+    # honored here, the freshness check rejects older_sha as stale, falls
+    # through to saf_find_built_ancestor, and that walk finds nothing usable
+    # either (every ancestor's own tag is also stubbed absent) -- a hard
+    # failure, not a quieter wrong-answer. Verified this test fails against
+    # the pre-F-20 baseline for exactly that reason (status non-zero, "No
+    # usable ancestor" error) before writing this comment.
+    revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
+    cat > "$revision_map_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "$base_sha_short") echo "$older_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_map_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_map_stub"
+
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    # Captured immediately, before the `run !` call below overwrites bats'
+    # shared $output/$status (see the SC2314 comment used by the analogous
+    # ancestor-fallback test above for why).
+    script_output="$output"
+    # Every service back-filled straight from base_sha's own tag -- never
+    # substituted for an ancestor's, and never refused as stale.
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha_short}" "$backfill_log"
+    run ! grep -qF "sha-${older_sha:0:7}" "$backfill_log"
+    [[ "$script_output" != *"Substituting nearest built ancestor"* ]]
+    [[ "$script_output" != *"No usable ancestor"* ]]
+}
+
 @test "#808: BASE_SHA is required -- an omitted BASE_SHA fails closed instead of silently skipping the freshness check" {
     unset BASE_SHA
     export EXISTING_IMAGES=""
