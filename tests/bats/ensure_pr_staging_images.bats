@@ -787,22 +787,25 @@ STUB
     # otherwise setup()'s default revision stub (always fresh at BASE_SHA)
     # would let the ordinary backfill succeed before this scenario is even
     # reached, the same reason the dedicated "confirmed run" test below needs
-    # this override too. Scoped to the BASE_SHA image tag specifically (not a
-    # blanket "always answer older_sha" stub): this test's own fixture name
-    # ("no ancestor anywhere has a usable run") requires every OTHER image
-    # query -- in particular saf_find_built_ancestor's own direct
-    # image-existence check for a candidate whose paths could not be
-    # confirmed ignorable -- to correctly report "no such image" too, or this
-    # stub would inadvertently simulate an ancestor candidate's image
-    # existing when this fixture means for none to.
+    # this override too. `exit 1` for every image, not "echo an older
+    # ancestor's sha" (#1095 F-20, 2026-08-07): since
+    # saf_resolve_untouched_backfill_source's own BASE_SHA-level checks now
+    # pass allow_reverse_ancestry=true (the same push-reuse-retag-aware
+    # acceptance saf_find_built_ancestor's own candidate checks already used),
+    # echoing a genuine ancestor of base_sha here would now be LEGITIMATELY
+    # accepted as fresh instead of refused -- see the "#808: ... is NOT
+    # back-filled ... stale relative to BASE_SHA" test's own comment a few
+    # hundred lines up in this same file for the identical reasoning, written
+    # before this fixture needed to catch up to it. This test's own fixture
+    # name ("no ancestor anywhere has a usable run") means every image query
+    # -- BASE_SHA's own and every ancestor candidate's -- must correctly
+    # report "no such image" for the scenario to hold at all, so a single
+    # unconditional `exit 1` is not just simpler than the old per-tag `case`,
+    # it is the only shape that still means what this test's name says.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_no_ancestor.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-image="\$1"
-case "\$image" in
-    *":sha-${base_sha:0:7}") echo "$older_sha" ;;
-    *) exit 1 ;;
-esac
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
@@ -850,14 +853,19 @@ STUB
     chmod +x "$run_exists_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
 
-    # Force the exact-BASE_SHA freshness check to fail first (same
-    # older_sha-reports-stale pattern the pre-existing "#808 stale" test
-    # already uses), so the script actually reaches the new fallback
-    # decision point instead of succeeding earlier.
+    # Force the exact-BASE_SHA freshness check to fail first, so the script
+    # actually reaches the new fallback decision point instead of succeeding
+    # earlier. `exit 1` (no such image), not "echo an older ancestor's sha"
+    # (#1095 F-20, 2026-08-07): saf_resolve_untouched_backfill_source's own
+    # BASE_SHA-level checks now pass allow_reverse_ancestry=true, so echoing
+    # a genuine ancestor of base_sha here would now be legitimately accepted
+    # as fresh instead of refused -- see the "#808: ... is NOT back-filled
+    # ... stale relative to BASE_SHA" test's own comment for the identical
+    # reasoning.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_run_exists.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-echo "$older_sha"
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
@@ -890,10 +898,17 @@ STUB
     chmod +x "$indeterminate_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$indeterminate_stub"
 
+    # Force the exact-BASE_SHA freshness check to fail first. `exit 1` (no
+    # such image), not "echo an older ancestor's sha" (#1095 F-20,
+    # 2026-08-07): saf_resolve_untouched_backfill_source's own BASE_SHA-level
+    # checks now pass allow_reverse_ancestry=true, so echoing a genuine
+    # ancestor of base_sha here would now be legitimately accepted as fresh
+    # instead of refused -- see the "#808: ... is NOT back-filled ... stale
+    # relative to BASE_SHA" test's own comment for the identical reasoning.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_indeterminate.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-echo "$older_sha"
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
