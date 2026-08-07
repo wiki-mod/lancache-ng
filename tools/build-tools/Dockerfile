@@ -436,7 +436,20 @@ RUN set -euo pipefail; \
     # linux-libc-dev is pulled in by the toolchain layer and can lag behind the
     # base image even after a generic upgrade; force the current security-fixed
     # package so Trivy does not fail the build-tools image on stale headers.
-    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev; \
+    # jq/libjq1 need the same treatment for a different reason: they are
+    # installed by an earlier, non-cache-busted RUN step above (plain
+    # `apt-get install`, no APT_CACHE_BUST reference), so once that layer is
+    # cached it never re-resolves against a newer mirror snapshot on its own --
+    # confirmed live (CVE-2026-32316, fixed in 1.7.1-6+deb13u3) by a real Trivy
+    # scan flagging exactly the version that layer had cached. dist-upgrade/
+    # full-upgrade above already re-run weekly and would normally pick this
+    # up, but a fix published mid-week is not visible until the following
+    # week's APT_CACHE_BUST value rotates (confirmed: 1.7.1-6+deb13u3 was
+    # already resolvable from trixie-security when this was diagnosed, yet
+    # the already-cached weekly layer still held 1.7.1-6+deb13u2). Naming
+    # jq/libjq1 explicitly here forces this one build to pick up the fix
+    # immediately rather than waiting for next week's rotation.
+    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     chown _apt:root "${distcc_pump_tmp}"; \
