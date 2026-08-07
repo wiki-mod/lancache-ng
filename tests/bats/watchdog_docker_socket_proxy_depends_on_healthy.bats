@@ -6,9 +6,14 @@
 # form, which only waits for that container to *start*, not for HAProxy
 # inside it to actually be accepting connections on :2375 -- even though
 # docker-socket-proxy has carried a real HTTP healthcheck since #1169 (see
-# its own service block in each compose file). This is a structural text
-# scan of the real deploy/{prod,quickstart}/docker-compose.yml files, same
-# extraction approach as tests/bats/netdata_network_isolation.bats and
+# its own service block in each compose file). Covers all three real
+# compose files that define a `watchdog` service (prod, quickstart, and
+# full-setup's CI validation harness -- the finding's own text explicitly
+# scopes to "all three real compose files", and full-setup's
+# docker-socket-proxy carries the identical healthcheck, so leaving it on
+# the old ordering-only form would just be the same gap in a third file).
+# This is a structural text scan of the real compose files, same extraction
+# approach as tests/bats/netdata_network_isolation.bats and
 # scripts/check-compose-healthchecks.sh (docker compose config needs a
 # populated .env/Docker to run at all).
 
@@ -19,6 +24,7 @@ setup() {
     compose_files=(
         "$repo_root/deploy/prod/docker-compose.yml"
         "$repo_root/deploy/quickstart/docker-compose.yml"
+        "$repo_root/deploy/full-setup/docker-compose.yml"
     )
 }
 
@@ -36,12 +42,12 @@ extract_service_block() {
     ' "$file"
 }
 
-# docker-socket-proxy itself must actually carry a healthcheck in both files
+# docker-socket-proxy itself must actually carry a healthcheck in every file
 # -- this is the precondition that makes `condition: service_healthy`
 # meaningful at all rather than a dependency that can never start (a fresh
 # check specifically because a prior review pass flagged that this exact
 # precondition must be verified, not assumed from the finding's prose).
-@test "docker-socket-proxy's own service block defines a healthcheck in both deploy files" {
+@test "docker-socket-proxy's own service block defines a healthcheck in every compose file" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" docker-socket-proxy)"
         [ -n "$block" ]
