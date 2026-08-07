@@ -17,11 +17,13 @@ use lancache_watchdog::docker_client::DockerProxyClient;
 use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
 use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 
-/// Issue #842's five alert-only monitored services (never restarted -- see
+/// Issue #842's alert-only monitored services (never restarted -- see
 /// `lib.rs`'s module doc comment and [`HealthReading::is_alert_ok`]'s own
-/// doc comment for why). Built once at startup from [`Settings`] rather
-/// than re-derived every loop iteration, since `DHCP_MODE`/`SYSLOG_ENABLED`
-/// never change for the lifetime of this process.
+/// doc comment for why), plus `ntp` (issue #1296, see this function's own
+/// `ntp_enabled` handling below). Built once at startup from [`Settings`]
+/// rather than re-derived every loop iteration, since `DHCP_MODE`/
+/// `SYSLOG_ENABLED`/`NTP_ENABLED` never change for the lifetime of this
+/// process.
 ///
 /// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
 /// with issue #842/#849 introducing this function): `syslog` (fluent-bit)
@@ -38,9 +40,13 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// (`services/syslog/healthcheck.sh`) is what actually proves fluent-bit
 /// AND syslog-ng are both alive inside it, one level below what this
 /// per-container Docker-API check can see.
-fn resolve_alert_only_targets(dhcp_mode: &str, syslog_enabled: bool) -> Vec<&'static str> {
+fn resolve_alert_only_targets(
+    dhcp_mode: &str,
+    syslog_enabled: bool,
+    ntp_enabled: bool,
+) -> Vec<&'static str> {
     // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
-    // profile (unlike dhcp/dhcp-proxy/syslog below), so both are
+    // profile (unlike dhcp/dhcp-proxy/syslog/ntp below), so both are
     // always monitored, matching how proxy/dns-standard/nats are always
     // monitored among the four restart-capable services above.
     let mut targets = vec![config::CONTAINER_UI, config::CONTAINER_NETDATA];
@@ -49,6 +55,17 @@ fn resolve_alert_only_targets(dhcp_mode: &str, syslog_enabled: bool) -> Vec<&'st
     }
     if syslog_enabled {
         targets.push(config::CONTAINER_SYSLOG);
+    }
+    // Issue #1296: closes this project's own pre-existing gap (issue #842:
+    // "watchdog only monitors proxy/dns-standard/dns-ssl") for `ntp`
+    // specifically, and is the only caller that ever makes
+    // `HealthReading::Degraded` (this same module's amber dashboard state
+    // for a CAP_SYS_TIME-denied `ntp` container) actually reachable --
+    // without `ntp` being monitored at all, get_health() would never be
+    // called for it, and the degraded-mode detection plumbing in
+    // docker_client.rs would never run against a real container.
+    if ntp_enabled {
+        targets.push(config::CONTAINER_NTP);
     }
     targets
 }
@@ -94,14 +111,16 @@ struct Settings {
     status_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
-    // Issue #842: gates which of the five alert-only services (see
-    // resolve_alert_only_targets()) are actually deployed. Read once here
-    // (not re-read per loop iteration) since neither knob can change for
-    // the lifetime of this process -- an operator changing DHCP_MODE or
-    // SYSLOG_ENABLED requires a `setup.sh update` + container recreate,
-    // which restarts this process anyway.
+    // Issue #842 (dhcp_mode/syslog_enabled) + #1296 (ntp_enabled): gates
+    // which of the alert-only services (see resolve_alert_only_targets())
+    // are actually deployed. Read once here (not re-read per loop
+    // iteration) since none of these three knobs can change for the
+    // lifetime of this process -- an operator changing DHCP_MODE/
+    // SYSLOG_ENABLED/NTP_ENABLED requires a `setup.sh update` + container
+    // recreate, which restarts this process anyway.
     dhcp_mode: String,
     syslog_enabled: bool,
+    ntp_enabled: bool,
 }
 
 fn load_settings() -> Settings {
@@ -221,6 +240,17 @@ fn load_settings() -> Settings {
     // watchdog.sh).
     let syslog_enabled = config::resolve_bool(env("SYSLOG_ENABLED").as_deref(), false);
 
+    // NTP_ENABLED (issue #1296): same `setup.sh`-provisioned env var and
+    // same default (false/"0", via `append_env_key_if_missing NTP_ENABLED
+    // "0"`) that gates the `ntp` Compose profile itself -- reusing it here
+    // rather than inventing a second toggle, same reasoning as
+    // SYSLOG_ENABLED above. Alert-only monitoring for `ntp` only makes
+    // sense once this project's own install actually started that
+    // container in the first place; an install with NTP_ENABLED=0 has no
+    // `lancache-ntp` container at all, and would otherwise show a false
+    // permanent alert for a container that was never supposed to exist.
+    let ntp_enabled = config::resolve_bool(env("NTP_ENABLED").as_deref(), false);
+
     Settings {
         docker_proxy_url,
         check_interval,
@@ -234,6 +264,7 @@ fn load_settings() -> Settings {
         container_names,
         dhcp_mode,
         syslog_enabled,
+        ntp_enabled,
     }
 }
 
@@ -282,17 +313,21 @@ async fn main() {
     let mut docker_proxy_alert_counter = AlertCounter::default();
 
     // Issue #842: ui/dhcp/dhcp-proxy/netdata/syslog (the last one combining
-    // fluent-bit+syslog-ng since the consolidation PR, 2026-08), alert-only
-    // (never restarted -- see resolve_alert_only_targets()'s own doc
-    // comment and lib.rs's module doc comment for why). A separate
+    // fluent-bit+syslog-ng since the consolidation PR, 2026-08), plus ntp
+    // (issue #1296), all alert-only (never restarted -- see
+    // resolve_alert_only_targets()'s own doc comment and lib.rs's module
+    // doc comment for why). A separate
     // AlertCounter per container, keyed the same way failure_counters is
     // above, so a persistently-down alert-only service keeps climbing
     // (never resets on some arbitrary threshold the way a restart-capable
     // FailureCounter would) -- see HealthReading::is_alert_ok's own doc
     // comment for the reasoning behind reusing AlertCounter's semantics
     // here instead of FailureCounter's.
-    let alert_only_targets =
-        resolve_alert_only_targets(&settings.dhcp_mode, settings.syslog_enabled);
+    let alert_only_targets = resolve_alert_only_targets(
+        &settings.dhcp_mode,
+        settings.syslog_enabled,
+        settings.ntp_enabled,
+    );
     let mut alert_only_counters: HashMap<&'static str, AlertCounter> = alert_only_targets
         .iter()
         .map(|name| (*name, AlertCounter::default()))
@@ -464,5 +499,55 @@ async fn main() {
         // for this daemon to eventually absorb.
 
         tokio::time::sleep(settings.check_interval).await;
+    }
+}
+
+#[cfg(test)]
+mod resolve_alert_only_targets_tests {
+    use super::*;
+
+    #[test]
+    // Baseline: DHCP disabled, syslog disabled, ntp disabled -- only the
+    // two always-on services (ui/netdata) are monitored.
+    fn no_optional_services_enabled_monitors_only_ui_and_netdata() {
+        let targets = resolve_alert_only_targets("disabled", false, false);
+        assert_eq!(
+            targets,
+            vec![config::CONTAINER_UI, config::CONTAINER_NETDATA]
+        );
+    }
+
+    #[test]
+    // Issue #1296: NTP_ENABLED=true adds lancache-ntp to the alert-only
+    // set, independent of DHCP_MODE/SYSLOG_ENABLED -- this is the only
+    // code path that makes get_health()'s new Degraded detection for `ntp`
+    // reachable at all against a real container.
+    fn ntp_enabled_adds_the_ntp_container() {
+        let targets = resolve_alert_only_targets("disabled", false, true);
+        assert!(targets.contains(&config::CONTAINER_NTP));
+    }
+
+    #[test]
+    // ntp_enabled=false must NOT add the ntp container, even when every
+    // other optional service is on -- an install without NTP_ENABLED=1 has
+    // no `lancache-ntp` container, and monitoring it anyway would produce
+    // a permanent false "unreachable" alert for a container that was
+    // never supposed to exist.
+    fn ntp_disabled_never_adds_the_ntp_container_even_with_others_enabled() {
+        let targets = resolve_alert_only_targets("kea", true, false);
+        assert!(!targets.contains(&config::CONTAINER_NTP));
+    }
+
+    #[test]
+    // All three optional gates together: dhcp/syslog/ntp all present
+    // alongside the two always-on services, with no interference between
+    // the three independent gates.
+    fn all_optional_services_enabled_together() {
+        let targets = resolve_alert_only_targets("kea", true, true);
+        assert!(targets.contains(&config::CONTAINER_UI));
+        assert!(targets.contains(&config::CONTAINER_NETDATA));
+        assert!(targets.contains(&config::CONTAINER_DHCP));
+        assert!(targets.contains(&config::CONTAINER_SYSLOG));
+        assert!(targets.contains(&config::CONTAINER_NTP));
     }
 }

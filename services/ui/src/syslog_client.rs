@@ -56,6 +56,17 @@ pub struct SyslogHostStats {
     // files/size_bytes/days above are metadata/filename-only and stay cheap
     // regardless of retained volume.
     pub days: u64,
+    // #849 bug-hunt finding observability.md#13: this whole struct was
+    // already computed by get_syslog_stats() on every dashboard render, but
+    // dashboard.html only ever rendered the aggregate hosts.len()/
+    // total_files -- the per-host breakdown was discarded despite already
+    // being available, a textbook instance of this project's own Feature
+    // Completeness rule (backend capability exists, UI doesn't expose it).
+    // Human-readable size, reusing nginx_client's own format_bytes() rather
+    // than duplicating a second byte-formatting implementation that could
+    // drift from it -- computed once here so the template does not need
+    // Tera-side arithmetic on a raw byte count.
+    pub size_human: String,
 }
 
 #[derive(Debug, Serialize, Default, Clone)]
@@ -323,6 +334,7 @@ pub fn get_syslog_stats(log_root: &str) -> SyslogStats {
         }
 
         host_stats.days = days.len() as u64;
+        host_stats.size_human = crate::nginx_client::format_bytes(host_stats.size_bytes);
         stats.total_files += host_stats.files;
         stats.total_size_bytes += host_stats.size_bytes;
         stats.hosts.push(host_stats);
@@ -349,9 +361,13 @@ pub fn get_syslog_size_gb(path: &str) -> f64 {
     }
 
     let allowed_prefixes = ["/var/log/lancache-syslog-ng"];
+    // Same path-boundary bug as nginx_client::is_allowed_cache_path: a bare
+    // `starts_with` would also accept a sibling path that merely shares the
+    // prefix string, e.g. "/var/log/lancache-syslog-ng-evil". Require an
+    // exact match or a `/`-bounded subpath.
     if !allowed_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix))
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
     {
         return 0.0;
     }
@@ -955,6 +971,16 @@ mod tests {
             .expect("hostA present");
         assert_eq!(host_a.files, 2);
         assert_eq!(host_a.days, 2);
+        // #849 observability.md#13: size_human must be a non-empty, real
+        // formatted string (not the Default-derived empty String a struct
+        // literal without this field would silently produce), proving the
+        // new field is actually populated by get_syslog_stats, not just
+        // present in the struct definition.
+        assert!(!host_a.size_human.is_empty());
+        assert_eq!(
+            host_a.size_human,
+            crate::nginx_client::format_bytes(host_a.size_bytes)
+        );
 
         let host_b = stats
             .hosts
@@ -963,6 +989,7 @@ mod tests {
             .expect("hostB present");
         assert_eq!(host_b.files, 1);
         assert_eq!(host_b.days, 1);
+        assert!(!host_b.size_human.is_empty());
 
         fs::remove_dir_all(root).expect("cleanup");
     }
@@ -1045,5 +1072,15 @@ mod tests {
             get_syslog_size_gb("/var/log/lancache-syslog-ng/../etc"),
             0.0
         );
+    }
+
+    // Finding #6 (docs/bug-hunt/ui-core.md, issue #849): same path-boundary
+    // gap as nginx_client's is_allowed_cache_path -- a bare `starts_with`
+    // would also accept a sibling directory that merely shares the prefix
+    // string, not the actual path component.
+    #[test]
+    fn get_syslog_size_gb_rejects_prefix_string_collision_without_path_boundary() {
+        assert_eq!(get_syslog_size_gb("/var/log/lancache-syslog-ng-evil"), 0.0);
+        assert_eq!(get_syslog_size_gb("/var/log/lancache-syslog-ngXYZ"), 0.0);
     }
 }
