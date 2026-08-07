@@ -149,6 +149,13 @@ async function refresh() {
     push(diskChart, parseFloat(readMB), parseFloat(writeMB));
 
     document.getElementById('netdata-error').classList.add('hidden');
+    // #849 bug-hunt finding observability.md#12: errorShown must reset once
+    // a refresh actually succeeds, otherwise a netdata outage that recovers
+    // and then fails again later in the same page load never shows the
+    // banner a second time (the `if (!errorShown)` guard below would stay
+    // permanently closed after the first failure) -- only a full page reload
+    // used to clear it.
+    errorShown = false;
   } catch (e) {
     if (!errorShown) {
       document.getElementById('netdata-error').classList.remove('hidden');
