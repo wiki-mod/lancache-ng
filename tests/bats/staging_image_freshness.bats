@@ -393,6 +393,61 @@ STUB
     [ -z "$result" ]
 }
 
+# #1095 F-21: a fake `docker` that SUCCEEDS with a real multi-platform index
+# on --raw, then echoes a fixed revision label on --format, logging every
+# invocation's own argv so the test can assert exactly which image
+# reference the second (--format) call targeted.
+fake_docker_multi_platform_success() {
+    local fake_bin_dir="$BATS_TEST_TMPDIR/fakebin_success"
+    mkdir -p "$fake_bin_dir"
+    call_log="$BATS_TEST_TMPDIR/docker_calls.log"
+    : > "$call_log"
+    cat > "$fake_bin_dir/docker" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$call_log"
+if [[ "\$*" == *"--raw"* ]]; then
+  cat <<'JSON'
+{"manifests":[{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","platform":{"architecture":"amd64","os":"linux"}},{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","platform":{"architecture":"arm64","os":"linux"}}]}
+JSON
+  exit 0
+elif [[ "\$*" == *"--format"* ]]; then
+  printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+  exit 0
+fi
+exit 1
+STUB
+    chmod +x "$fake_bin_dir/docker"
+    PATH="$fake_bin_dir:$PATH"
+}
+
+@test "sif_image_revision (real docker branch): a digest-ref input (repo@sha256:...) resolves its multi-platform child correctly, not truncated mid-digest" {
+    # #1095 F-21's digest-pinning fix passes sif_image_revision a caller-
+    # resolved repo@sha256:... reference (not only a mutable tag), so it can
+    # verify safety against, and export, the exact same immutable digest.
+    # The ORIGINAL "${image%:*}@digest" strip is only correct for a tag-ref
+    # input -- for a digest-ref input, the colon inside "sha256:..." itself
+    # would be misidentified as a tag separator, truncating the reference
+    # mid-digest ("repo@sha256@childdigest" instead of "repo@childdigest").
+    # This proves the fix by inspecting which reference the second
+    # (--format) call actually targeted, not just that SOME call succeeded.
+    fake_docker_multi_platform_success
+    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/ntp@sha256:pinnedpinnedpinnedpinnedpinnedpinnedpinnedpinnedpinnedpinnedpinn"
+    [ "$status" -eq 0 ]
+    [ "$output" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]
+    grep -qF 'ghcr.io/wiki-mod/lancache-ng/ntp@sha256:1111111111111111111111111111111111111111111111111111111111111111' "$call_log"
+    # Negative check: the truncated/malformed shape a regression would
+    # produce must NOT appear anywhere in the logged calls.
+    ! grep -qF '@sha256@sha256:' "$call_log"
+}
+
+@test "sif_image_revision (real docker branch): a plain tag-ref input still resolves its multi-platform child correctly (no regression)" {
+    fake_docker_multi_platform_success
+    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/ntp:nightly"
+    [ "$status" -eq 0 ]
+    [ "$output" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]
+    grep -qF 'ghcr.io/wiki-mod/lancache-ng/ntp@sha256:1111111111111111111111111111111111111111111111111111111111111111' "$call_log"
+}
+
 @test "sif_wait_for_fresh_base_image (real docker branch): a confirmed-absence failure is reported as confirmed absent, not the old ambiguous wording" {
     fake_docker_returning_stderr "Error response from daemon: manifest unknown"
     run sif_wait_for_fresh_base_image "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" "$c2" "build-tools" 1 2 1
