@@ -48,8 +48,16 @@ disk_info() { printf '{"pct": 0, "status": "unknown"}'; }
 log "Watchdog started."
 EOF
 
-    error_output=$(load_watchdog_functions "$fake_root" "$BATS_TEST_TMPDIR/drift.sh" 2>&1)
-    status="$?"
+    # AG-VAL-030: `error_output=$(cmd)` alone is a plain simple command under
+    # bats' default `set -e`, so a nonzero exit from load_watchdog_functions
+    # would abort the test right here instead of reaching the status check
+    # below. Wrapping the assignment as an `if` condition keeps it inside a
+    # tested construct, which -e explicitly exempts.
+    if error_output=$(load_watchdog_functions "$fake_root" "$BATS_TEST_TMPDIR/drift.sh" 2>&1); then
+        status=0
+    else
+        status="$?"
+    fi
     [ "$status" -ne 0 ]
     [[ "$error_output" == *"is empty"* ]]
 }
@@ -69,8 +77,14 @@ log "Watchdog started."
 disk_info() { printf '{"pct": 0, "status": "unknown"}'; }
 EOF
 
-    error_output=$(load_watchdog_functions "$fake_root" "$BATS_TEST_TMPDIR/truncated.sh" 2>&1)
-    status="$?"
+    # AG-VAL-030: same set -e hazard as the test above -- keep the
+    # assignment inside a tested `if` condition so a nonzero exit is
+    # captured instead of aborting the test early.
+    if error_output=$(load_watchdog_functions "$fake_root" "$BATS_TEST_TMPDIR/truncated.sh" 2>&1); then
+        status=0
+    else
+        status="$?"
+    fi
     [ "$status" -ne 0 ]
     [[ "$error_output" == *"did not define disk_info"* ]]
 }
