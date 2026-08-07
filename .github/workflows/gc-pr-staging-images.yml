@@ -191,3 +191,49 @@ jobs:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash scripts/gc-pr-staging-images.sh
 
+      # actions/checkout@v7.0.1's sparseCheckoutNonConeMode() (the code path
+      # `sparse-checkout-cone-mode: false` above selects) sets core.sparseCheckout
+      # via `git config` but writes the path patterns by appending directly to
+      # .git/info/sparse-checkout with a raw file write, never going through the
+      # `git sparse-checkout set` porcelain command. Reproduced repeatedly, live,
+      # on git 2.47.3 (2026-08-07, three independent runner hosts, both against
+      # this real repository and against throwaway synthetic ones of varying
+      # size): a sparse-checkout state set up that way does not reliably clear
+      # on a later job's plain `git sparse-checkout disable` call, nor on `git
+      # sparse-checkout init` immediately followed by `disable` -- both report
+      # exit 0, and across repeated runs the outcome varied (sometimes
+      # core.sparseCheckout stayed true after `disable` with paths outside the
+      # narrow set still missing from the working tree entirely; sometimes only
+      # the config value and the stale .git/info/sparse-checkout file lingered
+      # while the working tree itself looked fully populated). Self-hosted
+      # runners reuse `_work/lancache-ng/lancache-ng` across unrelated jobs and
+      # workflows (no per-job clone), and no other workflow in this repo passes
+      # a sparse-checkout input at all -- so whatever state this job leaves
+      # behind is inherited by the next job scheduled onto the same runner
+      # instance, whatever workflow it belongs to, with that job's own checkout
+      # step reporting full success regardless (confirmed: this produced "No
+      # such file or directory" / "Can't find 'action.yml'" failures across
+      # several unrelated build-push.yml jobs on 2026-08-07, traced via the
+      # runner's own _diag worker logs to a prior run of this exact job on the
+      # same runner instance). A lingering core.sparseCheckout=true is
+      # dangerous even when the working tree happens to look complete right
+      # now: git re-applies whatever sparse-checkout config is active on every
+      # future tree-changing operation, so the next job's checkout of a
+      # genuinely different commit (not the no-op case these reproductions
+      # exercised) would re-narrow down to the three paths above again. Given
+      # that `git sparse-checkout`'s own subcommands do not reliably undo this,
+      # this step clears the state directly instead of trusting `disable`
+      # alone: unsets core.sparseCheckout, removes .git/info/sparse-checkout,
+      # and forces a full re-checkout to repopulate anything that ended up
+      # missing. `if: always()` so a failing reap script still leaves the
+      # runner clean for whatever job runs on it next.
+      - name: Restore full working tree for the next job on this runner
+        if: always() && steps.creds.outputs.have-pat == 'true'
+        run: |
+          set -euo pipefail
+          git sparse-checkout init || true
+          git sparse-checkout disable || true
+          git config --local --unset-all core.sparseCheckout || true
+          rm -f .git/info/sparse-checkout
+          git checkout --progress --force HEAD -- .
+
