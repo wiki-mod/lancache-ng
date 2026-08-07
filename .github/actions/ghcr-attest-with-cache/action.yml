@@ -1,0 +1,63 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: GHCR provenance attestation with digest-bound cache
+description: >-
+  Wraps ghcr-attest-retry with a permanent digest-bound cache (actions/cache):
+  if this exact subject-digest was already attested by a previous run, skip
+  attesting it again. Found while investigating issue #1095's attestation-
+  caching question: merge-manifests re-creates and re-attests all 9 services'
+  merged multi-platform manifests on every single push, with no check at all
+  for whether the underlying per-arch digests (and therefore the merged
+  digest, since `docker buildx imagetools create` is deterministic for
+  identical inputs) actually changed since the previous push -- the same
+  waste shape as G11, but for provenance attestations instead of Trivy scans,
+  and firing far more often (every push, not only container-scan's specific
+  reuse path). Unlike G11's Trivy cache, this one has NO freshness window:
+  provenance attests "this exact digest's content was produced by this
+  pipeline", which is a permanent fact about that digest, not a time-decaying
+  verdict like a CVE scan result -- so once attested, an unchanged digest
+  never needs re-attesting.
+inputs:
+  subject-name:
+    required: true
+  subject-digest:
+    required: true
+  username:
+    required: true
+  password:
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Restore attestation marker
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ghcr-attest-clean
+        key: ghcr-attested-${{ inputs.subject-name }}-${{ inputs.subject-digest }}
+
+    - name: Attest image provenance to GHCR with retry
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: ./.github/actions/ghcr-attest-retry
+      with:
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+
+    # Only reached after a real, successful attestation (ghcr-attest-retry's own
+    # retry chain already failed the step, and therefore this composite, on a
+    # genuine failure) -- never marks a failed or skipped attestation as done.
+    - name: Write attestation marker
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${{ runner.temp }}/ghcr-attest-clean"
+        date -u +%Y-%m-%dT%H:%M:%SZ > "${{ runner.temp }}/ghcr-attest-clean/attested-at"
+
+    - name: Save attestation marker
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/ghcr-attest-clean
+        key: ghcr-attested-${{ inputs.subject-name }}-${{ inputs.subject-digest }}
