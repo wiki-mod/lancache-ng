@@ -50,6 +50,78 @@
 # near-simultaneous merge burst that saturated the heavy pool for over an hour
 # (#1065). Grouping does not change WHAT gets updated -- only how many separate
 # PRs/merges/pushes it takes to land the same set of updates.
+#
+# `schedule.day` is deliberately staggered across the three blocks below
+# (Monday/Wednesday/Friday) rather than left at the shared implicit default
+# (Monday for all three). Without this, a routine weekly run would still open
+# all ~3 grouped PRs on the same day, and merging them still lands 3 pushes to
+# `current_dev` in quick succession, each triggering the same scarce-runner-pool
+# build/scan matrix this note already flags as the actual bottleneck (#1065,
+# AG-CI-016/AG-CI-017's shared-runner-contention concerns) -- grouping bounds
+# the PR *count*, staggering bounds how many of those pushes can land the same
+# day.
+#
+# `groups.<name>.group-by: dependency-name` (GA on github.com, confirmed via
+# github/docs's own feature-flag data as of this audit) is set on both the
+# `rust-deps` and `docker-base-images` groups below because the directories
+# each one spans genuinely share dependencies, not just an ecosystem: all three
+# Rust crates (services/ui, services/dns/nats-subscriber, services/watchdog)
+# depend on `tokio`/`reqwest`/`serde`/`serde_json`, `async-nats` is shared by
+# two of them, and `axum` by two of them; all six Dockerfiles pin the identical
+# `alpine:3.24` base image. Without `group-by`, a shared dependency's bump
+# still lands in the one already-grouped PR (multi-`directories` + `groups`
+# already collapses that), but as a separate line item per directory for what
+# is really one logical upstream bump -- `group-by: dependency-name` collapses
+# those into a single line, which is the same PR-noise-reduction goal this
+# whole grouping strategy already exists for, just applied within a PR rather
+# than across PRs.
+#
+# Systematic pass against GitHub's full Dependabot options reference (F-18,
+# issue #1095, prompted by real `@dependabot rebase` friction on PR #1399):
+# real changes applied are the `group-by`/`schedule.day` additions above; the
+# rest of the options considered are recorded here specifically because the
+# reasoning is not obvious from the option's mere absence, and because F-18
+# asked for the "why not" to be captured, not just the "what changed":
+#
+# * `rebase-strategy`: NOT set (kept at default). PR #1399's "Looks like this
+#   PR has been edited by someone other than Dependabot" refusal is
+#   Dependabot's unconditional default behavior the moment a non-Dependabot
+#   commit lands on its branch -- it is independent of `rebase-strategy`,
+#   which only controls Dependabot's own *automatic* rebase triggers (a
+#   schedule run, a PR reopen, a `target-branch` change, or a conflict
+#   discovered after a push to the target branch). Setting
+#   `rebase-strategy: disabled` would not have prevented PR #1399's refusal,
+#   and would cost this project the useful "auto-rebase on target-branch
+#   conflict" behavior for every future PR. The real, better fix for next
+#   time: a manual commit pushed onto a Dependabot branch that includes
+#   `[dependabot skip]` (or `[skip dependabot]`/`[dependabot-skip]`/
+#   `[skip-dependabot]`) in its own commit message lets Dependabot force-push
+#   over it and keep rebasing normally -- a narrower, non-destructive
+#   alternative to `@dependabot recreate` (which discards the PR's history).
+# * `commit-message`: NOT set. This looked like a plausible fix for AG-GH-018
+#   (Conventional-Commit PR titles) compliance, since Dependabot's own
+#   PR-title heuristic has no way to match this project's `type(scope):
+#   subject` taxonomy or its documented scope list. Checked
+#   `scripts/check-pr-title-convention.sh` directly: it already
+#   unconditionally exempts `PR_AUTHOR == "dependabot[bot]"` from the title
+#   check (`pr-title-convention-check` job in build-push.yml), specifically
+#   because Dependabot cannot conform to this taxonomy on its own. There is
+#   no real compliance gap here to close with `commit-message.prefix`.
+# * `open-pull-requests-limit`: NOT set (kept at the documented default of 5
+#   per block). Each block already opens at most one grouped PR per branch
+#   per week and that PR's branch is reused (rebased in place) by the next
+#   scheduled run rather than opening a second one, so hitting the default
+#   ceiling of 5 concurrent version-update PRs for a single block would
+#   require several weeks of a PR sitting unmerged -- not a real constraint
+#   this repo's actual review cadence has hit.
+# * `ignore`: NOT set. No dependency in any of the three ecosystems currently
+#   has a documented reason to be excluded from updates; adding a speculative
+#   `ignore` entry with no real justification would violate this file's own
+#   "don't add options blindly" mandate as much as leaving a real gap would.
+# * `registries`: NOT applicable. This project uses only public package
+#   registries (crates.io, Docker Hub / GHCR mirrors, the GitHub Actions
+#   marketplace) -- there is no private registry for Dependabot to need
+#   access-configuration for.
 version: 2
 updates:
   # GitHub Actions -- one grouped PR per target branch (single directory: /).
@@ -58,6 +130,7 @@ updates:
     target-branch: current_dev
     schedule:
       interval: weekly
+      day: monday
     groups:
       actions:
         patterns: ["*"]
@@ -65,7 +138,12 @@ updates:
   # Rust (Cargo) -- all three crates (Admin UI + DNS NATS subscriber +
   # watchdog, added 2026-08 alongside services/watchdog/Cargo.toml, #1355)
   # collapse into ONE grouped PR per target branch via the multi-`directories`
-  # form, instead of a separate PR per crate directory.
+  # form, instead of a separate PR per crate directory. `group-by:
+  # dependency-name` additionally collapses a dependency shared by more than
+  # one of the three crates (e.g. tokio/reqwest/serde/serde_json, plus
+  # async-nats and axum shared by two of them) into a single line item within
+  # that one PR instead of one line item per directory -- see this file's own
+  # header comment for the full reasoning (F-18 audit, issue #1095).
   - package-ecosystem: cargo
     directories:
       - /services/ui
@@ -74,14 +152,23 @@ updates:
     target-branch: current_dev
     schedule:
       interval: weekly
+      day: wednesday
     groups:
       rust-deps:
         patterns: ["*"]
+        group-by: dependency-name
 
   # Docker base images -- all service Dockerfiles collapse into ONE grouped PR
-  # per target branch. Every service pins the same Debian base, so a single
-  # upstream digest bump previously opened six near-identical per-service PRs
-  # per branch; the multi-`directories` group makes it one cross-service PR.
+  # per target branch. Every service pins the identical Alpine base image
+  # (services/{proxy,dns,watchdog,dhcp,dhcp-proxy,ui} all pin the same
+  # `alpine:3.24` digest as of issue #815's Debian-to-Alpine migration -- this
+  # comment previously said "Debian base", which was accurate when first
+  # written but went stale once #815 landed; corrected during the F-18 audit,
+  # issue #1095), so a single upstream digest bump previously opened six
+  # near-identical per-service PRs per branch; the multi-`directories` group
+  # makes it one cross-service PR, and `group-by: dependency-name` (see this
+  # file's own header comment) collapses that single shared-base-image bump
+  # into one line item instead of six.
   - package-ecosystem: docker
     directories:
       - /services/proxy
@@ -93,6 +180,8 @@ updates:
     target-branch: current_dev
     schedule:
       interval: weekly
+      day: friday
     groups:
       docker-base-images:
         patterns: ["*"]
+        group-by: dependency-name
