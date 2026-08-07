@@ -122,7 +122,7 @@ fi
 # Why nats specifically, and not the other five services #842 raised
 # (ui, dhcp, dhcp-proxy, netdata, syslog/syslog-ng), is documented in that
 # issue's closing PR body rather than repeated in full here, but the two
-# load-bearing facts are: (1) scripts/docker-socket-proxy.sh's allowlist
+# load-bearing facts are: (1) scripts/untracked/docker-socket-proxy.sh's allowlist
 # already permits both inspecting AND restarting lancache-nats (added for
 # the Admin UI's own config-apply restart, e.g.
 # services/ui/src/routes/secondaries.rs::update_nats_conf) -- adding it here
@@ -163,13 +163,13 @@ fi
 
 # docker-socket-proxy (issue #1170 Part 1): a fixed literal, not a
 # ${CONTAINER_*:-...}-style override like the four names above. Those four
-# are validated against scripts/docker-socket-proxy.sh's allowlist below
+# are validated against scripts/untracked/docker-socket-proxy.sh's allowlist below
 # because get_health()/restart_container() build a real
 # /containers/<name>/... Docker-API URL out of them. This constant is never
 # used that way -- probe_docker_socket_proxy() (below) hits
 # DOCKER_PROXY_URL's own /_ping endpoint directly, with no container-name
 # path segment at all -- so it is deliberately NOT wired through a
-# CONTAINER_* env var, and scripts/check-naming-consistency.sh's watchdog_names
+# CONTAINER_* env var, and scripts/tracked/check-naming-consistency.sh's watchdog_names
 # extraction (which greps for exactly that ${CONTAINER_*:-lancache-*} shape)
 # correctly never sees it. Per docs/naming-conventions.md's "Operator-visible
 # consistency" section, docker-socket-proxy has a real container_name but is
@@ -198,19 +198,19 @@ EXPECTED_DNS_SSL="lancache-dns-ssl${LANCACHE_CONTAINER_SUFFIX}"
 EXPECTED_NATS="lancache-nats${LANCACHE_CONTAINER_SUFFIX}"
 
 if [ "$C_PROXY" != "$EXPECTED_PROXY" ]; then
-    log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported (expected '${EXPECTED_PROXY}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-proxy' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_PROXY to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
+    log_err "FATAL: CONTAINER_PROXY=${C_PROXY} is not supported (expected '${EXPECTED_PROXY}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/untracked/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-proxy' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_PROXY to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 if [ "$C_DNS_STD" != "$EXPECTED_DNS_STD" ]; then
-    log_err "FATAL: CONTAINER_DNS_STANDARD=${C_DNS_STD} is not supported (expected '${EXPECTED_DNS_STD}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-dns-standard' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_DNS_STANDARD to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
+    log_err "FATAL: CONTAINER_DNS_STANDARD=${C_DNS_STD} is not supported (expected '${EXPECTED_DNS_STD}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/untracked/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-dns-standard' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_DNS_STANDARD to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 if [ "$SSL_ENABLED" = "1" ] && [ "$C_DNS_SSL" != "$EXPECTED_DNS_SSL" ]; then
-    log_err "FATAL: CONTAINER_DNS_SSL=${C_DNS_SSL} is not supported (expected '${EXPECTED_DNS_SSL}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-dns-ssl' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_DNS_SSL to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
+    log_err "FATAL: CONTAINER_DNS_SSL=${C_DNS_SSL} is not supported (expected '${EXPECTED_DNS_SSL}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/untracked/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-dns-ssl' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_DNS_SSL to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 if [ "$C_NATS" != "$EXPECTED_NATS" ]; then
-    log_err "FATAL: CONTAINER_NATS=${C_NATS} is not supported (expected '${EXPECTED_NATS}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-nats' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_NATS to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
+    log_err "FATAL: CONTAINER_NATS=${C_NATS} is not supported (expected '${EXPECTED_NATS}'). Running more than one lancache-ng stack per host is a deliberate non-goal (#849 finding #5), not an unfinished feature -- scripts/untracked/docker-socket-proxy.sh's allowlist, the Admin UI, and this script all hardcode the fixed container name 'lancache-nats' (plus this run's own LANCACHE_CONTAINER_SUFFIX, if any) for exactly that reason. Revert CONTAINER_NATS to the default; if you have a genuine need for multiple stacks on one host, open a feature request describing it in detail rather than renaming this container."
     exit 1
 fi
 
@@ -353,7 +353,7 @@ restart_container() {
 # in-container hang detection, clean PID 1 shutdown) and is tracked
 # separately as issue #1170 Part 2 -- not implemented here.
 #
-# GET /_ping is already permitted by scripts/docker-socket-proxy.sh's
+# GET /_ping is already permitted by scripts/untracked/docker-socket-proxy.sh's
 # safe_ping ACL (the same allowlist entry get_health() and every other
 # caller in this file already rely on), so this needs zero new privilege.
 # Unlike get_health() (which parses a Docker /containers/.../json health

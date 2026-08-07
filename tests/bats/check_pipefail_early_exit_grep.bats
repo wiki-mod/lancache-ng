@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-pipefail-early-exit-grep.sh (AG-VAL-029 standing
+# Coverage for scripts/untracked/check-pipefail-early-exit-grep.sh (AG-VAL-029 standing
 # check for the confirmed real CI failure on issue #815's PR #1374, job
 # 91393831566: `rustup target list --installed | grep -qx ...` /
 # `rustc -vV | grep -qE ...` failed with exit 141/SIGPIPE under
@@ -21,7 +21,7 @@
 # The guard is invoked as `bash "$script"` per Rule-Ref: AG-VAL-024.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/check-pipefail-early-exit-grep.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-pipefail-early-exit-grep.sh"
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     fixture="$BATS_TEST_TMPDIR/fx"
     mkdir -p "$fixture/tools/build-tools"

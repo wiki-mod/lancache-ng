@@ -742,7 +742,7 @@ mod tests {
     // real, non-trivial content (the interpolated issuer + auth_users) rather
     // than assuming that history still applies today. (Test names retain the
     // `nats_conf` marker the #640 idempotence-coverage guard keys on -- see
-    // scripts/check-idempotence-test-coverage.sh -- even though since #811 this
+    // scripts/tracked/check-idempotence-test-coverage.sh -- even though since #811 this
     // writer emits the auth_callout.conf fragment rather than the whole file.)
     #[test]
     fn nats_conf_auth_callout_fragment_render_is_byte_identical_across_repeated_calls() {

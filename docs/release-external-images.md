@@ -146,7 +146,7 @@ Accepted, deliberately-suppressed vulnerability findings live in the repo-root
 periodic re-review). That file is Trivy-specific and not something a downstream
 consumer's non-Trivy tooling can parse.
 
-`scripts/generate-vex.sh` converts those entries into a standard
+`scripts/untracked/generate-vex.sh` converts those entries into a standard
 [OpenVEX](https://openvex.dev) JSON document, committed at the repo root as
 `vex.openvex.json`. Each accepted-vulnerability entry becomes an OpenVEX
 statement: the vulnerable component is present and the finding is accepted or
@@ -158,7 +158,7 @@ future entry genuinely represents non-exploitability, its status mapping must be
 revisited in the generator rather than blanket-applied.
 
 The committed `vex.openvex.json` is kept in sync with `.trivyignore.yaml` by
-`scripts/check-vex-drift.sh`, run as the "Check VEX document stays in sync" step
+`scripts/tracked/check-vex-drift.sh`, run as the "Check VEX document stays in sync" step
 in the `validate-compose` job: a PR that edits `.trivyignore.yaml` without
 regenerating the VEX document fails CI. The same document is attached to each
 release as the `vex.openvex.json` asset. This complements the Vulnerability

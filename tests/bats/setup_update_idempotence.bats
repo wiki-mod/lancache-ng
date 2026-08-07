@@ -14,7 +14,7 @@
 # compliance table). setup_env_migration.bats already covers several
 # individual helper functions migrate_env_for_update() calls
 # (append_env_migrated_assignment_if_missing, migrate_proxy_security_mode_for_update,
-# image-tag resolution) in isolation, and scripts/setup-cli-simulation.sh
+# image-tag resolution) in isolation, and scripts/untracked/simulations/setup-cli-simulation.sh
 # exercises the real `setup.sh update` CLI end-to-end through Docker -- but
 # neither ever calls the update-migration path a second time in a row to
 # prove it lands on a stable fixed point. This file closes that gap: it

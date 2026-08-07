@@ -74,7 +74,7 @@
 //! unaffected) follows directly from `authorize_secondary` re-querying the
 //! `secondaries` table on every single connection attempt -- there is no
 //! cache to invalidate -- and is exercised end-to-end by
-//! `scripts/nats-secondary-auth-callout-simulation.sh` against the real
+//! `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` against the real
 //! Admin UI binary and a real nats-server container.
 //!
 //! ## xkey request/response encryption (issue #682)
@@ -1082,7 +1082,7 @@ mod tests {
     // recover the original plaintext and hand back a sender key usable for
     // the reply. This is the property a live nats-server 2.14.3 additionally
     // proves by actually accepting our sealed response (see
-    // scripts/nats-secondary-auth-callout-simulation.sh) -- this unit test
+    // scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh) -- this unit test
     // only proves our own seal/open pairing is internally consistent, not
     // real-server interop.
     #[test]

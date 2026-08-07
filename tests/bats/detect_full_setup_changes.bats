@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/detect-full-setup-changes.sh
+# Docker-free, git-free unit coverage for scripts/untracked/detect-full-setup-changes.sh
 # (#715). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
 # per-service flags + should_run gate + docs_only handling, so the deep gate's
 # "run or skip, and which services need a staging image" decisions stay
@@ -10,7 +10,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/detect-full-setup-changes.sh"
+    script="$repo_root/scripts/untracked/detect-full-setup-changes.sh"
     files="$BATS_TEST_TMPDIR/changed.txt"
 }
 
@@ -97,7 +97,7 @@ val() {
 }
 
 @test "scripts change: scripts + setup_runtime true, should_run true" {
-    run_detect "scripts/ssl-mitm-cache-simulation.sh"
+    run_detect "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val setup_runtime)" = "true" ]
     [ "$(val should_run)" = "true" ]
@@ -108,10 +108,10 @@ val() {
 # comment in detect-full-setup-changes.sh) must no longer force the deep
 # suite to run on its own. Reproduces the real, confirmed regression
 # (PR #1333, run 30616274721: touching only AGENTS.md +
-# scripts/check-pr-title-convention.sh ran the full ~15-job simulation
+# scripts/tracked/check-pr-title-convention.sh ran the full ~15-job simulation
 # suite) so this test fails again if the narrowing regresses.
 @test "F-16: CI-tooling-only script change alone does not force should_run" {
-    run_detect "AGENTS.md" "scripts/check-pr-title-convention.sh"
+    run_detect "AGENTS.md" "scripts/tracked/check-pr-title-convention.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
@@ -120,7 +120,7 @@ val() {
     # Not every touched scripts/ path is on the allowlist here, so should_run
     # must stay true -- the allowlist only narrows the all-safe case, never a
     # mixed diff.
-    run_detect "scripts/check-pr-title-convention.sh" "scripts/ssl-mitm-cache-simulation.sh"
+    run_detect "scripts/tracked/check-pr-title-convention.sh" "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val should_run)" = "true" ]
 }
 

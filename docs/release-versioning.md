@@ -187,7 +187,7 @@ own durable `sha-<base_sha_short>` per-commit image -- exactly the right
 commit by construction, made possible because every non-PR push already
 publishes a fresh per-commit tag for every service (see `build-push.yml`'s
 "Ensure PR staging tags exist for full-setup services" step and
-`scripts/ensure-pr-staging-images.sh`). #808's bounded-wait/ancestry-check
+`scripts/untracked/ensure-pr-staging-images.sh`). #808's bounded-wait/ancestry-check
 mechanism (`scripts/lib/staging-image-freshness.sh`) is unchanged and still
 used: it doubles as the poll for the base commit's own push-triggered build
 finishing, and still guards against a corrupted or mislabeled image.
@@ -252,10 +252,10 @@ channel-tag promotion and its `#777` debounce/coalesce check both succeed,
 1. resolves the current release with `git describe --tags --match
    'v[0-9]*.[0-9]*.[0-9]*' --abbrev=0`;
 2. classifies every change since that tag's commit with
-   `scripts/classify-image-impact.sh` -- the same classifier `detect-changes`
+   `scripts/untracked/classify-image-impact.sh` -- the same classifier `detect-changes`
    uses, not a second copy;
 3. if that diff is image-affecting (`IMAGE_IMPACT=true`), computes the next
-   patch version with `scripts/compute-next-release-tag.sh` and pushes an
+   patch version with `scripts/untracked/compute-next-release-tag.sh` and pushes an
    annotated `vX.Y.Z` tag using the `PROJECT_AUTOMATION_PAT` secret;
 4. otherwise cuts nothing and moves on.
 
@@ -301,7 +301,7 @@ prebuilt production images if either:
   aarch64/arm64 are supported), or
 - the specific tag/channel this install resolved to does not actually publish
   a manifest for this host's architecture (checked via `docker buildx
-  imagetools inspect`, mirroring `scripts/require-image-platforms.sh`'s
+  imagetools inspect`, mirroring `scripts/untracked/require-image-platforms.sh`'s
   release/promotion guard).
 
 Adding another platform beyond amd64/arm64 requires updating the manifest,

@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Docker-free unit coverage for scripts/lib/gc-pr-staging-images.sh -- the
-# manifest-graph classification functions scripts/gc-pr-staging-images.sh
+# manifest-graph classification functions scripts/untracked/gc-pr-staging-images.sh
 # uses to fix the confirmed root cause (issue #1095) of
 # .github/workflows/gc-pr-staging-images.yml never reaping the ~55% of this
 # project's GHCR package versions that carry no tag at all (Buildx's own
@@ -43,7 +43,7 @@
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # Sourcing scripts/gc-pr-staging-images.sh (rather than just its lib)
+    # Sourcing scripts/untracked/gc-pr-staging-images.sh (rather than just its lib)
     # pulls in process_service() and every config variable it needs
     # (org/repo/services/max_deletions_per_service/min_age_seconds/
     # now_epoch/pr_state_cache/had_errors/deleted/kept) for the end-to-end
@@ -58,8 +58,8 @@ setup() {
     # otherwise use. No GH_TOKEN needs to be set for this: main()'s own
     # `: "${GH_TOKEN:?...}"` line is inside main()'s body, which the guard
     # never invokes here, so it is simply never evaluated during sourcing.
-    # shellcheck source=scripts/gc-pr-staging-images.sh
-    source "$repo_root/scripts/gc-pr-staging-images.sh"
+    # shellcheck source=scripts/untracked/gc-pr-staging-images.sh
+    source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"
 }
 
 # ---------------------------------------------------------------------------
@@ -313,7 +313,7 @@ setup() {
 # the case that actually proves the classification-gap fix, not just its
 # individual pure-function pieces. Also exercises process_service() under
 # this file's own `set -euo pipefail` (inherited from sourcing
-# scripts/gc-pr-staging-images.sh in setup() above), per AG-VAL-030's
+# scripts/untracked/gc-pr-staging-images.sh in setup() above), per AG-VAL-030's
 # requirement that a construct depending on the caller's shell options be
 # proven under those exact options, not a looser test environment.
 # ---------------------------------------------------------------------------

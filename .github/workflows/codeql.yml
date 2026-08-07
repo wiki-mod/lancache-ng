@@ -185,7 +185,7 @@ jobs:
           if [ "$force_all" = "true" ]; then
             rust_via_shared_classifier=true
           else
-            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/classify-image-impact.sh)"
+            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/untracked/classify-image-impact.sh)"
             if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|watchdog|workflow)=true$'; then
               rust_via_shared_classifier=true
             fi

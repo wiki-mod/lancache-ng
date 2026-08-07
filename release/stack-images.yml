@@ -6,7 +6,7 @@
 # (third-party) images used by supported deploy profiles, the mutable/
 # immutable tag channels (sha, nightly, release candidate, stable, latest),
 # and the image retention policy. Consumed by the release/promotion CI
-# workflow and validated by scripts/validate-stack-images.sh.
+# workflow and validated by scripts/untracked/validate-stack-images.sh.
 #
 # CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23; current_dev's own
 # nightly publishing model changed again in #1254/#1255, 2026-07-25): master

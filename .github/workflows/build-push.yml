@@ -231,13 +231,13 @@ jobs:
 
           # The per-path classification -- and the merge-base #536 fix that keeps an unrelated
           # already-merged PR from being misattributed to this branch -- now lives in
-          # scripts/classify-image-impact.sh so the promote job's version-bump logic (#819)
+          # scripts/untracked/classify-image-impact.sh so the promote job's version-bump logic (#819)
           # reuses the exact same rules instead of a drifting inline copy. The script writes the
           # "Changed files:" listing to stderr and the key=value booleans to stdout. checkout
           # above runs with fetch-depth: 0, which merge-base needs.
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
-            bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            bash scripts/untracked/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
             # push (branch or tag): diff exactly the commits this push introduced
             # (github.event.before..github.sha). Fail safe to --all-changed when that base is
@@ -248,9 +248,9 @@ jobs:
               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
               || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
               echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); classifying all paths as changed."
-              bash scripts/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+              bash scripts/untracked/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
             else
-              bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+              bash scripts/untracked/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -449,7 +449,7 @@ jobs:
             exit 1
           }
           echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-template-check-hosted:
     # Same zero-LAN-dependency property as file-headers-hosted: this check
@@ -486,7 +486,7 @@ jobs:
         run: |
           set -euo pipefail
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
     # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone, and (when
@@ -616,7 +616,7 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -719,7 +719,7 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -864,7 +864,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
+            bash -lc 'set -euo pipefail; bash scripts/tracked/check-line-endings.sh'
 
       # Relocated from `shellcheck` (#1245): that job gained a docs-only
       # self-skip, but this check must run on every PR regardless -- see this
@@ -921,7 +921,7 @@ jobs:
             -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
             -e GOVERNANCE_PR_BODY="$governance_pr_body" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+            bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
       # Warn-only guard (#893): flags a PR that edits CHANGELOG.md directly, since #899 that
       # file is normally written by an automated bot commit on release publish, never
@@ -963,7 +963,7 @@ jobs:
             -w /work \
             -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
+            bash scripts/tracked/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
           || true
 
   line-endings-hosted:
@@ -977,7 +977,7 @@ jobs:
         run: |
           echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/check-line-endings.sh
+        run: bash scripts/tracked/check-line-endings.sh
 
   language-policy:
     # Enforces AG-REL-001 (project language: Rust and shell) by asserting the ABSENCE of
@@ -1015,7 +1015,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
+            bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
 
   language-policy-hosted:
     name: language policy (GitHub-hosted fallback)
@@ -1027,7 +1027,7 @@ jobs:
         run: |
           echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check for banned-language source files (AG-REL-001)
-        run: bash scripts/check-language-policy.sh
+        run: bash scripts/tracked/check-language-policy.sh
 
   # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs with no LAN
   # dependency of their own: file-headers-hosted, compose-healthchecks-hosted (#1169),
@@ -1154,7 +1154,7 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -1243,7 +1243,7 @@ jobs:
           # Resolve the required published image FIRST. If it's unavailable or fails
           # smoke checks, this exits before the permissive selector below ever builds
           # the (large) local fallback image, so there's nothing left to clean up.
-          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
 
           case "$downstream_build_tools_image" in
             *@sha256:*)
@@ -1283,7 +1283,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/validate-stack-images.sh
+            bash scripts/untracked/validate-stack-images.sh
 
       - name: Validate prebuilt production install path
         run: |
@@ -1353,8 +1353,8 @@ jobs:
           grep -F 'config/prod' setup.sh >/dev/null \
             && grep -F 'services/dns/cdn-domains.txt' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must include repo-root config/prod env files and the domain list."; exit 1; }
-          grep -F 'scripts/docker-socket-proxy.sh' setup.sh >/dev/null \
-            || { echo "::error::deploy/prod backups must include the repo-root scripts/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
+          grep -F 'scripts/untracked/docker-socket-proxy.sh' setup.sh >/dev/null \
+            || { echo "::error::deploy/prod backups must include the repo-root scripts/untracked/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
           grep -F 'deploy_prod_repo_root "$archived_install"' setup.sh >/dev/null \
             && grep -F 'deploy_prod_repo_root "$install_dir"' setup.sh >/dev/null \
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
@@ -1575,12 +1575,12 @@ jobs:
             exit 1
           fi
           # The HAProxy allowlist itself lives in exactly one place,
-          # scripts/docker-socket-proxy.sh (see docs/naming-conventions.md's "Docker socket proxy
+          # scripts/untracked/docker-socket-proxy.sh (see docs/naming-conventions.md's "Docker socket proxy
           # allowlist" section) -- it used to also be duplicated into an unreferenced
           # x-docker-socket-proxy-command anchor in each of the three Compose files, which this
           # check used to validate instead of the real script. Those anchors were dead (never
           # aliased) and have been removed; validate the one real copy directly.
-          socket_proxy_script="scripts/docker-socket-proxy.sh"
+          socket_proxy_script="scripts/untracked/docker-socket-proxy.sh"
           grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
             && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
             && grep -Fq 'acl safe_probe_action' "$socket_proxy_script" \
@@ -1603,7 +1603,7 @@ jobs:
           for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
             grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
+                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline or divergent copy."
                 exit 1
               }
             # Match only the real top-level YAML key/anchor syntax here, not
@@ -1614,7 +1614,7 @@ jobs:
             # reintroduction on every run.
             grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
               && {
-                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/docker-socket-proxy.sh without ever being referenced."
+                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/untracked/docker-socket-proxy.sh without ever being referenced."
                 exit 1
               }
             true
@@ -1979,7 +1979,7 @@ jobs:
             || { echo "::error::shellcheck container must run with the runner UID/GID."; exit 1; }
           grep -F -- "-v \"\$PWD:/work:ro\"" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
-          grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/select-build-tools-image.sh >/dev/null \
+          grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/untracked/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Compose validation fallback image tag must be scoped to the workflow run and attempt."; exit 1; }
           grep -F -- "--env DOCKER_CONFIG=/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
@@ -2121,7 +2121,7 @@ jobs:
             || { echo "::error::Docker Rust builds must expose the selected build-tools image as a job output."; exit 1; }
           grep -F "printf 'build_tools_image=ghcr.io/%s/build-tools:latest\\n' \"\$GITHUB_REPOSITORY\" >> \"\$GITHUB_OUTPUT\"" .github/workflows/build-push.yml >/dev/null \
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
-          grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
+          grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
           # Positive check (not a "must NOT contain the old pattern" negative
           # check): the old negative form quoted the forbidden pattern as its
@@ -2131,12 +2131,12 @@ jobs:
           # unconditionally, forever, regardless of the real code below.
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
-          grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'docker buildx imagetools inspect "$image"' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'published_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
+          grep -F 'published_image_reference()' scripts/untracked/select-build-tools-image.sh >/dev/null \
+            && grep -F 'docker buildx imagetools inspect "$image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
+            && grep -F 'published_image_reference "$published_image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Build-tools selector must export the smoke-validated published image by multi-arch manifest digest."; exit 1; }
           if awk '
-            index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)\"") { in_resolve = 1 }
+            index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)\"") { in_resolve = 1 }
             in_resolve && index($0, "printf '\''build_tools_image=%s\\n'\'' \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
             in_resolve && index($0, "docker pull \"$downstream_build_tools_image\"") { found = 1 }
             END { exit found ? 0 : 1 }
@@ -2444,9 +2444,9 @@ jobs:
             || { echo "::error::README must document latest as the normal install default."; exit 1; }
           grep -F 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' docs/release-versioning.md >/dev/null \
             || { echo "::error::Release docs must document nightly as the pre-1.0 default (see #1068 item 1 / #1120)."; exit 1; }
-          grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
+          grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/untracked/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
-          bash scripts/validate-stack-images.sh
+          bash scripts/untracked/validate-stack-images.sh
           VALIDATE_COMPOSE
 
       # Deliberately its OWN step, not appended to "Validate compose files" above: that
@@ -2539,7 +2539,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-naming-consistency.sh
+            bash scripts/tracked/check-naming-consistency.sh
 
       - name: Check workflow service lists stay in sync (issue #822)
         # Guards against a service silently dropping out of manifest merge, channel
@@ -2547,7 +2547,7 @@ jobs:
         # when a new one is added to the build matrix but one of the several hardcoded
         # `services=(...)`/`full_setup_services=(...)` copies is missed. With no arguments,
         # the script checks this file's own 4 copies plus gc-pr-staging-images.yml,
-        # backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh -- all real files
+        # backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh -- all real files
         # found to duplicate this same #822 recurrence shape. Runs in the build-tools
         # container because it needs GNU grep -P, same as the naming-consistency guard above.
         run: |
@@ -2558,7 +2558,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-workflow-service-lists.sh
+            bash scripts/tracked/check-workflow-service-lists.sh
 
       - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
         # OSPS-VM-04.02: the committed OpenVEX document (vex.openvex.json) must
@@ -2566,7 +2566,7 @@ jobs:
         # vulnerability list changes. This guard fails closed if it drifts, so
         # a PR editing .trivyignore.yaml without regenerating the VEX document
         # cannot ship a stale supply-chain artifact. Runs in the build-tools
-        # container because scripts/check-vex-drift.sh needs jq, same as the
+        # container because scripts/tracked/check-vex-drift.sh needs jq, same as the
         # naming/service-list guards above.
         run: |
           set -euo pipefail
@@ -2576,7 +2576,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-vex-drift.sh
+            bash scripts/tracked/check-vex-drift.sh
 
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
         # services/netdata/Dockerfile installs netdata's official static musl build, which
@@ -2595,7 +2595,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-netdata-curl-pin.sh
+            bash scripts/untracked/check-netdata-curl-pin.sh
 
       - name: Check config-writer idempotence test coverage (#640)
         run: |
@@ -2606,7 +2606,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-idempotence-test-coverage.sh
+            bash scripts/tracked/check-idempotence-test-coverage.sh
 
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
         # Guards against the exact recurrence shape #873/#880 fixed once as a one-off manual
@@ -2625,18 +2625,18 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-bats-path-filter-coverage.sh
+            bash scripts/tracked/check-bats-path-filter-coverage.sh
 
       - name: Check setup.sh/simulation-script prompt drift (issue #1176)
         # Guards the failure class #1112/#1171 and #1082/#1175 both share: a PR changes
         # something several other files depend on by hand-duplicated convention, and nothing
         # catches the ones left stale until CI happens to exercise them days later on an
         # unrelated PR. This instance: setup.sh's interactive install wizard and the two
-        # expect-driven simulation scripts (scripts/setup-cli-simulation.sh,
-        # scripts/syslog-forwarding-simulation.sh) that hand-encode its prompt sequence. PR
+        # expect-driven simulation scripts (scripts/untracked/simulations/setup-cli-simulation.sh,
+        # scripts/untracked/simulations/syslog-forwarding-simulation.sh) that hand-encode its prompt sequence. PR
         # #1082 added a new unconditional prompt without updating either simulation script,
         # hanging both until timeout (#1175) -- discovered only because those jobs happened to
-        # run against an unrelated PR. scripts/check-setup-prompt-drift.sh fails closed
+        # run against an unrelated PR. scripts/tracked/check-setup-prompt-drift.sh fails closed
         # whenever an unconditional wizard prompt is missing a matching expect_prompt answer in
         # either script, or a simulation script's pattern no longer matches any real prompt.
         run: |
@@ -2647,7 +2647,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-setup-prompt-drift.sh
+            bash scripts/tracked/check-setup-prompt-drift.sh
 
       - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
         # Guards the exact incident this bug-hunt item found: docs/architecture-ng.md's nginx
@@ -2655,7 +2655,7 @@ jobs:
         # literal string, with nothing that ever checked it against the real shipped default in
         # config/prod/proxy.env. CACHE_MEM_MB's documented default was `200` while the real
         # shipped default had been `512` since the variable was introduced 2026-06-18/19 -- a
-        # ~7-week-old, unnoticed drift, per AG-VAL-029. scripts/check-proxy-cache-env-doc-drift.sh
+        # ~7-week-old, unnoticed drift, per AG-VAL-029. scripts/untracked/check-proxy-cache-env-doc-drift.sh
         # fails closed whenever a documented CACHE_* default disagrees with proxy.env's real value.
         run: |
           set -euo pipefail
@@ -2665,7 +2665,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-proxy-cache-env-doc-drift.sh
+            bash scripts/untracked/check-proxy-cache-env-doc-drift.sh
 
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
         # check-logging-matrix.sh itself shells out to `docker compose ...
@@ -2752,7 +2752,7 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-logging-matrix.sh
+            bash scripts/tracked/check-logging-matrix.sh
 
       - name: Remove fallback compose validation image
         if: always()
@@ -3053,9 +3053,9 @@ jobs:
           )
 
           # Maps this step's own matrix-service names to
-          # scripts/classify-image-impact.sh's output keys, for
+          # scripts/untracked/classify-image-impact.sh's output keys, for
           # saf_resolve_untouched_backfill_source's service-scoped check
-          # below -- see scripts/ensure-pr-staging-images.sh's own
+          # below -- see scripts/untracked/ensure-pr-staging-images.sh's own
           # classify_key_map for the full reasoning.
           declare -A classify_key_map=(
             [proxy]="proxy"
@@ -3102,7 +3102,7 @@ jobs:
             # from base.sha or later -- see scripts/lib/staging-image-freshness.sh for the
             # mechanism, and scripts/lib/staging-ancestor-fallback.sh for the full resolution
             # sequence (exact-BASE_SHA wait, then the ancestor fallback when that wait genuinely
-            # cannot succeed) this step now shares with scripts/ensure-pr-staging-images.sh
+            # cannot succeed) this step now shares with scripts/untracked/ensure-pr-staging-images.sh
             # instead of carrying an independent copy of the same logic. 900/1200 (BASE_SHA's own
             # wait), 300/600 (ancestor-candidate checks) and the "50" search depth intentionally
             # match that script's own BASE_FRESHNESS_POLL_*/ANCESTOR_FRESHNESS_POLL_*/
@@ -3207,7 +3207,7 @@ jobs:
           FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ steps.channel.outputs.tag }}
         run: |
           set -euo pipefail
-          scripts/full-setup-client-simulation.sh
+          scripts/untracked/simulations/full-setup-client-simulation.sh
 
       - name: Tear down full-setup validation stack
         if: always()
@@ -3717,7 +3717,7 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          image="$(bash scripts/select-build-tools-image.sh)"
+          image="$(bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       # Coverage output must land on a writable host path: the repo checkout
       # itself is bind-mounted read-only into the build-tools container below,
@@ -4908,7 +4908,7 @@ jobs:
         # reuse the published channel image instead. This reads determine-push-reuse-scope's
         # `reuse_<service>` output -- the SAME already-verified three-part decision (channel
         # image revision label + real git ancestry + a real content diff via
-        # scripts/classify-image-impact.sh) that build/build-arm64's own retag-vs-rebuild
+        # scripts/untracked/classify-image-impact.sh) that build/build-arm64's own retag-vs-rebuild
         # decision trusts -- rather than a second, weaker, independently-computed check.
         # Consuming the SAME decision matters concretely: a narrower check could say
         # "unchanged" while the wider one correctly falls back to a real rebuild (channel
@@ -5076,7 +5076,7 @@ jobs:
     # run. This job exists as a SEPARATE job -- not inline in build/build-arm64's own
     # "Determine whether this service needs building" step -- for one load-bearing
     # reason: the verification this decision requires (sif_is_ancestor_or_equal, and a
-    # real content diff via scripts/classify-image-impact.sh from the channel image's own
+    # real content diff via scripts/untracked/classify-image-impact.sh from the channel image's own
     # build commit) needs full git history, and build/build-arm64's own checkouts use the
     # default shallow clone. Running the decision here once, with the one job in this
     # push path that already has full history, means build and build-arm64 both just read
@@ -6917,7 +6917,7 @@ jobs:
               docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image" \
               --annotation "index:org.opencontainers.image.description=${service_descriptions[$service]}"
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+              bash scripts/untracked/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
 
             # Output key uses underscores (dhcp-proxy/build-tools contain
             # hyphens, which the expression syntax in the attest steps below
@@ -6993,7 +6993,7 @@ jobs:
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+              bash scripts/untracked/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
 
             # Same underscore-key reasoning as the trusted-ref step above.
             # This PR staging manifest is the exact tag full-setup-validate
@@ -7463,7 +7463,7 @@ jobs:
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
               :
             elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              bash scripts/check-stable-external-images.sh
+              bash scripts/tracked/check-stable-external-images.sh
               channel_tags+=(latest)
             else
               echo "::error::Unsupported release tag '${GITHUB_REF_NAME}'. Use vX.Y.Z or vX.Y.Z-rc.N."
@@ -7509,7 +7509,7 @@ jobs:
 
           for service in "${services[@]}"; do
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}:${source_tag}" "$REQUIRED_PLATFORMS"
+              bash scripts/untracked/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}:${source_tag}" "$REQUIRED_PLATFORMS"
           done
 
           pointer_context="$(mktemp -d)"
@@ -7545,7 +7545,7 @@ jobs:
             "$pointer_context"
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-            bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
+            bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
           stack_pointer_digest="$(digest_for_image "$stack_pointer_image")"
           {
             printf 'stack-pointer-subject=ghcr.io/%s/stack\n' "$REPOSITORY"
@@ -7606,7 +7606,7 @@ jobs:
       # (master) only -- on any other ref this step is a deliberate no-op until master
       # itself starts receiving pushes, the still-undesigned "v0.2.0 -> master" promotion
       # event tracked in #825. Minor/major bumps stay a manual maintainer tag push; only Z
-      # is ever computed here (see scripts/compute-next-release-tag.sh).
+      # is ever computed here (see scripts/untracked/compute-next-release-tag.sh).
       #
       # `if:` is written as `success() && ...`, not a bare `github.ref == ...` condition,
       # for the same reason the job-level `if:` above carries its own long comment: a
@@ -7647,13 +7647,13 @@ jobs:
           # (not just "the previous push") means a burst of N merges landing
           # on master between two promote runs still yields exactly ONE
           # bump reflecting the whole burst, not N.
-          image_impact="$(bash scripts/classify-image-impact.sh "$base_commit" "$COMMIT_SHA" | grep -x 'IMAGE_IMPACT=true' || true)"
+          image_impact="$(bash scripts/untracked/classify-image-impact.sh "$base_commit" "$COMMIT_SHA" | grep -x 'IMAGE_IMPACT=true' || true)"
           if [[ -z "$image_impact" ]]; then
             echo "::notice::No image-affecting change between ${base_tag} (${base_commit}) and ${COMMIT_SHA}; no patch release cut."
             exit 0
           fi
 
-          next_tag="$(bash scripts/compute-next-release-tag.sh "$base_tag")"
+          next_tag="$(bash scripts/untracked/compute-next-release-tag.sh "$base_tag")"
 
           # Cheap end-of-run re-check, independent of and in addition to the debounce check
           # the "Promote coherent stack tags" step already performed earlier in this same job:
@@ -7873,7 +7873,7 @@ jobs:
           TAG_NAME: ${{ github.ref_name }}
           # syslog (issue #1428) added here explicitly: this SERVICES scalar is a
           # plain space-separated env value, not a services=(...) bash array, so
-          # scripts/check-workflow-service-lists.sh's regex-based guard cannot see
+          # scripts/tracked/check-workflow-service-lists.sh's regex-based guard cannot see
           # or enforce it -- missing it here would silently drop syslog from this
           # release job's platform-coverage verification with no CI signal at all.
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
@@ -7886,7 +7886,7 @@ jobs:
           read -r -a services <<< "$SERVICES"
           for service in "${services[@]}"; do
             image="ghcr.io/${REPOSITORY}/${service}:${TAG_NAME}"
-            bash scripts/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
+            bash scripts/untracked/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
           done
 
       # Patches (rather than overwrites) an existing release body: the image_notes_start/end

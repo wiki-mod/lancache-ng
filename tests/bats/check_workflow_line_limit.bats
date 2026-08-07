@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises scripts/check-workflow-line-limit.sh (issue #1095, 2026-08-01)
+# Exercises scripts/untracked/check-workflow-line-limit.sh (issue #1095, 2026-08-01)
 # against small, throwaway .github/workflows fixture trees rather than this
 # repo's own real build-push.yml, so both the passing and failing path are
 # proven -- per AG-VAL-024, a check that only ever runs against an
@@ -10,7 +10,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/check-workflow-line-limit.sh"
+    script="$repo_root/scripts/untracked/check-workflow-line-limit.sh"
     fixture_root="$(mktemp -d)"
     mkdir -p "$fixture_root/.github/workflows"
 }

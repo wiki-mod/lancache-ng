@@ -76,4 +76,4 @@ runs:
           -e PR_AUTHOR \
           -e PR_TITLE_LINT_MODE \
           "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-          bash scripts/check-pr-title-convention.sh
+          bash scripts/tracked/check-pr-title-convention.sh

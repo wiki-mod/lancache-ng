@@ -30,7 +30,7 @@
 # safely (never deleting a still-referenced platform manifest or a live
 # referrers-API attestation), and this file's own "reap staging tags and
 # orphaned versions" step below for why the actual logic now lives in
-# scripts/gc-pr-staging-images.sh rather than inline here.
+# scripts/untracked/gc-pr-staging-images.sh rather than inline here.
 #
 # Two triggers cover both the common case and the safety-net case:
 #   - pull_request (closed): reaps promptly right after the PR that owns a
@@ -121,7 +121,7 @@ jobs:
     # plus, per about-to-delete orphan candidate, one more GET to check for a
     # referrers-API attestation subject -- real added work, not free, but
     # bounded by max_deletions_per_service (see GC_MAX_DELETIONS_PER_SERVICE
-    # in scripts/gc-pr-staging-images.sh) rather than by the full ~13,600-
+    # in scripts/untracked/gc-pr-staging-images.sh) rather than by the full ~13,600-
     # version untagged backlog this PR deliberately does not drain in one
     # pass. 60 minutes is double the observed 20-30 minute baseline -- enough
     # headroom for the new per-version registry calls under normal GHCR
@@ -149,7 +149,7 @@ jobs:
           fi
 
       # Needed only because the reap logic now lives in a real script file
-      # (scripts/gc-pr-staging-images.sh) instead of inline YAML -- the
+      # (scripts/untracked/gc-pr-staging-images.sh) instead of inline YAML -- the
       # pre-extraction version of this workflow never checked out the repo
       # at all, since every line it needed was already inline. `sparse-
       # checkout` keeps this light (just the two script paths this job
@@ -182,7 +182,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: |
-            scripts/gc-pr-staging-images.sh
+            scripts/untracked/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
             scripts/lib/gc-pr-staging-images.sh
           sparse-checkout-cone-mode: false
@@ -191,7 +191,7 @@ jobs:
         if: steps.creds.outputs.have-pat == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-        run: bash scripts/gc-pr-staging-images.sh
+        run: bash scripts/untracked/gc-pr-staging-images.sh
 
       # actions/checkout@v7.0.1's sparseCheckoutNonConeMode() (the code path
       # `sparse-checkout-cone-mode: false` above selects) sets core.sparseCheckout

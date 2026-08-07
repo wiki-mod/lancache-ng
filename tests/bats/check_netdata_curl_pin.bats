@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-netdata-curl-pin.sh: the maintainer-approved
+# Coverage for scripts/untracked/check-netdata-curl-pin.sh: the maintainer-approved
 # tracking mechanism from PR #1352 (issue #1304's "option (c)" decision) --
 # since Trivy cannot see netdata's statically-linked, vendored curl at all,
 # this script instead reads netdata's own upstream build recipe directly and
@@ -19,7 +19,7 @@
 # actually vendors.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/check-netdata-curl-pin.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/untracked/check-netdata-curl-pin.sh"
     dockerfile_fixture="$BATS_TEST_TMPDIR/Dockerfile"
     bundled_fixture="$BATS_TEST_TMPDIR/bundled-packages.version"
 }

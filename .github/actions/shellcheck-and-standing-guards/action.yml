@@ -88,7 +88,7 @@ runs:
           -w /work \
           -e GH_TOKEN \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-action-node-versions.sh
+          bash scripts/tracked/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage (#896)
       # Standing guard: every full-setup-validate.yml/
@@ -107,7 +107,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-validation-subnet-wrapper-coverage.sh
+          bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
     - name: Check executable bits on bare-path script invocations (#1019)
       # Standing guard for the executable-bit failure pattern: a repo script
@@ -127,7 +127,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-executable-bits.sh
+          bash scripts/tracked/check-executable-bits.sh
 
     - name: Check build-tools smoke-test coverage (#790/#791)
       # Standing guard for build-tool coverage: keeps select-build-tools-image.sh's
@@ -144,7 +144,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-build-tools-smoke-coverage.sh
+          bash scripts/tracked/check-build-tools-smoke-coverage.sh
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
       # Standing guard for a confirmed real CI failure:
@@ -165,7 +165,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-pipefail-early-exit-grep.sh
+          bash scripts/untracked/check-pipefail-early-exit-grep.sh
 
     - name: Check pipefail guard's own scope coverage
       # Standing guard on the guard above: verifies

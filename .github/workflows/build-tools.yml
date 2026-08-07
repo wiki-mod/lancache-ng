@@ -54,7 +54,7 @@ on:
     # own broad trigger -- see that file for the per-path provenance this
     # comment used to carry, and AG-CI-010 (CLAUDE.md) for the "routine PRs
     # must not rebuild the build-tools image" contract this narrowing
-    # restores. scripts/check-bats-path-filter-coverage.sh (#879) now
+    # restores. scripts/tracked/check-bats-path-filter-coverage.sh (#879) now
     # targets build-tools-smoke.yml's on.push.paths/on.pull_request.paths
     # instead of this workflow's, since that is where the suites actually
     # run today.
@@ -1006,7 +1006,7 @@ jobs:
   merge-build-tools-manifests:
     # Combines build-tools's linux/amd64 tag with build-tools-arm64's
     # linux/arm64 tag into the real sha-<commit> multi-platform tag that
-    # scripts/select-build-tools-image.sh and setup.sh consume -- same
+    # scripts/untracked/select-build-tools-image.sh and setup.sh consume -- same
     # imagetools create pattern as build-push.yml's merge-manifests, no image
     # is rebuilt here, only a manifest list assembled from two already-pushed
     # digests.
@@ -1084,7 +1084,7 @@ jobs:
           printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
 
       # Mirrors the guard build-push.yml's own merge-manifests job runs via
-      # scripts/require-image-platforms.sh: a manual `imagetools create` can
+      # scripts/untracked/require-image-platforms.sh: a manual `imagetools create` can
       # still produce a tag missing a required platform if either staging tag
       # silently resolved to the wrong architecture, and that would only
       # surface later as a confusing per-runner-class failure downstream.
@@ -1094,7 +1094,7 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          bash scripts/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
+          bash scripts/untracked/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
 
       - name: Resolve merged manifest digest
         id: merged-digest

@@ -93,4 +93,4 @@ runs:
           -e GH_TOKEN \
           -e PR_IS_FORK \
           "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-          bash scripts/check-pr-tracking-metadata.sh
+          bash scripts/tracked/check-pr-tracking-metadata.sh

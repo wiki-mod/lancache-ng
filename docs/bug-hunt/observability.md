@@ -15,7 +15,7 @@ pipeline as wired in `deploy/{dev,prod,quickstart,full-setup}/docker-compose.yml
 `services/syslog/netdata-web_log.conf`, `services/ui/src/routes/netdata_proxy.rs`,
 `services/ui/src/routes/logs.rs`, `services/ui/src/syslog_client.rs`,
 `services/ui/src/routes/dashboard.rs`, `services/ui/src/templates/{dashboard,logs,stats,base}.html`,
-`services/watchdog/watchdog.sh`, `scripts/check-logging-matrix.sh`,
+`services/watchdog/watchdog.sh`, `scripts/tracked/check-logging-matrix.sh`,
 `docs/architecture-ng.md`, `docs/threat-model.md`.
 
 Read against `origin/v0.2.0` in a dedicated clone (`bughunt-observability`
@@ -249,7 +249,7 @@ across all three real compose files:
 gets **zero** netdata web-log analytics: neither the source file nor the
 collector config is available to it, even though fluent-bit dutifully
 produces `nginx-proxy.log` there too. This 3-way inconsistency is invisible
-to `scripts/check-logging-matrix.sh` (see Finding 8) since that script only
+to `scripts/tracked/check-logging-matrix.sh` (see Finding 8) since that script only
 checks matrix-row existence per Compose service, not per-collector wiring
 parity across the three files.
 
@@ -422,7 +422,7 @@ still real and current in the code checked this session. A reader following
 `#633` today lands on a closed issue with no signal that the specific gap
 cited is still open (AG-DOC-001 territory).
 
-### 16. `scripts/check-logging-matrix.sh` structurally cannot catch the netdata web_log wiring drift (Finding 6)
+### 16. `scripts/tracked/check-logging-matrix.sh` structurally cannot catch the netdata web_log wiring drift (Finding 6)
 
 Read the script in full: by its own explicit design (stated in its own
 header comment), it only verifies that every real Compose service has *a*

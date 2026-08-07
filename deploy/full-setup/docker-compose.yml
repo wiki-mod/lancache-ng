@@ -70,7 +70,7 @@ services:
   # closing the gap issue #668 raised: previously dns-standard and dns-ssl
   # resolved to the exact same reachable endpoint, so nothing could tell a
   # correctly-wired dns-ssl apart from one wrongly pointed at the
-  # standard-mode address. scripts/ssl-mitm-cache-simulation.sh proves this
+  # standard-mode address. scripts/untracked/simulations/ssl-mitm-cache-simulation.sh proves this
   # end-to-end by connecting to whatever each DNS server actually answers
   # with and inspecting the certificate presented there.
   #
@@ -503,7 +503,7 @@ services:
       # Issue #866: register_secondary now refuses registration (HTTP 503)
       # unless NATS_BIND_IP or NATS_ADVERTISE_URL is set -- see the identical
       # comment in deploy/prod/docker-compose.yml for the full rationale.
-      # scripts/nats-secondary-auth-callout-simulation.sh registers
+      # scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh registers
       # "secondaries" that are actually client containers on this same
       # validation Docker network, so `nats://nats:4222` genuinely IS
       # reachable for them (unlike a real remote secondary on a separate

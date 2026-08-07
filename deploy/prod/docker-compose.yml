@@ -15,7 +15,7 @@
 name: lancache-ng
 
 # The Docker socket proxy's HAProxy allowlist lives in exactly one place,
-# scripts/docker-socket-proxy.sh (mounted read-only below), which is the
+# scripts/untracked/docker-socket-proxy.sh (mounted read-only below), which is the
 # canonical source per docs/naming-conventions.md. This file used to also
 # carry an unreferenced x-docker-socket-proxy-command YAML anchor with a
 # near-duplicate copy of that same config -- it was never aliased anywhere
@@ -231,7 +231,7 @@ services:
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
   # socket-proxy limits Docker access to Admin UI/watchdog operations. The
-  # custom HAProxy config in scripts/docker-socket-proxy.sh (mounted below)
+  # custom HAProxy config in scripts/untracked/docker-socket-proxy.sh (mounted below)
   # replaces Tecnativa's broad CONTAINERS/POST toggles with a deny-by-default
   # allowlist for named lancache-ng containers.
   docker-socket-proxy:
@@ -242,7 +242,7 @@ services:
     stdin_open: true
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ../../scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
+      - ../../scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
     healthcheck:
@@ -251,7 +251,7 @@ services:
       # by lancache-docker-socket-proxy.sh is actually forwarding to the real
       # Docker socket backend, not just that something is listening on 2375.
       # /_ping is explicitly allowlisted by that script's own `safe_ping` ACL
-      # (see scripts/docker-socket-proxy.sh), so this exercises the same path
+      # (see scripts/untracked/docker-socket-proxy.sh), so this exercises the same path
       # watchdog itself depends on. Uses wget (BusyBox): verified empirically
       # against this exact pinned image (tecnativa/docker-socket-proxy, Alpine
       # base) that wget is present but curl is not -- same reasoning as nats'
@@ -683,7 +683,7 @@ services:
     # failure comes back, not just adding until things looked fine) -- see
     # the PR implementing this issue for the full session. Real end-to-end
     # clock-stepping under this exact capability set is additionally
-    # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
+    # verified on every PR by `scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh`'s
     # GitHub-hosted CI job, the only environment in this project's CI that
     # runs on a real, non-LXC-nested kernel (see that script's own header) --
     # kept in sync with this cap_add list; update both together.
@@ -699,7 +699,7 @@ services:
       # This project's self-hosted CI runner fleet cannot itself confirm
       # chronyd actually retains and uses this post-privilege-drop (every
       # host there is LXC-nested and dies earlier at an unrelated adjtimex
-      # restriction, issue #1296); `scripts/ntp-cap-sys-time-simulation.sh`'s
+      # restriction, issue #1296); `scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh`'s
       # GitHub-hosted job is what proves the real clock-stepping path.
       - SYS_TIME
       # chronyd binds UDP/123 (and its cmdmon socket) BEFORE dropping to the

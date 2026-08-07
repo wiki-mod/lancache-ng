@@ -195,7 +195,7 @@ every NATS-applied write plus a 60s unconditional export-and-diff watcher, a rea
 `GET /snapshots` + `POST /rollback` HTTP listener with `X-API-Key` auth on port 8083, and
 an Admin UI route forwarding to it), and are covered by 23 unit tests
 (`zone_snapshots.rs`), 4 unit tests (`rollback_listener.rs`), and a real end-to-end
-simulation (`scripts/dns-zone-rollback-simulation.sh`). This was already flagged in the
+simulation (`scripts/untracked/simulations/dns-zone-rollback-simulation.sh`). This was already flagged in the
 capability-inventory SoT pass (§11); re-verified independently here as part of this sweep.
 
 **Evidence:** `docs/dns-admin-ui-scope.md:250-295`; `services/dns/nats-subscriber/src/zone_snapshots.rs`
