@@ -1,0 +1,85 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Trivy scan with digest-bound result cache
+description: >-
+  Scans an image with Trivy, but skips the scan entirely if the exact same
+  digest was already confirmed clean within the caller-supplied freshness
+  window (issue #1095, finding G11: container-scan re-scanned an unchanged,
+  already-clean channel-image digest with Trivy on every push, with no
+  digest-bound scan-result cache at all). Callers, not this action, own the
+  freshness policy: an SBOM/dependency inventory is a pure function of image
+  content and would be safe to cache forever, but a vulnerability verdict is
+  time-dependent (Trivy's CVE database gains new disclosures over time), so
+  a stale "clean" result must not be served indefinitely -- this action only
+  honors whatever freshness-bucket token the caller passes in, it does not
+  decide how coarse that bucket is.
+inputs:
+  image-ref:
+    description: Digest-qualified image reference to scan (e.g. ghcr.io/org/repo/service@sha256:...).
+    required: true
+  digest:
+    description: The bare digest (sha256:...) of image-ref, used verbatim in the cache key.
+    required: true
+  cache-key-scope:
+    description: Caller-chosen scope prefix (e.g. service+platform) so unrelated matrix rows never collide on the same cache key even if a digest were ever reused.
+    required: true
+  freshness-bucket:
+    description: Caller-computed freshness window token (e.g. a UTC date). Same digest + same bucket = scan skipped; a new bucket forces a real re-scan regardless of digest.
+    required: true
+  trivyignores:
+    required: false
+    default: .trivyignore.yaml
+  skip-dirs:
+    required: false
+    default: /usr/local/rustup/toolchains
+  vuln-db-cache-dir:
+    description: Trivy's own vulnerability-database cache dir (a different concept from this action's scan-result cache above) -- passed through to trivy-action's cache-dir input unchanged.
+    required: false
+    default: ""
+outputs:
+  cache-hit:
+    description: "true if a clean-scan marker already existed for this digest+bucket (the Trivy scan below was skipped)."
+    value: ${{ steps.restore.outputs.cache-hit }}
+runs:
+  using: composite
+  steps:
+    - name: Restore scan-result marker
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/trivy-scan-clean
+        key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
+
+    - name: Scan image with Trivy
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        scanners: vuln,secret
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: true
+        cache: "false"
+        cache-dir: ${{ inputs.vuln-db-cache-dir }}
+        timeout: 10m
+        exit-code: "1"
+
+    # Only reached when the Trivy step above ran AND passed (exit 0) --
+    # composite steps stop on the first failure by default, same as a job,
+    # so a vulnerable/failed scan never reaches here and never gets cached
+    # as clean. Skipped on a cache hit (nothing new to write).
+    - name: Write scan-result marker
+      if: steps.restore.outputs.cache-hit != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        mkdir -p "${{ runner.temp }}/trivy-scan-clean"
+        date -u +%Y-%m-%dT%H:%M:%SZ > "${{ runner.temp }}/trivy-scan-clean/scanned-at"
+
+    - name: Save scan-result marker
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ runner.temp }}/trivy-scan-clean
+        key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
