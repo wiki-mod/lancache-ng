@@ -742,13 +742,17 @@ services:
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
-      # deploy/prod/docker-compose.yml's identical addition -- currently
-      # unused by watchdog.sh (the bash entrypoint this ENTRYPOINT still
-      # runs), read only by the Rust crate's resolve_alert_only_targets()
-      # once that becomes this service's actual ENTRYPOINT.
+      # DHCP_MODE/SYSLOG_ENABLED/NTP_ENABLED (issue #842/#849/#1296):
+      # matches deploy/prod/docker-compose.yml's identical addition and its
+      # own comment there for the full rationale -- DHCP_MODE/SYSLOG_ENABLED
+      # are still unused by watchdog.sh (the bash entrypoint this
+      # ENTRYPOINT actually runs), read only by the Rust crate's
+      # resolve_alert_only_targets() once that becomes this service's
+      # actual ENTRYPOINT; NTP_ENABLED is different -- watchdog.sh itself
+      # now reads it directly to decide whether to alert-only-monitor `ntp`.
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see
@@ -1013,7 +1017,17 @@ services:
       # flap this healthcheck unhealthy for that reason alone. Verified live:
       # a freshly started, not-yet-synchronised chronyd still returns a
       # "Reference ID" line immediately.
-      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      #
+      # Second statement (issue #1296, maintainer decision): see
+      # deploy/prod/docker-compose.yml's matching comment on this exact
+      # line for the full rationale -- kept identical across both compose
+      # files. In short: surfaces a real CAP_SYS_TIME-denied degraded mode
+      # into Docker's own `.State.Health.Log` every healthcheck cycle, so
+      # `services/watchdog` can report a genuinely distinct amber
+      # "Degraded" state instead of a plain healthy dot, without ever
+      # making this container Docker-"unhealthy" for a real, deliberate
+      # reduced-guarantee mode.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
       retries: 3

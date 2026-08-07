@@ -113,6 +113,15 @@ impl DockerProxyClient {
     /// `curl -sf`'s own `-f` (fail on HTTP error) semantics plus the bash's
     /// explicit `|| { echo "unreachable"; return; }`/`|| echo
     /// "unreachable"` fallbacks on both the curl call and the jq parse.
+    ///
+    /// Issue #1296: when the real Status is "healthy", also checks the SAME
+    /// already-fetched response body for a [`HealthReading::Degraded`]
+    /// marker (see [`degraded_reason_from_health_log`]) before returning --
+    /// no second request, no new docker-socket-proxy allowlist entry, since
+    /// `.State.Health.Log` is already part of this exact JSON body. Only
+    /// checked on a genuinely "healthy" Status: a stale marker left over in
+    /// an old log entry must never override a real unhealthy/starting
+    /// reading (see this function's own tests for that ordering).
     pub async fn get_health(
         &self,
         container_name: &str,
@@ -139,6 +148,11 @@ impl DockerProxyClient {
             .pointer("/State/Health/Status")
             .and_then(|v| v.as_str())
             .unwrap_or("none");
+        if raw_status == "healthy"
+            && let Some(reason) = degraded_reason_from_health_log(&body)
+        {
+            return HealthReading::Degraded(reason);
+        }
         HealthReading::from_docker_status(raw_status)
     }
 
@@ -211,6 +225,35 @@ impl DockerProxyClient {
     }
 }
 
+/// Issue #1296: looks for a `DEGRADED: <reason>` line anywhere in the LAST
+/// entry of `.State.Health.Log` (the most recent healthcheck run's own
+/// captured stdout+stderr, already part of the `/containers/<name>/json`
+/// body every `get_health()` call fetches -- see that function's own
+/// comment). This is a deliberately generic, service-agnostic convention
+/// (not hardcoded to any one container name): any service's healthcheck
+/// command can opt into it by printing this exact prefix on a line of its
+/// own output while still exiting 0, the same way `ntp`'s compose
+/// healthcheck does (see `deploy/prod/docker-compose.yml`'s `ntp` service).
+/// Only the LAST log entry is checked, not the whole history: a container
+/// that recovered from a past degraded episode must not keep showing
+/// amber forever because an old entry still contains the marker text --
+/// Docker's own `Log` array is bounded (keeps the most recent 5 entries by
+/// default) and already ordered oldest-to-newest, so `.last()` is exactly
+/// "what did the most recent healthcheck run report."
+fn degraded_reason_from_health_log(body: &serde_json::Value) -> Option<String> {
+    const MARKER: &str = "DEGRADED: ";
+    let output = body
+        .pointer("/State/Health/Log")?
+        .as_array()?
+        .last()?
+        .get("Output")?
+        .as_str()?;
+    output
+        .lines()
+        .find_map(|line| line.strip_prefix(MARKER))
+        .map(|reason| reason.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -272,6 +315,63 @@ mod tests {
         let client = DockerProxyClient::new(base_url).unwrap();
         let reading = client
             .get_health("lancache-proxy", Some(Duration::from_secs(2)))
+            .await;
+        assert_eq!(reading, HealthReading::Healthy);
+    }
+
+    #[tokio::test]
+    // Issue #1296: a "healthy" Status plus a `DEGRADED: ` line in the most
+    // recent healthcheck run's own captured output must produce a
+    // Degraded reading, not plain Healthy -- this is the exact real shape
+    // `ntp`'s compose healthcheck now emits when CAP_SYS_TIME is denied.
+    async fn get_health_detects_a_degraded_marker_in_the_healthcheck_log_output() {
+        let base_url = serve_one_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{\"Health\":{\"Status\":\"healthy\",\"Log\":[{\"Output\":\"Reference ID    : 00000000 ()\\nDEGRADED: CAP_SYS_TIME denied -- clock not disciplined (issue #1296)\\n\"}]}}}",
+        )
+        .await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        let reading = client
+            .get_health("lancache-ntp", Some(Duration::from_secs(2)))
+            .await;
+        assert_eq!(
+            reading,
+            HealthReading::Degraded(
+                "CAP_SYS_TIME denied -- clock not disciplined (issue #1296)".to_string()
+            )
+        );
+    }
+
+    #[tokio::test]
+    // A stale `DEGRADED: ` marker sitting in an old/irrelevant log entry
+    // must never override a genuinely non-healthy Status -- Degraded is
+    // only ever a refinement OF "healthy," never a replacement for
+    // "unhealthy"/"starting". Confirms the ordering in get_health() checks
+    // Status first and only consults the log when Status is "healthy".
+    async fn get_health_ignores_a_degraded_marker_when_status_is_not_healthy() {
+        let base_url = serve_one_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{\"Health\":{\"Status\":\"unhealthy\",\"Log\":[{\"Output\":\"DEGRADED: leftover text\"}]}}}",
+        )
+        .await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        let reading = client
+            .get_health("lancache-ntp", Some(Duration::from_secs(2)))
+            .await;
+        assert_eq!(reading, HealthReading::Unhealthy);
+    }
+
+    #[tokio::test]
+    // A plain "healthy" Status with ordinary healthcheck output (no marker
+    // line at all) must still parse as plain Healthy -- confirms the new
+    // degraded_reason_from_health_log() check is additive, not a
+    // regression for every service that never uses this convention.
+    async fn get_health_treats_ordinary_healthy_output_as_plain_healthy() {
+        let base_url = serve_one_response(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nConnection: close\r\n\r\n{\"State\":{\"Health\":{\"Status\":\"healthy\",\"Log\":[{\"Output\":\"Reference ID    : ABCD1234 (some.pool.server)\\n\"}]}}}",
+        )
+        .await;
+        let client = DockerProxyClient::new(base_url).unwrap();
+        let reading = client
+            .get_health("lancache-ntp", Some(Duration::from_secs(2)))
             .await;
         assert_eq!(reading, HealthReading::Healthy);
     }

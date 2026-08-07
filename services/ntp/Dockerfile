@@ -78,11 +78,23 @@ COPY entrypoint.sh /entrypoint.sh
 # dropped-privilege chronyd -- entrypoint.sh's own chown call fixes this up
 # at container start; see its comment for the real, reproducible bug this
 # validation pass found (present identically pre-migration on Debian too).
-# Seccomp (`-F 1`, see entrypoint.sh's own comment on its final `exec`):
-# `libseccomp` is pulled in automatically as a real transitive dependency
-# of `chrony-nts` on this base (confirmed live in this image's own `apk
-# add` output, and via `chronyd -v` reporting `+SCFILTER`), not something
-# this Dockerfile opts into explicitly.
+# Seccomp (`-F 2` -- downgraded from an original `-F 1`, see entrypoint.sh's
+# own comment on its final `exec` for the real, reproduced kernel-version-
+# dependent crash that caused the downgrade, issue #1296): `libseccomp` is
+# pulled in automatically as a real transitive dependency of `chrony-nts`
+# on this base (confirmed live in this image's own `apk add` output, and
+# via `chronyd -v` reporting `+SCFILTER`), not something this Dockerfile
+# opts into explicitly.
+#
+# CAP_SYS_TIME graceful-degradation dependency (issue #1296): entrypoint.sh's
+# clock_control_available() probes via `adjtimex`, which is NOT a separate
+# package added by this Dockerfile -- it is one of Alpine's base `busybox`
+# binary's own built-in applets (confirmed live: present with no extra
+# `apk add`). If a future base-image change ever drops or renames it,
+# clock_control_available() fails closed with its own loud, distinct error
+# (see that function's comment) rather than silently misreporting clock
+# control as available -- but keep this comment in sync if that dependency
+# ever needs to become an explicit package instead.
 RUN chmod +x /entrypoint.sh \
     && mkdir -p /var/lib/chrony /var/log/chrony
 
