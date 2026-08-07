@@ -2031,21 +2031,17 @@ jobs:
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
-          # The two checks that used to live here (container-scan's own local scan-build
-          # networking entitlement: `allow_args+=(--allow network.host)` and its explicit
-          # docker-container Buildx builder) are removed along with that code (issue #1095
-          # G8 fix): container-scan no longer runs any local `docker buildx build` at all
-          # for a changed service, so the property they verified has no code path left to
-          # check. NOTE, found while removing them: both were already unable to fail even
-          # before this change -- `grep -F '<literal>' .github/workflows/build-push.yml`
-          # matches the check's OWN quoted source line whenever that literal string is
-          # simple text with no shell-escaping quirks, so these passed unconditionally
-          # regardless of whether the real code they were meant to verify still existed.
-          # This self-reference defect class likely affects other `grep -F` (not `grep -E`
-          # with an anchored `^...$` pattern, which do NOT self-match, confirmed for the
-          # `network:`/`allow:` checks directly above) checks against this same file
-          # elsewhere in this guard block -- flagged separately (not audited or fixed here,
-          # a distinct, potentially large undertaking of its own).
+          # Container-scan's own local scan-build networking entitlement (`allow_args+=(--
+          # allow network.host)` and its explicit docker-container Buildx builder) has no
+          # code path to check anymore: container-scan no longer runs any local `docker
+          # buildx build` for a changed service (issue #1095 G8 fix), so no check for it
+          # lives here. A plain `grep -F '<literal>' .github/workflows/build-push.yml`
+          # check embedded in this same file always matches its own quoted source line
+          # whenever the literal is simple text with no shell-escaping quirks, independent
+          # of whether the real code it names still exists -- unlike the anchored `grep -E
+          # '^...$'` checks (e.g. the `network:`/`allow:` pair directly above), which do not
+          # self-match. That defect class is broader than these two removed checks and is
+          # tracked separately, not audited or fixed in this PR.
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
