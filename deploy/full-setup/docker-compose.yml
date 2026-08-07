@@ -494,6 +494,9 @@ services:
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       - PDNS_API_KEY=validation-pdns-key
+      # Must match the netdata service's own NETDATA_ALARM_TOKEN literal
+      # above -- see routes/netdata_alarms.rs for what this token gates.
+      - NETDATA_ALARM_TOKEN=validation-netdata-alarm-token
       - NATS_URL=nats://nats:4222
       # Issue #866: register_secondary now refuses registration (HTTP 503)
       # unless NATS_BIND_IP or NATS_ADVERTISE_URL is set -- see the identical
@@ -566,6 +569,75 @@ services:
       - SYS_PTRACE
     security_opt:
       - apparmor:unconfined
+    # Netdata alarm -> Admin UI forwarding (bug hunt #849, observability.md
+    # finding #3), wired into this validation profile too (AG-VAL-027: a new
+    # forward channel must be exercised by full-setup-deep-validate.yml, not
+    # only documented in prod/quickstart). Unlike those two profiles, this
+    # harness hardcodes every credential (see the nats/ui services' fixed
+    # `validation-*` literals above) instead of resolving through the
+    # shared-secrets volume -- there is no dynamic-secret path anywhere else
+    # in this file, so adding one just for this token would be inconsistent
+    # with the rest of the harness, not more correct. Only the alarm-token
+    # file + health_alarm_notify.conf override are added here; the
+    # netdata.conf log-path redirection dev/prod/quickstart's entrypoint also
+    # writes is deliberately NOT ported -- this profile never wired central
+    # logging for netdata (see this file's own volumes list, which has no
+    # netdata-logs mount).
+    entrypoint: ["/usr/bin/bash", "-c"]
+    command:
+      - |
+        set -e
+        printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
+        chmod 0600 /etc/netdata/.netdata-alarm-token
+        # Live-verified 2026-08-06 (PR #1444 real-alarm check): netdata's own
+        # daemon -- and therefore alarm-notify.sh and this file's
+        # custom_sender() -- runs as the image's unprivileged `netdata`
+        # user (uid 201), never as root, once past this root-context setup
+        # script. Without this chown, the token file stays root:root/0600
+        # from the printf above, so the real health-engine-triggered
+        # alarm-notify.sh process gets "Permission denied" reading it,
+        # `cat ... 2>/dev/null` silently swallows that into an empty
+        # string, and every real (non-manually-triggered) alarm silently
+        # fails Admin UI auth with 401 -- confirmed by instrumenting this
+        # exact custom_sender() body and observing token_len=0 on a real
+        # health.d-fired alarm, versus a correct non-empty token when the
+        # same file is read via a root shell (e.g. `docker exec`), which is
+        # why naive manual testing as root does not catch this.
+        chown netdata:netdata /etc/netdata/.netdata-alarm-token
+        cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
+        # shellcheck disable=SC2154
+        # name/chart/host/status/old_status/value_string/units/info/
+        # unique_id/alarm_id/event_id/when/duration below are populated by
+        # Netdata's own alarm-notify.sh before it sources this file's
+        # custom_sender() -- never assigned in this fragment itself. See
+        # deploy/prod/docker-compose.yml's matching heredoc for the full
+        # explanation.
+        # shellcheck disable=SC2034
+        # SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM are read by Netdata's own
+        # alarm-notify.sh AFTER sourcing this file, not used within it.
+        SEND_CUSTOM="YES"
+        DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
+        _lancache_json_escape() {
+          printf '%s' "$$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+        custom_sender() {
+          local token
+          token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
+          docurl -s --max-time 15 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Netdata-Alarm-Token: $${token}" \
+            -d "{\"unique_id\":$${unique_id},\"alarm_id\":$${alarm_id},\"event_id\":$${event_id},\"when\":$${when},\"name\":\"$$(_lancache_json_escape "$${name}")\",\"chart\":\"$$(_lancache_json_escape "$${chart}")\",\"host\":\"$$(_lancache_json_escape "$${host}")\",\"status\":\"$$(_lancache_json_escape "$${status}")\",\"old_status\":\"$$(_lancache_json_escape "$${old_status}")\",\"value_string\":\"$$(_lancache_json_escape "$${value_string}")\",\"units\":\"$$(_lancache_json_escape "$${units}")\",\"info\":\"$$(_lancache_json_escape "$${info}")\",\"duration\":$${duration}}" \
+            "http://ui:8080/api/netdata-alarms" >/dev/null 2>&1
+        }
+        ALARMCONF
+        exec /usr/sbin/run.sh
+    environment:
+      # Fixed literal, matching every other credential in this validation
+      # harness (e.g. ui's PDNS_API_KEY=validation-pdns-key below) -- see the
+      # comment above this service for why this profile does not use the
+      # shared-secrets resolution prod/quickstart use instead.
+      - NETDATA_ALARM_TOKEN=validation-netdata-alarm-token
     volumes:
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata

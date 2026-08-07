@@ -964,9 +964,26 @@ explicit pass:**
   a known, open, non-blocking bug that produces a false-negative warning log on a
   slow-to-stop container — validators must know to cross-check `StartedAt` rather
   than trusting the warning literally.
-- **Netdata-alarm → Admin UI notification integration** remains entirely unbuilt (PR
-  #1165 explicitly marks this half of the original dashboard vision as still open,
-  `docs/bug-hunt/observability.md` finding #3 "PARTIALLY FIXED").
+- **Netdata-alarm → Admin UI notification integration** (`docs/bug-hunt/
+  observability.md` finding #3, PR #1165's remaining open half) has been built:
+  the `netdata` container's `custom_sender()` integration
+  (`deploy/*/docker-compose.yml`'s `netdata:` service, all three real profiles)
+  POSTs each Netdata health.d alarm event to the Admin UI's new
+  `POST /api/netdata-alarms` (`services/ui/src/routes/netdata_alarms.rs`,
+  `services/ui/src/netdata_alarms.rs`), gated by a shared `NETDATA_ALARM_TOKEN`
+  (issue #858 pattern) and rendered on the dashboard's new "Netdata alarms"
+  card. Durable coverage added: `docker compose -f <file> config --quiet` for
+  all three deployment profiles (catching a real Compose `$`-interpolation
+  parse bug during this work, not merely asserted clean), plus unit tests for
+  the storage module's bounded history, idempotent-append-on-duplicate-
+  `unique_id`, and malformed/missing-file tolerance, and for the ingest route's
+  fail-closed constant-time token check. **Still unproven**: whether
+  `SEND_CUSTOM="YES"`/`DEFAULT_RECIPIENT_CUSTOM="lancache-ui"` alone actually
+  cause Netdata's real `custom_sender()` to fire for a genuine alarm depends on
+  Netdata's own per-role recipient resolution, which this pass could not
+  exercise end-to-end — the wiring is written to Netdata's documented
+  `health_alarm_notify.conf` contract, but a live `alarm-notify.sh ... test`
+  run against a real deployed stack is the still-needed follow-up proof.
 - **The DNS reset-to-known-good E2E** (PR #1152) has only ever been run with two
   environment deviations in place (a locally built image, a patched healthcheck probe
   domain) due to the since-fixed #1150 bug — the *unmodified* real CI path for this
