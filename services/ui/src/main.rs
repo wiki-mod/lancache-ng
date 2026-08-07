@@ -1372,9 +1372,9 @@ mod tests {
         .unwrap();
     }
 
-    // Finding #10 (docs/bug-hunt/ui-core.md, issue #849): a writable path
-    // must still succeed exactly as before this fix -- the diagnostic
-    // eprintln! only fires on the failure branch.
+    // A writable path must still open successfully and produce a usable
+    // `File` -- the diagnostic eprintln! only fires on the failure branch,
+    // never on this happy path.
     #[test]
     fn open_ui_log_file_succeeds_for_a_writable_path() {
         let path = std::env::temp_dir().join(format!(
