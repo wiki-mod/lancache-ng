@@ -2031,12 +2031,17 @@ jobs:
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
-          grep -F 'allow_args+=(--allow network.host)' .github/workflows/build-push.yml >/dev/null \
-            && grep -F '"${allow_args[@]}" \' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Local docker build scan must pass --allow network.host when host networking is selected."; exit 1; }
-          grep -F 'name: Set up Docker Buildx for scan build' .github/workflows/build-push.yml >/dev/null \
-            && grep -F 'docker buildx build \' .github/workflows/build-push.yml >/dev/null \
-            || { echo "::error::Local scan build must use an explicit docker-container Buildx builder (docker buildx build), not the plain docker driver -- network.host entitlement is only granted by default on container-driver builders."; exit 1; }
+          # Container-scan's own local scan-build networking entitlement (`allow_args+=(--
+          # allow network.host)` and its explicit docker-container Buildx builder) has no
+          # code path to check anymore: container-scan no longer runs any local `docker
+          # buildx build` for a changed service (issue #1095 G8 fix), so no check for it
+          # lives here. A plain `grep -F '<literal>' .github/workflows/build-push.yml`
+          # check embedded in this same file always matches its own quoted source line
+          # whenever the literal is simple text with no shell-escaping quirks, independent
+          # of whether the real code it names still exists -- unlike the anchored `grep -E
+          # '^...$'` checks (e.g. the `network:`/`allow:` pair directly above), which do not
+          # self-match. That defect class is broader than these two removed checks and is
+          # tracked separately, not audited or fixed in this PR.
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -4682,18 +4687,25 @@ jobs:
           fi
 
   container-scan:
-    # Full image vulnerability scans are intentionally limited to trusted refs. They
-    # build every service image and routinely dominate PR runtime on self-hosted runners;
-    # PRs still exercise Dockerfiles in the build job below. The build job depends on
-    # this gate before it can push normal service images. UPDATED (Step 3, issue
-    # #1095): every service now also receives an additional exact pushed-digest scan in
-    # the build job, because the multi-arch published image is produced there and can
-    # differ from the throwaway image this job builds and scans below (a fresh
-    # `docker buildx build` stamps a new `created` timestamp on every invocation, so the
-    # two builds' digests never match even given byte-identical inputs -- see "Determine
-    # per-service publish scan reuse" below and "Scan pushed service digest with Trivy"
-    # in build/build-arm64). This used to be build-tools-only; Step 3 generalized the
-    # same already-proven mechanism to the other 7 services.
+    # Never runs on `pull_request` (see `if:` below) -- PRs exercise Dockerfiles via
+    # `build` below with no vulnerability scan; that gap is separate and untouched here.
+    #
+    # UPDATED (issue #1095, closes finding G8 / originally #1348): used to unconditionally
+    # `docker buildx build --load` its own throwaway, never-pushed image per changed
+    # service, then scan THAT -- a second, independent build of the same commit that
+    # `build`/`build-arm64` also build and push moments later. A fresh `docker buildx
+    # build` stamps a new `created` timestamp every time, so the two never share a digest
+    # even for byte-identical inputs: "kit 678/345/675 goes in, kit 654 comes out" --
+    # this job's scan verdict was never about the artifact actually shipped. `build`/
+    # `build-arm64`'s own "Scan pushed service digest with Trivy" step (Step 3, all 8
+    # services) already scans the EXACT pushed digest, so the throwaway rebuild bought no
+    # provenance, only redundant compute. That branch ("should-scan == true" below) is
+    # removed: a changed service now only pays for the cheap reuse-eligibility check
+    # above, and the pushed-digest scan in build/build-arm64 is the sole real gate.
+    #
+    # The OTHER branch ("should-scan == false", Step 4 / #1331 / #1339, G11 via #1467)
+    # is untouched: when a service is proven unchanged there is no new build to scan, so
+    # this job Trivy-scans the already-published channel image by digest instead.
     #
     # UPDATED (issue #1290): this used to be a bare `if:` relying on GitHub's implicit
     # `&& success()`, which was safe only while `validate-compose` and (since #1095 Part
@@ -4725,9 +4737,8 @@ jobs:
     # full #979 rationale. On push, `build`'s `if:` requires
     # `needs['container-scan'].result == 'success'`, so this scan is a hard gate on the
     # channel publish path: cancelling it in a merge cascade starves the channel. On a PR
-    # it is safe to cancel a superseded scan -- it only reads/builds a local image to scan
-    # (never pushes to GHCR) and `build` cleanly skips a cancelled scan via its `needs`
-    # gate.
+    # it is safe to cancel a superseded scan -- it never builds locally (G8 fix) and at
+    # most reads a remote image (never pushes), so `build` cleanly skips it via `needs`.
     #
     # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) keep their own
     # run_id-suffixed key so a manual retrigger or rerun cannot be confused with a
@@ -4740,17 +4751,16 @@ jobs:
           format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # Each matrix row carries its own JSON-encoded runner selector so amd64
-    # rows stay on the self-hosted pool (with LAN acceleration available) and
-    # arm64 rows run natively on a GitHub-hosted arm64 runner -- QEMU on the
-    # self-hosted pool would reintroduce the emulated-Rust-compile risk this
-    # scan is meant to catch before build/build-arm64 push anything real.
+    # Runner selector kept aligned with build/build-arm64's own per-arch split even
+    # though this job no longer builds anything (G8 fix): the surviving "should-scan ==
+    # false" branch's registry pull + Trivy scan still benefits from the same split, and
+    # one shared convention beats a second, independently-tuned selector.
     runs-on: ${{ fromJSON(matrix.runner) }}
-    # Real per-service runs: 24s-7min (this job's own comment above notes it
-    # "routinely dominates PR runtime" -- it builds a full service image,
-    # amd64 on self-hosted or native arm64 on a hosted runner, then Trivy
-    # scans it). 60 minutes gives real headroom for a cold Docker layer
-    # cache or a Trivy vulnerability-database refresh, neither of which
+    # Post-G8-fix timing: a changed service ("should-scan == true") only runs the cheap
+    # reuse-eligibility check and finishes in seconds; an unchanged service ("should-scan
+    # == false") pulls the channel image and Trivy-scans it, same cost as always. 60
+    # minutes gives headroom for a cold layer cache or vuln-DB refresh on that branch,
+    # neither of which
     # shows up in the warm-cache samples above; still far under build's own
     # 150-minute bound for the same class of work at full multi-arch scale.
     timeout-minutes: 60
@@ -4760,146 +4770,67 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
-          # decision 2026-08-06): proxy/dhcp-proxy/watchdog/dhcp/syslog/ntp have no real
-          # compile/link step in their Dockerfiles (precompiled package install or a
-          # COPY --from an upstream image only, confirmed by direct inspection, not
-          # assumed from the service name) and measured well below dns/ui/build-tools in
-          # a real full-rebuild run -- see issue #1095's comment thread for the numbers.
-          # dns/ui (Rust via ${BUILD_TOOLS_IMAGE}) and build-tools (Go+Rust) stay heavy.
-          # watchdog is scoped to its CURRENT Dockerfile only: issue #842's planned Rust
-          # rewrite must trigger a fresh re-evaluation, not a grandfathered stay on light.
+          # G8 fix (issue #1095): this job no longer builds anything, so `context`,
+          # `build_contexts`, `description`, and `platform` (only ever consumed by the
+          # now-removed throwaway-build step) are dropped from this matrix entirely --
+          # only `service`/`platform_tag`/`runner` are still read below. Runner tiers are
+          # kept in sync manually with `build`'s own matrix (see that job's comment for
+          # the full light/heavy measured-cost rationale, AG-CI-002): the surviving
+          # "should-scan == false" branch's registry pull + Trivy scan still benefits
+          # from the same split as the real build, even though this job itself no longer
+          # builds anything to measure a compile cost for.
           - service: proxy
-            context: services/proxy
-            # cdn-domains.txt lives in services/dns/, outside this image's own
-            # build context — see services/proxy/Dockerfile's COPY --from
-            # comment for why a named additional context is needed here.
-            build_contexts: dns-domains=services/dns
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
-            context: services/dns
-            build_contexts: ""
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
-            rust: true
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
-            context: services/watchdog
-            build_contexts: ""
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp
-            context: services/dhcp
-            build_contexts: ""
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
-            context: services/dhcp-proxy
-            build_contexts: ""
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
-            context: services/ntp
-            build_contexts: ""
-            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: syslog
-            context: services/syslog
-            build_contexts: ""
-            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
-            context: services/ui
-            build_contexts: ""
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
-            rust: true
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: build-tools
-            context: tools/build-tools
-            build_contexts: ""
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
-            platform: linux/amd64
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
-            context: services/proxy
-            build_contexts: dns-domains=services/dns
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: dns
-            context: services/dns
-            build_contexts: ""
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
-            rust: true
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: watchdog
-            context: services/watchdog
-            build_contexts: ""
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: dhcp
-            context: services/dhcp
-            build_contexts: ""
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: dhcp-proxy
-            context: services/dhcp-proxy
-            build_contexts: ""
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: ntp
-            context: services/ntp
-            build_contexts: ""
-            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: syslog
-            context: services/syslog
-            build_contexts: ""
-            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: ui
-            context: services/ui
-            build_contexts: ""
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
-            rust: true
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: build-tools
-            context: tools/build-tools
-            build_contexts: ""
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
-            platform: linux/arm64
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
@@ -4965,290 +4896,15 @@ jobs:
           fi
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
-      - name: Compute Docker build parallelism
-        if: steps.push-scan-changes.outputs.should-scan == 'true'
-        id: docker-build-jobs
-        run: |
-          set -euo pipefail
-
-          if [ -n "${CARGO_BUILD_JOBS:-}" ]; then
-            case "$CARGO_BUILD_JOBS" in
-              ''|*[!0-9]*)
-                echo "::error::CARGO_BUILD_JOBS must be a positive integer."
-                exit 1
-                ;;
-            esac
-            if [ "$CARGO_BUILD_JOBS" -le 0 ]; then
-              echo "::error::CARGO_BUILD_JOBS must be greater than zero."
-              exit 1
-            fi
-            jobs="$CARGO_BUILD_JOBS"
-            echo "::notice::Using CARGO_BUILD_JOBS=$jobs from repository variable for Docker builds."
-          else
-            detected_cores="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN || echo 2)"
-            jobs=$((detected_cores - 2))
-            if [ "$jobs" -lt 4 ]; then
-              jobs=4
-            fi
-            echo "::notice::Using CARGO_BUILD_JOBS=$jobs from $detected_cores detected cores for Docker builds."
-          fi
-
-          echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
-
-      - name: Prepare Rust acceleration secret files
-        # Trusted Rust image builds may use Redis sccache, sccache-dist, and
-        # distcc as CI infrastructure. Secrets are written to temporary files for
-        # BuildKit and are never exposed to fork PRs or Dependabot runs.
-        # Only the amd64 rows run on the self-hosted LAN pool that can reach
-        # this acceleration infrastructure -- the arm64 rows run on a
-        # GitHub-hosted runner and always scan an unaccelerated native build.
-        if: >-
-          ${{
-            steps.push-scan-changes.outputs.should-scan == 'true' &&
-            matrix.rust == true &&
-            matrix.platform_tag == 'amd64' &&
-            github.actor != 'dependabot[bot]' &&
-            github.event_name != 'pull_request'
-          }}
-        id: sccache-secret
-        env:
-          SCCACHE_REDIS_MODE: ${{ vars.SCCACHE_REDIS_MODE }}
-          SCCACHE_REDIS_URL: ${{ secrets.SCCACHE_REDIS_URL }}
-          SCCACHE_DIST_SCHEDULER_URL: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
-          SCCACHE_DIST_AUTH_TOKEN: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
-          DISTCC_POTENTIAL_HOSTS: ${{ vars.DISTCC_POTENTIAL_HOSTS }}
-        run: |
-          set -euo pipefail
-
-          mode="${SCCACHE_REDIS_MODE:-required}"
-          secret_files=()
-
-          toml_escape() {
-            printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
-          }
-
-          case "$mode" in
-            required|optional|off)
-              ;;
-            *)
-              echo "::error::SCCACHE_REDIS_MODE must be one of: required, optional, off."
-              exit 1
-              ;;
-          esac
-
-          sccache_enabled=1
-          redis_enabled=1
-          if [ "$mode" = "off" ]; then
-            sccache_enabled=0
-            redis_enabled=0
-            echo "Redis-backed sccache is disabled by SCCACHE_REDIS_MODE=off."
-          fi
-
-          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -z "$SCCACHE_DIST_AUTH_TOKEN" ]; then
-            echo "::error::SCCACHE_DIST_AUTH_TOKEN is required when SCCACHE_DIST_SCHEDULER_URL is set."
-            exit 1
-          fi
-
-          if [ "$sccache_enabled" = "1" ] && [ -z "$SCCACHE_DIST_SCHEDULER_URL" ] && [ -n "$SCCACHE_DIST_AUTH_TOKEN" ]; then
-            echo "::error::SCCACHE_DIST_SCHEDULER_URL is required when SCCACHE_DIST_AUTH_TOKEN is set."
-            exit 1
-          fi
-
-          if [ "$sccache_enabled" = "1" ] && [ -z "$SCCACHE_REDIS_URL" ]; then
-            if [ "$mode" = "optional" ]; then
-              echo "Skipping Redis-backed sccache because SCCACHE_REDIS_URL is empty and SCCACHE_REDIS_MODE=optional."
-              redis_enabled=0
-            else
-              echo "::error::SCCACHE_REDIS_URL repository secret is required for trusted Rust image scans so sccache can use Redis."
-              exit 1
-            fi
-          fi
-
-          umask 077
-          if [ "$redis_enabled" = "1" ]; then
-            redis_file="${{ runner.temp }}/sccache-redis-url"
-            printf '%s' "$SCCACHE_REDIS_URL" > "$redis_file"
-            secret_files+=("sccache_redis_url=$redis_file")
-            echo "redis-file=$redis_file" >> "$GITHUB_OUTPUT"
-          fi
-
-          if [ "$sccache_enabled" = "1" ] && [ -n "$SCCACHE_DIST_SCHEDULER_URL" ]; then
-            dist_config_file="${{ runner.temp }}/sccache-dist-config"
-            {
-              printf '[dist]\n'
-              printf 'scheduler_url = "%s"\n' "$(toml_escape "$SCCACHE_DIST_SCHEDULER_URL")"
-              printf 'toolchains = []\n'
-              printf 'toolchain_cache_size = 5368709120\n'
-              printf '\n[dist.auth]\n'
-              printf 'type = "token"\n'
-              printf 'token = "%s"\n' "$(toml_escape "$SCCACHE_DIST_AUTH_TOKEN")"
-            } > "$dist_config_file"
-            secret_files+=("sccache_dist_config=$dist_config_file")
-            echo "dist-config-file=$dist_config_file" >> "$GITHUB_OUTPUT"
-          fi
-
-          if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
-            if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
-              echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
-              exit 1
-            fi
-
-            distcc_hosts_file="${{ runner.temp }}/distcc-potential-hosts"
-            printf '%s' "$DISTCC_POTENTIAL_HOSTS" > "$distcc_hosts_file"
-            secret_files+=("distcc_potential_hosts=$distcc_hosts_file")
-            echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
-          fi
-
-          {
-            echo "secret-files<<SECRET_FILES"
-            printf '%s\n' "${secret_files[@]}"
-            echo "SECRET_FILES"
-          } >> "$GITHUB_OUTPUT"
-
-      - name: Select Rust acceleration network
-        # BuildKit host networking is only enabled when secret-backed
-        # acceleration needs access to private runner services. Normal builds
-        # stay on the default isolated network.
-        if: matrix.rust == true && matrix.platform_tag == 'amd64'
-        env:
-          SECRET_FILES: ${{ steps.sccache-secret.outputs.secret-files }}
-        run: |
-          set -euo pipefail
-
-          rust_network=bridge
-          buildx_network=default
-          if [ -n "$SECRET_FILES" ]; then
-            rust_network=host
-            buildx_network=host
-          fi
-          printf 'RUST_ACCELERATION_NETWORK=%s\n' "$rust_network" >> "$GITHUB_ENV"
-          printf 'RUST_BUILDX_NETWORK=%s\n' "$buildx_network" >> "$GITHUB_ENV"
-
-      - name: Validate acceleration infrastructure outside BuildKit cache
-        if: matrix.rust == true && matrix.platform_tag == 'amd64'
-        uses: ./.github/actions/rust-acceleration-preflight
-        with:
-          service: ${{ matrix.service }}
-          redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
-          dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
-          distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
-          build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
-          platform: ${{ matrix.platform }}
-
-      - name: Set up Docker Buildx for scan build (amd64)
-        # A docker-container builder is required for --allow network.host to actually take
-        # effect: that entitlement is enabled by default for container-driver builders since
-        # buildx v0.13 (docker/buildx#2266), but the plain `docker` driver additionally
-        # requires the daemon itself to be started with --allow-insecure-entitlement
-        # network.host -- an infrastructure-level flag this workflow can't set. Using an
-        # explicit container-driver builder here avoids that dependency entirely.
-        #
-        # Split from the arm64 row below (issue #930): this self-hosted amd64 row persists
-        # its local Buildx cache/image pulls across runs and has never hit the arm64 row's
-        # Docker Hub anonymous-pull rate limit, so it keeps the plain, unretried setup step.
-        if: >-
-          matrix.platform_tag == 'amd64' &&
-          steps.push-scan-changes.outputs.should-scan == 'true'
-        id: buildx-amd64
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Set up Docker Buildx for scan build (arm64, retried)
-        # Issue #930: this row runs on a GitHub-hosted arm64 runner, a fresh VM every run with
-        # no local image cache, which has hit Docker Hub's anonymous-pull rate limit
-        # (surfacing as "unauthorized: authentication required") while bootstrapping
-        # moby/buildkit:buildx-stable-1. Confirmed transient: a rerun with zero code changes
-        # succeeded. Retried via .github/actions/buildx-setup-retry instead of the plain
-        # action used by the amd64 row above.
-        if: >-
-          matrix.platform_tag == 'arm64' &&
-          steps.push-scan-changes.outputs.should-scan == 'true'
-        id: buildx-arm64
-        uses: ./.github/actions/buildx-setup-retry
-
-      - name: Build local scan image
-        # Issue #1095 Part 1 (Option B): this is the actual heavy compute in this job (a full
-        # docker buildx build), so it -- along with the Trivy scan step below -- is gated on
-        # push-supersession-check's output. The cheaper prep steps above (Buildx setup,
-        # secret/cache prep) are deliberately left ungated: gating every step for a marginal
-        # saving was judged not worth the added editing surface on a file with this much
-        # incident history; see this job's `needs:` comment for the invariant this relies on.
-        if: steps.push-scan-changes.outputs.should-scan == 'true' && needs['push-supersession-check'].outputs.superseded != 'true'
-        env:
-          CARGO_BUILD_JOBS: ${{ steps.docker-build-jobs.outputs.jobs }}
-          SCCACHE_REDIS_FILE: ${{ steps.sccache-secret.outputs.redis-file }}
-          SCCACHE_DIST_CONFIG_FILE: ${{ steps.sccache-secret.outputs.dist-config-file }}
-          DISTCC_HOSTS_FILE: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          MATRIX_BUILD_CONTEXTS: ${{ matrix.build_contexts }}
-        run: |
-          set -euo pipefail
-          source "$GITHUB_WORKSPACE/scripts/lib/docker-buildx-retry.sh"
-
-          secret_args=()
-          if [ -n "$SCCACHE_REDIS_FILE" ]; then
-            secret_args+=(--secret "id=sccache_redis_url,src=$SCCACHE_REDIS_FILE")
-          fi
-          if [ -n "$SCCACHE_DIST_CONFIG_FILE" ]; then
-            secret_args+=(--secret "id=sccache_dist_config,src=$SCCACHE_DIST_CONFIG_FILE")
-          fi
-          if [ -n "$DISTCC_HOSTS_FILE" ]; then
-            secret_args+=(--secret "id=distcc_potential_hosts,src=$DISTCC_HOSTS_FILE")
-          fi
-
-          build_context_args=()
-          if [ -n "${MATRIX_BUILD_CONTEXTS:-}" ]; then
-            build_context_args+=(--build-context "$MATRIX_BUILD_CONTEXTS")
-          fi
-
-          scan_build_network="${RUST_BUILDX_NETWORK:-default}"
-          if [ "$scan_build_network" = "bridge" ]; then
-            scan_build_network=default
-          fi
-          allow_args=()
-          if [ "$scan_build_network" = "host" ]; then
-            allow_args+=(--allow network.host)
-          fi
-
-          # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN
-          # step is fed from this build's own layer cache with no wall-clock expiry, so a stale
-          # cached layer can keep this scan (the gate meant to catch exactly this class of bug)
-          # from ever seeing a Debian security fix shipped after the layer was first cached.
-          # Passed unconditionally for every matrix.service -- harmless for services whose
-          # Dockerfile does not declare this ARG, and only actually changes the resolved
-          # command text (hence the cache key) for build-tools's own Dockerfile.
-          apt_cache_bust="$(date -u +%G-W%V)"
-
-          docker_buildx_retry -- docker buildx build \
-            --load \
-            --pull \
-            --platform ${{ matrix.platform }} \
-            --network "$scan_build_network" \
-            "${allow_args[@]}" \
-            --build-arg "BUILD_TOOLS_IMAGE=$BUILD_TOOLS_IMAGE" \
-            --build-arg "CARGO_BUILD_JOBS=$CARGO_BUILD_JOBS" \
-            --build-arg "APT_CACHE_BUST=$apt_cache_bust" \
-            "${secret_args[@]}" \
-            "${build_context_args[@]}" \
-            -t lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} \
-            ${{ matrix.context }}
-
-      # Exactly one of the two "Set up Docker Buildx for scan build" rows
-      # above actually ran per matrix row (gated on matrix.platform_tag), so
-      # exactly one of steps.buildx-amd64/steps.buildx-arm64 has a real
-      # builder name -- the other is empty and the `||` falls through to it.
-      # Same should-scan gate as "Build local scan image" above: nothing to
-      # remove when that step (and therefore the builder setup) was skipped.
-      - name: Remove buildx builder
-        if: ${{ always() && steps.push-scan-changes.outputs.should-scan == 'true' }}
-        run: |
-          docker buildx rm "${{ steps.buildx-amd64.outputs.name || steps.buildx-arm64.outputs.name }}" || true
+      # A changed service ("should-scan == true") does nothing further in this job (G8
+      # fix, issue #1095): no local build, no local scan. build/build-arm64's own "Scan
+      # pushed service digest with Trivy" step is the sole scan for that case.
 
       - name: Self-heal Trivy's own default cache directory ownership
         # Real incident (2026-08-03): trivy-action's own default cache dir
-        # (~/.cache/trivy, NOT the "Prepare local Trivy cache" dir below --
-        # that one is fully managed by this workflow) was found owned by
-        # root:root on a self-hosted runner, causing "permission denied"
-        # opening trivy.db and failing container-scan for that matrix row.
+        # (~/.cache/trivy) was found owned by root:root on a self-hosted
+        # runner, causing "permission denied" opening trivy.db and failing
+        # container-scan for that matrix row.
         # Host-level ownership/setgid was fixed directly on all runner hosts
         # (2026-08-03), but that alone does not survive the directory itself
         # being wiped and recreated from scratch by some future root-run
@@ -5264,137 +4920,6 @@ jobs:
             find "$trivy_home_cache" -type d -exec chmod g+s {} +
           fi
 
-      - name: Prepare local Trivy cache
-        # Trivy's cache backend (BoltDB) only allows one process to hold a given cache
-        # directory open at a time. This directory used to be keyed only by service+platform,
-        # not by ref -- safe back when the top-level "publish" concurrency group serialized
-        # whole pipeline runs, but #892 narrowed cancellation to per-job groups keyed by
-        # (service, platform, ref[, run_id]), making it genuinely possible for two different
-        # trusted refs to run this job for the same service+platform at the same time. Two
-        # such runs used to race on this exact directory, producing a cache-lock error or a
-        # corrupted/partially-written cache (#904).
-        #
-        # INVARIANT: concurrency only guarantees mutual exclusion within a group, so this
-        # directory's key must be at least as fine as the concurrency-group key above -- two
-        # runs in DIFFERENT groups (so they CAN run concurrently) must never collapse onto the
-        # same cache-dir string. That means mirroring the group key's full shape: sanitizing
-        # `github.ref` (not `ref_name`, which would collapse a branch and a same-named tag
-        # into one dir), and appending `run_id` in exactly the same condition the group key
-        # does (workflow_dispatch or a rerun). An earlier revision keyed only on sanitized
-        # `ref_name` with no run_id -- strictly coarser than the group key, leaving exactly
-        # this race open for the dispatch/rerun case.
-        #
-        # Folding the sanitized ref (and run_id where applicable) into the path makes each
-        # concurrency-group instance own a directory no other instance can ever write to.
-        # Reuses the same sanitization build-tools.yml already applies to its own per-ref
-        # mutable tag. Trade-off (#904): a ref's first ordinary-push scan, or a brand-new
-        # release tag, no longer benefits from another ref's warm cache the way the single
-        # shared directory used to allow.
-        #
-        # Retention (#912, investigated live on the runner hosts): a populated cache dir is
-        # >99.9% redundant copies of the two global Trivy DBs (~1.2 GB trivy.db + ~1.5 GB
-        # trivy-java.db); the actually image-specific fanal cache is ~100 KB. Only dirs a
-        # future run can reuse are worth keeping, so dirs that are cold-by-design are marked
-        # `ephemeral=true` here and deleted again by the "Remove ephemeral Trivy cache" step
-        # below the scan: workflow_dispatch runs/reruns get their own isolated,
-        # run_id-suffixed directory (never read back); tag refs are immutable and pushed
-        # exactly once, so without cleanup one dir per release would accumulate forever --
-        # they take the run_id suffix too (strictly finer than their group key, so the delete
-        # can never touch a directory another instance could be using). What remains
-        # persistent is exactly the reusable population: branch refs, bounded to one dir per
-        # service+platform per active branch, reused on every push.
-        id: trivy-cache
-        if: steps.push-scan-changes.outputs.should-scan == 'true'
-        run: |
-          set -euo pipefail
-          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
-          if [ -z "$sanitized_ref" ]; then
-            echo "::error::Could not derive a safe Trivy cache directory name from ref '$GITHUB_REF'."
-            exit 1
-          fi
-          cache_dir="/var/tmp/lancache-ng-trivy-cache/${{ matrix.service }}-${{ matrix.platform_tag }}-${sanitized_ref}"
-          if [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ] \
-            || [ "${GITHUB_REF#refs/tags/}" != "$GITHUB_REF" ]; then
-            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
-            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
-          fi
-          mkdir -p "$cache_dir"
-          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
-      - name: Enforce Trivy cache generation retention
-        # Persistent per-branch cache dirs (ephemeral=false above) are reused on every push
-        # and are never touched by the ephemeral cleanup step below or by host-level
-        # `systemd-tmpfiles` aging -- both only apply to dirs that go idle, and these are
-        # touched on every push/schedule run, so they never idle long enough (#928, same
-        # reasoning as the ephemeral case in #925/#927). Left alone they persist and grow
-        # without bound.
-        #
-        # Trivy's local cache is a pure re-downloadable cache of the public vulnerability DB
-        # (never a source of truth), so a periodic wholesale reset is safe: this stamps each
-        # persistent dir's last full-reset time in a sentinel file and wipes+recreates the
-        # whole dir once that generation exceeds TRIVY_CACHE_MAX_AGE_DAYS, forcing a full,
-        # fresh DB re-download for that cell.
-        #
-        # Deliberately NOT keyed off the directory's own mtime: every push refreshes mtime on
-        # files the scan step touches, so an mtime-based check would never fire for these
-        # continuously-reused dirs -- the exact reason host-level tmpfiles aging cannot solve
-        # this either. The sentinel file is only ever written by this step, so its age tracks
-        # "time since last forced reset", not "time since last use".
-        #
-        # Runs before the scan (not after) so the run that crosses the age threshold pays the
-        # one-time re-download cost itself, rather than leaving the next run to discover an
-        # already-wiped, cold directory.
-        #
-        # Scoped to build-push.yml's container-scan job only: build-tools.yml still writes
-        # its persistent Trivy cache dirs to unscoped fixed paths as of this change (PR #927,
-        # scoping + ephemeral cleanup for that workflow, is open but not yet merged) --
-        # retention there is deliberately deferred to a follow-up once #927 lands.
-        if: ${{ steps.trivy-cache.outputs.ephemeral == 'false' }}
-        env:
-          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
-          TRIVY_CACHE_MAX_AGE_DAYS: "14"
-        run: |
-          set -euo pipefail
-          # Fail closed the same way "Remove ephemeral Trivy cache" below
-          # does: a step-output-derived path must never be trusted blindly
-          # before an `rm -rf`, even after a future refactor of the prepare
-          # step's output wiring.
-          case "$TRIVY_CACHE_DIR" in
-            /var/tmp/lancache-ng-trivy-cache/?*) ;;
-            *)
-              echo "::error::Refusing to touch unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
-              exit 1
-              ;;
-          esac
-          stamp="$TRIVY_CACHE_DIR/.generation-stamp"
-          if [ -f "$stamp" ] && [ -z "$(find "$stamp" -mtime "+${TRIVY_CACHE_MAX_AGE_DAYS}" -print -quit)" ]; then
-            echo "Trivy cache generation for $TRIVY_CACHE_DIR is within ${TRIVY_CACHE_MAX_AGE_DAYS}d, keeping it."
-            exit 0
-          fi
-          echo "Resetting Trivy cache generation for $TRIVY_CACHE_DIR (stamp missing or older than ${TRIVY_CACHE_MAX_AGE_DAYS}d)."
-          rm -rf -- "$TRIVY_CACHE_DIR"
-          mkdir -p -- "$TRIVY_CACHE_DIR"
-          touch -- "$stamp"
-      - name: Scan image with Trivy
-        # Same push-supersession-check gate as "Build local scan image"
-        # above (this step scans the image that step builds -- if that step
-        # was skipped there is nothing here to scan).
-        if: steps.push-scan-changes.outputs.should-scan == 'true' && needs['push-supersession-check'].outputs.superseded != 'true'
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
-        with:
-          image-ref: lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
-          hide-progress: true
-          cache: "false"
-          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-          timeout: 10m
-          exit-code: "1"
-
       # Companion to "Determine per-service publish scan reuse" above (originally issue
       # #1290, build-tools-only; generalized to every service by Step 3, issue #1095):
       # when a service is unchanged this run, no local image was built to scan, but the
@@ -5406,8 +4931,7 @@ jobs:
       # scan.
       - name: Resolve channel image for unchanged-scan retag
         id: channel-image
-        # Same push-supersession-check gate as "Build local scan image"/"Scan
-        # image with Trivy" above (issue #1095 Part 1): a push that is
+        # push-supersession-check gate (issue #1095 Part 1): a push that is
         # already superseded before this job started has no reason to pay
         # for a channel-image registry read and a Trivy scan either -- the
         # newer push that supersedes it runs this same step for real.
@@ -5462,9 +4986,8 @@ jobs:
         run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       # A multi-platform image-ref: Trivy/Docker resolve it to the runner's own native
-      # platform automatically, same as "Scan image with Trivy" above. G11 fix: skips
-      # the scan below entirely when this exact digest already scanned clean today
-      # (see .github/actions/trivy-scan-with-cache).
+      # platform automatically. G11 fix: skips the scan below entirely when this exact
+      # digest already scanned clean today (see .github/actions/trivy-scan-with-cache).
       - name: Scan channel image with Trivy (no rebuild)
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         uses: ./.github/actions/trivy-scan-with-cache
@@ -5473,38 +4996,10 @@ jobs:
           digest: ${{ steps.channel-image.outputs.digest }}
           cache-key-scope: ${{ matrix.service }}-${{ matrix.platform_tag }}
           freshness-bucket: ${{ steps.scan-cache-bucket.outputs.value }}
-          vuln-db-cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-
-      - name: Remove ephemeral Trivy cache
-        # Ephemeral dirs (dispatch/rerun/tag -- see the prepare step's own comment) are
-        # cold-by-design and never read by any later run, so keeping them would only leak one
-        # ~1-2.5 GB directory per run onto the runner host (#912). `always()` so a failed or
-        # cancelled scan still cleans up; when the prepare step was skipped its output is
-        # empty and this step skips too. The case guard fails closed rather than trusting the
-        # interpolated path blindly: `rm -rf` on a step-output-derived path must never be able
-        # to escape the dedicated cache root, even after a future refactor of the prepare
-        # step's output wiring.
-        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
-        env:
-          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
-        run: |
-          set -euo pipefail
-          case "$TRIVY_CACHE_DIR" in
-            /var/tmp/lancache-ng-trivy-cache/?*)
-              rm -rf -- "$TRIVY_CACHE_DIR"
-              ;;
-            *)
-              echo "::error::Refusing to delete unexpected Trivy cache path '$TRIVY_CACHE_DIR'."
-              exit 1
-              ;;
-          esac
-      - name: Remove scan image
-        if: >-
-          ${{
-            always() &&
-            steps.push-scan-changes.outputs.should-scan == 'true'
-          }}
-        run: docker rmi lancache-ng-scan:${{ matrix.service }}-${{ matrix.platform_tag }}-${{ github.run_id }} || true
+          # vuln-db-cache-dir intentionally omitted (G8 fix removed this job's own
+          # managed cache dir): trivy-action falls back to its own default
+          # (~/.cache/trivy), which "Self-heal Trivy's own default cache directory
+          # ownership" above already keeps writable.
 
   determine-push-reuse-scope:
     # Step 4 (issue #1095): decides, once per push (not once per build/build-arm64/
@@ -5804,12 +5299,18 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # Runner tiers below: same issue #1095 / AG-CI-002 measured exception as
-          # container-scan's matrix -- see that job's own comment for the full
-          # rationale (Dockerfile compile-graph evidence, measured build times,
-          # watchdog's #842-scoped non-permanence). Kept in sync manually with
-          # container-scan's copy, same convention as this job's own
-          # service_descriptions duplication elsewhere in this file.
+          # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
+          # decision 2026-08-06) are this rule's canonical copy: proxy/dhcp-proxy/
+          # watchdog/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles
+          # (precompiled package install or a COPY --from an upstream image only,
+          # confirmed by direct inspection, not assumed from the service name) and
+          # measured well below dns/ui/build-tools in a real full-rebuild run -- see issue
+          # #1095's comment thread for the numbers. dns/ui (Rust via ${BUILD_TOOLS_IMAGE})
+          # and build-tools (Go+Rust) stay heavy. watchdog is scoped to its CURRENT
+          # Dockerfile only: issue #842's planned Rust rewrite must trigger a fresh
+          # re-evaluation, not a grandfathered stay on light. container-scan's own matrix
+          # mirrors this split (kept in sync manually) even though it no longer builds
+          # anything itself (G8 fix) -- see that job's own comment for why it still cares.
           - service: proxy
             context: services/proxy
             # cdn-domains.txt lives in services/dns/, outside this image's own
@@ -6535,10 +6036,10 @@ jobs:
       - name: Scan pushed service digest with Trivy
         # Step 3 (issue #1095): generalized from build-tools-only to every service -- the
         # exact pushed digest is scanned before provenance and channel promotion for all 8
-        # services now, closing the provenance gap where the artifact Trivy scanned
-        # (container-scan's own throwaway local build) was never the artifact actually
-        # published (this step's own image-ref is already resolved generically per
-        # matrix.service -- only this `if:` had been narrowed to build-tools-only).
+        # services now. G8 fix: this is now the ONLY vulnerability scan for a changed
+        # service on a trusted ref -- container-scan's own throwaway rebuild-and-scan
+        # (which used to scan a different, never-published image with a different
+        # digest) was removed, since it never verified the artifact actually published.
         if: >-
           ${{
             github.event_name != 'pull_request' &&
