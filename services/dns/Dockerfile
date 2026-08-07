@@ -258,10 +258,11 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 #     (identical) -- i.e. identical to what Debian trixie's 4.9.16 already
 #     used and to what the 5.1.3 package needed. Now that the `apk add` step
 #     below installs plain stable's 5.0.7-r0 instead (issue #1483), this
-#     stays valid: 5.0.7 is a patch release within the already-verified
-#     5.0.x line, and CI's real build (see that issue's PR) confirms
-#     schema.sqlite3.sql is still absent from the installed package and that
-#     entrypoint.sh's fallback still engages correctly.
+#     stays valid: re-confirmed live via a real CI build (2026-08-07, PR
+#     resolving issue #1483) that the installed 5.0.7-r0 package still ships
+#     no schema.sqlite3.sql (`apk info -L pdns-backend-sqlite3` lists no
+#     schema file), so entrypoint.sh's vendored-schema fallback still
+#     engages exactly as it did for 5.0.5/5.1.3.
 #
 # Package translations from the prior apt-get list (all confirmed live
 # against a real `alpine:3.24` container, not assumed from the apk package
