@@ -529,10 +529,15 @@ sif_wait_for_fresh_base_image() {
   # restored on any of this function's several return points -- no explicit
   # save/restore needed.
   if (( hard_ceiling_seconds > 0 )); then
+    # shellcheck disable=SC2034 # read by ghcr_retry() in scripts/lib/ghcr-retry.sh,
+    # a cross-file dynamic-scope read shellcheck cannot see.
     local GHCR_RETRY_MAX_ATTEMPTS=1
+    # shellcheck disable=SC2034 # same cross-file reason.
     local GHCR_RETRY_BACKOFF_SECONDS=0
   else
+    # shellcheck disable=SC2034 # same cross-file reason.
     local GHCR_RETRY_MAX_ATTEMPTS=2
+    # shellcheck disable=SC2034 # same cross-file reason.
     local GHCR_RETRY_BACKOFF_SECONDS=5
   fi
 
