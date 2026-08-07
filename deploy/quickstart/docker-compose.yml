@@ -85,8 +85,33 @@ services:
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
-      - "${IP_SSL:-127.0.0.1}:80:80"
-      - "${IP_SSL:-127.0.0.1}:443:443"
+      # Issue #1415 (follow-up, real-world signature confirmed on PR #1463's
+      # CI run 2026-08-07): this row publishes unconditionally even when SSL
+      # mode is declined -- setup.sh's fresh-install wizard then leaves .env's
+      # IP_SSL genuinely EMPTY (not unset), and Compose's `:-` operator treats
+      # empty exactly like unset, so the bare `${IP_SSL:-127.0.0.1}` this used
+      # to read fell back to the one shared literal every SSL-declined install
+      # on a host defaults to -- including two concurrent CI simulation runs,
+      # which is why scripts/setup-cli-simulation.sh's own dynamic
+      # IP_STANDARD/IP_SSL derivation (already fixed for the IP_STANDARD row
+      # above by PR #1456) never actually closed this second row's collision:
+      # exporting IP_SSL from the wrapper is moot once setup.sh's wizard
+      # itself blanks it before ever calling `docker compose up`, and the
+      # written .env is just as empty either way. IP_SSL_BIND_FALLBACK is a
+      # SEPARATE knob setup.sh's wizard never assigns and never writes to
+      # .env, so it survives untouched through that blanking -- confirmed with
+      # a real `docker compose config` run on a runner host (not just static
+      # YAML reading, per AG-CI-015/017) that nested `${A:-${B:-literal}}`
+      # interpolation resolves correctly on this project's pinned Compose
+      # version, including when $IP_SSL is set-but-empty rather than unset.
+      # Left unset (the default, and the only supported value for a real
+      # install), both rows below still resolve to the identical historical
+      # 127.0.0.1 literal -- unchanged for every real deployment. Only
+      # scripts/setup-cli-simulation.sh sets it, to this run's own
+      # sim_ip_octet()-derived address, mirroring LANCACHE_CONTAINER_SUFFIX's
+      # existing CI-only-knob pattern documented at the top of this file.
+      - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:80:80"
+      - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:443:443"
     healthcheck:
       # Since #1276/#1322: see deploy/prod/docker-compose.yml's matching
       # comment -- container port 443 is now the stream-level SNI dispatch
@@ -717,13 +742,17 @@ services:
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
-      # deploy/prod/docker-compose.yml's identical addition -- currently
-      # unused by watchdog.sh (the bash entrypoint this ENTRYPOINT still
-      # runs), read only by the Rust crate's resolve_alert_only_targets()
-      # once that becomes this service's actual ENTRYPOINT.
+      # DHCP_MODE/SYSLOG_ENABLED/NTP_ENABLED (issue #842/#849/#1296):
+      # matches deploy/prod/docker-compose.yml's identical addition and its
+      # own comment there for the full rationale -- DHCP_MODE/SYSLOG_ENABLED
+      # are still unused by watchdog.sh (the bash entrypoint this
+      # ENTRYPOINT actually runs), read only by the Rust crate's
+      # resolve_alert_only_targets() once that becomes this service's
+      # actual ENTRYPOINT; NTP_ENABLED is different -- watchdog.sh itself
+      # now reads it directly to decide whether to alert-only-monitor `ntp`.
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see
@@ -988,7 +1017,17 @@ services:
       # flap this healthcheck unhealthy for that reason alone. Verified live:
       # a freshly started, not-yet-synchronised chronyd still returns a
       # "Reference ID" line immediately.
-      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      #
+      # Second statement (issue #1296, maintainer decision): see
+      # deploy/prod/docker-compose.yml's matching comment on this exact
+      # line for the full rationale -- kept identical across both compose
+      # files. In short: surfaces a real CAP_SYS_TIME-denied degraded mode
+      # into Docker's own `.State.Health.Log` every healthcheck cycle, so
+      # `services/watchdog` can report a genuinely distinct amber
+      # "Degraded" state instead of a plain healthy dot, without ever
+      # making this container Docker-"unhealthy" for a real, deliberate
+      # reduced-guarantee mode.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -55,7 +55,16 @@
     <div class="flex flex-wrap gap-x-6 gap-y-2" id="watchdog-services">
       {% for svc in watchdog_status.services %}
       <div class="flex items-center gap-2" data-service="{{ svc.name }}">
-        <span class="w-2.5 h-2.5 rounded-full {% if svc.status == "green" %}bg-green-400{% elif svc.status == "yellow" %}bg-yellow-400{% elif svc.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot"></span>
+        {# "amber" (issue #1296): a distinct, deliberate reduced-guarantee
+           state -- NOT "yellow" (which means "unknown/transitional" here,
+           see HealthReading::color()'s own doc comment on the Rust side).
+           `title` surfaces svc.health verbatim (e.g. "degraded", matching
+           every other health string this project's own status.json schema
+           already carries) as a real, persistent tooltip, not just a
+           startup log line -- this was previously true only in the field's
+           own doc comment, never actually rendered anywhere in this
+           template until now. #}
+        <span class="w-2.5 h-2.5 rounded-full {% if svc.status == "green" %}bg-green-400{% elif svc.status == "amber" %}bg-amber-400{% elif svc.status == "yellow" %}bg-yellow-400{% elif svc.status == "red" %}bg-red-400{% else %}bg-slate-500{% endif %}" data-role="dot" title="{{ svc.health }}"></span>
         <span class="text-sm text-slate-300">{{ svc.label }}</span>
         {% if svc.failures > 0 %}
         <span class="text-xs text-amber-400" data-role="failures">({{ svc.failures }} failures)</span>
@@ -218,15 +227,60 @@
       </div>
       <span class="text-xs text-slate-500 font-mono">{{ syslog_size_gb }} / {{ syslog_max_gb }} GB</span>
     </div>
-    <p class="text-xs text-slate-500">Storage-budget retention is watchdog's responsibility, not this page's.</p>
+    <!-- #849 bug-hunt finding observability.md#13: syslog_client::get_syslog_stats
+         already computes a per-host breakdown (files/size/distinct days) on
+         every render (routes/dashboard.rs); this table exposes it instead of
+         discarding it down to the two aggregate numbers above. -->
+    {% if syslog_stats.hosts %}
+    <div class="overflow-x-auto">
+      <table class="w-full text-xs">
+        <thead>
+          <tr class="text-slate-500 text-left border-b border-slate-700/50">
+            <th class="pb-1 pr-4 font-medium">Host</th>
+            <th class="pb-1 pr-4 font-medium">Files</th>
+            <th class="pb-1 pr-4 font-medium">Days</th>
+            <th class="pb-1 font-medium">Size</th>
+          </tr>
+        </thead>
+        <tbody class="divide-y divide-slate-700/30">
+          {% for host in syslog_stats.hosts %}
+          <tr>
+            <td class="py-1 pr-4 text-blue-400 font-mono">{{ host.host }}</td>
+            <td class="py-1 pr-4 text-slate-300 font-mono">{{ host.files }}</td>
+            <td class="py-1 pr-4 text-slate-300 font-mono">{{ host.days }}</td>
+            <td class="py-1 text-slate-300 font-mono">{{ host.size_human }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% endif %}
+    <p class="text-xs text-slate-500 mt-2">Storage-budget retention is watchdog's responsibility, not this page's.</p>
   </div>
   {% endif %}
 
   <!-- Recent requests: last N lines tailed from the access log
        (nginx_client::parse_log_tail), newest-to-oldest is not guaranteed —
-       this is simply the tail of the file. -->
+       this is simply the tail of the file.
+
+       #849 bug-hunt finding observability.md#19: this tile always reads
+       nginx's own direct access log (recent_logs_task, routes/dashboard.rs),
+       even once syslog mode is enabled and /logs switches to the central
+       syslog-ng store instead -- the two pages can then show data through
+       different pipelines on the same install. This is not a data-loss bug
+       (nginx keeps writing its own access log regardless of whether
+       syslog-ng also receives a forwarded copy), so the fix is to label the
+       source explicitly rather than merge two structurally different log
+       formats (syslog-ng's forwarded lines carry raw
+       timestamp/host/program/message fields, not nginx's parsed
+       method/path/status/cache-status shape) into one. -->
   <div class="card">
-    <h2 class="font-semibold text-slate-200 mb-3">Recent requests (proxy)</h2>
+    <div class="flex items-center justify-between mb-3">
+      <h2 class="font-semibold text-slate-200">Recent requests (proxy)</h2>
+      {% if syslog_enabled %}
+      <span class="text-xs text-slate-500" title="This tile always reads nginx's own direct access log, even in syslog mode. The central syslog-ng view (aggregating every wired service, not just the proxy) is on the Logs page.">direct nginx log · see <a href="/logs" class="underline hover:text-slate-300">Logs</a> for the syslog-ng view</span>
+      {% endif %}
+    </div>
     {% if recent_logs %}
     <div class="overflow-x-auto">
       <table class="w-full text-sm">
@@ -319,21 +373,33 @@
   // different SSL_ENABLED value, never mid-session, so patching existing
   // [data-service] rows by name is enough and avoids re-deriving the same
   // label/color mapping twice (once in Tera, once in JS).
-  const WATCHDOG_DOT_COLOR_CLASSES = ['bg-green-400', 'bg-yellow-400', 'bg-red-400', 'bg-slate-500'];
+  // 'bg-amber-400' (issue #1296) kept in sync with the Tera template's own
+  // color ternary above and with HealthReading::color() on the Rust side
+  // (services/watchdog/src/health.rs) -- update all three together if this
+  // ever changes.
+  const WATCHDOG_DOT_COLOR_CLASSES = ['bg-green-400', 'bg-amber-400', 'bg-yellow-400', 'bg-red-400', 'bg-slate-500'];
 
   function watchdogColorClass(status) {
     if (status === 'green') return 'bg-green-400';
+    if (status === 'amber') return 'bg-amber-400';
     if (status === 'yellow') return 'bg-yellow-400';
     if (status === 'red') return 'bg-red-400';
     return 'bg-slate-500';
   }
 
-  function setWatchdogDotColor(dot, status) {
+  // `health` is optional (the disk-cache dot has no equivalent health
+  // string, only a color) -- only touches the title attribute when a
+  // value is actually supplied, so a poller call that omits it never wipes
+  // out the server-rendered tooltip with an empty string.
+  function setWatchdogDotColor(dot, status, health) {
     if (!dot) {
       return;
     }
     dot.classList.remove(...WATCHDOG_DOT_COLOR_CLASSES);
     dot.classList.add(watchdogColorClass(status));
+    if (health !== undefined) {
+      dot.setAttribute('title', health);
+    }
   }
 
   async function refreshWatchdogStatus() {
@@ -365,7 +431,7 @@
         if (!row) {
           return;
         }
-        setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status);
+        setWatchdogDotColor(row.querySelector('[data-role="dot"]'), svc.status, svc.health);
       });
       if (data.disk && data.disk.cache) {
         const diskRow = document.querySelector('[data-service="disk-cache"]');

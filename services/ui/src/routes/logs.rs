@@ -10,7 +10,7 @@
 
 use crate::{AppState, nginx_client, syslog_client};
 use axum::extract::{Query, State};
-use axum::response::Html;
+use axum::response::IntoResponse;
 use serde::Deserialize;
 use std::sync::Arc;
 use tera::Context;
@@ -33,7 +33,7 @@ pub struct LogFilter {
 pub async fn logs_page(
     State(state): State<Arc<AppState>>,
     Query(params): Query<LogFilter>,
-) -> Html<String> {
+) -> impl IntoResponse {
     let mut ctx = Context::new();
     ctx.insert("active_page", "logs");
 

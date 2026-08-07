@@ -555,6 +555,58 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
 }
 
+@test "#1095 F-20: BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
+    # Discriminating test for the two allow_reverse_ancestry=true call sites
+    # F-20 added inside saf_resolve_untouched_backfill_source() (Step 1's
+    # fast path here, since every service is untouched by default per
+    # setup()'s docs-only fixture -- Step 2's normal-path call site carries
+    # the identical fix and reasoning, see that call site's own comment).
+    #
+    # Simulates the real push-reuse shape (#1095 Step 4): base_sha's own
+    # per-commit tag exists, but imagetools create copied the label from the
+    # older commit whose content it reused -- so the revision label reads
+    # older_sha, a genuine strict ancestor of base_sha, not base_sha itself.
+    # Only base_sha's own tag resolves to anything at all; every other tag
+    # (including any ancestor candidate's) reports "no image" -- this makes
+    # the pass/fail outcome unambiguous: if allow_reverse_ancestry is not
+    # honored here, the freshness check rejects older_sha as stale, falls
+    # through to saf_find_built_ancestor, and that walk finds nothing usable
+    # either (every ancestor's own tag is also stubbed absent) -- a hard
+    # failure, not a quieter wrong-answer. Verified this test fails against
+    # the pre-F-20 baseline for exactly that reason (status non-zero, "No
+    # usable ancestor" error) before writing this comment.
+    revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
+    cat > "$revision_map_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "$base_sha_short") echo "$older_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_map_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_map_stub"
+
+    export EXISTING_IMAGES=""
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="false" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export DHCP_TOUCHED="false" DHCP_PROXY_TOUCHED="false" NTP_TOUCHED="false"
+    run bash "$script"
+    [ "$status" -eq 0 ]
+    # Captured immediately, before the `run !` call below overwrites bats'
+    # shared $output/$status (see the SC2314 comment used by the analogous
+    # ancestor-fallback test above for why).
+    script_output="$output"
+    # Every service back-filled straight from base_sha's own tag -- never
+    # substituted for an ancestor's, and never refused as stale.
+    [ "$(wc -l < "$backfill_log")" -eq 9 ]
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha_short}" "$backfill_log"
+    run ! grep -qF "sha-${older_sha:0:7}" "$backfill_log"
+    [[ "$script_output" != *"Substituting nearest built ancestor"* ]]
+    [[ "$script_output" != *"No usable ancestor"* ]]
+}
+
 @test "#808: BASE_SHA is required -- an omitted BASE_SHA fails closed instead of silently skipping the freshness check" {
     unset BASE_SHA
     export EXISTING_IMAGES=""
@@ -787,22 +839,25 @@ STUB
     # otherwise setup()'s default revision stub (always fresh at BASE_SHA)
     # would let the ordinary backfill succeed before this scenario is even
     # reached, the same reason the dedicated "confirmed run" test below needs
-    # this override too. Scoped to the BASE_SHA image tag specifically (not a
-    # blanket "always answer older_sha" stub): this test's own fixture name
-    # ("no ancestor anywhere has a usable run") requires every OTHER image
-    # query -- in particular saf_find_built_ancestor's own direct
-    # image-existence check for a candidate whose paths could not be
-    # confirmed ignorable -- to correctly report "no such image" too, or this
-    # stub would inadvertently simulate an ancestor candidate's image
-    # existing when this fixture means for none to.
+    # this override too. `exit 1` for every image, not "echo an older
+    # ancestor's sha" (#1095 F-20, 2026-08-07): since
+    # saf_resolve_untouched_backfill_source's own BASE_SHA-level checks now
+    # pass allow_reverse_ancestry=true (the same push-reuse-retag-aware
+    # acceptance saf_find_built_ancestor's own candidate checks already used),
+    # echoing a genuine ancestor of base_sha here would now be LEGITIMATELY
+    # accepted as fresh instead of refused -- see the "#808: ... is NOT
+    # back-filled ... stale relative to BASE_SHA" test's own comment a few
+    # hundred lines up in this same file for the identical reasoning, written
+    # before this fixture needed to catch up to it. This test's own fixture
+    # name ("no ancestor anywhere has a usable run") means every image query
+    # -- BASE_SHA's own and every ancestor candidate's -- must correctly
+    # report "no such image" for the scenario to hold at all, so a single
+    # unconditional `exit 1` is not just simpler than the old per-tag `case`,
+    # it is the only shape that still means what this test's name says.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_no_ancestor.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-image="\$1"
-case "\$image" in
-    *":sha-${base_sha:0:7}") echo "$older_sha" ;;
-    *) exit 1 ;;
-esac
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
@@ -850,14 +905,19 @@ STUB
     chmod +x "$run_exists_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
 
-    # Force the exact-BASE_SHA freshness check to fail first (same
-    # older_sha-reports-stale pattern the pre-existing "#808 stale" test
-    # already uses), so the script actually reaches the new fallback
-    # decision point instead of succeeding earlier.
+    # Force the exact-BASE_SHA freshness check to fail first, so the script
+    # actually reaches the new fallback decision point instead of succeeding
+    # earlier. `exit 1` (no such image), not "echo an older ancestor's sha"
+    # (#1095 F-20, 2026-08-07): saf_resolve_untouched_backfill_source's own
+    # BASE_SHA-level checks now pass allow_reverse_ancestry=true, so echoing
+    # a genuine ancestor of base_sha here would now be legitimately accepted
+    # as fresh instead of refused -- see the "#808: ... is NOT back-filled
+    # ... stale relative to BASE_SHA" test's own comment for the identical
+    # reasoning.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_run_exists.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-echo "$older_sha"
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
@@ -890,10 +950,17 @@ STUB
     chmod +x "$indeterminate_stub"
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$indeterminate_stub"
 
+    # Force the exact-BASE_SHA freshness check to fail first. `exit 1` (no
+    # such image), not "echo an older ancestor's sha" (#1095 F-20,
+    # 2026-08-07): saf_resolve_untouched_backfill_source's own BASE_SHA-level
+    # checks now pass allow_reverse_ancestry=true, so echoing a genuine
+    # ancestor of base_sha here would now be legitimately accepted as fresh
+    # instead of refused -- see the "#808: ... is NOT back-filled ... stale
+    # relative to BASE_SHA" test's own comment for the identical reasoning.
     stale_stub="$BATS_TEST_TMPDIR/stale_revision_indeterminate.sh"
-    cat > "$stale_stub" <<STUB
+    cat > "$stale_stub" <<'STUB'
 #!/usr/bin/env bash
-echo "$older_sha"
+exit 1
 STUB
     chmod +x "$stale_stub"
     export STAGING_IMAGE_REVISION_CMD="$stale_stub"
@@ -965,4 +1032,23 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 0 ]
     [[ "$output" != *"Substituting nearest built ancestor"* ]]
     printf '%s\n' "$output" | grep -q "paths could not be positively confirmed"
+}
+
+# scripts/lib/staging-poll-defaults.sh coverage: sourced directly (not via a
+# full run of $script) so these two cases run instantly instead of actually
+# waiting out a real 3600s poll to observe the workflow_changed=true default.
+@test "staging poll defaults: normal (workflow_changed=false) case is unchanged" {
+    # shellcheck source=scripts/lib/staging-poll-defaults.sh
+    source "$repo_root/scripts/lib/staging-poll-defaults.sh"
+    staging_poll_set_defaults_for_workflow_changed "false"
+    [ "$default_poll_timeout_seconds" -eq 1500 ]
+    [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
+}
+
+@test "staging poll defaults: workflow_changed=true widens the full-rebuild budget to 3600s" {
+    # shellcheck source=scripts/lib/staging-poll-defaults.sh
+    source "$repo_root/scripts/lib/staging-poll-defaults.sh"
+    staging_poll_set_defaults_for_workflow_changed "true"
+    [ "$default_poll_timeout_seconds" -eq 3600 ]
+    [ "$default_poll_hard_ceiling_seconds" -eq 3600 ]
 }
