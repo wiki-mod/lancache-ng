@@ -24,7 +24,7 @@
 # backends.
 #
 # Deliberately a standalone script rather than an extension of
-# scripts/proxy-deep-wildcard-tls-simulation.sh: that script validates
+# scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh: that script validates
 # SSL-mode certificate *selection* (which cert nginx presents for a given
 # SNI, terminated by nginx itself). This script validates standard-mode SNI
 # *passthrough routing* (which real backend nginx's stream module forwards
@@ -54,7 +54,7 @@
 # reached.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"

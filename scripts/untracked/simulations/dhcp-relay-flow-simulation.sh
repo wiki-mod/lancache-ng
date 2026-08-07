@@ -27,7 +27,7 @@
 # request across the segment boundary and relayed the reply back.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 client_net="lancache-ng-relay-client-$$"

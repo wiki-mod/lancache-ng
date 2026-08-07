@@ -4,7 +4,7 @@
 #
 # Real DHCP behavior test for services/dhcp-proxy's ProxyDHCP/PXE mode
 # (issue #705) -- the dnsmasq-proxy DHCP mode that
-# scripts/dhcp-kea-lease-flow-simulation.sh's own header comment
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's own header comment
 # explicitly calls out as "entirely different code path, out of scope
 # for this script." This script is that missing coverage.
 #
@@ -41,7 +41,7 @@
 # in-process sniff. The probe is compiled once below with the build-tools
 # image and mounted into the client container.
 #
-# Safety model, mirroring scripts/dhcp-kea-lease-flow-simulation.sh's own
+# Safety model, mirroring scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's own
 # (see that script's header comment for the fuller rationale): both the
 # dnsmasq-proxy server and the synthetic PXE client run as ordinary
 # Docker containers on a throwaway, per-run bridge network this script
@@ -61,7 +61,7 @@
 # configured address the DHCPOFFER is asserted to point at).
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/dhcp-lease-parse.sh

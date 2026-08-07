@@ -34,11 +34,11 @@
 # as a guard failure instead of the check silently checking nothing.
 #
 # Usage:
-#   scripts/check-idempotence-test-coverage.sh [repo_root]
+#   scripts/tracked/check-idempotence-test-coverage.sh [repo_root]
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root="${1:-$(cd "$script_dir/.." && pwd)}"
+repo_root="${1:-$(cd "$script_dir/../.." && pwd)}"
 cd "$repo_root"
 
 # writer_path|evidence_path[|extra_marker] pairs. Kept as a flat array (not
@@ -281,7 +281,7 @@ for pair in "${WRITER_TEST_EVIDENCE[@]}"; do
     extra_marker="${fields[2]:-}"
 
     if [ ! -f "$writer_path" ]; then
-        fail "check-idempotence-test-coverage: config-writer '$writer_path' no longer exists; update WRITER_TEST_EVIDENCE in scripts/check-idempotence-test-coverage.sh (or remove the entry if the writer itself was removed)."
+        fail "check-idempotence-test-coverage: config-writer '$writer_path' no longer exists; update WRITER_TEST_EVIDENCE in scripts/tracked/check-idempotence-test-coverage.sh (or remove the entry if the writer itself was removed)."
         continue
     fi
 
@@ -302,13 +302,13 @@ for pair in "${WRITER_TEST_EVIDENCE[@]}"; do
             fi
             ;;
         *)
-            fail "check-idempotence-test-coverage: unsupported evidence file type for '$evidence_path' (expected .bats or .rs); update scripts/check-idempotence-test-coverage.sh."
+            fail "check-idempotence-test-coverage: unsupported evidence file type for '$evidence_path' (expected .bats or .rs); update scripts/tracked/check-idempotence-test-coverage.sh."
             ;;
     esac
 done
 
 if [ "$failures" -gt 0 ]; then
-    printf '::error::check-idempotence-test-coverage: %d config-writer(s) missing repeat-run/idempotence test coverage (see scripts/check-idempotence-test-coverage.sh).\n' "$failures" >&2
+    printf '::error::check-idempotence-test-coverage: %d config-writer(s) missing repeat-run/idempotence test coverage (see scripts/tracked/check-idempotence-test-coverage.sh).\n' "$failures" >&2
     exit 1
 fi
 

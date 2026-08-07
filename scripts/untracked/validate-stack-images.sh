@@ -11,7 +11,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 manifest=${1:-"$repo_root/release/stack-images.yml"}
 
 fail() {
@@ -269,9 +269,9 @@ require_grep 'docker buildx imagetools inspect "\$source_image"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* source image before moving a public channel'
 require_grep 'imagetools inspect "\$image" --format' \
-  scripts/require-image-platforms.sh \
+  scripts/untracked/require-image-platforms.sh \
   'the shared platform coverage guard must inspect single-platform image metadata before falling back to text Platform lines'
-if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/require-image-platforms.sh"; then
+if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/untracked/require-image-platforms.sh"; then
   fail 'the shared platform coverage guard must not require host jq'
 fi
 require_grep 'bash scripts/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
@@ -357,9 +357,9 @@ require_grep 'golang:latest ->' \
   .github/workflows/build-push.yml \
   'release notes must include the resolved golang:latest base digest for build-tools'
 require_grep 'stable releases require external images in supported profiles to be pinned by digest, mirrored, or explicitly removed from the stable profile' \
-  scripts/check-stable-external-images.sh \
+  scripts/tracked/check-stable-external-images.sh \
   'stable release promotion must fail closed while release-relevant external images are floating'
-require_grep 'bash scripts/check-stable-external-images.sh' \
+require_grep 'bash scripts/tracked/check-stable-external-images.sh' \
   .github/workflows/build-push.yml \
   'stable release promotion must call the external image gate before moving latest'
 require_grep 'expected_prerelease=' \
@@ -372,7 +372,7 @@ require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLA
   .github/workflows/build-push.yml \
   'release workflow must verify every published release image via the shared platform coverage guard'
 require_grep 'is missing required platform' \
-  scripts/require-image-platforms.sh \
+  scripts/untracked/require-image-platforms.sh \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
 # container-scan's OWN per-run local-build cache dir (the same literal pattern this
 # check used to require) was removed along with the local-build branch it belonged to

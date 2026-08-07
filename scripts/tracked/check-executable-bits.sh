@@ -33,7 +33,7 @@
 # script-under-test fails with exit 126, so the regression surfaces there
 # rather than needing to be re-derived here.
 #
-# Modeled on scripts/check-action-node-versions.sh (issue #801/#804), the
+# Modeled on scripts/tracked/check-action-node-versions.sh (issue #801/#804), the
 # `scripts/check-*.sh` + CI-job template #822's own Pattern H names for
 # converting a recurring whack-a-mole into an impossible-to-reintroduce class.
 #
@@ -61,7 +61,7 @@
 # instead of depending on the real repository.
 set -euo pipefail
 
-repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 # The committed mode is read from git, so this must be a git work tree.

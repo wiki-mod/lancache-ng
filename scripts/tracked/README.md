@@ -4,7 +4,7 @@ Destination directory for CI-tooling-only scripts (issue #1095 F-16, decided
 2026-07-31). A script belongs here once it has been individually verified to
 have no service/product-code dependency at all -- i.e. it is exactly the kind
 of script currently enumerated by name in
-`scripts/detect-full-setup-changes.sh`'s `ci_tooling_only_scripts` allowlist.
+`scripts/untracked/detect-full-setup-changes.sh`'s `ci_tooling_only_scripts` allowlist.
 
 Any path under this directory is automatically recognized as CI-tooling-only
 by that script's `should_run` logic (directory-prefix match), so once a

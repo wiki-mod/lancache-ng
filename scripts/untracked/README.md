@@ -8,7 +8,7 @@ behavior (e.g. `detect-full-setup-changes.sh`, `plan-deep-validation.sh`,
 touched rather than being exempted.
 
 No special-case handling exists for this prefix in
-`scripts/detect-full-setup-changes.sh` -- none is needed, since any path
+`scripts/untracked/detect-full-setup-changes.sh` -- none is needed, since any path
 here that isn't also matched by `scripts/tracked/` or the legacy allowlist
 already falls through to should_run-relevant by default, exactly like an
 unclassified script today. `scripts/lib/` is treated the same way (also not

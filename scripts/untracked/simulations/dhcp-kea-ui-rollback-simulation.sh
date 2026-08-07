@@ -8,7 +8,7 @@
 # server back to an earlier known-good config -- not just return an HTTP
 # redirect. This is the UI-reachable path; the CLI fallback
 # (`setup.sh reset-to-last-known-good-config kea`) is separately proven by
-# scripts/setup-reset-kea-config-simulation.sh, which this script deliberately
+# scripts/untracked/simulations/setup-reset-kea-config-simulation.sh, which this script deliberately
 # mirrors (same real-Kea-container/real-Admin-UI topology, same bind-mounted
 # kea-data volume, same session/CSRF technique) rather than inventing a second
 # way to stand up Kea+the Admin UI. Both drive the identical config-test ->
@@ -42,7 +42,7 @@
 #     rollback listener notes.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"

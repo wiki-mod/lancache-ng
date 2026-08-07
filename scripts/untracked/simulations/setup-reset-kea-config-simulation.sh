@@ -6,7 +6,7 @@
 # reset-to-last-known-good-config kea` must actually roll a real, running Kea
 # server back to an earlier config -- not just return success. Reuses the
 # same real-Kea-container/real-Admin-UI topology
-# scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh already established for
+# scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh already established for
 # issue #634 (same image build, same bind-mounted kea-data volume, same
 # session/CSRF technique), rather than inventing a second way to stand up
 # Kea+the Admin UI for a test.
@@ -42,7 +42,7 @@
 #     in setup.sh.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
@@ -125,7 +125,7 @@ ui_container="lancache-ng-resetkea-ui-$$"
 # cleanup() chown+rm below is still kept, now purely to tidy this run's own
 # temp dir on a normal exit rather than as the cross-job safety net it used
 # to be. See issue #1123 for the sibling
-# scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh incident this same
+# scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh incident this same
 # failure class was confirmed in. Unique per run ($$) because $TMPDIR is
 # shared host-wide, unlike the per-checkout worktree this used to sit in.
 work_dir="${TMPDIR:-/tmp}/lancache-ng-setup-reset-kea-config.$$"

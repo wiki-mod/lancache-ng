@@ -36,14 +36,14 @@
 # `justification:` line) alongside its existing `id`/`paths`/`statement`/
 # `expired_at` fields.
 #
-# Parsing approach mirrors scripts/validate-stack-images.sh: a targeted awk
+# Parsing approach mirrors scripts/untracked/validate-stack-images.sh: a targeted awk
 # reader for this project's own small, controlled YAML schema (no yq/PyYAML
 # dependency), with jq doing all JSON assembly and escaping. Output is written
 # to stdout.
 #
 # Determinism: the document timestamp comes from $VEX_TIMESTAMP when set, else
 # the current UTC time. The committed vex.openvex.json and its CI drift check
-# (scripts/check-vex-drift.sh) rely on $VEX_TIMESTAMP to reproduce a byte-stable
+# (scripts/tracked/check-vex-drift.sh) rely on $VEX_TIMESTAMP to reproduce a byte-stable
 # document, so the only thing that changes the document is a real change to
 # .trivyignore.yaml, never the wall clock.
 set -euo pipefail

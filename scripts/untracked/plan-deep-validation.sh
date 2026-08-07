@@ -17,7 +17,7 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/validation-image-tag.sh
-source "$script_dir/lib/validation-image-tag.sh"
+source "$script_dir/../lib/validation-image-tag.sh"
 
 : "${EVENT_NAME:?EVENT_NAME is required}"
 : "${REPOSITORY:?REPOSITORY is required}"

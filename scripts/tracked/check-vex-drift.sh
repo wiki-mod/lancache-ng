@@ -6,8 +6,9 @@
 # "regenerate the VEX document whenever .trivyignore.yaml changes" (OSPS-VM-
 # 04.02) into CI -- a PR that edits the accepted-vulnerability list but forgets
 # to regenerate the VEX document is caught here instead of shipping a stale
-# supply-chain artifact. Modeled on scripts/check-workflow-service-lists.sh's
-# regenerate-and-diff pattern.
+# supply-chain artifact. Modeled on
+# scripts/tracked/check-workflow-service-lists.sh's regenerate-and-diff
+# pattern.
 #
 # Determinism: the committed document carries a timestamp that must not cause a
 # false-positive drift on every run, so this reads the committed timestamp back
@@ -22,7 +23,7 @@ trivyignore="${2:-.trivyignore.yaml}"
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 if [ ! -f "$committed" ]; then
-  echo "::error::$committed is missing. Generate it with: bash scripts/generate-vex.sh > $committed" >&2
+  echo "::error::$committed is missing. Generate it with: bash scripts/untracked/generate-vex.sh > $committed" >&2
   exit 1
 fi
 
@@ -32,14 +33,14 @@ if [ -z "$committed_ts" ]; then
   exit 1
 fi
 
-regenerated="$(VEX_TIMESTAMP="$committed_ts" bash "$script_dir/generate-vex.sh" "$trivyignore")"
+regenerated="$(VEX_TIMESTAMP="$committed_ts" bash "$script_dir/../untracked/generate-vex.sh" "$trivyignore")"
 
 if ! diff -u \
     <(jq -S . "$committed") \
     <(printf '%s\n' "$regenerated" | jq -S .) >/tmp/vex-drift.diff 2>&1; then
   echo "::error::$committed is out of sync with $trivyignore." >&2
   echo "Regenerate it with:" >&2
-  echo "  bash scripts/generate-vex.sh > $committed" >&2
+  echo "  bash scripts/untracked/generate-vex.sh > $committed" >&2
   echo "Difference (committed vs. regenerated):" >&2
   cat /tmp/vex-drift.diff >&2
   exit 1

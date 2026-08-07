@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Shared classification/lookup functions for scripts/gc-pr-staging-images.sh
+# Shared classification/lookup functions for scripts/untracked/gc-pr-staging-images.sh
 # (the standalone reaper .github/workflows/gc-pr-staging-images.yml now
 # calls, extracted from that workflow's own former inline `run:` block --
 # see issue #1095 for the root-cause writeup this extraction answers).
@@ -24,7 +24,7 @@
 #      it reads the actual manifest graph (which digests a tagged manifest
 #      references as children) so an untagged version can be proven either
 #      "still referenced by something tagged" (keep) or "genuinely orphaned"
-#      (eligible, subject to the age gate in scripts/gc-pr-staging-images.sh).
+#      (eligible, subject to the age gate in scripts/untracked/gc-pr-staging-images.sh).
 #   2. RATE-LIMIT/CONCURRENCY GAP: fixed by the workflow's own new
 #      `concurrency:` block, not by anything in this file -- documented here
 #      only so a reader of this file's history knows both defects were fixed
@@ -55,7 +55,7 @@
 # orphan. The caller must treat a failing check here as a reason to skip
 # orphan classification for the WHOLE service, not just the one malformed
 # entry -- a partially-populated protected-digest set is more dangerous than
-# an empty one (see scripts/gc-pr-staging-images.sh's own comment at its
+# an empty one (see scripts/untracked/gc-pr-staging-images.sh's own comment at its
 # call site).
 gcps_version_name_is_digest() {
   local name="$1"
@@ -109,7 +109,7 @@ gcps_version_name_is_digest() {
 # whatsoever, so there is nothing in the JSON body this function receives
 # for it to find; the association only exists in that version's TAG, which
 # this function is never given (it only ever sees a manifest body). The
-# caller (scripts/gc-pr-staging-images.sh's process_service(), in its Pass 1
+# caller (scripts/untracked/gc-pr-staging-images.sh's process_service(), in its Pass 1
 # tag loop) handles that case itself, directly off the tag string, for
 # exactly this reason -- see its own comment at the `sha256-<hex>` tag-shape
 # check for the full live-verified rationale.
@@ -216,7 +216,7 @@ gcps_is_old_enough_to_delete() {
 # entirely, never reachable by the pre-fix tag-only check, not because
 # their PR state was unknown). That verification does not retroactively
 # guarantee a FUTURE run can't hit this differently-shaped failure mode,
-# though, so scripts/gc-pr-staging-images.sh's caller now tracks how many
+# though, so scripts/untracked/gc-pr-staging-images.sh's caller now tracks how many
 # times this function returns LOOKUP_FAILED across a whole run and treats a
 # suspiciously high count as a real, run-failing error (see
 # GC_MAX_PR_LOOKUP_FAILURES in that file) -- turning a hypothetically
@@ -270,7 +270,7 @@ gcps_pr_lookup_state() {
 # gcps_registry_anon_token <service> <repository>
 #
 # Fetches (and the caller is expected to cache -- see
-# scripts/gc-pr-staging-images.sh's own per-service token cache) an anonymous
+# scripts/untracked/gc-pr-staging-images.sh's own per-service token cache) an anonymous
 # read-only Bearer token scoped to `repository:<repository>/<service>:pull`.
 # This project's GHCR packages are public, so an anonymous pull token is
 # sufficient for manifest reads -- no GHCR_PACKAGE_DELETE_PAT scope is spent

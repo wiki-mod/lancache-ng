@@ -17,7 +17,7 @@
 # release, channels, image publishing, and provenance") is treated as the
 # exemption signal #893 asked for: a PR carrying it prints an informational
 # notice instead of a warning, covering the one legitimate manual scenario
-# CONTRIBUTING.md itself documents -- scripts/collect-changelog-entries.sh's
+# CONTRIBUTING.md itself documents -- scripts/untracked/collect-changelog-entries.sh's
 # fallback path, "useful for reconstructing history or if the automated
 # pipeline is ever disabled". Getting this exemption wrong in either
 # direction is low-risk exactly because the check never blocks a merge.
@@ -170,7 +170,7 @@ main() {
   fi
 
   if pr_has_release_label; then
-    echo "::notice::This PR edits CHANGELOG.md and carries the 'release' label, so this looks like an expected manual release-notes edit (e.g. the scripts/collect-changelog-entries.sh fallback path). No action needed."
+    echo "::notice::This PR edits CHANGELOG.md and carries the 'release' label, so this looks like an expected manual release-notes edit (e.g. the scripts/untracked/collect-changelog-entries.sh fallback path). No action needed."
   else
     echo "::warning::This PR edits CHANGELOG.md directly. Since #899, CHANGELOG.md is normally written automatically by .github/workflows/update-changelog.yaml when a GitHub Release is published -- see CONTRIBUTING.md's 'Releasing Changes to CHANGELOG.md'. A direct edit in a regular PR is usually unintended and risks a merge-conflict cascade with other open PRs (issue #889). This is a warn-only check (issue #893) and does not block merge; if this edit is deliberate, consider adding the 'release' label to silence this notice."
   fi

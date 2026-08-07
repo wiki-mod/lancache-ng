@@ -6,8 +6,8 @@
 # reset-to-last-known-good-config dns` must actually roll a real, running
 # PowerDNS zone's live record data back to an earlier known-good snapshot via
 # nats-subscriber's rollback listener -- not just return success. Mirrors
-# scripts/setup-reset-kea-config-simulation.sh's rigor for the Kea target and
-# reuses scripts/dns-zone-rollback-simulation.sh's proven stack/UI-mutation
+# scripts/untracked/simulations/setup-reset-kea-config-simulation.sh's rigor for the Kea target and
+# reuses scripts/untracked/simulations/dns-zone-rollback-simulation.sh's proven stack/UI-mutation
 # setup (issue #628) for standing up a real dns-standard/nats/ui trio and
 # making real record changes, but exercises the CLI (`bash setup.sh
 # reset-to-last-known-good-config dns ...`) instead of calling the rollback
@@ -65,7 +65,7 @@
 #     instead, which does not need a live stack for either.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh

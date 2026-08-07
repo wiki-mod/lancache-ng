@@ -10,7 +10,7 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT_DIR="$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null || pwd)"
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
-source "$SCRIPT_DIR/lib/reserve-validation-subnet.sh"
+source "$SCRIPT_DIR/../lib/reserve-validation-subnet.sh"
 UI_MANIFEST="services/ui/Cargo.toml"
 # Intentional developer/check default: use the repository build-tools image.
 # That image is the contract for local and CI-style UI checks and preinstalls

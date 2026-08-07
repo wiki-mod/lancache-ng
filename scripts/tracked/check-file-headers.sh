@@ -17,7 +17,7 @@ explicit_files=0
 [ "$#" -gt 0 ] && explicit_files=1
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 if [ "$explicit_files" -eq 0 ]; then
     cd "$repo_root"
 fi

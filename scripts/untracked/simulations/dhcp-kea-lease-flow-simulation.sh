@@ -121,7 +121,7 @@
 # on an isolated bridge network.
 set -euo pipefail
 
-if ! repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd); then
+if ! repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd); then
     echo "::error::Could not resolve the repository root directory from this script's own path." >&2
     exit 1
 fi
@@ -379,7 +379,7 @@ echo "== Building the PowerDNS image from this checkout's services/dns (issue #7
 # ghcr.io/wiki-mod/lancache-ng/build-tools:latest tag when no --build-arg is
 # given. Without this flag, this build would silently use that moving
 # `:latest` tag instead of $client_tool_image -- the same build-tools image
-# scripts/select-build-tools-image.sh already resolved for this workflow run
+# scripts/untracked/select-build-tools-image.sh already resolved for this workflow run
 # (and, on branches that add a tool to tools/build-tools/Dockerfile, a fresh
 # branch-local build of it, per full-setup-validate.yml's own "Resolve
 # build-tools image" step for this job). That mismatch would let this DNS

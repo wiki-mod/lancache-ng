@@ -76,7 +76,7 @@
 # A path-filter entry ending in "/**" covers every real dependency whose path
 # starts with that prefix (a directory wildcard, e.g. "services/dns/**").
 # Any other entry is an exact, literal match only (e.g.
-# "scripts/check-action-node-versions.sh" covers only that one file, not a
+# "scripts/tracked/check-action-node-versions.sh" covers only that one file, not a
 # sibling script). This mirrors how GitHub Actions' own `paths:` filter
 # actually matches (npm-style glob semantics for `**`, exact string
 # otherwise), and matches the individually-listed-script convention #880
@@ -97,7 +97,7 @@
 # fixture tree instead of mutating or depending on the real repository.
 set -euo pipefail
 
-repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 workflow_file=".github/workflows/build-tools-smoke.yml"

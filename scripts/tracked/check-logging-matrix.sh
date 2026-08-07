@@ -21,14 +21,14 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 cd "$repo_root"
 
 ARCHITECTURE_DOC=docs/architecture-ng.md
 
 # deploy/full-setup (a CI-only harness) and deploy/secondary (generated per
 # remote host, not part of this trust boundary) are the same documented
-# exceptions scripts/check-naming-consistency.sh already carves out for its
+# exceptions scripts/tracked/check-naming-consistency.sh already carves out for its
 # own Compose-file sweep. deploy/full-setup additionally never runs the
 # `logging` profile at all today, so it has no fluent-bit/syslog-ng services
 # to check in the first place.
@@ -55,7 +55,7 @@ fail() {
 # That chain forked roughly 3 short-lived processes per table row. CI on
 # this project's shared self-hosted runners hit a real flake traced to this
 # script: two back-to-back v0.2.0 CI runs against byte-identical
-# docs/architecture-ng.md and scripts/check-logging-matrix.sh content
+# docs/architecture-ng.md and scripts/tracked/check-logging-matrix.sh content
 # (commits c4e7ac9d then 9eef5d46, ~18 minutes apart, same build-tools
 # image digest) produced "OK" and then a false "syslog-ng has no row"
 # failure respectively, with no code change in between; re-running the

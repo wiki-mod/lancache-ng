@@ -139,15 +139,15 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/validation-image-tag.sh
-source "$script_dir/lib/validation-image-tag.sh"
+source "$script_dir/../lib/validation-image-tag.sh"
 # shellcheck source=scripts/lib/ghcr-retry.sh
-source "$script_dir/lib/ghcr-retry.sh"
+source "$script_dir/../lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/staging-image-freshness.sh
-source "$script_dir/lib/staging-image-freshness.sh"
+source "$script_dir/../lib/staging-image-freshness.sh"
 # shellcheck source=scripts/lib/staging-ancestor-fallback.sh
-source "$script_dir/lib/staging-ancestor-fallback.sh"
+source "$script_dir/../lib/staging-ancestor-fallback.sh"
 # shellcheck source=scripts/lib/staging-poll-defaults.sh
-source "$script_dir/lib/staging-poll-defaults.sh"
+source "$script_dir/../lib/staging-poll-defaults.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
 : "${PR_TAG:?PR_TAG (pr-<N>-sha-<short>) is required}"
@@ -276,7 +276,7 @@ ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
 # itself), plus dhcp and dhcp-proxy (#1296): neither is part of the
 # full-setup COMPOSE PROJECT (deploy/full-setup/docker-compose.yml has
 # neither service), but both are pulled directly by
-# scripts/syslog-forwarding-simulation.sh's Triggers 7/8 (real DHCP lease
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh's Triggers 7/8 (real DHCP lease
 # flows over deploy/quickstart/docker-compose.yml, added by #864) -- this
 # script's job is "ensure every staging image any deep-validation job in
 # this workflow needs," not "ensure exactly what full-setup's own compose
@@ -290,7 +290,7 @@ ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
 # change.
 #
 # ntp (#1296, 2026-07-30, completing the 3-of-3 this issue originally asked
-# for): now included too. scripts/syslog-forwarding-simulation.sh starts it
+# for): now included too. scripts/untracked/simulations/syslog-forwarding-simulation.sh starts it
 # (via --profile ntp, the same explicit-profile pattern already used for
 # dhcp-kea/dhcp-proxy above) and verifies its real Docker HEALTHCHECK
 # (chronyd's chronyc-tracking probe) the same way it verifies every other
@@ -308,7 +308,7 @@ ancestor_search_depth="${STAGING_ANCESTOR_SEARCH_DEPTH:-50}"
 # syslog (#1428, 2026-08): joins this list the same way ntp did above, once
 # the combined fluent-bit+syslog-ng first-party image (services/syslog/)
 # became a real build-matrix service with its own PR staging tag to ensure.
-# scripts/syslog-forwarding-simulation.sh already pulls/starts/health-waits on
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh already pulls/starts/health-waits on
 # the single `syslog` Compose service (updated by the same consolidation PR
 # this issue follows up on), so this is a real consumer, not a name added
 # with nothing exercising it -- see check-workflow-service-lists.sh's
@@ -329,7 +329,7 @@ declare -A touched_map=(
     [syslog]="${SYSLOG_TOUCHED:-false}"
 )
 
-# Maps this file's own matrix-service names to scripts/classify-image-impact.sh's
+# Maps this file's own matrix-service names to scripts/untracked/classify-image-impact.sh's
 # output keys, for saf_resolve_untouched_backfill_source's service-scoped
 # check below -- the two naming schemes differ for 3 of 9 services (dns vs
 # dns_image, dhcp-proxy vs dhcp_proxy, build-tools vs build_tools), same
@@ -365,7 +365,7 @@ image_exists() {
 # USERNAME/PASSWORD are optional (ghcr_retry backs off and retries even
 # without them, just without a fresh relogin -- see that function's own
 # comment), so this still works if a caller runs the script without setting
-# them, same as scripts/require-image-platforms.sh.
+# them, same as scripts/untracked/require-image-platforms.sh.
 backfill_from_base() {
     local pr_image="$1" base_image="$2"
     if [[ -n "${STAGING_BACKFILL_CMD:-}" ]]; then

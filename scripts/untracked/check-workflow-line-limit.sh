@@ -33,7 +33,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
 
@@ -70,7 +70,7 @@ if [ "${#line_offenders[@]}" -gt 0 ] || [ "${#byte_offenders[@]}" -gt 0 ]; then
     echo "This limit exists because GitHub silently stops dispatching pull_request" >&2
     echo "runs for a workflow file that modifies itself past some threshold above" >&2
     echo "~9000 lines / ~500KB (no error, no skipped conclusion -- the run is never" >&2
-    echo "created at all). See scripts/check-workflow-line-limit.sh's own header" >&2
+    echo "created at all). See scripts/untracked/check-workflow-line-limit.sh's own header" >&2
     echo "comment and issue #1095 for the reproduction. Split the file or trim its" >&2
     echo "comments rather than raising either limit." >&2
     exit 1

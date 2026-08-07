@@ -69,11 +69,11 @@
 # does not depend on any such external engine.
 #
 # Usage:
-#   scripts/check-validation-subnet-wrapper-coverage.sh [repo_root]
+#   scripts/tracked/check-validation-subnet-wrapper-coverage.sh [repo_root]
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root="${1:-$(cd "$script_dir/.." && pwd)}"
+repo_root="${1:-$(cd "$script_dir/../.." && pwd)}"
 cd "$repo_root"
 
 WORKFLOW_FILES=(
@@ -247,7 +247,7 @@ check_workflow_file() {
 
 for file in "${WORKFLOW_FILES[@]}"; do
     if [[ ! -f "$file" ]]; then
-        fail "check-validation-subnet-wrapper-coverage: '$file' no longer exists; update WORKFLOW_FILES in scripts/check-validation-subnet-wrapper-coverage.sh."
+        fail "check-validation-subnet-wrapper-coverage: '$file' no longer exists; update WORKFLOW_FILES in scripts/tracked/check-validation-subnet-wrapper-coverage.sh."
         continue
     fi
     check_workflow_file "$file"
@@ -265,7 +265,7 @@ if [[ "$jobs_examined_with_raw_output" -eq 0 ]]; then
 fi
 
 if [[ "$failures" -gt 0 ]]; then
-    printf '::error::check-validation-subnet-wrapper-coverage: %d violation(s) found (see scripts/check-validation-subnet-wrapper-coverage.sh).\n' "$failures" >&2
+    printf '::error::check-validation-subnet-wrapper-coverage: %d violation(s) found (see scripts/tracked/check-validation-subnet-wrapper-coverage.sh).\n' "$failures" >&2
     exit 1
 fi
 

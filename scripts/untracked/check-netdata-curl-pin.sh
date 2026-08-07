@@ -67,7 +67,7 @@ TRACKED_CVES_SOURCE_DATE="2026-07-31"
 ACCEPTED_UNTIL="2026-08-15"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "${script_dir}/.." && pwd)"
+repo_root="$(cd "${script_dir}/../.." && pwd)"
 dockerfile="${1:-${repo_root}/services/netdata/Dockerfile}"
 
 # Parses `ARG NETDATA_VERSION=vX.Y.Z` out of services/netdata/Dockerfile.

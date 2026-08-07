@@ -90,7 +90,7 @@ EOF
 # accept THIS run's actual suffixed container names. This only ever touches
 # the GENERATED /tmp file below, never this script's own checked-in source
 # text above: build-push.yml's "socket_proxy_script" step and
-# scripts/check-naming-consistency.sh both grep this script's static source
+# scripts/tracked/check-naming-consistency.sh both grep this script's static source
 # for the exact literal fixed names, so leaving that text untouched keeps
 # both checks passing unchanged regardless of whether a suffix is active.
 LANCACHE_CONTAINER_SUFFIX="${LANCACHE_CONTAINER_SUFFIX:-}"

@@ -21,7 +21,7 @@
 # instances of exactly this review-chronology sub-pattern still present
 # across fourteen files (.github/actions/rust-acceleration-preflight/
 # action.yml, .github/workflows/build-push.yml x3, .github/workflows/
-# gc-pr-staging-images.yml x2, scripts/dns-zone-rollback-simulation.sh,
+# gc-pr-staging-images.yml x2, scripts/untracked/simulations/dns-zone-rollback-simulation.sh,
 # services/dns/nats-subscriber/src/main.rs, services/ui/src/main.rs,
 # services/ui/src/routes/dhcp.rs, services/ui/src/routes/domains.rs,
 # services/ui/src/syslog_client.rs, and five tests/bats/*.bats files
@@ -76,7 +76,7 @@
 #     (pattern 1 above still catches that combined case, e.g. "regression
 #     pin for a bug caught in review").
 #   - "after this PR merges" / "until this PR's OWN builds" (scripts/check-
-#     build-tools-smoke-coverage.sh, scripts/ensure-pr-staging-images.sh,
+#     build-tools-smoke-coverage.sh, scripts/untracked/ensure-pr-staging-images.sh,
 #     full-setup-deep-validate.yml) -- these describe live CI/workflow
 #     semantics about whatever PR is CURRENTLY running through the
 #     pipeline (a dynamic runtime referent, re-evaluated fresh on every
@@ -91,7 +91,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
 
@@ -102,7 +102,7 @@ cd "$target_root"
 # documentation.
 is_self_reference() {
     case "$1" in
-        scripts/check-review-chronology-comments.sh) return 0 ;;
+        scripts/untracked/check-review-chronology-comments.sh) return 0 ;;
         tests/bats/check_review_chronology_comments.bats) return 0 ;;
         *) return 1 ;;
     esac
@@ -146,7 +146,7 @@ is_excluded() {
 # sentence like "every service found in the matrix; review the list when
 # adding one" -- a real risk against ~9000-line comment-heavy files like
 # build-push.yml. [[:space:]] (POSIX, not the GNU-only \s) is used for
-# whitespace, matching the convention scripts/check-governance-guards.sh
+# whitespace, matching the convention scripts/tracked/check-governance-guards.sh
 # already established for this kind of word-boundary regex in this repo.
 DISCOVERY_VERBS='(caught|found|flagged|spotted|identified|discovered|noticed)'
 # "<verb> in/during [a/the/this] [code/pr/peer] [self-]review" -- the verb
@@ -202,7 +202,7 @@ if [ "${#violations[@]}" -gt 0 ]; then
     echo "that context belongs in the PR/commit description, not in code that outlives the" >&2
     echo "change (AGENTS.md AG-CODE-003). Reword to describe the technical behavior/WHY" >&2
     echo "directly, without the self-referential review/PR-chronology framing; see" >&2
-    echo "scripts/check-review-chronology-comments.sh's own header comment for worked" >&2
+    echo "scripts/untracked/check-review-chronology-comments.sh's own header comment for worked" >&2
     echo "examples of how prior real instances in this repo were reworded." >&2
     exit 1
 fi

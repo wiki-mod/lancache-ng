@@ -34,9 +34,9 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
-source "$script_dir/lib/ghcr-retry.sh"
+source "$script_dir/../lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/gc-pr-staging-images.sh
-source "$script_dir/lib/gc-pr-staging-images.sh"
+source "$script_dir/../lib/gc-pr-staging-images.sh"
 
 org="wiki-mod"
 repo="wiki-mod/lancache-ng"
@@ -48,7 +48,7 @@ repo="wiki-mod/lancache-ng"
 # syslog added while this PR was in progress (merged in from current_dev,
 # #1428/#1431's fluent-bit+syslog-ng combined container): it is a real entry
 # in build-push.yml's own build/build-arm64 matrix like every other service
-# here, so scripts/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY
+# here, so scripts/tracked/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY
 # entry for this file (equal to the FULL canonical set, not a subset) would
 # fail this file the moment syslog landed in the matrix without this array
 # following it -- this is that follow-along update, done as part of merging
@@ -78,7 +78,7 @@ max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
 # versions alike), not just the new orphan path -- a version that looks
 # deletable by tag/reference state alone can still be the direct output of a
 # build, promotion, or backfill that is still actively in flight elsewhere in
-# the pipeline (e.g. scripts/ensure-pr-staging-images.sh's own back-fill
+# the pipeline (e.g. scripts/untracked/ensure-pr-staging-images.sh's own back-fill
 # `imagetools create` calls, which briefly create a fresh untagged manifest
 # before the tag move lands). Giving every deletion candidate a fixed window
 # to "prove" it is not mid-flight is far simpler and more robust than trying
@@ -629,7 +629,7 @@ main() {
   # flag to parse an ISO-8601 timestamp -- this project's self-hosted
   # runners are Linux hosts (GNU coreutils `date` is the default there), and
   # `date -d` is already an established pattern elsewhere in this repo (see
-  # scripts/ntp-cap-sys-time-simulation.sh), but this check alone cannot
+  # scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh), but this check alone cannot
   # distinguish a present-but-non-GNU `date` from a working one.
   local required_cmd
   for required_cmd in gh jq curl date; do
@@ -660,7 +660,7 @@ main() {
 }
 
 # `"${BASH_SOURCE[0]}" == "${0}"` is true only when this file is EXECUTED
-# directly (as the calling workflow does: `bash scripts/gc-pr-staging-images.sh`),
+# directly (as the calling workflow does: `bash scripts/untracked/gc-pr-staging-images.sh`),
 # not when it is `source`d by something else -- the bats suite sources this
 # file to reuse process_service() and its config variables under mocked
 # gh/curl, and must not have main() (which hard-requires a real GH_TOKEN and

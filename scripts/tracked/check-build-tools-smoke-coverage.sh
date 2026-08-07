@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Standing guard for issues #790/#791 (#822 Pattern G): keeps
-# scripts/select-build-tools-image.sh's smoke_test_image() required-tools
+# scripts/untracked/select-build-tools-image.sh's smoke_test_image() required-tools
 # list from silently drifting behind tools/build-tools/Dockerfile's own
 # final verification list. The Dockerfile installs and build-time-verifies a
 # tool; the smoke test -- which runs against the *published/resolved* image
@@ -53,11 +53,11 @@
 # fixture tree instead of depending on the real repository.
 set -euo pipefail
 
-repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 dockerfile="tools/build-tools/Dockerfile"
-smoke_script="scripts/select-build-tools-image.sh"
+smoke_script="scripts/untracked/select-build-tools-image.sh"
 
 for f in "$dockerfile" "$smoke_script"; do
   if [ ! -f "$f" ]; then

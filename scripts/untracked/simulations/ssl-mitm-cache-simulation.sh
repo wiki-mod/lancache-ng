@@ -27,7 +27,7 @@
 # the "DNS + port-routing proof" section below for the full mechanism).
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
@@ -127,7 +127,7 @@ echo "== Starting proxy/dns-standard/dns-ssl/nats/standard-passthrough-shim from
 LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d proxy dns-standard dns-ssl nats standard-passthrough-shim
 
 # Mirrors the health-wait pattern already proven in full-setup-validate.yml
-# and scripts/setup-cli-simulation.sh. ("compose" is already defined above,
+# and scripts/untracked/simulations/setup-cli-simulation.sh. ("compose" is already defined above,
 # reused here for the health checks and later cleanup.)
 deadline=$((SECONDS + 90))
 while (( SECONDS < deadline )); do
@@ -316,7 +316,7 @@ echo "dns-standard's resolved endpoint's certificate validates cleanly against t
 
 echo "Distinguishing property proven end-to-end (issue #668): dns-ssl's own DNS answer for $test_domain leads to a TLS endpoint presenting a certificate signed by our LAN CA (real MITM interception), while dns-standard's own DNS answer for the SAME domain leads to a genuinely different TLS endpoint presenting the real origin's own certificate (SNI passthrough, no interception) -- these are provably distinct endpoints determined by the DNS answer itself, not by a hardcoded address shared between both paths."
 
-# --connect-timeout/--max-time: same flags scripts/full-setup-client-simulation.sh
+# --connect-timeout/--max-time: same flags scripts/untracked/simulations/full-setup-client-simulation.sh
 # already uses for its own external-facing curl calls, so a hung connection
 # or an origin that never responds fails fast with a clear error instead of
 # hanging the job until the runner-level timeout. --max-time is higher here

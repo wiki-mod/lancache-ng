@@ -17,11 +17,11 @@ set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
-source "$script_dir/lib/ghcr-retry.sh"
+source "$script_dir/../lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/build-tools-channel.sh
-source "$script_dir/lib/build-tools-channel.sh"
+source "$script_dir/../lib/build-tools-channel.sh"
 # shellcheck source=scripts/lib/docker-buildx-retry.sh
-source "$script_dir/lib/docker-buildx-retry.sh"
+source "$script_dir/../lib/docker-buildx-retry.sh"
 
 repository="${GITHUB_REPOSITORY:-wiki-mod/lancache-ng}"
 
@@ -131,7 +131,7 @@ smoke_test_image() {
     # shellspec). #790: the smoke test asserted neither, even though both are
     # installed and build-time-verified in tools/build-tools/Dockerfile --
     # exactly the derive-not-from-real-requirements drift #822 Pattern G
-    # names. scripts/check-build-tools-smoke-coverage.sh now guards against
+    # names. scripts/tracked/check-build-tools-smoke-coverage.sh now guards against
     # this list drifting from the Dockerfile verification list again.
     bats --version >/dev/null
     shellspec --version >/dev/null

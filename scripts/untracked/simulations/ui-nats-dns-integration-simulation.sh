@@ -8,10 +8,10 @@
 # confirms the NATS message reaches nats-subscriber and lands in PowerDNS via
 # a real DNS query, then removes the record the same way and confirms it's
 # gone. Reuses the same published-image/health-wait/ephemeral-client pattern
-# already proven in scripts/ssl-mitm-cache-simulation.sh.
+# already proven in scripts/untracked/simulations/ssl-mitm-cache-simulation.sh.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh

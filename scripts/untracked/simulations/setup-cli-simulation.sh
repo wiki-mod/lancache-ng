@@ -21,7 +21,7 @@
 # what this script waits for.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/reserve-validation-subnet.sh
@@ -46,7 +46,7 @@ source "$repo_root/scripts/lib/setup-wizard-introspect.sh"
 #     tag exists for those, so setup.sh's normal channel->stack-pointer->sha
 #     resolution is exercised instead (and stays covered on those events).
 #
-# Defaults keep a bare local `bash scripts/setup-cli-simulation.sh` working:
+# Defaults keep a bare local `bash scripts/untracked/simulations/setup-cli-simulation.sh` working:
 # nightly is the only channel guaranteed to have published images pre-1.0. CI
 # always sets SETUP_SIM_IMAGE_CHANNEL explicitly, so this default is a
 # local-run convenience only, not a hardcoded-channel CI gate.
@@ -153,7 +153,7 @@ sim_container_name_suffix() {
 # LANCACHE_CONTAINER_SUFFIX comments above) would still collide binding the
 # identical host IP:port pairs, independent of and unfixed by
 # COMPOSE_PROJECT_NAME/LANCACHE_CONTAINER_SUFFIX already being unique.
-# Mirrors scripts/syslog-forwarding-simulation.sh's own established pattern
+# Mirrors scripts/untracked/simulations/syslog-forwarding-simulation.sh's own established pattern
 # (127.0.<octet>.2/.3, loopback range 127.0.0.0/8 routes locally with no
 # real interface needed) exactly, including deriving the octet from a
 # `cksum` of a per-run-unique token via `% 200 + 10` (keeps the octet in a
@@ -378,7 +378,7 @@ run_fresh_install_expect() {
     # channel path passes it through harmlessly.
     #
     # Unlike before, this heredoc is intentionally UNQUOTED (mirroring
-    # scripts/syslog-forwarding-simulation.sh's own established pattern for
+    # scripts/untracked/simulations/syslog-forwarding-simulation.sh's own established pattern for
     # the same reason): $expect_prompt_block must be bash-expanded here, so
     # every genuinely-Tcl `$name` reference below is backslash-escaped to
     # stay literal instead.

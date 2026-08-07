@@ -32,7 +32,7 @@
 # This same #822 recurrence shape was found again, beyond build-push.yml's 4
 # internal copies (issue #935's original scope), in 3 more real files that
 # duplicate the same service list with no sync mechanism:
-#   - scripts/gc-pr-staging-images.sh: a `services=(...)` copy that must
+#   - scripts/untracked/gc-pr-staging-images.sh: a `services=(...)` copy that must
 #     equal the full canonical set (its own comment: "Every service
 #     build-push.yml's build/build-arm64 jobs can push a PR staging tag
 #     for"). Until #1095 (2026-08-06) this array lived inline in
@@ -48,7 +48,7 @@
 #     build-tools"). Named `services=`, not `full_setup_services=`, but
 #     semantically the same subset relationship -- see
 #     SUBSET_SERVICES_FILES below.
-#   - scripts/ensure-pr-staging-images.sh: a `full_setup_services=(...)`
+#   - scripts/untracked/ensure-pr-staging-images.sh: a `full_setup_services=(...)`
 #     copy -- see FULL_SETUP_EXACT_EXCLUSIONS below.
 # All three are checked against the SAME canonical set derived from
 # build-push.yml's build matrix below, since none of them has a build matrix
@@ -67,7 +67,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 
 # Optional first argument: path to the workflow file the canonical service
 # set is derived from (its `- service:` build matrix), plus any further
@@ -85,9 +85,9 @@ else
     cd "$repo_root"
     workflow=".github/workflows/build-push.yml"
     extra_files=(
-        "scripts/gc-pr-staging-images.sh"
+        "scripts/untracked/gc-pr-staging-images.sh"
         ".github/workflows/backfill-stack-latest.yml"
-        "scripts/ensure-pr-staging-images.sh"
+        "scripts/untracked/ensure-pr-staging-images.sh"
     )
 fi
 
@@ -150,7 +150,7 @@ canonical_minus() {
 # Files where a `services=(...)` array is a deliberate, documented SUBSET of
 # the canonical set rather than the full build matrix -- unlike every
 # `services=(...)` copy inside build-push.yml itself (and inside
-# scripts/gc-pr-staging-images.sh), which must always equal the full set. Keyed by
+# scripts/untracked/gc-pr-staging-images.sh), which must always equal the full set. Keyed by
 # basename so this stays readable regardless of a file's full path. The value
 # is the EXACT, documented exclusion set (newline-separated), not just a
 # boolean flag: checking only "no phantom members" would accept a real
@@ -169,7 +169,7 @@ declare -A SUBSET_SERVICES_FILES=(
 # SUBSET_SERVICES_FILES above. $2 ("required" or "optional") controls whether
 # finding zero arrays in this file is itself a failure: "required" for files
 # where a `services=(...)` array is known to always exist (build-push.yml,
-# scripts/gc-pr-staging-images.sh, backfill-stack-latest.yml) so a rename/refactor
+# scripts/untracked/gc-pr-staging-images.sh, backfill-stack-latest.yml) so a rename/refactor
 # that silently removes it is caught; "optional" for files that legitimately
 # never declare one (e.g. ensure-pr-staging-images.sh only has
 # full_setup_services=(...), checked separately below).
@@ -235,10 +235,10 @@ check_services_arrays() {
 declare -A FULL_SETUP_EXACT_EXCLUSIONS=(
     # #1296 (2026-07-30): dhcp and dhcp-proxy moved OUT of this exclusion set
     # first -- ensure-pr-staging-images.sh started ensuring both, since
-    # scripts/syslog-forwarding-simulation.sh's Triggers 7/8 (added by #864,
+    # scripts/untracked/simulations/syslog-forwarding-simulation.sh's Triggers 7/8 (added by #864,
     # after this exclusion set was first written) pull both images directly.
     # ntp (the last remaining member) moved out too once
-    # scripts/syslog-forwarding-simulation.sh gained a real ntp
+    # scripts/untracked/simulations/syslog-forwarding-simulation.sh gained a real ntp
     # start+healthcheck consumer (see ensure-pr-staging-images.sh's own
     # full_setup_services=(...) comment) -- completing #1296's original 3-of-3
     # ask. The key is kept PRESENT with an empty value (rather than deleted

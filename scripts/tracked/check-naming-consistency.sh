@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Enforces the parts of docs/naming-conventions.md that are mechanically
-# checkable: that the Docker socket proxy allowlist (scripts/docker-socket-proxy.sh),
+# checkable: that the Docker socket proxy allowlist (scripts/untracked/docker-socket-proxy.sh),
 # every Compose file's container_name values, the watchdog's CONTAINER_*
 # defaults, the Admin UI's Docker-API container-name literals
 # (services/ui/src/docker_client.rs), and the Admin UI's *_SERVICE Compose
@@ -23,17 +23,17 @@
 # in the allowlist" set too, but issue #842/#849 added all four to the
 # allowlist's safe_container_inspect/lancache_container acls (inspect-only,
 # no restart grant) so watchdog's Rust rewrite can alert-only-monitor them --
-# see scripts/docker-socket-proxy.sh's own comment on that addition. This
+# see scripts/untracked/docker-socket-proxy.sh's own comment on that addition. This
 # comment is corrected here rather than left stale, per this project's own
 # documentation-drift rule (AG-DOC-001).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 cd "$repo_root"
 
 COMPOSE_FILES=(deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml)
-SOCKET_PROXY_SCRIPT=scripts/docker-socket-proxy.sh
+SOCKET_PROXY_SCRIPT=scripts/untracked/docker-socket-proxy.sh
 DOCKER_CLIENT_RS=services/ui/src/docker_client.rs
 WATCHDOG_SH=services/watchdog/watchdog.sh
 UI_CONFIG_RS=services/ui/src/config.rs

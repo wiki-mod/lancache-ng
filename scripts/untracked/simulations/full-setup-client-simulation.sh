@@ -14,9 +14,9 @@ if ! script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"; then
     exit 1
 fi
 # shellcheck source=scripts/lib/ghcr-retry.sh
-source "$script_dir/lib/ghcr-retry.sh"
+source "$script_dir/../../lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/full-setup-domain-probe.sh
-source "$script_dir/lib/full-setup-domain-probe.sh"
+source "$script_dir/../../lib/full-setup-domain-probe.sh"
 
 compose_file="${FULL_SETUP_COMPOSE_FILE:-deploy/full-setup/docker-compose.yml}"
 client_tools_image="${FULL_SETUP_CLIENT_TOOLS_IMAGE:-ghcr.io/wiki-mod/lancache-ng/build-tools:latest}"
@@ -29,7 +29,7 @@ dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 # default exactly (issue #668): this job never threads a real per-run
 # VALIDATION_STANDARD_SHIM_IP (the standard-passthrough-shim service it
 # names is Compose-profile-gated and only started by
-# scripts/ssl-mitm-cache-simulation.sh's own `docker compose up` call), so
+# scripts/untracked/simulations/ssl-mitm-cache-simulation.sh's own `docker compose up` call), so
 # dns-standard here always answers with this literal default -- this
 # variable just has to agree with that default, not resolve to anything
 # actually reachable in THIS job's stack.
@@ -59,7 +59,7 @@ fi
 [[ -n "$dns_container" ]] \
     || { echo "::error::dns-standard is not running in the full-setup validation stack."; exit 1; }
 
-# Unlike scripts/ssl-mitm-cache-simulation.sh (which sets up the Compose
+# Unlike scripts/untracked/simulations/ssl-mitm-cache-simulation.sh (which sets up the Compose
 # project itself and so already knows its own "${compose_project}_validation"
 # network name), this script is invoked separately against a stack it did not
 # start, so the project name -- and therefore the network name Compose
@@ -128,11 +128,11 @@ docker run --rm \
         # proxy SNI-passthrough listener (proxy:8443), so the two
         # nameservers genuinely no longer share one answer. This job does
         # not itself start that shim (it is Compose-profile-gated; only
-        # scripts/ssl-mitm-cache-simulation.sh names it explicitly), so this
+        # scripts/untracked/simulations/ssl-mitm-cache-simulation.sh names it explicitly), so this
         # check only proves the DNS answer is correct here, not that the
         # target is reachable -- the full endpoint-behavior proof (that each
         # answer leads to a genuinely different, correctly-behaving TLS
-        # listener) lives in scripts/ssl-mitm-cache-simulation.sh, which does
+        # listener) lives in scripts/untracked/simulations/ssl-mitm-cache-simulation.sh, which does
         # start the shim.
         check_dns dns-standard "$VALIDATION_DNS_STANDARD_IP" "$standard_shim_ip"
         check_dns dns-ssl "$VALIDATION_DNS_SSL_IP" "$proxy_ip"

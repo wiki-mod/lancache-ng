@@ -26,7 +26,7 @@ fail() {
 # scripts/lib/ghcr-retry.sh.
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
-source "$script_dir/lib/ghcr-retry.sh"
+source "$script_dir/../lib/ghcr-retry.sh"
 
 # docker buildx imagetools prints single-platform images differently from
 # multi-platform indexes. Current lancache-ng prebuilt images are amd64-only,

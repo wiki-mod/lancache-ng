@@ -4,7 +4,7 @@
 #
 # CI guard for issue #1176: setup.sh's interactive install wizard and the
 # expect-driven simulation scripts that drive it (scripts/setup-cli-
-# simulation.sh, scripts/syslog-forwarding-simulation.sh) hand-duplicate the
+# simulation.sh, scripts/untracked/simulations/syslog-forwarding-simulation.sh) hand-duplicate the
 # same fact -- the exact prompt text each `ask`/`confirm` call in setup.sh's
 # wizard prints -- with nothing that ever checked the two stay in sync. This
 # is the same failure class as #1112/#1171 (a shared literal moved without
@@ -37,7 +37,7 @@
 # --- Historical blind spot, now closed for introspection-driven scripts ----
 # A *new* prompt inserted along a *conditional* branch that a simulation
 # script's own answers actually walk (e.g. a new prompt added inside the SSL
-# block, which scripts/syslog-forwarding-simulation.sh's SSL_ENABLED=y path
+# block, which scripts/untracked/simulations/syslog-forwarding-simulation.sh's SSL_ENABLED=y path
 # exercises) used to be invisible to check 1 above, because this script never
 # executed setup.sh or interpreted which conditional branches a given sim's
 # fixed answer sequence actually takes -- it only classified whether a
@@ -46,8 +46,8 @@
 # Issue #1176's Angle 1 (`setup.sh list-prompts`, a real introspection mode
 # that walks the wizard's actual branch logic for a supplied answer
 # sequence -- see setup.sh's own `wizard_introspect_record_prompt` comment)
-# closes this from the OTHER direction: scripts/setup-cli-simulation.sh and
-# scripts/syslog-forwarding-simulation.sh no longer hand-encode their
+# closes this from the OTHER direction: scripts/untracked/simulations/setup-cli-simulation.sh and
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh no longer hand-encode their
 # expect_prompt sequences at all -- they call
 # scripts/lib/setup-wizard-introspect.sh's build_expect_prompt_block, which
 # runs `setup.sh list-prompts` with the exact same replies the script is
@@ -113,13 +113,13 @@
 # design, not a silent gap.
 set -euo pipefail
 
-repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 setup_script="setup.sh"
 sim_scripts=(
-    "scripts/setup-cli-simulation.sh"
-    "scripts/syslog-forwarding-simulation.sh"
+    "scripts/untracked/simulations/setup-cli-simulation.sh"
+    "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
 )
 
 if [[ -t 1 ]]; then

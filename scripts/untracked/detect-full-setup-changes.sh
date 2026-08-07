@@ -23,7 +23,7 @@
 #
 # SOURCE OF TRUTH NOTE: the path-to-service rules mirror the classifier
 # build-push.yml's `detect-changes` job runs. As of #819 that job no longer
-# carries the rules inline -- it delegates to scripts/classify-image-impact.sh,
+# carries the rules inline -- it delegates to scripts/untracked/classify-image-impact.sh,
 # which is now the single authoritative copy of the shared per-path booleans.
 # This script is STILL a hand-kept mirror of those rules (it adds its own
 # should_run gate and omits classifier keys the deep gate does not need), a
@@ -105,7 +105,7 @@ touches_exact() {
 # stack dependency -- forced should_run=true below, running this suite's
 # entire ~15-job real Docker-Compose deep validation (DNS/DHCP/NATS/proxy
 # TLS/syslog/Admin UI). Confirmed for real against PR #1333 (changed only
-# AGENTS.md + scripts/check-pr-title-convention.sh): run 30616274721 ran the
+# AGENTS.md + scripts/tracked/check-pr-title-convention.sh): run 30616274721 ran the
 # full simulation suite end to end.
 #
 # Every script below was individually verified (not classified by name
@@ -141,30 +141,30 @@ touches_exact() {
 # none, since anything not matched below already falls through to
 # should_run-relevant by default, exactly like an unclassified script today.
 ci_tooling_only_scripts=(
-    "scripts/check-action-node-versions.sh"
-    "scripts/check-bats-path-filter-coverage.sh"
-    "scripts/check-build-tools-smoke-coverage.sh"
-    "scripts/check-changelog-direct-edit.sh"
-    "scripts/check-compose-healthchecks.sh"
-    "scripts/check-executable-bits.sh"
-    "scripts/check-file-headers.sh"
-    "scripts/check-governance-guards.sh"
-    "scripts/check-idempotence-test-coverage.sh"
-    "scripts/check-language-policy.sh"
-    "scripts/check-line-endings.sh"
-    "scripts/check-logging-matrix.sh"
-    "scripts/check-mutable-refs.sh"
-    "scripts/check-naming-consistency.sh"
-    "scripts/check-orphaned-branches.sh"
-    "scripts/check-pr-title-convention.sh"
-    "scripts/check-pr-tracking-metadata.sh"
-    "scripts/check-setup-prompt-drift.sh"
-    "scripts/check-stable-external-images.sh"
-    "scripts/check-validation-subnet-wrapper-coverage.sh"
-    "scripts/check-vex-drift.sh"
-    "scripts/check-workflow-service-lists.sh"
-    "scripts/test-governance-guards.sh"
-    "scripts/validate-pr-template.sh"
+    "scripts/tracked/check-action-node-versions.sh"
+    "scripts/tracked/check-bats-path-filter-coverage.sh"
+    "scripts/tracked/check-build-tools-smoke-coverage.sh"
+    "scripts/tracked/check-changelog-direct-edit.sh"
+    "scripts/tracked/check-compose-healthchecks.sh"
+    "scripts/tracked/check-executable-bits.sh"
+    "scripts/tracked/check-file-headers.sh"
+    "scripts/tracked/check-governance-guards.sh"
+    "scripts/tracked/check-idempotence-test-coverage.sh"
+    "scripts/tracked/check-language-policy.sh"
+    "scripts/tracked/check-line-endings.sh"
+    "scripts/tracked/check-logging-matrix.sh"
+    "scripts/tracked/check-mutable-refs.sh"
+    "scripts/tracked/check-naming-consistency.sh"
+    "scripts/tracked/check-orphaned-branches.sh"
+    "scripts/tracked/check-pr-title-convention.sh"
+    "scripts/tracked/check-pr-tracking-metadata.sh"
+    "scripts/tracked/check-setup-prompt-drift.sh"
+    "scripts/tracked/check-stable-external-images.sh"
+    "scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
+    "scripts/tracked/check-vex-drift.sh"
+    "scripts/tracked/check-workflow-service-lists.sh"
+    "scripts/tracked/test-governance-guards.sh"
+    "scripts/tracked/validate-pr-template.sh"
 )
 
 # True when at least one changed path is under scripts/ AND that path is NOT

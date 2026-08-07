@@ -17,7 +17,7 @@
 # can reproduce.
 #
 # Deliberately a standalone script rather than an extension of
-# scripts/ssl-mitm-cache-simulation.sh: that script intentionally never
+# scripts/untracked/simulations/ssl-mitm-cache-simulation.sh: that script intentionally never
 # builds a custom image (it pulls the real published proxy/dns images and
 # relies on a CDN hostname -- deb.debian.org -- already baked into
 # services/dns/cdn-domains.txt at image-build time, see its own header
@@ -31,7 +31,7 @@
 # the proxy container itself.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
@@ -143,7 +143,7 @@ handshake() {
 # has no live backend in THIS script's synthetic fixtures -- verified here
 # via the generated dispatch map's own content instead of a live handshake
 # (a live, real-backend proof of the passthrough path itself lives in
-# scripts/proxy-ssl-mode-two-relay-dispatch-simulation.sh). Fails loudly if
+# scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh). Fails loudly if
 # the map does not route <sni> to the passthrough relay port (9446).
 dispatch_routes_to_passthrough() {
     local container="$1" sni="$2"

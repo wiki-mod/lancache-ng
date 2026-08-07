@@ -4,7 +4,7 @@
 #
 # Real Kea Control Agent mutation round-trip test (issue #634, the "static
 # host reservations" gap explicitly left open by
-# scripts/dhcp-kea-lease-flow-simulation.sh -- see docs/dhcp-modes.md). That
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh -- see docs/dhcp-modes.md). That
 # script drives a real DHCP client against our Kea service, but never mutates
 # Kea's config; this script drives a real mutation THROUGH the Admin UI's
 # actual HTTP route (POST /dhcp/static/add, the same route
@@ -29,7 +29,7 @@
 #      change does not touch services/ui, so the published image already has
 #      whatever Rust code is under test), both on the same Docker network
 #      deploy/full-setup/docker-compose.yml already defines -- the identical
-#      project/network/fixed-IP pattern scripts/ui-nats-dns-integration-simulation.sh
+#      project/network/fixed-IP pattern scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh
 #      already established for driving the Admin UI from a sibling
 #      container. docker-socket-proxy/proxy/nats are started too because the
 #      Admin UI blocks ALL requests (even /health) until it can reach NATS
@@ -67,7 +67,7 @@
 #     Kea/Admin-UI Control Agent interaction at all.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/dhcp-lease-parse.sh

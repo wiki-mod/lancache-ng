@@ -79,9 +79,9 @@ set -euo pipefail
 # overridden to a throwaway fixture tree by tests/bats/check_action_node_versions.bats,
 # which never has its own scripts/lib/ghcr-retry.sh -- this file's location
 # on disk never moves just because the tree it's asked to *scan* does.
-script_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/lib" && pwd)"
+script_lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/../lib" && pwd)"
 
-repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/ghcr-retry.sh

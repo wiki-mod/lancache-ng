@@ -35,7 +35,7 @@ if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
 fi
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 cd "$repo_root"
 
 pr_body_file="${1:-}"

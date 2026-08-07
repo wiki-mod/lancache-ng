@@ -73,7 +73,7 @@
 # `# pipefail-safe: <reason>` comment to suppress a false positive.
 set -euo pipefail
 
-repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
+repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
 # Repo-wide, per issue #1377 -- see this file's own header comment above.

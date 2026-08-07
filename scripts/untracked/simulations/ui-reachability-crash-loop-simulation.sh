@@ -31,7 +31,7 @@
 #     not about rescuing an unrelated crash-looping service's control surface.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"

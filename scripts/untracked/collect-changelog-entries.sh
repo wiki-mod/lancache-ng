@@ -25,7 +25,7 @@
 # this repository.
 #
 # Usage:
-#   scripts/collect-changelog-entries.sh [--base <branch>] [--since <ref-or-date>]
+#   scripts/untracked/collect-changelog-entries.sh [--base <branch>] [--since <ref-or-date>]
 #
 #   --base <branch>       Branch to collect merged PRs against (default: current_dev,
 #                         the active development branch -- v0.2.0 is frozen; #709).
@@ -45,7 +45,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 cd "$repo_root"
 
 # current_dev is today's active development branch (v0.2.0 is frozen); see

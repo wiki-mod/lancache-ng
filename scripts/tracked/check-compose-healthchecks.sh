@@ -10,7 +10,7 @@
 # unmonitored. Before #1169, `dhcp-proxy`, `ntp`, `netdata`, and
 # `docker-socket-proxy` had exactly this gap across one or more deploy
 # profiles; this script fails CI the moment a service (existing or newly
-# added) regresses back into it. Mirrors scripts/check-file-headers.sh's
+# added) regresses back into it. Mirrors scripts/tracked/check-file-headers.sh's
 # CI-enforced-convention shape (grep-based text scan, not a semantic parser,
 # with an explicit, commented exclusion list) per issue #1169's own pointer.
 #
@@ -33,13 +33,13 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 
 # Optional first argument: an alternate root directory to scan instead of
 # this repo's own root, so tests/bats/check_compose_healthchecks.bats can
 # point this at a small throwaway deploy/*/docker-compose.yml fixture tree
 # instead of requiring a full repo checkout -- same optional-override
-# convention scripts/check-workflow-service-lists.sh already uses for the
+# convention scripts/tracked/check-workflow-service-lists.sh already uses for the
 # same reason. CI's real invocation passes no argument.
 target_root="${1:-$repo_root}"
 cd "$target_root"

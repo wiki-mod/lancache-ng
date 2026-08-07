@@ -6,8 +6,8 @@
 # cache-configuration table hand-duplicates each CACHE_* variable's default
 # value as a literal string, with nothing that ever checked it against the
 # real shipped default in config/prod/proxy.env. This is the same failure
-# class as scripts/check-setup-prompt-drift.sh (#1176) and
-# scripts/check-naming-consistency.sh -- a fact hand-copied into
+# class as scripts/tracked/check-setup-prompt-drift.sh (#1176) and
+# scripts/tracked/check-naming-consistency.sh -- a fact hand-copied into
 # documentation silently drifts once the real value changes elsewhere. This
 # specific incident already happened: CACHE_MEM_MB's documented default was
 # `200`, while the real shipped default (config/prod/proxy.env,
@@ -27,7 +27,7 @@
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-repo_root="$(cd "$script_dir/.." && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 proxy_env="$repo_root/config/prod/proxy.env"
 arch_doc="$repo_root/docs/architecture-ng.md"
 

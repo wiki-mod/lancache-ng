@@ -11,7 +11,7 @@
 # one label of depth (RFC 6125) -- a client two or more labels below such an
 # entry got served a certificate that does not validate for its SNI, and
 # the TLS handshake failed outright even though DNS resolution worked
-# (proven by the sibling scripts/proxy-deep-wildcard-tls-simulation.sh,
+# (proven by the sibling scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh,
 # which still documents that residual RFC 6125 gap, now via config-content
 # assertions instead of a live mismatch handshake). This script proves the
 # fix itself: a stream-level dispatcher reads the SNI via ssl_preread before
@@ -58,11 +58,11 @@
 #
 # Fake-origin/network-alias mechanism, RFC 2606-reserved test domain, and
 # Docker embedded-DNS resolver technique all mirror
-# scripts/proxy-standard-mode-sni-routing-simulation.sh's own header
+# scripts/untracked/simulations/proxy-standard-mode-sni-routing-simulation.sh's own header
 # comment -- see that file for the full rationale, not repeated here.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"

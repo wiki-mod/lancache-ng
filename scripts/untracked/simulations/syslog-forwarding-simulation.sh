@@ -8,7 +8,7 @@
 # requires proving the operator can actually SEE that line through the real
 # Admin UI read path (routes/logs.rs -> syslog_client::parse_syslog_tail),
 # not a second direct read of the log file. Every earlier check in this
-# project's CI (scripts/check-logging-matrix.sh, `docker compose config`)
+# project's CI (scripts/tracked/check-logging-matrix.sh, `docker compose config`)
 # only validates presence/shape, never a live data flow all the way to the
 # UI's own HTTP response.
 #
@@ -26,8 +26,8 @@
 # in production (needed for real broadcast DHCP on the operator's actual
 # LAN) -- exercising that unmodified on a shared CI runner would leak real
 # DHCPDISCOVER broadcast traffic onto the runner host's own LAN interface,
-# the same risk scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/dhcp-proxy-pxe-simulation.sh already avoid by using their own
+# the same risk scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
+# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh already avoid by using their own
 # isolated bridge-network containers instead of quickstart's host-network
 # services. This script does the same for its two DHCP triggers: a
 # per-run compose override (`$work_dir/dhcp-test-override.yml`, built below)
@@ -70,10 +70,10 @@
 # (which every earlier `scripts/*-simulation.sh` uses). full-setup has
 # neither the `logging` profile (syslog-ng/fluent-bit) nor dhcp/dhcp-proxy
 # defined at all -- extending it would mean testing an unguarded copy of the
-# logging wiring instead of the real thing scripts/check-logging-matrix.sh
+# logging wiring instead of the real thing scripts/tracked/check-logging-matrix.sh
 # actually guards (prod/quickstart -- deploy/dev was retired in v0.3.0,
 # #766). quickstart already has every service and the full logging profile,
-# and is the same compose file scripts/setup-cli-simulation.sh already
+# and is the same compose file scripts/untracked/simulations/setup-cli-simulation.sh already
 # drives concurrently in CI via a unique COMPOSE_PROJECT_NAME + loopback IP
 # + retry-on-collision -- reused here directly rather than inventing a
 # second isolation mechanism.
@@ -95,7 +95,7 @@
 # not a fixup path this script depends on.
 set -euo pipefail
 
-repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
+repo_root=$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)
 cd "$repo_root"
 
 # shellcheck source=scripts/lib/setup-wizard-introspect.sh

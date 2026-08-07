@@ -4,8 +4,8 @@
 # Runs fixture-style checks for scripts/check-governance-guards.sh.
 set -euo pipefail
 
-ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-CHECKER="${ROOT_DIR}/scripts/check-governance-guards.sh"
+ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+CHECKER="${ROOT_DIR}/scripts/tracked/check-governance-guards.sh"
 
 fail() {
   printf 'test-governance-guards: %s\n' "$1" >&2
