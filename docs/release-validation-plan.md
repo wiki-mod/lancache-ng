@@ -820,11 +820,12 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   superseded commit than the workflow run's own reported head; remediated only by
   forcing a fresh, uncontested re-run, not by a code-level guard.
 - **C-7 / container-scan vs. published-digest scan mismatch** (issue #1348,
-  consolidated into #1095, **known accepted limitation** — see Coverage Assessment
-  below) — `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
-  actually-pushed image are two independent `docker buildx build` invocations that
-  never produce matching digests, even for byte-identical inputs, because each
-  build stamps its own fresh `created` timestamp into the image config.
+  consolidated into #1095, **fixed** — see Coverage Assessment below) —
+  `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
+  actually-pushed image used to be two independent `docker buildx build`
+  invocations that never produced matching digests; `container-scan`'s redundant
+  rebuild-and-scan branch was removed, leaving `build`/`build-arm64`'s own
+  pushed-digest scan as the sole, matching-numbers-correct vulnerability gate.
 - **`build-push.yml` self-modification trigger bug** (PR #1367 POC, **open, not yet
   resolved** — see Coverage Assessment below) — a PR that itself modifies
   `build-push.yml` may not reliably receive a `pull_request`-triggered run of the
@@ -990,21 +991,13 @@ explicit pass:**
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
 omitted):**
 
-- **C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
-  never share a digest** (issue #1348, consolidated into #1095, see
-  `build-push.yml`'s own comment at the `container-scan` job header, roughly lines
-  5003-5011) — both are independent `docker buildx build` invocations of the same
-  Dockerfile/commit; a fresh build stamps a new `created` timestamp into the image
-  config every time, so the two builds' digests never match even given
-  byte-identical inputs. **This is not currently a correctness/provenance gap**: the
-  "Scan pushed service digest with Trivy" step (`build-push.yml`'s `build` and
-  `build-arm64` jobs, per issue #1095 Step 3) already scans the exact digest that
-  gets pushed for all 8 services, not just `build-tools` as before — so the
-  security-relevant claim ("the scanned image is the shipped image") is verified
-  independently of `container-scan`'s throwaway build. What remains unfixed is a
-  **cost/redundancy** problem only: every changed service's Dockerfile gets built
-  twice per run (once to scan, once to push), tracked under the larger #1095
-  CI-pipeline rework, not expected to be resolved by a small, targeted fix.
+- ~~C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
+  never share a digest~~ — **fixed** (issue #1348/#1095's G8 finding; no longer an
+  accepted limitation, see the 2026-08-01 entry above and `container-scan`'s own
+  job-header comment in `build-push.yml`). `container-scan`'s redundant
+  rebuild-and-scan branch for a changed service was removed entirely;
+  `build`/`build-arm64`'s existing "Scan pushed service digest with Trivy" step is
+  now the sole vulnerability scan, and it always scans the exact pushed digest.
 - **`build-push.yml` self-modification trigger bug** (open, unresolved as of
   2026-08-01; maintainer's own POC is PR #1367, `Refs #1095`, `Refs #1356`) — a PR
   that itself modifies `build-push.yml` does not reliably receive a real
