@@ -274,7 +274,7 @@ require_grep 'imagetools inspect "\$image" --format' \
 if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/untracked/require-image-platforms.sh"; then
   fail 'the shared platform coverage guard must not require host jq'
 fi
-require_grep 'bash scripts/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
+require_grep 'bash scripts/untracked/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
   'promotion must verify every sha-* service image platform before moving public tags'
 require_grep 'rollback_promotions\(\)' \
@@ -368,7 +368,7 @@ require_grep 'expected_prerelease=' \
 require_grep '^  RELEASE_PLATFORMS: linux/amd64,linux/arm64$' \
   .github/workflows/build-push.yml \
   'build workflow must publish every platform declared by the stack manifest'
-require_grep 'bash scripts/require-image-platforms\.sh "\$image" "\$REQUIRED_PLATFORMS"' \
+require_grep 'bash scripts/untracked/require-image-platforms\.sh "\$image" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
   'release workflow must verify every published release image via the shared platform coverage guard'
 require_grep 'is missing required platform' \
