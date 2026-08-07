@@ -215,8 +215,9 @@ _sif_inspect_attempt() {
 # already follows -- see e.g. scripts/require-image-platforms.sh).
 #
 # Echoes stdout on success (return 0). On failure, echoes nothing and
-# returns 2 for a confirmed absence, 1 for everything else -- unchanged
-# external contract from before this fix; sif_image_revision below
+# returns 2 for a confirmed absence, 1 for everything else -- this is the
+# function's own stable external contract, independent of the underlying
+# registry-call mechanism; sif_image_revision below
 # propagates whichever of these two its own failing call produced, so a
 # caller several frames up (sif_wait_for_fresh_base_image) can tell the two
 # cases apart in its own log line instead of always printing the same
@@ -506,7 +507,8 @@ sif_wait_for_fresh_base_image() {
   #   without buying anything the loop's own sleep-and-repeat does not
   #   already provide -- so this case scopes down to exactly one attempt
   #   (no internal retry at all; a transient blip just becomes another "keep
-  #   polling" iteration, unchanged from before this fix).
+  #   polling" iteration, the same outer-loop-driven recovery this function
+  #   always relies on for any other transient condition).
   # - A single non-polling probe (hard_ceiling_seconds == 0 -- e.g. F-22's
   #   "one direct check before assuming the ancestor walk is needed" fast
   #   path, scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor())
