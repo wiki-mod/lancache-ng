@@ -166,17 +166,64 @@ _sif_inspect_failure_is_confirmed_absence() {
   grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown' <<<"$stderr_text"
 }
 
+# _sif_inspect_attempt <err_file> <args...>
+#
+# One single, unwrapped `docker buildx imagetools inspect "$@"` attempt --
+# the actual command _sif_inspect below hands to ghcr_retry so retries can
+# re-run exactly this and nothing more. Writes stdout on success. On
+# failure, classifies its own stderr (captured in <err_file>, overwritten
+# fresh on every attempt so the caller always sees the LAST attempt's text)
+# via _sif_inspect_failure_is_confirmed_absence: a confirmed registry
+# absence ("manifest unknown" and friends) exits with
+# GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE so ghcr_retry stops immediately
+# instead of burning its full retry budget on a manifest that positively
+# does not exist (retrying cannot make a real 404 not-exist); everything
+# else (network/timeout/rate-limit/auth/unrecognized) returns a plain 1,
+# which ghcr_retry treats as retryable.
+_sif_inspect_attempt() {
+  local err_file="$1"
+  shift
+  local out status
+  out="$(docker buildx imagetools inspect "$@" 2>"$err_file")"
+  status=$?
+  if (( status == 0 )); then
+    printf '%s\n' "$out"
+    return 0
+  fi
+  local err_text=""
+  err_text="$(cat "$err_file" 2>/dev/null)"
+  if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
+    return "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
+  fi
+  return 1
+}
+
 # _sif_inspect <args...>
 #
-# Internal helper: runs `docker buildx imagetools inspect "$@"`, capturing
-# stdout on success and, on failure, classifying the call's own stderr via
-# _sif_inspect_failure_is_confirmed_absence above. Echoes stdout on success
-# (return 0). On failure, echoes nothing and returns 2 for a confirmed
-# absence, 1 for everything else -- sif_image_revision below propagates
-# whichever of these two its own failing call produced, so a caller several
-# frames up (sif_wait_for_fresh_base_image) can tell the two cases apart in
-# its own log line instead of always printing the same both-cases-at-once
-# wording.
+# Internal helper: runs `docker buildx imagetools inspect "$@"` through the
+# project's shared ghcr_retry wrapper (scripts/lib/ghcr-retry.sh) instead of
+# a single bare attempt (#1095 F-21: PR #1378 widened this function's real
+# callers from 2 to 8 services -- 12 more unprotected registry reads per
+# eligible push -- without retry coverage, so a single transient GHCR error
+# on any one of them was read as "revision undeterminable" and silently
+# triggered a full rebuild+scan, erasing the whole point of the push-reuse
+# mechanism on registry-flaky days). ghcr_retry needs GHCR_RETRY_USERNAME/
+# GHCR_RETRY_PASSWORD in the environment to re-login between retries (both
+# optional -- see ghcr_retry's own header for the credential-less case) and
+# must already be sourced by the caller (scripts/lib/ghcr-retry.sh, the same
+# convention every other dual script/workflow-step caller in this project
+# already follows -- see e.g. scripts/require-image-platforms.sh).
+#
+# Echoes stdout on success (return 0). On failure, echoes nothing and
+# returns 2 for a confirmed absence, 1 for everything else -- unchanged
+# external contract from before this fix; sif_image_revision below
+# propagates whichever of these two its own failing call produced, so a
+# caller several frames up (sif_wait_for_fresh_base_image) can tell the two
+# cases apart in its own log line instead of always printing the same
+# both-cases-at-once wording. Internally this now means: ghcr_retry returns
+# GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE for a confirmed absence (translated
+# back to 2 here) or the last attempt's plain 1 after exhausting its retry
+# budget for everything else (passed through as 1).
 #
 # stderr is captured to a scratch file, not a variable via a second `2>&1`
 # command substitution: mixing stdout and stderr into one stream would lose
@@ -184,31 +231,27 @@ _sif_inspect_failure_is_confirmed_absence() {
 # (the manifest JSON / label value) to stay exactly what it was before this
 # change -- untouched by whatever the registry wrote to stderr. `mktemp`
 # failing (a full/read-only $TMPDIR) degrades to the pre-existing
-# "everything else" classification rather than aborting -- the classification
-# is a diagnostic nicety, never a reason to fail a call that would otherwise
-# have succeeded or to change which exit code a genuine inspect failure
-# already produced.
+# "everything else" classification (no retry-vs-permanent distinction
+# possible without a file to classify) rather than aborting -- the
+# classification is a diagnostic nicety, never a reason to fail a call that
+# would otherwise have succeeded or to change which exit code a genuine
+# inspect failure already produced.
 _sif_inspect() {
   local err_file stdout_output inspect_status
   err_file="$(mktemp 2>/dev/null)" || err_file=""
   if [[ -n "$err_file" ]]; then
-    stdout_output="$(docker buildx imagetools inspect "$@" 2>"$err_file")"
+    stdout_output="$(ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- _sif_inspect_attempt "$err_file" "$@")"
     inspect_status=$?
+    rm -f "$err_file"
   else
-    stdout_output="$(docker buildx imagetools inspect "$@" 2>/dev/null)"
+    stdout_output="$(ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker buildx imagetools inspect "$@" 2>/dev/null)"
     inspect_status=$?
   fi
   if (( inspect_status == 0 )); then
-    [[ -n "$err_file" ]] && rm -f "$err_file"
     printf '%s\n' "$stdout_output"
     return 0
   fi
-  local err_text=""
-  if [[ -n "$err_file" ]]; then
-    err_text="$(cat "$err_file" 2>/dev/null)"
-    rm -f "$err_file"
-  fi
-  if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
+  if (( inspect_status == "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}" )); then
     return 2
   fi
   return 1
@@ -252,10 +295,24 @@ sif_image_revision() {
       if [[ -z "$digest" ]]; then
         return 1
       fi
-      # Repo-without-tag + "@digest": images in this project never use a
-      # registry host with an explicit port, so the LAST colon in $image is
-      # always the tag separator and safe to strip this way.
-      target="${image%:*}@${digest}"
+      # Strip whatever reference form $image already carries before
+      # appending the resolved child "@digest" -- $image can now be either
+      # a mutable tag (repo:nightly) or an already-pinned digest reference
+      # (repo@sha256:...; #1095 F-21's digest-TOCTOU fix passes this form so
+      # a caller can verify and export the exact same immutable reference,
+      # see scripts/lib/push-reuse.sh's own header). A single
+      # "${image%:*}" strip (the original form of this line) is only
+      # correct for the tag case: for a digest-ref input, the LAST colon in
+      # $image sits INSIDE "sha256:..." itself, so that strip would cut the
+      # digest in half instead of removing a tag that was never there.
+      # Stripping "@..." first (a no-op for a tag-ref input, which has no
+      # "@") then ":..." (a no-op for a digest-ref input, which -- images in
+      # this project never using a registry host with an explicit port --
+      # has no colon left once the "@digest" suffix is gone) handles both
+      # forms with the same two lines.
+      local repo="${image%@*}"
+      repo="${repo%:*}"
+      target="${repo}@${digest}"
     fi
     local format_status
     revision="$(_sif_inspect "$target" --format '{{index .Image.Config.Labels "org.opencontainers.image.revision"}}')"
@@ -434,6 +491,50 @@ sif_wait_for_fresh_base_image() {
   local hard_ceiling_seconds="${5:?sif_wait_for_fresh_base_image: hard_ceiling_seconds is required}"
   local poll_interval_seconds="${6:?sif_wait_for_fresh_base_image: poll_interval_seconds is required}"
   local allow_reverse_ancestry="${7:-}"
+
+  # Scope ghcr_retry's own internal retry/backoff (added to sif_image_revision's
+  # underlying _sif_inspect calls by #1095 F-21) to match THIS call's own
+  # budget shape, rather than letting either extreme apply everywhere:
+  #
+  # - A genuine multi-iteration poll (hard_ceiling_seconds > 0) already IS a
+  #   retry loop -- that is what "wait" means here, and its own budget/
+  #   ceiling contract is load-bearing (the F-22 incident, #1095, measured
+  #   several services burning ~612s each against this exact ceiling).
+  #   Letting ghcr_retry's own up-to-90s internal retry-with-backoff run
+  #   silently inside a single poll iteration would eat into that same
+  #   ceiling in a way this loop's own budget arithmetic does not expect,
+  #   without buying anything the loop's own sleep-and-repeat does not
+  #   already provide -- so this case scopes down to exactly one attempt
+  #   (no internal retry at all; a transient blip just becomes another "keep
+  #   polling" iteration, unchanged from before this fix).
+  # - A single non-polling probe (hard_ceiling_seconds == 0 -- e.g. F-22's
+  #   "one direct check before assuming the ancestor walk is needed" fast
+  #   path, scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor())
+  #   gets exactly ONE iteration of this outer loop, so it has ZERO
+  #   redundancy of its own against a transient GHCR error -- confirmed live
+  #   (2026-08-07, PR #1440's "ensure PR staging images" check): the 0s
+  #   fast-path probe for proxy:sha-f5f991b failed on a single transient
+  #   registry-read error even though the image demonstrably existed
+  #   (verified directly afterward via `docker buildx imagetools inspect` on
+  #   a runner), because this exact case had no retry margin anywhere. A
+  #   short, bounded retry (2 attempts, 5s backoff -- cheap next to a real
+  #   rebuild+scan, unlike the full 4-attempt/30s-backoff default) gives
+  #   this specific shape the resilience its own zero-iteration budget
+  #   cannot provide any other way, without reintroducing the full poll-path
+  #   cost concern above.
+  #
+  # `local` here shadows the global for this function's entire dynamic
+  # extent (including every function it calls, transitively through
+  # sif_image_revision/_sif_inspect/ghcr_retry) and is automatically
+  # restored on any of this function's several return points -- no explicit
+  # save/restore needed.
+  if (( hard_ceiling_seconds > 0 )); then
+    local GHCR_RETRY_MAX_ATTEMPTS=1
+    local GHCR_RETRY_BACKOFF_SECONDS=0
+  else
+    local GHCR_RETRY_MAX_ATTEMPTS=2
+    local GHCR_RETRY_BACKOFF_SECONDS=5
+  fi
 
   local start_time=$SECONDS
   local hard_deadline=$((start_time + hard_ceiling_seconds))
