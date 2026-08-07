@@ -104,16 +104,45 @@ val() {
 }
 
 # F-16 (issue #1095): a CI-tooling-only script (verified zero stack
-# dependency, see the ci_tooling_only_scripts allowlist and its header
-# comment in detect-full-setup-changes.sh) must no longer force the deep
-# suite to run on its own. Reproduces the real, confirmed regression
-# (PR #1333, run 30616274721: touching only AGENTS.md +
-# scripts/tracked/check-pr-title-convention.sh ran the full ~15-job simulation
-# suite) so this test fails again if the narrowing regresses.
+# dependency, now living under scripts/tracked/ -- see that directory's own
+# README and detect-full-setup-changes.sh's header comment for the full
+# history) must no longer force the deep suite to run on its own. Reproduces
+# the real, confirmed regression (PR #1333, run 30616274721: touching only
+# AGENTS.md + the then-flat scripts/check-pr-title-convention.sh ran the
+# full ~15-job simulation suite) so this test fails again if the narrowing
+# regresses. This now exercises the scripts/tracked/ prefix match, not the
+# (now-empty) ci_tooling_only_scripts array -- see the dedicated array-is-
+# empty test below for that.
 @test "F-16: CI-tooling-only script change alone does not force should_run" {
     run_detect "AGENTS.md" "scripts/tracked/check-pr-title-convention.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
+}
+
+# F-16 follow-up (post-v0.3.0-release execution, issue #1095): once every
+# individually-verified CI-tooling-only script actually moved into
+# scripts/tracked/ (git mv, not a fresh add), the by-name
+# ci_tooling_only_scripts array became redundant -- scripts/tracked/'s own
+# directory-prefix match (exercised above and by the dedicated prefix test
+# below) covers every one of them already. Asserts the array is genuinely
+# empty, not merely unused, so a future accidental re-population (e.g. a
+# careless revert) is caught here rather than silently reintroducing
+# by-name maintenance the directory-prefix design was meant to retire.
+@test "F-16: ci_tooling_only_scripts array is empty now that scripts/tracked/ is populated" {
+    # The script has no "am I sourced" guard -- it always runs emit() at the
+    # bottom -- so source it (rather than exec it) inside a subshell with a
+    # real CHANGED_FILES fixture, redirecting emit()'s own stdout away, then
+    # read the array variable back directly. This is a stronger check than
+    # grepping the script's source text for array entries: it reads the
+    # variable's real runtime state after the script's own declaration ran.
+    : > "$files"
+    array_count="$(CHANGED_FILES="$files" bash -c '
+        set -euo pipefail
+        # shellcheck disable=SC1090
+        source "'"$script"'" >/dev/null
+        printf "%d" "${#ci_tooling_only_scripts[@]}"
+    ')"
+    [ "$array_count" = "0" ]
 }
 
 @test "F-16: a mix of an allowlisted CI-tooling script and a real simulation script still runs the suite" {

@@ -99,73 +99,50 @@ touches_exact() {
     return 1
 }
 
-# F-16 (issue #1095, 2026-07-31): scripts/ has no subdirectory structure to
-# path-filter against, so before this allowlist existed ANY change under
-# scripts/ -- including a pure CI/governance-lint script with zero product or
-# stack dependency -- forced should_run=true below, running this suite's
-# entire ~15-job real Docker-Compose deep validation (DNS/DHCP/NATS/proxy
-# TLS/syslog/Admin UI). Confirmed for real against PR #1333 (changed only
-# AGENTS.md + scripts/tracked/check-pr-title-convention.sh): run 30616274721 ran the
-# full simulation suite end to end.
+# F-16 (issue #1095, 2026-07-31): scripts/ originally had no subdirectory
+# structure to path-filter against, so before this allowlist existed ANY
+# change under scripts/ -- including a pure CI/governance-lint script with
+# zero product or stack dependency -- forced should_run=true below, running
+# this suite's entire ~15-job real Docker-Compose deep validation (DNS/DHCP/
+# NATS/proxy TLS/syslog/Admin UI). Confirmed for real against PR #1333
+# (changed only AGENTS.md + the then-flat scripts/check-pr-title-convention.sh):
+# run 30616274721 ran the full simulation suite end to end. PR #1341 (this
+# same day) fixed it with a by-name array allowlist as an interim measure,
+# since the real subdirectory move it should have been was blocked by
+# concurrent in-flight PRs and an explicit "nothing happens before the
+# v0.3.0 release" maintainer instruction (see this issue's F-16 thread).
 #
-# Every script below was individually verified (not classified by name
-# pattern alone, per AG-WF-028) via a full-repo grep sweep -- every
+# scripts/tracked/ (issue #1095 F-16, executed post-v0.3.0-release): the 24
+# scripts PR #1341 individually verified (full-repo grep sweep -- every
 # .github/workflows/*.yml, every other scripts/** file, setup.sh, and every
-# services/**/Dockerfile -- to confirm it is invoked only from build-push.yml's
-# own PR-gate jobs, build-tools-smoke.yml, backfill-stack-latest.yml, or
-# orphaned-branches.yml, none of which are part of this suite's job graph, and
-# is never sourced/invoked/COPYed by anything
-# full-setup-deep-validate.yml/full-setup-sims.yml/full-setup-validate.yml (or
-# the simulation scripts they run) exercises. A change to one of these, and
-# ONLY these, does not need to re-run the deep suite.
+# services/**/Dockerfile -- confirming each is invoked only from
+# build-push.yml's own PR-gate jobs, build-tools-smoke.yml,
+# backfill-stack-latest.yml, or orphaned-branches.yml, none of which are
+# part of this suite's job graph, and is never sourced/invoked/COPYed by
+# anything full-setup-deep-validate.yml/full-setup-sims.yml/
+# full-setup-validate.yml or the simulation scripts they run exercises) have
+# since actually moved into scripts/tracked/ (git mv, not a fresh file) and
+# been dropped from the array below, which is now empty by design: ANY path
+# under the scripts/tracked/ prefix is recognized as CI-tooling-only,
+# exactly as an exact-match array entry used to be -- this is the one
+# deliberate, narrow exception to "never widen should_run's narrowing by
+# directory/prefix" below, because scripts/tracked/ is itself defined to
+# contain only already-individually-verified scripts (the verification
+# happens at move time, not at check time). A brand-new CI-tooling-only
+# script gets this same treatment by being placed directly into
+# scripts/tracked/ at creation, not by adding a new array entry here.
 #
-# Fail-closed by construction: this list may only ever be used to NARROW
-# should_run for a script that has been individually re-verified this way --
-# never to widen it by directory/prefix. Any scripts/ path not in this exact
-# list (a brand-new script, an unclassified one, or anything under
-# scripts/lib/) still counts as should_run-relevant, exactly as
-# touches_prefix "scripts/" did before this allowlist existed.
-#
-# scripts/tracked/ vs scripts/untracked/ (issue #1095 F-16, decided
-# 2026-07-31, not yet populated -- the directory-by-directory migration of
-# the scripts above out of this array and into scripts/tracked/ is deferred
-# until after the v0.3.0 release; "nothing happens before the release" is an
-# explicit maintainer instruction, not an oversight): once a script has been
-# individually re-verified and moved into scripts/tracked/, ANY path under
-# that prefix is recognized as CI-tooling-only below, same as an exact match
-# against the array -- this is the one deliberate, narrow exception to the
-# "never widen by directory/prefix" rule just above, because scripts/tracked/
-# is itself defined to contain only already-individually-verified scripts (the
-# verification happens at move time, not at check time). scripts/untracked/
-# (like scripts/lib/) is NOT given any special prefix handling -- it needs
-# none, since anything not matched below already falls through to
-# should_run-relevant by default, exactly like an unclassified script today.
-ci_tooling_only_scripts=(
-    "scripts/tracked/check-action-node-versions.sh"
-    "scripts/tracked/check-bats-path-filter-coverage.sh"
-    "scripts/tracked/check-build-tools-smoke-coverage.sh"
-    "scripts/tracked/check-changelog-direct-edit.sh"
-    "scripts/tracked/check-compose-healthchecks.sh"
-    "scripts/tracked/check-executable-bits.sh"
-    "scripts/tracked/check-file-headers.sh"
-    "scripts/tracked/check-governance-guards.sh"
-    "scripts/tracked/check-idempotence-test-coverage.sh"
-    "scripts/tracked/check-language-policy.sh"
-    "scripts/tracked/check-line-endings.sh"
-    "scripts/tracked/check-logging-matrix.sh"
-    "scripts/tracked/check-mutable-refs.sh"
-    "scripts/tracked/check-naming-consistency.sh"
-    "scripts/tracked/check-orphaned-branches.sh"
-    "scripts/tracked/check-pr-title-convention.sh"
-    "scripts/tracked/check-pr-tracking-metadata.sh"
-    "scripts/tracked/check-setup-prompt-drift.sh"
-    "scripts/tracked/check-stable-external-images.sh"
-    "scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
-    "scripts/tracked/check-vex-drift.sh"
-    "scripts/tracked/check-workflow-service-lists.sh"
-    "scripts/tracked/test-governance-guards.sh"
-    "scripts/tracked/validate-pr-template.sh"
-)
+# Fail-closed by construction: this array (now empty, kept as a named,
+# still-iterated variable rather than deleted outright, so a future
+# individually-verified script that for some reason cannot move into
+# scripts/tracked/ has a documented, tested fallback path) may only ever be
+# used to NARROW should_run for a script that has been individually
+# re-verified this way -- never to widen it by directory/prefix. Any
+# scripts/ path that is neither under scripts/tracked/ nor listed here (a
+# brand-new script, an unclassified one, anything under scripts/untracked/,
+# or anything under scripts/lib/) still counts as should_run-relevant,
+# exactly as touches_prefix "scripts/" did before this allowlist existed.
+ci_tooling_only_scripts=()
 
 # True when at least one changed path is under scripts/ AND that path is NOT
 # on the allowlist above. False when every scripts/-prefixed changed path is a
