@@ -966,3 +966,22 @@ STUB
     [[ "$output" != *"Substituting nearest built ancestor"* ]]
     printf '%s\n' "$output" | grep -q "paths could not be positively confirmed"
 }
+
+# scripts/lib/staging-poll-defaults.sh coverage: sourced directly (not via a
+# full run of $script) so these two cases run instantly instead of actually
+# waiting out a real 3600s poll to observe the workflow_changed=true default.
+@test "staging poll defaults: normal (workflow_changed=false) case is unchanged" {
+    # shellcheck source=scripts/lib/staging-poll-defaults.sh
+    source "$repo_root/scripts/lib/staging-poll-defaults.sh"
+    staging_poll_set_defaults_for_workflow_changed "false"
+    [ "$default_poll_timeout_seconds" -eq 1500 ]
+    [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
+}
+
+@test "staging poll defaults: workflow_changed=true widens the full-rebuild budget to 3600s" {
+    # shellcheck source=scripts/lib/staging-poll-defaults.sh
+    source "$repo_root/scripts/lib/staging-poll-defaults.sh"
+    staging_poll_set_defaults_for_workflow_changed "true"
+    [ "$default_poll_timeout_seconds" -eq 3600 ]
+    [ "$default_poll_hard_ceiling_seconds" -eq 3600 ]
+}
