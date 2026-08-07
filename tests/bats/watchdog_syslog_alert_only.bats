@@ -129,7 +129,11 @@ setup() {
     [ -z "$C_SYSLOG" ]
 
     write_status
+    # `jq -e` exits 1 (not 0) whenever the filter's own output is `false` or
+    # `null` -- that is the entire point of `-e`, so a genuinely-absent key
+    # (has() itself evaluating to false, asserted via $output below) must be
+    # paired with status 1 here, not 0.
     run jq -e '.services | has("lancache-syslog")' "$status_file"
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
     [ "$output" = "false" ]
 }
