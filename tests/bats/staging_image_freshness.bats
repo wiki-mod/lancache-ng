@@ -356,9 +356,14 @@ STUB
     # visibility for every other ghcr_retry call site) -- `run` would fold
     # that into $output and corrupt this exact stdout-must-be-empty check.
     # Same reasoning tests/bats/push_reuse.bats' own stderr-diagnostics
-    # comment documents for the identical situation.
-    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)"
-    status=$?
+    # comment documents for the identical situation. `|| status=$?`, not a
+    # bare assignment statement: bats fails a test immediately on any
+    # non-zero exit inside its body unless the failure is absorbed by a
+    # conditional first -- sif_image_revision genuinely returns non-zero
+    # here (unlike push_reuse_decide, which always returns 0 by contract),
+    # so the bare form would abort the test before these assertions run.
+    status=0
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)" || status=$?
     [ "$status" -eq 2 ]
     [ -z "$result" ]
 }
@@ -378,10 +383,12 @@ STUB
     # a cross-file dynamic-scope read shellcheck cannot see.
     GHCR_RETRY_MAX_ATTEMPTS=1
     # Direct capture, not `run` -- see the confirmed-absence test above for
-    # why (ghcr_retry's own real-stderr diagnostics would otherwise corrupt
-    # this stdout-must-be-empty check).
-    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)"
-    status=$?
+    # both why (ghcr_retry's own real-stderr diagnostics would otherwise
+    # corrupt this stdout-must-be-empty check) and why `|| status=$?`
+    # specifically (a bare assignment would abort the test on the genuine
+    # non-zero exit before these assertions run).
+    status=0
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)" || status=$?
     [ "$status" -eq 1 ]
     [ -z "$result" ]
 }
