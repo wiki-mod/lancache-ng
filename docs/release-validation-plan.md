@@ -871,6 +871,52 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   issue #1377, which also fixed the repo-wide instances and widened this
   script's scope -- see the Standing check row above).
 
+### Additions dated 2026-08-07 (real incident since the 2026-08-01 survey above)
+
+- **`gc-pr-staging-images.yml` narrow-checkout runner corruption** (issue #1095,
+  fixed) — `actions/checkout@v7.0.1`'s `sparseCheckoutNonConeMode()` (selected by
+  this workflow's `sparse-checkout-cone-mode: false`) sets `core.sparseCheckout`
+  via `git config` but writes the narrow path patterns by appending directly to
+  `.git/info/sparse-checkout`, never through the `git sparse-checkout set`
+  porcelain command. Reproduced repeatedly, live, on a self-hosted runner host
+  (git 2.47.3, `.240`), both against a real shallow clone of this repository and
+  throwaway synthetic repositories of varying size: a sparse-checkout state set
+  up that way does not reliably clear on a later job's plain `git
+  sparse-checkout disable`, nor on `git sparse-checkout init` immediately
+  followed by `disable` — both report success, but across repeated runs the
+  actual outcome varied between full recovery and index skip-worktree bits
+  staying set on every path outside the narrow set; the exact trigger for the
+  variation was not isolated. Self-hosted runners reuse one working directory
+  across unrelated jobs/workflows, and no other workflow in this repo passes a
+  sparse-checkout input at all, so whatever state a `gc-pr-staging-images.yml`
+  run leaves behind is inherited by the next job scheduled onto the same
+  runner instance — traced via one such runner's own `_diag` worker logs (a
+  "reap closed-PR staging tags and orphaned versions" run, followed without an
+  intervening second reap run by a `build-push.yml` job that failed) to real
+  "No such file or directory" / "Can't find 'action.yml'" failures observed
+  across several unrelated `build-push.yml` jobs, on multiple runner hosts, on
+  2026-08-07. Because `disable`'s own exit code proved unreliable as a success
+  signal, the fix does not trust it: after the reap script runs, it sweeps any
+  remaining index skip-worktree bits directly via `git update-index
+  --no-skip-worktree` and asserts (failing the job loudly) that none remain,
+  rather than assuming the restore worked. The count itself is computed with
+  `awk` rather than `grep -c`, and only after capturing `git ls-files -v`'s
+  output into a variable first — a real git failure at that point must trip
+  `set -e` immediately via the plain assignment, and the count must never end
+  up empty (an empty `[ "$x" -ne 0 ]` comparison is a runtime error, not a
+  `set -e`-fatal one, inside an `if` condition, so it would otherwise silently
+  skip the check instead of failing it); confirmed with a real run against a
+  non-git directory that the step now exits non-zero rather than silently
+  succeeding. New standing check:
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
+  the fix including the always-reproducible case of a skip-worktree bit that
+  `disable` alone does not clear, and the fail-closed behavior itself, against
+  a throwaway local git repository — no network or real clone needed. A
+  durable guard against a *future* self-hosted workflow reintroducing a narrow
+  `sparse-checkout` input without a matching restore step does not exist yet;
+  recorded as an open gap in Coverage Assessment below.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -1063,6 +1109,17 @@ omitted):**
   permanently-running script either). The depth-2 real-backend-certificate
   assertion that remains in the committed script carries the ongoing regression
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
+- **No repo-wide guard against a future workflow reintroducing an unrestored
+  narrow `sparse-checkout` on a self-hosted job** (2026-08-07, issue #1095) —
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
+  this repo that currently sets a `sparse-checkout` input), but nothing checks
+  the repo's workflow files themselves for a *new* `sparse-checkout` input added
+  to some other self-hosted job without an equivalent restore step. A grep-based
+  guard (flag any `sparse-checkout:` input in `.github/workflows/**` whose job
+  does not also contain a matching config-unset/pattern-file-removal step) is
+  plausible but not yet built — this is a real, currently-open gap, not a
+  silently-assumed-covered case.
 
 ---
 

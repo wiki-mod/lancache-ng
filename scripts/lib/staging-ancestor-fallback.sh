@@ -977,9 +977,12 @@ saf_base_commit_has_confirmed_run() {
 # reports failure immediately rather than walking further back -- UNLESS
 # <classify_key>'s own service is confirmed untouched by that candidate's own
 # diff (saf_base_commit_service_untouched), in which case the run existing
-# says nothing about whether <service> was ever built there (Step 4 / #1095
-# reuse, confirmed live 2026-08-02, never creates a fresh per-commit tag for
-# a reused service), and this continues to the next candidate instead.
+# says nothing on its own about whether a fresh per-commit tag for <service>
+# is actually present (Step 4 / #1095 reuse, confirmed live 2026-08-02, does
+# not by itself prove a fresh per-commit tag exists yet for a reused
+# service -- see the corrected note at the has_run==0 branch below for why
+# this is a probe-and-move-on decision, not "it structurally never exists"),
+# and this continues to the next candidate instead if that tag isn't there.
 # Stacking many bounded waits (each up to <extended_hard_ceiling_seconds>)
 # across up to <search_depth> candidates would still be a worse failure mode
 # than the structural problem this mechanism exists to solve, and reaching
@@ -989,6 +992,22 @@ saf_base_commit_has_confirmed_run() {
 # inconclusive) still stops here: a real, seemingly-broken build for a
 # service-affecting commit is a genuine CI problem worth surfacing on its
 # own, not a reason to keep hunting for an even older substitute.
+#
+# #1095 F-22 (2026-08-07): the confirmed-untouched case described above used
+# to be reached ONLY here, after paying the full wait -- a candidate whose
+# own diff never touched <service> still burned the full wait, up to
+# <freshness_hard_ceiling_seconds> (and, if a confirmed-active retry
+# applied, <extended_hard_ceiling_seconds> on top) before this JUDGMENT CALL
+# got a chance to walk past it. Confirmed live against PR #1468 (runs
+# 31184925428/31187...): four services untouched by the same candidate
+# commit each independently paid the full 600s ceiling waiting on a tag that
+# was never going to appear, stacking to roughly 40 minutes for one job. The
+# has_run==0 branch below now runs this identical service-scoped check
+# BEFORE the wait, so the common "genuinely untouched" case is walked past in
+# the time a git diff takes, not a network poll loop -- this JUDGMENT CALL
+# and its own re-derivation of the check (the code immediately below) remain
+# as the fail-closed path for the "service WAS touched" and "the pre-check
+# was inconclusive" cases, which still need the real wait.
 #
 # Echoes the confirmed-good ancestor's full commit SHA on stdout on success;
 # returns non-zero with no output if no usable ancestor is found within the
@@ -1175,10 +1194,81 @@ saf_find_built_ancestor() {
     fi
 
     # has_run == 0 here: a build-push.yml run (any event) is positively
-    # confirmed to exist for this candidate -- proceed to the freshness
-    # check, the only remaining question being whether that run actually
-    # produced a confirmed-fresh image for <service>.
+    # confirmed to exist for this candidate -- the remaining question is
+    # whether that run actually produced a confirmed-fresh image for
+    # <service>.
+    #
+    # #1095 F-22 (2026-08-07, confirmed live against runs 31184925428/
+    # 31187... for PR #1468): four untouched services each independently
+    # paid the full 600s ancestor-candidate ceiling waiting on the exact same
+    # candidate commit, ~40 minutes total, when a cheap, no-network,
+    # git-diff-based "was <service> even touched by <candidate>" answer could
+    # settle it instead. That check now runs FIRST, before paying for the
+    # network wait below, not only AFTER it has already failed (the JUDGMENT
+    # CALL further down still performs this exact same check post-wait, for
+    # the "service WAS touched, or the check is inconclusive" paths that
+    # still need the wait).
+    #
+    # A push-reuse-eligible service does not structurally "never get a FRESH
+    # per-commit tag" for an untouched candidate, and the full-budget wait is
+    # not structurally guaranteed to time out either: a SUCCESSFULLY
+    # COMPLETED build-push.yml run does create the combined tag for an
+    # untouched service (the Step 4 retag, carrying the older commit's
+    # revision label -- exactly the allow_reverse_ancestry shape), verified
+    # directly against the registry. fb05ee33's tags were missing not
+    # because the wait is structurally doomed, but because that specific
+    # run's merge-manifests job aborted before ever reaching the untouched
+    # services (see issue #1095 for that separate, still-open finding). The
+    # real, narrower justification for skipping the full-budget wait below
+    # is: if the run truly never completed (aborted, or genuinely never
+    # produced this tag), waiting the full budget cannot help either, and
+    # the single 0/0 probe two lines down is cheap enough to try regardless
+    # of which case applies -- not that success is impossible.
+    #
+    # A confirmed-untouched candidate is NOT skipped outright, though --
+    # "never touched by this commit's own diff" is not the same claim as
+    # "this exact commit's tag can never exist": it can still exist via a
+    # Step 4 reverse-ancestry retag (this candidate's own build reusing an
+    # even older commit's content, see sif_wait_for_fresh_base_image's own
+    # allow_reverse_ancestry doc), or, in principle, a real image that
+    # genuinely got published for it despite the diff -- both real shapes
+    # this project's own bats fixtures for this function already exercise
+    # (a candidate with an installed image but no service-touching diff).
+    # So a confirmed-untouched candidate pays for exactly ONE non-polling
+    # (0/0 budget) probe against its own image, the same "single attempt,
+    # never a full poll loop" shape saf_resolve_untouched_backfill_source's
+    # own fast path already uses for BASE_SHA itself -- if that probe
+    # resolves immediately, this candidate genuinely has a usable image and
+    # is used directly; if not, this moves on to the next candidate without
+    # ever entering the full-budget poll loop below.
+    #
+    # KNOWN, ACCEPTED TRADE-OFF (not a #808 fail-open break): the 0/0 probe
+    # does not call saf_candidate_run_is_active() first, unlike the post-wait
+    # JUDGMENT CALL further down. So if this candidate's own run is still
+    # genuinely IN FLIGHT (not aborted, not yet reached the retag step), the
+    # probe will not see the tag yet and this candidate is skipped in favor
+    # of an older one -- where the pre-F-22 code would instead have waited
+    # out the full budget and likely found it. This is a deliberate
+    # freshness-for-speed trade, not an oversight: the older ancestor this
+    # falls back to still carries the same full untouched-diff proof, so
+    # nothing here weakens the fail-closed safety guarantee, only which
+    # (still-valid) candidate gets picked. If this trade-off proves too
+    # aggressive in practice, the fix is to call saf_candidate_run_is_active()
+    # before the 0/0 probe and only skip on a confirmed-not-active answer --
+    # deliberately not done here to keep this pass's change minimal and
+    # single-purpose.
+    local candidate_pre_service_untouched_status=0
+    saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_pre_service_untouched_status=$?
     ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
+    if (( candidate_pre_service_untouched_status == 0 )); then
+      if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" 0 0 "$freshness_poll_interval_seconds" true >/dev/null; then
+        printf '%s\n' "$candidate"
+        return 0
+      fi
+      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it, and a single non-polling probe against its per-commit tag found nothing yet -- either that run never completed (aborted or genuinely never retagged this service) or its retag simply hasn't landed yet. Skipping the full network wait and continuing to the next candidate, which still carries its own full untouched-diff proof." >&2
+      continue
+    fi
+
     # Deliberately NOT redirecting stderr here (only stdout): the
     # ::notice::/::warning::/::error:: diagnostic lines
     # sif_wait_for_fresh_base_image writes to stderr must still reach the job
@@ -1216,22 +1306,31 @@ saf_find_built_ancestor() {
     # Found a run-bearing candidate whose image never became confirmed-fresh
     # -- even after the activity-confirmed extended retry, if one applied.
     # Before applying the JUDGMENT CALL above (stop, do not walk further):
-    # this run existing at all says nothing about whether it actually built
-    # <service> specifically -- a real push that only changed OTHER services
-    # is exactly this project's Step 4 (#1095) reuse behavior, confirmed live
-    # 2026-08-02 (a Step 4 reuse push never creates a fresh sha-<commit> tag
-    # for the reused service). If <classify_key>'s own service was untouched
-    # by THIS candidate's own diff, its image never existing is that same
-    # expected, safe-to-walk-past shape, not a broken build -- continue to
-    # the next candidate instead of stopping. Only when the service WAS
-    # actually touched (or the check is inconclusive) does the original
+    # re-derive the same service-scoped untouched check the PRE-wait check
+    # above already ran (#1095 F-22). This is now normally redundant (a
+    # positive pre-check already `continue`d past this candidate before ever
+    # reaching the wait), EXCEPT when the pre-check was inconclusive (status
+    # 2 -- a transient git/fetch issue), in which case the wait still ran per
+    # the pre-check's own fall-through, and this independent re-derivation
+    # gets a second chance to positively resolve it now. Kept deliberately
+    # separate from the pre-check (not cached/shared) for the same reason
+    # BASE_SHA's own pre/post push-run check stays independently re-derived
+    # in saf_resolve_untouched_backfill_source: a fast-path bug can only cost
+    # time this way, never safety. If <classify_key>'s own service was
+    # untouched by THIS candidate's own diff, having reached this point means
+    # even the full-budget wait above found no usable tag for it -- expected
+    # for Step 4 (#1095) reuse when the run never completed a retag for this
+    # service (aborted, or the diff-implied reuse just never got confirmed
+    # fresh in time), not proof of a broken build -- continue to the next
+    # candidate instead of stopping. Only when the service WAS actually
+    # touched (or the check is inconclusive here too) does the original
     # JUDGMENT CALL still apply: a real, seemingly-broken build for a
     # service-affecting commit is a genuine CI problem worth surfacing on its
     # own, not a reason to keep hunting for an even older substitute.
     local candidate_run_service_untouched_status=0
     saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_run_service_untouched_status=$?
     if (( candidate_run_service_untouched_status == 0 )); then
-      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it -- its image never existing is expected (Step 4 reuse or an unrelated change), not a broken build. Continuing to the next candidate." >&2
+      echo "::notice::Ancestor candidate $candidate has a confirmed build-push.yml run, but $service ($classify_key) was not touched by it, and even the full-budget wait found no usable tag for it -- expected for Step 4 reuse or an unrelated change when the retag never completed, not proof of a broken build. Continuing to the next candidate." >&2
       continue
     fi
     echo "::error::Ancestor candidate $candidate has a confirmed build-push.yml run and $classify_key's own service was touched by it (or that check was inconclusive, status $candidate_run_service_untouched_status), but its $service image never became confirmed-fresh. Stopping here instead of walking further back -- this needs a maintainer look at $candidate's own build-push.yml run." >&2
@@ -1405,7 +1504,24 @@ saf_resolve_untouched_backfill_source() {
     # ancestor walk is needed at all. If it's not already there, waiting
     # longer cannot help: no push run exists, and the paths are confirmed
     # ignorable, so there is no in-flight push build to wait out.
-    if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" 0 0 "$freshness_poll_interval_seconds" >/dev/null; then
+    #
+    # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): $base_image is
+    # always an immutable per-commit sha-<base_sha> tag here, never a mutable
+    # channel tag -- exactly the same safety condition
+    # sif_wait_for_fresh_base_image's own allow_reverse_ancestry doc requires,
+    # and exactly the same reasoning saf_find_built_ancestor's own candidate
+    # checks already rely on (see that function's own comments). Before this
+    # fix, this specific call site was the one F-20 named as still exposed:
+    # push-reuse (Step 4, #1095) can retag $base_image FOR $base_sha's own
+    # commit while content-copying an older commit's build, which keeps that
+    # older commit's org.opencontainers.image.revision label (imagetools
+    # create copies labels byte-for-byte, never rewrites them) -- without
+    # allow_reverse_ancestry, that legitimately-safe retag would be wrongly
+    # reported as "stale" here and this would fall through to the ancestor
+    # walk unnecessarily, even though $base_sha's own image already exists
+    # and is exactly as safe to use as an ancestor candidate's own
+    # reverse-ancestry match already is.
+    if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" 0 0 "$freshness_poll_interval_seconds" true >/dev/null; then
       printf '%s\n' "$base_image"
       return 0
     fi
@@ -1425,9 +1541,15 @@ saf_resolve_untouched_backfill_source() {
   # LONG (base_freshness_*) budget deliberately -- see this function's own
   # header for why this specific wait, unlike the ancestor-candidate checks,
   # needs congestion-scale headroom.
+  #
+  # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): same reasoning as
+  # Step 1's fast-path call above -- $base_image is always an immutable
+  # per-commit tag, so a push-reuse retag that kept an older source commit's
+  # revision label is exactly as safe to accept here as it already is for
+  # every ancestor-candidate check in saf_find_built_ancestor.
   echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $base_sha before backfilling..." >&2
   if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" \
-    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
     printf '%s\n' "$base_image"
     return 0
   fi
