@@ -16,6 +16,13 @@
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     lib="$repo_root/scripts/lib/staging-image-freshness.sh"
+    # #1095 F-21: staging-image-freshness.sh's own _sif_inspect now routes
+    # its registry reads through ghcr_retry (scripts/lib/ghcr-retry.sh) --
+    # must be sourced first so the real (non-stubbed) docker branch below
+    # can find it, matching every other dual script/workflow-step caller's
+    # own sourcing convention in this project.
+    # shellcheck source=scripts/lib/ghcr-retry.sh
+    source "$repo_root/scripts/lib/ghcr-retry.sh"
     # shellcheck source=scripts/lib/staging-image-freshness.sh
     source "$lib"
 
@@ -349,6 +356,18 @@ STUB
 
 @test "sif_image_revision (real docker branch, no stub): an unrecognized/transient registry error returns status 1 (unchanged ambiguous case)" {
     fake_docker_returning_stderr "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
+    # #1095 F-21: sif_image_revision's registry reads now go through
+    # ghcr_retry, which defaults to 4 attempts/30s backoff -- a caller-less
+    # direct call like this one (unlike sif_wait_for_fresh_base_image, which
+    # scopes this down itself) would otherwise genuinely wait up to 90s here
+    # for a fake docker that fails identically every attempt. This test is
+    # about the final classification (still 1, ambiguous), not about
+    # exercising the real retry budget (covered separately by
+    # tests/bats/ghcr_retry.bats), so pin a single fast attempt --
+    # tests/bats/ghcr_retry.bats' own convention for the same reason.
+    # shellcheck disable=SC2034 # read by ghcr_retry() in scripts/lib/ghcr-retry.sh,
+    # a cross-file dynamic-scope read shellcheck cannot see.
+    GHCR_RETRY_MAX_ATTEMPTS=1
     run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
     [ "$status" -eq 1 ]
     [ -z "$output" ]
