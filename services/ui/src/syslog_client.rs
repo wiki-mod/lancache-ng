@@ -361,9 +361,13 @@ pub fn get_syslog_size_gb(path: &str) -> f64 {
     }
 
     let allowed_prefixes = ["/var/log/lancache-syslog-ng"];
+    // Same path-boundary bug as nginx_client::is_allowed_cache_path: a bare
+    // `starts_with` would also accept a sibling path that merely shares the
+    // prefix string, e.g. "/var/log/lancache-syslog-ng-evil". Require an
+    // exact match or a `/`-bounded subpath.
     if !allowed_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix))
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
     {
         return 0.0;
     }
@@ -1068,5 +1072,15 @@ mod tests {
             get_syslog_size_gb("/var/log/lancache-syslog-ng/../etc"),
             0.0
         );
+    }
+
+    // Finding #6 (docs/bug-hunt/ui-core.md, issue #849): same path-boundary
+    // gap as nginx_client's is_allowed_cache_path -- a bare `starts_with`
+    // would also accept a sibling directory that merely shares the prefix
+    // string, not the actual path component.
+    #[test]
+    fn get_syslog_size_gb_rejects_prefix_string_collision_without_path_boundary() {
+        assert_eq!(get_syslog_size_gb("/var/log/lancache-syslog-ng-evil"), 0.0);
+        assert_eq!(get_syslog_size_gb("/var/log/lancache-syslog-ngXYZ"), 0.0);
     }
 }
