@@ -349,9 +349,18 @@ STUB
 
 @test "sif_image_revision (real docker branch, no stub): a confirmed-absence registry error returns status 2" {
     fake_docker_returning_stderr "Error response from daemon: manifest unknown"
-    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
+    # Direct `$(... 2>/dev/null)` capture, not bats' `run` (which merges
+    # stdout+stderr into $output): #1095 F-21's ghcr_retry wrapping means a
+    # genuine failure path now legitimately logs its own ::warning::/::error::
+    # diagnostics to real stderr (this project's normal, desired CI-log
+    # visibility for every other ghcr_retry call site) -- `run` would fold
+    # that into $output and corrupt this exact stdout-must-be-empty check.
+    # Same reasoning tests/bats/push_reuse.bats' own stderr-diagnostics
+    # comment documents for the identical situation.
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)"
+    status=$?
     [ "$status" -eq 2 ]
-    [ -z "$output" ]
+    [ -z "$result" ]
 }
 
 @test "sif_image_revision (real docker branch, no stub): an unrecognized/transient registry error returns status 1 (unchanged ambiguous case)" {
@@ -368,9 +377,13 @@ STUB
     # shellcheck disable=SC2034 # read by ghcr_retry() in scripts/lib/ghcr-retry.sh,
     # a cross-file dynamic-scope read shellcheck cannot see.
     GHCR_RETRY_MAX_ATTEMPTS=1
-    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
+    # Direct capture, not `run` -- see the confirmed-absence test above for
+    # why (ghcr_retry's own real-stderr diagnostics would otherwise corrupt
+    # this stdout-must-be-empty check).
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)"
+    status=$?
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "$result" ]
 }
 
 @test "sif_wait_for_fresh_base_image (real docker branch): a confirmed-absence failure is reported as confirmed absent, not the old ambiguous wording" {
