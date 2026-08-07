@@ -3,18 +3,19 @@
 #
 # Drift guard for #849 bug-hunt finding observability.md#20: netdata's own
 # HTTP API (port 19999) is never published to the host in any real
-# deployment, but before this fix it also had no explicit `networks:` entry,
-# so it implicitly joined the same shared `default` Compose network as every
+# deployment, but leaving it without an explicit `networks:` entry would
+# put it on the same implicit shared `default` Compose network as every
 # other real service (dns, proxy, dhcp, nats, ...) -- any one of them could
-# reach netdata's full, unauthenticated API directly, not just the two
+# then reach netdata's full, unauthenticated API directly, not just the two
 # endpoints the Admin UI's own outbound proxy allowlist restricts itself to.
-# The fix scopes netdata to a dedicated `netdata-net` network shared only
-# with the Admin UI (the sole real caller, via NETDATA_URL). This is a
-# structural text scan of the real deploy/{prod,quickstart}/docker-compose.yml
-# files (not a fixture) -- `docker compose config` needs a populated `.env`
-# and Docker to run at all (see scripts/check-compose-healthchecks.sh's
-# identical reasoning for why it also avoids that path), so this mirrors that
-# script's own service-block-extraction approach instead.
+# Scoping netdata to a dedicated `netdata-net` network shared only with the
+# Admin UI (the sole real caller, via NETDATA_URL) closes that exposure.
+# This is a structural text scan of the real
+# deploy/{prod,quickstart}/docker-compose.yml files (not a fixture) --
+# `docker compose config` needs a populated `.env` and Docker to run at all
+# (see scripts/check-compose-healthchecks.sh's identical reasoning for why
+# it also avoids that path), so this mirrors that script's own
+# service-block-extraction approach instead.
 
 bats_require_minimum_version 1.5.0
 

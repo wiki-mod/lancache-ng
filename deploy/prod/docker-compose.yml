@@ -1451,17 +1451,18 @@ services:
     # #849 bug-hunt finding observability.md#20: netdata never publishes a
     # host port (grepped every deploy/*/docker-compose.yml for "19999" --
     # only ever the internal NETDATA_URL env var or a container-local
-    # healthcheck), but before this change it had no explicit `networks:`
-    # either, so it implicitly joined the same shared `default` network as
-    # every other real service (dns, proxy, dhcp, nats, ...) -- any one of
-    # them could reach netdata's full, unauthenticated HTTP API
-    # (`/api/v1/alarms`, `/api/v1/allmetrics`, etc., not just the two
-    # endpoints the Admin UI's own proxy allowlist restricts its own outbound
-    # calls to) directly at http://netdata:19999. Only the Admin UI actually
-    # needs to reach netdata (NETDATA_URL below); scoping netdata to its own
-    # dedicated network -- not `internal: true`, since netdata's own image
-    # may still need outbound internet access for its own operation -- means
-    # no other lancache-ng container can resolve or reach it at all anymore.
+    # healthcheck). An explicit `networks:` entry below is required for
+    # netdata: leaving it unset would put netdata on the same implicit
+    # shared `default` network as every other real service (dns, proxy,
+    # dhcp, nats, ...), letting any one of them reach netdata's full,
+    # unauthenticated HTTP API (`/api/v1/alarms`, `/api/v1/allmetrics`,
+    # etc., not just the two endpoints the Admin UI's own proxy allowlist
+    # restricts its own outbound calls to) directly at
+    # http://netdata:19999. Only the Admin UI actually needs to reach
+    # netdata (NETDATA_URL below); scoping netdata to its own dedicated
+    # network -- not `internal: true`, since netdata's own image may still
+    # need outbound internet access for its own operation -- keeps every
+    # other lancache-ng container unable to resolve or reach it at all.
     networks:
       - netdata-net
     logging:
