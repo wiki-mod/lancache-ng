@@ -20,7 +20,7 @@ setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-build-tools-smoke-coverage.sh"
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     fixture="$BATS_TEST_TMPDIR/fx"
-    mkdir -p "$fixture/tools/build-tools" "$fixture/scripts"
+    mkdir -p "$fixture/tools/build-tools" "$fixture/scripts/untracked"
 }
 
 # write_dockerfile <tool>...

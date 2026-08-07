@@ -27,7 +27,7 @@
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-setup-prompt-drift.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
-    mkdir -p "$fixture_root/scripts"
+    mkdir -p "$fixture_root/scripts/untracked/simulations"
 }
 
 # write_setup <wizard_body>

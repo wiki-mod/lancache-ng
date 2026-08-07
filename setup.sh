@@ -1649,7 +1649,12 @@ install_quickstart_compose_assets() {
 
     socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
     helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
-    mkdir -p "$install_dir/scripts"
+    # docker-socket-proxy.sh's own source moved one directory level deeper
+    # (issue #1095 F-16, scripts/untracked/docker-socket-proxy.sh); the
+    # installed copy mirrors that same nesting, so the target directory
+    # needs both levels created, not just the flat "scripts" mkdir that
+    # sufficed before that move.
+    mkdir -p "$install_dir/scripts/untracked"
     install -m 0644 "$QUICKSTART_COMPOSE" "$install_dir/docker-compose.yml"
     if [[ -d "$socket_proxy_target" ]]; then
         rm -rf "$socket_proxy_target"

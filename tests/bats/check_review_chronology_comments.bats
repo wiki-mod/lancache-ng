@@ -165,7 +165,7 @@ EOF
     # guard would fail against its own repository the moment this file (or
     # the script) were added, since both literally contain e.g. "caught in
     # review" as example text.
-    mkdir -p "$fixture_root/scripts" "$fixture_root/tests/bats"
+    mkdir -p "$fixture_root/scripts/untracked" "$fixture_root/tests/bats"
     cp "$script" "$fixture_root/scripts/untracked/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \
         "$fixture_root/tests/bats/check_review_chronology_comments.bats"
