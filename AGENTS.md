@@ -97,7 +97,7 @@ This matrix maps the hard rules defined below to how they are currently enforced
 | AG-KD-004 | nginx instead of Squid: reads `Host`/`$ssl_server_name` directly rather than needing iptables DNAT + `SO_ORIGINAL_DST`, which a DNS-spoof scenario (no real DNAT) cannot provide | Code review (`services/proxy` architecture inspection) |
 | AG-KD-005 | Pre-generated per-domain wildcard certs, incl. the leading-dot-vs-bare-exact-host deeper-cert threshold, fixed placeholder CN, and SHA-256-hashed filenames for deeper entries | Code review (`services/proxy/entrypoint.sh` cert-generation inspection) |
 | AG-KD-006 | `proxy_cache_lock on` (only one nginx worker fetches a cache-miss URL at a time) | Code review (nginx config inspection) |
-| AG-KD-007 | nginx installed from nginx.org's mainline apt repo (statically-compiled stream module, no `load_module` directive), not Debian's own `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
+| AG-KD-007 | nginx installed from nginx.org's own mainline package repository (statically-compiled stream module, no `load_module` directive), never the base OS's own distro `nginx` package | Code review (`services/proxy/Dockerfile` inspection) |
 | AG-KD-008 | No separate dev deployment profile — `deploy/prod/` is the only profile; do not reintroduce a parallel `deploy/dev/`/`config/dev/` pair | Manual review (repo inspection — no second deployment profile exists) |
 | AG-KD-009 | `build-tools` stays Debian-based (`rust:latest`/`golang:latest`), not migrated to Alpine/musl; `trixie-backports` is pinned in project-wide for current tooling; Ubuntu or another actively-current Debian derivative may be reconsidered for this image specifically if Debian's package currency becomes a real blocker | Manual review (`tools/build-tools/Dockerfile` inspection) |
 | AG-OP-001 | Cache key is `$host$uri` | Code review (nginx config inspection) |
@@ -454,7 +454,7 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, and (as of this migration) `services/dns` run on Alpine (issues #815/#1234/#1346); `services/proxy`, `services/ntp`, and `services/ui` still run on Debian 13 (Trixie) images as of this writing. `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice. See issue #815 for the full per-service OS evaluation and remaining migration status.
+Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy`, `services/ui`, and `services/syslog` all run on Alpine — the first six as issue #815's staged migration off Debian, `services/syslog` (#1431/#1433) by starting on Alpine from its first commit rather than migrating. `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice — it is the only first-party image left on Debian. See issue #815 for the full per-service OS evaluation history.
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
@@ -528,13 +528,15 @@ by configuring which DNS server IP they point to:
 - **[AG-KD-006]** **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
   workers wait. Critical for large game files that multiple clients might request simultaneously.
 - **[AG-KD-007]** **nginx's stream module for standard-mode SNI passthrough**: `services/proxy/Dockerfile` installs
-  nginx from nginx.org's own mainline apt repo, not Debian's own `nginx` package. nginx.org's
-  package compiles the stream module in statically (confirmed via its own `nginx -V` output:
-  `--with-stream --with-stream_ssl_preread_module`, among others) — there is no separate module
-  package to install and no `load_module` directive anywhere in `services/proxy/nginx.conf`.
-  (Corrected 2026-07-30: this previously and incorrectly described a separate
-  `libnginx-mod-stream` package requiring an explicit `load_module` line — that described
-  Debian's own nginx package, which this project does not use.)
+  nginx from nginx.org's own mainline package repository — an apt repo on Debian, an apk repo
+  since the service's Alpine migration (issue #815), both resolving the identical mainline
+  version — never the base OS's own distro `nginx` package. nginx.org's package compiles the
+  stream module in statically (confirmed via its own `nginx -V` output: `--with-stream
+  --with-stream_ssl_preread_module`, among others) — there is no separate module package to
+  install and no `load_module` directive anywhere in `services/proxy/nginx.conf`. (Corrected
+  2026-07-30: this previously and incorrectly described a separate `libnginx-mod-stream` package
+  requiring an explicit `load_module` line — that described Debian's own nginx package, which
+  this project does not use.)
 - **[AG-KD-008]** **No separate dev deployment profile**: there is only one deployment profile,
   `deploy/prod/` — there used to be a parallel `deploy/dev/`/`config/dev/` pair (separate
   LAN IPs, offset DNS ports, a separate compose file kept in sync with prod by hand),
