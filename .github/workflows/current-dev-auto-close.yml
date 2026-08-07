@@ -130,29 +130,30 @@ jobs:
             // contraction. Confirmed live incident (2026-08-07): this
             // workflow auto-closed issue #1095 when PR #1443 merged into
             // current_dev, solely because its body's sentence "This PR does
-            // not close #1095" contains the substring "close #1095" -- the
-            // pattern had no negation awareness at all before this fix and
-            // matched that substring exactly like a real `Closes #1095`.
-            // Verified against the real PR #1443 body (produces zero matches
-            // with this fix, one false match without it) and a battery of
-            // synthetic positive/negative cases (still matches every real
-            // closing-keyword shape; no longer matches "does not close",
-            // "won't fix", "never closes", "cannot resolve", "doesn't
-            // close", "isn't going to fix").
+            // not close #1095" contains the substring "close #1095" -- an
+            // unbounded keyword match with no negation awareness matches
+            // that substring exactly like a real `Closes #1095`. Verified
+            // against the real PR #1443 body (produces zero matches with
+            // this pattern, one false match without the negative lookbehind)
+            // and a battery of synthetic positive/negative cases (still
+            // matches every real closing-keyword shape; does not match
+            // "does not close", "won't fix", "never closes", "cannot
+            // resolve", "doesn't close", "isn't going to fix").
             //
-            // The sentence-boundary cap is deliberate, not incidental: an
-            // earlier version of this fix let the gap between negation and
-            // keyword match ANY whitespace including newlines
-            // (`(?:\w+\s+){0,2}`), which crosses sentence and paragraph
-            // boundaries -- "This is not ideal.\n\nCloses #123" would have
-            // silently suppressed a real, unrelated Closes reference several
-            // sentences later. That failure direction is worse than the
-            // original bug: the original produced a loud, reversible false
-            // close (a comment + closed issue, easy to spot and undo); a
-            // negation-scope-too-wide bug produces a silent non-close --
-            // nothing fires, nothing looks wrong, and nobody notices an
-            // issue that should have closed just... didn't. Caught before
-            // merging (advisor review), not found in production.
+            // The sentence-boundary cap is deliberate, not incidental: a
+            // negation-detection gap that matches ANY whitespace including
+            // newlines (e.g. `(?:\w+\s+){0,2}`) crosses sentence and
+            // paragraph boundaries -- "This is not ideal.\n\nCloses #123"
+            // would then silently suppress a real, unrelated Closes
+            // reference several sentences later. That failure direction is
+            // worse than an unbounded false-positive match: a false close is
+            // loud and reversible (a comment + closed issue, easy to spot
+            // and undo); an over-wide negation match produces a silent
+            // non-close -- nothing fires, nothing looks wrong, and nobody
+            // notices an issue that should have closed just... didn't. The
+            // 20-character same-sentence bound avoids that failure
+            // direction while still catching the common negation phrasings
+            // above.
             //
             // This is a heuristic, not full NLP negation detection: a
             // negation separated from the keyword by more than ~20
