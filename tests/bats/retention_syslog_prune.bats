@@ -338,14 +338,16 @@ make_log_file() {
     }
 }
 
-# #849 bug-hunt finding observability.md#21: before this fix, the
-# still-over-budget branch stamped $now unconditionally -- identical to the
-# converged/success branch -- so the top-of-function 86400s rate-limit gate
-# made the very retry the WARNING log line promises wait up to a full 24h,
-# even though syslog-ng could rotate today's active (currently protected)
-# file and make it prunable within minutes. Today's file alone exceeding the
-# budget guarantees the size pass ends still-over-budget no matter what else
-# it prunes, deterministically exercising that branch.
+# #849 bug-hunt finding observability.md#21: the still-over-budget branch
+# must back-date its stamp for a short retry rather than stamping $now the
+# way the converged/success branch does. Stamping $now unconditionally on
+# this branch would be indistinguishable from the converged/success branch,
+# so the top-of-function 86400s rate-limit gate would make the very retry
+# the WARNING log line promises wait up to a full 24h, even though
+# syslog-ng could rotate today's active (currently protected) file and make
+# it prunable within minutes. Today's file alone exceeding the budget
+# guarantees the size pass ends still-over-budget no matter what else it
+# prunes, deterministically exercising that branch.
 @test "maybe_prune_syslog still-exceeded branch back-dates the stamp for a short retry instead of a full 24h" {
     local today; today="$(date -u +%Y%m%d).log"
     local active_path="$log_root/hostA/$today"
@@ -370,8 +372,9 @@ make_log_file() {
 }
 
 # Complements the test above: the ordinary converged path must be completely
-# unaffected by the still-exceeded branch's back-dating logic -- a fresh,
-# full-strength $now stamp, exactly as before this fix.
+# unaffected by the still-exceeded branch's back-dating logic -- it always
+# stamps a fresh, full-strength $now, never the back-dated value the
+# still-over-budget branch produces.
 @test "maybe_prune_syslog stamps the full current time when the size budget converges" {
     make_log_file old.log 1 40
 

@@ -5,13 +5,14 @@
 # watchdog-helpers.sh's load_watchdog_functions() extracts watchdog.sh's
 # functions via two literal-text awk anchors (the DOCKER_PROXY_URL= default
 # assignment that starts capture, and the "Watchdog started." log line that
-# ends it). Before this fix, a drifted anchor silently produced an empty or
-# truncated extraction file that a plain `source` accepted with no error --
-# the only symptom would have surfaced much later as a confusing "command not
-# found" deep inside some unrelated @test that calls a now-undefined
-# function, not as a clear "the test harness failed to extract functions"
-# message at setup() time. This file proves the helper now fails loudly and
-# immediately instead, using synthetic fake watchdog.sh stand-ins that
+# ends it). A drifted anchor can silently produce an empty or truncated
+# extraction file that a plain `source` accepts with no error -- without a
+# loud, immediate check, the only symptom would surface much later as a
+# confusing "command not found" deep inside some unrelated @test that calls
+# a now-undefined function, not as a clear "the test harness failed to
+# extract functions" message at setup() time. This file proves the helper
+# fails loudly and immediately instead, using synthetic fake watchdog.sh
+# stand-ins that
 # reproduce exactly the two ways the real anchors could drift (start anchor
 # no longer matches at all; end anchor matches too early, truncating the
 # range before it reaches a real function definition), and separately

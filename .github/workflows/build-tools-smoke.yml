@@ -205,6 +205,15 @@ on:
       - "services/watchdog/retention.sh"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
+      # services/syslog/netdata-web_log.conf (#879 gap found by
+      # scripts/check-bats-path-filter-coverage.sh against tests/bats/
+      # check_logging_matrix_weblog_parity.bats, which reads this file
+      # directly via $repo_root to assert its job list stays byte-parity
+      # with deploy/quickstart/docker-compose.yml's inline copy): without
+      # this entry, a PR touching only the real netdata web_log config
+      # would not already match any other path above and so would never
+      # run the parity suite written for it.
+      - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
@@ -289,6 +298,15 @@ on:
       - "services/watchdog/retention.sh"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
+      # services/syslog/netdata-web_log.conf (#879 gap found by
+      # scripts/check-bats-path-filter-coverage.sh against tests/bats/
+      # check_logging_matrix_weblog_parity.bats, which reads this file
+      # directly via $repo_root to assert its job list stays byte-parity
+      # with deploy/quickstart/docker-compose.yml's inline copy): without
+      # this entry, a PR touching only the real netdata web_log config
+      # would not already match any other path above and so would never
+      # run the parity suite written for it.
+      - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
