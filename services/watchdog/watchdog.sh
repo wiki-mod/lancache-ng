@@ -7,19 +7,12 @@
 # standalone services/watchdog/retention.sh (#842, 2026-08-01), run as a
 # genuinely separate OS process by the compose `command:` override -- see
 # that file's header for the full blast-radius-separation rationale. This
-# file no longer reads CACHE_VALID_DAYS/SYSLOG_*/FLUENT_BIT_SELFLOG_* at all;
-# CACHE_DIR is one exception, still read here for disk_info()'s unrelated
-# disk-usage-percentage reporting into status.json, resolved independently of
-# retention.sh's own copy (see that file's resolve_cache_dir() comment for
-# why this is deliberate duplication, not shared state). SYSLOG_ENABLED is
-# the other exception (#849 bug-hunt finding observability.md#8, 2026-08-06):
-# this file DOES now read it, gating alert-only health monitoring of the
-# combined syslog+fluent-bit container -- see check_alert_only()'s own
-# comment below for why that container is alert-only rather than
-# restart-capable, and why SYSLOG_ENABLED/DHCP_MODE were already present in
-# every deploy/*/docker-compose.yml's `watchdog:` environment block (added
-# ahead of this change for the not-yet-wired-up Rust rewrite -- see
-# services/watchdog/src/lib.rs's module doc comment).
+# file no longer reads CACHE_VALID_DAYS/SYSLOG_ENABLED/SYSLOG_*/
+# FLUENT_BIT_SELFLOG_* at all; CACHE_DIR is the one exception, still read
+# here for disk_info()'s unrelated disk-usage-percentage reporting into
+# status.json, resolved independently of retention.sh's own copy (see that
+# file's resolve_cache_dir() comment for why this is deliberate duplication,
+# not shared state).
 
 set -euo pipefail
 
@@ -30,8 +23,8 @@ DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
 DISK_ALARM_PCT="${DISK_ALARM_PCT:-95}"
 STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"
 
-F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0; F_SYSLOG=0
-H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"; H_SYSLOG="unknown"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
 # Some diagnostics (resolve_cache_dir()'s fail-closed error, the CONTAINER_*
@@ -158,24 +151,6 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 # allowlist would be wrong, not merely unnecessary. It exists purely as the
 # stable status.json/dashboard key and log label for this probe.
 C_DOCKER_PROXY="lancache-docker-socket-proxy"
-
-# syslog (#849 bug-hunt finding observability.md#8, 2026-08-06): a fixed
-# literal, same reasoning as C_DOCKER_PROXY above -- no
-# ${CONTAINER_*:-...}-style override exists for it in the Rust rewrite this
-# mirrors (services/watchdog/src/config.rs's CONTAINER_SYSLOG is a plain
-# `const`, never read from an env var), so there is nothing for
-# scripts/check-naming-consistency.sh's watchdog_names extraction to
-# validate here either. Gated on SYSLOG_ENABLED, matching
-# resolve_alert_only_targets()'s own `if syslog_enabled { targets.push(...) }`
-# gate exactly -- an install that never opted into `docker compose --profile
-# logging` never starts this container at all, so monitoring it
-# unconditionally would report a permanent false "unhealthy" for a container
-# that was never supposed to exist.
-if is_truthy "${SYSLOG_ENABLED:-false}"; then
-    C_SYSLOG="lancache-syslog"
-else
-    C_SYSLOG=""
-fi
 
 # LANCACHE_CONTAINER_SUFFIX (issue #1415): the FATAL guards below no longer
 # compare against the bare literal default -- they compare against this
@@ -434,44 +409,6 @@ check_and_maybe_restart() {
     fi
 }
 
-# Alert-only monitoring (#849 bug-hunt finding observability.md#8): unlike
-# check_and_maybe_restart() above, this never calls restart_container().
-# scripts/docker-socket-proxy.sh's safe_service_restart ACL (line 63) only
-# permits a restart POST for lancache-proxy/lancache-dns-standard/
-# lancache-dns-ssl/lancache-nats -- a restart attempt for any other
-# container, including the syslog+fluent-bit container this monitors, would
-# get an HTTP 403 from HAProxy, so restart-capable monitoring is not even
-# implementable here without a separate, deliberate allowlist-widening
-# decision (a real security-boundary change, out of scope for a bug-hunt
-# fix). This also mirrors the already-decided design in the not-yet-wired-up
-# Rust rewrite (services/watchdog/src/main.rs's resolve_alert_only_targets(),
-# services/watchdog/src/health.rs's HealthReading::is_alert_ok, issue #842):
-# alert-only visibility, not auto-restart, is the deliberate safe default for
-# a newly-monitored service until a per-service restart decision is
-# consciously made ("a mid-startup restart of a dependency can make a
-# dependent service's own reconnect logic worse, not better"). `_fcount`
-# climbs for as long as the container stays unhealthy/unreachable (same
-# never-resets-via-restart shape as probe_docker_socket_proxy()'s own
-# counter above) rather than resetting at RESTART_AFTER -- there is no
-# restart here for that threshold to gate.
-check_alert_only() {
-    local name="$1"
-    local -n _fcount="$2"
-    local -n _hstring="$3"
-
-    local health
-    health=$(get_health "$name")
-    _hstring="$health"
-
-    if [ "$health" = "unhealthy" ]; then
-        _fcount=$((_fcount + 1))
-        log "UNHEALTHY $name (${_fcount} consecutive failures) -- alert only, watchdog does not restart this service (issue #842)"
-    elif [ "$health" = "healthy" ]; then
-        [ "$_fcount" -gt 0 ] && log "RECOVERED $name"
-        _fcount=0
-    fi
-}
-
 # Writes the status JSON consumed by the Admin UI dashboard. Built with
 # plain string interpolation rather than a JSON library or `jq` (this image
 # doesn't ship jq for writing, only `curl`/`jq` for reading Docker's health
@@ -492,17 +429,6 @@ write_status() {
     \"$C_DNS_SSL\":   {\"status\": \"$(health_color "$H_DNS_SSL")\",   \"health\": \"$H_DNS_SSL\",   \"failures\": $F_DNS_SSL}"
     fi
 
-    # #849 bug-hunt finding observability.md#8: same conditional-inclusion
-    # shape as ssl_services above -- omitted entirely (not just "unknown")
-    # when SYSLOG_ENABLED is falsy, so an install that never opted into
-    # central logging doesn't show a permanently "unhealthy"/never-existed
-    # container in the dashboard's service list.
-    local syslog_service=""
-    if [ -n "$C_SYSLOG" ]; then
-        syslog_service=",
-    \"$C_SYSLOG\":   {\"status\": \"$(health_color "$H_SYSLOG")\",   \"health\": \"$H_SYSLOG\",   \"failures\": $F_SYSLOG}"
-    fi
-
     cat > "${STATUS_FILE}.tmp" <<EOF
 {
   "updated": "$ts",
@@ -510,7 +436,7 @@ write_status() {
     "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
   "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD},
   "$C_NATS":   {"status": "$(health_color "$H_NATS")",   "health": "$H_NATS",   "failures": $F_NATS},
-  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}${syslog_service}
+  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}
   },
   "disk": {
     "cache": ${disk_cache}
@@ -520,7 +446,7 @@ EOF
     mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
-log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY; alert-only monitored: ${C_SYSLOG:-none}"
+log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 
@@ -535,16 +461,6 @@ while true; do
     # see probe_docker_socket_proxy()'s own comment for why this daemon must
     # never attempt to restart its own Docker API gateway.
     probe_docker_socket_proxy F_DOCKER_PROXY H_DOCKER_PROXY
-    # Alert-only (#849 bug-hunt finding observability.md#8): deliberately
-    # check_alert_only, not check_and_maybe_restart -- see that function's
-    # own comment for why restart-capable monitoring is not implementable
-    # for this container without a separate allowlist-widening decision.
-    # Skipped entirely (not called with an empty name) when SYSLOG_ENABLED
-    # is falsy, matching every other SSL_ENABLED-style conditional monitor
-    # above.
-    if [ -n "$C_SYSLOG" ]; then
-        check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
-    fi
     write_status
     sleep "$CHECK_INTERVAL"
 done

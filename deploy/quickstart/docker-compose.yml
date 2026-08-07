@@ -743,15 +743,10 @@ services:
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
       # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
-      # deploy/prod/docker-compose.yml's identical addition. DHCP_MODE is
-      # still unused by watchdog.sh (the bash entrypoint this ENTRYPOINT
-      # still runs) -- only the Rust crate's resolve_alert_only_targets()
-      # reads it, once that becomes this service's actual ENTRYPOINT.
-      # SYSLOG_ENABLED is genuinely consumed by watchdog.sh today: bug-hunt
-      # finding observability.md#8 (2026-08-06) added alert-only monitoring
-      # of the combined syslog+fluent-bit container, gated on this var --
-      # see deploy/prod/docker-compose.yml's identical comment for the full
-      # reasoning.
+      # deploy/prod/docker-compose.yml's identical addition -- currently
+      # unused by watchdog.sh (the bash entrypoint this ENTRYPOINT still
+      # runs), read only by the Rust crate's resolve_alert_only_targets()
+      # once that becomes this service's actual ENTRYPOINT.
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
     volumes:
@@ -773,11 +768,8 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
-    # #849 bug-hunt finding watchdog.md#14: matches deploy/prod's identical
-    # change -- see that file's comment for the full reasoning.
     depends_on:
-      docker-socket-proxy:
-        condition: service_healthy
+      - docker-socket-proxy
     networks:
       - default
       - docker-api
@@ -1169,26 +1161,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # #849 bug-hunt finding watchdog.md#14: matches deploy/prod's identical
-    # change -- see that file's comment for the full reasoning. proxy/netdata/
-    # nats keep `service_started` (the exact behavior the plain list form
-    # already had); Compose's map form requires every entry in one
-    # `depends_on:` block to use the same syntax.
     depends_on:
-      docker-socket-proxy:
-        condition: service_healthy
-      proxy:
-        condition: service_started
-      netdata:
-        condition: service_started
-      nats:
-        condition: service_started
+      - docker-socket-proxy
+      - proxy
+      - netdata
+      - nats
     networks:
       - default
       - docker-api
-      # #849 bug-hunt finding observability.md#20: needed to reach netdata
-      # (NETDATA_URL below) now that netdata no longer sits on `default`.
-      - netdata-net
     restart: always
     logging:
       driver: json-file
@@ -1275,14 +1255,6 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    # #849 bug-hunt finding observability.md#20: matches deploy/prod's
-    # identical change -- netdata never publishes a host port, but with no
-    # explicit `networks:` it implicitly joined the same shared `default`
-    # network as every other real service, so any of them could reach its
-    # full, unauthenticated HTTP API directly. Only the Admin UI (below,
-    # NETDATA_URL) actually needs to reach it.
-    networks:
-      - netdata-net
     logging:
       driver: json-file
       options: {max-size: "10m", max-file: "3"}
@@ -1290,9 +1262,6 @@ services:
 networks:
   docker-api:
     internal: true
-  # #849 bug-hunt finding observability.md#20: dedicated to netdata + the
-  # Admin UI -- see the netdata service's own comment above.
-  netdata-net: {}
 
 volumes:
   # Shared handshake secrets (#858). A persistent volume mounted into every
