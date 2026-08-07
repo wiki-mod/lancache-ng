@@ -6,7 +6,7 @@ use crate::{
 };
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::{Html, Json};
+use axum::response::{IntoResponse, Json};
 use serde_json::json;
 use std::sync::Arc;
 use tera::Context;
@@ -41,7 +41,10 @@ fn watchdog_status_json(result: watchdog_status::WatchdogStatusReadResult) -> se
     }
 }
 
-pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+pub async fn dashboard(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let cfg = &state.config;
 
     // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and

@@ -1,0 +1,29 @@
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: File header / workflow size / review-chronology checks
+description: >-
+  The three plain bash/grep checks build-push.yml's self-hosted `file-headers`
+  job runs. Extracted (issue #1095 duplication finding) after finding that
+  `file-headers-hosted`, the GitHub-hosted fallback for when self-hosted
+  runners are down, only ever mirrored the first of these three checks --
+  the "workflow line-count ceiling" (AG-CI-021) and "review-chronology
+  comments" (AG-CODE-003) checks silently never ran at all on the fallback
+  path, a real coverage gap rather than duplication, fixed by adding them
+  here so both jobs now run the same three checks.
+runs:
+  using: composite
+  steps:
+    - name: Check repository header on all tracked files
+      shell: bash
+      run: bash scripts/check-file-headers.sh
+
+    # See scripts/check-workflow-line-limit.sh's own header comment for why
+    # this exists (issue #1095, 2026-08-01 build-push.yml trigger bug).
+    - name: Check workflow files stay under the hard line-count ceiling
+      shell: bash
+      run: bash scripts/check-workflow-line-limit.sh
+
+    # See scripts/check-review-chronology-comments.sh's own header comment
+    # for the exact sub-pattern this targets and why.
+    - name: Check for review-chronology comments (AG-CODE-003)
+      shell: bash
+      run: bash scripts/check-review-chronology-comments.sh

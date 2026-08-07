@@ -3,11 +3,11 @@
 
 use crate::AppState;
 use axum::extract::State;
-use axum::response::Html;
+use axum::response::IntoResponse;
 use std::sync::Arc;
 use tera::Context;
 
-pub async fn stats_page(State(state): State<Arc<AppState>>) -> Html<String> {
+pub async fn stats_page(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let mut ctx = Context::new();
     ctx.insert("active_page", "stats");
     crate::routes::render(&state.templates, "stats.html", &ctx, state.config.dev_mode)

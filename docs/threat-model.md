@@ -162,8 +162,10 @@ injects malicious content that the proxy caches and serves to every client.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- The proxy fetches origins over TLS with `proxy_ssl_verify on` and the Debian CA
-  bundle (`proxy_ssl_trusted_certificate`); see also T8.
+- The proxy fetches origins over TLS with `proxy_ssl_verify on` and the container's system CA
+  bundle (`proxy_ssl_trusted_certificate`, `/etc/ssl/certs/ca-certificates.crt` on
+  this service's current Alpine base, issue #815 -- the same path the prior
+  Debian base also used); see also T8.
 - Upstream resolution uses `NGINX_UPSTREAM_RESOLVER` (default `8.8.8.8 8.8.4.4 [2001:4860:4860::8888] [2001:4860:4860::8844]`),
   never the LAN spoof DNS — `services/proxy/entrypoint.sh` refuses to start if the
   resolver is set to a lancache DNS/proxy IP, preventing a resolve-to-self loop.
@@ -505,7 +507,7 @@ the cache.
 **Likelihood**: Low · **Impact**: High
 
 **Mitigations**:
-- `proxy_ssl_verify on` with the Debian CA bundle for all origin connections.
+- `proxy_ssl_verify on` with the container's system CA bundle for all origin connections.
 - Origin names resolve via real upstream DNS, never the spoof DNS (see T1).
 
 **Residual risk**: Medium — verification reduces MITM risk but cannot stop a real
