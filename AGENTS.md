@@ -449,7 +449,7 @@ No other runtime language may be introduced without explicit maintainer approval
 
 ## Architecture
 
-Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy` (as of this migration), and `services/ui` (landed in a sibling PR while this one was in flight -- confirmed live against `services/ui/Dockerfile`'s current `FROM` line) all run on Alpine (issue #815's staged migration, now complete for every runtime service that started out on Debian). `services/syslog` (the combined fluent-bit + syslog-ng central logging service, #1431/#1433) is also on Alpine, but was never part of issue #815's migration -- it was born on Alpine from its first commit, confirmed live against `services/syslog/Dockerfile`'s own `FROM alpine:3.20@sha256:...` line, so it is listed here for completeness rather than as a migration outcome. `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice -- it is the only first-party image left on Debian. See issue #815 for the full per-service OS evaluation history.
+Everything runs in Docker containers. Base OS is mixed, not uniformly Debian: `services/dhcp`, `services/dhcp-proxy`, `services/watchdog`, `services/ntp`, `services/dns`, `services/proxy`, `services/ui`, and `services/syslog` all run on Alpine — the first six as issue #815's staged migration off Debian, `services/syslog` (#1431/#1433) by starting on Alpine from its first commit rather than migrating. `tools/build-tools` (the shared CI/dev image) stays Debian-based by deliberate decision (Rule-Ref: AG-KD-009), independent of any individual service's own base-OS choice — it is the only first-party image left on Debian. See issue #815 for the full per-service OS evaluation history.
 
 ```
 services/proxy/          # nginx: unified proxy serving both standard + SSL mode via different ports
@@ -523,19 +523,15 @@ by configuring which DNS server IP they point to:
 - **[AG-KD-006]** **`proxy_cache_lock on`**: Only one nginx worker fetches a cache-miss URL at a time. Other
   workers wait. Critical for large game files that multiple clients might request simultaneously.
 - **[AG-KD-007]** **nginx's stream module for standard-mode SNI passthrough**: `services/proxy/Dockerfile` installs
-  nginx from nginx.org's own mainline package repository, never the base OS's own distro
-  `nginx` package. nginx.org's package compiles the stream module in statically (confirmed via
-  its own `nginx -V` output: `--with-stream --with-stream_ssl_preread_module`, among others) —
-  there is no separate module package to install and no `load_module` directive anywhere in
-  `services/proxy/nginx.conf`. This holds identically regardless of which package manager
-  fronts nginx.org's repo for the current base OS: an apt repo while this service ran on
-  Debian, and (since this service's Alpine migration, issue #815) an apk repo at
-  `https://nginx.org/packages/mainline/alpine/v<ver>/main` — confirmed live (2026-08-06) that
-  both resolve the identical mainline version (1.31.3 at migration time) with the identical
-  statically-compiled stream module, so this rule's substance needed no other change. (Corrected
+  nginx from nginx.org's own mainline package repository — an apt repo on Debian, an apk repo
+  since the service's Alpine migration (issue #815), both resolving the identical mainline
+  version — never the base OS's own distro `nginx` package. nginx.org's package compiles the
+  stream module in statically (confirmed via its own `nginx -V` output: `--with-stream
+  --with-stream_ssl_preread_module`, among others) — there is no separate module package to
+  install and no `load_module` directive anywhere in `services/proxy/nginx.conf`. (Corrected
   2026-07-30: this previously and incorrectly described a separate `libnginx-mod-stream` package
   requiring an explicit `load_module` line — that described Debian's own nginx package, which
-  this project does not use, on either base OS.)
+  this project does not use.)
 - **[AG-KD-008]** **No separate dev deployment profile**: there is only one deployment profile,
   `deploy/prod/` — there used to be a parallel `deploy/dev/`/`config/dev/` pair (separate
   LAN IPs, offset DNS ports, a separate compose file kept in sync with prod by hand),
