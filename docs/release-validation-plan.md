@@ -871,6 +871,35 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   issue #1377, which also fixed the repo-wide instances and widened this
   script's scope -- see the Standing check row above).
 
+### Additions dated 2026-08-07 (real incident since the 2026-08-01 survey above)
+
+- **`gc-pr-staging-images.yml` narrow-checkout runner corruption** (issue #1095,
+  fixed) — `actions/checkout@v7.0.1`'s `sparseCheckoutNonConeMode()` (selected by
+  this workflow's `sparse-checkout-cone-mode: false`) sets `core.sparseCheckout`
+  via `git config` but writes the narrow path patterns by appending directly to
+  `.git/info/sparse-checkout`, never through the `git sparse-checkout set`
+  porcelain command. Reproduced repeatedly, live, on three self-hosted runner
+  hosts (git 2.47.3): a sparse-checkout state set up that way does not reliably
+  clear on a later job's plain `git sparse-checkout disable`, nor on `git
+  sparse-checkout init` immediately followed by `disable` — both report success,
+  but `core.sparseCheckout` and/or the stale pattern file can linger regardless.
+  Self-hosted runners reuse one working directory across unrelated
+  jobs/workflows, and no other workflow in this repo passes a sparse-checkout
+  input at all, so whatever state this job left behind was inherited by the next
+  job scheduled onto the same runner instance — traced via a runner's own
+  `_diag` worker logs to real "No such file or directory" / "Can't find
+  'action.yml'" failures across several unrelated `build-push.yml` jobs on
+  2026-08-07. Fixed with an explicit restore step after the reap script runs
+  (unset `core.sparseCheckout`, remove the stale pattern file, force a real
+  re-checkout) rather than trusting git's own sparse-checkout subcommands alone.
+  New standing check: `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats`
+  regresses both the failure (plain `disable` leaving `core.sparseCheckout` set)
+  and the fix (the explicit restore sequence actually clearing it), against a
+  throwaway local git repository — no network or real clone needed. A durable
+  guard against a *future* self-hosted workflow reintroducing a narrow
+  `sparse-checkout` input without a matching restore step does not exist yet;
+  recorded as an open gap in Coverage Assessment below.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -1063,6 +1092,17 @@ omitted):**
   permanently-running script either). The depth-2 real-backend-certificate
   assertion that remains in the committed script carries the ongoing regression
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
+- **No repo-wide guard against a future workflow reintroducing an unrestored
+  narrow `sparse-checkout` on a self-hosted job** (2026-08-07, issue #1095) —
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
+  this repo that currently sets a `sparse-checkout` input), but nothing checks
+  the repo's workflow files themselves for a *new* `sparse-checkout` input added
+  to some other self-hosted job without an equivalent restore step. A grep-based
+  guard (flag any `sparse-checkout:` input in `.github/workflows/**` whose job
+  does not also contain a matching config-unset/pattern-file-removal step) is
+  plausible but not yet built — this is a real, currently-open gap, not a
+  silently-assumed-covered case.
 
 ---
 
