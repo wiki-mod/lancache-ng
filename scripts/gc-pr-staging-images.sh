@@ -378,6 +378,28 @@ process_service() {
         # so blanket-protecting all of them costs nothing worth trading for
         # that fragile inference.
         #
+        # CORRECTED (issue #1095 G8 follow-up): the real invariant this branch
+        # protects is "successfully-scanned sha-<commit> tags stay tabu," not
+        # every sha-<commit> tag unconditionally regardless of outcome -- a
+        # scan-failed image was never a valid backfill candidate in the first
+        # place, since saf_resolve_untouched_backfill_source() exists to find
+        # a genuinely usable built image, not a disqualified one. This branch
+        # still protects every sha-<commit> tag it encounters with no
+        # per-tag distinction, but that is safe, not merely convenient: a
+        # scan-failed tag is deleted immediately, upstream of this reaper
+        # entirely, by build-push.yml's own "Delete GHCR package version
+        # pushed by a failed scan" step (build/build-arm64 jobs) the moment
+        # "Scan pushed service digest with Trivy" fails against that exact
+        # pushed digest -- so a scan-failed sha-<commit> tag should never
+        # exist by the time any reaper run could see it. This reaper has no
+        # reliable signal of its own to tell a passed-scan tag apart from a
+        # failed one after the fact (GHCR's package-version metadata carries
+        # no scan-result marker), so it deliberately does not attempt that
+        # distinction here -- it relies entirely on the upstream immediate-
+        # delete fix to keep a failed tag from ever reaching this decision in
+        # the first place, rather than trying to re-derive scan outcome from
+        # data this script was never given.
+        #
         # `sha256-<64-hex>` tags (GHCR/Buildx's legacy referrers-fallback
         # attestation-association convention) also fall into this branch --
         # a real one, protected the same as any other non pr-* tag -- but
