@@ -1473,7 +1473,24 @@ saf_resolve_untouched_backfill_source() {
     # ancestor walk is needed at all. If it's not already there, waiting
     # longer cannot help: no push run exists, and the paths are confirmed
     # ignorable, so there is no in-flight push build to wait out.
-    if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" 0 0 "$freshness_poll_interval_seconds" >/dev/null; then
+    #
+    # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): $base_image is
+    # always an immutable per-commit sha-<base_sha> tag here, never a mutable
+    # channel tag -- exactly the same safety condition
+    # sif_wait_for_fresh_base_image's own allow_reverse_ancestry doc requires,
+    # and exactly the same reasoning saf_find_built_ancestor's own candidate
+    # checks already rely on (see that function's own comments). Before this
+    # fix, this specific call site was the one F-20 named as still exposed:
+    # push-reuse (Step 4, #1095) can retag $base_image FOR $base_sha's own
+    # commit while content-copying an older commit's build, which keeps that
+    # older commit's org.opencontainers.image.revision label (imagetools
+    # create copies labels byte-for-byte, never rewrites them) -- without
+    # allow_reverse_ancestry, that legitimately-safe retag would be wrongly
+    # reported as "stale" here and this would fall through to the ancestor
+    # walk unnecessarily, even though $base_sha's own image already exists
+    # and is exactly as safe to use as an ancestor candidate's own
+    # reverse-ancestry match already is.
+    if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" 0 0 "$freshness_poll_interval_seconds" true >/dev/null; then
       printf '%s\n' "$base_image"
       return 0
     fi
@@ -1493,9 +1510,15 @@ saf_resolve_untouched_backfill_source() {
   # LONG (base_freshness_*) budget deliberately -- see this function's own
   # header for why this specific wait, unlike the ancestor-candidate checks,
   # needs congestion-scale headroom.
+  #
+  # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): same reasoning as
+  # Step 1's fast-path call above -- $base_image is always an immutable
+  # per-commit tag, so a push-reuse retag that kept an older source commit's
+  # revision label is exactly as safe to accept here as it already is for
+  # every ancestor-candidate check in saf_find_built_ancestor.
   echo "::notice::$service is untouched by this PR; waiting for its PR-base per-commit image ($base_image) to exist and be confirmed built at $base_sha before backfilling..." >&2
   if sif_wait_for_fresh_base_image "$base_image" "$base_sha" "$service" \
-    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" >/dev/null; then
+    "$base_freshness_timeout_seconds" "$base_freshness_hard_ceiling_seconds" "$freshness_poll_interval_seconds" true >/dev/null; then
     printf '%s\n' "$base_image"
     return 0
   fi
