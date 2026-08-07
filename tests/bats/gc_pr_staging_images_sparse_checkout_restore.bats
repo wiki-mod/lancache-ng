@@ -34,12 +34,20 @@
 # the workflow's fix does not trust it: it sweeps any remaining index
 # skip-worktree bits directly via `git update-index --no-skip-worktree`, and
 # asserts (failing the job loudly) that none remain afterward rather than
-# assuming the restore worked. These cases regress the failure mode (so a
-# future change to the workflow's checkout step can't silently reintroduce
-# it undetected) and every stage of that fix, including the case where
-# `disable` alone provably does not clear an existing skip-worktree bit. No
-# network access and no real lancache-ng clone needed -- a throwaway local
-# `git init` repository reproduces the same git plumbing behavior.
+# assuming the restore worked. That assertion itself captures `git ls-files
+# -v`'s output into a variable before counting matches with awk instead of
+# piping straight into `grep -c` -- `grep -c`'s own "no match" exit code
+# (1) is indistinguishable from a real git failure once wrapped in `||
+# true`, and an empty resulting count would make `[ "$x" -ne 0 ]` a runtime
+# error rather than a `set -e`-fatal one inside an `if` condition, silently
+# skipping the check instead of failing it. These cases regress the failure
+# mode (so a future change to the workflow's checkout step can't silently
+# reintroduce it undetected), every stage of the fix (including the case
+# where `disable` alone provably does not clear an existing skip-worktree
+# bit), and that the step genuinely fails closed -- non-zero exit, not a
+# silent no-op -- when git itself is broken. No network access and no real
+# lancache-ng clone needed -- a throwaway local `git init` repository
+# reproduces the same git plumbing behavior.
 
 setup() {
     if ! command -v git >/dev/null 2>&1; then
@@ -62,10 +70,57 @@ setup() {
     echo "outside-b" >"$test_repo/.github/actions/some-action/action.yml"
     git -C "$test_repo" add -A
     git -C "$test_repo" commit --quiet -m "seed"
+
+    # gc-pr-staging-images.yml's "Restore full working tree for the next job
+    # on this runner" step verbatim (same commands, same order), extracted
+    # into its own script file rather than a bash function defined in this
+    # test file: bats' own `run` implementation does not reliably preserve
+    # `set -e` semantics for a function invoked through it, which masked a
+    # real fail-closed bug during development of this test (an in-file
+    # function reported exit 0 for a directory that isn't a git repository,
+    # while the identical commands run as a standalone script correctly
+    # exited non-zero) -- running it as a real external script sidesteps
+    # that bats-specific pitfall entirely and is also a closer match to how
+    # the workflow itself executes it (a real `bash` process running a
+    # `run:` block's script, not a shell function call).
+    restore_script="$(mktemp)"
+    cat >"$restore_script" <<'RESTORE_SCRIPT'
+#!/usr/bin/env bash
+cd "$1" || exit 1
+set -euo pipefail
+git sparse-checkout init || true
+git sparse-checkout disable || true
+git config --local --unset-all core.sparseCheckout || true
+rm -f .git/info/sparse-checkout
+
+# `git ls-files -v` is captured into a variable BEFORE piping to awk, not
+# piped to it directly: a real git failure here must trip `set -e`
+# immediately via this plain assignment, which a direct pipe into awk would
+# instead hide behind awk's own exit code.
+ls_files_before="$(git ls-files -v)"
+mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+  git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+fi
+git checkout --progress --force HEAD -- .
+
+# Counts with awk rather than `grep -c`: awk's own exit code is 0 regardless
+# of match count, so a zero-match "fully restored" result needs no `|| true`
+# fallback that could otherwise let remaining_after end up empty/invalid and
+# silently skip the check below under `set -e` (an empty `[ "$x" -ne 0 ]`
+# comparison is a runtime error, not a fatal one, inside an `if` condition).
+ls_files_after="$(git ls-files -v)"
+remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
+if [ "$remaining_after" -ne 0 ]; then
+  echo "::error::${remaining_after} path(s) still carry the skip-worktree bit after the restore sequence" >&2
+  exit 1
+fi
+RESTORE_SCRIPT
 }
 
 teardown() {
     rm -rf "$test_repo"
+    rm -f "$restore_script"
 }
 
 # Mirrors actions/checkout's sparseCheckoutNonConeMode(): `git config
@@ -78,32 +133,11 @@ narrow_via_legacy_manual_append() {
     git -C "$test_repo" checkout --progress --force HEAD >/dev/null 2>&1
 }
 
-# Runs gc-pr-staging-images.yml's "Restore full working tree for the next
-# job on this runner" step verbatim (same commands, same order) against
-# $test_repo, returning its exit status the same way the workflow step
-# would fail the job on a genuinely incomplete restore.
+# Runs the restore script (see setup() above) against the directory given as
+# $1 -- a real git repo for the recovery-path tests below, or a non-repo
+# directory for the fail-closed test.
 run_workflow_restore_step() {
-    (
-        cd "$test_repo" || exit 1
-        set -euo pipefail
-        git sparse-checkout init || true
-        git sparse-checkout disable || true
-        git config --local --unset-all core.sparseCheckout || true
-        rm -f .git/info/sparse-checkout
-
-        # shellcheck disable=SC2016 -- intentional single-quoted awk program
-        mapfile -t remaining_skip_worktree < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
-        if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
-            git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
-        fi
-        git checkout --progress --force HEAD -- .
-
-        remaining_after="$(git ls-files -v | grep -c '^S ' || true)"
-        if [ "$remaining_after" -ne 0 ]; then
-            echo "::error::${remaining_after} path(s) still carry the skip-worktree bit after the restore sequence" >&2
-            exit 1
-        fi
-    )
+    bash "$restore_script" "$1"
 }
 
 @test "legacy manual sparse-checkout setup narrows the working tree as expected" {
@@ -137,7 +171,7 @@ run_workflow_restore_step() {
 @test "the workflow's restore step fully restores a legacy-manual narrow checkout and its assertion passes" {
     narrow_via_legacy_manual_append
 
-    run run_workflow_restore_step
+    run run_workflow_restore_step "$test_repo"
     [ "$status" -eq 0 ]
 
     [ -f "$test_repo/README.md" ]
@@ -167,11 +201,27 @@ run_workflow_restore_step() {
     git -C "$test_repo" update-index --skip-worktree README.md
     rm -f "$test_repo/README.md"
 
-    run run_workflow_restore_step
+    run run_workflow_restore_step "$test_repo"
     [ "$status" -eq 0 ]
     [ -f "$test_repo/README.md" ]
 
     run git -C "$test_repo" ls-files -v
     [[ "$output" != *$'\nS '* ]]
     [[ "$output" != S\ * ]]
+}
+
+@test "the workflow's restore step fails closed (non-zero exit) instead of silently succeeding when git itself is broken" {
+    # Regression for a subtler hazard the sweep/assert logic itself could
+    # introduce: if the final skip-worktree count were computed via
+    # `grep -c ... || true` instead of awk, a genuine git failure at that
+    # point could leave the count variable empty, and `[ "$x" -ne 0 ]` on an
+    # empty string is a *runtime* error inside an `if` condition -- not a
+    # fatal one under `set -e` -- so the check would be silently skipped and
+    # the step would exit 0 despite never having verified anything. Proves
+    # the actual shipped behavior (fails closed) against a directory that
+    # is not a git repository at all, rather than reasoning about it.
+    not_a_repo="$(mktemp -d)"
+    run run_workflow_restore_step "$not_a_repo"
+    [ "$status" -ne 0 ]
+    rm -rf "$not_a_repo"
 }

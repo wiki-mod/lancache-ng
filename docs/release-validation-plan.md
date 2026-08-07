@@ -899,15 +899,23 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   signal, the fix does not trust it: after the reap script runs, it sweeps any
   remaining index skip-worktree bits directly via `git update-index
   --no-skip-worktree` and asserts (failing the job loudly) that none remain,
-  rather than assuming the restore worked. New standing check:
+  rather than assuming the restore worked. The count itself is computed with
+  `awk` rather than `grep -c`, and only after capturing `git ls-files -v`'s
+  output into a variable first — a real git failure at that point must trip
+  `set -e` immediately via the plain assignment, and the count must never end
+  up empty (an empty `[ "$x" -ne 0 ]` comparison is a runtime error, not a
+  `set -e`-fatal one, inside an `if` condition, so it would otherwise silently
+  skip the check instead of failing it); confirmed with a real run against a
+  non-git directory that the step now exits non-zero rather than silently
+  succeeding. New standing check:
   `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
-  failure (plain `disable` leaving `core.sparseCheckout` set) and every stage
-  of the fix, including the always-reproducible case of a skip-worktree bit
-  that `disable` alone does not clear, against a throwaway local git
-  repository — no network or real clone needed. A durable guard against a
-  *future* self-hosted workflow reintroducing a narrow `sparse-checkout` input
-  without a matching restore step does not exist yet; recorded as an open gap
-  in Coverage Assessment below.
+  failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
+  the fix including the always-reproducible case of a skip-worktree bit that
+  `disable` alone does not clear, and the fail-closed behavior itself, against
+  a throwaway local git repository — no network or real clone needed. A
+  durable guard against a *future* self-hosted workflow reintroducing a narrow
+  `sparse-checkout` input without a matching restore step does not exist yet;
+  recorded as an open gap in Coverage Assessment below.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 
