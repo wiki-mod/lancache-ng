@@ -13,36 +13,33 @@
 # .git/info/sparse-checkout with a raw file write, never going through the
 # `git sparse-checkout set` porcelain command.
 #
-# Reproduced repeatedly, live, on git 2.47.3 (2026-08-07, three independent
-# runner hosts, both against the real lancache-ng repository and against
-# throwaway synthetic ones of varying size): a sparse-checkout state set up
-# that way does not reliably clear on a later job's plain `git
+# Reproduced repeatedly, live, on a self-hosted runner host (git 2.47.3,
+# 2026-08-07), both against the real lancache-ng repository and against
+# throwaway synthetic repositories of varying size: a sparse-checkout state
+# set up that way does not reliably clear on a later job's plain `git
 # sparse-checkout disable` call, nor on `git sparse-checkout init`
 # immediately followed by `disable` -- both report exit 0, and across
-# repeated runs the actual outcome varied (sometimes core.sparseCheckout
-# stayed true with paths outside the narrow set missing from the working
-# tree entirely; sometimes only the config value and the stale
-# .git/info/sparse-checkout file lingered while the working tree itself
-# looked fully populated). What stayed consistent across every repetition:
-# core.sparseCheckout itself was never reliably cleared by git's own
-# sparse-checkout subcommands alone. Self-hosted runners reuse one working
-# directory across unrelated jobs/workflows, so whatever state this job
-# leaves behind is inherited by the next job scheduled onto the same runner
-# instance -- and a lingering core.sparseCheckout=true is dangerous even
-# when the tree happens to look complete right now, because git re-applies
-# whatever sparse-checkout config is active on every future tree-changing
-# operation, so the next job's checkout of a genuinely different commit
-# would re-narrow down to the old paths again.
+# repeated runs the outcome varied between full recovery and index
+# skip-worktree bits staying set on every path outside the narrow set. The
+# exact trigger for the variation was not isolated. Self-hosted runners
+# reuse one working directory across unrelated jobs/workflows, so whatever
+# state a job leaves behind is inherited by the next job scheduled onto the
+# same runner instance -- and a lingering core.sparseCheckout=true is
+# dangerous even when the tree happens to look complete right now, because
+# git re-applies whatever sparse-checkout config is active on every future
+# tree-changing operation, so the next job's checkout of a genuinely
+# different commit would re-narrow down to the old paths again.
 #
-# These cases regress both the failure mode (so a future change to the
-# workflow's checkout step can't silently reintroduce it undetected) and the
-# fix this project applies in gc-pr-staging-images.yml's "Restore full
-# working tree for the next job on this runner" step: since git's own
-# sparse-checkout subcommands don't reliably undo this, that step clears the
-# state directly (unset the config, remove the stale pattern file, force a
-# full re-checkout) instead of trusting `disable` alone. No network access
-# and no real lancache-ng clone needed -- a throwaway local `git init`
-# repository reproduces the same git plumbing behavior.
+# Because `disable`'s own exit code proved unreliable as a success signal,
+# the workflow's fix does not trust it: it sweeps any remaining index
+# skip-worktree bits directly via `git update-index --no-skip-worktree`, and
+# asserts (failing the job loudly) that none remain afterward rather than
+# assuming the restore worked. These cases regress the failure mode (so a
+# future change to the workflow's checkout step can't silently reintroduce
+# it undetected) and every stage of that fix, including the case where
+# `disable` alone provably does not clear an existing skip-worktree bit. No
+# network access and no real lancache-ng clone needed -- a throwaway local
+# `git init` repository reproduces the same git plumbing behavior.
 
 setup() {
     if ! command -v git >/dev/null 2>&1; then
@@ -81,6 +78,34 @@ narrow_via_legacy_manual_append() {
     git -C "$test_repo" checkout --progress --force HEAD >/dev/null 2>&1
 }
 
+# Runs gc-pr-staging-images.yml's "Restore full working tree for the next
+# job on this runner" step verbatim (same commands, same order) against
+# $test_repo, returning its exit status the same way the workflow step
+# would fail the job on a genuinely incomplete restore.
+run_workflow_restore_step() {
+    (
+        cd "$test_repo" || exit 1
+        set -euo pipefail
+        git sparse-checkout init || true
+        git sparse-checkout disable || true
+        git config --local --unset-all core.sparseCheckout || true
+        rm -f .git/info/sparse-checkout
+
+        # shellcheck disable=SC2016 -- intentional single-quoted awk program
+        mapfile -t remaining_skip_worktree < <(git ls-files -v | awk '/^S /{print substr($0,3)}')
+        if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+            git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+        fi
+        git checkout --progress --force HEAD -- .
+
+        remaining_after="$(git ls-files -v | grep -c '^S ' || true)"
+        if [ "$remaining_after" -ne 0 ]; then
+            echo "::error::${remaining_after} path(s) still carry the skip-worktree bit after the restore sequence" >&2
+            exit 1
+        fi
+    )
+}
+
 @test "legacy manual sparse-checkout setup narrows the working tree as expected" {
     narrow_via_legacy_manual_append
     [ -f "$test_repo/scripts/narrow-a.sh" ]
@@ -109,20 +134,10 @@ narrow_via_legacy_manual_append() {
     [ "$output" = "true" ]
 }
 
-@test "the workflow's explicit restore sequence fully restores a legacy-manual narrow checkout" {
+@test "the workflow's restore step fully restores a legacy-manual narrow checkout and its assertion passes" {
     narrow_via_legacy_manual_append
 
-    # This mirrors gc-pr-staging-images.yml's "Restore full working tree for
-    # the next job on this runner" step verbatim. `git sparse-checkout
-    # init`/`disable` alone were confirmed unreliable at fully clearing
-    # core.sparseCheckout across repeated live reproductions, so the fix does
-    # not trust them alone -- it explicitly unsets the config, removes the
-    # stale pattern file, and forces a real re-checkout.
-    git -C "$test_repo" sparse-checkout init || true
-    git -C "$test_repo" sparse-checkout disable || true
-    git -C "$test_repo" config --local --unset-all core.sparseCheckout || true
-    rm -f "$test_repo/.git/info/sparse-checkout"
-    run git -C "$test_repo" checkout --progress --force HEAD -- .
+    run run_workflow_restore_step
     [ "$status" -eq 0 ]
 
     [ -f "$test_repo/README.md" ]
@@ -139,6 +154,24 @@ narrow_via_legacy_manual_append() {
 
     run git -C "$test_repo" ls-files -v
     [ "$status" -eq 0 ]
+    [[ "$output" != *$'\nS '* ]]
+    [[ "$output" != S\ * ]]
+}
+
+@test "the workflow's restore step's own sweep recovers a skip-worktree bit regardless of how it was set" {
+    # Sets a skip-worktree bit directly rather than via the flaky
+    # legacy-setup reproduction above, so this test does not depend on
+    # reproducing that specific flakiness to prove the step's own
+    # sweep+assert logic (the part that does not rely on `disable` or
+    # `init` succeeding) is sound on its own.
+    git -C "$test_repo" update-index --skip-worktree README.md
+    rm -f "$test_repo/README.md"
+
+    run run_workflow_restore_step
+    [ "$status" -eq 0 ]
+    [ -f "$test_repo/README.md" ]
+
+    run git -C "$test_repo" ls-files -v
     [[ "$output" != *$'\nS '* ]]
     [[ "$output" != S\ * ]]
 }

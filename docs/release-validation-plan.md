@@ -878,27 +878,36 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   this workflow's `sparse-checkout-cone-mode: false`) sets `core.sparseCheckout`
   via `git config` but writes the narrow path patterns by appending directly to
   `.git/info/sparse-checkout`, never through the `git sparse-checkout set`
-  porcelain command. Reproduced repeatedly, live, on three self-hosted runner
-  hosts (git 2.47.3): a sparse-checkout state set up that way does not reliably
-  clear on a later job's plain `git sparse-checkout disable`, nor on `git
-  sparse-checkout init` immediately followed by `disable` — both report success,
-  but `core.sparseCheckout` and/or the stale pattern file can linger regardless.
-  Self-hosted runners reuse one working directory across unrelated
-  jobs/workflows, and no other workflow in this repo passes a sparse-checkout
-  input at all, so whatever state this job left behind was inherited by the next
-  job scheduled onto the same runner instance — traced via a runner's own
-  `_diag` worker logs to real "No such file or directory" / "Can't find
-  'action.yml'" failures across several unrelated `build-push.yml` jobs on
-  2026-08-07. Fixed with an explicit restore step after the reap script runs
-  (unset `core.sparseCheckout`, remove the stale pattern file, force a real
-  re-checkout) rather than trusting git's own sparse-checkout subcommands alone.
-  New standing check: `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats`
-  regresses both the failure (plain `disable` leaving `core.sparseCheckout` set)
-  and the fix (the explicit restore sequence actually clearing it), against a
-  throwaway local git repository — no network or real clone needed. A durable
-  guard against a *future* self-hosted workflow reintroducing a narrow
-  `sparse-checkout` input without a matching restore step does not exist yet;
-  recorded as an open gap in Coverage Assessment below.
+  porcelain command. Reproduced repeatedly, live, on a self-hosted runner host
+  (git 2.47.3, `.240`), both against a real shallow clone of this repository and
+  throwaway synthetic repositories of varying size: a sparse-checkout state set
+  up that way does not reliably clear on a later job's plain `git
+  sparse-checkout disable`, nor on `git sparse-checkout init` immediately
+  followed by `disable` — both report success, but across repeated runs the
+  actual outcome varied between full recovery and index skip-worktree bits
+  staying set on every path outside the narrow set; the exact trigger for the
+  variation was not isolated. Self-hosted runners reuse one working directory
+  across unrelated jobs/workflows, and no other workflow in this repo passes a
+  sparse-checkout input at all, so whatever state a `gc-pr-staging-images.yml`
+  run leaves behind is inherited by the next job scheduled onto the same
+  runner instance — traced via one such runner's own `_diag` worker logs (a
+  "reap closed-PR staging tags and orphaned versions" run, followed without an
+  intervening second reap run by a `build-push.yml` job that failed) to real
+  "No such file or directory" / "Can't find 'action.yml'" failures observed
+  across several unrelated `build-push.yml` jobs, on multiple runner hosts, on
+  2026-08-07. Because `disable`'s own exit code proved unreliable as a success
+  signal, the fix does not trust it: after the reap script runs, it sweeps any
+  remaining index skip-worktree bits directly via `git update-index
+  --no-skip-worktree` and asserts (failing the job loudly) that none remain,
+  rather than assuming the restore worked. New standing check:
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  failure (plain `disable` leaving `core.sparseCheckout` set) and every stage
+  of the fix, including the always-reproducible case of a skip-worktree bit
+  that `disable` alone does not clear, against a throwaway local git
+  repository — no network or real clone needed. A durable guard against a
+  *future* self-hosted workflow reintroducing a narrow `sparse-checkout` input
+  without a matching restore step does not exist yet; recorded as an open gap
+  in Coverage Assessment below.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 
