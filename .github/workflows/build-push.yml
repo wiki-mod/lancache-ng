@@ -5586,8 +5586,20 @@ jobs:
       # IMMUTABLE digest reference, so no matter when it runs, it cannot observe different
       # content than what was verified -- unlike the old mutable-tag read, this closes the
       # race rather than merely shrinking its window.
+      #
+      # push-supersession-check gate (issue #1095 Part 1, added here by #1095 F-21):
+      # "Determine whether this service needs building" above forces should-build to
+      # 'false' for EVERY service on a superseded push, regardless of whether
+      # determine-push-reuse-scope ever verified (and pinned a digest for) this specific
+      # service -- unlike a genuine reuse=true case, a superseded push's DIGEST_* output
+      # for this service can legitimately be empty. Without this guard, this step would
+      # still run, find no pinned digest, and hard-fail via the empty-digest check below,
+      # where the pre-#1095-F-21 code merely (silently, and separately not-quite-safely)
+      # retagged from the mutable tag directly. Matches container-scan's own "Resolve
+      # channel image for unchanged-scan retag" step, which already carries this same
+      # condition for the identical reason.
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
-        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
+        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
@@ -6431,12 +6443,13 @@ jobs:
 
       # Mirrors build's own "Retag unchanged service image" step exactly,
       # just for the linux/arm64 leg -- see that step's comment for the full
-      # Step 4/#1095 rationale, including the #1095 F-21 digest-pinning fix.
-      # Both legs run independently in parallel jobs but resolve the SAME
-      # pinned digest determine-push-reuse-scope exported, so they always
-      # agree on which source content to retag.
+      # Step 4/#1095 rationale, including the #1095 F-21 digest-pinning fix
+      # and the push-supersession-check guard's own reasoning. Both legs run
+      # independently in parallel jobs but resolve the SAME pinned digest
+      # determine-push-reuse-scope exported, so they always agree on which
+      # source content to retag.
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
-        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
+        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
