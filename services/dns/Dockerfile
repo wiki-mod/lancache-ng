@@ -258,11 +258,16 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 #     (identical) -- i.e. identical to what Debian trixie's 4.9.16 already
 #     used and to what the 5.1.3 package needed. Now that the `apk add` step
 #     below installs plain stable's 5.0.7-r0 instead (issue #1483), this
-#     stays valid: re-confirmed live via a real CI build (2026-08-07, PR
-#     resolving issue #1483) that the installed 5.0.7-r0 package still ships
-#     no schema.sqlite3.sql (`apk info -L pdns-backend-sqlite3` lists no
-#     schema file), so entrypoint.sh's vendored-schema fallback still
-#     engages exactly as it did for 5.0.5/5.1.3.
+#     stays valid: a real CI build (2026-08-07, PR resolving issue #1483)
+#     ran this project's full-setup "DNS zone/record rollback simulation"
+#     and "UI/NATS/DNS integration simulation" against the actually-shipped
+#     5.0.7-r0 package -- both passed, which requires entrypoint.sh's
+#     vendored-schema fallback to have engaged correctly and PowerDNS to
+#     have read/written real zone data through it (a piped `apk info -L`
+#     grep alone was tried first but is not reliable evidence one way or the
+#     other: an Alpine `edge`-repo-index warning on stderr during that same
+#     command made an empty match result ambiguous between "no schema file"
+#     and "the listing itself produced no output").
 #
 # Package translations from the prior apt-get list (all confirmed live
 # against a real `alpine:3.24` container, not assumed from the apk package
@@ -272,7 +277,9 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 #     (`liblua-5.4.so.0`, confirmed via `ldd`), not LuaJIT -- exactly the
 #     "Lua-less-relative-to-Debian" build #815 said to check for before
 #     relying on it for filter-aaaa.lua/recursor.lua. The separate
-#     `pdns-recursor-luajit` package (same 5.4.4-r0 version) links
+#     `pdns-recursor-luajit` package (same version as plain pdns-recursor on
+#     whichever channel is active -- 5.4.4-r0 at this 2026-08-05 migration,
+#     5.4.5-r0 as of the 2026-08-07 pdns-stable-pin fix, issue #1483) links
 #     `libluajit-5.1.so.2` instead, matching Debian's own LuaJIT-based build
 #     and this project's stated acceptance criterion.
 #   - dnsutils -> bind-tools.
