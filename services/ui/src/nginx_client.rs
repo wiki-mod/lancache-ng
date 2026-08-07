@@ -478,7 +478,13 @@ fn parse_log_line(re: &Regex, line: &str) -> Option<LogEntry> {
     })
 }
 
-fn format_bytes(b: u64) -> String {
+// pub(crate), not private: syslog_client.rs's get_syslog_stats() (#849
+// bug-hunt finding observability.md#13) reuses this exact formatting for its
+// own per-host SyslogHostStats.size_human field, rather than duplicating an
+// independent byte-formatting implementation that could drift from this
+// one's thresholds/precision (AG-CODE-011's "the same decision must share
+// code" principle).
+pub(crate) fn format_bytes(b: u64) -> String {
     const KB: u64 = 1_024;
     const MB: u64 = 1_048_576;
     const GB: u64 = 1_073_741_824;
