@@ -1199,33 +1199,31 @@ saf_find_built_ancestor() {
     # <service>.
     #
     # #1095 F-22 (2026-08-07, confirmed live against runs 31184925428/
-    # 31187... for PR #1468 -- four untouched services each independently
+    # 31187... for PR #1468): four untouched services each independently
     # paid the full 600s ancestor-candidate ceiling waiting on the exact same
-    # candidate commit, ~40 minutes total, before this fix): check the cheap,
-    # no-network, git-diff-based "was <service> even touched by <candidate>"
-    # answer FIRST, before paying for the network wait below, not only AFTER
-    # it has already failed (the JUDGMENT CALL further down still performs
-    # this exact same check post-wait, for the "service WAS touched, or the
-    # check is inconclusive" paths that still need the wait).
+    # candidate commit, ~40 minutes total, when a cheap, no-network,
+    # git-diff-based "was <service> even touched by <candidate>" answer could
+    # settle it instead. That check now runs FIRST, before paying for the
+    # network wait below, not only AFTER it has already failed (the JUDGMENT
+    # CALL further down still performs this exact same check post-wait, for
+    # the "service WAS touched, or the check is inconclusive" paths that
+    # still need the wait).
     #
-    # IMPORTANT -- corrected claim (2026-08-07, caught before this branch was
-    # opened as a PR): an earlier version of this comment claimed a
-    # push-reuse-eligible service "never gets a FRESH per-commit tag" for an
-    # untouched candidate and that the full-budget wait was "structurally
-    # guaranteed to time out, every single time." That is false and was
-    # disproved by directly querying the registry: a SUCCESSFULLY COMPLETED
-    # build-push.yml run does create the combined tag for an untouched
-    # service (the Step 4 retag, carrying the older commit's revision label
-    # -- exactly the allow_reverse_ancestry shape). fb05ee33's tags were
-    # missing not because the wait is structurally doomed, but because that
-    # specific run's merge-manifests job aborted before ever reaching the
-    # untouched services (see this project's #1095 comment for that separate,
-    # still-open finding). The real, narrower justification for skipping the
-    # full-budget wait below is: if the run truly never completed (aborted,
-    # or genuinely never produced this tag), waiting the full budget cannot
-    # help either, and the single 0/0 probe two lines down is cheap enough
-    # to try regardless of which case applies -- not that success is
-    # impossible.
+    # A push-reuse-eligible service does not structurally "never get a FRESH
+    # per-commit tag" for an untouched candidate, and the full-budget wait is
+    # not structurally guaranteed to time out either: a SUCCESSFULLY
+    # COMPLETED build-push.yml run does create the combined tag for an
+    # untouched service (the Step 4 retag, carrying the older commit's
+    # revision label -- exactly the allow_reverse_ancestry shape), verified
+    # directly against the registry. fb05ee33's tags were missing not
+    # because the wait is structurally doomed, but because that specific
+    # run's merge-manifests job aborted before ever reaching the untouched
+    # services (see issue #1095 for that separate, still-open finding). The
+    # real, narrower justification for skipping the full-budget wait below
+    # is: if the run truly never completed (aborted, or genuinely never
+    # produced this tag), waiting the full budget cannot help either, and
+    # the single 0/0 probe two lines down is cheap enough to try regardless
+    # of which case applies -- not that success is impossible.
     #
     # A confirmed-untouched candidate is NOT skipped outright, though --
     # "never touched by this commit's own diff" is not the same claim as
