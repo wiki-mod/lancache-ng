@@ -61,27 +61,37 @@
 # the PR *count*, staggering bounds how many of those pushes can land the same
 # day.
 #
-# `groups.<name>.group-by: dependency-name` (GA on github.com, confirmed via
-# github/docs's own feature-flag data as of this audit) is set on both the
-# `rust-deps` and `docker-base-images` groups below because the directories
-# each one spans genuinely share dependencies, not just an ecosystem: all three
-# Rust crates (services/ui, services/dns/nats-subscriber, services/watchdog)
-# depend on `tokio`/`reqwest`/`serde`/`serde_json`, `async-nats` is shared by
-# two of them, and `axum` by two of them; all six Dockerfiles pin the identical
-# `alpine:3.24` base image. Without `group-by`, a shared dependency's bump
-# still lands in the one already-grouped PR (multi-`directories` + `groups`
-# already collapses that), but as a separate line item per directory for what
-# is really one logical upstream bump -- `group-by: dependency-name` collapses
-# those into a single line, which is the same PR-noise-reduction goal this
-# whole grouping strategy already exists for, just applied within a PR rather
-# than across PRs.
+# `groups.<name>.group-by: dependency-name` was evaluated and deliberately
+# NOT added, despite real, confirmed cross-directory dependency overlap in
+# both the `rust-deps` group (tokio/reqwest/serde/serde_json shared across
+# all three crates; async-nats and axum shared by two of them) and the
+# `docker-base-images` group (all six Dockerfiles pin the identical
+# `alpine:3.24` base image). GitHub's own tutorial example for this option
+# (see the `groups` reference page's "Grouping updates across directories in
+# a monorepo" section) names the resulting PR after a single dependency
+# ("Bump lodash in monorepo-dependencies group"), not after the group as a
+# whole the way an ordinary multi-dependency grouped PR is titled ("Bump the
+# X group with N updates") -- a real, structural signal that `group-by` may
+# key PR creation per dependency name rather than per named group, which
+# would fan a single already-grouped PR back out into one PR per updated
+# dependency the moment more than one dependency in the same group needs
+# updating in the same week. That is the exact opposite of this file's
+# BURST-FAN-OUT CONTROL goal above, and the documentation available does not
+# resolve the ambiguity for a `patterns: ["*"]` catch-all group with more
+# than one dependency changing at once. Given the downside (silently
+# reintroducing the #1065 fan-out this file exists to prevent) outweighs the
+# upside (deduplicating a same-dependency line item across directories
+# within an already-single PR), this was left out rather than shipped on an
+# unconfirmed reading -- revisit only with a real, observed multi-dependency
+# grouped run confirming the actual PR count `group-by` produces.
 #
 # Systematic pass against GitHub's full Dependabot options reference (F-18,
 # issue #1095, prompted by real `@dependabot rebase` friction on PR #1399):
-# real changes applied are the `group-by`/`schedule.day` additions above; the
-# rest of the options considered are recorded here specifically because the
-# reasoning is not obvious from the option's mere absence, and because F-18
-# asked for the "why not" to be captured, not just the "what changed":
+# the one real change applied is the `schedule.day` staggering above; the
+# rest of the options considered (including `group-by` above) are recorded
+# here specifically because the reasoning is not obvious from the option's
+# mere absence, and because F-18 asked for the "why not" to be captured, not
+# just the "what changed":
 #
 # * `rebase-strategy`: NOT set (kept at default). PR #1399's "Looks like this
 #   PR has been edited by someone other than Dependabot" refusal is
@@ -138,12 +148,7 @@ updates:
   # Rust (Cargo) -- all three crates (Admin UI + DNS NATS subscriber +
   # watchdog, added 2026-08 alongside services/watchdog/Cargo.toml, #1355)
   # collapse into ONE grouped PR per target branch via the multi-`directories`
-  # form, instead of a separate PR per crate directory. `group-by:
-  # dependency-name` additionally collapses a dependency shared by more than
-  # one of the three crates (e.g. tokio/reqwest/serde/serde_json, plus
-  # async-nats and axum shared by two of them) into a single line item within
-  # that one PR instead of one line item per directory -- see this file's own
-  # header comment for the full reasoning (F-18 audit, issue #1095).
+  # form, instead of a separate PR per crate directory.
   - package-ecosystem: cargo
     directories:
       - /services/ui
@@ -156,19 +161,13 @@ updates:
     groups:
       rust-deps:
         patterns: ["*"]
-        group-by: dependency-name
 
   # Docker base images -- all service Dockerfiles collapse into ONE grouped PR
-  # per target branch. Every service pins the identical Alpine base image
-  # (services/{proxy,dns,watchdog,dhcp,dhcp-proxy,ui} all pin the same
-  # `alpine:3.24` digest as of issue #815's Debian-to-Alpine migration -- this
-  # comment previously said "Debian base", which was accurate when first
-  # written but went stale once #815 landed; corrected during the F-18 audit,
-  # issue #1095), so a single upstream digest bump previously opened six
-  # near-identical per-service PRs per branch; the multi-`directories` group
-  # makes it one cross-service PR, and `group-by: dependency-name` (see this
-  # file's own header comment) collapses that single shared-base-image bump
-  # into one line item instead of six.
+  # per target branch. Every listed service pins the identical Alpine base
+  # image (`alpine:3.24`, per issue #815's Debian-to-Alpine migration), so a
+  # single upstream digest bump previously opened six near-identical
+  # per-service PRs per branch; the multi-`directories` group makes it one
+  # cross-service PR.
   - package-ecosystem: docker
     directories:
       - /services/proxy
@@ -184,4 +183,3 @@ updates:
     groups:
       docker-base-images:
         patterns: ["*"]
-        group-by: dependency-name
