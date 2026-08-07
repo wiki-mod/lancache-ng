@@ -5,13 +5,16 @@
 # Reaps GHCR container package versions for this project's own images
 # (services/* plus build-tools) that are no longer needed: closed-PR
 # `pr-<N>-sha-<short>` staging tags (the original #626 mechanism this file
-# replaces the former inline workflow logic for) AND genuinely orphaned
+# replaces the former inline workflow logic for), genuinely orphaned
 # untagged versions (the per-platform manifests and Buildx attestation/SBOM
-# sub-manifests every multi-arch push creates automatically). Invoked by
-# .github/workflows/gc-pr-staging-images.yml -- see that file's own header
-# for the two triggers (pull_request: closed, and a periodic full sweep) and
-# scripts/lib/gc-pr-staging-images.sh's own header for the two defects this
-# extraction fixes.
+# sub-manifests every multi-arch push creates automatically), AND (added for
+# F-17, issue #1095) sha-<commit> tags beyond a per-service retention count,
+# for commits that are current_dev-exclusive (never promoted to master or a
+# release tag) -- see process_service_sha_retention()'s own header for the
+# full policy. Invoked by .github/workflows/gc-pr-staging-images.yml -- see
+# that file's own header for the two triggers (pull_request: closed, and a
+# periodic full sweep) and scripts/lib/gc-pr-staging-images.sh's own header
+# for the classification defects and primitives this file builds on.
 #
 # EXTRACTED (2026-08-06, issue #1095) from that workflow's own inline `run:`
 # block into this standalone script for two reasons: (1) AG-CI-021's
@@ -85,7 +88,69 @@ max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
 # to positively enumerate every possible concurrent producer.
 min_age_seconds="${GC_MIN_AGE_SECONDS:-86400}"
 
+# F-17 (issue #1095): retention/pruning for sha-<commit> image tags, which
+# were previously unconditionally protected forever regardless of age or
+# count -- see this file's own tag-loop comment below (the "any non pr-*
+# tag" branch) for the pre-F-17 reasoning this policy narrows, and
+# scripts/lib/gc-pr-staging-images.sh's gcps_commit_branch_relation() for
+# the ancestry-check primitive this pass is built on.
+#
+# Maintainer decision (issue #1095, 2026-08-07): keep at most this many
+# previous sha-<commit> versions per service, for current_dev specifically
+# -- release/master provenance images stay protected regardless of count
+# (see process_service_sha_retention()'s own header for the full policy).
+sha_retention_keep="${GC_SHA_RETENTION_KEEP:-10}"
+#
+# Real deletion under this new policy stays OFF by default on purpose: F-17
+# was scoped, per the coordinating task that implemented it, to ship
+# classification/dry-run only in this PR, with actual deletion needing its
+# own separate, later, explicit maintainer approval -- not bundled into the
+# same approval as "does the retention count/scope design make sense."
+# GC_SHA_RETENTION_ENABLED=true is the one-line flip a maintainer can set as
+# a repository variable once that separate approval is given; nothing else
+# in this file needs to change.
+sha_retention_enabled="${GC_SHA_RETENTION_ENABLED:-false}"
+#
+# A distinct (lower) cap from max_deletions_per_service above, not a reuse
+# of it: this is a brand-new deletion category on its first rollout, and
+# each candidate costs up to 3 extra `gh api compare` calls (current_dev,
+# master, and however many release tags exist) on top of the existing
+# per-version work, so a smaller per-run budget is a deliberate extra
+# caution while this policy is still new, independent of whichever cap the
+# pre-existing categories use.
+sha_retention_max_deletions_per_service="${GC_SHA_RETENTION_MAX_DELETIONS_PER_SERVICE:-20}"
+
 now_epoch="$(date -u +%s)"
+
+# Every vX.Y.Z release tag this repository has ever cut -- populated by
+# main() (see main()'s own comment for why the real listing call lives
+# there and not here) for process_service_sha_retention()'s "not also
+# reachable from a release tag" protection check. Declared (empty) at this
+# top level, not inside main(), so tests/bats/gc_pr_staging_images.bats can
+# `source` this whole file -- which reaches every line at this top level,
+# including this one -- without needing a real `gh` binary or network
+# access: main() is the only place that performs the actual `gh api`
+# listing call, exactly mirroring this file's own GH_TOKEN check and
+# required-tool check, which live inside main() for the identical reason.
+#
+# `-g` is not cosmetic here: `declare` (without `-g`) inside a function
+# scopes its target LOCAL to that function, even when the `declare` line
+# itself lives at another file's top level and is only reached via `source`
+# -- `source` does not open a new scope, so a `source` call made FROM
+# inside a function (exactly what tests/bats/gc_pr_staging_images.bats's own
+# `setup()` does) runs this file's top-level code AS PART OF that function's
+# body. Confirmed live (2026-08-07) with a minimal reproduction: a plain
+# `declare -A foo=()` at a sourced file's top level is provably gone
+# (`declare -p foo` reports "not found") the moment the function that
+# sourced it returns -- exactly what caused this array's original
+# non-`-g` declaration to silently fail bats' own per-test `setup()`/`@test`
+# boundary: `commit_relation_cache` (see below) did not exist at all by the
+# time a `@test` body ran, and a `local -n` nameref to a not-yet-existing
+# name falls back to indexed-array (arithmetic-subscript) semantics instead
+# of associative-array (string-subscript) semantics, producing exactly the
+# `<hex-string>: unbound variable` failures this fix resolves.
+declare -ag release_tags=()
+sha_retention_lookup_ok=1
 
 # Confirmed PR states are cached across services (a PR number is unique
 # repo-wide, so a state looked up while processing "proxy" is still valid
@@ -97,8 +162,33 @@ now_epoch="$(date -u +%s)"
 # analysis job runs per-file with no cross-file (-x) mode, so it never sees
 # that indirect-by-name consumer and can't trace this usage across the
 # source boundary.
+#
+# CORRECTED (F-17, issue #1095): this was declared without `-g` before this
+# PR. Empirically, its own existing tests (gcps_pr_lookup_state's caching
+# test, and every process_service() test exercising a pr-* tag) still pass
+# either way in practice -- plausible because every one of THOSE call paths
+# writes to the cache (via a confirmed OPEN/CLOSED/LOOKUP_FAILED answer)
+# before anything else in the same test needs to read a PRE-POPULATED
+# entry back, so a freshly auto-vivified (if oddly-typed) variable never
+# actually gets exercised on its read path the same way this PR's own
+# sha-tag retention pass does (multiple distinct (commit, ref) pairs
+# checked, cached, and re-read for the SAME commit across gates, within one
+# test). Not a proven-safe distinction to keep relying on, though -- fixed
+# here defensively alongside commit_relation_cache below, both for
+# consistency and because a future test shape could hit the exact same
+# latent gap this PR's own tests just did.
 # shellcheck disable=SC2034
-declare -A pr_state_cache=()
+declare -Ag pr_state_cache=()
+
+# Same cross-service, per-run caching rationale as pr_state_cache above,
+# applied to gcps_commit_branch_relation()'s ANCESTOR/NOT_ANCESTOR/
+# LOOKUP_FAILED answers: a commit's relation to current_dev/master/a release
+# tag is a repo-wide fact, not a per-service one, so a commit checked while
+# processing "proxy" does not need re-checking while processing "dns". See
+# `release_tags`'s own comment above for why `-g` is required, not optional,
+# here -- this exact array is what exposed the gap `-g`'s absence caused.
+# shellcheck disable=SC2034
+declare -Ag commit_relation_cache=()
 
 # A single ambiguous PR-state lookup (LOOKUP_FAILED) is deliberately safe
 # on its own -- it just keeps that one version, exactly like an open PR (see
@@ -123,6 +213,11 @@ pr_lookup_failures=0
 had_errors=0
 deleted=0
 kept=0
+# Counted separately from `deleted` (real deletions) so the final summary
+# distinguishes "actually removed" from "would have been removed under the
+# F-17 retention policy, but GC_SHA_RETENTION_ENABLED is not set" -- folding
+# this into `deleted` would misreport a dry run as having done real work.
+sha_retention_would_delete=0
 
 # process_service <service>
 #
@@ -354,11 +449,27 @@ process_service() {
         [[ "$protected" == "1" ]] && break
       else
         # Any non pr-* tag (nightly, dev, latest, vX.Y.Z, sha-<commit>, ...)
-        # is a real published channel/source tag. Never delete it -- this
-        # includes sha-<commit> tags specifically, for every deletion
-        # mechanism this project runs, present and future, regardless of
-        # git-branch reachability or age: scripts/lib/staging-ancestor-
-        # fallback.sh's saf_find_built_ancestor() (called from
+        # is a real published channel/source tag. Never delete it via THIS
+        # pass (the closed-PR-tag reap) -- this includes sha-<commit> tags,
+        # unconditionally, regardless of git-branch reachability or age.
+        #
+        # CORRECTED (F-17, issue #1095): sha-<commit> tags are no longer
+        # unconditionally protected forever by every mechanism this script
+        # runs -- process_service_sha_retention() (called from
+        # process_service() right after this Pass 1 loop) is a second,
+        # separate deletion mechanism that CAN and does prune a sha-<commit>
+        # tag, but only when it can positively confirm the commit is
+        # current_dev-exclusive (never promoted to master or a release tag)
+        # AND ranked beyond the newest $sha_retention_keep for that service.
+        # This Pass 1 branch's own blanket protection is unaffected and
+        # still correct on its own terms: the reasoning below (about
+        # ancestor_search_depth, and about scan-failed tags) explains why
+        # blanket protection was the right STARTING default, not why it must
+        # stay unconditional forever -- see process_service_sha_retention's
+        # own header for the narrower, provably-safe carve-out F-17 adds on
+        # top of it.
+        #
+        # scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor() (called from
         # saf_resolve_untouched_backfill_source()) walks back from a PR's
         # base commit looking for a usable sha-<commit> image, but only up to
         # ancestor_search_depth commits deep -- NOT literally unbounded.
@@ -503,6 +614,14 @@ process_service() {
     fi
   done <<< "$version_list"
 
+  # Pass 1.5: sha-<commit> tag retention (F-17, issue #1095) -- deliberately
+  # called regardless of orphan_phase_ok below: it only ever needs each
+  # version's own tags/created_at (already available on version_list), never
+  # the manifest-children graph orphan_phase_ok/children_digests exist for,
+  # so a manifest-fetch problem that disables Pass 2 for this service has no
+  # bearing on whether sha-tag retention can still run safely.
+  process_service_sha_retention "$service" "$version_list"
+
   if [[ "$orphan_phase_ok" != "1" ]]; then
     return
   fi
@@ -600,6 +719,191 @@ process_service() {
   done <<< "$version_list"
 }
 
+# process_service_sha_retention <service> <version_list>
+#
+# F-17 (issue #1095): prunes sha-<commit> image tags (and their -amd64/
+# -arm64 legs) beyond the newest $sha_retention_keep per service, but ONLY
+# for a commit confirmed to be current_dev-exclusive -- reachable from
+# current_dev's tip, and NOT also reachable from master's tip or any release
+# tag. Before this pass existed, every sha-<commit> tag was unconditionally
+# protected forever (see process_service()'s own Pass 1 tag-loop comment for
+# the original reasoning) because a blanket "protect everything" default is
+# always safe, just unbounded -- this pass narrows that default only where
+# it can prove narrowing is safe, and leaves the blanket protection in place
+# everywhere it can't prove that (ambiguous ancestry, no confirmed
+# current_dev membership, release/master membership, a release-tag-listing
+# failure disabling the whole pass via sha_retention_lookup_ok). Real
+# deletion additionally requires sha_retention_enabled=true (see that
+# variable's own comment at its declaration) -- until then this pass only
+# classifies and logs what it WOULD delete, exactly like a dry run.
+#
+# Runs entirely in the CURRENT shell (called as a plain statement from
+# process_service(), never wrapped in `$(...)`), for the identical reason
+# process_service() itself is called that way from main()'s loop: so this
+# function's updates to the top-level had_errors/deleted/kept/
+# sha_retention_would_delete/commit_relation_cache variables are immediately
+# visible afterward, not lost to a subshell.
+#
+# Grouping is per COMMIT, not per individual tag/version: a single commit
+# can carry up to three real tags (the merged multi-platform sha-<short>,
+# plus sha-<short>-amd64 and sha-<short>-arm64 legs -- see build-push.yml's
+# own merge-manifests job), each a SEPARATE GHCR package version with its
+# own version id. Ranking and pruning per-tag independently could keep one
+# leg of a commit while pruning another, leaving an inconsistent partial
+# state; this function ranks by commit (using the newest created_at seen
+# among that commit's own tag versions) and, if a commit is pruned, prunes
+# every one of its known tag versions together.
+process_service_sha_retention() {
+  local service="$1"
+  local version_list="$2"
+  local package="lancache-ng%2F${service}"
+
+  if [[ "$sha_retention_lookup_ok" != "1" ]]; then
+    # Already warned once, at the top-level release-tag fetch that set this
+    # flag -- not re-warning per service here to avoid 8x duplicate noise.
+    return
+  fi
+
+  local version_entry version_id tag_list created_at created_epoch tag
+  local -A commit_created_at=()   # commit-short-sha -> newest created_at epoch seen
+  local -A commit_version_ids=()  # commit-short-sha -> space-separated version id list
+
+  while IFS= read -r version_entry; do
+    [[ -z "$version_entry" ]] && continue
+    if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
+      echo "::error::Failed to read a package version's id for $service (sha-tag retention pass) via jq: $version_id"
+      had_errors=1
+      continue
+    fi
+    [[ -z "$version_id" || "$version_id" == "null" ]] && continue
+
+    if ! tag_list="$(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]' 2>&1)"; then
+      echo "::error::Failed to enumerate tags for $service version $version_id (sha-tag retention pass) via jq: $tag_list"
+      had_errors=1
+      continue
+    fi
+    [[ -z "$tag_list" ]] && continue # untagged -- not a sha-<commit> tag, nothing for this pass
+
+    local matched_commit=""
+    while IFS= read -r tag; do
+      [[ -z "$tag" ]] && continue
+      # Matches the merged multi-platform tag (sha-<short>) and both
+      # per-arch legs (sha-<short>-amd64, sha-<short>-arm64) -- see
+      # build-push.yml's build/build-arm64/merge-manifests jobs for where
+      # each of these three real tag shapes gets pushed. Deliberately does
+      # NOT match sha256-<64-hex> (the Buildx attestation-fallback TAG
+      # shape, a completely different namespace already handled elsewhere
+      # in process_service()'s Pass 1) -- the hyphen after "sha" plus a
+      # short (not 64-char) hex run is what distinguishes them.
+      if [[ "$tag" =~ ^sha-([0-9a-f]{7,40})(-amd64|-arm64)?$ ]]; then
+        matched_commit="${BASH_REMATCH[1]}"
+        break
+      fi
+    done <<< "$tag_list"
+    [[ -z "$matched_commit" ]] && continue
+
+    if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
+      echo "::warning::Failed to read created_at for $service version $version_id (sha-tag retention pass) via jq: $created_at -- excluding it from ranking this run (fail closed: it stays exactly as protected as before this pass existed)."
+      continue
+    fi
+    if ! created_epoch="$(gcps_created_at_to_epoch "$created_at")"; then
+      echo "::warning::Could not parse created_at ('$created_at') for $service version $version_id (sha-tag retention pass) -- excluding it from ranking this run (fail closed)."
+      continue
+    fi
+
+    commit_version_ids["$matched_commit"]="${commit_version_ids[$matched_commit]:-}${commit_version_ids[$matched_commit]:+ }$version_id"
+    if [[ -z "${commit_created_at[$matched_commit]:-}" ]] || (( created_epoch > commit_created_at[$matched_commit] )); then
+      commit_created_at["$matched_commit"]="$created_epoch"
+    fi
+  done <<< "$version_list"
+
+  local commit_count="${#commit_created_at[@]}"
+  if (( commit_count == 0 )); then
+    return # nothing sha-<commit>-tagged for this service this run
+  fi
+
+  # Rank commits newest-first by their own newest-seen created_at (ties
+  # broken arbitrarily by sort -- commits created the same second are
+  # equally "new" for this purpose, so tie order does not affect
+  # correctness). "epoch:commit" pairs, sorted numerically descending on
+  # the epoch field; commit-short-shas are hex only, so the ":" separator
+  # cannot collide with either field's own content.
+  local commit entry
+  local -a ranked=()
+  for commit in "${!commit_created_at[@]}"; do
+    ranked+=("${commit_created_at[$commit]}:${commit}")
+  done
+  mapfile -t ranked < <(printf '%s\n' "${ranked[@]}" | sort -t: -k1,1nr)
+
+  local rank=0
+  local service_sha_retention_deletions=0
+  for entry in "${ranked[@]}"; do
+    commit="${entry#*:}"
+    rank=$((rank + 1))
+
+    if (( rank <= sha_retention_keep )); then
+      continue # within the newest-N window -- always kept, no ancestry check needed
+    fi
+
+    if (( service_sha_retention_deletions >= sha_retention_max_deletions_per_service )); then
+      echo "::notice::$service hit its sha-tag retention deletion cap ($sha_retention_max_deletions_per_service) this run while processing commits beyond the newest $sha_retention_keep; the rest are left for a later run."
+      continue
+    fi
+    if ! gcps_is_old_enough_to_delete "${commit_created_at[$commit]}" "$now_epoch" "$min_age_seconds"; then
+      continue
+    fi
+
+    # Fail-closed eligibility chain: EVERY check below must positively
+    # confirm "safe to prune" for this commit to become a deletion
+    # candidate. Any LOOKUP_FAILED (ambiguous) or "still protected" result
+    # at any step leaves the commit exactly as protected as it was before
+    # this pass existed -- see gcps_commit_branch_relation's own comment for
+    # why the caller (here) must apply the correct fail-closed direction
+    # per question rather than trusting a single boolean.
+    local relation
+    relation="$(gcps_commit_branch_relation "$repo" "$commit" "current_dev" commit_relation_cache)"
+    if [[ "$relation" != "ANCESTOR" ]]; then
+      continue # not confirmed reachable from current_dev at all -- don't touch it
+    fi
+    relation="$(gcps_commit_branch_relation "$repo" "$commit" "master" commit_relation_cache)"
+    if [[ "$relation" != "NOT_ANCESTOR" ]]; then
+      continue # confirmed reachable from master, OR ambiguous -- protect either way
+    fi
+
+    local release_tag protected_by_release=0
+    for release_tag in "${release_tags[@]}"; do
+      relation="$(gcps_commit_branch_relation "$repo" "$commit" "$release_tag" commit_relation_cache)"
+      if [[ "$relation" != "NOT_ANCESTOR" ]]; then
+        protected_by_release=1
+        break
+      fi
+    done
+    if (( protected_by_release == 1 )); then
+      continue
+    fi
+
+    # Eligible: current_dev-exclusive, ranked beyond the retention window,
+    # old enough, under this run's dedicated deletion cap.
+    service_sha_retention_deletions=$((service_sha_retention_deletions + 1))
+    local vid
+    for vid in ${commit_version_ids[$commit]}; do
+      if [[ "$sha_retention_enabled" == "true" ]]; then
+        echo "Deleting $service version $vid (sha-<commit> retention: commit $commit ranked #$rank, beyond the newest $sha_retention_keep, current_dev-exclusive)."
+        local delete_output
+        if delete_output="$(gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${vid}" 2>&1)"; then
+          deleted=$((deleted + 1))
+        else
+          echo "::error::Failed to delete $service sha-retention version $vid (commit $commit): $delete_output"
+          had_errors=1
+        fi
+      else
+        echo "::notice::[dry-run, GC_SHA_RETENTION_ENABLED not set] Would delete $service version $vid (sha-<commit> retention: commit $commit ranked #$rank, beyond the newest $sha_retention_keep, current_dev-exclusive)."
+        sha_retention_would_delete=$((sha_retention_would_delete + 1))
+      fi
+    done
+  done
+}
+
 # main
 #
 # Everything that must NOT happen just from sourcing this file (requiring a
@@ -632,18 +936,70 @@ main() {
   # scripts/ntp-cap-sys-time-simulation.sh), but this check alone cannot
   # distinguish a present-but-non-GNU `date` from a working one.
   local required_cmd
-  for required_cmd in gh jq curl date; do
+  for required_cmd in gh jq curl date sort; do
     if ! command -v "$required_cmd" >/dev/null 2>&1; then
       echo "::error::Required tool '$required_cmd' was not found on this runner. This script cannot run without it."
       exit 1
     fi
   done
 
+  # F-17 (issue #1095): list every vX.Y.Z release tag ONCE for the whole
+  # run (not per service -- a commit's release-tag membership does not
+  # depend on which service's images are being processed right now), into
+  # the top-level release_tags array process_service_sha_retention() reads.
+  # Deliberately performed here inside main(), not at this file's top
+  # level, so that `source`-ing this script (as
+  # tests/bats/gc_pr_staging_images.bats does, to reuse process_service()
+  # under mocked gh/curl without a real credential) never makes a real,
+  # unmocked network call as a side effect of sourcing -- the exact same
+  # reasoning this function's own GH_TOKEN check and required-tool loop
+  # above are already built on.
+  #
+  # A listing failure here must NOT be silently read as "no release tags
+  # exist, therefore nothing is release-protected" -- that is exactly the
+  # dangerous direction (a real release commit's sha-* tag looking safe to
+  # prune when it is not) -- so sha_retention_lookup_ok gates the entire
+  # sha-tag retention pass off for this run instead, leaving every
+  # sha-<commit> tag exactly as protected as it was before this policy
+  # existed. The pre-existing closed-PR-tag and orphan reap passes are
+  # entirely unaffected either way; this flag only gates the new pass.
+  local release_tags_raw
+  if ! release_tags_raw="$(gh api --paginate "repos/${repo}/tags" 2>&1)"; then
+    echo "::warning::Failed to list release tags for $repo -- disabling sha-<commit> tag retention (F-17) for this entire run, since it cannot prove a retention candidate isn't also a release. Every closed-PR-tag and orphan reap pass is unaffected: $release_tags_raw"
+    sha_retention_lookup_ok=0
+  else
+    # A real, successful listing that simply contains zero vX.Y.Z-shaped
+    # tags is not a failure (this repository could in principle have none
+    # yet) -- `grep -E ... || true` here only exists to keep a genuinely
+    # empty match set from tripping this script's own `set -e` (grep's own
+    # exit code is 1, not an error, for "found nothing"), which is exactly
+    # the AG-VAL-004 "optional fallback with a documented reason" case, not
+    # a hidden required-command failure. Confirmed live (2026-08-07,
+    # `gh api --paginate repos/wiki-mod/lancache-ng/tags`) this repository
+    # actually has three: v0.1.0, v0.2.0, v0.3.0 -- and confirmed, via
+    # `gh api repos/wiki-mod/lancache-ng/compare/<tag>...master`, that a
+    # real release tag's own commit is NOT always a simple linear ancestor
+    # of every OTHER release tag's or current_dev's tip (this project's
+    # actual release history includes divergent lines, e.g. v0.2.0 vs the
+    # current v0.3.0-based master) -- process_service_sha_retention()'s
+    # per-commit, per-ref compare calls handle this correctly regardless,
+    # since each check is independent and fails closed on its own.
+    mapfile -t release_tags < <(printf '%s' "$release_tags_raw" | jq -r '.[].name' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+' || true)
+  fi
+
   for service in "${services[@]}"; do
     process_service "$service"
   done
 
   echo "::notice::PR staging-tag GC complete: deleted $deleted version(s), kept $kept."
+
+  if [[ "$sha_retention_lookup_ok" != "1" ]]; then
+    echo "::warning::sha-<commit> tag retention (F-17) was disabled for this entire run (release-tag listing failed at startup -- see the warning above). Every sha-<commit> tag was left exactly as protected as before this policy existed."
+  elif [[ "$sha_retention_enabled" == "true" ]]; then
+    echo "::notice::sha-<commit> tag retention (F-17): deleted $deleted version(s) counted above under this policy this run (GC_SHA_RETENTION_ENABLED=true)."
+  else
+    echo "::notice::sha-<commit> tag retention (F-17) ran in dry-run mode (GC_SHA_RETENTION_ENABLED is not 'true'): $sha_retention_would_delete version(s) across all services would have been deleted under the current retention policy (keep newest $sha_retention_keep per service, current_dev-exclusive commits only). Nothing was actually deleted by this policy this run."
+  fi
 
   if (( pr_lookup_failures > 0 )); then
     echo "::warning::$pr_lookup_failures PR-state lookup(s) could not be confirmed this run (ambiguous gh api result, not a real 404) -- every one of those tagged versions was kept as a precaution, per gcps_pr_lookup_state's own fail-safe design."

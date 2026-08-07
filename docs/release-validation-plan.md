@@ -916,6 +916,52 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   durable guard against a *future* self-hosted workflow reintroducing a narrow
   `sparse-checkout` input without a matching restore step does not exist yet;
   recorded as an open gap in Coverage Assessment below.
+- **No automated retention/pruning for `sha-<commit>` image tags (F-17, issue
+  #1095, dry-run classification implemented; real deletion still gated off)**
+  — `docs/release-versioning.md`'s own Retention section described this
+  requirement ("automated cleanup must be opt-in and must read the manifest
+  retention section... `sha-*` tags referenced by supported releases must not
+  be deleted") but no code ever implemented it: every `sha-<commit>` tag was
+  unconditionally protected forever, regardless of age or count, growing
+  without bound as `current_dev` accumulates commits. Maintainer decision
+  (2026-08-07): keep at most 10 previous `sha-<commit>` versions per service,
+  for `current_dev` specifically. `scripts/gc-pr-staging-images.sh`'s new
+  `process_service_sha_retention()` prunes beyond that count, but only for a
+  commit it can positively confirm, via GitHub's compare API
+  (`gcps_commit_branch_relation()` in `scripts/lib/gc-pr-staging-images.sh`),
+  is reachable from `current_dev`'s tip AND NOT also reachable from `master`'s
+  tip or any `vX.Y.Z` release tag — every ambiguous or failed lookup fails
+  closed (protect, don't prune), mirroring this file's existing
+  `gcps_pr_lookup_state` OPEN/CLOSED/LOOKUP_FAILED pattern. Live-verified
+  against the real repository (2026-08-07, this project's own actual, non-linear
+  release history): `gh api repos/wiki-mod/lancache-ng/compare/<short-sha>...<ref>`
+  accepts abbreviated (7-char) SHAs and correctly reports `ahead`/`identical`
+  for a real ancestor and `diverged`/`behind` otherwise, including the
+  confirmed-real case that `master`'s and `current_dev`'s own tips, and two
+  different release tags (`v0.2.0`/`v0.3.0`), compare as `diverged` against
+  each other despite sharing history further back — the per-commit,
+  per-ref design handles this correctly since each check is independent.
+  Real deletion needs the separate, explicit opt-in
+  `GC_SHA_RETENTION_ENABLED=true` (default off): this PR ships
+  classification/dry-run only (logged via `::notice::`), with real deletion
+  needing its own later, separate maintainer approval — not proven with a
+  real deletion pass for that reason. New standing check:
+  `tests/bats/gc_pr_staging_images.bats` gained coverage for
+  `gcps_commit_branch_relation` (ANCESTOR/NOT_ANCESTOR/LOOKUP_FAILED for
+  real `ahead`/`identical`/`behind`/`diverged`/API-failure/404 compare
+  results, and per-`(commit, ref)` caching) and for
+  `process_service_sha_retention` (within-window commits skip ancestry
+  checks entirely; an eligible current_dev-exclusive commit becomes a
+  dry-run candidate and is NOT actually deleted by default;
+  `GC_SHA_RETENTION_ENABLED=true` performs a real deletion call; a commit
+  reachable from `master` or a release tag stays protected regardless of
+  rank; a too-young commit is never even ancestry-checked; a release-tag
+  listing failure disables the whole pass for the run). Open gap: no real,
+  live dry run has yet been captured showing this classification's actual
+  output against the full, current registry state across all 8 services in
+  one run (only targeted live `gh api compare` calls proving the mechanism
+  itself is correct, per the reproduction above) — recorded here rather than
+  silently assumed equivalent.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 

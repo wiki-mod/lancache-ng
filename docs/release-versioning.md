@@ -339,6 +339,25 @@ release, rollback path, or published deployment document.
 Automated cleanup must be opt-in and must read the manifest retention section.
 It must not delete release or rollback digests by pattern alone.
 
+**Implemented (F-17, issue #1095, 2026-08-07):** the requirement above --
+that automated `sha-*` tag cleanup exist at all -- was previously written
+here but not built; `.github/workflows/gc-pr-staging-images.yml`'s reaper
+only ever touched closed-PR staging tags and, later, genuinely orphaned
+untagged versions, never a plain `sha-<commit>` tag. `scripts/gc-pr-staging-images.sh`'s
+`process_service_sha_retention()` now prunes `sha-<commit>` tags (and their
+`-amd64`/`-arm64` legs) beyond a per-service retention count (maintainer
+decision: 10), but only for a commit it can positively prove, via GitHub's
+compare API, is current_dev-exclusive -- reachable from `current_dev`'s tip
+and NOT also reachable from `master`'s tip or any release tag. This matches
+the "release digests... referenced by supported releases must not be
+deleted" sentence above by construction, not by a separate check: a
+`sha-*` tag that is part of a supported release's or `master`'s own
+ancestry fails the eligibility chain and stays protected regardless of its
+age or rank. Real deletion under this policy needs the repository variable
+`GC_SHA_RETENTION_ENABLED=true` as a separate, explicit opt-in (default
+off -- classification/dry-run only), matching this section's own
+"must be opt-in" requirement literally, not just in spirit.
+
 ## CI Guardrails
 
 The CI guardrails must fail closed when:

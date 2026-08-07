@@ -30,6 +30,17 @@
 # orphaned versions" step below for why the actual logic now lives in
 # scripts/gc-pr-staging-images.sh rather than inline here.
 #
+# ALSO (F-17, issue #1095) prunes sha-<commit> tags (and their -amd64/-arm64
+# legs) beyond a per-service retention count of GC_SHA_RETENTION_KEEP
+# (default 10, the maintainer's own 2026-08-07 decision), but only for a
+# commit confirmed current_dev-exclusive (never promoted to master or a
+# release tag) -- every other sha-<commit> tag stays exactly as protected as
+# before. Real deletion under this policy needs GC_SHA_RETENTION_ENABLED=true
+# as a separate, explicit opt-in (default off: classification/dry-run only,
+# logged via ::notice::) -- see scripts/gc-pr-staging-images.sh's
+# process_service_sha_retention() for the full policy and its fail-closed
+# reasoning.
+#
 # Two triggers cover both the common case and the safety-net case:
 #   - pull_request (closed): reaps promptly right after the PR that owns a
 #     given staging tag closes (merged or not).
@@ -125,6 +136,20 @@ jobs:
     # headroom for the new per-version registry calls under normal GHCR
     # response times, without reintroducing a multi-hour silent-hang window
     # the way 150 minutes did.
+    #
+    # F-17 (issue #1095) adds further bounded work on top of the above: up
+    # to 3 `gh api compare` calls (current_dev, master, one per release tag
+    # until a match) per sha-<commit> RETENTION CANDIDATE (a commit ranked
+    # beyond GC_SHA_RETENTION_KEEP for its service), capped at
+    # GC_SHA_RETENTION_MAX_DELETIONS_PER_SERVICE (default 20) candidates per
+    # service per run -- at most 20 x 3 x 8 = 480 extra GitHub REST calls in
+    # the worst case, cheap individually (no registry manifest fetch
+    # involved, unlike the orphan pass) and independent of GHCR's own
+    # rate-limit budget (these hit the GitHub API, not the registry). Not
+    # expected to meaningfully change the 60-minute budget above, but not
+    # re-measured against a real run with a large sha-retention backlog
+    # either -- flagged as an open verification item in this PR rather than
+    # asserted as proven headroom.
     timeout-minutes: 60
     steps:
       # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
