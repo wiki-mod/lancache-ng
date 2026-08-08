@@ -4,9 +4,9 @@
 #
 # Docker CLI boundary for exact-identity validation. The reusable simulation
 # suite deliberately keeps its existing behavioral scripts; this shim changes
-# only how first-party image references reach Docker. A first-party candidate
-# transport tag is replaced with its recorded OCI digest, and every Compose
-# model is overlaid with the exact runtime digests from the same stack lock.
+# only how first-party image references reach Docker. Every direct first-party
+# image reference must resolve to the digest recorded in the stack lock, and
+# every Compose model is overlaid with those same runtime digests.
 #
 # The override is rendered for every Compose invocation instead of being cached
 # once. Several simulations enable profiles only on later commands; a cached
@@ -57,30 +57,80 @@ if [[ -z "$candidate_tag" ]]; then
     exit 1
 fi
 
-ci_lock_digest_ref_for_transport() {
-    local ref="$1" image digest transport
-    while IFS=$'\t' read -r image digest; do
-        transport="${image}:${candidate_tag}"
-        if [[ "$ref" == "$transport" ]]; then
-            ci_ai_require_digest "$digest" || return 1
-            printf '%s@%s\n' "$image" "$digest"
-            return $?
+ci_lock_expected_digest() {
+    local image="$1" digest count
+    if digest="$(jq -r --arg image "$image" '[((.runtime + .tooling)[] | select(.image == $image) | .digest)] | .[]' "$lock")"; then
+        :
+    else
+        return $?
+    fi
+    count="$(printf '%s\n' "$digest" | sed '/^$/d' | wc -l | tr -d ' ')"
+    [[ "$count" == 1 ]] || return 1
+    ci_ai_require_digest "$digest" || return 1
+    printf '%s\n' "$digest"
+}
+
+ci_lock_rewrite_first_party_ref() {
+    local ref="$1" image supplied expected tag
+    [[ "$ref" == ghcr.io/wiki-mod/lancache-ng/* ]] || return 2
+
+    if [[ "$ref" == *@sha256:* ]]; then
+        image="${ref%@*}"
+        supplied="${ref#*@}"
+        if expected="$(ci_lock_expected_digest "$image")"; then
+            :
+        else
+            ci_ai_fail "first-party digest reference is not present in the stack lock: $ref"
+            return 1
         fi
-    done < <(jq -r '(.runtime + .tooling)[] | [.image,.digest] | @tsv' "$lock")
-    return 1
+        if [[ "$supplied" != "$expected" ]]; then
+            ci_ai_fail "first-party digest differs from stack lock for $image: expected $expected, got $supplied"
+            return 1
+        fi
+        printf '%s@%s\n' "$image" "$expected"
+        return 0
+    fi
+
+    # ghcr.io has no port component here, so the final colon unambiguously
+    # separates an image name from its tag. Unqualified first-party names are
+    # rejected rather than allowing Docker's implicit `latest` to enter a
+    # stack-lock validation run.
+    if [[ "$ref" != *:* ]]; then
+        ci_ai_fail "unqualified first-party image is forbidden under stack lock: $ref"
+        return 1
+    fi
+    image="${ref%:*}"
+    tag="${ref##*:}"
+    if expected="$(ci_lock_expected_digest "$image")"; then
+        :
+    else
+        ci_ai_fail "first-party tagged reference is not present in the stack lock: $ref"
+        return 1
+    fi
+    if [[ "$tag" != "$candidate_tag" ]]; then
+        ci_ai_fail "mutable first-party tag is forbidden under stack lock: $ref"
+        return 1
+    fi
+    printf '%s@%s\n' "$image" "$expected"
 }
 
 ci_lock_rewrite_direct_args() {
     local -n input_ref=$1
     local -n output_ref=$2
-    local arg locked
+    local arg locked status
     output_ref=()
     for arg in "${input_ref[@]}"; do
-        if locked="$(ci_lock_digest_ref_for_transport "$arg" 2>/dev/null)"; then
+        if locked="$(ci_lock_rewrite_first_party_ref "$arg")"; then
             output_ref+=("$locked")
+            continue
         else
-            output_ref+=("$arg")
+            status=$?
         fi
+        if (( status == 2 )); then
+            output_ref+=("$arg")
+            continue
+        fi
+        return "$status"
     done
 }
 
@@ -287,5 +337,9 @@ fi
 
 args=("$@")
 rewritten=()
-ci_lock_rewrite_direct_args args rewritten
+if ci_lock_rewrite_direct_args args rewritten; then
+    :
+else
+    exit $?
+fi
 exec "$real_docker" "${rewritten[@]}"
