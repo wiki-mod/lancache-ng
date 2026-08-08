@@ -1132,7 +1132,7 @@ _render_stream_backend_map > "$STREAM_TARGET_FILE"
 # 127.0.0.1-only relay hops this comment just explained must NOT get it).
 # A one-level-deeper subdirectory is invisible to a non-recursive `*.conf`
 # glob against its parent, so this file is reachable only via the explicit,
-# scoped `include` statements this fix adds to the two external listeners.
+# scoped `include` statements placed inside the two external listeners.
 mkdir -p /etc/nginx/stream.d/access.d
 STREAM_CLIENT_ACL_FILE="/etc/nginx/stream.d/access.d/00-stream-client-acl.conf"
 
