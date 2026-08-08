@@ -769,24 +769,42 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
 // (that 255-byte figure is a wire-format <character-string> limit PowerDNS
 // already handles by auto-chunking, not a limit this validator needs to
 // enforce), and its own zone API docs state no separate content-length cap.
-// The real, protocol-level ceiling that does exist is RFC 1035 SS3.2.1's
-// RDLENGTH field: a 16-bit unsigned value, capping any single resource
-// record's total RDATA at 65535 bytes. A TXT record's wire RDATA is one or
-// more <character-string>s (RFC 1035 SS3.3/3.3.14), each a 1-byte length
-// prefix followed by up to 255 content bytes -- PowerDNS's chunking above
-// means a C-byte content value costs C content bytes PLUS ceil(C / 255)
-// length-prefix bytes on the wire, not just C bytes. Content of exactly
-// 65279 bytes needs ceil(65279 / 255) = 256 length-prefix bytes, for a
-// total RDATA of 65279 + 256 = 65535 bytes -- exactly RDLENGTH's ceiling.
-// One byte more (65280) needs the same 256 prefixes (255 * 256 = 65280) for
-// a total of 65536, one byte over the limit. 65279 is therefore the real
-// maximum content length this validator can accept, not 65535 -- the
-// difference is exactly the chunking overhead RDLENGTH must also account
-// for. Deliberately NOT the 255-byte figure some callers might expect:
-// this module's own existing test (validates_supported_lan_record_edge_cases)
-// already asserts a 512-byte TXT content is valid, which is correct given
-// PowerDNS's own documented auto-chunking behavior above.
-const MAX_TXT_CONTENT_BYTES: usize = 65_279;
+//
+// The real, protocol-level ceiling is not RDLENGTH alone: it is the DNS
+// message itself, since RFC 1035 SS4.2.2 (TCP) carries each message behind
+// its own 16-bit length prefix, capping any single DNS message -- header,
+// question, and every answer's RDATA included -- at 65535 bytes total. A
+// TXT record's wire RDATA is one or more <character-string>s (RFC 1035
+// SS3.3/3.3.14), each a 1-byte length prefix followed by up to 255 content
+// bytes, so a C-byte content value costs C content bytes PLUS
+// ceil(C / 255) length-prefix bytes on the wire -- but that RDATA does not
+// travel alone. A response carrying this record also needs, at minimum:
+// a 12-byte header (RFC 1035 SS4.1.1); the question section that produced
+// this answer, whose QNAME can be as long as this validator's own
+// `is_valid_dns_fqdn`/`is_lan_zone_name` name-length ceiling allows
+// (253 presentation-form characters, i.e. up to 255 wire-format bytes per
+// RFC 1035 SS3.1/3.3.14 -- this file's own `is_valid_dns_fqdn_impl`'s
+// `name.len() > 253` check), plus 2-byte QTYPE and 2-byte QCLASS; and the
+// answer's own resource-record framing -- a compressed NAME pointer
+// (RFC 1035 SS4.1.4, 2 bytes, the normal case whenever the answer name
+// matches the question name), 2-byte TYPE, 2-byte CLASS, 4-byte TTL, and
+// the 2-byte RDLENGTH field itself. Conservatively for the longest name
+// this validator allows (not per-request name-dependent, so this stays a
+// compile-time constant): 12 (header) + (255 + 2 + 2) (question) +
+// (2 + 2 + 2 + 4 + 2) (answer frame) = 283 bytes of non-RDATA overhead,
+// leaving 65535 - 283 = 65252 bytes for RDATA. Solving
+// C + ceil(C / 255) <= 65252 for the largest integer C gives 64997
+// (64997 + ceil(64997 / 255) = 64997 + 255 = 65252, and one byte more,
+// 64998, needs the same 255 prefixes for 65253 -- one over). 64997 is
+// therefore the real maximum content length this validator can accept for
+// any allowed record name, not 65535 and not the earlier 65279 (which
+// only accounted for RDLENGTH's own ceiling, not the surrounding message
+// that must also carry this record home). Deliberately NOT the 255-byte
+// figure some callers might expect: this module's own existing test
+// (validates_supported_lan_record_edge_cases) already asserts a 512-byte
+// TXT content is valid, which is correct given PowerDNS's own documented
+// auto-chunking behavior above.
+const MAX_TXT_CONTENT_BYTES: usize = 64_997;
 
 fn is_valid_txt_content(content: &str) -> bool {
     let content = content.trim();
@@ -1802,13 +1820,14 @@ mod tests {
         assert!(validate_lan_record("api.lan.", "A", "192.0.2.10", u32::MAX).is_none());
     }
 
-    // Locks MAX_TXT_CONTENT_BYTES (65279, the chunking-overhead-adjusted
-    // RFC 1035 SS3.2.1 RDLENGTH ceiling -- see that constant's own header
-    // comment for the exact arithmetic) as is_valid_txt_content's real
-    // boundary, while confirming the pre-existing 512-byte case (validated
-    // above via PowerDNS's own documented TXT auto-chunking) still passes.
+    // Locks MAX_TXT_CONTENT_BYTES (64997, the chunking-overhead- and
+    // surrounding-DNS-message-framing-adjusted RFC 1035 SS4.2.2 65535-byte
+    // message ceiling -- see that constant's own header comment for the
+    // exact arithmetic) as is_valid_txt_content's real boundary, while
+    // confirming the pre-existing 512-byte case (validated above via
+    // PowerDNS's own documented TXT auto-chunking) still passes.
     #[test]
-    fn txt_content_upper_bound_matches_rdlength_ceiling() {
+    fn txt_content_upper_bound_matches_message_ceiling() {
         assert!(is_valid_txt_content(&"x".repeat(MAX_TXT_CONTENT_BYTES)));
         assert!(!is_valid_txt_content(
             &"x".repeat(MAX_TXT_CONTENT_BYTES + 1)

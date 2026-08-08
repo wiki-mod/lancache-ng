@@ -298,6 +298,10 @@ findings that overlap with it are still listed (for completeness) with a note.
     **Fix**: `MAX_TTL` corrected to `2_147_483_647`, matching RFC 2181 SS8's actual ceiling (a
     value with the sign bit set is specified to be reinterpreted as 0 by a compliant resolver, not
     accepted as a real TTL). Regression test: `ttl_upper_bound_matches_rfc_2181_not_u32_max`.
+    Follow-up: `templates/domains.html`'s TTL field had no matching `max` attribute, so the browser
+    still accepted a value above the new server-side ceiling and `add_lan_record` silently redirected
+    back to `/domains` with no visible error once the server rejected it. Fixed: added
+    `max="2147483647"` plus a visible client-side validation message.
 
 15. **~~`is_valid_txt_content` (`routes/domains.rs:442-446`) has no upper length bound on TXT
     record content -- only rejects empty and control characters.~~ FIXED by #1470 (commit
@@ -306,10 +310,15 @@ findings that overlap with it are still listed (for completeness) with a note.
     authenticated session) could submit an arbitrarily large TXT value that this route accepts and
     forwards via NATS before any PowerDNS-side limit is hit. Low severity given the route requires
     an authenticated admin session already.
-    **Fix**: added `MAX_TXT_CONTENT_BYTES = 65_279` (RFC 1035 SS3.2.1's 65535-byte RDLENGTH
-    ceiling, adjusted for the per-255-byte-chunk length-prefix overhead PowerDNS's own documented
-    TXT auto-chunking adds on the wire -- see that constant's own header comment for the exact
-    arithmetic). Regression test: `txt_content_upper_bound_matches_rdlength_ceiling`.
+    **Fix**: added `MAX_TXT_CONTENT_BYTES = 64_997` (RFC 1035 SS4.2.2's 65535-byte DNS message
+    ceiling -- not RDLENGTH alone -- adjusted for both the per-255-byte-chunk length-prefix
+    overhead PowerDNS's own documented TXT auto-chunking adds on the wire, and the surrounding DNS
+    header/question/answer-frame bytes that must also fit in the same message; see that constant's
+    own header comment for the exact arithmetic). An earlier version of this fix used `65_279`,
+    accounting for RDLENGTH's own ceiling only -- that value's RDATA alone already reaches the full
+    65535-byte message ceiling, leaving no room for the header/question/answer framing a real
+    response also needs, so it could not actually be delivered in a single DNS message. Regression
+    test: `txt_content_upper_bound_matches_message_ceiling`.
 
 16. **~~`fetch_lan_records` (`routes/domains.rs:741-769`) doesn't check
     `resp.status().is_success()` before calling `.json()`, unlike `flush_recursor_cache` in the
