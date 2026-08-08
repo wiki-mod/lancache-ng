@@ -171,17 +171,26 @@ to the operator anywhere in this project:**
   topology doesn't prevent, since netdata itself isn't behind a proxy —
   see network section below — but is undocumented as a supported
   integration path).
-- netdata sits on the plain `lancache` network like every other service —
+- **Updated (finding #20 fixed):** netdata no longer sits on the shared
+  `default` network. It is scoped to a dedicated `netdata-net` network
+  shared only with the Admin UI (the sole real caller of `NETDATA_URL`) —
   it is **not** on the `docker-api` internal network (that's only for the
-  Admin UI's socket-proxy path) and has no other network isolation beyond
-  Docker's default bridge; nothing prevents another container on the same
-  `lancache` network from hitting `http://netdata:19999` directly and using
-  any of its full (non-allowlisted) API surface, including `alarms`, `info`,
-  `allmetrics` — the allowlisting in `netdata_proxy.rs` only constrains what
-  the *Admin UI's own outbound path* can request, not network-level access
-  to netdata itself. (This mirrors the pattern already flagged for the
-  broader threat model re: read-only Docker-socket access — not a new class
-  of finding, just noting it applies to netdata's HTTP API surface too.)
+  Admin UI's socket-proxy path) and, since this fix, not on `default`
+  either. Every other container that used to be able to reach
+  `http://netdata:19999` directly (proxy, dns, dhcp, watchdog, ...) no
+  longer has network-level routing to it at all; the allowlisting in
+  `netdata_proxy.rs` was already correct for the Admin UI's own outbound
+  path and is now backed by real network isolation too, not just
+  application-level allowlisting. `netdata-net` is deliberately not
+  `internal: true` (unlike `docker-api`) since netdata's own image may
+  still need outbound internet access for its own operation — this finding
+  was about *inter-container* exposure, not netdata's own egress. One
+  exception, not a regression: `nats` is a member of both `default` and
+  `netdata-net`, since netdata's own go.d.plugin runs an active NATS
+  collector against `nats:8222` — that endpoint was already reachable from
+  every `default`-network container before this fix and remains so
+  unchanged; only netdata's own broad HTTP API (port 19999) is the surface
+  this finding closed.
 
 ## 3. Central logging pipeline (`syslog-ng` / `fluent-bit`) — status per #453/#632/#633
 

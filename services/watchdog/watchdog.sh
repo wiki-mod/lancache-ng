@@ -159,20 +159,29 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 # stable status.json/dashboard key and log label for this probe.
 C_DOCKER_PROXY="lancache-docker-socket-proxy"
 
-# syslog (#849 bug-hunt finding observability.md#8, 2026-08-06): a fixed
-# literal, same reasoning as C_DOCKER_PROXY above -- no
+# syslog (#849 bug-hunt finding observability.md#8, 2026-08-06): no
 # ${CONTAINER_*:-...}-style override exists for it in the Rust rewrite this
 # mirrors (services/watchdog/src/config.rs's CONTAINER_SYSLOG is a plain
 # `const`, never read from an env var), so there is nothing for
 # scripts/check-naming-consistency.sh's watchdog_names extraction to
-# validate here either. Gated on SYSLOG_ENABLED, matching
-# resolve_alert_only_targets()'s own `if syslog_enabled { targets.push(...) }`
-# gate exactly -- an install that never opted into `docker compose --profile
-# logging` never starts this container at all, so monitoring it
-# unconditionally would report a permanent false "unhealthy" for a container
-# that was never supposed to exist.
+# validate here either -- unlike C_PROXY/C_DNS_STD/etc. above, there is no
+# separate FATAL-guarded CONTAINER_SYSLOG env var to compare against. It
+# DOES still need LANCACHE_CONTAINER_SUFFIX appended, though: this
+# container's own real name (see deploy/*/docker-compose.yml's
+# `container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}`) and
+# scripts/docker-socket-proxy.sh's own generated HAProxy allowlist (which
+# rewrites its `lancache-syslog` ACL entry with this exact suffix at
+# startup) both carry it -- referenced directly from the raw environment
+# variable here since LANCACHE_CONTAINER_SUFFIX itself is not normalized
+# until further below, and this assignment runs first. Gated on
+# SYSLOG_ENABLED, matching resolve_alert_only_targets()'s own `if
+# syslog_enabled { targets.push(...) }` gate exactly -- an install that
+# never opted into `docker compose --profile logging` never starts this
+# container at all, so monitoring it unconditionally would report a
+# permanent false "unhealthy" for a container that was never supposed to
+# exist.
 if is_truthy "${SYSLOG_ENABLED:-false}"; then
-    C_SYSLOG="lancache-syslog"
+    C_SYSLOG="lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}"
 else
     C_SYSLOG=""
 fi
@@ -463,9 +472,19 @@ check_alert_only() {
     health=$(get_health "$name")
     _hstring="$health"
 
-    if [ "$health" = "unhealthy" ]; then
+    # "unreachable" (get_health()'s own fallback for a curl failure or an
+    # unparseable/empty response, see that function's header) is treated as
+    # a failure here, not just "unhealthy": the container being gone,
+    # unresponsive, or unreachable through docker-socket-proxy is exactly
+    # the "enabled but not actually running/reachable" outage this
+    # alert-only monitoring exists to surface -- silently ignoring it would
+    # leave a stopped/crashed container with zero alerting for as long as
+    # it stayed down. "starting" (Docker's own healthcheck grace period) and
+    # "none" (no healthcheck configured/reported yet) stay non-failures, the
+    # same as before, since both are normal transient states, not outages.
+    if [ "$health" = "unhealthy" ] || [ "$health" = "unreachable" ]; then
         _fcount=$((_fcount + 1))
-        log "UNHEALTHY $name (${_fcount} consecutive failures) -- alert only, watchdog does not restart this service (issue #842)"
+        log "UNHEALTHY $name (${_fcount} consecutive failures, health=${health}) -- alert only, watchdog does not restart this service (issue #842)"
     elif [ "$health" = "healthy" ]; then
         [ "$_fcount" -gt 0 ] && log "RECOVERED $name"
         _fcount=0

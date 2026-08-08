@@ -44,9 +44,10 @@ extract_service_block() {
 
 # docker-socket-proxy itself must actually carry a healthcheck in every file
 # -- this is the precondition that makes `condition: service_healthy`
-# meaningful at all rather than a dependency that can never start (a fresh
-# check specifically because a prior review pass flagged that this exact
-# precondition must be verified, not assumed from the finding's prose).
+# meaningful at all rather than a dependency that can never start; verified
+# explicitly rather than assumed, since the other tests in this file only
+# check that watchdog/ui reference `condition: service_healthy` and would
+# stay green even if that condition could never actually be satisfied.
 @test "docker-socket-proxy's own service block defines a healthcheck in every compose file" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" docker-socket-proxy)"

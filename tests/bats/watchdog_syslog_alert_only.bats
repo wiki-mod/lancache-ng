@@ -74,6 +74,32 @@ setup() {
     done
 }
 
+@test "C_SYSLOG carries LANCACHE_CONTAINER_SUFFIX when one is set (issue #1415 coordinated-suffix shape)" {
+    # Real bug this test guards against: deploy/quickstart/docker-compose.yml
+    # and the syslog-forwarding simulation both name this container
+    # lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}, and
+    # scripts/docker-socket-proxy.sh's own generated HAProxy allowlist
+    # rewrites its lancache-syslog ACL entry with the identical suffix at
+    # startup -- C_SYSLOG must match, or every watchdog inspect request in
+    # a suffixed deployment targets a container that does not exist.
+    # The FATAL guards further down this file's own sourced range require a
+    # COORDINATED suffix -- every CONTAINER_* override must carry the same
+    # suffix as LANCACHE_CONTAINER_SUFFIX itself, or this correctly refuses
+    # to start (see EXPECTED_PROXY/etc. and their own FATAL checks). Setting
+    # only LANCACHE_CONTAINER_SUFFIX without the matching CONTAINER_*
+    # overrides is the mismatched-suffix case those guards exist to reject,
+    # not the scenario this test is exercising.
+    LANCACHE_CONTAINER_SUFFIX="ci7x9q" \
+    CONTAINER_PROXY="lancache-proxyci7x9q" \
+    CONTAINER_DNS_STANDARD="lancache-dns-standardci7x9q" \
+    CONTAINER_NATS="lancache-natsci7x9q" \
+    load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-suffix.sh"
+    [ "$C_SYSLOG" = "lancache-syslogci7x9q" ] || {
+        echo "expected C_SYSLOG=lancache-syslogci7x9q, got '$C_SYSLOG'" >&2
+        return 1
+    }
+}
+
 @test "check_alert_only reports healthy and resets the failure counter on success" {
     get_health() { printf 'healthy\n'; }
 
@@ -94,6 +120,40 @@ setup() {
     [ "$H_SYSLOG" = "unhealthy" ]
     [ "$F_SYSLOG" -eq $((RESTART_AFTER + 5)) ]
     [ "${#restart_calls[@]}" -eq 0 ]
+}
+
+@test "check_alert_only treats 'unreachable' as a failure, the same as 'unhealthy'" {
+    # Real bug this test guards against: get_health() returns "unreachable"
+    # (not "unhealthy") when the container is absent, unresponsive, or the
+    # docker-socket-proxy call itself fails -- exactly the "enabled but not
+    # actually running" outage this alert-only monitoring exists to
+    # surface. An earlier version of check_alert_only() only matched the
+    # literal string "unhealthy", silently ignoring this case entirely: no
+    # failure-counter increment, no UNHEALTHY log line, ever.
+    get_health() { printf 'unreachable\n'; }
+
+    check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+    [ "$H_SYSLOG" = "unreachable" ]
+    [ "$F_SYSLOG" -eq 1 ] || {
+        echo "expected F_SYSLOG=1 after one 'unreachable' reading, got $F_SYSLOG" >&2
+        return 1
+    }
+}
+
+@test "check_alert_only still treats 'starting' and 'none' as non-failures, not just 'healthy'" {
+    # 'starting' (Docker's own healthcheck grace period) and 'none' (no
+    # healthcheck configured/reported yet) are normal transient states, not
+    # outages -- the 'unreachable' fix above must not overreach into
+    # flagging these too.
+    for state in starting none; do
+        F_SYSLOG=0
+        get_health() { printf '%s\n' "$state"; }
+        check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+        [ "$F_SYSLOG" -eq 0 ] || {
+            echo "health=$state unexpectedly incremented the failure counter to $F_SYSLOG" >&2
+            return 1
+        }
+    done
 }
 
 @test "check_alert_only's failure counter does not cap or reset at RESTART_AFTER" {

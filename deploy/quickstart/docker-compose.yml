@@ -436,6 +436,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # #849 bug-hunt finding observability.md#20 (netdata network isolation)
+    # re-verification: see deploy/prod/docker-compose.yml's identical nats
+    # networks: comment for the full reasoning -- netdata's own go.d.plugin
+    # NATS collector needs this endpoint, which scoping netdata to
+    # netdata-net alone would otherwise silently break.
+    networks:
+      - default
+      - netdata-net
     restart: always
     logging:
       driver: json-file

@@ -64,10 +64,15 @@ extract_service_block() {
             echo "netdata service block in $f does not list netdata-net" >&2
             return 1
         }
-        [[ "$block" != *$'\n      - default'* ]] || {
-            echo "netdata service block in $f still lists the shared 'default' network -- isolation regressed" >&2
+        # Docker Compose accepts network membership in either list form
+        # (`- default`) or map form (`default: {}`/`default:` with nested
+        # keys) -- both must be rejected, or a map-form rewrite could
+        # silently reconnect netdata to the shared network while this test
+        # still passed.
+        if grep -qE '^      (- default$|default:)' <<< "$block"; then
+            echo "netdata service block in $f still lists the shared 'default' network (list or map form) -- isolation regressed" >&2
             return 1
-        }
+        fi
     done
 }
 
@@ -80,4 +85,32 @@ extract_service_block() {
             return 1
         }
     done
+}
+
+@test "the default-network rejection catches map-form membership, not only list form" {
+    # Regression case: Docker Compose accepts networks: as either a list
+    # (- default) or a map (default: {}). A guard that only greps for the
+    # list-item spelling would pass a map-form rewrite that silently
+    # reconnects netdata to the shared network -- reproduced here against a
+    # small throwaway fixture, not this repo's real compose files, since
+    # neither real file currently uses map form and this test exists to
+    # prove the guard's own regex, not the real files' current content.
+    local fixture; fixture="$(mktemp)"
+    cat > "$fixture" <<'EOF'
+  netdata:
+    container_name: lancache-netdata
+    networks:
+      default: {}
+      netdata-net: {}
+EOF
+
+    block="$(extract_service_block "$fixture" netdata)"
+    [ -n "$block" ]
+    if ! grep -qE '^      (- default$|default:)' <<< "$block"; then
+        echo "map-form 'default: {}' membership was not detected as a network-isolation regression" >&2
+        rm -f "$fixture"
+        return 1
+    fi
+
+    rm -f "$fixture"
 }

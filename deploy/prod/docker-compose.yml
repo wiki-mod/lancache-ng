@@ -1083,6 +1083,26 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # #849 bug-hunt finding observability.md#20 (netdata network isolation)
+    # re-verification: netdata's own go.d.plugin runs an active NATS
+    # collector against this container's monitor endpoint (nats:8222, see
+    # the entrypoint's own http_port comment above) -- confirmed by reading
+    # netdata's real collector behavior, not assumed. Scoping netdata's own
+    # `networks:` to netdata-net only (see that service's own block) would
+    # silently break this existing collector, since nats stays on the
+    # implicit `default` network otherwise. Explicit membership in BOTH
+    # networks here keeps every existing default-network consumer (proxy,
+    # dns, watchdog, ui, dhcp, ...) working exactly as before, while also
+    # giving netdata -- now isolated to netdata-net -- a route back to this
+    # one specific, already-unauthenticated monitor endpoint. This does NOT
+    # reopen the observability.md#20 exposure: that finding was about
+    # netdata's own broad HTTP API (port 19999) being reachable from every
+    # other container, not about nats's own monitor endpoint (which was
+    # already reachable from every default-network container before this
+    # PR, unchanged here).
+    networks:
+      - default
+      - netdata-net
     restart: always
     logging:
       driver: json-file
