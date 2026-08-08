@@ -13,6 +13,8 @@ set -euo pipefail
 [[ $# -eq 1 ]] || { echo "usage: ci-install-gh-attestation-verifier.sh DEST_DIR" >&2; exit 2; }
 dest_dir="$1"
 version="2.97.0"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+source "$repo_root/scripts/lib/network-retry.sh"
 
 case "$(uname -m)" in
   x86_64|amd64)
@@ -36,9 +38,8 @@ rm -rf "$extract_dir"
 mkdir -p "$extract_dir"
 
 url="https://github.com/cli/cli/releases/download/v${version}/gh_${version}_linux_${arch}.tar.gz"
-curl --fail --location --silent --show-error \
-  --retry 3 --retry-delay 2 --retry-all-errors \
-  "$url" -o "$archive"
+network_retry -- \
+  curl --fail --location --silent --show-error "$url" -o "$archive"
 printf '%s  %s\n' "$expected_sha256" "$archive" | sha256sum -c - >/dev/null
 
 tar -xzf "$archive" -C "$extract_dir"
