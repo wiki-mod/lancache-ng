@@ -130,6 +130,7 @@ deny all;" ]
 @test "migration is a no-op for a snapshot that already has the stream-ACL file" {
     local params_conf="$live_dir/proxy-params.conf"
     local acl_file="$live_dir/00-stream-client-acl.conf"
+    printf 'nginx.conf v1\n' > "$nginx_conf"
     printf 'proxy-params v1\n' > "$params_conf"
     printf 'allow 10.0.0.0/8;\ndeny all;\n' > "$acl_file"
     kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "$nginx_conf" "$params_conf" "$acl_file"

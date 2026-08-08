@@ -15,18 +15,23 @@ load_proxy_known_good_snapshot_helpers() {
         # Three disjoint ranges, mirroring the technique in
         # proxy-cert-helpers.sh: the known-good-snapshot library functions
         # (between the BEGIN/END marker comments), the
-        # _migrate_legacy_proxy_snapshots_for_stream_acl backfill, and the
-        # _proxy_validate_snapshot_or_rollback function further down.
+        # _proxy_validate_snapshot_or_rollback function, and (defined further
+        # down, AFTER it, in entrypoint.sh's own real file order)
+        # _migrate_legacy_proxy_snapshots_for_stream_acl. Exits only once the
+        # LAST of these three ranges closes -- exiting right after
+        # _proxy_validate_snapshot_or_rollback's own closing brace would stop
+        # before ever reaching _migrate_legacy_proxy_snapshots_for_stream_acl
+        # later in the file.
         awk '
             /^# BEGIN known-good-snapshot library/ { capture = 1; next }
             /^# END known-good-snapshot library/ { capture = 0 }
             capture { print }
-            /^_migrate_legacy_proxy_snapshots_for_stream_acl\(\) \{/ { in_migrate = 1 }
-            in_migrate { print }
-            in_migrate && /^\}$/ { in_migrate = 0 }
             /^_proxy_validate_snapshot_or_rollback\(\) \{/ { in_fn = 1 }
             in_fn { print }
-            in_fn && /^\}$/ { exit }
+            in_fn && /^\}$/ { in_fn = 0 }
+            /^_migrate_legacy_proxy_snapshots_for_stream_acl\(\) \{/ { in_migrate = 1 }
+            in_migrate { print }
+            in_migrate && /^\}$/ { exit }
         ' "$repo_root/services/proxy/entrypoint.sh"
     } > "$helper_file"
 
