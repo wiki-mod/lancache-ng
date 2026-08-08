@@ -25,8 +25,14 @@
 # independent of that governance rule.
 #
 # SCOPE: repo-wide, per issue #1377 -- every tracked shell script under
-# scripts/** and tools/**, plus setup.sh (the production installer). This
-# was originally scoped to only `tools/build-tools/Dockerfile` (the exact
+# scripts/**, tools/**, and services/**, plus setup.sh (the production
+# installer). `services/**` was added later: this file's own header had
+# claimed "repo-wide" coverage while its glob list actually omitted every
+# service entrypoint, which is exactly where a real, previously-undetected
+# instance of this failure class was later found and fixed (a `set -e`
+# script silently dying on an unguarded `printf ... | grep -qi` after a
+# multi-line capture). This was originally scoped to only
+# `tools/build-tools/Dockerfile` (the exact
 # file the confirmed incident occurred in) because a first wide scan found
 # 41 preexisting instances of the same raw pattern across the codebase with
 # none individually reviewed yet, and fixing or reviewing all of them in
@@ -87,6 +93,7 @@ if ! tracked_scan_files="$(git ls-files -- \
   'scripts/*.sh' 'scripts/**/*.sh' \
   'tools/*.sh' 'tools/**/*.sh' \
   'tools/*/Dockerfile*' \
+  'services/*.sh' 'services/**/*.sh' \
   'setup.sh')"; then
   printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Not treating this as a clean pass.\n' "$repo_root" >&2
   exit 1

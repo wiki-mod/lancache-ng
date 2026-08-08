@@ -919,8 +919,13 @@ _dns_recursor_validate_snapshot_or_rollback() {
         # PDNS_API_KEY also changed. Detected here, not assumed: compare
         # what's actually on disk after the restore against the live env,
         # so this only fires when the two are genuinely out of sync.
-        local restored_api_key
-        restored_api_key=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf" | head -n1)
+        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
+        # under this script's own pipefail, a multi-match recursor.conf could
+        # let head exit after the first line while sed is still writing more,
+        # which pipefail would report as failure even though head succeeded.
+        local sed_output restored_api_key
+        sed_output=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf")
+        restored_api_key=$(head -n1 <<< "$sed_output")
         if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
             echo "[lancache-dns] WARNING: the restored recursor.conf's api_key does not match the current PDNS_API_KEY. The recursor's REST API (port 8082) is now authenticating with a stale key while pdns.conf, the Admin UI, and nats-subscriber use the current one -- packet-cache flush calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
         fi
@@ -991,8 +996,13 @@ _dns_auth_validate_snapshot_or_rollback() {
         # env, so this only fires when the two are genuinely out of sync.
         # pdns.conf is flat `key=value` (no leading whitespace, no YAML
         # colon), unlike recursor.conf's indented `api_key: value`.
-        local restored_api_key
-        restored_api_key=$(sed -n 's/^api-key=//p' "$pdns_conf" | head -n1)
+        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
+        # under this script's own pipefail, a multi-match pdns.conf could let
+        # head exit after the first line while sed is still writing more,
+        # which pipefail would report as failure even though head succeeded.
+        local sed_output restored_api_key
+        sed_output=$(sed -n 's/^api-key=//p' "$pdns_conf")
+        restored_api_key=$(head -n1 <<< "$sed_output")
         if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
             echo "[lancache-dns] WARNING: the restored pdns.conf's api-key does not match the current PDNS_API_KEY. The authoritative server's REST API (port 8081) is now authenticating with a stale key while recursor.conf, the Admin UI, and nats-subscriber use the current one -- domain writes/reconciliation calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
         fi
