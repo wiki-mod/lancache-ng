@@ -129,6 +129,78 @@ EOF
     [[ "$output" == *"OK"* ]] || fail "flagged a named-vs-unnamed final stage as a divergence: $output"
 }
 
+@test "accepts a lowercase 'from' instruction and leading whitespace, not only 'FROM '" {
+    # Real Codex finding: Dockerfile instruction names are case-insensitive,
+    # so a valid Dockerfile may use `from`/`From` and/or indent the
+    # instruction -- a case-sensitive `^FROM ` match found nothing for
+    # these, which under set -o pipefail aborted the whole script with no
+    # diagnostic instead of comparing base images.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM golang:1.24 AS builder
+RUN go build ./...
+   from alpine:3.24
+COPY --from=builder /app /app
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY . /app
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "did not recognize a lowercase/indented 'from' line as equivalent: $output"
+}
+
+@test "fails closed, with a diagnostic, when a Dockerfile has no FROM instruction at all" {
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+RUN echo "no FROM line at all"
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no FROM instruction found"* ]] || fail "did not emit a clear diagnostic for a FROM-less Dockerfile: $output"
+}
+
+@test "accepts quoted YAML scalars for package-ecosystem and directory entries" {
+    # Real Codex finding: `package-ecosystem: "docker"` and quoted directory
+    # strings are valid, equivalent YAML to the unquoted forms
+    # write_dependabot_docker_block uses, but the original line-based parse
+    # matched only the unquoted spelling and silently found zero directories.
+    cat > "$fixture_root/.github/dependabot.yml" <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+  - package-ecosystem: "docker"
+    directories:
+      - "/services/a"
+      - '/services/b'
+    target-branch: current_dev
+    schedule:
+      interval: weekly
+EOF
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "did not parse quoted package-ecosystem/directory scalars: $output"
+}
+
 @test "validates two docker-ecosystem blocks independently, not merged together" {
     # Reproduces this guard's own documented remediation: splitting a
     # diverged directory into its own separate dependabot.yml block must

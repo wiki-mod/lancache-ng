@@ -707,9 +707,11 @@ jobs:
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       # Coverage fix (issue #1095): this used to only run "Check repository header on all
-      # tracked files", silently never running the workflow line-count ceiling or
-      # review-chronology checks at all when self-hosted runners were down. Now runs the
-      # same three checks as the self-hosted file-headers job above.
+      # tracked files", silently never running the workflow line-count ceiling, the
+      # review-chronology, or the dependabot-docker-base-consistency checks at all when
+      # self-hosted runners were down. Now runs the same checks as the self-hosted
+      # file-headers job above -- see that composite action's own name/description for
+      # the current count, rather than restating it here where it can go stale again.
       - uses: ./.github/actions/file-headers-check
 
   compose-healthchecks-hosted:

@@ -69,12 +69,26 @@ fi
 # time one is seen, and collects every subsequent `      - /path` entry
 # (tab-separated with its block index) until the next top-level
 # `- package-ecosystem:` block or end of file. Output lines are
-# `<block_index>\t<directory>`.
-mapfile -t tagged_directories < <(awk '
-  /^  - package-ecosystem: docker/ { in_docker=1; block++; next }
-  /^  - package-ecosystem:/ && !/docker/ { in_docker=0 }
-  in_docker && /^      - \// { path=$0; sub(/^      - /, "", path); print block "\t" path }
-' "$dependabot_file")
+# `<block_index>\t<directory>`. Both the ecosystem value and each directory
+# entry may be a bare scalar or a single/double-quoted YAML string (e.g.
+# `package-ecosystem: "docker"`, `- "/services/proxy"`) -- both forms parse
+# identically, since YAML itself treats them as equivalent, so the pattern
+# below strips a matching leading/trailing quote character (either kind)
+# before comparing. The awk program is fed via a quoted heredoc rather than
+# this script's original bash single-quoted string, since the regex needs a
+# literal `'` character in its own quote-stripping character class, which a
+# bash single-quoted string cannot contain at all.
+mapfile -t tagged_directories < <(awk -f - "$dependabot_file" <<'AWKPROG'
+/^  - package-ecosystem:[[:space:]]*["']?[Dd]ocker["']?[[:space:]]*$/ { in_docker=1; block++; next }
+/^  - package-ecosystem:/ && !/[Dd]ocker/ { in_docker=0 }
+in_docker && /^      - / {
+    path=$0
+    sub(/^      - /, "", path)
+    gsub(/^["']|["'][[:space:]]*$/, "", path)
+    if (path ~ /^\//) print block "\t" path
+}
+AWKPROG
+)
 
 if [ "${#tagged_directories[@]}" -eq 0 ]; then
     printf '::error::check-dependabot-docker-base-consistency: found no docker-ecosystem directories in %s -- did its structure change shape?\n' "$dependabot_file" >&2
@@ -96,13 +110,28 @@ for entry in "${tagged_directories[@]}"; do
     # Last FROM line = final/runtime stage. A multi-stage Dockerfile's
     # earlier builder-stage FROM lines (e.g. FROM ${BUILD_TOOLS_IMAGE} AS
     # builder) are not the shipped base image and are deliberately excluded
-    # by only taking the last match (tail -n1), not the first.
-    last_from_line=$(grep -E '^FROM ' "$dockerfile" | tail -n1)
-    # Normalize to just the image reference: drop the leading "FROM ",
-    # any "--platform=..." flag, and a trailing " AS <name>" stage alias --
-    # `FROM alpine:3.24 AS runtime` and `FROM alpine:3.24` must compare
-    # equal, since both ship the identical base image.
-    normalized_image=$(sed -E 's/^FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?//; s/[[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+[[:space:]]*$//' <<< "$last_from_line")
+    # by only taking the last match (tail -n1), not the first. Dockerfile
+    # instruction names are case-insensitive (`from`/`FROM`/`From` are all
+    # valid) and may carry leading whitespace, so the match is
+    # case-insensitive with an optional leading-whitespace/no-space-required
+    # form -- a case-sensitive `^FROM ` match silently found nothing for a
+    # valid lowercase `from` line, which under `set -o pipefail` aborted
+    # this whole script with no diagnostic (grep's own "no match" exit 1
+    # propagating through the pipeline) instead of comparing base images.
+    # `|| true` here is not hiding that failure (Rule-Ref: AG-VAL-004): the
+    # explicit empty-check immediately below turns it into a clear,
+    # diagnosed ::error:: instead of pipefail's unexplained abort.
+    last_from_line=$(grep -Ei '^[[:space:]]*FROM[[:space:]]' "$dockerfile" | tail -n1 || true)
+    if [ -z "$last_from_line" ]; then
+        printf '::error::check-dependabot-docker-base-consistency: no FROM instruction found in %s\n' "$dockerfile" >&2
+        exit 1
+    fi
+    # Normalize to just the image reference: drop the leading "FROM "
+    # (case-insensitively, per the match above), any "--platform=..." flag,
+    # and a trailing " AS <name>" stage alias -- `FROM alpine:3.24 AS
+    # runtime`, `from alpine:3.24 AS runtime`, and `FROM alpine:3.24` must
+    # all compare equal, since all three ship the identical base image.
+    normalized_image=$(sed -E 's/^[[:space:]]*FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?//I; s/[[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+[[:space:]]*$//' <<< "$last_from_line")
     base_image_of["${block}"$'\t'"${dockerfile}"]="$normalized_image"
     blocks_seen+=("$block")
 done
