@@ -650,7 +650,12 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          # Issue #1095 G1 (minor, non-casing-bug cleanup found alongside the real fix):
+          # GITHUB_REPOSITORY is already a default Actions env var with exactly this
+          # value -- restating it here via ${{ github.repository }} recomputed a value
+          # already available under the identical name for no reason. Removed; the
+          # `-e GITHUB_REPOSITORY` docker run flag below still forwards the (unchanged)
+          # default host value into the container.
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
