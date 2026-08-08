@@ -21,6 +21,7 @@ setup() {
       "image":"ghcr.io/wiki-mod/lancache-ng/proxy",
       "artifact_source_sha":"1111111111111111111111111111111111111111",
       "source_fingerprint":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "build_inputs":{"build_args":{},"build_contexts":{}},
       "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "candidate_ref":"ghcr.io/wiki-mod/lancache-ng/proxy:candidate-v2-old",
       "platforms":{
@@ -34,6 +35,7 @@ setup() {
       "image":"ghcr.io/wiki-mod/lancache-ng/build-tools",
       "artifact_source_sha":"1111111111111111111111111111111111111111",
       "source_fingerprint":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "build_inputs":{"build_args":{},"build_contexts":{}},
       "digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "candidate_ref":"ghcr.io/wiki-mod/lancache-ng/build-tools:candidate-v2-old",
       "platforms":{
@@ -54,6 +56,7 @@ JSON
   "candidate_source_sha":"1111111111111111111111111111111111111111",
   "artifact_source_sha":"1111111111111111111111111111111111111111",
   "source_fingerprint":"sha256:5656565656565656565656565656565656565656565656565656565656565656",
+  "build_inputs":{"build_args":{},"build_contexts":{}},
   "digest":"sha256:7878787878787878787878787878787878787878787878787878787878787878",
   "candidate_ref":"ghcr.io/wiki-mod/lancache-ng/build-tools:release-v2-test",
   "platforms":{
@@ -73,6 +76,7 @@ JSON
     and .runtime.proxy.candidate_ref == "ghcr.io/wiki-mod/lancache-ng/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     and .tooling["build-tools"].digest == "sha256:7878787878787878787878787878787878787878787878787878787878787878"
     and .tooling["build-tools"].source_fingerprint == "sha256:5656565656565656565656565656565656565656565656565656565656565656"
+    and .tooling["build-tools"].build_inputs == {build_args:{},build_contexts:{}}
     and .release.tag == "v0.4.0"
     and .release.runtime_origin == "accepted-stack"
     and .release.build_tools_origin == "fresh-release-build"
