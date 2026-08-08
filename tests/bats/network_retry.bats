@@ -71,3 +71,25 @@ EOF
   [ "$(cat "$COUNTER_FILE")" -eq 1 ]
   [[ "$output" == *"failed permanently"* ]]
 }
+
+@test "curl transport classifier distinguishes transient from deterministic failures" {
+  run bash -c 'source "$1"; network_retry_curl_exit_is_transient 7' _ "$REPO_ROOT/scripts/lib/network-retry.sh"
+  [ "$status" -eq 0 ]
+  run bash -c 'source "$1"; network_retry_curl_exit_is_transient 28' _ "$REPO_ROOT/scripts/lib/network-retry.sh"
+  [ "$status" -eq 0 ]
+  run bash -c 'source "$1"; network_retry_curl_exit_is_transient 60' _ "$REPO_ROOT/scripts/lib/network-retry.sh"
+  [ "$status" -ne 0 ]
+  run bash -c 'source "$1"; network_retry_curl_exit_is_transient 23' _ "$REPO_ROOT/scripts/lib/network-retry.sh"
+  [ "$status" -ne 0 ]
+}
+
+@test "HTTP classifier retries timeout rate-limit and server errors only" {
+  for code in 408 425 429 500 503; do
+    run bash -c 'source "$1"; network_retry_http_status_is_transient "$2"' _ "$REPO_ROOT/scripts/lib/network-retry.sh" "$code"
+    [ "$status" -eq 0 ]
+  done
+  for code in 400 401 403 404; do
+    run bash -c 'source "$1"; network_retry_http_status_is_transient "$2"' _ "$REPO_ROOT/scripts/lib/network-retry.sh" "$code"
+    [ "$status" -ne 0 ]
+  done
+}
