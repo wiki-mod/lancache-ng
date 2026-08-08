@@ -99,6 +99,34 @@ JSON
   [ "$status" -ne 0 ]
 }
 
+@test "stack lock validator rejects any unexpected platform key" {
+  source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
+  lock="$BATS_TEST_TMPDIR/extra-platform.json"
+  cat >"$lock" <<'JSON'
+{
+  "schema":"stack-lock/v1",
+  "source_sha":"1111111111111111111111111111111111111111",
+  "candidate_tag":"candidate-v2-test",
+  "runtime":{
+    "proxy":{
+      "image":"ghcr.io/wiki-mod/lancache-ng/proxy",
+      "artifact_source_sha":"1111111111111111111111111111111111111111",
+      "source_fingerprint":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+      "digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+      "platforms":{
+        "linux/amd64":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "linux/arm64":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "linux/s390x":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    }
+  },
+  "tooling":{}
+}
+JSON
+  run ci_ai_validate_stack_lock "$lock"
+  [ "$status" -ne 0 ]
+}
+
 @test "acceptance schema requires every final gate" {
   source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
   record="$BATS_TEST_TMPDIR/acceptance.json"
