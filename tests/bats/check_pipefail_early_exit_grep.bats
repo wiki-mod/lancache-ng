@@ -204,6 +204,22 @@ write_script() {
     [[ "$output" == *"setup.sh"* ]]
 }
 
+@test "fails on the same pattern in a services/**-style entrypoint file" {
+    # Pins the services/** pathspec itself: this is the exact class of real
+    # bug found in services/dns/entrypoint.sh (a set -e script silently
+    # dying on an unguarded printf | grep -qi). Without this fixture, an
+    # accidental narrowing of scan_files that dropped 'services/*.sh'
+    # 'services/**/*.sh' would leave the whole suite green.
+    write_script "services/example-service/entrypoint.sh" \
+        'if printf "%s" "$captured_value" | grep -qi "needle"; then' \
+        '  echo found' \
+        'fi'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/entrypoint.sh"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
 @test "an untracked scripts/**-style file (never git add-ed) is invisible to the guard" {
     # Documents scan_files' own real discovery mechanism (git ls-files): a
     # file that exists on disk but was never committed to the fixture repo
