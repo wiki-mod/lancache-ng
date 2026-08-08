@@ -2,13 +2,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Emits the non-source-controlled inputs that must be frozen for one image
-# build. The JSON is part of the artifact fingerprint and also drives the
-# actual Buildx build arguments/named-context overrides.
+# Emits or validates the non-source-controlled inputs that must be frozen for
+# one image build. The canonical JSON is part of the artifact fingerprint and
+# also drives the actual Buildx build arguments/named-context overrides.
 set -euo pipefail
 
-[[ $# -eq 2 ]] || {
-    echo "usage: ci-build-inputs.sh SERVICE json|build-args|build-contexts" >&2
+[[ $# -ge 2 && $# -le 3 ]] || {
+    echo "usage: ci-build-inputs.sh SERVICE json|build-args|build-contexts|validate [BUILD_INPUTS_JSON]" >&2
     exit 2
 }
 service="$1"
@@ -18,8 +18,67 @@ require_digest_ref() {
     local name="$1" value="$2"
     [[ "$value" =~ ^[^[:space:]@]+@sha256:[0-9a-f]{64}$ ]] || {
         echo "ci-build-inputs: $name must be an exact digest-qualified image reference, got '${value:-<empty>}'" >&2
-        exit 1
+        return 1
     }
+}
+
+validate_json() {
+    local value="$1"
+    jq -e '
+        type == "object"
+        and (keys | sort) == ["build_args","build_contexts"]
+        and (.build_args | type == "object")
+        and (.build_contexts | type == "object")
+        and ([.build_args[], .build_contexts[]] | all(type == "string"))
+    ' <<<"$value" >/dev/null || {
+        echo "ci-build-inputs: invalid build-input JSON schema for $service" >&2
+        return 1
+    }
+
+    case "$service" in
+        dns|ui)
+            [[ "$(jq -r '.build_args | keys | sort | join(",")' <<<"$value")" == BUILD_TOOLS_IMAGE ]] || {
+                echo "ci-build-inputs: $service must carry exactly BUILD_TOOLS_IMAGE as external build arg" >&2
+                return 1
+            }
+            [[ "$(jq '.build_contexts | length' <<<"$value")" -eq 0 ]] || return 1
+            require_digest_ref BUILD_TOOLS_IMAGE "$(jq -r '.build_args.BUILD_TOOLS_IMAGE' <<<"$value")"
+            ;;
+        build-tools)
+            [[ "$(jq '.build_args | length' <<<"$value")" -eq 0 ]] || return 1
+            [[ "$(jq -r '.build_contexts | keys | sort | join(",")' <<<"$value")" == 'golang:latest,rust:latest' ]] || {
+                echo "ci-build-inputs: build-tools must carry exactly golang:latest and rust:latest context overrides" >&2
+                return 1
+            }
+            for key in 'golang:latest' 'rust:latest'; do
+                context="$(jq -r --arg key "$key" '.build_contexts[$key]' <<<"$value")"
+                [[ "$context" == docker-image://* ]] || {
+                    echo "ci-build-inputs: $key override must use docker-image://" >&2
+                    return 1
+                }
+                require_digest_ref "$key" "${context#docker-image://}" || return 1
+            done
+            ;;
+        *)
+            [[ "$(jq '(.build_args | length) + (.build_contexts | length)' <<<"$value")" -eq 0 ]] || {
+                echo "ci-build-inputs: $service has unexpected external build inputs" >&2
+                return 1
+            }
+            ;;
+    esac
+}
+
+if [[ "$mode" == validate ]]; then
+    [[ $# -eq 3 ]] || {
+        echo "ci-build-inputs: validate requires BUILD_INPUTS_JSON" >&2
+        exit 2
+    }
+    validate_json "$3"
+    exit 0
+fi
+[[ $# -eq 2 ]] || {
+    echo "ci-build-inputs: $mode does not accept a third argument" >&2
+    exit 2
 }
 
 build_args='{}'
@@ -43,16 +102,19 @@ case "$service" in
     *) ;;
 esac
 
+value="$(jq -cnS --argjson build_args "$build_args" --argjson build_contexts "$build_contexts" \
+    '{build_args:$build_args,build_contexts:$build_contexts}')"
+validate_json "$value"
+
 case "$mode" in
     json)
-        jq -cnS --argjson build_args "$build_args" --argjson build_contexts "$build_contexts" \
-            '{build_args:$build_args,build_contexts:$build_contexts}'
+        printf '%s\n' "$value"
         ;;
     build-args)
-        jq -r '. | to_entries | sort_by(.key)[] | "\(.key)=\(.value)"' <<<"$build_args"
+        jq -r '.build_args | to_entries | sort_by(.key)[] | "\(.key)=\(.value)"' <<<"$value"
         ;;
     build-contexts)
-        jq -r '. | to_entries | sort_by(.key)[] | "\(.key)=\(.value)"' <<<"$build_contexts"
+        jq -r '.build_contexts | to_entries | sort_by(.key)[] | "\(.key)=\(.value)"' <<<"$value"
         ;;
     *)
         echo "ci-build-inputs: unsupported mode: $mode" >&2
