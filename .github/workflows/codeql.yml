@@ -157,28 +157,14 @@ jobs:
     runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
     timeout-minutes: 120
     needs: detect-changes
-    # Job-level concurrency, mirroring build-push.yml's container-scan/build
-    # groups exactly (issue #1513): this job needs the scarce
-    # lancache-heavy+codeql runner pool (5 total), and without this group a
-    # superseded PR commit's run never gets reclaimed -- observed live as 9+
-    # queued runs from one rapidly-iterating branch starving every other PR's
-    # CI. matrix.language is part of the key because this is a matrix job;
-    # without it the 'actions' and 'rust' legs would cancel each other even
-    # though both must finish for the same commit. cancel-in-progress is
-    # scoped to pull_request only, not unconditional true: a push run to
-    # master/current_dev/v0.2.0 uploads the baseline SARIF later PRs are
-    # diffed against, and cancelling it mid-flight on a following push would
-    # silently leave that ref without a fresh baseline (same reasoning as
-    # container-scan/shellcheck/line-endings/language-policy/validate-compose
-    # in build-push.yml, not dns_test/ui_test/rust_coverage's unconditional
-    # true, which rely on a different, already-tolerant downstream consumer
-    # CodeQL's SARIF upload does not have). Only pull_request events (first
-    # attempt) share the collapsible ref+language group at all: push,
-    # schedule, and workflow_dispatch always get a run-id-suffixed, always-
-    # unique key, so a baseline-producing push run is never even queued
-    # behind another push to the same ref, let alone cancelled. A manual
-    # re-run of an older PR attempt (github.run_attempt != '1') is isolated
-    # the same way, so it cannot cancel the newest commit's own analysis.
+    # Reclaim superseded PR analyses before they consume the scarce heavy
+    # runner pool. Keep each matrix language in its own group so the required
+    # analyses for one commit cannot cancel each other.
+    #
+    # Pushes produce the baseline SARIF used for later comparisons, while
+    # schedules, manual dispatches, and reruns are independently requested
+    # work. A run-id suffix keeps all of those executions isolated; only the
+    # first attempt for a PR shares a collapsible ref-and-language group.
     concurrency:
       group: >-
         ${{
