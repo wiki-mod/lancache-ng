@@ -114,11 +114,20 @@ ci_lock_compose_override() {
     local output="$1"
     shift
     local -a globals=("$@")
-    local rendered override service compose_image image digest locked_ref
+    local rendered override service compose_image image digest locked_ref status
     local matched=0
 
-    rendered="$("$real_docker" compose "${globals[@]}" config --format json)" \
-        || ci_ai_fail "could not render Compose model before applying stack lock"
+    # Keep the real Compose exit code. Converting every render failure to the
+    # generic ci_ai_fail status would still fail closed, but would erase the
+    # diagnostic/status contract required by callers and by the strict shell
+    # regression coverage for this trust boundary.
+    if rendered="$("$real_docker" compose "${globals[@]}" config --format json)"; then
+        :
+    else
+        status=$?
+        echo "ci-artifact-identity: could not render Compose model before applying stack lock (exit $status)" >&2
+        return "$status"
+    fi
     override='{"services":{}}'
 
     while IFS=$'\t' read -r service compose_image; do
