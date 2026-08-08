@@ -796,10 +796,12 @@ VERSIONS_JSON
 # ---------------------------------------------------------------------------
 
 @test "process_service_sha_retention: a commit within the retention window needs no ancestry check and is never a candidate" {
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=1
     # shellcheck disable=SC2034 # read by process_service_sha_retention in
     # the sourced script
     release_tags=()
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=1
     # Instant retries: these fixtures' curl() mocks intentionally don't
     # cover the per-tagged-version manifest-fetch call Pass 1 also makes
@@ -849,14 +851,21 @@ VERSIONS_JSON
     # (rank 1, within the window) never triggers any ancestry check at all.
     [ "$(wc -l < "$compare_log")" -eq 1 ]
     grep -q "compare/deadbee1" "$compare_log"
+    # shellcheck disable=SC2154 # set as a global by the sourced script's
+    # process_service_sha_retention(), mirroring this file's existing
+    # $deleted/$kept disable comments for the same reason (see the very
+    # first process_service() test above for that established pattern).
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 0 ]
     [ "$deleted" -eq 0 ]
 }
 
 @test "process_service_sha_retention: a current_dev-exclusive commit beyond the window is a dry-run candidate, not an actual deletion" {
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=1
     # shellcheck disable=SC2034
     release_tags=()
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=1
     # Instant retries: these fixtures' curl() mocks intentionally don't
     # cover the per-tagged-version manifest-fetch call Pass 1 also makes
@@ -910,15 +919,18 @@ VERSIONS_JSON
 
     process_service proxy
 
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 1 ]
     [ "$deleted" -eq 0 ]
     [ ! -s "$delete_log" ]
 }
 
 @test "process_service_sha_retention: GC_SHA_RETENTION_ENABLED=true actually deletes an eligible commit's version" {
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=1
     # shellcheck disable=SC2034
     release_tags=()
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=1
     # Instant retries: these fixtures' curl() mocks intentionally don't
     # cover the per-tagged-version manifest-fetch call Pass 1 also makes
@@ -931,6 +943,7 @@ VERSIONS_JSON
     GHCR_RETRY_BACKOFF_SECONDS=0
     # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
     GHCR_RETRY_MAX_ATTEMPTS=1
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_enabled="true"
 
     delete_log="$BATS_TEST_TMPDIR/deletes_retention_enabled"
@@ -972,15 +985,18 @@ VERSIONS_JSON
 
     process_service proxy
 
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 0 ]
     [ "$deleted" -eq 1 ]
     grep -q "versions/2$" "$delete_log"
 }
 
 @test "process_service_sha_retention: a commit also reachable from master stays protected regardless of retention rank" {
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=1
     # shellcheck disable=SC2034
     release_tags=()
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=1
     # Instant retries: these fixtures' curl() mocks intentionally don't
     # cover the per-tagged-version manifest-fetch call Pass 1 also makes
@@ -1028,14 +1044,17 @@ VERSIONS_JSON
 
     process_service proxy
 
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 0 ]
     [ "$deleted" -eq 0 ]
 }
 
 @test "process_service_sha_retention: a commit reachable from a release tag stays protected" {
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=1
     # shellcheck disable=SC2034
     release_tags=(v1.0.0)
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=1
     # Instant retries: these fixtures' curl() mocks intentionally don't
     # cover the per-tagged-version manifest-fetch call Pass 1 also makes
@@ -1084,6 +1103,7 @@ VERSIONS_JSON
 
     process_service proxy
 
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 0 ]
     [ "$deleted" -eq 0 ]
 }
@@ -1098,9 +1118,11 @@ VERSIONS_JSON
     # created "now"/"10 minutes ago" (rank 1/2, within the window -- never
     # even reach the age or ancestry checks); "deadbee1" is created 2 hours
     # ago (rank 3, beyond the window, but still far short of the 24h gate).
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=2
     # shellcheck disable=SC2034
     release_tags=()
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=1
     # Instant retries: these fixtures' curl() mocks intentionally don't
     # cover the per-tagged-version manifest-fetch call Pass 1 also makes
@@ -1153,16 +1175,19 @@ VERSIONS_JSON
     process_service proxy
 
     [ ! -s "$compare_log" ]
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 0 ]
 }
 
 @test "process_service_sha_retention: sha_retention_lookup_ok=0 disables the whole pass, no ancestry checks at all" {
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_keep=1
     # shellcheck disable=SC2034
     release_tags=()
     # Simulates main()'s own release-tag-listing failure having already
     # disabled this pass for the run -- process_service_sha_retention must
     # return immediately, before reading version_list at all.
+    # shellcheck disable=SC2034 # read by process_service_sha_retention() in the sourced script
     sha_retention_lookup_ok=0
 
     gh() {
@@ -1187,6 +1212,7 @@ VERSIONS_JSON
 
     process_service proxy
 
+    # shellcheck disable=SC2154 # set as a global by the sourced script's process_service_sha_retention()
     [ "$sha_retention_would_delete" -eq 0 ]
     [ "$deleted" -eq 0 ]
 }
