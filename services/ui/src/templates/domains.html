@@ -148,7 +148,7 @@
         <p class="text-xs text-slate-500 mt-0.5">PowerDNS Authoritative Server · Lokale DNS-Records für das LAN</p>
       </div>
 
-      <form action="/domains/lan/add" method="post" class="flex flex-col gap-3">
+      <form action="/domains/lan/add" method="post" class="flex flex-col gap-3" data-lan-record-form>
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         {# LAN records are written through PowerDNS, not the CDN domain file;
            record type and content stay separate to avoid stringly typed parsing. #}
@@ -156,7 +156,7 @@
           <input type="text" name="name" placeholder="z.B. myserver.lan."
                  required
                  class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
-          <select name="record_type" required
+          <select name="record_type" required data-lan-record-type
                   class="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-2 focus:ring-green-500">
             <option value="">Typ wählen</option>
             <option value="A">A</option>
@@ -168,10 +168,11 @@
         </div>
         <div class="flex gap-2">
           <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
-                 required min="1"
+                 required min="1" max="2147483647"
+                 title="TTL must be between 1 and 2147483647 seconds (RFC 2181)."
                  class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
           <input type="text" name="content" placeholder="z.B. 192.168.1.10 oder mail.example.com"
-                 required
+                 required data-lan-record-content
                  class="flex-1 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
           <button type="submit"
                   class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
@@ -247,7 +248,8 @@
         </div>
         <div class="flex gap-2">
           <input type="number" name="ttl" value="300" placeholder="TTL (Sekunden)"
-                 required min="1"
+                 required min="1" max="2147483647"
+                 title="TTL must be between 1 and 2147483647 seconds (RFC 2181)."
                  class="w-24 bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm text-white placeholder-slate-400 focus:outline-none focus:ring-2 focus:ring-green-500">
           <button type="submit"
                   class="bg-green-600 hover:bg-green-500 text-white text-sm font-medium px-4 py-2 rounded-lg transition-colors">
@@ -513,6 +515,22 @@
     return confirm('PTR ' + btn.dataset.ptrIp + ' → ' + btn.dataset.ptrHost + ' entfernen?');
   }
 
+  // maxlength counts UTF-16 code units, while the DNS boundary is measured
+  // in UTF-8 bytes. Custom validity keeps the browser and Rust validator on
+  // the same byte-aware boundary without incorrectly rejecting non-ASCII text.
+  function validateLanTxtContent() {
+    const form = document.querySelector('[data-lan-record-form]');
+    const recordType = form.querySelector('[data-lan-record-type]');
+    const content = form.querySelector('[data-lan-record-content]');
+    const contentBytes = new TextEncoder().encode(content.value.trim()).length;
+
+    if (recordType.value === 'TXT' && contentBytes > 64986) {
+      content.setCustomValidity('TXT content must not exceed 64,986 UTF-8 bytes.');
+    } else {
+      content.setCustomValidity('');
+    }
+  }
+
   // Zone-snapshot timestamps (#628): same Intl.DateTimeFormat-based helper
   // as templates/secondaries.html's own .js-epoch handling -- each template
   // keeps its own small copy rather than a shared JS file, matching this
@@ -543,6 +561,10 @@
   document.querySelectorAll('.dns-tab-btn').forEach((button) => {
     button.addEventListener('click', () => setActiveDnsTab(button.dataset.dnsTab));
   });
+
+  document.querySelector('[data-lan-record-type]').addEventListener('change', validateLanTxtContent);
+  document.querySelector('[data-lan-record-content]').addEventListener('input', validateLanTxtContent);
+  document.querySelector('[data-lan-record-form]').addEventListener('submit', validateLanTxtContent);
 
   setActiveDnsTab('cdn');
   formatEpochCells();

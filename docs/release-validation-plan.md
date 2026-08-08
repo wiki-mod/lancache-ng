@@ -243,6 +243,7 @@ as proof of it:**
 | **Review-chronology code comments (AG-CODE-003 sub-pattern)** (2026-08-02) | No git-tracked source/config comment narrates the review chronology of the change it sits in ("caught in review", "before this fix", "flagged in review on PR #123", and similar phrasings) — these read as internal notes to the reviewer/author at PR-open time, not durable technical rationale, and go stale/confusing the moment the PR merges | `bash scripts/check-review-chronology-comments.sh` (wired into `build-push.yml`'s `file-headers` job); `bats tests/bats/check_review_chronology_comments.bats` (14 cases: 6 real-shaped positive fixtures proving the fail path is reachable per `AG-VAL-024`, including the reverse-order "a PR review (#765) found ..." shape and the self-review compound-word case; 5 deliberate near-miss negative fixtures — "manual review to notice it", "remembered during review", bare "regression pin", "after this PR merges"/"until this PR's OWN builds" — proving the tight adjacency regex does not over-match generic review/PR mentions; the excluded-file-type and self-reference-exclusion cases; and the "passes against the real repository tree" case). A real audit against this repo's own tracked files (2026-08-02) found eighteen genuine instances across fourteen files, fixed in the same pass this guard was added, so the check starts clean | Fail if the guard script reports any finding against the real tree, or if any of the 14 bats cases regresses (especially the 5 negative-fixture cases — a widened regex that starts flagging generic "review"/"PR" mentions is a false-positive regression, not an improvement) |
 | **`standard-passthrough-shim` restart policy + runner-host reaper `StartedAt`-vs-`Created` blind spot** (fixed, issue #1095, 2026-08-05/06 multi-day container-leak incident) | (a) `deploy/full-setup/docker-compose.yml`'s profile-gated, per-run-only `standard-passthrough-shim` service carries no restart policy, so a crashed/killed instance stays exited instead of resurrecting itself; (b) `tools/runner-host/lancache-ci-cleanup.sh`'s `reap_orphaned_running_containers` keys its age check on each container's immutable `.Created` timestamp, not the restart-resettable `.State.StartedAt`, so a leaked container that happens to get restarted (by a crash-loop, or by Docker's own restart manager on daemon/host startup) is still reaped by its true age; (c) the same script also reaps `lancache-ng-validation-*` Docker networks left with zero attached containers after (b) removes their last container | Confirmed live on runner host `192.168.1.240` (2026-08-05): three `lancache-ng-validation-*-standard-passthrough-shim-1` containers created 2026-08-03 had survived that host's own reboot ~14h earlier and every scheduled cleanup run since, because each run's `StartedAt` read showed only the few-minutes-old post-reboot restart time (root-caused via direct `journalctl -u lancache-ci-cleanup.timer/.service` + `docker inspect` inspection over SSH, not log-reading alone) — the same host's own two other genuinely-active validation containers (created within the last hour) were correctly left alone throughout, proving the discrimination held even before the fix. The `.Created`-keyed fix was proven both ways in dry-run mode against this exact real state (`DRY_RUN=1`: the 2-day-old three flagged "WOULD REAP", the young one correctly kept), then run for real (`DRY_RUN=0`) to reap the three real orphans, confirmed gone afterward via `docker ps -a`. The network reap was proven via a real, disposable `lancache-ng-validation-99999_validation` network + container on runner host `192.168.1.243`: kept while a container was attached (0 removal), reaped once that container was removed (0 attached containers) — both directions demonstrated live, not just read from the code. `deploy/full-setup/docker-compose.yml`'s edited service was validated with a real `docker compose --profile ssl-mitm-proof config` (resolves to `restart: 'no'`, not the YAML boolean `false`) and a real `docker compose ... up -d --no-deps standard-passthrough-shim` on `192.168.1.243` (`HostConfig.RestartPolicy.Name=no`, container reaches `Health=healthy`), then torn down cleanly. `bash -n`/`shellcheck --severity=warning` clean on `tools/runner-host/lancache-ci-cleanup.sh` inside the pinned build-tools container | Fail if a future orphaned `lancache-ng-validation-*` container survives a runner-host reboot past `REAP_VALIDATION_AFTER_HOURS` (i.e. if the age check is ever changed back to a restart-resettable signal), if `reap_orphaned_validation_networks` ever removes a network reporting a nonzero attached-container count, or if `standard-passthrough-shim` (or any other genuinely throwaway, profile-gated validation service added later) regains a `restart:` policy other than `"no"` without a stated, reviewed reason |
 | **Proxy cache env/doc drift — CACHE_MEM_MB (bug-hunt #849/#1068 item 11)** (fixed, 2026-08-05) | `docs/architecture-ng.md`'s nginx cache-configuration table's documented default for each `CACHE_*` variable stays in sync with the real shipped default in `config/prod/proxy.env` | Confirmed live via `git log` that `CACHE_MEM_MB`'s documented default (`200`) had been wrong for ~7 weeks — the real shipped default (`config/prod/proxy.env`, `deploy/quickstart/.env`, `setup.sh`) has been `512` since the variable was introduced 2026-06-18/19. Fixed the doc and added `bash scripts/check-proxy-cache-env-doc-drift.sh` (wired into `build-push.yml`, same job as the setup-prompt-drift/logging-matrix doc guards), which parses every `CACHE_*=value` line in `config/prod/proxy.env` and, for each one with a matching table row in `docs/architecture-ng.md`, fails if the documented default disagrees with the real one. Verified both directions on runner host `.241`: passes cleanly against the real tree (7 of 7 documented `CACHE_*` variables matched); a negative control reintroducing the exact historical drift (`CACHE_MEM_MB=200` in a scratch copy of `proxy.env`, doc left at `512`) reproducibly fails with the specific mismatched key/values named | Fail if the guard script reports a finding against the real tree, or if the negative control (reintroducing a `CACHE_*` value mismatch) stops being caught |
+| **Proxy stream-level client ACL** (fixed, 2026-08-06/07) | `PROXY_ALLOWED_CLIENT_CIDRS` genuinely restricts which client IPs may open a TCP connection to EITHER externally-facing stream-level listener — the standard-mode `:8443` SNI-passthrough listener, and the SSL-mode `:443` SNI dispatcher — not just the `http`-context `geo`/`map`-driven `$lancache_client_allowed` check inside the MITM/passthrough relays, which never runs for a client the stream layer itself should have rejected before `ssl_preread` ever extracts an SNI. The generated ACL (`entrypoint.sh`'s `_render_stream_client_acl`, `/etc/nginx/stream.d/access.d/00-stream-client-acl.conf`) must apply to both external listeners, never to the internal loopback-only MITM/passthrough relay hops the SSL-mode dispatcher hands off to (those must stay reachable from 127.0.0.1 regardless of the configured CIDR list, or the relay chain itself breaks) | `bats tests/bats/proxy_stream_client_acl.bats` (4 cases) proves the generated config text; the following differential live proof is what actually proves nginx *enforces* it (bats alone only proves generation) — run two real `proxy` containers, one with `PROXY_ALLOWED_CLIENT_CIDRS` unset (default: no restriction) and one with it set to a CIDR that excludes the test client's own address: **(A) SSL-mode `:443` dispatcher** (`SSL_ENABLED=1` on both): (1) against the unrestricted container, `openssl s_client -connect <host>:443 -servername <a configured CDN domain>` extracts the SNI and proceeds to an upstream-resolution attempt (fails only for the unrelated, expected reason that the sandbox has no real upstream DNS for that domain — this is the "allowed" baseline, not a false pass); (2) against the restricted container from an excluded address, the same command is rejected instantly at the TCP layer (`access forbidden by rule`/connection reset) with the SNI never reaching `ssl_preread` at all — the stream access log shows the deny, not a `ssl_preread` failure. **(B) standard-mode `:8443` listener** (either `SSL_ENABLED` value): the identical allowed-vs-excluded differential, `openssl s_client -connect <host>:8443 -servername <a configured CDN domain>` in place of `:443` — this is nginx.conf's own static `stream {}` block, generated independently of "2a."'s SSL-mode dispatcher, so passing (A) proves nothing about (B) or vice versa; both must be run. The instant-403-vs-SNI-extracted distinction is what discriminates a real ACL enforcement from an unrelated connectivity failure; a naive single fixed-timeout comparison between the two cases is **not** sufficient (an early version of this check used one timeout for both cases and produced misleadingly identical-looking results). A second, separate live check proves the SSL-mode scoping specifically: with `PROXY_ALLOWED_CLIENT_CIDRS` set to a CIDR that includes the test caller (e.g. `127.0.0.0/8`), `openssl s_client -connect 127.0.0.1:443 -servername <a covered domain>` must still complete a TLS handshake presenting the container's own `CN=lancache-ng` MITM certificate — proving the ACL, scoped to `stream.d/access.d/`, was correctly kept off the two internal 127.0.0.1-only relay server blocks the dispatcher hands off to, not merely reasoned about | Fail if an excluded client's connection is not rejected before SNI extraction on EITHER listener, if an included client's request is wrongly rejected on either, or if the internal-relay handshake in the SSL-mode-scoping check fails to complete (proof the ACL leaked onto a loopback-only relay hop) |
 
 **Gap closed (2026-08-05, issue #1377):** the guard above was previously scoped to only scan `tools/build-tools/Dockerfile` -- the one file PR #1374's confirmed incident occurred in -- with a documented, tracked gap covering the rest of the repository. Issue #1377 closed that gap: `scripts/check-pipefail-early-exit-grep.sh`'s `scan_files` now discovers every tracked shell script under `scripts/**`/`tools/**` plus `setup.sh` via `git ls-files`, so a newly added script is covered automatically rather than needing this list hand-maintained. See the Standing check row above for what was found and fixed.
 
@@ -820,11 +821,12 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   superseded commit than the workflow run's own reported head; remediated only by
   forcing a fresh, uncontested re-run, not by a code-level guard.
 - **C-7 / container-scan vs. published-digest scan mismatch** (issue #1348,
-  consolidated into #1095, **known accepted limitation** — see Coverage Assessment
-  below) — `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
-  actually-pushed image are two independent `docker buildx build` invocations that
-  never produce matching digests, even for byte-identical inputs, because each
-  build stamps its own fresh `created` timestamp into the image config.
+  consolidated into #1095, **fixed** — see Coverage Assessment below) —
+  `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
+  actually-pushed image used to be two independent `docker buildx build`
+  invocations that never produced matching digests; `container-scan`'s redundant
+  rebuild-and-scan branch was removed, leaving `build`/`build-arm64`'s own
+  pushed-digest scan as the sole, matching-numbers-correct vulnerability gate.
 - **`build-push.yml` self-modification trigger bug** (PR #1367 POC, **open, not yet
   resolved** — see Coverage Assessment below) — a PR that itself modifies
   `build-push.yml` may not reliably receive a `pull_request`-triggered run of the
@@ -869,6 +871,52 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `AG-VAL-030`, since claimed by an unrelated rule; landed as `AG-VAL-032` via
   issue #1377, which also fixed the repo-wide instances and widened this
   script's scope -- see the Standing check row above).
+
+### Additions dated 2026-08-07 (real incident since the 2026-08-01 survey above)
+
+- **`gc-pr-staging-images.yml` narrow-checkout runner corruption** (issue #1095,
+  fixed) — `actions/checkout@v7.0.1`'s `sparseCheckoutNonConeMode()` (selected by
+  this workflow's `sparse-checkout-cone-mode: false`) sets `core.sparseCheckout`
+  via `git config` but writes the narrow path patterns by appending directly to
+  `.git/info/sparse-checkout`, never through the `git sparse-checkout set`
+  porcelain command. Reproduced repeatedly, live, on a self-hosted runner host
+  (git 2.47.3, `.240`), both against a real shallow clone of this repository and
+  throwaway synthetic repositories of varying size: a sparse-checkout state set
+  up that way does not reliably clear on a later job's plain `git
+  sparse-checkout disable`, nor on `git sparse-checkout init` immediately
+  followed by `disable` — both report success, but across repeated runs the
+  actual outcome varied between full recovery and index skip-worktree bits
+  staying set on every path outside the narrow set; the exact trigger for the
+  variation was not isolated. Self-hosted runners reuse one working directory
+  across unrelated jobs/workflows, and no other workflow in this repo passes a
+  sparse-checkout input at all, so whatever state a `gc-pr-staging-images.yml`
+  run leaves behind is inherited by the next job scheduled onto the same
+  runner instance — traced via one such runner's own `_diag` worker logs (a
+  "reap closed-PR staging tags and orphaned versions" run, followed without an
+  intervening second reap run by a `build-push.yml` job that failed) to real
+  "No such file or directory" / "Can't find 'action.yml'" failures observed
+  across several unrelated `build-push.yml` jobs, on multiple runner hosts, on
+  2026-08-07. Because `disable`'s own exit code proved unreliable as a success
+  signal, the fix does not trust it: after the reap script runs, it sweeps any
+  remaining index skip-worktree bits directly via `git update-index
+  --no-skip-worktree` and asserts (failing the job loudly) that none remain,
+  rather than assuming the restore worked. The count itself is computed with
+  `awk` rather than `grep -c`, and only after capturing `git ls-files -v`'s
+  output into a variable first — a real git failure at that point must trip
+  `set -e` immediately via the plain assignment, and the count must never end
+  up empty (an empty `[ "$x" -ne 0 ]` comparison is a runtime error, not a
+  `set -e`-fatal one, inside an `if` condition, so it would otherwise silently
+  skip the check instead of failing it); confirmed with a real run against a
+  non-git directory that the step now exits non-zero rather than silently
+  succeeding. New standing check:
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
+  the fix including the always-reproducible case of a skip-worktree bit that
+  `disable` alone does not clear, and the fail-closed behavior itself, against
+  a throwaway local git repository — no network or real clone needed. A
+  durable guard against a *future* self-hosted workflow reintroducing a narrow
+  `sparse-checkout` input without a matching restore step does not exist yet;
+  recorded as an open gap in Coverage Assessment below.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 
@@ -917,9 +965,26 @@ explicit pass:**
   a known, open, non-blocking bug that produces a false-negative warning log on a
   slow-to-stop container — validators must know to cross-check `StartedAt` rather
   than trusting the warning literally.
-- **Netdata-alarm → Admin UI notification integration** remains entirely unbuilt (PR
-  #1165 explicitly marks this half of the original dashboard vision as still open,
-  `docs/bug-hunt/observability.md` finding #3 "PARTIALLY FIXED").
+- **Netdata-alarm → Admin UI notification integration** (`docs/bug-hunt/
+  observability.md` finding #3, PR #1165's remaining open half) has been built:
+  the `netdata` container's `custom_sender()` integration
+  (`deploy/*/docker-compose.yml`'s `netdata:` service, all three real profiles)
+  POSTs each Netdata health.d alarm event to the Admin UI's new
+  `POST /api/netdata-alarms` (`services/ui/src/routes/netdata_alarms.rs`,
+  `services/ui/src/netdata_alarms.rs`), gated by a shared `NETDATA_ALARM_TOKEN`
+  (issue #858 pattern) and rendered on the dashboard's new "Netdata alarms"
+  card. Durable coverage added: `docker compose -f <file> config --quiet` for
+  all three deployment profiles (catching a real Compose `$`-interpolation
+  parse bug during this work, not merely asserted clean), plus unit tests for
+  the storage module's bounded history, idempotent-append-on-duplicate-
+  `unique_id`, and malformed/missing-file tolerance, and for the ingest route's
+  fail-closed constant-time token check. **Still unproven**: whether
+  `SEND_CUSTOM="YES"`/`DEFAULT_RECIPIENT_CUSTOM="lancache-ui"` alone actually
+  cause Netdata's real `custom_sender()` to fire for a genuine alarm depends on
+  Netdata's own per-role recipient resolution, which this pass could not
+  exercise end-to-end — the wiring is written to Netdata's documented
+  `health_alarm_notify.conf` contract, but a live `alarm-notify.sh ... test`
+  run against a real deployed stack is the still-needed follow-up proof.
 - **The DNS reset-to-known-good E2E** (PR #1152) has only ever been run with two
   environment deviations in place (a locally built image, a patched healthcheck probe
   domain) due to the since-fixed #1150 bug — the *unmodified* real CI path for this
@@ -986,25 +1051,35 @@ explicit pass:**
   explicit decision to split this into a separate live-stack milestone rather than
   compress it into this pass.
 
+- **AG-VAL-034's GNU/BusyBox construct audit for Alpine-migrated services has no
+  standing mechanical check yet, despite recurring four times** (`services/watchdog`
+  #1346, `services/dhcp`/`dhcp-proxy` #1347, `services/dns` #1425, `services/proxy`
+  issue #815/this migration pass) — each occurrence was caught only by a human/agent
+  reading the entrypoint script line-by-line and cross-checking against a real
+  `alpine:3.24` container, exactly the standing-check gap `AG-VAL-029` exists to close.
+  `AG-VAL-034`'s own rule text already names the missing piece: "a mechanical guard
+  for `services/*/entrypoint.sh` against an Alpine final stage is proposed future
+  work, not yet built." Recorded here rather than silently deferred a fifth time: a
+  low-false-positive version would grep each Alpine-based service's `entrypoint.sh`
+  for the confirmed-recurring pattern shapes (`find[^|]*-printf`, `date[^|]*%N`,
+  `grep[^|]*-[a-zA-Z]*P\b`) and assert the corresponding fix package
+  (`findutils`/`coreutils`/`grep`) is present in that service's `Dockerfile` — the
+  same shape as `scripts/check-pipefail-early-exit-grep.sh`'s existing pattern/fix-package
+  cross-check. Not built in this pass; a future PR should add it as its own standing
+  check rather than relying on the fifth migration's agent to re-derive this list from
+  scratch again.
+
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
 omitted):**
 
-- **C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
-  never share a digest** (issue #1348, consolidated into #1095, see
-  `build-push.yml`'s own comment at the `container-scan` job header, roughly lines
-  5003-5011) — both are independent `docker buildx build` invocations of the same
-  Dockerfile/commit; a fresh build stamps a new `created` timestamp into the image
-  config every time, so the two builds' digests never match even given
-  byte-identical inputs. **This is not currently a correctness/provenance gap**: the
-  "Scan pushed service digest with Trivy" step (`build-push.yml`'s `build` and
-  `build-arm64` jobs, per issue #1095 Step 3) already scans the exact digest that
-  gets pushed for all 8 services, not just `build-tools` as before — so the
-  security-relevant claim ("the scanned image is the shipped image") is verified
-  independently of `container-scan`'s throwaway build. What remains unfixed is a
-  **cost/redundancy** problem only: every changed service's Dockerfile gets built
-  twice per run (once to scan, once to push), tracked under the larger #1095
-  CI-pipeline rework, not expected to be resolved by a small, targeted fix.
+- ~~C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
+  never share a digest~~ — **fixed** (issue #1348/#1095's G8 finding; no longer an
+  accepted limitation, see the 2026-08-01 entry above and `container-scan`'s own
+  job-header comment in `build-push.yml`). `container-scan`'s redundant
+  rebuild-and-scan branch for a changed service was removed entirely;
+  `build`/`build-arm64`'s existing "Scan pushed service digest with Trivy" step is
+  now the sole vulnerability scan, and it always scans the exact pushed digest.
 - **`build-push.yml` self-modification trigger bug** (open, unresolved as of
   2026-08-01; maintainer's own POC is PR #1367, `Refs #1095`, `Refs #1356`) — a PR
   that itself modifies `build-push.yml` does not reliably receive a real
@@ -1052,6 +1127,40 @@ omitted):**
   permanently-running script either). The depth-2 real-backend-certificate
   assertion that remains in the committed script carries the ongoing regression
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
+- **No repo-wide guard against a future workflow reintroducing an unrestored
+  narrow `sparse-checkout` on a self-hosted job** (2026-08-07, issue #1095) —
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
+  this repo that currently sets a `sparse-checkout` input), but nothing checks
+  the repo's workflow files themselves for a *new* `sparse-checkout` input added
+  to some other self-hosted job without an equivalent restore step. A grep-based
+  guard (flag any `sparse-checkout:` input in `.github/workflows/**` whose job
+  does not also contain a matching config-unset/pattern-file-removal step) is
+  plausible but not yet built — this is a real, currently-open gap, not a
+  silently-assumed-covered case.
+- **Recorded exception (2026-08-08, Rule-Ref: AG-CC-004): third-party
+  automated-reviewer output language cannot be checked by a durable, repeatable
+  CI test.**
+  - **Scope**: Rule-Ref: AG-CC-004's requirement that a third-party automated tool's
+    GitHub-bound output (e.g. Codex's PR review comments) be English.
+  - **Reason**: checking this mechanically would require either scripting a
+    real trigger of that external tool's review inside CI (not something this
+    repository controls or can invoke on demand) or scraping its
+    already-posted comments after the fact on a schedule with no fixed timing
+    guarantee — neither is a genuine standing check in the sense this
+    document's other entries mean.
+  - **Tracking**: `AGENTS.md`'s Rule-Ref: AG-CC-004 rule text and its Rule Enforcement
+    Matrix entry; issue #1507 (the language-rules rework this exception was
+    recorded alongside).
+  - **Validation**: manual-review-only — spot-check an automated reviewer's
+    GitHub-bound output language against Rule-Ref: AG-GH-001 whenever a review is
+    observed; no automated pass/fail signal exists for this today.
+  - **Non-Expansion**: this exception covers only automated-reviewer output
+    language checking. It does not extend to any other AG-CC-*/AG-GH-*
+    requirement, and does not exempt a human contributor's or an agent's own
+    GitHub-bound output from Rule-Ref: AG-GH-001 in any way. Revisit if this tool (or
+    a future one) ever exposes an on-demand, scriptable review trigger that
+    would make a real CI check practical.
 
 ---
 

@@ -11,7 +11,7 @@
 use crate::{AppState, docker_client, nats_auth_callout, nats_config, nats_kick};
 use axum::extract::{Path, State};
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{Html, Json};
+use axum::response::{Json, Response};
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::Path as FsPath;
@@ -87,7 +87,7 @@ pub struct Secondary {
 pub async fn secondaries_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
-) -> Result<Html<String>, StatusCode> {
+) -> Result<Response, StatusCode> {
     let db = state
         .db
         .lock()
@@ -195,9 +195,14 @@ pub async fn register_secondary(
     // shared DNS-reader credential. `name` doubles as the NATS username --
     // it already passed the same alphanumeric+dash charset check NATS
     // usernames require (see nats_config::validate_nats_username), and it's
-    // already the table's primary key, so no separate uniqueness check is
-    // needed. Only the password's hash is ever persisted; the plaintext is
-    // returned exactly once, here, and never stored.
+    // already the table's primary key, so this application-level tying of
+    // nats_user to name is enough to keep two rows from colliding today.
+    // Finding #5 (docs/bug-hunt/ui-core.md, issue #849) added an independent
+    // UNIQUE index on the nats_user column itself in
+    // main.rs::migrate_secondaries_table_for_auth_callout, as a
+    // defense-in-depth backstop in case a future change ever decouples this
+    // assignment from `name`. Only the password's hash is ever persisted;
+    // the plaintext is returned exactly once, here, and never stored.
     let nats_user = form.name.clone();
     let nats_password = generate_nats_password();
     let nats_password_hash = nats_auth_callout::hash_nats_password(&nats_password)

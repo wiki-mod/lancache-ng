@@ -184,11 +184,15 @@ stated scope, not a documented "Scope Boundaries" exclusion.
 
 Per this project's own governance ("Feature Completeness": *"If backend code
 supports a feature but the Admin UI does not expose it, treat that as UI
-delivery debt by default"*), this is a real, currently-untracked gap: an
-operator can only configure PXE boot-pointer support by hand-editing
-`config/{dev,prod}/dhcp-proxy.env` or the persisted settings file — the
-Admin UI's DHCP page has no fields for it, and (per §5) no automated check
-would catch the Admin UI silently failing to persist these three keys.
+delivery debt by default"*), this remains a real, currently-untracked gap,
+though narrower than when this was first written: `setup.sh` now has its
+own interactive wizard prompt plus `setup.sh update` migration/validation
+for all three PXE boot-pointer variables (its own separate opt-in step, see
+`docs/dhcp-modes.md`), so hand-editing `config/{dev,prod}/dhcp-proxy.env`
+or the persisted settings file is no longer the *only* configuration path —
+but the Admin UI's DHCP page still has no fields for these three keys, and
+(per §5) no automated check would catch the Admin UI silently failing to
+persist these three keys.
 
 **Only partially tracked:** issue **#647** ("spec: define full dnsmasq
 relay/proxy DHCP Admin UI feature scope", open) is the closest existing

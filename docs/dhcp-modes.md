@@ -214,6 +214,28 @@ ProxyDHCP replies for this service at all (see the finding boxed above),
 so it is entirely opt-in: leave both variables below empty and nothing in
 this section or the "Optional (issue #450)" one above changes.
 
+> **Reachability, unlike the "Optional (issue #450)" fields above (issue
+> #849 dhcp-proxy.md finding #2):** `setup.sh` now prompts for these three
+> variables (as their own separate, explicitly-worded opt-in step, given the
+> behavior-change note above) and validates/migrates them on `setup.sh
+> update` exactly like the #450 fields. They are **not yet** editable from
+> the Admin UI's DHCP page the way the #450 fields are — that requires
+> wiring three new form fields through `services/ui/src/routes/dhcp.rs`,
+> which is a separate, larger piece of work than the setup.sh side. Until
+> that lands, changing these three values after initial setup means editing
+> `.env` and restarting for **quickstart** (`deploy/quickstart/docker-compose.yml`
+> wires each of these three keys as `environment: - KEY=${KEY:-}`, so the
+> running container reads whatever `.env` holds at `docker compose up` time).
+> **`deploy/prod` does not work this way**: its dhcp-proxy service reads
+> `config/prod/dhcp-proxy.env` via `env_file:`, never `.env`/`.env.local`
+> directly, so editing `.env` and restarting has no effect there. For
+> `deploy/prod`, edit `config/prod/dhcp-proxy.env` directly and restart.
+> That runtime file is the permanent authoritative source; `setup.sh update`
+> only initializes keys that are missing there and never replaces an existing
+> value (including an explicit empty value) from the duplicate in `.env`.
+> STATUS: as of 2026-08-06, `setup.sh` coverage is
+> done; Admin UI coverage is open (AG-FEAT-002 UI delivery debt).
+
 | Key | Meaning | Example |
 |---|---|---|
 | `DHCP_PROXY_PXE_BOOT_SERVER` | Address of your own external PXE/TFTP boot server. Required for any PXE boot-pointer to activate at all. | `10.0.0.5` |
