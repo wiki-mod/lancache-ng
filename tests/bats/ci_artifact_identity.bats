@@ -290,7 +290,7 @@ JSON
   workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
   pointer_line="$(grep -n 'name: Build immutable release stack pointer before mutable publication' "$workflow" | cut -d: -f1)"
   acceptance_line="$(grep -n 'name: Attest immutable release acceptance before mutable publication' "$workflow" | cut -d: -f1)"
-  mutation_line="$(grep -n 'name: Publish release references as one rollback-protected critical section' "$workflow" | cut -d: -f1)"
+  mutation_line="$(grep -n 'name: Publish release refs as one rollback-protected critical section' "$workflow" | cut -d: -f1)"
   [[ "$pointer_line" =~ ^[0-9]+$ ]]
   [[ "$acceptance_line" =~ ^[0-9]+$ ]]
   [[ "$mutation_line" =~ ^[0-9]+$ ]]
