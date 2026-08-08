@@ -8,13 +8,18 @@ setup() {
     rust="rust@sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
 }
 
-@test "dns and ui consume the exact bootstrap build-tools digest" {
+@test "dns and ui consume the exact bootstrap build-tools digest through a context override" {
+    key='ghcr.io/wiki-mod/lancache-ng/build-tools:latest'
     for service in dns ui; do
         run env CI_BOOTSTRAP_BUILD_TOOLS_IMAGE="$bootstrap" \
             bash "$REPO_ROOT/scripts/ci-build-inputs.sh" "$service" json
         [ "$status" -eq 0 ]
-        run jq -e --arg ref "$bootstrap" \
-            '.build_args.BUILD_TOOLS_IMAGE == $ref and (.build_contexts | length == 0)' <<<"$output"
+        json="$output"
+        run jq -e --arg key "$key" --arg ref "docker-image://$bootstrap" '
+            (.build_args | length == 0)
+            and .build_contexts[$key] == $ref
+            and (.build_contexts | length == 1)
+        ' <<<"$json"
         [ "$status" -eq 0 ]
     done
 }
@@ -50,9 +55,11 @@ setup() {
 
 @test "source fingerprint changes when exact external build input changes" {
     sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
-    one="$(env CI_SOURCE_BUILD_INPUTS_JSON='{"build_args":{"BUILD_TOOLS_IMAGE":"ghcr.io/example/build-tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"build_contexts":{}}' \
-        bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
-    two="$(env CI_SOURCE_BUILD_INPUTS_JSON='{"build_args":{"BUILD_TOOLS_IMAGE":"ghcr.io/example/build-tools@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"build_contexts":{}}' \
-        bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
+    key='ghcr.io/wiki-mod/lancache-ng/build-tools:latest'
+    one_json="$(jq -cn --arg key "$key" --arg value 'docker-image://ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' '{build_args:{},build_contexts:{($key):$value}}')"
+    two_json="$(jq -cn --arg key "$key" --arg value 'docker-image://ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' '{build_args:{},build_contexts:{($key):$value}}')"
+
+    one="$(env CI_SOURCE_BUILD_INPUTS_JSON="$one_json" bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
+    two="$(env CI_SOURCE_BUILD_INPUTS_JSON="$two_json" bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
     [ "$one" != "$two" ]
 }
