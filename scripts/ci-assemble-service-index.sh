@@ -32,6 +32,9 @@ scope="$(jq -r '.scope' "$amd64_file")"
 artifact_source_sha="$(jq -r '.artifact_source_sha' "$amd64_file")"
 [[ "$(jq -r '.artifact_source_sha' "$arm64_file")" == "$artifact_source_sha" ]] || ci_ai_fail "artifact source SHA mismatch between platforms for $service"
 ci_ai_require_sha "$artifact_source_sha"
+source_fingerprint="$(jq -r '.source_fingerprint' "$amd64_file")"
+[[ "$(jq -r '.source_fingerprint' "$arm64_file")" == "$source_fingerprint" ]] || ci_ai_fail "source fingerprint mismatch between platforms for $service"
+ci_ai_require_digest "$source_fingerprint"
 amd64_digest="$(jq -r '.digest' "$amd64_file")"
 arm64_digest="$(jq -r '.digest' "$arm64_file")"
 ci_ai_require_digest "$amd64_digest"
@@ -63,6 +66,7 @@ jq -n \
   --arg image "$image" \
   --arg candidate_source_sha "$source_sha" \
   --arg artifact_source_sha "$artifact_source_sha" \
+  --arg source_fingerprint "$source_fingerprint" \
   --arg digest "$index_digest" \
   --arg amd64 "$amd64_digest" \
   --arg arm64 "$arm64_digest" \
@@ -74,6 +78,7 @@ jq -n \
     image: $image,
     candidate_source_sha: $candidate_source_sha,
     artifact_source_sha: $artifact_source_sha,
+    source_fingerprint: $source_fingerprint,
     digest: $digest,
     candidate_ref: $candidate_ref,
     platforms: {
