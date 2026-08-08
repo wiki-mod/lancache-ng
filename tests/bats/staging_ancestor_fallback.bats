@@ -1998,6 +1998,38 @@ STUB
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
+@test "saf_resolve_untouched_backfill_source: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed instead of silently truncating the ancestor tag (AG-VAL-030)" {
+    # Issue #1095 G2 follow-up: saf_find_built_ancestor builds
+    # ancestor_image="...:sha-$(dmeta_short_sha "$candidate")" -- if that
+    # call's failure were embedded directly inside the string (rather than
+    # assigned to its own variable first and checked with `||`), a malformed
+    # DOCKER_METADATA_SHORT_SHA_LENGTH would be silently absorbed by the
+    # outer assignment (this file has no top-level `set -e`, see its own
+    # header), producing a plausible-looking-but-wrong "...:sha-" tag instead
+    # of a clear failure. This test exercises the real saf_resolve_
+    # untouched_backfill_source entry point (not dmeta_short_sha directly) to
+    # prove the fail-closed behaviour survives through the real call site.
+    setup_linear_fixture
+    install_run_exists_stub
+    printf '%s\tany\n' "$ancestor2_sha" >> "$runs_file"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$base_sha") exit 1 ;;
+    "$older_sha") exit 1 ;;
+    "$ancestor2_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+
+    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
+    [ "$status" -ne 0 ]
+    [[ "$output" != *"sha-\""* ]]
+    [[ "$output" == *"Could not derive the short SHA"* || "$output" == *"DOCKER_METADATA_SHORT_SHA_LENGTH must be a positive integer"* ]]
+}
+
 @test "saf_resolve_untouched_backfill_source: fast path also fires for a real, non-doc commit that only touches a DIFFERENT service" {
     # 2026-08-02 finding: a commit that touches only ui (a real, non-doc
     # change -- saf_base_commit_paths_are_ignorable would say "not
