@@ -19,31 +19,25 @@
 # every real deployment, which is the closest existing live coverage for the
 # "did we break the healthcheck" half of this change).
 #
-# IMPORTANT, found live during this fix's own review (2026-08-06/07): an
-# EARLIER version of this same finding #11 fix served /healthz via a bare
-# `return 200 "ok\n";` in the same location as the `allow`/`deny` ACL --
-# every assertion in this file still passed against that version, because
-# they only check the ACL text is PRESENT, never that nginx actually
-# enforces it. A real differential live-container test (two real `proxy`
-# containers, one queried from a genuinely excluded source IP on a
-# dedicated Docker network, per docs/release-validation-plan.md's Standing
-# checks row for finding #11) proved that version's ACL was a complete
-# no-op: ANY source got 200, including a source outside both allowed
-# CIDRs. Root cause: `return` is an ngx_http_rewrite_module directive that
-# runs in nginx's rewrite phase, which executes BEFORE the access phase
-# `allow`/`deny` are evaluated in -- confirmed in isolation on a stock,
-# unmodified nginx:1.27-alpine image (not specific to this project's own
-# build): a bare `deny all;` alone correctly returns 403; the identical
-# `deny all;` alongside a `return` in the same location returns 200
-# regardless of source. The fix (this file's current version) serves the
-# body via `alias` to a real file instead (entrypoint.sh's own "3a."
-# generates it at startup) -- `alias` uses ngx_http_static_module's
-# content-phase handler, which runs AFTER the access phase and was
-# confirmed live to enforce the ACL correctly in both directions. The two
-# tests below guard specifically against reintroducing the `return`+`deny`
-# shape in either file, since that is the one part of this regression a
-# static grep-based check CAN catch cheaply and reliably, even without a
-# live nginx harness.
+# IMPORTANT technical invariant this file cannot verify by itself, stated
+# explicitly rather than left implicit: a bare `return 200 "ok\n";` in the
+# same location as an `allow`/`deny` ACL makes that ACL a complete no-op.
+# `return` is an ngx_http_rewrite_module directive that runs in nginx's
+# rewrite phase, which executes BEFORE the access phase `allow`/`deny` are
+# evaluated in -- confirmed in isolation on a stock, unmodified
+# nginx:1.27-alpine image (not specific to this project's own build): a
+# bare `deny all;` alone correctly returns 403; the identical `deny all;`
+# alongside a `return` in the same location returns 200 regardless of
+# source, real client IP included. Serving the body via `alias` to a real
+# file instead (entrypoint.sh's own "3a." generates it at startup) avoids
+# this entirely: `alias` uses ngx_http_static_module's content-phase
+# handler, which runs AFTER the access phase, so the ACL is actually
+# enforced. The two tests below guard specifically against reintroducing
+# the `return`+`deny` shape in either file, since that is the one part of
+# this invariant a static grep-based check CAN catch cheaply and reliably,
+# even without a live nginx harness -- the ACL's actual runtime enforcement
+# still needs a real container (see docs/release-validation-plan.md's
+# Standing checks row for this).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
