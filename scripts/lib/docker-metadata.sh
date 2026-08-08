@@ -56,3 +56,33 @@ dmeta_short_sha() {
 
     printf '%s\n' "${full_sha:0:length}"
 }
+
+# Issue #1095 gap G1: the owner/repo segment of every ghcr.io/<repo>/<service>
+# path this workflow constructs in shell. GHCR (and the OCI distribution spec
+# generally) requires an all-lowercase repository path -- `github.repository`
+# itself is NOT guaranteed lowercase (confirmed live during this project's own
+# rename to LanCache-NG, when one GitHub Actions context still resolved the
+# old `wiki-mod/lancache-ng` casing while another had already picked up
+# `wiki-mod/LanCache-NG` -- see scripts/lib/validation-image-tag.sh's
+# vit_pr_staging_available() for the full incident). Rather than passing
+# `github.repository` into yet another `REPOSITORY: ${{ github.repository }}`
+# step env (as dozens of call sites previously did, each trusting it was
+# already correctly cased), every bash call site now reads this one function,
+# which lowercases $GITHUB_REPOSITORY itself. GITHUB_REPOSITORY is a default
+# environment variable GitHub Actions sets in every job/step automatically --
+# https://docs.github.com/en/actions/learn-github-actions/variables#default-environment-variables
+# -- so no per-step `env:` passthrough, and no cross-job `needs:`/output
+# wiring, is required to reach it.
+#
+# NON-EXPANSION NOTE: this function covers bash-reachable GHCR-path
+# construction only. A pure YAML expression context (a `subject-name:`,
+# `image-ref:`, or `images:` action input that cannot run bash) has no
+# equivalent -- GitHub Actions expressions have no toLower() function at all
+# (confirmed against GitHub's own expressions documentation) -- so those
+# sites still read the live github.repository context directly and are a
+# deliberately separate, tracked follow-up (see the introducing PR's Scope
+# Boundaries section), not silently left inconsistent with this function by
+# oversight.
+dmeta_ghcr_repo() {
+    printf '%s\n' "${GITHUB_REPOSITORY,,}"
+}

@@ -71,3 +71,20 @@ setup() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"must be a positive integer"* ]]
 }
+
+@test "dmeta_ghcr_repo: lowercases an already-lowercase GITHUB_REPOSITORY (no-op case)" {
+    export GITHUB_REPOSITORY="wiki-mod/lancache-ng"
+    run dmeta_ghcr_repo
+    [ "$status" -eq 0 ]
+    [ "$output" = "wiki-mod/lancache-ng" ]
+}
+
+@test "dmeta_ghcr_repo: lowercases a mixed-case GITHUB_REPOSITORY" {
+    # Reproduces the real 2026 rename incident this function exists to
+    # prevent a recurrence of: one GitHub Actions context resolved the old
+    # casing while another had already picked up the new one.
+    export GITHUB_REPOSITORY="wiki-mod/LanCache-NG"
+    run dmeta_ghcr_repo
+    [ "$status" -eq 0 ]
+    [ "$output" = "wiki-mod/lancache-ng" ]
+}
