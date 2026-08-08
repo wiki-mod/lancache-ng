@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # dnsmasq DHCP proxy entrypoint. Validates required env vars, renders
@@ -14,10 +15,78 @@ set -e
 # before dnsmasq starts.
 mkdir -p /var/log/lancache-dhcp-proxy
 
-if [ -f /data/lancache-ui-settings.env ]; then
-    # shellcheck disable=SC1091
-    . /data/lancache-ui-settings.env
-fi
+# _dhcp_proxy_source_ui_settings <settings_file>
+#
+# Reads the Admin-UI-persisted settings file (DHCP_MODE and every
+# DHCP_PROXY_*/DHCP_PROXY_PXE_* var below can be set there instead of, or in
+# addition to, the container's own environment) if it exists, WITHOUT
+# executing it as shell code; a missing file is not an error -- a fresh
+# install has none yet, and every var this function might set has its own
+# `: "${VAR:=}"` fallback further down.
+#
+# Deliberately does NOT `. <file>` (dot-source) the settings file, even
+# though an earlier version of this function did: `write_ui_settings_file`
+# (services/ui/src/routes/dhcp.rs) writes raw, unquoted `KEY=value` lines
+# with no shell-metacharacter escaping, and at least one value that can
+# legitimately end up there -- DHCP_PROXY_CUSTOM_OPTIONS, via the Admin
+# UI's own custom-DHCP-option form field -- is validated
+# (validate_custom_dhcp_option_data) only for length and the absence of an
+# embedded newline/CR, not for `$`, backticks, or any other shell
+# metacharacter. Confirmed by real execution: dot-sourcing a file
+# containing `DHCP_PROXY_CUSTOM_OPTIONS="x-$(id)"` actually runs `id` as a
+# live command during sourcing, before dnsmasq ever starts -- a real
+# command-injection path from an authenticated Admin UI session into this
+# container's startup. Parsing the file as plain KEY=value text instead
+# (a case-statement allowlist of the exact key names below, `printf -v` for
+# the assignment, never `eval` or a dot-source) closes that off entirely.
+# services/ntp/entrypoint.sh has the identical `. <file>` pattern against
+# this same settings file and needs the same fix -- left untouched here to
+# stay within this fix's own file/service scope; tracked in issue #849's
+# comment thread instead of silently fixed or silently dropped.
+_dhcp_proxy_source_ui_settings() {
+    local settings_file="$1"
+    [ -f "$settings_file" ] || return 0
+
+    local line key value
+    while IFS= read -r line || [ -n "$line" ]; do
+        case "$line" in
+            '' | '#'*) continue ;;
+        esac
+        case "$line" in
+            *=*)
+                key="${line%%=*}"
+                value="${line#*=}"
+                ;;
+            *)
+                continue
+                ;;
+        esac
+        # Strip one layer of matching quotes for an operator's own
+        # hand-edited file -- the Admin UI's own writer never quotes
+        # values. Never interpreted as shell syntax either way: this is a
+        # plain string trim, not a re-parse.
+        case "$value" in
+            \"*\") value="${value#\"}"; value="${value%\"}" ;;
+            \'*\') value="${value#\'}"; value="${value%\'}" ;;
+        esac
+        # Allowlist: only assign the variables this script actually reads
+        # further down. $key can only ever equal one of these exact
+        # literal strings after matching this case pattern (bash case
+        # matching here is a literal string comparison, not a regex/glob
+        # substitution into the pattern), so this cannot become a
+        # variable-name injection either -- an unrecognized key in the file
+        # (a future Admin-UI-only setting, a typo, or anything else) is
+        # silently ignored rather than exported as an arbitrary shell
+        # variable.
+        case "$key" in
+            DHCP_MODE | DHCP_RELAY_LOCAL_ADDR | DHCP_SUBNET_START | DHCP_DNS_PRIMARY | DHCP_DNS_SECONDARY | UPSTREAM_DHCP_IP | DHCP_NTP_SERVERS | DHCP_PROXY_INTERFACE | DHCP_PROXY_ROUTER | DHCP_PROXY_DOMAIN | DHCP_PROXY_BOOT_FILENAME | DHCP_PROXY_BOOT_SERVER | DHCP_PROXY_CUSTOM_OPTIONS | DHCP_PROXY_PXE_BOOT_SERVER | DHCP_PROXY_PXE_BOOT_FILENAME_BIOS | DHCP_PROXY_PXE_BOOT_FILENAME_UEFI)
+                printf -v "$key" '%s' "$value"
+                ;;
+        esac
+    done < "$settings_file"
+}
+
+_dhcp_proxy_source_ui_settings /data/lancache-ui-settings.env
 
 # DHCP_MODE (issue #844): this dnsmasq container serves two mutually-exclusive
 # sub-modes, selected by the Admin-UI-persisted DHCP_MODE (written into
@@ -435,10 +504,42 @@ fi
 # have no effect (dnsmasq --test does not reject one, it is just silently
 # ignored at runtime, which is worse than not offering the field at all).
 #
+# _dhcp_proxy_reject_embedded_newline <label> <value...>
+#
+# Shared by every render function below: prints a WARNING and returns 1 if
+# any <value> contains an embedded newline, which would otherwise inject an
+# extra, attacker- or fat-fingered-operator-controlled line into the
+# rendered dnsmasq.conf (every value here ultimately comes from an env var
+# or an Admin-UI-persisted settings file, either of which could contain
+# one). Written once and called from each render function instead of a
+# per-function copy of the same `case ... *$'\n'*)` check, so a future
+# fourth render function (or a fix to this one) cannot independently drift
+# out of sync the way _dhcp_proxy_render_optional_directives and
+# _dhcp_proxy_render_pxe_service_directives previously did -- the former's
+# own header comment claimed this exact protection while the function body
+# never actually implemented it for any of its values, only for the ones
+# routed through _dhcp_proxy_render_custom_options's numeric code check
+# (which itself only validated the code, never the value).
+_dhcp_proxy_reject_embedded_newline() {
+    local label="$1"
+    shift
+    local value
+    for value in "$@"; do
+        case "$value" in
+            *$'\n'*)
+                echo "WARNING: ${label} contains an embedded newline; no directive was rendered for it." >&2
+                return 1
+                ;;
+        esac
+    done
+    return 0
+}
+
 # Deliberately light validation: this function only rejects input shapes
 # that would either be silently ignored (making the operator think a value
 # is active when it is not, e.g. an out-of-range custom option code) or that
-# would corrupt the file (embedded newlines). Everything else is left to
+# would corrupt the file (embedded newlines, via
+# _dhcp_proxy_reject_embedded_newline above). Everything else is left to
 # `dnsmasq --test` immediately after this runs, which is the authoritative
 # fail-closed gate shared with every other value in this file -- a failure
 # there still goes through the existing known-good-snapshot rollback path
@@ -446,22 +547,22 @@ fi
 _dhcp_proxy_render_optional_directives() {
     local dest_conf="$1"
 
-    if [ -n "$DHCP_PROXY_INTERFACE" ]; then
+    if [ -n "$DHCP_PROXY_INTERFACE" ] && _dhcp_proxy_reject_embedded_newline "DHCP_PROXY_INTERFACE" "$DHCP_PROXY_INTERFACE"; then
         printf 'interface=%s\n' "$DHCP_PROXY_INTERFACE" >> "$dest_conf"
     fi
 
-    if [ -n "$DHCP_PROXY_ROUTER" ]; then
+    if [ -n "$DHCP_PROXY_ROUTER" ] && _dhcp_proxy_reject_embedded_newline "DHCP_PROXY_ROUTER" "$DHCP_PROXY_ROUTER"; then
         printf 'dhcp-option-pxe=3,%s\n' "$DHCP_PROXY_ROUTER" >> "$dest_conf"
     fi
 
-    if [ -n "$DHCP_NTP_SERVERS" ]; then
+    if [ -n "$DHCP_NTP_SERVERS" ] && _dhcp_proxy_reject_embedded_newline "DHCP_NTP_SERVERS" "$DHCP_NTP_SERVERS"; then
         # Option 42 (NTP servers). DHCP_NTP_SERVERS is a comma-separated IPv4
         # list, matching the Kea-mode field of the same name and the Admin
         # UI's shared validation for it.
         printf 'dhcp-option-pxe=42,%s\n' "$DHCP_NTP_SERVERS" >> "$dest_conf"
     fi
 
-    if [ -n "$DHCP_PROXY_DOMAIN" ]; then
+    if [ -n "$DHCP_PROXY_DOMAIN" ] && _dhcp_proxy_reject_embedded_newline "DHCP_PROXY_DOMAIN" "$DHCP_PROXY_DOMAIN"; then
         # Option 15 (domain name).
         printf 'dhcp-option-pxe=15,%s\n' "$DHCP_PROXY_DOMAIN" >> "$dest_conf"
     fi
@@ -474,8 +575,16 @@ _dhcp_proxy_render_optional_directives() {
         # dnsmasq as both a PXE proxy-DHCP server and a DHCP relay"), and it
         # is what the existing PXE tooling (scripts/dhcp-proxy-pxe-simulation.sh,
         # tools/pxe-client-probe) expects. Server-name is left empty; only
-        # filename and (optionally) server-address are operator-configurable here.
-        printf 'dhcp-boot=%s,,%s\n' "$DHCP_PROXY_BOOT_FILENAME" "$DHCP_PROXY_BOOT_SERVER" >> "$dest_conf"
+        # filename and (optionally) server-address are operator-configurable
+        # here. Confirmed against dnsmasq's own upstream documentation
+        # (--dhcp-boot's man-page text): "Server name and address are
+        # optional: if not provided, the name is left empty, and the address
+        # set to the address of the machine running dnsmasq" -- so an empty
+        # DHCP_PROXY_BOOT_SERVER here is not a bug, it deliberately falls
+        # through to that documented dnsmasq default.
+        if _dhcp_proxy_reject_embedded_newline "DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER" "$DHCP_PROXY_BOOT_FILENAME" "$DHCP_PROXY_BOOT_SERVER"; then
+            printf 'dhcp-boot=%s,,%s\n' "$DHCP_PROXY_BOOT_FILENAME" "$DHCP_PROXY_BOOT_SERVER" >> "$dest_conf"
+        fi
     elif [ -n "$DHCP_PROXY_BOOT_SERVER" ]; then
         echo "WARNING: DHCP_PROXY_BOOT_SERVER is set without DHCP_PROXY_BOOT_FILENAME; a boot server address alone is not meaningful to PXE clients, so no dhcp-boot line was rendered." >&2
     fi
@@ -496,7 +605,21 @@ _dhcp_proxy_render_optional_directives() {
 # back to a specific setting. The DHCP option code range (1-254) is checked
 # here too: an out-of-range numeric code passes `dnsmasq --test` but is
 # silently never sent (confirmed live), which would otherwise look like a
-# working config that quietly does nothing.
+# working config that quietly does nothing. Codes 3 (router), 6 (DNS
+# servers), 15 (domain name), and 42 (NTP servers) are also rejected: 6 is
+# always rendered unconditionally by dnsmasq.conf.template regardless of any
+# other setting, and 3/15/42 are each rendered by
+# _dhcp_proxy_render_optional_directives above whenever the matching
+# DHCP_PROXY_ROUTER/DHCP_PROXY_DOMAIN/DHCP_NTP_SERVERS var is set -- routing
+# any of these four through the free-form custom-option list instead would
+# silently produce two `dhcp-option-pxe=<code>,...` lines for the same code
+# in the rendered config, with no warning telling the operator which one (if
+# either) dnsmasq actually honors. The Admin UI's own
+# parse_custom_options_form (services/ui/src/routes/dhcp.rs) already blocks
+# these same four codes for dnsmasq-proxy's custom-options field for the
+# identical reason; this is the entrypoint-side backstop for anyone who
+# edits DHCP_PROXY_CUSTOM_OPTIONS directly (env file, docker-compose
+# override) rather than through the Admin UI.
 _dhcp_proxy_render_custom_options() {
     local dest_conf="$1" spec="$2"
     local -a entries=()
@@ -539,6 +662,51 @@ _dhcp_proxy_render_custom_options() {
             continue
         fi
 
+        case "$code" in
+            6)
+                # Always collides: dnsmasq.conf.template renders
+                # dhcp-option-pxe=6 unconditionally, independent of any var
+                # this file reads.
+                echo "WARNING: ignoring DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}': option code 6 (DNS servers) always collides with this service's own dhcp-option-pxe=6 (DHCP_DNS_PRIMARY/DHCP_DNS_SECONDARY), which is not configurable here." >&2
+                continue
+                ;;
+            3)
+                if [ -n "$DHCP_PROXY_ROUTER" ]; then
+                    echo "WARNING: ignoring DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}': option code 3 (router) collides with DHCP_PROXY_ROUTER, which is already set. Unset DHCP_PROXY_ROUTER or drop this custom entry." >&2
+                    continue
+                fi
+                ;;
+            15)
+                if [ -n "$DHCP_PROXY_DOMAIN" ]; then
+                    echo "WARNING: ignoring DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}': option code 15 (domain name) collides with DHCP_PROXY_DOMAIN, which is already set. Unset DHCP_PROXY_DOMAIN or drop this custom entry." >&2
+                    continue
+                fi
+                ;;
+            42)
+                if [ -n "$DHCP_NTP_SERVERS" ]; then
+                    echo "WARNING: ignoring DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}': option code 42 (NTP servers) collides with DHCP_NTP_SERVERS, which is already set. Unset DHCP_NTP_SERVERS or drop this custom entry." >&2
+                    continue
+                fi
+                ;;
+        esac
+
+        # Defense-in-depth, not a currently-reachable path: confirmed by
+        # real execution that `IFS=';' read -r -a entries <<< "$spec"` above
+        # already stops at the FIRST raw newline anywhere in $spec (read's
+        # line-terminator detection is independent of IFS, which only
+        # controls word-splitting within the line it does read), so
+        # $value can never actually carry an embedded newline through this
+        # code path today -- anything after such a newline in
+        # DHCP_PROXY_CUSTOM_OPTIONS is silently dropped before this loop
+        # ever starts, not injected into the rendered file. This check
+        # exists so a future change to how $spec is split (e.g. switching
+        # away from `read` for some other reason) cannot silently
+        # reintroduce the injection this same guard already prevents for
+        # every other value in this file.
+        if ! _dhcp_proxy_reject_embedded_newline "DHCP_PROXY_CUSTOM_OPTIONS entry '${entry}'" "$value"; then
+            continue
+        fi
+
         printf 'dhcp-option-pxe=%s,%s\n' "$code" "$value" >> "$dest_conf"
     done
 }
@@ -573,15 +741,13 @@ _dhcp_proxy_render_pxe_service_directives() {
         return 0
     fi
 
-    # Lightweight validation matching _dhcp_proxy_render_custom_options'
-    # own rationale: reject only what would corrupt the rendered file
-    # (embedded newlines), everything else is left to `dnsmasq --test`.
-    case "$DHCP_PROXY_PXE_BOOT_SERVER$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" in
-        *$'\n'*)
-            echo "WARNING: one of DHCP_PROXY_PXE_BOOT_SERVER/DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/DHCP_PROXY_PXE_BOOT_FILENAME_UEFI contains an embedded newline; no PXE boot-pointer was rendered." >&2
-            return 0
-            ;;
-    esac
+    # Lightweight validation matching every other render function's own
+    # rationale: reject only what would corrupt the rendered file (embedded
+    # newlines, via the shared _dhcp_proxy_reject_embedded_newline above),
+    # everything else is left to `dnsmasq --test`.
+    if ! _dhcp_proxy_reject_embedded_newline "DHCP_PROXY_PXE_BOOT_SERVER/DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"; then
+        return 0
+    fi
 
     local have_bios=0 have_uefi=0
     [ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ] && have_bios=1
