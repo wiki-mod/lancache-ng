@@ -797,10 +797,11 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
 // (64997 + ceil(64997 / 255) = 64997 + 255 = 65252, and one byte more,
 // 64998, needs the same 255 prefixes for 65253 -- one over). 64997 is
 // therefore the real maximum content length this validator can accept for
-// any allowed record name, not 65535 and not the earlier 65279 (which
-// only accounted for RDLENGTH's own ceiling, not the surrounding message
-// that must also carry this record home). Deliberately NOT the 255-byte
-// figure some callers might expect: this module's own existing test
+// any allowed record name, rather than the 65279-byte content bound that
+// accounts only for RDLENGTH and its TXT chunk prefixes while omitting the
+// surrounding message that must also carry this record home. Deliberately
+// not the 255-byte figure some callers might expect: this module's own
+// existing test
 // (validates_supported_lan_record_edge_cases) already asserts a 512-byte
 // TXT content is valid, which is correct given PowerDNS's own documented
 // auto-chunking behavior above.
