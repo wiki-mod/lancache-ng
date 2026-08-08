@@ -1,0 +1,57 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Resolve simulation build-tools
+description: Select exact locked tooling when present, otherwise preserve the existing PR-staging/published build-tools policy.
+inputs:
+  locked-image:
+    description: Digest-qualified build-tools image supplied by an active stack lock.
+    required: false
+    default: ""
+  pr-staging-available:
+    required: false
+    default: "false"
+  build-tools-touched:
+    required: false
+    default: "false"
+  image-tag:
+    required: true
+  repository:
+    required: true
+  require-published:
+    description: Require an already-published selector result when no lock/PR build-tools image applies.
+    required: false
+    default: "true"
+outputs:
+  image:
+    description: Selected build-tools image reference.
+    value: ${{ steps.resolve.outputs.image }}
+runs:
+  using: composite
+  steps:
+    - id: resolve
+      shell: bash
+      env:
+        LOCKED_IMAGE: ${{ inputs.locked-image }}
+        PR_STAGING_AVAILABLE: ${{ inputs.pr-staging-available }}
+        BUILD_TOOLS_TOUCHED: ${{ inputs.build-tools-touched }}
+        IMAGE_TAG: ${{ inputs.image-tag }}
+        REPOSITORY: ${{ inputs.repository }}
+        REQUIRE_PUBLISHED: ${{ inputs.require-published }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$LOCKED_IMAGE" ]]; then
+          [[ "$LOCKED_IMAGE" =~ ^ghcr\.io/wiki-mod/lancache-ng/build-tools@sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::Locked build-tools reference is not the expected digest-qualified image: $LOCKED_IMAGE" >&2
+            exit 1
+          }
+          image="$LOCKED_IMAGE"
+          echo "::notice::Using stack-lock build-tools identity $image."
+        elif [[ "$PR_STAGING_AVAILABLE" == true && "$BUILD_TOOLS_TOUCHED" == true ]]; then
+          image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
+          echo "::notice::Using the confirmed PR-scoped build-tools image $image."
+        elif [[ "$REQUIRE_PUBLISHED" == true ]]; then
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+        else
+          image="$(bash scripts/select-build-tools-image.sh)"
+        fi
+        printf 'image=%s\n' "$image" >> "$GITHUB_OUTPUT"
