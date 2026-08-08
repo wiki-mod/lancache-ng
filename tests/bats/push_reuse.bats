@@ -134,6 +134,36 @@ STUB
     [ "$result" = "false" ]
 }
 
+@test "push_reuse_decide: reuse=false when classify-image-impact.sh reports a build-affecting workflow change in the full revision span, even though this service's own key is unchanged (#1095 F-21)" {
+    # The revision-span gap two Codex review threads on PR #1378 found: a
+    # caller's own before..sha diff (build-push.yml's decide_one()) only
+    # sees the immediately preceding push, so it cannot detect a
+    # build-affecting workflow/composite-action change that landed several
+    # pushes earlier, before the channel's own last refresh. This service's
+    # own key (ntp=false) alone must NOT be enough to declare reuse safe --
+    # the full-span "workflow" key from the SAME classify_output must also
+    # be checked.
+    revision_stub "$c1"
+    classify_stub $'ntp=false\nworkflow=true'
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
+@test "push_reuse_decide: reuse=false (fail closed) when the classify output is missing the workflow key entirely" {
+    # Mirrors the existing "missing this service's key entirely" test above,
+    # for the workflow key specifically: a malformed/unexpected classify
+    # output must not be silently treated as "no workflow change" just
+    # because grep found nothing to contradict it.
+    revision_stub "$c1"
+    classify_stub $'ntp=false'
+
+    result="$(push_reuse_decide "ntp" "ghcr.io/example/ntp:nightly" "$c2" 2>/dev/null)"
+
+    [ "$result" = "false" ]
+}
+
 @test "push_reuse_decide: reuse=false (fail closed) when classify-image-impact.sh itself fails" {
     revision_stub "$c1"
     classify_stub "FAIL"
