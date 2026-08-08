@@ -473,11 +473,8 @@ jobs:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
-      - name: Run real NTP CAP_SYS_TIME simulation against this candidate tag
-        env:
-          REPOSITORY: ${{ github.repository }}
-          IMAGE_TAG: ${{ needs.stack-lock.outputs.candidate_tag }}
-        run: timeout --kill-after=30 900 bash scripts/ntp-cap-sys-time-simulation.sh
+      - name: Run real NTP CAP_SYS_TIME simulation against exact locked digest
+        run: timeout --kill-after=30 900 bash scripts/ci-run-locked-ntp-simulation.sh stack-lock/stack-lock.json
       - name: Prove candidate tags still match the frozen lock after NTP simulation
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -520,7 +517,7 @@ jobs:
           digest="$(jq -r '.tooling["build-tools"].digest' stack-lock/stack-lock.json)"
           [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid build-tools digest in stack lock"; exit 1; }
           printf 'BUILD_TOOLS_IMAGE=%s@%s\n' "$image" "$digest" >> "$GITHUB_ENV"
-      - name: Run complete quickstart logging simulation on candidate runtime set
+      - name: Run complete quickstart logging simulation on exact locked runtime set
         env:
           SETUP_SIM_IMAGE_CHANNEL: pinned
           SETUP_SIM_IMAGE_TAG: ${{ needs.stack-lock.outputs.candidate_tag }}
@@ -538,7 +535,7 @@ jobs:
             -e GITHUB_RUN_ID \
             -e GITHUB_RUN_ATTEMPT \
             "$BUILD_TOOLS_IMAGE" \
-            timeout --kill-after=30 2400 bash scripts/syslog-forwarding-simulation.sh
+            timeout --kill-after=30 2400 bash scripts/ci-run-locked-quickstart-simulation.sh stack-lock/stack-lock.json
       - name: Prove candidate tags still match the frozen lock after quickstart simulation
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
