@@ -14,6 +14,32 @@ catalog="$(bash "$repo_root/scripts/query-stack-images.sh" all)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 ci_ai_require_sha "$source_sha"
 
+# Resolve deliberately mutable external image tags exactly once for this plan.
+# A workflow may provide pre-resolved values, but the planner can derive them
+# itself so every matrix row uses the same frozen identities. The stable
+# build-tools channel is selected only when the candidate source is exactly the
+# fetched master tip; PR merge commits and current_dev resolve through nightly.
+if [[ -z "${CI_BOOTSTRAP_BUILD_TOOLS_IMAGE:-}" ]]; then
+    build_tools_channel=nightly
+    if master_sha="$(git -C "$repo_root" rev-parse refs/remotes/origin/master 2>/dev/null)" \
+        && [[ "$source_sha" == "$master_sha" ]]; then
+        build_tools_channel=latest
+    fi
+    CI_BOOTSTRAP_BUILD_TOOLS_IMAGE="$(
+        bash "$repo_root/scripts/ci-resolve-image-ref.sh" \
+            "ghcr.io/wiki-mod/lancache-ng/build-tools:${build_tools_channel}"
+    )"
+    export CI_BOOTSTRAP_BUILD_TOOLS_IMAGE
+fi
+if [[ -z "${CI_GOLANG_BASE_IMAGE:-}" ]]; then
+    CI_GOLANG_BASE_IMAGE="$(bash "$repo_root/scripts/ci-resolve-image-ref.sh" golang:latest)"
+    export CI_GOLANG_BASE_IMAGE
+fi
+if [[ -z "${CI_RUST_BASE_IMAGE:-}" ]]; then
+    CI_RUST_BASE_IMAGE="$(bash "$repo_root/scripts/ci-resolve-image-ref.sh" rust:latest)"
+    export CI_RUST_BASE_IMAGE
+fi
+
 classification=""
 baseline_usable=false
 baseline_sha=""
