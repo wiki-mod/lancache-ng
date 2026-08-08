@@ -83,13 +83,22 @@ ci_ai_validate_stack_lock() {
     ' "$file" >/dev/null || ci_ai_fail "invalid stack lock: $file"
 }
 
+# Structural acceptance schema. A release pointer and a reusable branch
+# acceptance share the same gate set, but they do not share the same trust
+# policy. In particular, only candidate acceptances from protected product
+# branches may be reused/promoted as a baseline. Keep that stronger rule in
+# ci_ai_validate_reusable_acceptance rather than making release records pretend
+# they were signed from a branch ref they did not use.
 ci_ai_validate_acceptance() {
     local file="$1"
     jq -e '
       .schema == "stack-acceptance/v1"
       and .accepted == true
       and (.source_sha | test("^[0-9a-f]{40}$"))
-      and (.source_ref | type == "string" and test("^refs/(heads|tags)/[A-Za-z0-9._/-]+$"))
+      and (
+        (.source_ref == null)
+        or (.source_ref | type == "string" and test("^refs/(heads|tags)/[A-Za-z0-9._/-]+$"))
+      )
       and (.stack_lock_sha256 | test("^[0-9a-f]{64}$"))
       and (.accepted_tag | type == "string" and startswith("accepted-v2-"))
       and .gates.identity_complete == true
@@ -102,6 +111,15 @@ ci_ai_validate_acceptance() {
       and .gates.supplemental_full_setup == true
       and .gates.publication_policy == true
     ' "$file" >/dev/null || ci_ai_fail "invalid acceptance record: $file"
+}
+
+ci_ai_validate_reusable_acceptance() {
+    local file="$1"
+    ci_ai_validate_acceptance "$file" || return 1
+    jq -e '
+      .source_ref == "refs/heads/current_dev"
+      or .source_ref == "refs/heads/master"
+    ' "$file" >/dev/null || ci_ai_fail "acceptance is not reusable from a protected product branch: $file"
 }
 
 ci_ai_manifest_json() {
