@@ -213,9 +213,7 @@ fn wait_with_timeout(
                 std::thread::sleep(std::time::Duration::from_millis(20));
             }
             Err(e) => {
-                eprintln!(
-                    "[known-good-snapshot][dns][WARNING] failed to poll {description}: {e}"
-                );
+                eprintln!("[known-good-snapshot][dns][WARNING] failed to poll {description}: {e}");
                 return false;
             }
         }
@@ -890,7 +888,8 @@ mod tests {
         // our own copy of the pid (taken above) so this test can still
         // verify the process is really gone afterward, since
         // wait_with_timeout() consumes `child` by value.
-        let timed_out_result = wait_with_timeout(child, std::time::Duration::from_millis(100), "test");
+        let timed_out_result =
+            wait_with_timeout(child, std::time::Duration::from_millis(100), "test");
         let elapsed = started.elapsed();
 
         assert!(!timed_out_result);
@@ -913,7 +912,10 @@ mod tests {
                 .status()
                 .map(|s| s.success())
                 .unwrap_or(false);
-            assert!(!still_alive, "child pid {pid} is still running after wait_with_timeout was supposed to kill it");
+            assert!(
+                !still_alive,
+                "child pid {pid} is still running after wait_with_timeout was supposed to kill it"
+            );
         }
     }
 }

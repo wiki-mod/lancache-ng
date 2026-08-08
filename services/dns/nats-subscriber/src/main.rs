@@ -1215,7 +1215,11 @@ mod tests {
         let update = dns_record_to_zone_update(&record).expect("must succeed");
         let rrset = &update.rrsets[0];
         assert_eq!(rrset.changetype, Some("REPLACE".to_string()));
-        assert_eq!(rrset.ttl, Some(300), "a REPLACE rrset must always carry a real TTL -- PowerDNS documents it as a required field, not optional-for-REPLACE");
+        assert_eq!(
+            rrset.ttl,
+            Some(300),
+            "a REPLACE rrset must always carry a real TTL -- PowerDNS documents it as a required field, not optional-for-REPLACE"
+        );
         assert!(rrset.records.is_some());
     }
 
