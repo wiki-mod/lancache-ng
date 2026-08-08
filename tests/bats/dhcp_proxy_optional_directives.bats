@@ -155,6 +155,7 @@ setup() {
     # check (which only validated the code, never the value). Every value
     # below now goes through the shared _dhcp_proxy_reject_embedded_newline
     # helper.
+    # shellcheck disable=SC2034 # see comment above
     DHCP_PROXY_INTERFACE=$'eth0\ninterface=evil0'
 
     run _dhcp_proxy_render_optional_directives "$dest_conf"
@@ -186,6 +187,7 @@ setup() {
 @test "an embedded newline in DHCP_PROXY_BOOT_FILENAME or DHCP_PROXY_BOOT_SERVER is rejected and renders no dhcp-boot line" {
     # shellcheck disable=SC2034 # see comment above
     DHCP_PROXY_BOOT_FILENAME="pxelinux.0"
+    # shellcheck disable=SC2034 # see comment above
     DHCP_PROXY_BOOT_SERVER=$'10.0.0.5\ndhcp-boot=injected,,evil'
 
     run _dhcp_proxy_render_optional_directives "$dest_conf"

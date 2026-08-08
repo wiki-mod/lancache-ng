@@ -138,6 +138,7 @@ setup() {
     # function's own guard now goes through the shared
     # _dhcp_proxy_reject_embedded_newline helper, same as every other
     # render function in this file.
+    # shellcheck disable=SC2034 # see comment above
     DHCP_PROXY_PXE_BOOT_SERVER=$'10.0.0.5\ndhcp-boot=injected,,evil'
     # shellcheck disable=SC2034 # see comment above
     DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="bios.0"
