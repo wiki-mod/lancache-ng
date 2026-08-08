@@ -61,6 +61,7 @@ setup() {
 # the fix adds exactly one "" entry, not a second one duplicating (and
 # potentially conflicting with) strict mode's own default-driven safety.
 @test "the empty-SNI key appears exactly once regardless of mode" {
+    # shellcheck disable=SC2034 # read by _render_stream_backend_map(), sourced dynamically via load_proxy_stream_backend_map_helpers() -- invisible to shellcheck's static analysis
     PROXY_SECURITY_MODE="lazy"
     run _render_stream_backend_map
     [ "$status" -eq 0 ]

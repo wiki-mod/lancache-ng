@@ -54,6 +54,7 @@ setup() {
 }
 
 @test "deny all always comes after every allow line, never before" {
+    # shellcheck disable=SC2034 # read by _render_stream_client_acl(), sourced dynamically via load_proxy_stream_client_acl_helpers() -- invisible to shellcheck's static analysis
     PROXY_ALLOWED_CLIENT_CIDRS="192.168.1.0/24 10.0.0.0/8"
     run _render_stream_client_acl
     [ "$status" -eq 0 ]
