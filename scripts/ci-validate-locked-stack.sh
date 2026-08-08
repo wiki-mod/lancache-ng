@@ -21,7 +21,7 @@ fi
 
 work_dir="$(mktemp -d)"
 rendered="$work_dir/locked-compose.yml"
-"$repo_root/scripts/ci-render-locked-compose.sh" "$lock" "$rendered"
+bash "$repo_root/scripts/ci-render-locked-compose.sh" "$lock" "$rendered"
 compose=(docker compose -f "$rendered")
 project_name="${COMPOSE_PROJECT_NAME:?COMPOSE_PROJECT_NAME is required from validation subnet reservation}"
 
