@@ -37,15 +37,14 @@
 # collide with anything. This file is SOURCED by other scripts (see the
 # header above) -- `source` runs in the CALLING script's own shell, so a
 # bare `script_dir=...` here would silently overwrite an identically-named
-# variable already in scope there. That real regression shipped once already
-# in this exact PR: scripts/plan-deep-validation.sh sets its own `script_dir`
-# at its own top level, then sources this file -- a `script_dir=` assignment
-# here clobbered it, so plan-deep-validation.sh's later
-# `$script_dir/detect-full-setup-changes.sh` resolved to
-# `scripts/lib/detect-full-setup-changes.sh` (this file's own directory)
-# instead of `scripts/detect-full-setup-changes.sh` (the caller's directory),
-# failing with "No such file or directory" on a real PR run. Resolving the
-# path inline, with no intermediate variable at all, avoids the collision
+# variable already in scope there: both of this file's real callers
+# (scripts/plan-deep-validation.sh, scripts/ensure-pr-staging-images.sh)
+# set their own `script_dir` at their own top level before sourcing this
+# file, and depend on that variable retaining ITS OWN value afterward (e.g.
+# plan-deep-validation.sh's later `$script_dir/detect-full-setup-
+# changes.sh` call). Resolving the path inline, with no intermediate
+# variable at all, avoids that collision entirely rather than picking a
+# different-but-still-guessable variable name.
 # entirely rather than picking a "probably unique enough" variable name.
 # shellcheck source=scripts/lib/docker-metadata.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"

@@ -7,15 +7,15 @@
 # derivation (scripts/lib/docker-metadata.sh's dmeta_short_sha(), which in
 # turn reads DOCKER_METADATA_SHORT_SHA_LENGTH) instead of independently
 # hardcoding the truncation length as a literal `::7}`/`:0:7`-style bash
-# substring slice. Before dmeta_short_sha() existed, this exact hardcode was
-# found independently, at the identical length, in 19 places across five
-# files (.github/workflows/build-push.yml x8, .github/workflows/
-# build-tools.yml x3, .github/workflows/build-push-hosted-fallback.yml x1,
+# substring slice. This exact hardcode was found independently, at the
+# identical length, in 20 places across five files
+# (.github/workflows/build-push.yml x8, .github/workflows/build-tools.yml
+# x3, .github/workflows/build-push-hosted-fallback.yml x1,
 # scripts/lib/validation-image-tag.sh x1, scripts/lib/staging-ancestor-
-# fallback.sh x6) -- every one computing the same value the same way, with
+# fallback.sh x7) -- every one computing the same value the same way, with
 # no single site any of them actually read, so a future change to that
-# length would have needed to be found and edited in sync by hand at every
-# one of them, or silently diverge.
+# length would need to be found and edited in sync by hand at every one of
+# them, or silently diverge.
 #
 # Detection is deliberately narrow, matching the real pattern found at every
 # confirmed instance rather than a broad ban on the bash substring-slice
