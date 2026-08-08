@@ -276,20 +276,134 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
-# Least-privilege hardening (issue #1358), leg 3: the final chronyd exec
-# must pass `-F 1` (chrony's own strict seccomp allow-list level, per
-# chrony-project.org's chronyd(8) docs) -- only added after live
-# confirmation that this image's Alpine chrony-nts build actually reports
-# `+SCFILTER` in `chronyd -v`'s feature list (see services/ntp/Dockerfile's
-# comment), and that chronyd still starts/syncs/serves normally with it
-# (verified live on a real runner; see the PR implementing this issue for
-# the full session, and `scripts/ntp-cap-sys-time-simulation.sh`'s
-# GitHub-hosted CI job for the real clock-stepping-under-seccomp proof)
-# rather than being killed on its first disallowed syscall, which is the
-# failure mode an over-strict or unsupported seccomp level would produce
-# instead.
-@test "the final chronyd exec passes -F 1 (seccomp strict allow-list)" {
-    run grep -E '^exec chronyd .* -F 1$' "$repo_root/services/ntp/entrypoint.sh"
+# Least-privilege hardening (issue #1358), leg 3 -- REVISED (issue #1296):
+# the original test here asserted a hardcoded `-F 1` (chrony's strict
+# seccomp allow-list level). Real verification on a genuine non-LXC VM
+# found `-F 1` deterministically crashes chronyd there (a real kernel-
+# version-dependent ptrace/seccomp interaction on the pidfile-open
+# syscall, unrelated to and masquerading as the CAP_SYS_TIME issue below --
+# see entrypoint.sh's own comment on this exact line for the full
+# incident). Downgraded to `-F 2` (chrony's own documented looser level)
+# and re-verified for real: 5/5 clean starts, 0 restarts, genuine
+# `Stratum`/`Leap status: Normal` sync. `NTP_CHRONYD_FLAGS` is now an array
+# built up across two code paths (the unconditional base flag here, plus a
+# conditional `-x` appended by the CAP_SYS_TIME-degradation branch below),
+# so this checks the array's initial value rather than a single fixed exec
+# line.
+@test "the chronyd flags array starts with -F 2 (seccomp looser named-block level)" {
+    run grep -E '^NTP_CHRONYD_FLAGS=\(-F 2\)$' "$repo_root/services/ntp/entrypoint.sh"
+    [ "$status" -eq 0 ]
+}
+
+# CAP_SYS_TIME graceful degradation (issue #1296): real, executed unit
+# tests for clock_control_available() in isolation, using a fake `adjtimex`
+# on PATH instead of touching the real kernel time variables (this test
+# suite must not actually call adjtimex() -- that would be both
+# environment-dependent, since bats itself might run somewhere this write
+# is denied for unrelated reasons, and a real, if tiny, side effect on
+# whatever host runs bats). Fakes both the read (no args) and write (-t)
+# invocations, matching the function's real two-step usage -- an earlier
+# version of this function/test pair used `date -s`, which this project's
+# own live verification found probes the WRONG syscall (see
+# clock_control_available's own comment in entrypoint.sh for the real
+# incident: `date -s` succeeds on a host where chronyd's actual `adjtimex`
+# call still fails).
+@test "clock_control_available succeeds when adjtimex -t succeeds (real CAP_SYS_TIME)" {
+    fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+    mkdir -p "$fake_bin"
+    cat > "$fake_bin/adjtimex" <<'EOF'
+#!/bin/sh
+# Checks all args (not just "$1") for "-t" -- the production call is
+# `adjtimex -q -t <tick>`, so "-t" is "$2", not "$1".
+case " $* " in
+    *" -t "*) exit 0 ;;
+    *)        echo "    -t  tick:         10000 us" ;;
+esac
+EOF
+    chmod +x "$fake_bin/adjtimex"
+
+    PATH="$fake_bin:$PATH" run clock_control_available
+    [ "$status" -eq 0 ]
+}
+
+@test "clock_control_available fails when adjtimex -t is denied (nested/LXC host, issue #1296)" {
+    fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+    mkdir -p "$fake_bin"
+    cat > "$fake_bin/adjtimex" <<'EOF'
+#!/bin/sh
+# Reproduces this project's own real, live-confirmed failure mode: a
+# genuine no-op `adjtimex -t <current tick>` write is denied with a
+# non-zero exit when CAP_SYS_TIME is requested but not actually honored by
+# a nested container host -- the read (no args) still succeeds, since mode
+# 0 needs no capability on any kernel. Checks all args (not just "$1") for
+# "-t", matching real busybox adjtimex's own order-independent flag
+# parsing -- the production call is `adjtimex -q -t <tick>`, so "-t" is
+# "$2", not "$1".
+case " $* " in
+    *" -t "*) echo "adjtimex: : Operation not permitted" >&2; exit 1 ;;
+    *)        echo "    -t  tick:         10000 us" ;;
+esac
+EOF
+    chmod +x "$fake_bin/adjtimex"
+
+    PATH="$fake_bin:$PATH" run clock_control_available
+    [ "$status" -ne 0 ]
+}
+
+@test "clock_control_available fails closed if adjtimex's read output has no parseable tick line" {
+    fake_bin="$BATS_TEST_TMPDIR/fake-bin"
+    mkdir -p "$fake_bin"
+    cat > "$fake_bin/adjtimex" <<'EOF'
+#!/bin/sh
+# A read that returns nothing usable (e.g. a future busybox reformats its
+# output) must not be silently treated as "capability available" -- that
+# would be the unsafe direction to guess wrong in (a real crash-loop is
+# recoverable/visible; a false "available" that then hits the real
+# adjtimex crash is exactly the bug this function exists to prevent).
+exit 0
+EOF
+    chmod +x "$fake_bin/adjtimex"
+
+    PATH="$fake_bin:$PATH" run clock_control_available
+    [ "$status" -ne 0 ]
+    # This must be distinguishable in logs from the expected/documented
+    # nested-LXC case (the other two clock_control_available tests above) --
+    # a loud, distinct ERROR, not folded into the same message, since an
+    # unparseable probe output means something unexpected broke, not that
+    # this project's already-known restriction applies.
+    [[ "$output" == *"ERROR:"* ]]
+    [[ "$output" == *"NOT the expected nested/LXC restriction"* ]]
+}
+
+@test "clock_control_available fails closed and logs loudly if adjtimex is entirely missing" {
+    # An empty PATH (no fake adjtimex provided at all) simulates a future
+    # base-image change that drops the busybox applet this probe depends on
+    # -- the `command -v` guard must catch this before ever invoking a
+    # nonexistent command, with its own distinct loud error.
+    fake_bin="$BATS_TEST_TMPDIR/empty-bin"
+    mkdir -p "$fake_bin"
+
+    PATH="$fake_bin" run clock_control_available
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"ERROR:"* ]]
+    [[ "$output" == *"missing from this image"* ]]
+    [[ "$output" == *"NOT the expected nested/LXC restriction"* ]]
+}
+
+# Structural check (top-level branch logic, not a function this file's
+# extraction mechanism can load in isolation -- same rationale as the
+# pidfile-directory test below): the degraded-mode branch must actually
+# append `-x` to the real flags array chronyd is exec'd with, not just log
+# a warning and otherwise proceed identically. A silent no-op fallback
+# would still crash-loop exactly as before, defeating the entire point of
+# detecting the restriction in the first place.
+@test "the CAP_SYS_TIME-degraded branch appends -x to NTP_CHRONYD_FLAGS" {
+    run grep -E '^\s*NTP_CHRONYD_FLAGS\+=\(-x\)$' "$repo_root/services/ntp/entrypoint.sh"
+    [ "$status" -eq 0 ]
+}
+
+@test "the final chronyd exec uses the NTP_CHRONYD_FLAGS array, not a fixed flag list" {
+    run grep -E '^exec chronyd -n -f "\$NTP_RUNTIME_CONF" "\$\{NTP_CHRONYD_FLAGS\[@\]\}"$' "$repo_root/services/ntp/entrypoint.sh"
     [ "$status" -eq 0 ]
 }
 

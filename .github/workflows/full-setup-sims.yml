@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Reusable workflow: the ten shared full-setup validation/simulation jobs that
 # used to be maintained as two independently-drifting copies in
@@ -668,8 +669,13 @@ jobs:
     # Real DHCP lease flow against a Kea container built from THIS checkout's
     # services/dhcp source -- so it already tests the PR's own DHCP code
     # directly and needs no staging tag. This is where dhcp coverage lands in
-    # the automatic gate (it was absent from the shallow check). dhcp-proxy
-    # still has no deep job (tracked in #705) and so is still uncovered here.
+    # the automatic gate (it was absent from the shallow check). dhcp-proxy's
+    # own real, live-Docker PXE simulation now exists too
+    # (scripts/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
+    # currently runs only as a manual-dispatch job in full-setup-validate.yml,
+    # not as part of THIS automatic per-PR gate -- wiring it in here (mirroring
+    # this job's own shape) is a real, separate CI-trigger-behavior change,
+    # not a stale-comment fix, and is intentionally left for its own pass.
     name: DHCP Kea lease-flow simulation
     needs: [setup-cli-simulation]
     if: always() && inputs.should_run == 'true'
