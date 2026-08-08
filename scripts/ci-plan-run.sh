@@ -6,7 +6,8 @@
 # an accepted baseline lock exists, the baseline source is an ancestor of the
 # candidate source, classify-image-impact proves that service unchanged, the
 # source-controlled Docker inputs have the same source fingerprint, and the
-# accepted lock contains both required child digests. Any uncertainty builds.
+# accepted lock contains the complete index plus both required child digests.
+# Any uncertainty builds.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -44,6 +45,7 @@ while IFS= read -r entry; do
     ci_ai_require_digest "$source_fingerprint"
 
     mode=build
+    reused_index_digest=""
     if [[ "$baseline_usable" == true ]]; then
         key="${service//-/_}"
         changed="$(awk -F= -v key="$key" '$1 == key { print $2; exit }' <<<"$classification")"
@@ -60,6 +62,8 @@ while IFS= read -r entry; do
                 and .[$scope][$service].platforms["linux/amd64"]
                 and .[$scope][$service].platforms["linux/arm64"]
               ' "$baseline_lock" >/dev/null; then
+                reused_index_digest="$(jq -r --arg scope "$entry_scope" --arg service "$service" '.[$scope][$service].digest' "$baseline_lock")"
+                ci_ai_require_digest "$reused_index_digest"
                 mode=reuse
             fi
         elif [[ "$changed" == false && -n "$baseline_fingerprint" ]]; then
@@ -80,6 +84,7 @@ while IFS= read -r entry; do
             reused_digest="$(jq -r --arg scope "$entry_scope" --arg service "$service" --arg platform "$platform" '.[$scope][$service].platforms[$platform]' "$baseline_lock")"
             artifact_source_sha="$(jq -r --arg scope "$entry_scope" --arg service "$service" '.[$scope][$service].artifact_source_sha' "$baseline_lock")"
             ci_ai_require_digest "$reused_digest"
+            ci_ai_require_digest "$reused_index_digest"
             ci_ai_require_sha "$artifact_source_sha"
         fi
         row="$(
@@ -94,6 +99,7 @@ while IFS= read -r entry; do
             --arg arch "$arch" \
             --arg mode "$mode" \
             --arg reused_digest "$reused_digest" \
+            --arg reused_index_digest "$reused_index_digest" \
             --arg artifact_source_sha "$artifact_source_sha" \
             --arg source_fingerprint "$source_fingerprint" \
             --argjson runner "$runner" \
@@ -108,6 +114,7 @@ while IFS= read -r entry; do
               arch: $arch,
               mode: $mode,
               reused_digest: $reused_digest,
+              reused_index_digest: $reused_index_digest,
               artifact_source_sha: $artifact_source_sha,
               source_fingerprint: $source_fingerprint,
               runner: $runner
