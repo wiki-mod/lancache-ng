@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Regression guard for bug-hunt #849 findings #11 (/healthz had no access
-# control at all in either conf.d/http.conf or conf.d/https.conf) and #15
-# (Cache-Control/Expires were ignored for caching but not hidden from the
-# client, unlike Set-Cookie/Vary). These are static config files, not shell
+# Regression guard for two proxy config fixes: /healthz previously had no
+# access control at all in either conf.d/http.conf or conf.d/https.conf, and
+# Cache-Control/Expires were previously ignored for caching but not hidden
+# from the client, unlike Set-Cookie/Vary. These are static config files, not shell
 # functions -- there is no `nginx -t`/live-request harness in this bats
 # suite (no Docker/nginx available here, see tests/bats/proxy_cert_generation.bats's
 # own "_bounded_cert_name is defined before the SSL_ENABLED conditional
@@ -101,7 +101,7 @@ _healthz_block() {
 # broken, not part of this finding) must still be present too -- proves this
 # change added to the existing directives rather than accidentally
 # replacing them.
-@test "proxy-params.conf still hides Set-Cookie and Vary (pre-existing, unrelated to this fix)" {
+@test "proxy-params.conf still hides Set-Cookie and Vary" {
     grep -qE '^proxy_hide_header +Set-Cookie;' "$proxy_params"
     grep -qE '^proxy_hide_header +Vary;' "$proxy_params"
 }
