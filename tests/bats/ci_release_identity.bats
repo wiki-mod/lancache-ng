@@ -123,3 +123,19 @@ JSON
   run ci_ai_validate_release_acceptance "$record"
   [ "$status" -ne 0 ]
 }
+
+@test "release evidence artifacts are collision-free and SBOM JSON cannot be counted as gate evidence" {
+  workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
+
+  run grep -F 'output: sbom-${{ matrix.service }}-${{ matrix.arch }}.spdx.json' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F 'evidence/${{ matrix.service }}__${{ matrix.arch }}.evidence.json' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "find release/evidence -type f -name '*.evidence.json'" "$workflow"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'output: sbom.spdx.json' "$workflow"
+  [ "$status" -ne 0 ]
+  run grep -F "find release/evidence -type f -name '*.json'" "$workflow"
+  [ "$status" -ne 0 ]
+}
