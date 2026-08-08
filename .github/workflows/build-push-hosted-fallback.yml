@@ -398,7 +398,14 @@ jobs:
         id: short-sha
         run: |
           set -euo pipefail
-          printf 'value=%s\n' "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length -- this file already
+          # declared DOCKER_METADATA_SHORT_SHA_LENGTH above but read it nowhere.
+          printf 'value=%s\n' "$(dmeta_short_sha "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         # Retried variant (not the plain action): ubuntu-latest is also a

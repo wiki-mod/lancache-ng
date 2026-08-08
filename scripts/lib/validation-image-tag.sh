@@ -26,6 +26,16 @@
 # follow-up that made this the single implementation. The whole point of
 # #715 is to REUSE that exact pr-<N>-sha-<short> mechanism, never invent a
 # second, divergent one.
+#
+# Issue #1095 G2: vit_resolve_tag() below needs the single declared
+# short-SHA derivation (dmeta_short_sha()), not its own independent
+# hardcode -- self-source it the same way scripts/lib/run-in-validation-
+# subnet.sh already sources scripts/lib/reserve-validation-subnet.sh,
+# rather than relying on every caller of this file to have sourced
+# docker-metadata.sh first.
+script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# shellcheck source=scripts/lib/docker-metadata.sh
+source "$script_dir/docker-metadata.sh"
 
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
 # channel it publishes to. Mirrors build-push.yml's promote/validate mapping
@@ -104,7 +114,9 @@ vit_resolve_tag() {
     fi
 
     if [[ "$(vit_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
-        printf 'pr-%s-sha-%s\n' "$pr_number" "${build_sha:0:7}"
+        # Issue #1095 G2: read the one declared short-SHA derivation instead of
+        # independently hardcoding the truncation length.
+        printf 'pr-%s-sha-%s\n' "$pr_number" "$(dmeta_short_sha "$build_sha")"
         return 0
     fi
 

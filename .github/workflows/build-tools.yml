@@ -101,6 +101,16 @@ concurrency:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  # Issue #1095 G2: must stay equal to build-push.yml's own
+  # DOCKER_METADATA_SHORT_SHA_LENGTH declaration -- GitHub Actions has no
+  # mechanism to share an env value across separate workflow files, so this
+  # is a second declaration of the same project-wide constant, not a second
+  # independent choice of length. scripts/lib/docker-metadata.sh's
+  # dmeta_short_sha() (this file's own single derivation, same as
+  # build-push.yml) falls back to 7 if this were ever removed, but an
+  # explicit declaration here keeps the value visible rather than relying on
+  # a silent fallback.
+  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   # run_id-run_attempt suffixed, not a fixed name: build-tools and
   # build-tools-arm64 each load a *local* scan image onto their own runner's
   # Docker daemon, and the self-hosted amd64 runner in particular is reused
@@ -319,7 +329,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Issue #1147: this job's local Buildx cache (see "Prepare local Buildx
@@ -852,7 +867,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Issue #1147: same reasoning as build-tools's own identically-named
@@ -1099,8 +1119,12 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          short_sha="${GITHUB_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-amd64"
           arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-arm64"
           source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"

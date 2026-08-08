@@ -2597,9 +2597,14 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.actor }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # Calls scripts/lib/validation-image-tag.sh's own functions instead of reimplementing
           # the same channel/pr-staging-available/tag decisions inline a second time (issue #822
@@ -2668,7 +2673,6 @@ jobs:
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
-          REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
           # #808/#1254/#1255: this PR's own base commit. Needed both to prove the back-fill
           # source image was actually built from it (or later) before backfilling an untouched
@@ -2694,6 +2698,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -4388,9 +4398,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What: Mirrors "Determine per-service publish scan reuse" above's own case mapping.
-          # Why: Single source for which digest_* output belongs to which matrix.service.
-          # From: PR #1499
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: Derives the lowercased GHCR owner/repo once for this step's case mapping below.
+          # Why: Issue #1095 G1's single declared source, replacing an independent
+          #   github.repository-casing assumption at each site.
+          # From: PR #1499 | Issue #1095
+          repository="$(dmeta_ghcr_repo)"
           case "$MATRIX_SERVICE" in
             proxy) digest="$DIGEST_PROXY" ;;
             dns) digest="$DIGEST_DNS" ;;
@@ -4407,7 +4422,7 @@ jobs:
             echo "::error::determine-push-reuse-scope reported reuse=true for $MATRIX_SERVICE but did not export a pinned digest -- refusing to scan an unverified reference." >&2
             exit 1
           fi
-          image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}@${digest}"
+          image="ghcr.io/${repository}/${MATRIX_SERVICE}@${digest}"
           echo "::notice::$MATRIX_SERVICE is unchanged on this push; scanning $image (the exact digest determine-push-reuse-scope already pinned and verified) instead of rebuilding it."
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -4529,7 +4544,6 @@ jobs:
       - name: Decide per-service push reuse
         id: decide
         env:
-          REPOSITORY: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
@@ -4548,6 +4562,12 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -4947,7 +4967,6 @@ jobs:
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
-          REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -4966,6 +4985,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -5058,9 +5081,12 @@ jobs:
           short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
-            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "$repository" "$MATRIX_SERVICE" "$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
@@ -5817,7 +5843,6 @@ jobs:
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
-          REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -5836,6 +5861,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -5913,9 +5942,12 @@ jobs:
           short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
-            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "$repository" "$MATRIX_SERVICE" "$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
@@ -6149,7 +6181,6 @@ jobs:
         id: create-trusted-manifests
         if: github.event_name != 'pull_request'
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -6163,6 +6194,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
           # Issue #1095 G2: read the one declared short-SHA derivation instead of
           # independently hardcoding the truncation length.
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
@@ -6259,7 +6294,6 @@ jobs:
         id: create-pr-staging-manifests
         if: github.event_name == 'pull_request'
         env:
-          REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # Must match build/build-arm64's "Compute PR staging tag" exactly
           # -- see that step's comment for why this is github.sha (the
@@ -6277,6 +6311,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
           # Issue #1095 G2: read the one declared short-SHA derivation instead of
           # independently hardcoding the truncation length.
           short_sha="$(dmeta_short_sha "$BUILD_SHA")"
@@ -6584,7 +6622,6 @@ jobs:
       - name: Promote coherent stack tags
         id: promote-stack
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
@@ -6600,6 +6637,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
           # Issue #1095 G2: read the one declared short-SHA derivation instead of
           # independently hardcoding the truncation length.
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
@@ -6844,11 +6885,16 @@ jobs:
       - name: Cut an automated patch release tag for image-affecting master changes
         if: ${{ success() && github.ref == 'refs/heads/master' }}
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # This is core release machinery on the release-bearing branch, not
           # optional convenience automation, so a missing PAT fails closed
@@ -7020,7 +7066,6 @@ jobs:
       - name: Verify release image platform coverage
         shell: bash
         env:
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           # syslog (issue #1428) added here explicitly: this SERVICES scalar is a
           # plain space-separated env value, not a services=(...) bash array, so
@@ -7033,6 +7078,12 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           read -r -a services <<< "$SERVICES"
           for service in "${services[@]}"; do
@@ -7053,7 +7104,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -7067,6 +7117,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
           # Issue #1095 G2: read the one declared short-SHA derivation instead of
           # independently hardcoding the truncation length.
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
@@ -7261,10 +7315,15 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           if [ ! -s vex.openvex.json ]; then
             echo "::error::vex.openvex.json is missing from the checkout." >&2
@@ -7371,13 +7430,18 @@ jobs:
       - name: Resolve released image digest
         id: digest
         env:
-          REPOSITORY: ${{ github.repository }}
           SERVICE: ${{ matrix.service }}
           TAG_NAME: ${{ github.ref_name }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -7433,11 +7497,16 @@ jobs:
         # OpenVEX upload above.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
+          # instead of trusting github.repository was already correctly cased.
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           asset="${SERVICE}.cdx.json"
           if [ ! -s "$asset" ]; then

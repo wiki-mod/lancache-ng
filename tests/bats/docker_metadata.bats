@@ -41,7 +41,7 @@ setup() {
     export DOCKER_METADATA_SHORT_SHA_LENGTH="12"
     run dmeta_short_sha "abcdef0123456789"
     [ "$status" -eq 0 ]
-    [ "$output" = "abcdef0123456" ]
+    [ "$output" = "abcdef012345" ]
 }
 
 @test "dmeta_short_sha: a SHA shorter than the declared length returns the whole SHA" {
