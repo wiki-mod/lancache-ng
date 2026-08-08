@@ -877,7 +877,7 @@ mod tests {
     // the child is actually killed rather than left running.
     #[test]
     fn wait_with_timeout_kills_and_returns_false_for_a_process_that_never_exits() {
-        let mut child = std::process::Command::new("sh")
+        let child = std::process::Command::new("sh")
             .args(["-c", "sleep 60"])
             .spawn()
             .expect("sh must be available to run this test");
