@@ -17,7 +17,9 @@
 # already consumed. This matters at an ISO-week boundary: recomputing wall-clock
 # time after a long image build could otherwise record Monday's fingerprint for
 # an image that was actually built with Sunday's value. When the override is
-# absent the current ISO week remains the planning/reuse default.
+# absent the current ISO week remains the planning/reuse default. A producer
+# recording an already-built artifact sets CI_SOURCE_REQUIRE_APT_CACHE_BUST=true
+# so a missing exact build input fails instead of falling back to wall clock.
 #
 # This is a source/build-input equivalence fingerprint, not a claim that a
 # fresh rebuild at an arbitrary later date would be byte-identical. Reuse is
@@ -82,6 +84,9 @@ refresh_inputs='{}'
 if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' <<<"$dockerfile_text"; then
     apt_cache_bust="${CI_SOURCE_APT_CACHE_BUST:-}"
     if [[ -z "$apt_cache_bust" ]]; then
+        if [[ "${CI_SOURCE_REQUIRE_APT_CACHE_BUST:-false}" == true ]]; then
+            ci_ai_fail "exact APT_CACHE_BUST build input is required for $service but was not supplied"
+        fi
         apt_cache_bust="$(date -u +%G-W%V)"
     fi
     [[ "$apt_cache_bust" =~ ^[0-9]{4}-W[0-9]{2}$ ]] \
