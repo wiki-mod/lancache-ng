@@ -78,3 +78,32 @@ setup() {
     run pxe_boot_pointer_answers_are_complete "10.0.0.5" "pxelinux.0" "bootx64.efi"
     [ "$status" -eq 0 ]
 }
+
+# is_valid_dhcp_proxy_boot_filename() must reject every character
+# validate_env_value() rejects before writing .env, so the wizard's
+# per-field retry loop cannot accept a value that only fails later, deep
+# into validate_env_values_for_initial_write()'s pre-write check (after the
+# installer has already walked the operator through several more setup
+# steps). Covers each rejected character individually, plus a filename
+# that was already valid under the whitespace/comma-only check, to prove
+# this is a strictly additive tightening, not a behavior change for
+# already-valid input.
+@test "is_valid_dhcp_proxy_boot_filename rejects every character validate_env_value also rejects" {
+    run is_valid_dhcp_proxy_boot_filename 'images/boot#1.efi'
+    [ "$status" -ne 0 ]
+    run is_valid_dhcp_proxy_boot_filename 'boot$file.efi'
+    [ "$status" -ne 0 ]
+    run is_valid_dhcp_proxy_boot_filename 'boot`file.efi'
+    [ "$status" -ne 0 ]
+    run is_valid_dhcp_proxy_boot_filename 'boot"file.efi'
+    [ "$status" -ne 0 ]
+    run is_valid_dhcp_proxy_boot_filename "boot'file.efi"
+    [ "$status" -ne 0 ]
+    run is_valid_dhcp_proxy_boot_filename 'boot\file.efi'
+    [ "$status" -ne 0 ]
+    run is_valid_dhcp_proxy_boot_filename "$(printf 'boot\nfile.efi')"
+    [ "$status" -ne 0 ]
+    # Still accepts a real, already-valid filename shape.
+    run is_valid_dhcp_proxy_boot_filename "pxelinux.0"
+    [ "$status" -eq 0 ]
+}
