@@ -37,6 +37,15 @@ ci_ai_require_sha "$artifact_source_sha"
 source_fingerprint="$(jq -r '.source_fingerprint' "$amd64_file")"
 [[ "$(jq -r '.source_fingerprint' "$arm64_file")" == "$source_fingerprint" ]] || ci_ai_fail "source fingerprint mismatch between platforms for $service"
 ci_ai_require_digest "$source_fingerprint"
+build_inputs="$(jq -cS '.build_inputs' "$amd64_file")"
+[[ "$(jq -cS '.build_inputs' "$arm64_file")" == "$build_inputs" ]] || ci_ai_fail "build inputs mismatch between platforms for $service"
+bash "$repo_root/scripts/ci-build-inputs.sh" "$service" validate "$build_inputs" || {
+    # Legacy source-only records are representable only with a genuinely empty
+    # object. Artifact-producing v2 records are expected to use the exact
+    # service-specific contract and will therefore pass the validator above.
+    [[ "$build_inputs" == '{"build_args":{},"build_contexts":{}}' ]] \
+        || ci_ai_fail "invalid build inputs for $service"
+}
 amd64_digest="$(jq -r '.digest' "$amd64_file")"
 arm64_digest="$(jq -r '.digest' "$arm64_file")"
 ci_ai_require_digest "$amd64_digest"
@@ -87,6 +96,7 @@ jq -n \
   --arg candidate_source_sha "$source_sha" \
   --arg artifact_source_sha "$artifact_source_sha" \
   --arg source_fingerprint "$source_fingerprint" \
+  --argjson build_inputs "$build_inputs" \
   --arg digest "$index_digest" \
   --arg amd64 "$amd64_digest" \
   --arg arm64 "$arm64_digest" \
@@ -99,6 +109,7 @@ jq -n \
     candidate_source_sha: $candidate_source_sha,
     artifact_source_sha: $artifact_source_sha,
     source_fingerprint: $source_fingerprint,
+    build_inputs: $build_inputs,
     digest: $digest,
     candidate_ref: $candidate_ref,
     platforms: {
