@@ -1164,9 +1164,11 @@ omitted):**
     (wired into the `file-headers-check` composite action) now fails CI if
     any listed Dockerfile's final `FROM` line ever diverges from the
     others, with bats coverage
-    (`tests/bats/check_dependabot_docker_base_consistency.bats`, 9 cases
-    including a real-repository self-check) proving both the passing and
-    failing path.
+    (`tests/bats/check_dependabot_docker_base_consistency.bats`, including a
+    real-repository self-check) proving both the passing and failing path --
+    see that file's own case count directly rather than a number restated
+    here, which has already drifted stale more than once as cases were
+    added.
     The general exception below still stands for any *other* config-file
     comment's factual claim, which remains genuinely hard to check
     mechanically.

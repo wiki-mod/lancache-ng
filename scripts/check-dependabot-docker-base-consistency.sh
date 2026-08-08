@@ -62,9 +62,10 @@ fi
 
 # Extract each docker-ecosystem block's `directories:` list, tagged with a
 # zero-based block index so blocks are never merged together. This is a
-# deliberately narrow, line-based parse (not a real YAML parser -- this
-# project's own convention for its lightweight guard scripts, matching
-# scripts/check-short-sha-truncation.sh's identical choice): it looks for
+# deliberately narrow, line-based parse (not a real YAML parser -- cheap,
+# host-runnable bash/awk/grep with no build-tools-image dependency of its
+# own, matching this project's other lightweight guard scripts' shape,
+# e.g. scripts/check-review-chronology-comments.sh): it looks for
 # each `package-ecosystem: docker` line, incrementing the block index every
 # time one is seen, and collects every subsequent `      - /path` entry
 # (tab-separated with its block index) until the next top-level
@@ -74,16 +75,22 @@ fi
 # `package-ecosystem: "docker"`, `- "/services/proxy"`) -- both forms parse
 # identically, since YAML itself treats them as equivalent, so the pattern
 # below strips a matching leading/trailing quote character (either kind)
-# before comparing. The awk program is fed via a quoted heredoc rather than
-# this script's original bash single-quoted string, since the regex needs a
-# literal `'` character in its own quote-stripping character class, which a
-# bash single-quoted string cannot contain at all.
+# before comparing. Either line may also carry a trailing YAML comment
+# (e.g. `package-ecosystem: docker # runtime services`, `- /services/proxy
+# # primary`) -- YAML comments are valid anywhere after a scalar value, so
+# both patterns tolerate an optional `# ...` tail before end of line, and
+# the comment-stripping step below removes it from the extracted directory
+# value too before quote-stripping. The awk program is fed via a quoted
+# heredoc rather than this script's original bash single-quoted string,
+# since the regex needs a literal `'` character in its own quote-stripping
+# character class, which a bash single-quoted string cannot contain at all.
 mapfile -t tagged_directories < <(awk -f - "$dependabot_file" <<'AWKPROG'
-/^  - package-ecosystem:[[:space:]]*["']?[Dd]ocker["']?[[:space:]]*$/ { in_docker=1; block++; next }
+/^  - package-ecosystem:[[:space:]]*["']?[Dd]ocker["']?[[:space:]]*(#.*)?$/ { in_docker=1; block++; next }
 /^  - package-ecosystem:/ && !/[Dd]ocker/ { in_docker=0 }
 in_docker && /^      - / {
     path=$0
     sub(/^      - /, "", path)
+    sub(/[[:space:]]*#.*$/, "", path)
     gsub(/^["']|["'][[:space:]]*$/, "", path)
     if (path ~ /^\//) print block "\t" path
 }
@@ -132,6 +139,50 @@ for entry in "${tagged_directories[@]}"; do
     # runtime`, `from alpine:3.24 AS runtime`, and `FROM alpine:3.24` must
     # all compare equal, since all three ship the identical base image.
     normalized_image=$(sed -E 's/^[[:space:]]*FROM[[:space:]]+(--platform=[^[:space:]]+[[:space:]]+)?//I; s/[[:space:]]+[Aa][Ss][[:space:]]+[^[:space:]]+[[:space:]]*$//' <<< "$last_from_line")
+
+    # Resolve an ARG-substituted image reference (e.g. `FROM ${RUNTIME_BASE}`)
+    # rather than comparing the literal, unsubstituted string: two
+    # Dockerfiles can both read `${RUNTIME_BASE}` in their final FROM line
+    # while declaring genuinely different `ARG RUNTIME_BASE=...` defaults
+    # above it, in which case comparing the raw `${RUNTIME_BASE}` text would
+    # report both as "the same image" despite actually diverging. Only
+    # global-scope ARGs (declared before the file's own last FROM line,
+    # the only ones Docker itself makes visible to a FROM instruction's own
+    # image reference) are collected; a later same-named ARG re-declared
+    # inside a build stage does not change what an earlier FROM line reads.
+    # Falls back to the literal string if there is nothing to substitute.
+    if [[ "$normalized_image" == *'$'* ]]; then
+        declare -A arg_defaults=()
+        last_from_line_num=$(grep -niE '^[[:space:]]*FROM[[:space:]]' "$dockerfile" | tail -n1 | cut -d: -f1)
+        while IFS= read -r arg_decl; do
+            [ -n "$arg_decl" ] || continue
+            arg_name="${arg_decl%%=*}"
+            if [[ "$arg_decl" == *=* ]]; then
+                arg_value="${arg_decl#*=}"
+                # Strip one matching pair of surrounding quotes, if present.
+                arg_value="${arg_value%\"}"; arg_value="${arg_value#\"}"
+                arg_value="${arg_value%\'}"; arg_value="${arg_value#\'}"
+                arg_defaults["$arg_name"]="$arg_value"
+            fi
+        done < <(head -n "$last_from_line_num" "$dockerfile" | grep -Ei '^[[:space:]]*ARG[[:space:]]+' | sed -E 's/^[[:space:]]*ARG[[:space:]]+//I')
+
+        # Substitute every ${NAME} or $NAME this specific image reference
+        # contains, using only the ARG defaults just collected -- a bash
+        # associative array, not eval, so no other part of $normalized_image
+        # is ever executed as code.
+        resolved_image="$normalized_image"
+        for arg_name in "${!arg_defaults[@]}"; do
+            resolved_image="${resolved_image//\$\{$arg_name\}/${arg_defaults[$arg_name]}}"
+            resolved_image="${resolved_image//\$$arg_name/${arg_defaults[$arg_name]}}"
+        done
+
+        if [[ "$resolved_image" == *'$'* ]]; then
+            printf '::error::check-dependabot-docker-base-consistency: %s'"'"'s final FROM line (%s) references a variable this guard could not resolve to a plain image reference (no matching ARG default found before that FROM line) -- cannot prove this Dockerfile'"'"'s effective base image, failing closed rather than silently comparing an unresolved literal.\n' "$dockerfile" "$normalized_image" >&2
+            exit 1
+        fi
+        normalized_image="$resolved_image"
+    fi
+
     base_image_of["${block}"$'\t'"${dockerfile}"]="$normalized_image"
     blocks_seen+=("$block")
 done
@@ -170,7 +221,7 @@ done
 
 if [ "$overall_status" -ne 0 ]; then
     echo "" >&2
-    echo "Either update the stale base-image claim in dependabot.yml's own comment to match reality, or split the diverged Dockerfile(s) into their own dependabot.yml block/group so each block's own grouped-PR premise holds again." >&2
+    echo "This check only compares the Dockerfiles' own FROM lines -- it does not read dependabot.yml's comments at all, so editing that comment's wording cannot make this pass. Either change the diverged Dockerfile(s)' base image(s) so every directory in the block matches again, or split the diverged directory into its own separate dependabot.yml docker-ecosystem block/group so each block's own grouped-PR premise holds independently." >&2
     exit 1
 fi
 

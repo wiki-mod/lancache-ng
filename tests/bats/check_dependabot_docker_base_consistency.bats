@@ -130,11 +130,11 @@ EOF
 }
 
 @test "accepts a lowercase 'from' instruction and leading whitespace, not only 'FROM '" {
-    # Real Codex finding: Dockerfile instruction names are case-insensitive,
-    # so a valid Dockerfile may use `from`/`From` and/or indent the
-    # instruction -- a case-sensitive `^FROM ` match found nothing for
-    # these, which under set -o pipefail aborted the whole script with no
-    # diagnostic instead of comparing base images.
+    # Dockerfile instruction names are case-insensitive, so a valid
+    # Dockerfile may use `from`/`From` and/or indent the instruction -- a
+    # case-sensitive `^FROM ` match finds nothing for these, which under
+    # set -o pipefail aborts the whole script with no diagnostic instead
+    # of comparing base images.
     write_dependabot_docker_block
     mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
     cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
@@ -169,10 +169,10 @@ EOF
 }
 
 @test "accepts quoted YAML scalars for package-ecosystem and directory entries" {
-    # Real Codex finding: `package-ecosystem: "docker"` and quoted directory
-    # strings are valid, equivalent YAML to the unquoted forms
-    # write_dependabot_docker_block uses, but the original line-based parse
-    # matched only the unquoted spelling and silently found zero directories.
+    # `package-ecosystem: "docker"` and quoted directory strings are valid,
+    # equivalent YAML to the unquoted forms write_dependabot_docker_block
+    # uses -- a parser that only matches the unquoted spelling silently
+    # finds zero directories for this equally-valid form.
     cat > "$fixture_root/.github/dependabot.yml" <<'EOF'
 version: 2
 updates:
@@ -199,6 +199,93 @@ EOF
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]] || fail "did not parse quoted package-ecosystem/directory scalars: $output"
+}
+
+@test "accepts a trailing YAML comment on the package-ecosystem and directory lines" {
+    # `package-ecosystem: docker # runtime services` and `- /services/a #
+    # primary` are both valid YAML (a comment is legal after any scalar) --
+    # a parser anchored on end-of-line right after the value finds neither
+    # block, silently reporting zero directories.
+    cat > "$fixture_root/.github/dependabot.yml" <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: docker # runtime services
+    directories:
+      - /services/a # primary service
+      - /services/b
+    schedule:
+      interval: weekly
+EOF
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "did not tolerate a trailing YAML comment: $output"
+}
+
+@test "resolves an ARG-substituted FROM line and still catches a genuine divergence" {
+    # `FROM ${RUNTIME_BASE}` is identical text in both Dockerfiles below,
+    # but each declares a different ARG default before its own final FROM
+    # line -- comparing the raw, unsubstituted text would report both as
+    # "the same image" despite their effective bases actually diverging.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM ${RUNTIME_BASE}
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=debian:12-slim
+FROM ${RUNTIME_BASE}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "did not resolve ARG defaults before comparing, or did not report both resolved images: $output"
+}
+
+@test "resolves an ARG-substituted FROM line and passes when the resolved images genuinely match" {
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM ${RUNTIME_BASE}
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM ${RUNTIME_BASE}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "flagged two Dockerfiles resolving to the identical ARG-substituted image: $output"
+}
+
+@test "fails closed on a FROM line referencing an ARG with no discoverable default" {
+    # No ARG declaration precedes this FROM line at all (e.g. the value is
+    # only ever supplied via --build-arg at build time, invisible to this
+    # guard) -- cannot prove the effective base image either way, so this
+    # must fail closed with a clear diagnostic rather than silently
+    # comparing the literal, unresolved ${RUNTIME_BASE} text.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM ${RUNTIME_BASE}
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"could not resolve"* ]] || fail "did not fail closed on an unresolvable ARG reference: $output"
 }
 
 @test "validates two docker-ecosystem blocks independently, not merged together" {
