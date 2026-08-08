@@ -30,18 +30,14 @@
 # separately as follow-up #879"). This script is that guard.
 #
 # --- Extraction: how a "real dependency" is identified -----------------
-# Every one of this project's tests/bats/*.bats files establishes its own
-# repo root the same way: `repo_root="$(cd "$BATS_TEST_DIRNAME/../.." &&
-# pwd)"` (confirmed: every .bats file in this repo uses this exact pattern,
-# with the same variable name). Every real, on-disk file a bats test or
-# helper reads is therefore referenced as a `$repo_root/<path>` (or
-# `${repo_root}/<path>`) string somewhere in that file's text -- this is the
-# ONE signal this script trusts. The four check_*.bats files that test this
-# project's own scripts/check-*.sh guards are a second, narrower case: they
-# reference their script-under-test directly as
-# `$BATS_TEST_DIRNAME/../../scripts/<name>.sh`, bypassing repo_root entirely
-# (there is nothing else in those files worth reading via repo_root), so that
-# exact prefix is matched too.
+# Bats files in this repository use both lower-case `repo_root` and upper-case
+# `REPO_ROOT` variables for the checkout root. A real, on-disk dependency may
+# therefore appear as `$repo_root/<path>`, `${repo_root}/<path>`,
+# `$REPO_ROOT/<path>`, or `${REPO_ROOT}/<path>` and all four forms must be
+# treated equivalently. The check_*.bats files that test this project's own
+# scripts/check-*.sh guards are a second, narrower case: they reference their
+# script-under-test directly as `$BATS_TEST_DIRNAME/../../scripts/<name>.sh`,
+# bypassing either repo-root variable, so that exact prefix is matched too.
 #
 # This is deliberately NOT a generic "any path-looking string" grep -- issue
 # #879 itself warns that approach over-matches, and #873's own manual trace
@@ -51,35 +47,22 @@
 #      check_idempotence_test_coverage.bats's seed_passing_fixture(), which
 #      creates "$fixture_root/services/dns/entrypoint.sh" -- a path that
 #      LOOKS like a real repo path but lives under $BATS_TEST_TMPDIR, never
-#      under $repo_root). Since this script only ever matches the literal
-#      variable name `repo_root` (never `fixture_root`, `BATS_TEST_TMPDIR`, or
-#      any other sandbox-rooted variable), these never enter the candidate
-#      set at all.
+#      under either recognized repo-root variable). These never enter the
+#      candidate set at all.
 #   2. Example/negative-test path strings that don't correspond to a real
-#      file (e.g. a "no such file" test case). These DO use `$repo_root/...`
-#      syntax, so they must be filtered after extraction: any candidate that
-#      does not exist on disk under the repo root being checked is dropped
-#      silently (it cannot be "a real dependency of the bats suite" if there
-#      is nothing there to depend on). A candidate produced by truncated
-#      variable interpolation (e.g. a hypothetical
-#      "$repo_root/services/$service/entrypoint.sh" -- none exist in this
-#      repo today, but the extraction regex below cannot capture a `$`) is
-#      caught by the same existence filter: an extraction that stops at a bare
-#      trailing "/" either fails the existence check outright or, in the
-#      pathological case where that partial prefix happens to be a real
-#      directory, is dropped explicitly by the trailing-slash check below,
-#      since a bare directory match is never what a `source`/read call
-#      actually depends on.
+#      file (e.g. a "no such file" test case). These DO use a recognized repo
+#      root variable, so they must be filtered after extraction: any candidate
+#      that does not exist on disk under the repo root being checked is dropped
+#      silently. A candidate produced by truncated variable interpolation is
+#      caught by the same existence filter or the trailing-slash check below.
 #
 # --- Coverage semantics --------------------------------------------------
 # A path-filter entry ending in "/**" covers every real dependency whose path
 # starts with that prefix (a directory wildcard, e.g. "services/dns/**").
 # Any other entry is an exact, literal match only (e.g.
 # "scripts/check-action-node-versions.sh" covers only that one file, not a
-# sibling script). This mirrors how GitHub Actions' own `paths:` filter
-# actually matches (npm-style glob semantics for `**`, exact string
-# otherwise), and matches the individually-listed-script convention #880
-# established for top-level scripts/*.sh files.
+# sibling script). This mirrors the subset of path-filter forms intentionally
+# used by this workflow today.
 #
 # --- Why both push AND pull_request are checked independently ------------
 # #880's own PR body warns about exactly this failure mode: "every entry
@@ -167,43 +150,37 @@ if [[ $violations -gt 0 ]]; then
     exit 1
 fi
 
-# Collect every "$repo_root/<path>" / "${repo_root}/<path>" candidate, plus
-# every "$BATS_TEST_DIRNAME/../../<path>" candidate (the check_*.bats
-# self-referencing form), across all scan_files. `|| true` on each grep is
-# required: grep exits 1 on genuinely zero matches in a given file (e.g. a
-# helper file with no BATS_TEST_DIRNAME reference at all), which is expected
-# and must not trip `set -e` before the other pattern gets a chance to run.
+# Collect every recognized repo-root candidate plus every
+# "$BATS_TEST_DIRNAME/../../<path>" candidate across all scan_files. `|| true`
+# is required because grep exits 1 when a particular form has zero matches.
 mapfile -t raw_matches < <(
-    { grep -hoE '\$\{?repo_root\}?/[A-Za-z0-9_./-]+' "${scan_files[@]}" || true
-      grep -hoE '\$BATS_TEST_DIRNAME/\.\./\.\./[A-Za-z0-9_./-]+' "${scan_files[@]}" || true; }
+    {
+      grep -hoE '\$\{?repo_root\}?/[A-Za-z0-9_./-]+' "${scan_files[@]}" || true
+      grep -hoE '\$\{?REPO_ROOT\}?/[A-Za-z0-9_./-]+' "${scan_files[@]}" || true
+      grep -hoE '\$BATS_TEST_DIRNAME/\.\./\.\./[A-Za-z0-9_./-]+' "${scan_files[@]}" || true
+    }
 )
 
 if [[ ${#raw_matches[@]} -eq 0 ]]; then
-    printf "%b[BATS PATH FILTER]%b found no \$repo_root/... or \$BATS_TEST_DIRNAME/../../... references in any of %d scanned bats/helper files -- check the extraction pattern in this script.\n" "$RED" "$NC" "${#scan_files[@]}" >&2
+    printf "%b[BATS PATH FILTER]%b found no repo-root or \$BATS_TEST_DIRNAME/../../... references in any of %d scanned bats/helper files -- check the extraction pattern in this script.\n" "$RED" "$NC" "${#scan_files[@]}" >&2
     exit 1
 fi
 
 mapfile -t candidates < <(
     printf '%s\n' "${raw_matches[@]}" \
-        | sed -E 's#^\$\{?repo_root\}?/##; s#^\$BATS_TEST_DIRNAME/\.\./\.\./##' \
+        | sed -E 's#^\$\{?(repo_root|REPO_ROOT)\}?/##; s#^\$BATS_TEST_DIRNAME/\.\./\.\./##' \
         | sort -u
 )
 
 deps=()
 for candidate in "${candidates[@]}"; do
-    # A trailing "/" means extraction stopped at a "$"-interpolated segment
-    # (see the header comment on truncated dynamic paths) -- never a concrete
-    # file, so it can never be "covered" or "missing" in any meaningful sense.
     [[ "$candidate" == */ ]] && continue
-    # Existence filter: distinguishes a real dependency from an
-    # example/negative-test path string that never corresponds to an actual
-    # repo file (see header comment, exclusion case 2).
     [[ -e "$candidate" ]] || continue
     deps+=("$candidate")
 done
 
 if [[ ${#deps[@]} -eq 0 ]]; then
-    printf "%b[BATS PATH FILTER]%b every extracted \$repo_root/... candidate was filtered out as nonexistent -- check the extraction pattern in this script (expected at least one real dependency, e.g. setup.sh or scripts/lib/**).\n" "$RED" "$NC" >&2
+    printf "%b[BATS PATH FILTER]%b every extracted repo-root candidate was filtered out as nonexistent -- check the extraction pattern in this script (expected at least one real dependency, e.g. setup.sh or scripts/lib/**).\n" "$RED" "$NC" >&2
     exit 1
 fi
 
