@@ -478,7 +478,10 @@ struct KeaSnapshotSummary {
 // Kea is unreachable or a fetch fails, the affected tables render empty
 // instead of taking down the whole page (see the else-branch and the
 // `unwrap_or_default()` calls below).
-pub async fn dhcp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+pub async fn dhcp_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let mut ctx = Context::new();
     let dhcp_mode = state.config.effective_dhcp_mode();
     let dhcp_has_kea = dhcp_mode.is_kea();
@@ -1745,16 +1748,52 @@ fn is_valid_boot_filename(raw: &str) -> bool {
             .any(|c| c.is_whitespace() || c == ',' || c.is_control())
 }
 
+// dnsmasq-proxy's own reserved custom-option codes. Deliberately NOT the
+// same set as Kea subnet options' is_ui_managed_subnet_option_code (which
+// also reserves 119 for Kea's own dedicated domain-search field): this
+// service (services/dhcp-proxy/entrypoint.sh's
+// _dhcp_proxy_render_optional_directives) only has dedicated fields for
+// router(3)/DNS(6)/domain(15)/NTP(42) -- it has no domain-search field at
+// all, so reusing Kea's five-code set (issue #849 dhcp-proxy.md finding
+// #15) wrongly blocked option 119 for dnsmasq-proxy operators with no
+// dedicated field to set it through instead, leaving it completely
+// unreachable via the Admin UI. This set must be kept in sync BY HAND with
+// entrypoint.sh's own `_dhcp_proxy_render_custom_options` collision guard
+// (services/dhcp-proxy/entrypoint.sh) if either service's dedicated-field
+// set ever changes -- they are two independent copies in two different
+// languages (Rust here, Bash there) with no shared source to enforce this
+// automatically.
+fn is_dhcp_proxy_managed_custom_option_code(code: u16) -> bool {
+    matches!(code, 3 | 6 | 15 | 42)
+}
+
+// Same shape as parse_custom_dhcp_option_code, but reserving only
+// dnsmasq-proxy's own four codes (see is_dhcp_proxy_managed_custom_option_code
+// above) instead of Kea's five.
+fn parse_dhcp_proxy_custom_option_code(raw: &str) -> Result<u16, &'static str> {
+    let code = raw
+        .trim()
+        .parse::<u16>()
+        .map_err(|_| "option code must be a number")?;
+    if code == 0 || code > 254 {
+        return Err("option code must be between 1 and 254");
+    }
+    if is_dhcp_proxy_managed_custom_option_code(code) {
+        return Err("option code is managed by dedicated dnsmasq-proxy fields");
+    }
+    Ok(code)
+}
+
 // Parses the Admin UI's one-entry-per-line custom option textarea
 // (`CODE:VALUE` per line) into the `;`-separated single-line form persisted
 // to DHCP_PROXY_CUSTOM_OPTIONS (env/settings files are simple `KEY=value`
 // lines with no embedded newlines, matching the constraint
 // `validate_custom_dhcp_option_data` already enforces for Kea's per-subnet
-// custom options). Reuses the exact same code/data validators as Kea's
-// custom subnet options, including the exclusion of codes 3/6/15/42/119 --
-// those are already covered by this page's dedicated router/DNS/domain/NTP
-// fields, so routing them through the free-form custom list instead would
-// create two divergent ways to set the same option.
+// custom options). Reuses Kea's data validator (the value-shape rules --
+// non-empty, length-bounded, no embedded newline -- apply identically here)
+// but NOT Kea's code validator, which reserves an extra code (119) this
+// service has no dedicated field for (see parse_dhcp_proxy_custom_option_code
+// above, issue #849 dhcp-proxy.md finding #15).
 fn parse_custom_options_form(raw: &str) -> Result<String, String> {
     let mut rendered = Vec::new();
     for (line_no, line) in raw.lines().enumerate() {
@@ -1765,7 +1804,7 @@ fn parse_custom_options_form(raw: &str) -> Result<String, String> {
         let (code_raw, data_raw) = line
             .split_once(':')
             .ok_or_else(|| format!("line {}: expected CODE:VALUE", line_no + 1))?;
-        let code = parse_custom_dhcp_option_code(code_raw)
+        let code = parse_dhcp_proxy_custom_option_code(code_raw)
             .map_err(|message| format!("line {}: {message}", line_no + 1))?;
         let data = validate_custom_dhcp_option_data(data_raw)
             .map_err(|message| format!("line {}: {message}", line_no + 1))?;
@@ -6989,6 +7028,31 @@ mod tests {
         assert_eq!(parse_custom_options_form("").unwrap(), "");
         assert_eq!(parse_custom_options_form("   \n  \n").unwrap(), "");
         assert_eq!(custom_options_storage_to_form(""), "");
+    }
+
+    // Regression test for issue #849 dhcp-proxy.md finding #15:
+    // parse_custom_options_form used to reuse Kea subnet options'
+    // is_ui_managed_subnet_option_code, which reserves code 119
+    // (domain-search) for Kea's own dedicated field -- a field dnsmasq-proxy
+    // does not have at all, making option 119 completely unreachable via
+    // this form even though nothing else offers it. Confirms 119 is now
+    // accepted while 3/6/15/42 (dnsmasq-proxy's actual dedicated-field
+    // codes, matching services/dhcp-proxy/entrypoint.sh's own
+    // _dhcp_proxy_render_custom_options collision guard) remain rejected.
+    #[test]
+    fn custom_options_form_allows_option_119_but_still_blocks_dnsmasq_proxys_own_managed_codes() {
+        assert_eq!(
+            parse_custom_options_form("119:example.com").unwrap(),
+            "119:example.com",
+            "option 119 has no dedicated dnsmasq-proxy field and must be allowed through the custom list"
+        );
+
+        for managed in ["3:10.0.0.1", "6:8.8.8.8", "15:example.com", "42:10.0.0.20"] {
+            assert!(
+                parse_custom_options_form(managed).is_err(),
+                "code in {managed:?} is managed by a dedicated dnsmasq-proxy field and must stay rejected"
+            );
+        }
     }
 
     // The Admin UI's "custom options" list must show exactly the options

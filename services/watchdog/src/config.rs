@@ -455,12 +455,13 @@ pub fn resolve_cache_dir(
     Ok(DEFAULT_CACHE_DIR.to_string())
 }
 
-/// Fixed container names for issue #842's five alert-only services (`ui`,
-/// `dhcp`, `dhcp-proxy`, `netdata`, `syslog`). Deliberately NOT
-/// sourced from a `CONTAINER_*` env var override, unlike `ContainerNames`'s
-/// four restart-capable fields above -- same reasoning as
-/// `ContainerNames::docker_socket_proxy`: these five are never restarted (see
-/// `main.rs`'s alert-only loop), so there is no `resolve_container_names`-style
+/// Fixed container names for issue #842's alert-only services (`ui`,
+/// `dhcp`, `dhcp-proxy`, `netdata`, `syslog`), plus `ntp` (issue #1296).
+/// Deliberately NOT sourced from a `CONTAINER_*` env var override, unlike
+/// `ContainerNames`'s four restart-capable fields above -- same reasoning
+/// as `ContainerNames::docker_socket_proxy`: none of these are ever
+/// restarted (see `main.rs`'s alert-only loop), so there is no
+/// `resolve_container_names`-style
 /// fatal-mismatch check to apply, and no compose file, the Admin UI's
 /// `docker_client.rs`, or `scripts/docker-socket-proxy.sh`'s allowlist
 /// support renaming any of them either.
@@ -479,6 +480,20 @@ pub const CONTAINER_NETDATA: &str = "lancache-netdata";
 pub const CONTAINER_DHCP: &str = "lancache-dhcp";
 pub const CONTAINER_DHCP_PROXY: &str = "lancache-dhcp-proxy";
 pub const CONTAINER_SYSLOG: &str = "lancache-syslog";
+/// Added for issue #1296: `ntp` was never alert-only monitored at all
+/// before this (a real, pre-existing gap this project's own issue #842
+/// named -- "watchdog only monitors proxy/dns-standard/dns-ssl"), which
+/// meant its new `HealthReading::Degraded` amber dashboard state (see
+/// `health.rs`) had no caller that would ever actually query it. Alert-
+/// only (never restarted), same as `dhcp`/`dhcp-proxy`/`syslog` above: a
+/// genuinely crashed `ntp` container is still worth a dashboard alert, but
+/// this project's restart-capable set (`proxy`/`dns-standard`/`dns-ssl`/
+/// `nats`) is reserved for services whose own restart is a safe, useful
+/// recovery action watchdog already knows how to take -- `ntp` has no
+/// established need for that today, and adding it as alert-only closes
+/// the real monitoring gap without expanding the restart-capable set's
+/// own, separately-reviewed scope.
+pub const CONTAINER_NTP: &str = "lancache-ntp";
 
 /// Resolves which (if any) DHCP container should be alert-only-monitored,
 /// mirroring `setup.sh`'s own `DHCP_MODE` semantics (see that script's

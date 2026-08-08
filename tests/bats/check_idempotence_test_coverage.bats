@@ -143,6 +143,22 @@ ${at_test} "nats entrypoint regenerates a byte-identical nats.conf across repeat
     true
 }
 EOF
+
+    # netdata_alarms.rs (bug hunt #849, observability.md finding #3) is its
+    # own evidence file too, like zone_snapshots.rs above -- self-referential
+    # (writer == evidence), no extra_marker needed since it's a fixture path
+    # with nothing unrelated in it that could accidentally satisfy the
+    # generic marker.
+    mkdir -p "$fixture_root/services/ui/src"
+    cat > "$fixture_root/services/ui/src/netdata_alarms.rs" <<'EOF'
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn append_is_idempotent_for_the_same_unique_id() {
+        assert!(true);
+    }
+}
+EOF
 }
 
 @test "passes when every config-writer has a real repeat-run test" {
