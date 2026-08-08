@@ -72,8 +72,10 @@ time of this audit — see "Branch divergence" at the end.
 
 ## 2. nginx configuration surface
 
-- **`conf.d/http.conf`** (port 80, always loaded): `/healthz` (plain 200, no
-  access log), `/nginx_status` (`stub_status`, ACL'd to `172.16.0.0/12` — the
+- **`conf.d/http.conf`** (port 80, always loaded): `/healthz` (ACL'd to
+  `127.0.0.1/32`/`172.16.0.0/12` — denied sources get 403; allowed sources
+  get 200 served from a generated alias file, no access log),
+  `/nginx_status` (`stub_status`, ACL'd to `172.16.0.0/12` — the
   Docker bridge range; consumed by the Admin UI's `nginx_client.rs` for live
   stats), and the main `location /` gated by `$lancache_client_allowed` then
   `$cdn_host_allowed` before `proxy_pass https://$host$request_uri`.
@@ -89,9 +91,10 @@ time of this audit — see "Branch divergence" at the end.
   internal MITM relay attaches, so `$remote_addr` (and therefore
   `$lancache_client_allowed`/access logging) still reflects the real client,
   not the relay's own loopback address. The `8445` listener has no
-  PROXY-protocol requirement and is unauthenticated by design — it only
-  serves `/healthz` (a fixed 200, no upstream/cache access), and is
-  loopback-only regardless.
+  PROXY-protocol requirement and is loopback-only by design — it only serves
+  `/healthz`, gated by the same `127.0.0.1/32`/`172.16.0.0/12` ACL as
+  `http.conf`'s copy (denied sources get 403; allowed sources get 200 from
+  the same generated alias file, no upstream/cache access either way).
 - **`nginx.conf`**: shared `proxy_cache_path` (one cache zone, `lancache`,
   for both HTTP and HTTPS legs — same cache key space), upstream `resolver`
   (must be real public/upstream DNS, never the LAN cache's own DNS —
