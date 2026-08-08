@@ -192,9 +192,9 @@ JSON
 
 @test "locked-stack health loop uses only services that actually started" {
   script="$REPO_ROOT/scripts/ci-validate-locked-stack.sh"
-  run grep -F 'ps --services' "$script"
+  run grep -F 'mapfile -t active_services < <("${compose[@]}" ps --services)' "$script"
   [ "$status" -eq 0 ]
-  run grep -F 'config --services' "$script"
+  run grep -F 'mapfile -t active_services < <("${compose[@]}" config --services)' "$script"
   [ "$status" -ne 0 ]
 }
 
