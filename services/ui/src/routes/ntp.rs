@@ -82,7 +82,7 @@ impl IntoResponse for NtpError {
 
 // ─── Handlers ───
 
-pub async fn ntp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+pub async fn ntp_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> impl IntoResponse {
     let mut ctx = Context::new();
     ctx.insert("active_page", "ntp");
     ctx.insert("ntp_enabled", &state.config.effective_ntp_enabled());
