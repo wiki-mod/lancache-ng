@@ -99,7 +99,7 @@ JSON
   [ "$status" -ne 0 ]
 }
 
-@test "acceptance validator requires every final gate including runtime deep validation" {
+@test "acceptance validator requires source ref and every final gate" {
   source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
   record="$BATS_TEST_TMPDIR/acceptance.json"
   cat >"$record" <<'JSON'
@@ -124,12 +124,19 @@ JSON
 JSON
   run ci_ai_validate_acceptance "$record"
   [ "$status" -ne 0 ]
-  jq '.gates.provenance = true' "$record" >"$record.tmp"
+
+  jq '.source_ref = "refs/heads/current_dev" | .gates.provenance = true' "$record" >"$record.tmp"
   mv "$record.tmp" "$record"
   run ci_ai_validate_acceptance "$record"
   [ "$status" -ne 0 ]
+
   jq '.gates.runtime_deep_validation = true' "$record" >"$record.tmp"
   mv "$record.tmp" "$record"
   run ci_ai_validate_acceptance "$record"
   [ "$status" -eq 0 ]
+
+  jq '.source_ref = "refs/pull/1512/merge"' "$record" >"$record.tmp"
+  mv "$record.tmp" "$record"
+  run ci_ai_validate_acceptance "$record"
+  [ "$status" -ne 0 ]
 }
