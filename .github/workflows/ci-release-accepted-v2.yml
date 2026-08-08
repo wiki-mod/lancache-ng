@@ -1,17 +1,22 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Release publication consumes a positively accepted runtime lock. Runtime
-# services are never rebuilt here. The governance-required tag-scoped
-# build-tools image must currently resolve to the already-accepted build-tools
-# digest; support for a distinct release rebuild stays fail-closed until that
-# producer emits its own source-fingerprint-bearing identity record.
+# Releases consume an already accepted runtime stack without rebuilding any
+# runtime service. Repository governance requires a release-tag-scoped
+# build-tools artifact, so this workflow creates that tooling artifact once per
+# native platform, records its exact build inputs and digests, assembles one
+# multi-platform index without rebuilding it, and inserts that truthful new
+# tooling identity into the release lock.
 #
-# No mutable release reference moves until the release pointer itself has been
-# built under a unique immutable tag and both its provenance and release
-# acceptance attestations have been published. The final multi-reference move
-# joins the repository's existing global promotion mutex and rolls back any
-# already-moved references on failure.
+# Publication is deliberately split from evidence generation. The default mode
+# builds/scans/smokes/SBOM-attests exact identities but moves no release ref.
+# PUBLISH first creates and attests an immutable release stack pointer, then
+# enters the same repository-wide promotion mutex used by channel promotion.
+# Runtime/tooling release refs move first and the coherent stack pointer moves
+# last. A failed partial write attempts to restore every ref that had a previous
+# digest; a newly created ref with no predecessor is left non-authoritative
+# because the stack release pointer never advances after a failed critical
+# section, and the failure is reported loudly for cleanup/retry.
 name: Release Accepted Stack v2
 
 on:
@@ -26,7 +31,7 @@ on:
         required: true
         type: string
       confirm:
-        description: Type PUBLISH to create OCI release references. Any other value performs validation/SBOM only.
+        description: Type PUBLISH to move OCI release references. Any other value performs validation/SBOM only.
         required: true
         default: DRY-RUN
         type: string
@@ -36,23 +41,20 @@ permissions:
 
 jobs:
   plan:
+    name: freeze accepted runtime and release source
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
       publish: ${{ steps.mode.outputs.publish }}
-      release_build_tools_digest: ${{ steps.build-tools.outputs.digest }}
       source_sha: ${{ steps.release-source.outputs.source_sha }}
+      candidate_tag: ${{ steps.config.outputs.candidate_tag }}
+      refresh_bucket: ${{ steps.config.outputs.refresh_bucket }}
     permissions:
       contents: read
       packages: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          fetch-tags: true
-
-      - name: Validate release inputs
+      - name: Validate release input shape
         env:
           ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -63,6 +65,13 @@ jobs:
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
             || { echo "::error::invalid release tag: $RELEASE_TAG"; exit 1; }
 
+      - name: Checkout the exact release-tag source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+          fetch-tags: true
+
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -72,65 +81,64 @@ jobs:
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Extract positively accepted runtime lock
-        env:
-          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
+      - id: config
+        name: Freeze release build inputs for the whole run
         run: |
           set -euo pipefail
-          bash scripts/ci-extract-stack-lock.sh \
+          printf 'candidate_tag=release-v2-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+          printf 'refresh_bucket=%s\n' "$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Extract cryptographically accepted runtime lock
+        env:
+          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-v2-release"
+          timeout --kill-after=30 300 bash scripts/ci-extract-stack-lock.sh \
             "ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}" \
-            "$RUNNER_TEMP/stack-lock.json"
+            "$RUNNER_TEMP/ci-v2-release/accepted-stack-lock.json"
 
       - id: release-source
-        name: Require release tag to identify the accepted source commit
+        name: Require release tag to identify the accepted runtime source
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
           tag_sha="$(git rev-list -n 1 "${RELEASE_TAG}^{commit}")"
-          accepted_sha="$(jq -r '.source_sha' "$RUNNER_TEMP/stack-lock.json")"
+          accepted_sha="$(jq -r '.source_sha' "$RUNNER_TEMP/ci-v2-release/accepted-stack-lock.json")"
           [[ "$tag_sha" == "$accepted_sha" ]] || {
-            echo "::error::Release tag $RELEASE_TAG resolves to $tag_sha, but accepted stack source is $accepted_sha."
+            echo "::error::Release tag $RELEASE_TAG resolves to $tag_sha, but accepted runtime source is $accepted_sha."
             exit 1
           }
-          printf 'source_sha=%s\n' "$accepted_sha" >> "$GITHUB_OUTPUT"
-
-      - id: build-tools
-        name: Require governance build-tools tag to preserve accepted identity
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-        run: |
-          set -euo pipefail
-          source scripts/lib/ci-artifact-identity.sh
-          ref="ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}"
-          digest="$(ci_ai_ref_digest "$ref")"
-          accepted_digest="$(jq -r '.tooling["build-tools"].digest' "$RUNNER_TEMP/stack-lock.json")"
-          ci_ai_require_digest "$accepted_digest"
-          [[ "$digest" == "$accepted_digest" ]] || {
-            echo "::error::build-tools:${RELEASE_TAG} resolves to $digest, while the accepted stack contains $accepted_digest." >&2
-            echo "::error::V2 will not copy the old source_fingerprint onto a different release build-tools digest. A distinct release rebuild must first provide its own signed identity record carrying the exact source/build-input fingerprint." >&2
-            exit 1
+          [[ "$GITHUB_SHA" == "$tag_sha" ]] || {
+            echo "::notice::Workflow-dispatch source $GITHUB_SHA differs from release source $tag_sha; all release build/test checkouts stay pinned to the tag commit."
           }
-
-          amd64="$(ci_ai_platform_digest "ghcr.io/wiki-mod/lancache-ng/build-tools@${digest}" linux/amd64)"
-          arm64="$(ci_ai_platform_digest "ghcr.io/wiki-mod/lancache-ng/build-tools@${digest}" linux/arm64)"
-          accepted_amd64="$(jq -r '.tooling["build-tools"].platforms["linux/amd64"]' "$RUNNER_TEMP/stack-lock.json")"
-          accepted_arm64="$(jq -r '.tooling["build-tools"].platforms["linux/arm64"]' "$RUNNER_TEMP/stack-lock.json")"
-          [[ "$amd64" == "$accepted_amd64" && "$arm64" == "$accepted_arm64" ]] \
-            || ci_ai_fail "release build-tools tag does not preserve the accepted platform child digests"
-
-          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-          jq --arg release_tag "$RELEASE_TAG" '
-            .candidate_tag = $release_tag
-            | .runtime |= with_entries(.value.candidate_ref = (.value.image + "@" + .value.digest))
-            | .tooling |= with_entries(.value.candidate_ref = (.value.image + "@" + .value.digest))
-          ' "$RUNNER_TEMP/stack-lock.json" > "$RUNNER_TEMP/release-lock.json"
-          ci_ai_validate_stack_lock "$RUNNER_TEMP/release-lock.json"
+          printf 'source_sha=%s\n' "$tag_sha" >> "$GITHUB_OUTPUT"
 
       - id: matrix
+        name: Derive release build-tools platform matrix from canonical catalog
         run: |
           set -euo pipefail
-          printf 'matrix=%s\n' "$(bash scripts/ci-lock-matrix.sh "$RUNNER_TEMP/release-lock.json" platform)" >> "$GITHUB_OUTPUT"
+          entry="$(bash scripts/query-stack-images.sh tooling | jq -c '.include[] | select(.service == "build-tools")')"
+          [[ -n "$entry" ]] || { echo "::error::canonical catalog has no build-tools entry"; exit 1; }
+          matrix="$(
+            jq -cn --argjson entry "$entry" '{
+              include: [
+                $entry.platforms[] as $platform
+                | $entry + {
+                    platform:$platform,
+                    arch:(if $platform == "linux/arm64" then "arm64" else "amd64" end),
+                    runner:(if $platform == "linux/arm64" then "ubuntu-24.04-arm" else ["self-hosted","linux","lancache","lancache-heavy"] end)
+                  }
+                | del(.platforms)
+              ]
+            }'
+          )"
+          [[ "$(jq '.include | length' <<<"$matrix")" -eq 2 ]] \
+            || { echo "::error::release build-tools requires exactly amd64 and arm64"; exit 1; }
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
       - id: mode
         env:
@@ -141,26 +149,30 @@ jobs:
             echo 'publish=true' >> "$GITHUB_OUTPUT"
           else
             echo 'publish=false' >> "$GITHUB_OUTPUT"
-            echo "::notice::Release workflow is in validation/SBOM-only mode. No OCI release tag will move."
+            echo "::notice::Release workflow is in validation/SBOM-only mode. No release reference will move."
           fi
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: ci-v2-release-lock
-          path: ${{ runner.temp }}/release-lock.json
+          name: ci-v2-accepted-runtime-lock
+          path: ${{ runner.temp }}/ci-v2-release/accepted-stack-lock.json
           retention-days: 30
 
       - name: Remove Buildx builder
         if: always()
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-  sbom:
+  build-tools-platform:
+    name: build release build-tools ${{ matrix.arch }} once
     needs: plan
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 45
+    timeout-minutes: 120
+    concurrency:
+      group: ci-v2-release-build-tools-${{ matrix.arch }}
+      cancel-in-progress: false
     permissions:
       contents: read
       packages: write
@@ -168,7 +180,200 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Buildx on persistent amd64 runner
+        if: matrix.arch == 'amd64'
+        id: buildx-self
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Set up Buildx with hosted arm64 retry
+        if: matrix.arch == 'arm64'
+        id: buildx-arm
+        uses: ./.github/actions/buildx-setup-retry
+
+      - name: Build and push release build-tools quarantine candidate exactly once
+        id: build
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ matrix.arch == 'amd64' && steps.buildx-self.outputs.name || steps.buildx-arm.outputs.name }}
+          context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
+          build-args: APT_CACHE_BUST=${{ needs.plan.outputs.refresh_bucket }}
+          push: "true"
+          tags: ${{ matrix.image }}:${{ needs.plan.outputs.candidate_tag }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.revision=${{ needs.plan.outputs.source_sha }}
+            io.lancache-ng.candidate=${{ needs.plan.outputs.candidate_tag }}
+            io.lancache-ng.release=${{ inputs.release_tag }}
+          outputs: type=image,oci-mediatypes=true
+          platforms: ${{ matrix.platform }}
+          provenance: "false"
+          pull: "true"
+          cache-from: type=gha,scope=ci-v2-release-build-tools-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-v2-release-build-tools-${{ matrix.arch }}
+
+      - name: Attest release build-tools child provenance to exact digest
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Record exact release build-tools producer identity
+        run: |
+          set -euo pipefail
+          mkdir -p candidate-record
+          bash scripts/ci-write-candidate-record.sh \
+            tooling build-tools "${{ matrix.image }}" \
+            "${{ needs.plan.outputs.source_sha }}" "${{ needs.plan.outputs.source_sha }}" \
+            "${{ matrix.platform }}" "${{ steps.build.outputs.digest }}" built \
+            "candidate-record/build-tools__${{ matrix.arch }}.json"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-build-tools-${{ matrix.arch }}
+          path: candidate-record/build-tools__${{ matrix.arch }}.json
+          retention-days: 30
+
+      - name: Remove amd64 Buildx builder
+        if: always() && matrix.arch == 'amd64'
+        run: docker buildx rm "${{ steps.buildx-self.outputs.name }}" || true
+
+      - name: Remove arm64 Buildx builder
+        if: always() && matrix.arch == 'arm64'
+        run: docker buildx rm "${{ steps.buildx-arm.outputs.name }}" || true
+
+  assemble-release:
+    name: assemble release build-tools index and exact release lock
+    needs: [plan, build-tools-platform]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: ci-v2-accepted-runtime-lock
+          path: release
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-build-tools-*
+          merge-multiple: true
+          path: release/build-tools-platforms
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - id: tooling-index
+        name: Assemble release build-tools index without rebuilding
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p release/index
+          bash scripts/ci-assemble-service-index.sh \
+            build-tools ghcr.io/wiki-mod/lancache-ng/build-tools \
+            "${{ needs.plan.outputs.source_sha }}" \
+            "${{ needs.plan.outputs.candidate_tag }}" \
+            release/build-tools-platforms release/index/build-tools.json
+          digest="$(jq -r '.digest' release/index/build-tools.json)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid release build-tools index digest"; exit 1; }
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest assembled release build-tools index provenance
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/wiki-mod/lancache-ng/build-tools
+          subject-digest: ${{ steps.tooling-index.outputs.digest }}
+
+      - name: Assemble release lock from accepted runtime plus fresh tooling
+        run: |
+          set -euo pipefail
+          bash scripts/ci-assemble-release-lock.sh \
+            release/accepted-stack-lock.json \
+            release/index/build-tools.json \
+            "${{ inputs.release_tag }}" \
+            "${{ needs.plan.outputs.candidate_tag }}" \
+            release/release-lock.json
+
+      - name: Prove all release-lock transport references still resolve to recorded identities
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-verify-lock-tags.sh release/release-lock.json
+
+      - id: matrix
+        name: Derive exact release evidence matrix from lock
+        run: |
+          set -euo pipefail
+          printf 'matrix=%s\n' "$(bash scripts/ci-lock-matrix.sh release/release-lock.json platform)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-v2-release-lock
+          path: release/release-lock.json
+          retention-days: 90
+
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+  release-evidence:
+    name: release evidence ${{ matrix.service }} ${{ matrix.arch }}
+    needs: [plan, assemble-release]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.assemble-release.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.release_tag }}
+          fetch-depth: 0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -187,11 +392,29 @@ jobs:
           cache-key-scope: release-${{ matrix.service }}-${{ matrix.arch }}
           freshness-bucket: ${{ steps.freshness.outputs.bucket }}
 
-      - name: Native release smoke on exact child digest
+      - name: Native smoke exact release child digest
         run: |
           set -euo pipefail
-          timeout --kill-after=30 300 docker pull "${{ matrix.image }}@${{ matrix.digest }}"
-          timeout --kill-after=30 120 docker run --rm --entrypoint /bin/sh "${{ matrix.image }}@${{ matrix.digest }}" -c 'true'
+          ref="${{ matrix.image }}@${{ matrix.digest }}"
+          timeout --kill-after=30 300 docker pull "$ref"
+          timeout --kill-after=30 120 docker run --rm --entrypoint /bin/sh "$ref" -c 'true'
+
+      - name: Prove release build-tools can execute the v2 validation contract natively
+        if: matrix.service == 'build-tools'
+        run: |
+          set -euo pipefail
+          ref="${{ matrix.image }}@${{ matrix.digest }}"
+          timeout --kill-after=30 1500 docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "$ref" \
+            timeout --kill-after=30 1200 bash -lc '
+              set -euo pipefail
+              bash -n scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
+              shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
+              bats tests/bats/ci_artifact_identity.bats tests/bats/network_retry.bats
+            '
 
       - name: Generate SPDX SBOM from exact release digest
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -203,7 +426,7 @@ jobs:
           cache: "false"
           timeout: 10m
 
-      - name: Attest SBOM to exact digest with GHCR retry
+      - name: Attest SBOM to exact release digest
         uses: ./.github/actions/ghcr-sbom-attest-retry
         with:
           username: ${{ github.actor }}
@@ -212,34 +435,63 @@ jobs:
           subject-digest: ${{ matrix.digest }}
           sbom-path: sbom.spdx.json
 
+      - name: Write exact-digest release evidence record
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          jq -n \
+            --arg service "${{ matrix.service }}" \
+            --arg platform "${{ matrix.platform }}" \
+            --arg digest "${{ matrix.digest }}" \
+            --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schema:"release-evidence/v1",
+              service:$service,
+              platform:$platform,
+              digest:$digest,
+              trivy:"passed",
+              native_smoke:"passed",
+              sbom_attested:true,
+              observed_at:$observed_at
+            }' > "evidence/${{ matrix.service }}__${{ matrix.arch }}.json"
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: sbom-${{ matrix.service }}-${{ matrix.arch }}-${{ inputs.release_tag }}
-          path: sbom.spdx.json
+          name: release-evidence-${{ matrix.service }}-${{ matrix.arch }}
+          path: |
+            evidence/${{ matrix.service }}__${{ matrix.arch }}.json
+            sbom.spdx.json
           retention-days: 90
 
   publish:
-    needs: [plan, sbom]
+    name: publish coherent release references
+    needs: [plan, assemble-release, release-evidence]
     if: needs.plan.outputs.publish == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 60
     permissions:
-      # scripts/lib/promote-lock.sh uses one dedicated git ref as the existing
-      # cross-workflow mutex for every channel/reference promotion path.
       contents: write
       packages: write
       id-token: write
       attestations: write
       artifact-metadata: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout exact release source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.release_tag }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ci-v2-release-lock
           path: release
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: release-evidence-*
+          merge-multiple: true
+          path: release/evidence
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
@@ -250,18 +502,39 @@ jobs:
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Re-resolve governance build-tools tag before pointer staging
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
+      - name: Verify complete exact-digest release evidence set
         run: |
           set -euo pipefail
           source scripts/lib/ci-artifact-identity.sh
-          expected="$(jq -r '.tooling["build-tools"].digest' release/release-lock.json)"
-          actual="$(ci_ai_ref_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}")"
-          [[ "$actual" == "$expected" ]] \
-            || ci_ai_fail "build-tools:${RELEASE_TAG} moved after release planning: expected $expected, got $actual"
+          ci_ai_validate_stack_lock release/release-lock.json
+          expected="$(( $(bash scripts/query-stack-images.sh all | jq '.include | length') * 2 ))"
+          mapfile -t files < <(find release/evidence -type f -name '*.json' -print | sort)
+          [[ "${#files[@]}" -eq "$expected" ]] \
+            || ci_ai_fail "expected $expected release evidence records, found ${#files[@]}"
+          for file in "${files[@]}"; do
+            service="$(jq -r '.service' "$file")"
+            platform="$(jq -r '.platform' "$file")"
+            digest="$(jq -r '.digest' "$file")"
+            [[ "$(jq -r '.schema' "$file")" == release-evidence/v1 ]] \
+              || ci_ai_fail "unexpected release evidence schema in $file"
+            [[ "$(jq -r '.trivy' "$file")" == passed ]] \
+              || ci_ai_fail "release Trivy evidence is not passed in $file"
+            [[ "$(jq -r '.native_smoke' "$file")" == passed ]] \
+              || ci_ai_fail "release native smoke evidence is not passed in $file"
+            [[ "$(jq -r '.sbom_attested' "$file")" == true ]] \
+              || ci_ai_fail "release SBOM evidence is not attested in $file"
+            locked="$(jq -r --arg service "$service" --arg platform "$platform" '(.runtime[$service] // .tooling[$service]).platforms[$platform] // empty' release/release-lock.json)"
+            [[ -n "$locked" && "$locked" == "$digest" ]] \
+              || ci_ai_fail "release evidence digest $digest does not match lock for $service/$platform"
+          done
 
-      - name: Prepare immutable release stack pointer
+      - name: Re-resolve release candidate references before acceptance
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-verify-lock-tags.sh release/release-lock.json
+
+      - name: Prepare immutable release acceptance and pointer context
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
@@ -272,7 +545,8 @@ jobs:
           lock_hash="$(sha256sum release-pointer/stack-lock.json | awk '{print $1}')"
           accepted_tag="accepted-v2-release-${RELEASE_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           jq -n \
-            --arg source_sha "$(jq -r '.source_sha' release-pointer/stack-lock.json)" \
+            --arg source_sha "${{ needs.plan.outputs.source_sha }}" \
+            --arg source_ref "refs/tags/${RELEASE_TAG}" \
             --arg lock_hash "$lock_hash" \
             --arg accepted_tag "$accepted_tag" \
             --arg release_tag "$RELEASE_TAG" \
@@ -282,6 +556,7 @@ jobs:
               schema:"stack-acceptance/v1",
               accepted:true,
               source_sha:$source_sha,
+              source_ref:$source_ref,
               stack_lock_sha256:$lock_hash,
               accepted_tag:$accepted_tag,
               release_tag:$release_tag,
@@ -296,10 +571,14 @@ jobs:
                 exact_locked_stack:true,
                 runtime_deep_validation:true,
                 supplemental_full_setup:true,
-                publication_policy:true
+                publication_policy:true,
+                accepted_runtime_identity_preserved:true,
+                release_build_tools_built:true,
+                release_build_tools_provenance:true,
+                release_exact_digest_evidence:true
               }
             }' > release-pointer/acceptance.json
-          ci_ai_validate_acceptance release-pointer/acceptance.json
+          ci_ai_validate_release_acceptance release-pointer/acceptance.json
           cp release/stack-pointer/Dockerfile release-pointer/Dockerfile
           printf 'RELEASE_ACCEPTED_TAG=%s\n' "$accepted_tag" >> "$GITHUB_ENV"
 
@@ -335,7 +614,7 @@ jobs:
           predicate-type: https://wiki-mod.github.io/lancache-ng/attestations/release/v1
           predicate-path: release-pointer/acceptance.json
 
-      - name: Acquire the cross-workflow promote lock
+      - name: Acquire cross-workflow promotion lock
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
           GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
@@ -347,11 +626,10 @@ jobs:
           echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
           promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
 
-      - name: Publish release references as one rollback-protected critical section
+      - name: Publish release refs as one rollback-protected critical section
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_STACK_DIGEST: ${{ steps.stack.outputs.digest }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -379,7 +657,7 @@ jobs:
             if [[ "$status" -eq 0 || "${#promoted_targets[@]}" -eq 0 ]]; then
               exit "$status"
             fi
-            echo "::error::Release publication failed after one or more mutable refs moved; attempting best-effort rollback."
+            echo "::error::Release publication failed after one or more refs moved; attempting best-effort rollback."
             for target in "${promoted_targets[@]}"; do
               previous="${previous_refs[$target]:-}"
               if [[ -n "$previous" ]]; then
@@ -388,21 +666,18 @@ jobs:
                     --tag "$target" "${target%:*}@${previous}" \
                   || echo "::error::Could not restore previous digest for $target."
               else
-                echo "::error::No previous digest existed for $target; manual GHCR inspection is required."
+                echo "::error::$target did not exist before this run and cannot be safely tag-deleted without risking its shared package version. The coherent stack release ref was not advanced; inspect this non-authoritative partial ref before retrying."
               fi
             done
             exit "$status"
           }
           trap rollback_release_refs EXIT
 
-          # Freeze the tag-scoped build-tools producer once more inside the
-          # actual mutation critical section. It is not moved here, but it is
-          # part of the release lock and therefore cannot be allowed to drift
-          # after SBOM/smoke validation and before coherent publication.
-          expected_build_tools="$(jq -r '.tooling["build-tools"].digest' release/release-lock.json)"
-          actual_build_tools="$(digest_for_ref "ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}")"
-          [[ "$actual_build_tools" == "$expected_build_tools" ]] \
-            || ci_ai_fail "build-tools:${RELEASE_TAG} moved before final release publication"
+          # Freeze every source identity again inside the actual mutation lock.
+          # Runtime candidate_ref values are digest-qualified; build-tools uses
+          # the unique release candidate tag. A moved/missing source therefore
+          # stops before any release target changes.
+          bash scripts/ci-verify-lock-tags.sh release/release-lock.json
 
           while IFS=$'\t' read -r image digest; do
             ci_ai_require_digest "$digest"
@@ -411,17 +686,18 @@ jobs:
             metadata="$(mktemp)"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false \
-                --tag "$target" \
-                "${image}@${digest}" \
+                --tag "$target" "${image}@${digest}" \
                 --metadata-file "$metadata"
             published="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
             rm -f "$metadata"
-            [[ "$published" == "$digest" ]] || ci_ai_fail "release tagging changed digest for $image"
+            [[ "$published" == "$digest" ]] \
+              || ci_ai_fail "release tagging changed digest for $image"
             promoted_targets+=("$target")
-          done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' release/release-lock.json)
+          done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' release/release-lock.json)
 
-          # The stack pointer is the coherent release reference and is moved
-          # last, only after all runtime refs reached their recorded digests.
+          # The stack pointer is the release's coherence marker and moves last.
+          # Until this succeeds, any newly-created component tag from a failed
+          # run is explicitly non-authoritative and cannot represent a release.
           stack_target="ghcr.io/wiki-mod/lancache-ng/stack:${RELEASE_TAG}"
           previous_refs["$stack_target"]="$(digest_for_ref "$stack_target" || true)"
           metadata="$(mktemp)"
@@ -436,18 +712,15 @@ jobs:
             || ci_ai_fail "release stack tag changed pointer digest"
           promoted_targets+=("$stack_target")
 
-          # Read all refs back after the complete write sequence. This catches
-          # both a failed move and any concurrent/remote drift before success
-          # is reported. The shared promote lock prevents this repository's
-          # own other promotion workflows from racing this section.
           while IFS=$'\t' read -r image digest; do
             actual="$(digest_for_ref "${image}:${RELEASE_TAG}")"
-            [[ "$actual" == "$digest" ]] || ci_ai_fail "post-publication digest mismatch for ${image}:${RELEASE_TAG}"
-          done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' release/release-lock.json)
+            [[ "$actual" == "$digest" ]] \
+              || ci_ai_fail "post-publication digest mismatch for ${image}:${RELEASE_TAG}"
+          done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' release/release-lock.json)
           [[ "$(digest_for_ref "$stack_target")" == "$RELEASE_STACK_DIGEST" ]] \
             || ci_ai_fail "post-publication stack pointer digest mismatch"
 
-      - name: Release the cross-workflow promote lock
+      - name: Release cross-workflow promotion lock
         if: always()
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
