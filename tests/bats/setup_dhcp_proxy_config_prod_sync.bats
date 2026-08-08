@@ -12,15 +12,9 @@
 # write into config/prod/dhcp-proxy.env would silently overwrite a real,
 # already-configured value there with an empty .env-resolved duplicate.
 #
-# Which file is authoritative per key depends on whether the operator has
-# actually used docs/dhcp-modes.md's documented path for these PXE-pointer
-# keys ("changing these values after initial setup means editing .env
-# directly"): if the source .env/.env.local file has the key at all
-# (env_key_exists(), regardless of value -- including an explicit empty),
-# that answer wins, even to clear a previously-set value. Only when the
-# source file never had the key at all does config/prod/dhcp-proxy.env's
-# own existing value take precedence, protecting a value set entirely out
-# of band (e.g. hand-edited before this .env-based workflow existed).
+# config/prod/dhcp-proxy.env is permanently authoritative because it is the
+# file deploy/prod actually consumes. A migrated .env contains every key, so
+# its mere key presence cannot identify a later deliberate operator change.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -58,7 +52,6 @@ EOF
 @test "a key neither file has set yet converges from the resolved fallback value" {
     cat > "$config_prod_env" <<'EOF'
 DHCP_PROXY_PXE_BOOT_SERVER=
-DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=
 EOF
 
     sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" "fallback-uefi.efi"
@@ -67,22 +60,21 @@ EOF
     [ "$output" = "fallback-uefi.efi" ]
 }
 
-@test "an explicit clear in the source .env overrides a stale non-empty config/prod value (the confirmed real bug)" {
+@test "an explicit config/prod value survives a duplicate clear in the migrated source .env" {
     cat > "$config_prod_env" <<'EOF'
 DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
 EOF
-    # The operator used docs/dhcp-modes.md's documented path and cleared the
-    # key in .env -- the key line exists, with an empty value.
+    # The duplicate in .env is empty, but config/prod remains authoritative.
     source_env_with_clear="$BATS_TEST_TMPDIR/dot-env-explicit-clear"
     printf 'DHCP_PROXY_PXE_BOOT_SERVER=\n' > "$source_env_with_clear"
 
     sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_clear" "" "" "" "" "" "" "" "" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
-    [ "$output" = "" ]
+    [ "$output" = "10.9.9.9" ]
 }
 
-@test "a new value in the source .env overrides an older config/prod value" {
+@test "a later direct config/prod edit survives a stale migrated source .env value" {
     cat > "$config_prod_env" <<'EOF'
 DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
 EOF
@@ -92,7 +84,7 @@ EOF
     sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_new_value" "" "" "" "" "" "" "" "10.5.5.5" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
-    [ "$output" = "10.5.5.5" ]
+    [ "$output" = "10.9.9.9" ]
 }
 
 @test "a non-deploy/prod install_dir is a true no-op (quickstart has no config/prod/dhcp-proxy.env to sync)" {

@@ -407,6 +407,33 @@ EOF
     [ "$output" = "real-pxelinux.0" ]
 }
 
+@test "migrate_env_for_update preserves a direct config/prod edit made after the first migration" {
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=pxelinux.0
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' "$env_file"
+
+    # Operators edit the runtime file directly for deploy/prod. The duplicate
+    # .env value is now stale and must never overwrite this later valid edit.
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "10.0.0.2" "$config_prod_env"
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.0.0.2" ]
+}
+
 @test "migrate_env_for_update in dnsmasq-proxy mode does not die on an incomplete hand-edited PXE pair in config/prod/dhcp-proxy.env" {
     # config/prod/dhcp-proxy.env is hand-edited and has never passed through
     # this function's own dnsmasq-proxy validation block -- entrypoint.sh
@@ -440,11 +467,10 @@ EOF
     run migrate_env_for_update "$prod_install_dir"
     [ "$status" -eq 0 ]
 
-    # The incomplete pair converges to fully cleared, not left half-set --
-    # matching entrypoint.sh's own "both or neither" contract instead of
-    # silently carrying a state the container would only warn about forever.
+    # The authoritative runtime file is not rewritten; entrypoint.sh retains
+    # its existing warning/no-directive behavior for this hand-edited state.
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
-    [ "$output" = "" ]
+    [ "$output" = "10.9.9.9" ]
 }
 
 @test "migrate_env_for_update in dnsmasq-proxy mode does not die on an invalid hand-edited value in config/prod/dhcp-proxy.env" {
@@ -473,5 +499,5 @@ EOF
     [ "$status" -eq 0 ]
 
     run get_env_var DHCP_PROXY_ROUTER "$config_prod_env"
-    [ "$output" = "" ]
+    [ "$output" = "not-an-ip-address" ]
 }

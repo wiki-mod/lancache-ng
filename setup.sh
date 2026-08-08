@@ -1823,7 +1823,7 @@ sync_dhcp_proxy_config_prod_env() {
     local dhcp_ntp_servers="$6" dhcp_proxy_domain="$7" dhcp_proxy_boot_filename="$8"
     local dhcp_proxy_boot_server="$9" dhcp_proxy_pxe_boot_server="${10}" dhcp_proxy_pxe_boot_filename_bios="${11}"
     local dhcp_proxy_pxe_boot_filename_uefi="${12}"
-    local repo_root config_prod_env key fallback existing kv
+    local repo_root config_prod_env key fallback kv
 
     is_deploy_prod_install_dir "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir")
@@ -1831,24 +1831,12 @@ sync_dhcp_proxy_config_prod_env() {
     [[ -f "$config_prod_env" ]] || return 0
 
     # config_prod_env, not $source_env_file (.env/.env.local), is what
-    # deploy/prod's real dhcp-proxy container reads -- see this function's
-    # own header comment. Which one is authoritative per key depends on
-    # whether the operator has actually used docs/dhcp-modes.md's documented
-    # path for these three PXE-pointer keys ("changing these values after
-    # initial setup means editing .env directly and restarting"):
-    #   - $source_env_file HAS the key (env_key_exists, regardless of value,
-    #     including an explicit empty): the operator used that documented
-    #     path for THIS update run, and their answer -- even an explicit
-    #     clear -- must win. Treating "present but empty" the same as
-    #     "absent" here previously meant an operator clearing a PXE pointer
-    #     via .env could never actually disable it, since config_prod_env's
-    #     stale non-empty value kept overriding the clear.
-    #   - $source_env_file does NOT have the key at all: nothing was changed
-    #     via the documented .env path this run, so preserve config_prod_env's
-    #     own existing value if it has one (protects a value set entirely out
-    #     of band, e.g. a hand-edited config_prod_env predating this .env-based
-    #     workflow) -- converging to the resolved fallback only when neither
-    #     file has a value, which still reaches a safe default.
+    # deploy/prod's real dhcp-proxy container reads, so it is the permanent
+    # authority for every key below. Key presence (including an explicit
+    # empty value) must win here: migrate_env_for_update() permanently adds
+    # these keys to .env, which means .env presence cannot distinguish a later
+    # operator edit from an old migration value. The resolved .env fallback is
+    # used only to initialize a key that config_prod_env does not have yet.
     for kv in \
         "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
         "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
@@ -1863,18 +1851,11 @@ sync_dhcp_proxy_config_prod_env() {
     do
         key="${kv%%:*}"
         fallback="${kv#*:}"
-        if env_key_exists "$key" "$source_env_file"; then
+        if ! env_key_exists "$key" "$config_prod_env"; then
             set_env_key "$key" "$fallback" "$config_prod_env"
-        else
-            existing=$(get_env_var "$key" "$config_prod_env")
-            if [[ -n "$existing" ]]; then
-                set_env_key "$key" "$existing" "$config_prod_env"
-            else
-                set_env_key "$key" "$fallback" "$config_prod_env"
-            fi
         fi
     done
-    print_ok "Converged dnsmasq-proxy/PXE keys in $config_prod_env (deploy/prod's dhcp-proxy container reads this file directly, not .env/.env.local); an explicit answer in $source_env_file wins, otherwise any value already set in $config_prod_env was preserved."
+    print_ok "Converged missing dnsmasq-proxy/PXE keys in $config_prod_env from $source_env_file; existing deploy/prod values were preserved because this runtime file is authoritative."
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -2909,10 +2890,7 @@ migrate_env_for_update() {
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
     # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
-    # decides whether an operator's .env answer should override
-    # config/prod/dhcp-proxy.env by checking whether the key exists in
-    # $env_file at all -- an explicit empty counts as "operator cleared it",
-    # a missing key means "preserve config/prod/dhcp-proxy.env's own value".
+    # treats config/prod/dhcp-proxy.env as deploy/prod's permanent authority.
     # For a deploy/prod install, seed each of the ten append_env_key_if_missing
     # calls below from config/prod/dhcp-proxy.env's own current value instead
     # of an unconditional "" default. Backfilling with "" would make $env_file
@@ -3178,9 +3156,9 @@ migrate_env_for_update() {
     # calls above already seeded each of these ten keys from
     # config/prod/dhcp-proxy.env's own real value on a deploy/prod install
     # (see the comment above them), so $env_file and config/prod/dhcp-proxy.env
-    # already agree by this point on a first-time migration, and a genuine
-    # operator edit to $env_file is still correctly distinguishable from that
-    # convergence on every later run.
+    # already agree by this point on a first-time migration. On later runs the
+    # runtime config remains authoritative because a migrated .env key cannot
+    # be distinguished from a deliberate edit by key presence alone.
     sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
         "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
         "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
