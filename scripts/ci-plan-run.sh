@@ -13,7 +13,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source_sha="${SOURCE_SHA:-${GITHUB_SHA:-}}"
 baseline_lock="${BASELINE_STACK_LOCK:-}"
-catalog="$("$repo_root/scripts/query-stack-images.sh" all)"
+catalog="$(bash "$repo_root/scripts/query-stack-images.sh" all)"
 
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 ci_ai_require_sha "$source_sha"
@@ -26,7 +26,7 @@ if [[ -n "$baseline_lock" && -f "$baseline_lock" ]]; then
     baseline_sha="$(jq -r '.source_sha' "$baseline_lock")"
     if git cat-file -e "${baseline_sha}^{commit}" 2>/dev/null \
         && git merge-base --is-ancestor "$baseline_sha" "$source_sha"; then
-        classification="$("$repo_root/scripts/classify-image-impact.sh" "$baseline_sha" "$source_sha")"
+        classification="$(bash "$repo_root/scripts/classify-image-impact.sh" "$baseline_sha" "$source_sha")"
         baseline_usable=true
     else
         echo "::notice::Accepted baseline source $baseline_sha is not a usable ancestor of $source_sha; building every image." >&2
@@ -41,7 +41,7 @@ while IFS= read -r entry; do
     source_path="$(jq -r '.source' <<<"$entry")"
     context="$(jq -r '.context' <<<"$entry")"
     build_contexts="$(jq -r '.build_contexts' <<<"$entry")"
-    source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha")"
+    source_fingerprint="$(bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha")"
     ci_ai_require_digest "$source_fingerprint"
 
     mode=build
