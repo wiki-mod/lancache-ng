@@ -87,10 +87,15 @@ ci_ai_validate_acceptance() {
       and .accepted == true
       and (.source_sha | test("^[0-9a-f]{40}$"))
       and (.stack_lock_sha256 | test("^[0-9a-f]{64}$"))
+      and (.accepted_tag | type == "string" and startswith("accepted-v2-"))
+      and .gates.identity_complete == true
+      and .gates.platform_complete == true
+      and .gates.provenance == true
       and .gates.exact_digest_security == true
       and .gates.native_platform_smoke == true
       and .gates.exact_locked_stack == true
       and .gates.supplemental_full_setup == true
+      and .gates.publication_policy == true
     ' "$file" >/dev/null || ci_ai_fail "invalid acceptance record: $file"
 }
 
