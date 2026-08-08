@@ -723,22 +723,22 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
 // (a resolution bug that ever yielded an empty/placeholder token must still fail
 // closed rather than start in a silently insecure state, issue #659), not as
 // the primary boot gate it once was.
-// Finding #17 (docs/bug-hunt/ui-routes.md, issue #849): this token gates
-// `POST /api/secondary/register` (the only route that lets a new secondary
-// join this primary) with a plain equality check (routes/secondaries.rs's
-// constant-time comparison), but nothing previously rejected a short,
-// easily-guessable value that is neither empty nor a known placeholder --
-// e.g. an operator hand-typing "changeme123" or "secret" instead of running
-// the generator this rule's own error message recommends. setup.sh's real
-// default is a 64-character hex string (32 CSPRNG bytes via
-// `ensure_secret_env_key ... hex32`); this floor is deliberately much
-// lower than that (32 characters, half the real default) so a genuinely
-// hand-chosen operator secret with reasonable entropy is not rejected,
-// while a trivially short/guessable value is. This is a length floor only
-// -- rate-limiting the registration endpoint itself against online
-// brute-forcing is a separate, larger undertaking (shared per-route state,
-// a rate-limiting strategy decision) not attempted in this same pass; see
-// this PR's own Scope Boundaries section.
+// This token gates `POST /api/secondary/register` (the only route that
+// lets a new secondary join this primary) with a plain equality check
+// (routes/secondaries.rs's constant-time comparison), which by itself
+// rejects only an empty or known-placeholder value. Without a length
+// floor, a short, easily-guessable value that is neither of those (e.g.
+// an operator hand-typing "changeme123" or "secret" instead of running
+// the generator this rule's own error message recommends) would still be
+// accepted. setup.sh's real default is a 64-character hex string (32
+// CSPRNG bytes via `ensure_secret_env_key ... hex32`); this floor is
+// deliberately much lower than that (32 characters, half the real
+// default) so a genuinely hand-chosen operator secret with reasonable
+// entropy is not rejected, while a trivially short/guessable value is.
+// This is a length floor only -- rate-limiting the registration endpoint
+// itself against online brute-forcing is a separate, larger undertaking
+// (shared per-route state, a rate-limiting strategy decision) requiring
+// its own maintainer decision, tracked on issue #849.
 const MIN_SECONDARY_REGISTRATION_TOKEN_LEN: usize = 32;
 
 fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
@@ -1438,11 +1438,10 @@ mod tests {
         );
     }
 
-    // Finding #17 (docs/bug-hunt/ui-routes.md, issue #849): a token that is
-    // neither empty nor a known placeholder, but too short to meaningfully
-    // resist brute-forcing, must still be rejected. `MIN_SECONDARY_
-    // REGISTRATION_TOKEN_LEN` is the exact boundary this locks -- one
-    // character under it must fail, exactly at it must pass.
+    // A token that is neither empty nor a known placeholder, but too short
+    // to meaningfully resist brute-forcing, must still be rejected.
+    // `MIN_SECONDARY_REGISTRATION_TOKEN_LEN` is the exact boundary this
+    // locks -- one character under it must fail, exactly at it must pass.
     #[test]
     fn secondary_registration_token_rejects_short_non_placeholder_values() {
         let too_short = "a".repeat(MIN_SECONDARY_REGISTRATION_TOKEN_LEN - 1);

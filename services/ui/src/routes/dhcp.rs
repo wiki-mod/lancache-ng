@@ -111,20 +111,16 @@ impl std::fmt::Display for DhcpError {
 
 impl std::error::Error for DhcpError {}
 
-// Finding #22 (docs/bug-hunt/ui-routes.md, issue #849), extended as an
-// AG-WF-011 failure-class fix rather than a single-call-site patch:
 // kea_config_modify's closures throughout this file share the literal
 // "subnet not found" error string (from find_subnet_mut, used directly or
 // via dhcp4_subnets_mut+find) whenever a caller-supplied subnet_id doesn't
 // exist -- a client-input problem (the operator's own request named a
-// subnet that isn't there), not a server-side config-mutation failure. The
-// naive `.map_err(|e| DhcpError::config_error(e.to_string()))` every
-// kea_config_modify call site previously used maps *every* closure failure
-// to 500 Internal Server Error, including this one, when a bad subnet_id
-// should surface as 404 Not Found. This one shared helper is used at every
-// call site instead, so the mapping only needs to be correct once, and any
-// closure failure that is not this specific "subnet not found" case keeps
-// exactly its previous 500 behavior.
+// subnet that isn't there), not a server-side config-mutation failure, and
+// should surface as 404 Not Found rather than the generic 500 Internal
+// Server Error every other closure failure maps to. This one shared
+// helper is used at every kea_config_modify call site, so the mapping
+// only needs to be correct once here, and any closure failure that is not
+// this specific "subnet not found" case keeps the generic 500 behavior.
 fn kea_config_modify_error(e: Box<dyn std::error::Error + Send + Sync>) -> DhcpError {
     let message = e.to_string();
     if message == "subnet not found" {
@@ -4443,13 +4439,12 @@ mod tests {
         );
     }
 
-    // Finding #22 (docs/bug-hunt/ui-routes.md, issue #849): a caller-supplied
-    // subnet_id that doesn't exist must map to 404 Not Found, not the
-    // blanket 500 every other kea_config_modify closure failure correctly
-    // still gets -- the actual bug this fix closes. Exercises
-    // kea_config_modify_error directly against the exact literal string
-    // find_subnet_mut produces (`.ok_or("subnet not found")`), since that
-    // string is the load-bearing contract between the two functions.
+    // A caller-supplied subnet_id that doesn't exist must map to 404 Not
+    // Found, not the blanket 500 every other kea_config_modify closure
+    // failure correctly gets. Exercises kea_config_modify_error directly
+    // against the exact literal string find_subnet_mut produces
+    // (`.ok_or("subnet not found")`), since that string is the
+    // load-bearing contract between the two functions.
     #[test]
     fn kea_config_modify_error_maps_subnet_not_found_to_404() {
         let boxed: Box<dyn std::error::Error + Send + Sync> = "subnet not found".into();
