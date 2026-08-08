@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Guided lifecycle CLI for a lancache-ng installation. Subcommands: install
@@ -176,6 +177,24 @@ is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
     [[ "$filename" != *[[:space:],]* ]]
+}
+
+# True (exit 0) only when a PXE boot-pointer answer set has both a boot
+# server AND at least one boot filename -- the combination
+# services/dhcp-proxy/entrypoint.sh's _dhcp_proxy_render_pxe_service_directives
+# actually needs to render a real pxe-service directive. A server alone, or
+# a filename alone, produces no directive at all: dnsmasq just logs a
+# startup WARNING and PXE boot-pointer support stays silently inactive.
+# Shared by both the interactive install wizard (which only ever asks for a
+# filename once a server is already given, so it can only hit the
+# server-without-filename half of this check) and migrate_env_for_update
+# (which validates a possibly hand-edited existing .env/.env.local that can
+# carry either half incomplete) so the two callers can never drift apart on
+# what "complete" means for this feature.
+pxe_boot_pointer_answers_are_complete() {
+    local server="$1" filename_bios="$2" filename_uefi="$3"
+    [[ -n "$server" ]] || return 1
+    [[ -n "$filename_bios" || -n "$filename_uefi" ]]
 }
 
 # Two-tier detection for a secondary node's own LAN IP: prefer the source
@@ -1773,6 +1792,42 @@ resolve_update_ip_config_paths() {
     printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
 }
 
+# deploy/prod's dhcp-proxy service (deploy/prod/docker-compose.yml) loads its
+# runtime values via `env_file: ../../config/prod/dhcp-proxy.env` -- a static
+# file Compose reads directly, with no `${VAR}` interpolation from
+# .env/.env.local at all (unlike deploy/quickstart's dhcp-proxy service,
+# which wires each value through `environment: - KEY=${KEY:-}`). Every value
+# migrate_env_for_update()/the fresh-install writer resolve for DHCP_PROXY_*
+# and DHCP_RELAY_LOCAL_ADDR therefore never reaches a real deploy/prod
+# container unless it is also written here -- a no-op for a quickstart
+# install (or any other non-deploy/prod install_dir), which has no separate
+# file to sync.
+sync_dhcp_proxy_config_prod_env() {
+    local install_dir="$1"
+    local dhcp_relay_local_addr="$2" dhcp_proxy_interface="$3" dhcp_proxy_router="$4"
+    local dhcp_ntp_servers="$5" dhcp_proxy_domain="$6" dhcp_proxy_boot_filename="$7"
+    local dhcp_proxy_boot_server="$8" dhcp_proxy_pxe_boot_server="$9" dhcp_proxy_pxe_boot_filename_bios="${10}"
+    local dhcp_proxy_pxe_boot_filename_uefi="${11}"
+    local repo_root config_prod_env
+
+    is_deploy_prod_install_dir "$install_dir" || return 0
+    repo_root=$(deploy_prod_repo_root "$install_dir")
+    config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
+    [[ -f "$config_prod_env" ]] || return 0
+
+    set_env_key DHCP_RELAY_LOCAL_ADDR "$dhcp_relay_local_addr" "$config_prod_env"
+    set_env_key DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" "$config_prod_env"
+    set_env_key DHCP_PROXY_ROUTER "$dhcp_proxy_router" "$config_prod_env"
+    set_env_key DHCP_NTP_SERVERS "$dhcp_ntp_servers" "$config_prod_env"
+    set_env_key DHCP_PROXY_DOMAIN "$dhcp_proxy_domain" "$config_prod_env"
+    set_env_key DHCP_PROXY_BOOT_FILENAME "$dhcp_proxy_boot_filename" "$config_prod_env"
+    set_env_key DHCP_PROXY_BOOT_SERVER "$dhcp_proxy_boot_server" "$config_prod_env"
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "$dhcp_proxy_pxe_boot_server" "$config_prod_env"
+    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$config_prod_env"
+    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$config_prod_env"
+    print_ok "Synced dnsmasq-proxy/PXE values to $config_prod_env (deploy/prod's dhcp-proxy container reads this file directly, not .env/.env.local)."
+}
+
 # Full .env rewrites keep the original owner/mode because the file contains
 # runtime tokens and may already be locked down to 0600.
 write_env_file() {
@@ -2801,11 +2856,11 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "" "$env_file"
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
-    # Issue #705: PXE boot-pointer fields -- previously only reachable by
-    # hand-editing config/prod/dhcp-proxy.env directly (issue #849
-    # dhcp-proxy.md finding #2), so an existing install upgrading via
-    # `setup.sh update` needs these keys converged in just like the #450
-    # fields above, not just newly-generated installs.
+    # Issue #705: PXE boot-pointer fields. Without this convergence step an
+    # existing install upgrading via `setup.sh update` would never gain
+    # these keys, since the only other way to set them was hand-editing
+    # config/prod/dhcp-proxy.env directly -- converge them here just like
+    # the #450 fields above, not only for newly-generated installs.
     append_env_key_if_missing DHCP_PROXY_PXE_BOOT_SERVER "" "$env_file"
     append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "" "$env_file"
     append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "" "$env_file"
@@ -2859,6 +2914,25 @@ migrate_env_for_update() {
                 || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace or commas."
             [[ -z "$dhcp_proxy_pxe_boot_filename_uefi" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_uefi" \
                 || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace or commas."
+            # The three PXE boot-pointer fields above are validated individually,
+            # but entrypoint.sh's pxe-service rendering needs the server AND at
+            # least one boot filename together (see
+            # pxe_boot_pointer_answers_are_complete's own header comment) -- a
+            # server with no filename, or a filename with no server, produces
+            # no pxe-service directive at all (a silent, always-on startup
+            # WARNING, not a fatal error). The interactive wizard already
+            # enforces this combined invariant at entry time; converge an
+            # existing install the same way instead of carrying an
+            # inconsistent combination forward untouched.
+            if [[ -n "$dhcp_proxy_pxe_boot_server" ]] \
+                && ! pxe_boot_pointer_answers_are_complete "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" "$dhcp_proxy_pxe_boot_filename_uefi"; then
+                print_warn "DHCP_PROXY_PXE_BOOT_SERVER is set in $env_file but neither boot filename is; PXE boot-pointer support cannot activate without at least one. Clearing DHCP_PROXY_PXE_BOOT_SERVER."
+                dhcp_proxy_pxe_boot_server=""
+            elif [[ -z "$dhcp_proxy_pxe_boot_server" && ( -n "$dhcp_proxy_pxe_boot_filename_bios" || -n "$dhcp_proxy_pxe_boot_filename_uefi" ) ]]; then
+                print_warn "A DHCP_PROXY_PXE_BOOT_FILENAME_* value is set in $env_file but DHCP_PROXY_PXE_BOOT_SERVER is empty; PXE boot-pointer support cannot activate without a boot server. Clearing the boot filename value(s)."
+                dhcp_proxy_pxe_boot_filename_bios=""
+                dhcp_proxy_pxe_boot_filename_uefi=""
+            fi
             ;;
         dnsmasq-relay)
             # Issue #844: relay mode forwards to an upstream server and injects
@@ -2892,6 +2966,16 @@ migrate_env_for_update() {
     set_env_key DHCP_PROXY_PXE_BOOT_SERVER "$dhcp_proxy_pxe_boot_server" "$env_file"
     set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$env_file"
     set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$env_file"
+    # A manual deploy/prod install's dhcp-proxy container reads
+    # config/prod/dhcp-proxy.env directly, not $env_file -- see
+    # sync_dhcp_proxy_config_prod_env's own header comment for why writing
+    # only $env_file above would leave deploy/prod's dhcp-proxy container on
+    # stale values regardless of what this function just resolved.
+    sync_dhcp_proxy_config_prod_env "$install_dir" \
+        "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
+        "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
+        "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
+        "$dhcp_proxy_pxe_boot_filename_uefi"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -6766,8 +6850,9 @@ DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
 DHCP_PROXY_CUSTOM_OPTIONS=""
 # Issue #705: PXE boot-pointer (`pxe-service`) fields, separate from the
-# #450 fields above -- previously only reachable by hand-editing
-# config/prod/dhcp-proxy.env directly (issue #849 dhcp-proxy.md finding #2).
+# #450 fields above -- the only other way to set these is hand-editing
+# config/prod/dhcp-proxy.env directly, so a fresh install writes real,
+# wizard-driven values (or the empty default) here instead.
 DHCP_PROXY_PXE_BOOT_SERVER=""
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
@@ -6973,15 +7058,15 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
                 ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" ""
             done
 
-            if [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]]; then
+            if pxe_boot_pointer_answers_are_complete "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"; then
+                print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
+            else
                 # Matches entrypoint.sh's own fail-safe: a boot server alone
                 # renders no pxe-service directive at all (just a WARNING on
                 # every start), so reset it here rather than persist a
                 # permanently-incomplete, warning-generating config.
                 print_warn "No BIOS or UEFI boot filename set; PXE boot-pointer support will remain inactive."
                 DHCP_PROXY_PXE_BOOT_SERVER=""
-            else
-                print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
             fi
         fi
     fi
@@ -7621,10 +7706,9 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
-    # DHCP_PROXY_BOOT_SERVER was missing from this summary even before the
-    # PXE boot-pointer fields below were added (found while adding those,
-    # AG-WF-011 same-failure-class fix: an operator-set value invisible in
-    # the install summary looks unconfigured even when it isn't).
+    # An operator-set value that never appears in this install summary looks
+    # unconfigured even when it isn't -- print it whenever it is non-empty,
+    # matching the other conditional lines in this block.
     [[ -n "$DHCP_PROXY_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot server:" "$DHCP_PROXY_BOOT_SERVER"
     [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot-pointer server:" "$DHCP_PROXY_PXE_BOOT_SERVER"
     [[ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && printf "  %-26s %s\n" "  PXE boot-pointer (BIOS):" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
