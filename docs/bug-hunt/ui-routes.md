@@ -310,15 +310,14 @@ findings that overlap with it are still listed (for completeness) with a note.
     authenticated session) could submit an arbitrarily large TXT value that this route accepts and
     forwards via NATS before any PowerDNS-side limit is hit. Low severity given the route requires
     an authenticated admin session already.
-    **Fix**: added `MAX_TXT_CONTENT_BYTES = 64_997` (RFC 1035 SS4.2.2's 65535-byte DNS message
+    **Fix**: added `MAX_TXT_CONTENT_BYTES = 64_986` (RFC 1035 SS4.2.2's 65535-byte DNS message
     ceiling -- not RDLENGTH alone -- adjusted for both the per-255-byte-chunk length-prefix
     overhead PowerDNS's own documented TXT auto-chunking adds on the wire, and the surrounding DNS
-    header/question/answer-frame bytes that must also fit in the same message; see that constant's
-    own header comment for the exact arithmetic). An earlier version of this fix used `65_279`,
-    accounting for RDLENGTH's own ceiling only -- that value's RDATA alone already reaches the full
-    65535-byte message ceiling, leaving no room for the header/question/answer framing a real
-    response also needs, so it could not actually be delivered in a single DNS message. Regression
-    test: `txt_content_upper_bound_matches_message_ceiling`.
+    header/question/answer-frame bytes and the mandatory option-free EDNS response OPT record that
+    must also fit in the same message; see that constant's own header comment for the exact
+    arithmetic). The form applies the same UTF-8 byte-aware ceiling through browser custom validity;
+    HTML `maxlength` is unsuitable because it counts UTF-16 code units instead. Regression test:
+    `txt_content_upper_bound_matches_message_ceiling`.
 
 16. **~~`fetch_lan_records` (`routes/domains.rs:741-769`) doesn't check
     `resp.status().is_success()` before calling `.json()`, unlike `flush_recursor_cache` in the
@@ -509,4 +508,3 @@ This document is the raw, unfiltered output of the collection phase for issue #8
 no self-verification during collection, per the maintainer-agreed methodology for this sweep).
 Severity judgments in the accompanying tool-call findings are the collecting agent's own
 first-pass estimate, not a verified ranking -- verification is a separate, later phase.
-
