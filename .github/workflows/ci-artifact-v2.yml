@@ -123,17 +123,17 @@ jobs:
             -v "$RUNNER_TEMP/ci-v2-out:/tmp/out" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc '
+            timeout --kill-after=30 1200 bash -lc '
               set -euo pipefail
-              bash -n scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh
-              shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh
-              actionlint \
+              bash -n scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
+              shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
+              actionlint -config-file .github/actionlint.yaml \
                 .github/workflows/ci-artifact-v2.yml \
                 .github/workflows/ci-promote-accepted-v2.yml \
                 .github/workflows/ci-security-refresh-v2.yml \
                 .github/workflows/ci-release-accepted-v2.yml
               bash scripts/check-workflow-line-limit.sh
-              bats tests/bats/ci_artifact_identity.bats
+              bats tests/bats/ci_artifact_identity.bats tests/bats/network_retry.bats
               bash scripts/query-stack-images.sh all >/tmp/out/catalog.json
               bash scripts/ci-plan-run.sh >/tmp/out/plan.json
             '
