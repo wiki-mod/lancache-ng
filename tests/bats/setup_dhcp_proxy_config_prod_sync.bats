@@ -11,10 +11,16 @@
 # resolves these values against .env/.env.local, so a naive unconditional
 # write into config/prod/dhcp-proxy.env would silently overwrite a real,
 # already-configured value there with an empty .env-resolved duplicate.
-# These tests prove sync_dhcp_proxy_config_prod_env() instead treats
-# config/prod/dhcp-proxy.env's own existing value as authoritative and
-# only uses the .env-resolved fallback to converge a key neither file has
-# set yet.
+#
+# Which file is authoritative per key depends on whether the operator has
+# actually used docs/dhcp-modes.md's documented path for these PXE-pointer
+# keys ("changing these values after initial setup means editing .env
+# directly"): if the source .env/.env.local file has the key at all
+# (env_key_exists(), regardless of value -- including an explicit empty),
+# that answer wins, even to clear a previously-set value. Only when the
+# source file never had the key at all does config/prod/dhcp-proxy.env's
+# own existing value take precedence, protecting a value set entirely out
+# of band (e.g. hand-edited before this .env-based workflow existed).
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -28,16 +34,20 @@ setup() {
     mkdir -p "$scratch_repo/deploy/prod" "$scratch_repo/config/prod"
     install_dir="$scratch_repo/deploy/prod"
     config_prod_env="$scratch_repo/config/prod/dhcp-proxy.env"
+    # A source .env/.env.local that never mentions any of these keys at all --
+    # the "operator never used the documented .env path this run" case.
+    source_env_file="$BATS_TEST_TMPDIR/dot-env-no-pxe-keys"
+    printf 'SOME_UNRELATED_KEY=1\n' > "$source_env_file"
 }
 
-@test "an existing non-empty config/prod value is preserved, not overwritten by an empty .env-resolved fallback" {
+@test "config/prod's existing value is preserved when the source .env never had the key at all" {
     cat > "$config_prod_env" <<'EOF'
 DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=
 EOF
 
-    sync_dhcp_proxy_config_prod_env "$install_dir" "" "" "" "" "" "" "" "" "" ""
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" ""
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
     [ "$output" = "10.9.9.9" ]
@@ -45,23 +55,51 @@ EOF
     [ "$output" = "real-pxelinux.0" ]
 }
 
-@test "a key config/prod has not set yet converges from the .env-resolved fallback value" {
+@test "a key neither file has set yet converges from the resolved fallback value" {
     cat > "$config_prod_env" <<'EOF'
 DHCP_PROXY_PXE_BOOT_SERVER=
 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=
 EOF
 
-    sync_dhcp_proxy_config_prod_env "$install_dir" "" "" "" "" "" "" "" "" "" "fallback-uefi.efi"
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "" "" "fallback-uefi.efi"
 
     run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$config_prod_env"
     [ "$output" = "fallback-uefi.efi" ]
+}
+
+@test "an explicit clear in the source .env overrides a stale non-empty config/prod value (the confirmed real bug)" {
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+EOF
+    # The operator used docs/dhcp-modes.md's documented path and cleared the
+    # key in .env -- the key line exists, with an empty value.
+    source_env_with_clear="$BATS_TEST_TMPDIR/dot-env-explicit-clear"
+    printf 'DHCP_PROXY_PXE_BOOT_SERVER=\n' > "$source_env_with_clear"
+
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_clear" "" "" "" "" "" "" "" "" "" ""
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "" ]
+}
+
+@test "a new value in the source .env overrides an older config/prod value" {
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+EOF
+    source_env_with_new_value="$BATS_TEST_TMPDIR/dot-env-new-value"
+    printf 'DHCP_PROXY_PXE_BOOT_SERVER=10.5.5.5\n' > "$source_env_with_new_value"
+
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_with_new_value" "" "" "" "" "" "" "" "10.5.5.5" "" ""
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.5.5.5" ]
 }
 
 @test "a non-deploy/prod install_dir is a true no-op (quickstart has no config/prod/dhcp-proxy.env to sync)" {
     quickstart_dir="$BATS_TEST_TMPDIR/opt-lancache-ng"
     mkdir -p "$quickstart_dir"
 
-    run sync_dhcp_proxy_config_prod_env "$quickstart_dir" "" "" "" "" "" "" "" "10.1.1.1" "" ""
+    run sync_dhcp_proxy_config_prod_env "$quickstart_dir" "$source_env_file" "" "" "" "" "" "" "" "10.1.1.1" "" ""
     [ "$status" -eq 0 ]
     [ ! -e "$quickstart_dir/../config" ]
 }
@@ -69,7 +107,32 @@ EOF
 @test "a missing config/prod/dhcp-proxy.env file (e.g. an unusual checkout) is a no-op, not a hard failure" {
     rm -f "$config_prod_env"
 
-    run sync_dhcp_proxy_config_prod_env "$install_dir" "" "" "" "" "" "" "" "10.1.1.1" "" ""
+    run sync_dhcp_proxy_config_prod_env "$install_dir" "$source_env_file" "" "" "" "" "" "" "" "10.1.1.1" "" ""
     [ "$status" -eq 0 ]
     [ ! -e "$config_prod_env" ]
+}
+
+@test "migrate_env_for_update() calls sync_dhcp_proxy_config_prod_env() after every ensure_secret_env_key call, not before" {
+    # Structural regression test, not a functional one: the real bug this
+    # guards was migrate_env_for_update() writing config/prod/dhcp-proxy.env
+    # -- a container's live, directly-consumed config -- BEFORE several
+    # ensure_secret_env_key calls that can still `die` (e.g. an openssl
+    # failure generating a secret). An aborted update must not leave that
+    # one write applied while $env_file itself stays at its pre-update
+    # state. A full functional simulation would need to fake an
+    # ensure_secret_env_key failure inside the real 1000+-line
+    # migrate_env_for_update(); a plain line-order check on the real
+    # function body is cheap and catches the same regression (the call
+    # moving back above any secret-generation step) just as reliably.
+    func_body_file="$BATS_TEST_TMPDIR/migrate_env_for_update_body.txt"
+    awk '/^migrate_env_for_update\(\) \{/,/^}/' "$repo_root/setup.sh" > "$func_body_file"
+    [ -s "$func_body_file" ] || { echo "Could not locate migrate_env_for_update() in setup.sh -- has it been renamed or restructured? Update this guard's extraction pattern to match." >&2; return 1; }
+
+    sync_line=$(grep -n '^\s*sync_dhcp_proxy_config_prod_env ' "$func_body_file" | head -1 | cut -d: -f1)
+    [ -n "$sync_line" ] || { echo "sync_dhcp_proxy_config_prod_env is no longer called from migrate_env_for_update() at all -- update this guard if that call moved elsewhere." >&2; return 1; }
+
+    last_secret_line=$(grep -n '^\s*ensure_secret_env_key ' "$func_body_file" | tail -1 | cut -d: -f1)
+    [ -n "$last_secret_line" ] || { echo "No ensure_secret_env_key call found in migrate_env_for_update() -- update this guard's extraction if that helper was renamed." >&2; return 1; }
+
+    [ "$sync_line" -gt "$last_secret_line" ]
 }
