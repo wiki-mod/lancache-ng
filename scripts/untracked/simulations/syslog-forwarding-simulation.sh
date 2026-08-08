@@ -67,7 +67,8 @@
 # is a distinct question this script does not resolve.
 #
 # COMPOSE BASE: deploy/quickstart/docker-compose.yml, not deploy/full-setup
-# (which every earlier `scripts/*-simulation.sh` uses). full-setup has
+# (which every earlier simulation script under this same directory uses).
+# full-setup has
 # neither the `logging` profile (syslog-ng/fluent-bit) nor dhcp/dhcp-proxy
 # defined at all -- extending it would mean testing an unguarded copy of the
 # logging wiring instead of the real thing scripts/tracked/check-logging-matrix.sh

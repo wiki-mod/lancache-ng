@@ -212,7 +212,9 @@ to the operator anywhere in this project:**
   still-open bug** was found in `services/ui/src/routes/logs.rs`
   (see §3.4 below) and a **real compose-topology gap** was found:
   `deploy/full-setup/docker-compose.yml` — the base every existing
-  `scripts/*-simulation.sh` CI script builds on — has neither
+  `scripts/untracked/simulations/*-simulation.sh` CI script builds on
+  (formerly `scripts/*-simulation.sh` before the F-16 restructure) — has
+  neither
   `dhcp`/`dhcp-proxy` nor the `logging` profile (`syslog-ng`/`fluent-bit`)
   at all; only `dev`/`quickstart` have all 9 wired services *and* the full
   logging profile together. PR #828 (**correction, 2026-07-18 review pass:

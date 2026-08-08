@@ -9,7 +9,7 @@ Methodology: read `setup.sh` in full (every `cmd_*` function, the dispatcher,
 the interactive `install` main-flow body, and the shared helpers each command
 calls), cross-referenced against `.github/AGENTS.md` (AG-OP-006..013,
 Convergence/Idempotence Checklist), `scripts/tracked/check-idempotence-test-coverage.sh`,
-`scripts/untracked/simulations/setup-cli-simulation.sh`, the other `scripts/*-simulation.sh` files,
+`scripts/untracked/simulations/setup-cli-simulation.sh`, the other `scripts/untracked/simulations/*-simulation.sh` files,
 every `tests/bats/setup_*.bats` file, and `gh issue` lookups for the issues
 named in code comments (#639, #665, #669, #762, #763, #819, #665, #666, #628,
 #652, #785, #836, #456).
