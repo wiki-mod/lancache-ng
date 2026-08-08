@@ -2996,6 +2996,10 @@ migrate_env_for_update() {
     append_env_key_if_missing DHCP_PROXY_DOMAIN "$prodsync_default_proxy_domain" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "$prodsync_default_boot_filename" "$env_file"
     append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "$prodsync_default_boot_server" "$env_file"
+    # Deliberately still "" here, unlike the seven keys above: this key is
+    # not one of the ten sync_dhcp_proxy_config_prod_env() converges (see
+    # that function's own `for kv in` list), so config/prod/dhcp-proxy.env
+    # has no authoritative value for it to preserve.
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
     # Issue #705: PXE boot-pointer fields. Without this convergence step an
     # existing install upgrading via `setup.sh update` would never gain
