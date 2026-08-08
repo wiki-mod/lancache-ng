@@ -3,7 +3,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for services/proxy/entrypoint.sh's
-# _render_stream_backend_map() -- bug-hunt #849, finding N4: lazy mode (the
+# _render_stream_backend_map(). Lazy mode (the
 # project's shipped default, PROXY_SECURITY_MODE unset or "lazy") generated
 # `default $ssl_preread_server_name:443;` with no "" (empty-SNI) guard ahead
 # of it, so a client that sends no SNI (or one ssl_preread cannot parse)

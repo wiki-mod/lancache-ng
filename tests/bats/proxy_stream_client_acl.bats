@@ -3,7 +3,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for services/proxy/entrypoint.sh's
-# _render_stream_client_acl() -- bug-hunt #849, finding N1: the stream-level
+# _render_stream_client_acl(). The stream-level
 # externally-facing listeners (nginx.conf's static 8443 standard-mode
 # passthrough server, and the dynamically-generated 443 SSL-mode dispatcher)
 # had zero client-IP enforcement, regardless of PROXY_ALLOWED_CLIENT_CIDRS,
@@ -41,12 +41,10 @@ setup() {
     [[ "$output" == *'deny all;'* ]]
 }
 
-# The exact regression this finding described: without this fix, no
-# allow/deny lines existed anywhere in the stream {} context regardless of
-# CIDR configuration. This proves the file the fix generates is never
-# silently empty (beyond its own header comment) once CIDRs are configured
-# -- an empty generated file would still `include` successfully (a no-op),
-# masking the exact same unrestricted-relay bug this fix exists to close.
+# Proves the generated file is never silently empty (beyond its own header
+# comment) once CIDRs are configured -- an empty generated file would still
+# `include` successfully (a no-op), masking a real unrestricted relay
+# regardless of how PROXY_ALLOWED_CLIENT_CIDRS is set.
 @test "the generated file is not merely the header comment once CIDRs are configured" {
     PROXY_ALLOWED_CLIENT_CIDRS="192.168.1.0/24"
     run _render_stream_client_acl

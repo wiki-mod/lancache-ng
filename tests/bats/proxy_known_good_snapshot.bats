@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Adapter-level tests for the proxy (nginx) known-good-snapshot integration
@@ -80,6 +81,70 @@ STUB
     [ "$status" -ne 0 ]
     [[ "$output" == *"no known-good nginx config snapshot is available"* ]]
     [ "$(cat "$nginx_conf")" = "BROKEN config" ]
+}
+
+@test "legacy pre-upgrade snapshot missing the stream-ACL file is backfilled and becomes usable for rollback again" {
+    # Simulates an install that already has a known-good snapshot from
+    # before this PR added STREAM_CLIENT_ACL_FILE (00-stream-client-acl.conf)
+    # to the candidate list -- only the two older candidate files exist in
+    # the snapshot, exactly as kgs_snapshot_create would have left it under
+    # the old 4-file (here reduced to 2 for test brevity) candidate set.
+    local params_conf="$live_dir/proxy-params.conf"
+    printf 'legacy nginx.conf v1\n' > "$nginx_conf"
+    printf 'legacy proxy-params v1\n' > "$params_conf"
+    kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "$nginx_conf" "$params_conf"
+
+    legacy_id="$(kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR")"
+    [ -n "$legacy_id" ]
+    [ ! -f "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
+
+    # This boot's freshly-generated ACL file (deterministic from
+    # PROXY_ALLOWED_CLIENT_CIDRS, unrelated to whether the legacy snapshot's
+    # own nginx.conf/proxy-params.conf are still valid).
+    local acl_file="$live_dir/00-stream-client-acl.conf"
+    printf 'allow 10.0.0.0/8;\ndeny all;\n' > "$acl_file"
+
+    _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR" "$acl_file"
+
+    [ -f "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf")" = "$(cat "$acl_file")" ]
+
+    # The migrated snapshot's original two files are untouched byte-for-byte
+    # (the backfill must not re-derive or alter what was already validated
+    # together).
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/nginx.conf")" = "legacy nginx.conf v1" ]
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/proxy-params.conf")" = "legacy proxy-params v1" ]
+
+    # Now a full 5-candidate-style rollback (nginx.conf + proxy-params.conf +
+    # the newly-backfilled ACL file) can actually select this migrated
+    # snapshot instead of finding zero usable snapshots.
+    printf 'BROKEN config\n' > "$nginx_conf"
+    printf 'BROKEN proxy-params\n' > "$params_conf"
+    printf 'BROKEN acl\n' > "$acl_file"
+    run kgs_snapshot_apply "$PROXY_CONFIG_SNAPSHOT_DIR" "proxy" "true" "$nginx_conf" "$params_conf" "$acl_file"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$acl_file")" = "allow 10.0.0.0/8;
+deny all;" ]
+}
+
+@test "migration is a no-op for a snapshot that already has the stream-ACL file" {
+    local params_conf="$live_dir/proxy-params.conf"
+    local acl_file="$live_dir/00-stream-client-acl.conf"
+    printf 'proxy-params v1\n' > "$params_conf"
+    printf 'allow 10.0.0.0/8;\ndeny all;\n' > "$acl_file"
+    kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "$nginx_conf" "$params_conf" "$acl_file"
+    already_migrated_id="$(kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR")"
+    original_mtime="$(stat -c '%Y' "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")"
+
+    printf 'allow 172.16.0.0/12;\ndeny all;\n' > "$acl_file"
+    run _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR" "$acl_file"
+    [ "$status" -eq 0 ]
+
+    # Untouched: still the ORIGINAL snapshotted content, not overwritten by
+    # this later, unrelated live edit to $acl_file.
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")" = "allow 10.0.0.0/8;
+deny all;" ]
+    [ "$(stat -c '%Y' "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")" = "$original_mtime" ]
 }
 
 @test "retention keeps only KEEP_KNOWN_GOOD_CONFIGS snapshots across repeated valid starts" {

@@ -7,7 +7,7 @@
 # already used by the other tests/bats/helpers/proxy-*.sh files for disjoint
 # ranges of the same file. This is the $stream_backend map generator whose
 # lazy-mode branch regressed issue #88 (empty SNI forwarding to the invalid
-# ":443" target) -- bug-hunt #849, finding N4.
+# ":443" target).
 
 load_proxy_stream_backend_map_helpers() {
     local repo_root="$1" helper_file="$2"
