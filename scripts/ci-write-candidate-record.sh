@@ -41,16 +41,42 @@ if [[ -n "$planned_source_fingerprint" ]]; then
     ci_ai_require_digest "$planned_source_fingerprint"
 fi
 
-# Artifact-producing callers pass the exact external build-input contract from
-# the plan. Older source-only callers remain representable with an empty object
-# until they are migrated; the v2 workflow always supplies this explicitly.
+# Artifact-producing v2/release callers pass the exact external build-input
+# contract from the plan. Older source-only callers are still representable by
+# an empty object, but must not accidentally opt into the strict per-service
+# external-input validator merely because this writer stores that empty object.
+build_inputs_explicit=false
 if [[ -v CI_SOURCE_BUILD_INPUTS_JSON ]]; then
+    build_inputs_explicit=true
     build_inputs_raw="$CI_SOURCE_BUILD_INPUTS_JSON"
     bash "$repo_root/scripts/ci-build-inputs.sh" "$service" validate "$build_inputs_raw"
 else
     build_inputs_raw='{"build_args":{},"build_contexts":{}}'
 fi
 build_inputs="$(jq -cS . <<<"$build_inputs_raw")"
+
+fingerprint_with_inputs() {
+    local apt_cache_bust="$1"
+    if [[ "$build_inputs_explicit" == true ]]; then
+        CI_SOURCE_BUILD_INPUTS_JSON="$build_inputs" \
+        CI_SOURCE_APT_CACHE_BUST="$apt_cache_bust" \
+        CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
+            bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
+    else
+        CI_SOURCE_APT_CACHE_BUST="$apt_cache_bust" \
+        CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
+            bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
+    fi
+}
+
+fingerprint_reused() {
+    if [[ "$build_inputs_explicit" == true ]]; then
+        CI_SOURCE_BUILD_INPUTS_JSON="$build_inputs" \
+            bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
+    else
+        bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
+    fi
+}
 
 if [[ "$mode" == built ]]; then
     # The build action writes a digest-keyed marker after the successful push.
@@ -69,17 +95,9 @@ if [[ "$mode" == built ]]; then
         apt_cache_bust="${apt_values[0]}"
     fi
 
-    source_fingerprint="$(
-        CI_SOURCE_BUILD_INPUTS_JSON="$build_inputs" \
-        CI_SOURCE_APT_CACHE_BUST="$apt_cache_bust" \
-        CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
-        bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
-    )"
+    source_fingerprint="$(fingerprint_with_inputs "$apt_cache_bust")"
 else
-    source_fingerprint="$(
-        CI_SOURCE_BUILD_INPUTS_JSON="$build_inputs" \
-        bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
-    )"
+    source_fingerprint="$(fingerprint_reused)"
     [[ -n "$planned_source_fingerprint" ]] \
         || ci_ai_fail "reused candidate is missing its planned source fingerprint"
     [[ "$planned_source_fingerprint" == "$source_fingerprint" ]] \
