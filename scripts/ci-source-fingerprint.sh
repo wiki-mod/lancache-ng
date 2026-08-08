@@ -40,7 +40,7 @@ ci_ai_require_sha "$source_sha"
 git -C "$repo_root" cat-file -e "${source_sha}^{commit}" 2>/dev/null \
     || ci_ai_fail "source commit does not exist locally: $source_sha"
 
-catalog="$("$repo_root/scripts/query-stack-images.sh" all)"
+catalog="$(bash "$repo_root/scripts/query-stack-images.sh" all)"
 entry="$(jq -c --arg service "$service" '.include[] | select(.service == $service)' <<<"$catalog")"
 [[ -n "$entry" ]] || ci_ai_fail "service is not present in canonical image catalog: $service"
 [[ "$(wc -l <<<"$entry" | tr -d ' ')" -eq 1 ]] || ci_ai_fail "service appears more than once in canonical image catalog: $service"
