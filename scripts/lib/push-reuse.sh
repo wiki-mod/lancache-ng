@@ -46,7 +46,21 @@
 # names as this design's own correctness requirement (see its "C-7" and
 # "Note on Step 4's actual implementation" sections) and issue #1290's
 # corrected implementation (in progress in parallel; both are expected to
-# converge on this same shape).
+# converge on this same shape). A fourth check, (4), reads the SAME
+# classify-image-impact.sh output (3) already computed for its "workflow"
+# key: reuse also requires no build-affecting workflow/composite-action file
+# to have changed anywhere in the full revision..github_sha span, not merely
+# in the immediately preceding push -- a caller's own before..sha diff
+# (build-push.yml's decide_one()) cannot see a workflow change several
+# pushes back, before the channel's last refresh.
+#
+# <channel_image> may be either a mutable channel tag (repo:nightly) or an
+# already-resolved immutable digest reference (repo@sha256:...) -- callers
+# that need to export the exact digest they verified reuse against (so a
+# later job never independently re-resolves the same mutable tag and risks
+# racing a channel refresh) resolve the digest once, build the pinned
+# reference, and pass that in here instead of the tag. sif_image_revision
+# handles both forms.
 #
 # WHY no polling: unlike scripts/lib/staging-image-freshness.sh's
 # sif_wait_for_fresh_base_image (built for a genuinely different situation --
@@ -155,6 +169,26 @@ push_reuse_decide() {
   changed_flag="$(grep -m1 "^${service_key}=" <<<"$classify_output" | cut -d= -f2)"
   if [[ "$changed_flag" != "false" ]]; then
     echo "push_reuse_decide: classify-image-impact.sh reported '${service_key}=${changed_flag:-<missing>}' for ${revision}..${github_sha} -- failing closed to a real rebuild." >&2
+    printf 'false\n'
+    return 0
+  fi
+
+  # A caller's own before..sha diff (the immediately preceding push only,
+  # see this file's decide_one() caller in build-push.yml) cannot see a
+  # build-affecting workflow change that landed in an EARLIER push, before
+  # the channel's own last refresh -- the exact revision-span gap two Codex
+  # review threads on PR #1378 found. classify_output above already covers
+  # the FULL revision..github_sha span (not just before..sha), and
+  # classify-image-impact.sh already emits a "workflow" key alongside every
+  # per-service key for that identical span -- reading it here costs nothing
+  # extra (no second classify invocation) and closes the gap: reuse is only
+  # safe when no build-affecting workflow/composite-action file changed
+  # anywhere between the channel image's own recorded revision and
+  # github_sha, not merely in the last push.
+  local workflow_flag
+  workflow_flag="$(grep -m1 '^workflow=' <<<"$classify_output" | cut -d= -f2)"
+  if [[ "$workflow_flag" != "false" ]]; then
+    echo "push_reuse_decide: classify-image-impact.sh reported 'workflow=${workflow_flag:-<missing>}' for ${revision}..${github_sha} -- a build-affecting workflow/composite-action file changed somewhere in the full revision span (not just the immediately preceding push) -- failing closed to a real rebuild." >&2
     printf 'false\n'
     return 0
   fi
