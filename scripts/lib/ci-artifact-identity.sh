@@ -39,6 +39,7 @@ ci_ai_validate_platform_record() {
       and (.image | type == "string" and startswith("ghcr.io/"))
       and (.candidate_source_sha | test("^[0-9a-f]{40}$"))
       and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
+      and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
       and (.platform == "linux/amd64" or .platform == "linux/arm64")
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
       and (.mode == "built" or .mode == "reused")
@@ -54,6 +55,7 @@ ci_ai_validate_index_record() {
       and (.image | type == "string" and startswith("ghcr.io/"))
       and (.candidate_source_sha | test("^[0-9a-f]{40}$"))
       and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
+      and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
       and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
       and (.platforms["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
@@ -72,6 +74,7 @@ ci_ai_validate_stack_lock() {
         [(.runtime + .tooling)[] |
           (.image | type == "string" and startswith("ghcr.io/"))
           and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
+          and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
           and (.digest | test("^sha256:[0-9a-f]{64}$"))
           and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
           and (.platforms["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
