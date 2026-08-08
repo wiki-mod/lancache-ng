@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! HTTP client for querying nginx stub_status metrics and parsing access logs.
 
@@ -183,12 +184,14 @@ pub fn parse_nginx_time_local(time_local: &str) -> Option<i64> {
     // format always includes one, with no ':' separator). `len() != 5`
     // only guards the *byte* length, not char boundaries -- a bare
     // `&offset[0..1]` byte-slice would panic if the first character were
-    // multi-byte UTF-8 (impossible from a real nginx log, but this parser
-    // also runs on directly client-influenced input via `logs.rs`'s
-    // request handling, so it must degrade to `None` instead of panicking
-    // on any malformed input, not just the ones a real nginx would ever
-    // produce). `get(0..1)` returns `None` instead of panicking in that
-    // case, same as the `get(1..3)`/`get(3..5)` calls below already do.
+    // multi-byte UTF-8. That never happens from nginx's own generated
+    // $time_local (services/proxy/nginx.conf), but this parser also runs on
+    // whatever bytes are actually on disk in the log file, which malformed
+    // or operator-edited log content could still make multi-byte at this
+    // position, so it must degrade to `None` instead of panicking on any
+    // malformed input, not just the ones nginx itself would ever produce.
+    // `get(0..1)` returns `None` instead of panicking in that case, same as
+    // the `get(1..3)`/`get(3..5)` calls below already do.
     if offset.len() != 5 {
         return None;
     }
