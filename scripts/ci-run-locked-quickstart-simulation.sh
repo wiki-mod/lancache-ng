@@ -6,9 +6,9 @@
 # final Compose override generated from one immutable stack lock. The existing
 # simulation remains the behavioral authority; this wrapper changes only how
 # its first-party images are resolved. Every docker compose invocation made by
-# the sourced simulation gets the same last-wins image override, and every
-# successful `compose up` is followed by a .Config.Image assertion against the
-# digest-qualified rendered model.
+# the sourced simulation gets a last-wins image override for the currently
+# active Compose model, and every successful `compose up` is followed by a
+# .Config.Image assertion against that digest-qualified rendered model.
 set -euo pipefail
 
 [[ $# -eq 1 ]] || {
@@ -131,8 +131,9 @@ ci_locked_quickstart_assert_running_images() {
 
 # The behavioral script performs ordinary docker operations as well as Compose
 # operations. Only Compose is rewritten. The final -f override is inserted
-# immediately before the subcommand, after every file supplied by the original
-# script, so its image values win without changing networks/environment/etc.
+# immediately before the subcommand, after every file/profile supplied by the
+# original script, so its image values win without changing networks,
+# environment, or profile selection.
 docker() {
     if [[ "${1:-}" != compose ]]; then
         command docker "$@"
@@ -144,14 +145,16 @@ docker() {
     local status
     ci_locked_quickstart_split_compose_args input globals compose_command
 
-    if [[ "$CI_LOCKED_QUICKSTART_OVERRIDE_READY" != true ]]; then
-        # A cleanup path reached before the simulation finished creating its
-        # temporary compose overrides may not yet be renderable. In that
-        # already-failing path, preserve the original cleanup call. The first
-        # real pull/up path must render successfully or the test fails.
-        if ! ci_locked_quickstart_build_override "${globals[@]}"; then
-            command docker compose "${input[@]}"
-            return
+    # Re-render for every Compose invocation instead of freezing the first
+    # profile set seen by `pull`. The simulation later enables ssl/logging/
+    # dhcp profiles before `up`; rebuilding here guarantees newly active
+    # first-party services also receive digest-qualified image references.
+    # If an already-failing cleanup path is no longer renderable, retain the
+    # last successfully generated override. The first real render must always
+    # succeed, otherwise no unpinned Compose command is allowed to proceed.
+    if ! ci_locked_quickstart_build_override "${globals[@]}"; then
+        if [[ "$CI_LOCKED_QUICKSTART_OVERRIDE_READY" != true ]]; then
+            return 1
         fi
     fi
 
