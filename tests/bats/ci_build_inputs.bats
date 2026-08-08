@@ -63,3 +63,29 @@ setup() {
     two="$(env CI_SOURCE_BUILD_INPUTS_JSON="$two_json" bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
     [ "$one" != "$two" ]
 }
+
+@test "candidate workflow freezes external inputs and records the same matrix object" {
+    workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
+    run grep -F 'CI_BOOTSTRAP_BUILD_TOOLS_IMAGE=%s' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'ci-resolve-image-ref.sh golang:latest' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'ci-resolve-image-ref.sh rust:latest' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'build-contexts: ${{ matrix.build_contexts }}' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'CI_SOURCE_BUILD_INPUTS_JSON: ${{ toJSON(matrix.build_inputs) }}' "$workflow"
+    [ "$status" -eq 0 ]
+}
+
+@test "release workflow freezes tooling bases and records the same build-input object" {
+    workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
+    run grep -F 'ci-resolve-image-ref.sh golang:latest' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'ci-resolve-image-ref.sh rust:latest' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'build-contexts: ${{ matrix.build_contexts }}' "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F 'CI_SOURCE_BUILD_INPUTS_JSON: ${{ toJSON(matrix.build_inputs) }}' "$workflow"
+    [ "$status" -eq 0 ]
+}
