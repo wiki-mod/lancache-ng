@@ -101,13 +101,12 @@ EOF
 }
 
 @test "fails on a digit before sha in the variable name, e.g. commit1_sha" {
-    # Real shape a Codex finding on PR #1503 caught: a multi-candidate
-    # comparison naming its variables commit1_sha/commit2_sha (or similarly
-    # base2_sha) is still a valid bash identifier despite the digit, but the
-    # widened pattern's earlier prefix class ([A-Za-z_]* only) rejected any
-    # digit anywhere before "sha", so this exact shape passed the guard
-    # silently even though it independently hardcodes the truncation length
-    # just like every other flagged shape.
+    # A multi-candidate comparison naming its variables
+    # commit1_sha/commit2_sha (or similarly base2_sha) is still a valid bash
+    # identifier despite the digit, but a prefix class of [A-Za-z_]* only
+    # rejects any digit anywhere before "sha", so this exact shape would pass
+    # the guard silently even though it independently hardcodes the
+    # truncation length just like every other flagged shape.
     cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
 #!/usr/bin/env bash
 candidate="${commit1_sha:0:7}"
@@ -116,6 +115,56 @@ EOF
     run bash "$script" "$fixture_root"
     [ "$status" -eq 1 ]
     [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
+}
+
+@test "fails on a whitespace-padded :0:7 slice, e.g. \${GITHUB_SHA: 0 : 7}" {
+    # Bash's substring-expansion grammar evaluates offset/length as
+    # arithmetic expressions, so it tolerates embedded whitespace around
+    # either colon and either number: `${GITHUB_SHA: 0 : 7}` slices
+    # identically to `${GITHUB_SHA:0:7}`. A pattern that only matched the
+    # exact `:0:7` shape (no whitespace) would let this reformatted
+    # hardcode bypass the guard entirely.
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+short_sha="${GITHUB_SHA: 0 : 7}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
+}
+
+@test "fails on a whitespace-padded ::7 slice too" {
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+short_sha="${GITHUB_SHA : : 7}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+}
+
+@test "propagates a real grep failure instead of folding it into a clean pass" {
+    # A bare `grep ... || true` cannot distinguish grep's exit status 1
+    # ("no match", the normal outcome for most scanned files) from any
+    # status greater than 1 (grep itself failed, e.g. an unreadable file
+    # from corrupted runner permissions) -- both collapse to a silently
+    # accepted "no violations here". Reproduced by making the scanned file
+    # itself unreadable while it still contains a banned slice, so a
+    # false "No hardcoded ... found" would be observably wrong, not just
+    # theoretically possible.
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+short_sha="${COMMIT_SHA::7}"
+EOF
+    chmod 000 "$fixture_root/scripts/lib/example.sh"
+
+    run bash "$script" "$fixture_root"
+    chmod 644 "$fixture_root/scripts/lib/example.sh"
+
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"grep"*"failed"* ]] || fail "did not diagnose the grep failure: $output"
+    [[ "$output" != *"No hardcoded"* ]] || fail "reported a false clean pass despite the unreadable file: $output"
 }
 
 @test "passes when the site reads dmeta_short_sha() instead" {
@@ -164,16 +213,17 @@ EOF
 }
 
 @test "fails closed, with a diagnostic, when git ls-files itself fails" {
-    # Real Codex finding: `mapfile -t files < <(git ls-files ...)` (the
-    # script's prior form) cannot see a failure inside its own process
-    # substitution -- not even under `set -euo pipefail`, since pipefail
-    # only covers `|` pipelines, not `<(...)`. A broken `.git` (present as
-    # a path, satisfying the `[ -e "$target_root/.git" ]` branch check, but
-    # not a real repository) makes `git ls-files` fail with "fatal: not a
-    # git repository" -- reproduced here with a plain empty directory named
-    # `.git` (no real git metadata inside it), the exact minimal shape that
-    # triggers this. The old code would have silently scanned zero files
-    # and reported a false clean pass instead of failing loudly.
+    # `mapfile -t files < <(git ls-files ...)` cannot see a failure inside
+    # its own process substitution -- not even under `set -euo pipefail`,
+    # since pipefail only covers `|` pipelines, not `<(...)`. A broken
+    # `.git` (present as a path, satisfying the `[ -e "$target_root/.git" ]`
+    # branch check, but not a real repository) makes `git ls-files` fail
+    # with "fatal: not a git repository" -- reproduced here with a plain
+    # empty directory named `.git` (no real git metadata inside it), the
+    # exact minimal shape that triggers this. A process-substitution-based
+    # implementation would silently scan zero files and report a false
+    # clean pass instead of failing loudly; the command-substitution form
+    # below must not.
     rm -rf "$fixture_root/.git"
     mkdir -p "$fixture_root/.git"
     cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'

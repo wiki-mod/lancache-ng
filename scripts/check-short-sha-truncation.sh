@@ -73,8 +73,13 @@ is_self_reference() {
 # line, whose length is a variable, from ever matching this pattern). The
 # optional prefix group before "sha" requires a valid bash identifier's
 # leading character (letter/underscore, never a digit) but allows digits
-# anywhere after that, so a name like `commit1_sha` still matches.
-SHORT_SHA_HARDCODE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?[Ss][Hh][Aa][A-Za-z0-9_]*(::[0-9]+|:0:[0-9]+)\}'
+# anywhere after that, so a name like `commit1_sha` still matches. Bash's
+# own substring-expansion grammar evaluates offset and length as arithmetic
+# expressions, so it tolerates embedded whitespace around either colon and
+# either number (e.g. `${GITHUB_SHA: 0 : 7}` slices identically to
+# `${GITHUB_SHA:0:7}`) -- the [[:space:]]* groups below match that shape too,
+# so reformatting the slice with stray spaces can no longer bypass the guard.
+SHORT_SHA_HARDCODE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?[Ss][Hh][Aa][A-Za-z0-9_]*[[:space:]]*(:[[:space:]]*:[[:space:]]*[0-9]+|:[[:space:]]*0[[:space:]]*:[[:space:]]*[0-9]+)\}'
 
 
 # Captured via command substitution, not a `mapfile -t files < <(...)`
@@ -108,10 +113,24 @@ for path in "${files[@]}"; do
     [ -f "$path" ] || continue
     is_self_reference "$path" && continue
 
-    while IFS= read -r match; do
-        [ -n "$match" ] || continue
-        violations+=("$match")
-    done < <(grep -EnH "$SHORT_SHA_HARDCODE_PATTERN" "$path" || true)
+    # Captured via command substitution (see the rationale above) so grep's
+    # real exit status is checkable: status 1 means "no match" (the normal,
+    # expected outcome for most scanned files) but status >1 means grep
+    # itself failed -- e.g. an unreadable file from corrupted runner
+    # permissions -- which must fail this guard closed instead of being
+    # silently folded into "no match" the way a bare `|| true` would.
+    grep_status=0
+    grep_output="$(grep -EnH "$SHORT_SHA_HARDCODE_PATTERN" "$path")" || grep_status=$?
+    if [ "$grep_status" -gt 1 ]; then
+        echo "::error::check-short-sha-truncation: \`grep\` failed reading '$path' (exit $grep_status). Not treating this as a clean pass." >&2
+        exit 1
+    fi
+    if [ -n "$grep_output" ]; then
+        while IFS= read -r match; do
+            [ -n "$match" ] || continue
+            violations+=("$match")
+        done <<< "$grep_output"
+    fi
 done
 
 if [ "${#violations[@]}" -gt 0 ]; then
