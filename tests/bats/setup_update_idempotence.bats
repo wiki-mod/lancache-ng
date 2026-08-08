@@ -334,17 +334,20 @@ write_legacy_env_fixture() {
     [ -z "$duplicate_keys" ]
 }
 
-@test "migrate_env_for_update on a deploy/prod install with no PXE keys in .env yet preserves an existing config/prod/dhcp-proxy.env PXE value (the confirmed real bug)" {
+@test "migrate_env_for_update on a deploy/prod install with no PXE keys in .env yet preserves an existing config/prod/dhcp-proxy.env PXE value across two runs (the confirmed real bug)" {
     # A pre-#705 (or even pre-#450) deploy/prod install: .env has never heard
     # of these keys at all, but the operator already configured PXE
     # boot-pointer support the only way that existed before setup.sh gained
     # this wizard/migration -- hand-editing config/prod/dhcp-proxy.env
-    # directly. append_env_key_if_missing below backfills these keys into
-    # .env as empty placeholders during this very run; before the fix, that
-    # backfill made env_key_exists() report "operator explicitly set this",
-    # so sync_dhcp_proxy_config_prod_env() overwrote the real value below
-    # with an empty string on this install's very first update after
-    # upgrading past the version that introduced these keys.
+    # directly. A fix that only seeds the backfill from $env_file's OWN
+    # prior state (e.g. a snapshot taken before the appends) merely defers
+    # this bug by one run: the second `setup.sh update` starts with .env
+    # already carrying the first run's backfilled placeholder, which looks
+    # identical to a genuine explicit clear either way. Running this twice is
+    # the actual discriminating check -- seeding the backfill from
+    # config/prod/dhcp-proxy.env's own real value (not from $env_file's own
+    # history) is what converges both files to agree from the first run
+    # onward, exactly like every other key in this function.
     prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
     config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
     mkdir -p "$prod_install_dir" "$config_prod_dir"
@@ -361,9 +364,22 @@ EOF
     run migrate_env_for_update "$prod_install_dir"
     [ "$status" -eq 0 ]
 
-    # The backfill actually happened -- proves this test exercises the race
-    # rather than accidentally skipping the PXE keys entirely.
-    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=' "$env_file"
+    # The backfill actually happened, and converged to config/prod's real
+    # value rather than an empty placeholder -- proves this test exercises
+    # the real seeding path rather than accidentally skipping it.
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' "$env_file"
+    grep -qx 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' "$env_file"
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.9.9.9" ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$config_prod_env"
+    [ "$output" = "real-pxelinux.0" ]
+
+    # The discriminating second run: .env now already carries these keys
+    # from run one, exactly the state that would fool a fix relying on
+    # $env_file's own prior existence instead of config/prod's real value.
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
 
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
     [ "$output" = "10.9.9.9" ]

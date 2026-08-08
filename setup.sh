@@ -2678,7 +2678,10 @@ migrate_env_for_update() {
     # global for the rest of the script's process lifetime instead of staying
     # scoped to this function like every other migration temp variable here.
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
-    local pxe_sync_pre_env_snapshot pxe_sync_pre_env_file
+    local prodsync_config_env prodsync_default_relay_local_addr prodsync_default_proxy_interface
+    local prodsync_default_proxy_router prodsync_default_ntp_servers prodsync_default_proxy_domain
+    local prodsync_default_boot_filename prodsync_default_boot_server prodsync_default_pxe_boot_server
+    local prodsync_default_pxe_boot_filename_bios prodsync_default_pxe_boot_filename_uefi
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
@@ -2903,39 +2906,57 @@ migrate_env_for_update() {
     # config/prod/dhcp-proxy.env by checking whether the key exists in
     # $env_file at all -- an explicit empty counts as "operator cleared it",
     # a missing key means "preserve config/prod/dhcp-proxy.env's own value".
-    # The append_env_key_if_missing() invocations below backfill each of these ten
-    # keys with an empty placeholder on an install that never had them, so
-    # checking $env_file's *current* state at sync time would make every
-    # first-time migration look exactly like an explicit clear -- silently
-    # wiping a real, already-configured config/prod/dhcp-proxy.env value the
-    # very first time an existing deploy/prod install runs `setup.sh update`
-    # after these keys were introduced. Snapshotting the file before any of
-    # the appends run preserves the real "did the operator actually already
-    # have this key" signal for sync_dhcp_proxy_config_prod_env to check
-    # instead.
-    pxe_sync_pre_env_snapshot=$(cat "$env_file")
+    # For a deploy/prod install, seed each of the ten append_env_key_if_missing
+    # calls below from config/prod/dhcp-proxy.env's own current value instead
+    # of an unconditional "" default. Backfilling with "" would make $env_file
+    # carry an explicit empty for that key from this point on, and every LATER
+    # `setup.sh update` run -- not just the first one after a key's
+    # introduction -- would then read that backfilled empty back as "operator
+    # cleared it" and use it to wipe a real, already-configured
+    # config/prod/dhcp-proxy.env value: a one-time snapshot of $env_file taken
+    # before these appends only defers that wipe to the second run, since the
+    # snapshot itself cannot help a run that starts after the first backfill
+    # already landed. Seeding from config/prod/dhcp-proxy.env's real value
+    # instead makes $env_file converge to match it immediately, so every
+    # later run reads back the same real value from both files and is a
+    # genuine no-op, exactly like every other key in this function.
+    if is_deploy_prod_install_dir "$install_dir"; then
+        prodsync_config_env="$(deploy_prod_repo_root "$install_dir")/config/prod/dhcp-proxy.env"
+        if [[ -f "$prodsync_config_env" ]]; then
+            prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
+            prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
+            prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
+            prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
+            prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
+            prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
+            prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
+            prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
+            prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
+            prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
+        fi
+    fi
     # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
     # forwarded as giaddr). Required in dnsmasq-relay mode, ignored otherwise.
-    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "" "$env_file"
+    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "$prodsync_default_relay_local_addr" "$env_file"
     dhcp_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$env_file")
     # Issue #450: additional optional dnsmasq relay/proxy fields. Unlike the
     # four values above, none of these are required in dnsmasq-proxy mode --
     # an empty value just means entrypoint.sh renders no directive for it.
-    append_env_key_if_missing DHCP_PROXY_INTERFACE "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_ROUTER "" "$env_file"
-    append_env_key_if_missing DHCP_NTP_SERVERS "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_DOMAIN "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_INTERFACE "$prodsync_default_proxy_interface" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_ROUTER "$prodsync_default_proxy_router" "$env_file"
+    append_env_key_if_missing DHCP_NTP_SERVERS "$prodsync_default_ntp_servers" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_DOMAIN "$prodsync_default_proxy_domain" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "$prodsync_default_boot_filename" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "$prodsync_default_boot_server" "$env_file"
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
     # Issue #705: PXE boot-pointer fields. Without this convergence step an
     # existing install upgrading via `setup.sh update` would never gain
     # these keys, since the only other way to set them was hand-editing
     # config/prod/dhcp-proxy.env directly -- converge them here just like
     # the #450 fields above, not only for newly-generated installs.
-    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_SERVER "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_default_pxe_boot_server" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_default_pxe_boot_filename_bios" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_default_pxe_boot_filename_uefi" "$env_file"
     dhcp_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$env_file")
     dhcp_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$env_file")
     dhcp_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$env_file")
@@ -3101,22 +3122,18 @@ migrate_env_for_update() {
     # write in this function that reaches a container's live config outside
     # $env_file, so an aborted update must not leave it applied while $env_file
     # itself stays at its pre-update state.
-    # Pass the pre-migration snapshot captured above, not $env_file itself --
-    # by this point every one of the ten keys below has already been
-    # backfilled with an empty placeholder if it was missing, so checking
-    # $env_file's current state here would make sync_dhcp_proxy_config_prod_env
-    # treat that backfill as an operator's explicit clear (see this
-    # function's own comment above the snapshot for the full incident).
-    pxe_sync_pre_env_file=$(mktemp) \
-        || die "Failed to create a temporary pre-migration .env snapshot for PXE-pointer sync."
-    printf '%s' "$pxe_sync_pre_env_snapshot" > "$pxe_sync_pre_env_file" \
-        || { rm -f "$pxe_sync_pre_env_file"; die "Failed to write the pre-migration .env snapshot for PXE-pointer sync."; }
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$pxe_sync_pre_env_file" \
+    # $env_file itself is now safe to pass directly: the append_env_key_if_missing
+    # calls above already seeded each of these ten keys from
+    # config/prod/dhcp-proxy.env's own real value on a deploy/prod install
+    # (see the comment above them), so $env_file and config/prod/dhcp-proxy.env
+    # already agree by this point on a first-time migration, and a genuine
+    # operator edit to $env_file is still correctly distinguishable from that
+    # convergence on every later run.
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
         "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
         "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
         "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
         "$dhcp_proxy_pxe_boot_filename_uefi"
-    rm -f "$pxe_sync_pre_env_file"
 
     print_ok ".env is complete for the current quickstart template"
 }
