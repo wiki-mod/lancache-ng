@@ -270,6 +270,26 @@ write_legacy_env_fixture() {
     [ "$first_run_hash" = "$second_run_hash" ]
 }
 
+@test "migrate_env_for_update on a quickstart (non-deploy/prod) install runs cleanly under set -u" {
+    # setup.sh's own top-level `set -euo pipefail` (line 16) is not captured
+    # by load_setup_update_helpers (its extraction starts at is_valid_ipv4(),
+    # well after that line), so every other test in this file runs the real
+    # migrate_env_for_update() under whatever options bats itself happens to
+    # use -- not necessarily nounset. The prodsync_default_* locals this
+    # function declares are only ever assigned inside an
+    # is_deploy_prod_install_dir branch; on this quickstart fixture that
+    # branch never runs, so an unset (not merely empty) local expanded
+    # unconditionally in the append_env_key_if_missing calls below it would
+    # abort here specifically, and only under the exact option set setup.sh's
+    # real callers use (AG-VAL-030) -- silently passing under bats' own
+    # default options is not equivalent proof.
+    set -u
+    write_converged_env_fixture
+
+    run migrate_env_for_update "$(dirname "$env_file")"
+    [ "$status" -eq 0 ]
+}
+
 @test "migrate_env_for_update on a legacy .env converges once and is stable on the second run" {
     write_legacy_env_fixture
 
@@ -385,4 +405,73 @@ EOF
     [ "$output" = "10.9.9.9" ]
     run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$config_prod_env"
     [ "$output" = "real-pxelinux.0" ]
+}
+
+@test "migrate_env_for_update in dnsmasq-proxy mode does not die on an incomplete hand-edited PXE pair in config/prod/dhcp-proxy.env" {
+    # config/prod/dhcp-proxy.env is hand-edited and has never passed through
+    # this function's own dnsmasq-proxy validation block -- entrypoint.sh
+    # tolerates a PXE boot server with no filename yet (renders no
+    # pxe-service directive, logs a startup warning, not fatal), but this
+    # function's own pxe_boot_pointer_answers_are_complete() guard requires
+    # the pair together and would die on exactly this state if seeded
+    # unvalidated. Confirms the seeding path added to fix the preservation
+    # bug above cannot itself turn a working install into a failing update.
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+    printf '%s\n' \
+        'DHCP_MODE=dnsmasq-proxy' \
+        'DHCP_SUBNET_START=192.0.2.0' \
+        'DHCP_DNS_PRIMARY=192.0.2.20' \
+        'UPSTREAM_DHCP_IP=192.0.2.1' \
+        >> "$env_file"
+
+    # Incomplete on purpose: a server with no filename, exactly the state
+    # entrypoint.sh's own design tolerates but this function's completeness
+    # guard does not.
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    # The incomplete pair converges to fully cleared, not left half-set --
+    # matching entrypoint.sh's own "both or neither" contract instead of
+    # silently carrying a state the container would only warn about forever.
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "" ]
+}
+
+@test "migrate_env_for_update in dnsmasq-proxy mode does not die on an invalid hand-edited value in config/prod/dhcp-proxy.env" {
+    # A hand-edited config/prod/dhcp-proxy.env is never guaranteed to satisfy
+    # $env_file's own stricter validation contract. A malformed IPv4 here
+    # must not abort an update that previously worked.
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+    printf '%s\n' \
+        'DHCP_MODE=dnsmasq-proxy' \
+        'DHCP_SUBNET_START=192.0.2.0' \
+        'DHCP_DNS_PRIMARY=192.0.2.20' \
+        'UPSTREAM_DHCP_IP=192.0.2.1' \
+        >> "$env_file"
+
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_ROUTER=not-an-ip-address
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    run get_env_var DHCP_PROXY_ROUTER "$config_prod_env"
+    [ "$output" = "" ]
 }

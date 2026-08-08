@@ -2678,10 +2678,17 @@ migrate_env_for_update() {
     # global for the rest of the script's process lifetime instead of staying
     # scoped to this function like every other migration temp variable here.
     local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
-    local prodsync_config_env prodsync_default_relay_local_addr prodsync_default_proxy_interface
-    local prodsync_default_proxy_router prodsync_default_ntp_servers prodsync_default_proxy_domain
-    local prodsync_default_boot_filename prodsync_default_boot_server prodsync_default_pxe_boot_server
-    local prodsync_default_pxe_boot_filename_bios prodsync_default_pxe_boot_filename_uefi
+    # Every one of these must be initialized here, not left to plain `local
+    # name` (which leaves it unset, not empty): setup.sh runs under `set -u`,
+    # and on a quickstart install (is_deploy_prod_install_dir false below) none
+    # of them are ever assigned before their unconditional expansion in the
+    # append_env_key_if_missing() invocations that follow -- an unset
+    # expansion there would abort the far more common quickstart install
+    # path entirely.
+    local prodsync_config_env="" prodsync_default_relay_local_addr="" prodsync_default_proxy_interface=""
+    local prodsync_default_proxy_router="" prodsync_default_ntp_servers="" prodsync_default_proxy_domain=""
+    local prodsync_default_boot_filename="" prodsync_default_boot_server="" prodsync_default_pxe_boot_server=""
+    local prodsync_default_pxe_boot_filename_bios="" prodsync_default_pxe_boot_filename_uefi=""
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
@@ -2923,16 +2930,57 @@ migrate_env_for_update() {
     if is_deploy_prod_install_dir "$install_dir"; then
         prodsync_config_env="$(deploy_prod_repo_root "$install_dir")/config/prod/dhcp-proxy.env"
         if [[ -f "$prodsync_config_env" ]]; then
+            # config/prod/dhcp-proxy.env is a hand-edited file that has never
+            # passed through this function's own dnsmasq-proxy validation
+            # block further below (it is normally only edited directly, or
+            # converged via this exact seeding path) -- validate each
+            # candidate default the same way the read-back further down does
+            # before using it, falling back to the pre-existing "" default
+            # and a warning otherwise. Without this, a value that
+            # entrypoint.sh's own container-side rendering tolerates (e.g. a
+            # PXE boot server with no filename yet -- no pxe-service
+            # directive, a startup warning, not fatal) could newly abort a
+            # `setup.sh update` that previously worked, since this function's
+            # own dnsmasq-proxy validation block requires stricter
+            # completeness/well-formedness than the container does.
             prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_relay_local_addr" || prodsync_default_relay_local_addr=""
             prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
+            is_valid_dhcp_proxy_interface "$prodsync_default_proxy_interface" || prodsync_default_proxy_interface=""
             prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_proxy_router" || prodsync_default_proxy_router=""
             prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
+            if [[ -n "$prodsync_default_ntp_servers" ]]; then
+                IFS=',' read -r -a _dhcp_ntp_check <<< "$prodsync_default_ntp_servers"
+                for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
+                    _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
+                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" || prodsync_default_ntp_servers=""
+                done
+            fi
             prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
+            is_valid_dhcp_proxy_domain "$prodsync_default_proxy_domain" || prodsync_default_proxy_domain=""
             prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
+            is_valid_dhcp_proxy_boot_filename "$prodsync_default_boot_filename" || prodsync_default_boot_filename=""
             prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_boot_server" || prodsync_default_boot_server=""
             prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_pxe_boot_server" || prodsync_default_pxe_boot_server=""
             prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
+            is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_bios" || prodsync_default_pxe_boot_filename_bios=""
             prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
+            is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_uefi" || prodsync_default_pxe_boot_filename_uefi=""
+            # The PXE trio must be complete (server + at least one filename)
+            # or entirely empty together -- entrypoint.sh tolerates an
+            # incomplete pair by rendering no pxe-service directive, but this
+            # function's own dnsmasq-proxy validation block below requires
+            # completeness and would die on a hand-edited config/prod file
+            # caught mid-incomplete-configuration.
+            if [[ -n "$prodsync_default_pxe_boot_server$prodsync_default_pxe_boot_filename_bios$prodsync_default_pxe_boot_filename_uefi" ]] \
+                && ! pxe_boot_pointer_answers_are_complete "$prodsync_default_pxe_boot_server" "$prodsync_default_pxe_boot_filename_bios" "$prodsync_default_pxe_boot_filename_uefi"; then
+                prodsync_default_pxe_boot_server=""
+                prodsync_default_pxe_boot_filename_bios=""
+                prodsync_default_pxe_boot_filename_uefi=""
+            fi
         fi
     fi
     # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
