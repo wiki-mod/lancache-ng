@@ -157,6 +157,19 @@ jobs:
     runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
     timeout-minutes: 120
     needs: detect-changes
+    # Only first-attempt PR jobs share a stable language+PR-ref group. A new
+    # synchronize/rebase therefore supersedes both queued and running analysis
+    # for the older PR commit without cancelling unrelated workflow jobs.
+    # Matrix language is part of the key so actions/rust never cancel each
+    # other. Push, schedule, dispatch and explicit re-runs are run-id isolated.
+    concurrency:
+      group: >-
+        ${{
+          (github.event_name != 'pull_request' || github.run_attempt != '1') &&
+          format('{0}-analyze-{1}-{2}-{3}', github.workflow, matrix.language, github.ref, github.run_id) ||
+          format('{0}-analyze-{1}-{2}', github.workflow, matrix.language, github.ref)
+        }}
+      cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}
     # `always()` is required here: GitHub implicitly ANDs any custom job
     # `if:` with `success()` of every `needs` job UNLESS the expression
     # itself calls one of the status-check functions -- without it, a
