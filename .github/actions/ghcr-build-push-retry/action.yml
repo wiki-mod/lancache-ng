@@ -248,4 +248,37 @@ runs:
           echo "::error::All build/push attempts against ${{ inputs.registry }} failed." >&2
           exit 1
         fi
+        [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+          echo "::error::Successful build attempt returned an invalid image digest: ${digest:-<empty>}" >&2
+          exit 1
+        }
         echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+    # The immutable-artifact pipeline needs to prove which refresh input
+    # produced a digest, not recompute that value later from wall-clock time.
+    # Persist only the non-secret APT_CACHE_BUST field, keyed by the returned
+    # digest. Other callers of this shared action may ignore this marker.
+    - name: Persist exact non-secret build refresh input by digest
+      if: steps.resolve.outcome == 'success'
+      shell: bash
+      env:
+        BUILD_ARGS_VALUE: ${{ inputs.build-args }}
+        BUILT_DIGEST: ${{ steps.resolve.outputs.digest }}
+      run: |
+        set -euo pipefail
+        marker_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}/lancache-build-inputs"
+        marker="$marker_dir/${BUILT_DIGEST#sha256:}.env"
+        mapfile -t values < <(printf '%s\n' "$BUILD_ARGS_VALUE" | sed -n 's/^APT_CACHE_BUST=//p')
+        if (( ${#values[@]} > 1 )); then
+          echo "::error::APT_CACHE_BUST was supplied more than once; exact build identity is ambiguous." >&2
+          exit 1
+        fi
+        mkdir -p "$marker_dir"
+        : > "$marker"
+        if (( ${#values[@]} == 1 )); then
+          [[ "${values[0]}" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || {
+            echo "::error::APT_CACHE_BUST has an invalid value: ${values[0]}" >&2
+            exit 1
+          }
+          printf 'APT_CACHE_BUST=%s\n' "${values[0]}" > "$marker"
+        fi
