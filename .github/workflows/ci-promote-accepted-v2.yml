@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       accepted_stack_tag:
-        description: Immutable accepted-<40-char source SHA> stack tag.
+        description: Immutable accepted-v2-* stack tag.
         required: true
         type: string
       channel:
@@ -22,7 +22,11 @@ on:
         type: string
 
 permissions:
-  contents: read
+  # The same refs/promote-lock/global mutex used by build-push.yml and
+  # backfill-stack-latest.yml is a git ref, so this job needs contents:write
+  # to create/delete that lock ref. Package writes are limited to moving GHCR
+  # references to already-accepted digests.
+  contents: write
   packages: write
 
 jobs:
@@ -33,24 +37,57 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Require explicit confirmation
+
+      - name: Require explicit confirmation and immutable accepted tag
         env:
           CONFIRM: ${{ inputs.confirm }}
+          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
         run: |
+          set -euo pipefail
           [[ "$CONFIRM" == PROMOTE ]] || { echo "::error::confirm must be exactly PROMOTE"; exit 1; }
+          [[ "$ACCEPTED_STACK_TAG" == accepted-v2-* ]] \
+            || { echo "::error::accepted_stack_tag must be an immutable accepted-v2-* tag"; exit 1; }
+
+      # Promotion/backfill correctness already has one repository-wide mutex.
+      # V2 joins that same critical section rather than inventing a second lock
+      # that could race the existing production promote path.
+      - name: Acquire the cross-workflow promote lock
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
+          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
+
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Prove accepted pointer and extract lock
+
+      - name: Freeze accepted stack pointer by digest and extract lock
         env:
           ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
         run: |
           set -euo pipefail
-          bash scripts/ci-extract-stack-lock.sh "ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}" "$RUNNER_TEMP/stack-lock.json"
+          source scripts/lib/ci-artifact-identity.sh
+          stack_tag_ref="ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}"
+          stack_digest="$(ci_ai_ref_digest "$stack_tag_ref")"
+          # Extract through the digest-qualified reference, not through the tag
+          # again. A concurrent tag move therefore cannot swap the evidence
+          # after its identity has been frozen for this promotion run.
+          bash scripts/ci-extract-stack-lock.sh \
+            "ghcr.io/wiki-mod/lancache-ng/stack@${stack_digest}" \
+            "$RUNNER_TEMP/stack-lock.json"
+          printf 'ACCEPTED_STACK_DIGEST=%s\n' "$stack_digest" >> "$GITHUB_ENV"
+
       - name: Prove accepted source is the current channel branch tip
         env:
           CHANNEL: ${{ inputs.channel }}
@@ -68,36 +105,104 @@ jobs:
             echo "::error::Accepted source $source_sha is not current origin/$branch tip $branch_tip. Refusing stale or cross-branch promotion."
             exit 1
           }
-      - name: Move channel references without rebuild
+
+      - name: Move channel references without rebuild, roll back on partial failure
         env:
           CHANNEL: ${{ inputs.channel }}
-          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           source scripts/lib/ci-artifact-identity.sh
           source scripts/lib/ghcr-retry.sh
+
+          declare -A previous_refs=()
+          promoted_targets=()
+
+          digest_for_ref() {
+            local ref="$1" manifest digest
+            if ! manifest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="$(jq -r '.digest // empty' <<<"$manifest")"
+            ci_ai_require_digest "$digest" >/dev/null 2>&1 || return 1
+            printf '%s\n' "$digest"
+          }
+
+          rollback_promotions() {
+            local status=$? target previous
+            if [[ "$status" -eq 0 || "${#promoted_targets[@]}" -eq 0 ]]; then
+              exit "$status"
+            fi
+            echo "::error::V2 promotion failed after one or more channel tags moved; attempting best-effort rollback."
+            for target in "${promoted_targets[@]}"; do
+              previous="${previous_refs[$target]:-}"
+              if [[ -n "$previous" ]]; then
+                ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                  docker buildx imagetools create --prefer-index=false \
+                    --tag "$target" "${target%:*}@${previous}" \
+                  || echo "::error::Could not restore previous digest for $target."
+              else
+                echo "::error::No previous digest existed for $target; manual GHCR inspection is required."
+              fi
+            done
+            exit "$status"
+          }
+          trap rollback_promotions EXIT
+
           while IFS=$'\t' read -r image digest; do
             ci_ai_require_digest "$digest"
+            target="${image}:${CHANNEL}"
+            previous_refs["$target"]="$(digest_for_ref "$target" || true)"
             metadata="$(mktemp)"
-            ghcr_retry ghcr.io "$GITHUB_ACTOR" "$GITHUB_TOKEN" -- \
-              docker buildx imagetools create --tag "${image}:${CHANNEL}" "${image}@${digest}" --metadata-file "$metadata"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create \
+                --tag "$target" \
+                "${image}@${digest}" \
+                --metadata-file "$metadata"
             promoted="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
             rm -f "$metadata"
             [[ "$promoted" == "$digest" ]] || ci_ai_fail "promotion changed digest for $image"
+            promoted_targets+=("$target")
           done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' "$RUNNER_TEMP/stack-lock.json")
 
-          stack_source="ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}"
-          stack_digest="$(ci_ai_ref_digest "$stack_source")"
+          stack_target="ghcr.io/wiki-mod/lancache-ng/stack:${CHANNEL}"
+          previous_refs["$stack_target"]="$(digest_for_ref "$stack_target" || true)"
           metadata="$(mktemp)"
-          ghcr_retry ghcr.io "$GITHUB_ACTOR" "$GITHUB_TOKEN" -- \
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --prefer-index=false \
-              --tag "ghcr.io/wiki-mod/lancache-ng/stack:${CHANNEL}" \
-              "ghcr.io/wiki-mod/lancache-ng/stack@${stack_digest}" \
+              --tag "$stack_target" \
+              "ghcr.io/wiki-mod/lancache-ng/stack@${ACCEPTED_STACK_DIGEST}" \
               --metadata-file "$metadata"
           promoted_stack="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
           rm -f "$metadata"
-          [[ "$promoted_stack" == "$stack_digest" ]] || ci_ai_fail "stack pointer promotion changed digest"
+          [[ "$promoted_stack" == "$ACCEPTED_STACK_DIGEST" ]] || ci_ai_fail "stack pointer promotion changed digest"
+          promoted_targets+=("$stack_target")
+
+          # Re-read every target after all writes. The stack pointer is written
+          # last and acts as the coherent stack-channel reference, but the
+          # individual service refs must still all match the same lock.
+          while IFS=$'\t' read -r image digest; do
+            actual="$(digest_for_ref "${image}:${CHANNEL}")"
+            [[ "$actual" == "$digest" ]] || ci_ai_fail "post-promotion digest mismatch for ${image}:${CHANNEL}"
+          done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' "$RUNNER_TEMP/stack-lock.json")
+          [[ "$(digest_for_ref "$stack_target")" == "$ACCEPTED_STACK_DIGEST" ]] \
+            || ci_ai_fail "post-promotion stack pointer digest mismatch"
+
       - name: Remove Buildx builder
         if: always()
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+      - name: Release the cross-workflow promote lock
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          promote_lock_release origin "$holder_note" || true
