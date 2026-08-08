@@ -8,15 +8,11 @@
 # relevant source and frozen external inputs are identical.
 #
 # Source-controlled inputs are the Docker context tree, Dockerfile blob and
-# named source contexts. CI_SOURCE_BUILD_INPUTS_JSON carries non-source inputs
-# that the workflow freezes before building, such as an exact build-tools
-# digest or a digest-pinned override for a deliberately mutable Dockerfile
-# base. The JSON has one canonical shape:
-#   {"build_args":{...},"build_contexts":{...}}
-#
-# Refresh inputs that intentionally vary over time are recorded separately.
-# Today that means the same ISO-week APT_CACHE_BUST value the candidate build
-# passes whenever the Dockerfile declares ARG APT_CACHE_BUST.
+# named source contexts. Non-source inputs are supplied through the exact
+# service contract in ci-build-inputs.sh, or explicitly as
+# CI_SOURCE_BUILD_INPUTS_JSON when recording/rechecking an already-planned
+# candidate. Refresh inputs that intentionally vary over time are recorded
+# separately.
 set -euo pipefail
 
 [[ $# -eq 2 ]] || {
@@ -69,15 +65,12 @@ if [[ -n "$build_contexts" ]]; then
     done <<<"$build_contexts"
 fi
 
-build_inputs_raw="${CI_SOURCE_BUILD_INPUTS_JSON:-{\"build_args\":{},\"build_contexts\":{}}}"
-jq -e '
-    type == "object"
-    and (keys | sort) == ["build_args","build_contexts"]
-    and (.build_args | type == "object")
-    and (.build_contexts | type == "object")
-    and ([.build_args[], .build_contexts[]] | all(type == "string"))
-' <<<"$build_inputs_raw" >/dev/null \
-    || ci_ai_fail "CI_SOURCE_BUILD_INPUTS_JSON has an invalid build-input schema for $service"
+if [[ -v CI_SOURCE_BUILD_INPUTS_JSON ]]; then
+    build_inputs_raw="$CI_SOURCE_BUILD_INPUTS_JSON"
+else
+    build_inputs_raw="$(bash "$repo_root/scripts/ci-build-inputs.sh" "$service" json)"
+fi
+bash "$repo_root/scripts/ci-build-inputs.sh" "$service" validate "$build_inputs_raw"
 build_inputs="$(jq -cS . <<<"$build_inputs_raw")"
 
 refresh_inputs='{}'
