@@ -87,7 +87,12 @@ concurrency:
 jobs:
   refresh-nightly:
     name: dispatch nightly channel refresh
-    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # This is an API-only dispatcher. It has no LAN, Docker, persistent-cache,
+    # or host-local-state dependency, so consuming a scarce self-hosted light
+    # runner here only couples channel refresh to local-fleet availability.
+    # Pin the hosted OS rather than `ubuntu-latest` so an unrelated latest-image
+    # migration cannot silently change the execution environment.
+    runs-on: ubuntu-24.04
     # This job only makes one `gh workflow run` API call and exits -- it does
     # not wait for build-push.yml's own (much longer) pipeline to finish.
     # Generous headroom over that trivial expected runtime still bounds a
@@ -100,6 +105,11 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+
+          command -v gh >/dev/null 2>&1 || {
+            echo "::error::GitHub CLI is required on the selected hosted runner image."
+            exit 1
+          }
 
           gh workflow run build-push.yml \
             --repo "${{ github.repository }}" \
