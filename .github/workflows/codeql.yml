@@ -23,6 +23,40 @@ on:
     - cron: "24 3 * * *"
   workflow_dispatch:
 
+# Workflow-level, not job-level (issue #1513/AG-CI-017 follow-up): a job-level
+# group on the analyze job only claims its slot after `needs: detect-changes`
+# resolves, so two rapid PR pushes can enter that group out of order if the
+# older commit's detect-changes happens to be delayed (e.g. queued behind
+# other work on the shared lancache-light pool) while the newer commit's
+# already reached analyze. cancel-in-progress then cancels whichever run is
+# CURRENTLY in the group when the next one arrives -- not the commit-older
+# one -- so an out-of-order arrival can have the stale run cancel the fresh
+# one, exactly backwards from the intent. A workflow-level group is claimed
+# as soon as the run itself starts, before any job's `needs` can introduce
+# that scheduling-dependent reordering, so entry order tracks trigger order
+# instead. This also removes the need for `matrix.language` in the key: the
+# two matrix legs are two jobs within the SAME run, and a workflow-level
+# group only ever compares DIFFERENT runs (different commits) against each
+# other, never a run against its own jobs.
+#
+# Only pull_request events (first attempt) share the collapsible ref-only
+# group at all: push, schedule, and workflow_dispatch always get a run-id-
+# suffixed, unique key, so a baseline-producing push run is never queued
+# behind or cancelled by another run on the same ref. cancel-in-progress is
+# scoped to pull_request only for the same reason: a push run to
+# master/current_dev/v0.2.0 uploads the baseline SARIF later PRs are diffed
+# against and must survive to completion. A manual rerun of an older PR
+# attempt (github.run_attempt != '1') is isolated the same way, so it cannot
+# cancel the newest commit's own analysis.
+concurrency:
+  group: >-
+    ${{
+      (github.event_name != 'pull_request' || github.run_attempt != '1') &&
+      format('{0}-{1}-{2}', github.workflow, github.ref, github.run_id) ||
+      format('{0}-{1}', github.workflow, github.ref)
+    }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
   security-events: write
@@ -157,22 +191,6 @@ jobs:
     runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
     timeout-minutes: 120
     needs: detect-changes
-    # Reclaim superseded PR analyses before they consume the scarce heavy
-    # runner pool. Keep each matrix language in its own group so the required
-    # analyses for one commit cannot cancel each other.
-    #
-    # Pushes produce the baseline SARIF used for later comparisons, while
-    # schedules, manual dispatches, and reruns are independently requested
-    # work. A run-id suffix keeps all of those executions isolated; only the
-    # first attempt for a PR shares a collapsible ref-and-language group.
-    concurrency:
-      group: >-
-        ${{
-          (github.event_name != 'pull_request' || github.run_attempt != '1') &&
-          format('{0}-analyze-{1}-{2}-{3}', github.workflow, matrix.language, github.ref, github.run_id) ||
-          format('{0}-analyze-{1}-{2}', github.workflow, matrix.language, github.ref)
-        }}
-      cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # `always()` is required here: GitHub implicitly ANDs any custom job
     # `if:` with `success()` of every `needs` job UNLESS the expression
     # itself calls one of the status-check functions -- without it, a
