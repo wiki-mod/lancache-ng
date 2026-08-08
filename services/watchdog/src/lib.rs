@@ -24,7 +24,7 @@
 //!    writing it.
 //! 3. `probe_docker_socket_proxy()`'s alert-only reachability probe (see
 //!    [`health::AlertCounter`]) -- also a `status.json` key, same reasoning.
-//! 4. Issue #842's five alert-only monitored services -- `ui`, `dhcp`
+//! 4. Issue #842's alert-only monitored services -- `ui`, `dhcp`
 //!    (when `DHCP_MODE=kea`), `dhcp-proxy` (when `DHCP_MODE=dnsmasq-proxy`/
 //!    `dnsmasq-relay`), `netdata`, `syslog` (when `SYSLOG_ENABLED` is
 //!    truthy; the combined fluent-bit+syslog-ng container since the
@@ -33,14 +33,17 @@
 //!    into this one entry now that they are one container, see
 //!    `main.rs`'s `resolve_alert_only_targets()` and `config.rs`'s
 //!    `CONTAINER_SYSLOG` doc comment for the concurrent-merge history) --
-//!    added here first, in this crate, rather than in `watchdog.sh`
-//!    directly: this scaffold was already the designated home for #842's
-//!    remaining monitored-service work (see the `ENTRYPOINT` note below),
-//!    and this crate's typed
+//!    plus `ntp` (when `NTP_ENABLED` is truthy, issue #1296: also the only
+//!    caller that makes [`health::HealthReading::Degraded`]'s amber
+//!    dashboard state reachable against a real container) -- added here
+//!    first, in this crate, rather than in `watchdog.sh` directly: this
+//!    scaffold was already the designated home for #842's remaining
+//!    monitored-service work (see the `ENTRYPOINT` note below), and this
+//!    crate's typed
 //!    [`health::HealthReading`]/[`health::AlertCounter`] machinery already
 //!    generalizes cleanly to "one more per-container inspect, alert-only,
-//!    never restarted" without inventing a fifth ad hoc bash variable.
-//!    Unlike the four restart-capable services above, none of these five are
+//!    never restarted" without inventing another ad hoc bash variable.
+//!    Unlike the four restart-capable services above, none of these are
 //!    ever passed to [`docker_client::DockerProxyClient::restart`] -- see
 //!    `main.rs`'s alert-only loop and [`health::HealthReading::is_alert_ok`]'s
 //!    own doc comment for why (the maintainer's own #842 scope note
