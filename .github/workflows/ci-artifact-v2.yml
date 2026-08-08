@@ -28,6 +28,19 @@ on:
 permissions:
   contents: read
 
+# A new first-attempt PR head makes every older PR candidate from that ref
+# obsolete, so reclaim the whole quarantine-only run at once. Explicit reruns
+# are isolated by run id/attempt, and workflow_dispatch is always isolated:
+# protected-branch acceptance must never be torn down by a later run.
+concurrency:
+  group: >-
+    ${{
+      (github.event_name == 'pull_request' && github.run_attempt == 1) &&
+      format('{0}-pr-{1}', github.workflow, github.ref) ||
+      format('{0}-run-{1}-{2}', github.workflow, github.run_id, github.run_attempt)
+    }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
+
 env:
   CANDIDATE_TAG: candidate-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
@@ -137,7 +150,10 @@ jobs:
               bash scripts/check-workflow-line-limit.sh
               bats \
                 tests/bats/ci_artifact_identity.bats \
+                tests/bats/ci_docker_lock_shim.bats \
+                tests/bats/ci_plan_run_invocation.bats \
                 tests/bats/ci_release_identity.bats \
+                tests/bats/ci_reused_index_identity.bats \
                 tests/bats/network_retry.bats
               bash scripts/query-stack-images.sh all >/tmp/out/catalog.json
               bash scripts/ci-plan-run.sh >/tmp/out/plan.json
@@ -245,6 +261,7 @@ jobs:
           BUILT_DIGEST: ${{ steps.build.outputs.digest }}
           REUSED_DIGEST: ${{ matrix.reused_digest }}
           MATRIX_MODE: ${{ matrix.mode }}
+          REUSED_INDEX_DIGEST: ${{ matrix.reused_index_digest }}
         run: |
           set -euo pipefail
           digest="$BUILT_DIGEST"
