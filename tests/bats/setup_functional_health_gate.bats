@@ -15,13 +15,16 @@
 # the fail-closed branch above stays the rare exception) closes out the
 # same failure class.
 #
-# Also covers the healthz probe's own split into a TCP-reachability step and
-# a container-loopback content step (see _verify_healthz_endpoint and
-# _tcp_port_reachable in setup.sh): each half must independently fail closed
-# (unreachable port with a perfectly healthy container behind it; a healthy
-# port with no proxy container to exec into), and neither depends on the
-# externally published address's own source-IP ACL, since the content probe
-# only ever runs against the container's own loopback.
+# Also covers the healthz probe's own split into a TCP-reachability step, an
+# external nginx-identity step, and a container-loopback content step (see
+# _verify_healthz_endpoint, _tcp_port_reachable, and
+# _external_healthz_response_is_nginx in setup.sh): each must independently
+# fail closed (unreachable port; a listener that answers but isn't this
+# project's proxy, e.g. a broken compose update remapping port 80 onto a
+# different service; a healthy port with no proxy container to exec into),
+# and the content probe never depends on the externally published address's
+# own source-IP ACL, since it only ever runs against the container's own
+# loopback.
 #
 # PATH is fully replaced per test with a minimal sandbox containing only the
 # one external command this function chain actually shells out to (awk, via
@@ -63,6 +66,11 @@ setup() {
     # functions rather than real binaries in
     # tests/bats/setup_update_health_baseline.bats.
     _tcp_port_reachable() { return 0; }
+    # Same reasoning as _tcp_port_reachable above: a real function this
+    # project's setup.sh defines (see _external_healthz_response_is_nginx),
+    # overridden here so every existing test that doesn't specifically
+    # target the nginx-identity step doesn't have to know it exists.
+    _external_healthz_response_is_nginx() { return 0; }
     service_container_id() { printf '%s' "fake-proxy-container-id"; }
     # Delegates "docker exec <id> <cmd...>" to the real command on PATH
     # (curl, in this file's case) so the existing curl-success/failure stubs
@@ -175,8 +183,58 @@ EOF
     [[ "$output" == *"TCP connect"* ]]
 }
 
+@test "fails when the published port answers but not as this project's nginx proxy" {
+    write_env "10.0.0.10" "" "0"
+    stub_tool curl 0 ""
+    stub_tool dig 0 "1.2.3.4"
+    _external_healthz_response_is_nginx() { return 1; }
+    PATH="$sandbox"
+    hash -r
+    run verify_stack_functional_health
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"did not answer as this project's nginx proxy"* ]]
+}
+
+@test "_external_healthz_response_is_nginx accepts a 403 from the healthz ACL as long as the Server header is nginx" {
+    stub_tool curl 0 "HTTP/1.1 403 Forbidden
+Server: nginx/1.27.0
+Content-Type: text/html"
+    PATH="$sandbox"
+    hash -r
+    # setup()'s own blanket `_external_healthz_response_is_nginx() { return
+    # 0; }` fake (installed so every OTHER test doesn't have to know this
+    # function exists) shadows the real one sourced from setup.sh in this
+    # same shell. Re-sourcing the whole helper file would fail on its
+    # `readonly` globals the second time; redefine just this one function by
+    # re-extracting it from the real setup.sh instead.
+    eval "$(awk '/^_external_healthz_response_is_nginx\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _external_healthz_response_is_nginx "10.0.0.10"
+    [ "$status" -eq 0 ]
+}
+
+@test "_external_healthz_response_is_nginx rejects a response from a non-nginx service" {
+    stub_tool curl 0 "HTTP/1.1 200 OK
+Server: SomeOtherService/1.0
+Content-Type: application/json"
+    PATH="$sandbox"
+    hash -r
+    eval "$(awk '/^_external_healthz_response_is_nginx\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _external_healthz_response_is_nginx "10.0.0.10"
+    [ "$status" -eq 1 ]
+}
+
+@test "_external_healthz_response_is_nginx fails when curl itself cannot connect" {
+    stub_tool curl 7 ""
+    PATH="$sandbox"
+    hash -r
+    eval "$(awk '/^_external_healthz_response_is_nginx\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _external_healthz_response_is_nginx "10.0.0.10"
+    [ "$status" -eq 1 ]
+}
+
 @test "fails when no proxy container is running to probe healthz through" {
     write_env "10.0.0.10" "" "0"
+    stub_tool curl 0 ""
     stub_tool dig 0 "1.2.3.4"
     service_container_id() { printf ''; }
     PATH="$sandbox"
