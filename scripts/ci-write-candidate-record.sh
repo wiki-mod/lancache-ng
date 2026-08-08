@@ -3,18 +3,29 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 set -euo pipefail
 
-[[ $# -eq 10 ]] || {
-    echo "usage: ci-write-candidate-record.sh SCOPE SERVICE IMAGE CANDIDATE_SOURCE_SHA ARTIFACT_SOURCE_SHA SOURCE_FINGERPRINT PLATFORM DIGEST MODE OUTPUT" >&2
+if [[ $# -ne 9 && $# -ne 10 ]]; then
+    echo "usage: ci-write-candidate-record.sh SCOPE SERVICE IMAGE CANDIDATE_SOURCE_SHA ARTIFACT_SOURCE_SHA [SOURCE_FINGERPRINT] PLATFORM DIGEST MODE OUTPUT" >&2
     exit 2
-}
+fi
 
 scope="$1"; service="$2"; image="$3"; candidate_source_sha="$4"; artifact_source_sha="$5"
-source_fingerprint="$6"; platform="$7"; digest="$8"; mode="$9"; output="${10}"
+if [[ $# -eq 10 ]]; then
+    source_fingerprint="$6"; platform="$7"; digest="$8"; mode="$9"; output="${10}"
+else
+    # Compatibility with the workflow call shape: derive the fingerprint from
+    # the candidate source at the last responsible moment rather than trusting
+    # another matrix field to carry it correctly.
+    platform="$6"; digest="$7"; mode="$8"; output="$9"
+    source_fingerprint=""
+fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 
 ci_ai_require_sha "$candidate_source_sha"
 ci_ai_require_sha "$artifact_source_sha"
+if [[ -z "$source_fingerprint" ]]; then
+    source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
+fi
 ci_ai_require_digest "$source_fingerprint"
 ci_ai_require_digest "$digest"
 [[ "$scope" == runtime || "$scope" == tooling ]] || ci_ai_fail "invalid scope $scope"
