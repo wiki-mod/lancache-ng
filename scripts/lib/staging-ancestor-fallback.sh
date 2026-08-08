@@ -1511,10 +1511,18 @@ saf_resolve_untouched_backfill_source() {
   # environment, not a parameter.
   local -x STAGING_FRESHNESS_GIT_DIR="$git_dir"
 
-  # Issue #1095 G2: read the one declared short-SHA derivation instead of
-  # independently hardcoding the truncation length.
+  # Issue #1095 G2 (AG-VAL-030 follow-up): read the one declared short-SHA
+  # derivation instead of independently hardcoding the truncation length.
+  # Checked explicitly with || -- this file has no top-level `set -e` (see
+  # its own header: functions must fail closed via their own explicit
+  # checks, not rely on a caller's shell options), so an unchecked failure
+  # here would silently continue with base_sha_short empty and
+  # base_image="ghcr.io/.../svc:sha-" instead of aborting.
   local base_sha_short
-  base_sha_short="$(dmeta_short_sha "$base_sha")"
+  base_sha_short="$(dmeta_short_sha "$base_sha")" || {
+    echo "::error::Could not derive the short SHA for base_sha $base_sha (see dmeta_short_sha's own error above). Refusing to build a base_image tag from an incomplete value." >&2
+    return 1
+  }
   local base_image="ghcr.io/${repository}/${service}:sha-${base_sha_short}"
   local ancestor_sha
   # Issue #1095 G2: shared by both the fast-path and regular-path branches
@@ -1581,9 +1589,14 @@ saf_resolve_untouched_backfill_source() {
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
       return 1
     fi
-    # Issue #1095 G2: read the one declared short-SHA derivation instead of
-    # independently hardcoding the truncation length.
-    ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")"
+    # Issue #1095 G2 (AG-VAL-030 follow-up): read the one declared short-SHA
+    # derivation instead of independently hardcoding the truncation length.
+    # Checked explicitly with || -- same fail-closed shape as base_sha_short
+    # above, for the same "no top-level set -e in this file" reason.
+    ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")" || {
+      echo "::error::Could not derive the short SHA for ancestor $ancestor_sha (see dmeta_short_sha's own error above). Refusing to substitute a tag built from an incomplete value." >&2
+      return 1
+    }
     echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $base_sha ($service was never built for $base_sha itself). (re)pointing at ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
     printf '%s\n' "ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}"
     return 0
@@ -1647,9 +1660,14 @@ saf_resolve_untouched_backfill_source() {
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
     return 1
   fi
-  # Issue #1095 G2: read the one declared short-SHA derivation instead of
-  # independently hardcoding the truncation length.
-  ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")"
+  # Issue #1095 G2 (AG-VAL-030 follow-up): read the one declared short-SHA
+  # derivation instead of independently hardcoding the truncation length.
+  # Checked explicitly with || -- same fail-closed shape as this function's
+  # earlier ancestor_sha_short site above.
+  ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")" || {
+    echo "::error::Could not derive the short SHA for ancestor $ancestor_sha (see dmeta_short_sha's own error above). Refusing to substitute a tag built from an incomplete value." >&2
+    return 1
+  }
   echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $base_sha ($service was never built for $base_sha itself). (re)pointing at ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
   printf '%s\n' "ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}"
   return 0

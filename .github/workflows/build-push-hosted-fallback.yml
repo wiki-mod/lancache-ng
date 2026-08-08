@@ -405,7 +405,14 @@ jobs:
           # Issue #1095 G2: read the one declared short-SHA derivation instead of
           # independently hardcoding the truncation length -- this file already
           # declared DOCKER_METADATA_SHORT_SHA_LENGTH above but read it nowhere.
-          printf 'value=%s\n' "$(dmeta_short_sha "$GITHUB_SHA")" >> "$GITHUB_OUTPUT"
+          # Assigned separately, not embedded inside printf's argument list:
+          # printf's OWN exit status would still be 0 even if the command
+          # substitution inside its argument failed (this is a `set -e`
+          # blind spot, unlike a bare `var="$(cmd)"` assignment, which set -e
+          # DOES catch), so embedding it here would silently ship a
+          # truncated "value=" output instead of failing this step.
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+          printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         # Retried variant (not the plain action): ubuntu-latest is also a

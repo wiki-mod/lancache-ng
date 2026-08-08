@@ -1998,7 +1998,7 @@ STUB
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
-@test "saf_resolve_untouched_backfill_source: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed instead of silently truncating the ancestor tag (AG-VAL-030)" {
+@test "saf_find_built_ancestor: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed at the ancestor candidate's own site, not silently truncating its tag (AG-VAL-030)" {
     # Issue #1095 G2 follow-up: saf_find_built_ancestor builds
     # ancestor_image="...:sha-$(dmeta_short_sha "$candidate")" -- if that
     # call's failure were embedded directly inside the string (rather than
@@ -2006,9 +2006,13 @@ STUB
     # DOCKER_METADATA_SHORT_SHA_LENGTH would be silently absorbed by the
     # outer assignment (this file has no top-level `set -e`, see its own
     # header), producing a plausible-looking-but-wrong "...:sha-" tag instead
-    # of a clear failure. This test exercises the real saf_resolve_
-    # untouched_backfill_source entry point (not dmeta_short_sha directly) to
-    # prove the fail-closed behaviour survives through the real call site.
+    # of a clear failure. Calls saf_find_built_ancestor DIRECTLY (not via
+    # saf_resolve_untouched_backfill_source) so the assertion below can only
+    # be satisfied by THIS function's own ancestor-candidate error message --
+    # saf_resolve_untouched_backfill_source's own, earlier base_sha_short
+    # computation (a separate call site, covered by the next test) never
+    # runs here at all, so this proves the fix at the site this test names,
+    # not merely "some dmeta_short_sha call somewhere failed".
     setup_linear_fixture
     install_run_exists_stub
     printf '%s\tany\n' "$ancestor2_sha" >> "$runs_file"
@@ -2024,10 +2028,26 @@ STUB
     chmod +x "$run_exists_stub"
 
     export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 3 3 1 0 0 "$git_dir"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not derive the short SHA for ancestor candidate"* ]]
+}
+
+@test "saf_resolve_untouched_backfill_source: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed at its own base_sha_short site (AG-VAL-030)" {
+    # Companion to the saf_find_built_ancestor test above: this function
+    # derives its OWN base_sha_short separately, right after entry, before
+    # any ancestor walk is ever reached (see this function's own header).
+    # That site had the exact same unchecked-assignment shape as the
+    # ancestor-candidate one until this same pass fixed both -- proven here
+    # via a message distinct from the ancestor-candidate one above, so this
+    # test cannot pass on that other site's fix alone. No run_exists_stub
+    # setup needed: base_sha_short is computed before any network check, so
+    # this fails before ever reaching one.
+    setup_linear_fixture
+    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
     run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
     [ "$status" -ne 0 ]
-    [[ "$output" != *"sha-\""* ]]
-    [[ "$output" == *"Could not derive the short SHA"* || "$output" == *"DOCKER_METADATA_SHORT_SHA_LENGTH must be a positive integer"* ]]
+    [[ "$output" == *"Could not derive the short SHA for base_sha"* ]]
 }
 
 @test "saf_resolve_untouched_backfill_source: fast path also fires for a real, non-doc commit that only touches a DIFFERENT service" {
