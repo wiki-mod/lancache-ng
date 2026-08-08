@@ -175,8 +175,18 @@ ci_lock_run_compose() {
     local override status
     ci_lock_split_compose_args input globals compose_command
     override="$(mktemp)"
-    trap 'rm -f "$override"' RETURN
-    ci_lock_compose_override "$override" "${globals[@]}"
+
+    # Avoid a RETURN trap here. This function is part of the validation trust
+    # boundary and runs under strict mode; cleanup that depends on RETURN-trap
+    # scope/inheritance is harder to prove than explicit control flow and can
+    # itself overwrite the status we are trying to preserve. A failed override
+    # render removes the temporary file before returning, while all later paths
+    # remove it after the real Compose call and identity assertion.
+    if ! ci_lock_compose_override "$override" "${globals[@]}"; then
+        status=$?
+        rm -f "$override"
+        return "$status"
+    fi
 
     if "$real_docker" compose "${globals[@]}" -f "$override" "${compose_command[@]}"; then
         status=0
@@ -184,10 +194,11 @@ ci_lock_run_compose() {
         status=$?
     fi
     if (( status == 0 )) && [[ "${compose_command[0]}" == up ]]; then
-        ci_lock_assert_compose_runtime "$override" "${globals[@]}"
+        if ! ci_lock_assert_compose_runtime "$override" "${globals[@]}"; then
+            status=$?
+        fi
     fi
     rm -f "$override"
-    trap - RETURN
     return "$status"
 }
 
