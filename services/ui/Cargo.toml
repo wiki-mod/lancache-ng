@@ -88,6 +88,20 @@ flate2 = { version = "1", optional = true }
 # vendor -- a strong trust signal for a crate this project uses to speak
 # the DHCP protocol directly on a LAN segment.
 dhcproto = { version = "0.15", optional = true }
+# Formats the Netdata alarm forwarding card's timestamp (netdata_alarms.rs,
+# bug hunt #849 finding #3) as RFC 3339 -- Tera's bundled filter set has no
+# built-in date formatting in this project's pinned tera version (confirmed
+# empirically: an earlier `| date(...)` template filter failed a real
+# `cargo test` run with "Unknown filter `date`", not assumed from docs).
+# Already resolved as a transitive dependency at this same version (pulled
+# in by the rustls/hickory chain, see Cargo.lock) -- promoting it to a
+# direct dependency for this one formatting call adds no new crate to the
+# build, only a manifest declaration, so this is not the kind of new
+# dependency AG-REL-001 asks for approval on. "formatting" is the minimum
+# feature needed for `OffsetDateTime::format`; "macros" (compile-time custom
+# format descriptions) is not needed since the well_known::Rfc3339 constant
+# covers this use case.
+time = { version = "0.3", default-features = false, features = ["formatting"], optional = true }
 
 [features]
 default = ["runtime"]
@@ -116,6 +130,7 @@ runtime = [
     "dep:zstd",
     "dep:flate2",
     "dep:dhcproto",
+    "dep:time",
 ]
 
 [dev-dependencies]

@@ -19,6 +19,7 @@ mod kea_snapshots;
 mod nats_auth_callout;
 mod nats_config;
 mod nats_kick;
+mod netdata_alarms;
 mod nginx_client;
 mod reverse_dns;
 mod routes;
@@ -56,6 +57,11 @@ pub struct AppState {
     pub docker: Docker,
     pub http_client: reqwest::Client,
     pub file_lock: std::sync::Mutex<()>,
+    // Guards the read-modify-write in netdata_alarms::append_alarm -- see
+    // that function's own doc comment for why a dedicated lock (not
+    // file_lock above, which already serializes the unrelated
+    // cdn-domains.txt writes in routes/domains.rs) is required here.
+    pub netdata_alarms_lock: std::sync::Mutex<()>,
     pub kea_config_lock: tokio::sync::Mutex<()>,
     pub dhcp_probe_lock: tokio::sync::Mutex<()>,
     pub nats: async_nats::Client,
@@ -985,6 +991,7 @@ async fn main() -> Result<()> {
         docker,
         http_client,
         file_lock: std::sync::Mutex::new(()),
+        netdata_alarms_lock: std::sync::Mutex::new(()),
         kea_config_lock: tokio::sync::Mutex::new(()),
         dhcp_probe_lock: tokio::sync::Mutex::new(()),
         nats,
@@ -1066,6 +1073,16 @@ async fn main() -> Result<()> {
         .route(
             "/api/secondary/register",
             post(routes::secondaries::register_secondary),
+        )
+        // Machine webhook from the netdata container's custom_sender()
+        // integration (bug hunt #849, observability.md finding #3) -- no
+        // browser session, so no CSRF token is available. Gated by its own
+        // X-Netdata-Alarm-Token header check instead (see
+        // routes/netdata_alarms.rs's module doc comment), the same
+        // token-gated-public-route shape as /api/secondary/register above.
+        .route(
+            "/api/netdata-alarms",
+            post(routes::netdata_alarms::ingest_alarm),
         )
         // Not behind basic_auth on purpose: these are non-sensitive brand
         // assets, not gated content. Serving them through the protected
@@ -1916,6 +1933,7 @@ mod tests {
             docker,
             http_client: reqwest::Client::new(),
             file_lock: std::sync::Mutex::new(()),
+            netdata_alarms_lock: std::sync::Mutex::new(()),
             kea_config_lock: tokio::sync::Mutex::new(()),
             dhcp_probe_lock: tokio::sync::Mutex::new(()),
             nats,
