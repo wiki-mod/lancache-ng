@@ -12,7 +12,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 ci_ai_require_sha "$source_sha"
 
-catalog="$("$repo_root/scripts/query-stack-images.sh" all)"
+catalog="$(bash "$repo_root/scripts/query-stack-images.sh" all)"
 lock="$(jq -n --arg source_sha "$source_sha" --arg candidate_tag "$candidate_tag" '{
   schema: "stack-lock/v1",
   source_sha: $source_sha,
