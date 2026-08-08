@@ -15,7 +15,7 @@ document.
 
 | Service | Default | Replaces | Notes |
 |---|---|---|---|
-| nginx (proxy) | on | — | Mainline from nginx.org, Debian 13 Base |
+| nginx (proxy) | on | — | Mainline from nginx.org, Alpine base (issue #815) |
 | PowerDNS | on | dnsmasq | Authoritative + Recursor for DNS spoofing & recursion |
 | Kea DHCP / DHCP modes | off | — | Configurable four-state: `disabled` / `kea` / `dnsmasq-proxy` / `dnsmasq-relay` (#844); requires PowerDNS (DDNS via nsupdate) in `kea` mode. The two dnsmasq modes share one `dhcp-proxy` container (config selected by DHCP_MODE): `dnsmasq-proxy` injects PXE options alongside an existing server, `dnsmasq-relay` forwards DHCP to an upstream server on another segment. See [docs/dhcp-modes.md](dhcp-modes.md). |
 | LanCache-NG-NTP | off (`ntp` Compose profile) | — | chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123; optional "auto-set as DHCP NTP server" toggle pushes its LAN address into Kea's `ntp-servers` option. See the "Kea DHCP" section below. |
@@ -26,7 +26,8 @@ document.
 
 ## nginx
 
-Mainline from nginx.org (not Debian package). Base: `debian:13-slim`.
+Mainline from nginx.org (never the base OS's own distro package). Base: `alpine:3.24`
+(migrated from `debian:13-slim` as part of issue #815's Alpine push).
 
 **Performance configuration:**
 
@@ -606,7 +607,6 @@ Central log receiver for the stack (#453), opt-in via `docker compose --profile 
 - Per-service log level configuration in the Admin UI.
 - Configurable remote forwarding destination (IP/port/protocol) from the Admin UI.
 - Fully zero-added-capability posture for the combined container: needs every producer log this project controls to be group-readable by gid 10001, a real, separate cross-service change tracked in issue #1427.
-- CI/release-pipeline wiring for the new first-party `syslog` image (build matrix, multi-arch publish, Trivy scan registration) -- tracked in issue #1428; `release/stack-images.yml` already declares the image, but `.github/workflows/build-push.yml` does not yet build/push it.
 
 **Logging matrix** (maintained here per #453's requirement; kept up to date as more services are wired):
 
@@ -738,6 +738,21 @@ one) rather than being a given.
   (green/yellow/red) plus a cache-disk usage indicator, persistently visible
   in the dashboard's "Service health" card, live-polled every 10 seconds
   (issue #870; see the "Status" note under Watchdog above)
+- Netdata alarm forwarding (bug hunt #849, `docs/bug-hunt/observability.md`
+  finding #3): the `netdata` container's own `health.d` alarms (disk usage,
+  CPU, memory, ...) previously had no notification integration or Admin UI
+  surface of their own. The `netdata:` service's compose command block now
+  configures Netdata's `custom_sender()` alarm-notify mechanism to POST each
+  alarm event to the Admin UI's `POST /api/netdata-alarms`
+  (`services/ui/src/routes/netdata_alarms.rs`), gated by a shared
+  `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern, same as
+  `PDNS_API_KEY`). The dashboard's "Netdata alarms" card
+  (`services/ui/src/netdata_alarms.rs`) shows the most recent alarms
+  server-rendered, not live-polled — an alarm is a discrete event, not a
+  continuously-changing gauge. This forwards alarm *events* only; Netdata's
+  full metrics dashboard (port 19999) remains unpublished, so deep
+  investigation of a forwarded alarm still needs direct Netdata access (see
+  `docs/threat-model.md`'s T9 for the residual-risk framing).
 
 ## Admin UI
 

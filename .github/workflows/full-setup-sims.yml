@@ -608,14 +608,31 @@ jobs:
         # namespace and otherwise unreachable from this sibling container.
         #
         # flock: see full-setup-validate.yml's identical step comment for the
-        # full finding -- this job installs a real quickstart stack with
-        # FIXED container names (lancache-nats, lancache-ui, ...), which are
-        # not project-name-scoped, so two runs of this job landing on the
-        # same physical runner host (this repo's runners are registered
-        # several-per-host, sharing one Docker daemon) collide. The `needs:`
-        # chain onto ui-nats-dns-integration-simulation above only serializes
-        # jobs *within this one workflow run*; it does nothing for two
-        # different PRs' runs overlapping, which is what actually happened.
+        # full finding -- this job installs a real quickstart stack against
+        # deploy/quickstart/docker-compose.yml. Historically (issue #838)
+        # that compose file pinned FIXED container names (lancache-nats,
+        # lancache-ui, ...), not project-name-scoped, so two runs of this job
+        # landing on the same physical runner host (this repo's runners are
+        # registered several-per-host, sharing one Docker daemon) collided.
+        # The `needs:` chain onto ui-nats-dns-integration-simulation above
+        # only serializes jobs *within this one workflow run*; it does
+        # nothing for two different PRs' runs overlapping, which is what
+        # actually happened.
+        #
+        # UPDATE (issue #1415): the compose file's container names are no
+        # longer literally fixed -- every `container_name:` now carries
+        # `${LANCACHE_CONTAINER_SUFFIX:-}`, and this job exports a real
+        # per-run suffix (plus a per-run loopback IP pair via
+        # setup-cli-simulation.sh's own sim_ip_octet()). That does NOT make
+        # this lock unnecessary: both this job's and syslog-forwarding-
+        # simulation.sh's per-run uniqueness still comes from a
+        # `cksum ... % 200` hash of a run-scoped string, a ~200-value space
+        # in which a same-host collision between two concurrent runs of the
+        # SAME script remains a real, non-negligible probability at this
+        # project's confirmed multi-runner-per-host concurrency -- see
+        # scripts/lib/quickstart-compose-lock.sh's own header for the full,
+        # current rationale (kept in sync with this comment).
+        #
         # The lock itself now comes from scripts/lib/quickstart-compose-lock.sh
         # (issue #838) -- see that file's header for why it must be `source`d
         # rather than executed, and why its lock path is a single shared
