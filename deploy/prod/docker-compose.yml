@@ -286,7 +286,7 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED (issue #842/#849): watchdog.env
+    # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED: watchdog.env
     # is a static, non-templated file (see its own header), so these
     # top-level .env values -- which do vary per install -- are passed the
     # same way the `retention` service below already passes SYSLOG_ENABLED
@@ -335,8 +335,8 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
-    # #849 bug-hunt finding watchdog.md#14: docker-socket-proxy is the one
-    # dependency every get_health()/restart_container() call in watchdog.sh
+    # docker-socket-proxy is the one dependency every
+    # get_health()/restart_container() call in watchdog.sh
     # goes through -- the plain list form only waited for that container to
     # *start*, not for HAProxy inside it to actually be accepting connections
     # on :2375. Narrow/self-healing in practice (HAProxy binds well within a
@@ -1115,9 +1115,9 @@ services:
     # baked into this stack anywhere (only `web_log.conf` is, for a
     # different collector). nats therefore does not need netdata-net
     # membership, and keeping it off that network is the correct, narrower
-    # isolation this PR's own netdata-network-scoping change intends --
-    # putting nats on netdata-net would have been a real, if accidental,
-    # widening of exactly the access surface this PR exists to close (a
+    # isolation the netdata-network-scoping design intends -- putting nats
+    # on netdata-net would have been a real, if accidental, widening of
+    # exactly the access surface that scoping is meant to close (a
     # compromised nats container could otherwise resolve and reach
     # netdata:19999, since Compose bridge-network membership is
     # bidirectional).
@@ -1379,9 +1379,9 @@ services:
     networks:
       - default
       - docker-api
-      # #849 bug-hunt finding observability.md#20: needed to reach netdata
-      # (NETDATA_URL below) now that netdata no longer sits on `default` --
-      # see the netdata service's own comment for why.
+      # Needed to reach netdata (NETDATA_URL below) now that netdata no
+      # longer sits on `default` -- see the netdata service's own comment
+      # for why.
       - netdata-net
     # See the watchdog service's own `depends_on:` above for the same
     # reasoning -- docker-socket-proxy has carried a real HTTP
@@ -1491,8 +1491,8 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    # #849 bug-hunt finding observability.md#20: netdata never publishes a
-    # host port (grepped every deploy/*/docker-compose.yml for "19999" --
+    # netdata never publishes a host port (grepped every
+    # deploy/*/docker-compose.yml for "19999" --
     # only ever the internal NETDATA_URL env var or a container-local
     # healthcheck). An explicit `networks:` entry below is required for
     # netdata: leaving it unset would put netdata on the same implicit
@@ -1517,8 +1517,8 @@ services:
 networks:
   docker-api:
     internal: true
-  # #849 bug-hunt finding observability.md#20: dedicated to netdata + the
-  # Admin UI (the only real caller, via NETDATA_URL) -- see the netdata
+  # Dedicated to netdata + the Admin UI (the only real caller, via
+  # NETDATA_URL) -- see the netdata
   # service's own comment above for why this exists as a separate network
   # rather than netdata staying on `default`.
   netdata-net: {}

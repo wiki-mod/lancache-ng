@@ -38,17 +38,36 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// (`services/syslog/healthcheck.sh`) is what actually proves fluent-bit
 /// AND syslog-ng are both alive inside it, one level below what this
 /// per-container Docker-API check can see.
-fn resolve_alert_only_targets(dhcp_mode: &str, syslog_enabled: bool) -> Vec<&'static str> {
+fn resolve_alert_only_targets(
+    dhcp_mode: &str,
+    syslog_enabled: bool,
+    container_suffix: &str,
+) -> Vec<String> {
     // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
     // profile (unlike dhcp/dhcp-proxy/syslog below), so both are
     // always monitored, matching how proxy/dns-standard/nats are always
     // monitored among the four restart-capable services above.
-    let mut targets = vec![config::CONTAINER_UI, config::CONTAINER_NETDATA];
+    //
+    // container_suffix (see load_settings()'s own LANCACHE_CONTAINER_SUFFIX
+    // read, threaded through here) must be appended to every one of these
+    // names, the same way it already is for ContainerNames's four
+    // restart-capable fields: every deploy/*/docker-compose.yml
+    // `container_name:` entry -- including `lancache-ui`, `lancache-netdata`,
+    // `lancache-dhcp`, `lancache-dhcp-proxy`, and `lancache-syslog` -- carries
+    // this same suffix in the coordinated-suffix CI shape. Without it, this
+    // function would keep returning the bare, unsuffixed name once that
+    // shape is active, so get_health() would query a container that was
+    // never started under that exact name and report a permanent false
+    // "unreachable" for a service that is actually healthy.
+    let mut targets = vec![
+        format!("{}{container_suffix}", config::CONTAINER_UI),
+        format!("{}{container_suffix}", config::CONTAINER_NETDATA),
+    ];
     if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
-        targets.push(dhcp_container);
+        targets.push(format!("{dhcp_container}{container_suffix}"));
     }
     if syslog_enabled {
-        targets.push(config::CONTAINER_SYSLOG);
+        targets.push(format!("{}{container_suffix}", config::CONTAINER_SYSLOG));
     }
     targets
 }
@@ -94,6 +113,12 @@ struct Settings {
     status_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
+    // Threaded through separately from `container_names` into
+    // resolve_alert_only_targets(), which builds its own container names
+    // from the plain config::CONTAINER_* constants rather than from
+    // ContainerNames -- see that function's own comment for why it needs
+    // this suffix applied too.
+    container_suffix: String,
     // Issue #842: gates which of the five alert-only services (see
     // resolve_alert_only_targets()) are actually deployed. Read once here
     // (not re-read per loop iteration) since neither knob can change for
@@ -161,6 +186,12 @@ fn load_settings() -> Settings {
     // "${SSL_ENABLED:-1}"`.
     let ssl_enabled = config::resolve_bool(env("SSL_ENABLED").as_deref(), true);
 
+    // Read once and kept as its own Settings field (not just consumed
+    // inline below): resolve_alert_only_targets() also needs this exact
+    // value, independently of container_names, to build its own suffixed
+    // names from the plain config::CONTAINER_* constants.
+    let container_suffix = env("LANCACHE_CONTAINER_SUFFIX").unwrap_or_default();
+
     let container_names = match config::resolve_container_names(
         env("CONTAINER_PROXY").as_deref(),
         env("CONTAINER_DNS_STANDARD").as_deref(),
@@ -170,7 +201,7 @@ fn load_settings() -> Settings {
         // Issue #1415: see resolve_container_names()'s own doc comment --
         // empty/unset for every real install, only ever non-empty for a
         // CI-coordinated quickstart-compose run.
-        env("LANCACHE_CONTAINER_SUFFIX").as_deref(),
+        Some(container_suffix.as_str()),
     ) {
         Ok(names) => names,
         Err(msg) => {
@@ -241,6 +272,7 @@ fn load_settings() -> Settings {
         status_file,
         cache_dir,
         container_names,
+        container_suffix,
         dhcp_mode,
         syslog_enabled,
     }
@@ -300,11 +332,14 @@ async fn main() {
     // FailureCounter would) -- see HealthReading::is_alert_ok's own doc
     // comment for the reasoning behind reusing AlertCounter's semantics
     // here instead of FailureCounter's.
-    let alert_only_targets =
-        resolve_alert_only_targets(&settings.dhcp_mode, settings.syslog_enabled);
-    let mut alert_only_counters: HashMap<&'static str, AlertCounter> = alert_only_targets
+    let alert_only_targets = resolve_alert_only_targets(
+        &settings.dhcp_mode,
+        settings.syslog_enabled,
+        &settings.container_suffix,
+    );
+    let mut alert_only_counters: HashMap<String, AlertCounter> = alert_only_targets
         .iter()
-        .map(|name| (*name, AlertCounter::default()))
+        .map(|name| (name.clone(), AlertCounter::default()))
         .collect();
 
     log(&format!(
@@ -473,5 +508,43 @@ async fn main() {
         // for this daemon to eventually absorb.
 
         tokio::time::sleep(settings.check_interval).await;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    // A coordinated LANCACHE_CONTAINER_SUFFIX (the CI-only shape every
+    // deploy/*/docker-compose.yml `container_name:` entry already carries)
+    // must reach every alert-only target's name, not just ContainerNames's
+    // four restart-capable fields -- otherwise get_health() queries the
+    // bare, unsuffixed container name, which never exists under that
+    // shape, and reports a permanent false "unreachable" for a service
+    // that is actually healthy.
+    fn resolve_alert_only_targets_applies_the_coordinated_suffix() {
+        let targets = resolve_alert_only_targets("kea", true, "-ci1");
+        assert_eq!(
+            targets,
+            vec![
+                "lancache-ui-ci1".to_string(),
+                "lancache-netdata-ci1".to_string(),
+                "lancache-dhcp-ci1".to_string(),
+                "lancache-syslog-ci1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    // No suffix (every real, non-CI install) must reproduce the exact bare
+    // names this function always returned before container_suffix existed
+    // -- an empty suffix must be a no-op, not merely "not crash."
+    fn resolve_alert_only_targets_is_unchanged_with_no_suffix() {
+        let targets = resolve_alert_only_targets("disabled", false, "");
+        assert_eq!(
+            targets,
+            vec!["lancache-ui".to_string(), "lancache-netdata".to_string()]
+        );
     }
 }

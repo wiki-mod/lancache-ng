@@ -13,8 +13,8 @@
 # disk-usage-percentage reporting into status.json, resolved independently of
 # retention.sh's own copy (see that file's resolve_cache_dir() comment for
 # why this is deliberate duplication, not shared state). LOGGING_ENABLED is
-# the other exception (#849 bug-hunt finding observability.md#8, 2026-08-06):
-# this file DOES now read it, gating alert-only health monitoring of the
+# the other exception: this file DOES now read it, gating alert-only health
+# monitoring of the
 # combined syslog+fluent-bit container -- see check_alert_only()'s own
 # comment below for why that container is alert-only rather than
 # restart-capable, and C_SYSLOG's own assignment further below for why
@@ -163,8 +163,8 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 # stable status.json/dashboard key and log label for this probe.
 C_DOCKER_PROXY="lancache-docker-socket-proxy"
 
-# syslog (#849 bug-hunt finding observability.md#8, 2026-08-06): no
-# ${CONTAINER_*:-...}-style override exists for it in the Rust rewrite this
+# syslog: no ${CONTAINER_*:-...}-style override exists for it in the Rust
+# rewrite this
 # mirrors (services/watchdog/src/config.rs's CONTAINER_SYSLOG is a plain
 # `const`, never read from an env var), so there is nothing for
 # scripts/check-naming-consistency.sh's watchdog_names extraction to
@@ -189,8 +189,8 @@ C_DOCKER_PROXY="lancache-docker-socket-proxy"
 # own comment on it) -- a normal install with central logging on but
 # retention/pruning never separately opted into legitimately runs this
 # container with SYSLOG_ENABLED still at its default "false", and gating
-# health monitoring on SYSLOG_ENABLED alone left that common case silently
-# unmonitored (a real Codex finding on this PR, not a hypothetical).
+# health monitoring on SYSLOG_ENABLED alone would leave that common case
+# silently unmonitored.
 if is_truthy "${LOGGING_ENABLED:-0}"; then
     C_SYSLOG="lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}"
 else
@@ -455,19 +455,20 @@ check_and_maybe_restart() {
     fi
 }
 
-# Alert-only monitoring (#849 bug-hunt finding observability.md#8): unlike
-# check_and_maybe_restart() above, this never calls restart_container().
+# Alert-only monitoring: unlike check_and_maybe_restart() above, this never
+# calls restart_container().
 # scripts/docker-socket-proxy.sh's safe_service_restart ACL (line 63) only
 # permits a restart POST for lancache-proxy/lancache-dns-standard/
 # lancache-dns-ssl/lancache-nats -- a restart attempt for any other
 # container, including the syslog+fluent-bit container this monitors, would
 # get an HTTP 403 from HAProxy, so restart-capable monitoring is not even
 # implementable here without a separate, deliberate allowlist-widening
-# decision (a real security-boundary change, out of scope for a bug-hunt
-# fix). This also mirrors the already-decided design in the not-yet-wired-up
-# Rust rewrite (services/watchdog/src/main.rs's resolve_alert_only_targets(),
-# services/watchdog/src/health.rs's HealthReading::is_alert_ok, issue #842):
-# alert-only visibility, not auto-restart, is the deliberate safe default for
+# decision (a real security-boundary change, deliberately not made in
+# passing here). This also mirrors the already-decided design in the
+# not-yet-wired-up Rust rewrite (services/watchdog/src/main.rs's
+# resolve_alert_only_targets(), services/watchdog/src/health.rs's
+# HealthReading::is_alert_ok): alert-only visibility, not auto-restart, is
+# the deliberate safe default for
 # a newly-monitored service until a per-service restart decision is
 # consciously made ("a mid-startup restart of a dependency can make a
 # dependent service's own reconnect logic worse, not better"). `_fcount`
@@ -496,7 +497,7 @@ check_alert_only() {
     # same as before, since both are normal transient states, not outages.
     if [ "$health" = "unhealthy" ] || [ "$health" = "unreachable" ]; then
         _fcount=$((_fcount + 1))
-        log "UNHEALTHY $name (${_fcount} consecutive failures, health=${health}) -- alert only, watchdog does not restart this service (issue #842)"
+        log "UNHEALTHY $name (${_fcount} consecutive failures, health=${health}) -- alert only, watchdog does not restart this service"
     elif [ "$health" = "healthy" ] || [ "$health" = "starting" ] || [ "$health" = "none" ]; then
         # Reset (and log recovery) on ANY non-failure reading, not just
         # "healthy" -- matches the Rust rewrite's AlertCounter::record(),
@@ -530,8 +531,8 @@ write_status() {
     \"$C_DNS_SSL\":   {\"status\": \"$(health_color "$H_DNS_SSL")\",   \"health\": \"$H_DNS_SSL\",   \"failures\": $F_DNS_SSL}"
     fi
 
-    # #849 bug-hunt finding observability.md#8: same conditional-inclusion
-    # shape as ssl_services above -- omitted entirely (not just "unknown")
+    # Same conditional-inclusion shape as ssl_services above -- omitted
+    # entirely (not just "unknown")
     # when C_SYSLOG is empty (LOGGING_ENABLED falsy, see that assignment's
     # own comment above), so an install that never opted into central
     # logging doesn't show a permanently "unhealthy"/never-existed container
@@ -574,8 +575,8 @@ while true; do
     # see probe_docker_socket_proxy()'s own comment for why this daemon must
     # never attempt to restart its own Docker API gateway.
     probe_docker_socket_proxy F_DOCKER_PROXY H_DOCKER_PROXY
-    # Alert-only (#849 bug-hunt finding observability.md#8): deliberately
-    # check_alert_only, not check_and_maybe_restart -- see that function's
+    # Alert-only: deliberately check_alert_only, not check_and_maybe_restart
+    # -- see that function's
     # own comment for why restart-capable monitoring is not implementable
     # for this container without a separate allowlist-widening decision.
     # Skipped entirely (not called with an empty name) when C_SYSLOG is

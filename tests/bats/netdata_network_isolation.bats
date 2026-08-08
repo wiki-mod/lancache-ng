@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Drift guard for #849 bug-hunt finding observability.md#20: netdata's own
-# HTTP API (port 19999) is never published to the host in any real
+# Drift guard: netdata's own HTTP API (port 19999) is never published to
+# the host in any real
 # deployment, but leaving it without an explicit `networks:` entry would
 # put it on the same implicit shared `default` Compose network as every
 # other real service (dns, proxy, dhcp, nats, ...) -- any one of them could

@@ -758,7 +758,7 @@ services:
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED (issue #842/#849): matches
+      # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED: matches
       # deploy/prod/docker-compose.yml's identical addition -- see that
       # file's own comment on this same environment block for the full
       # reasoning, including why LOGGING_ENABLED (not SYSLOG_ENABLED) is the
@@ -1204,8 +1204,8 @@ services:
     networks:
       - default
       - docker-api
-      # #849 bug-hunt finding observability.md#20: needed to reach netdata
-      # (NETDATA_URL below) now that netdata no longer sits on `default`.
+      # Needed to reach netdata (NETDATA_URL below) now that netdata no
+      # longer sits on `default`.
       - netdata-net
     restart: always
     logging:
@@ -1309,8 +1309,8 @@ services:
 networks:
   docker-api:
     internal: true
-  # #849 bug-hunt finding observability.md#20: dedicated to netdata + the
-  # Admin UI -- see the netdata service's own comment above.
+  # Dedicated to netdata + the Admin UI -- see the netdata service's own
+  # comment above.
   netdata-net: {}
 
 volumes:

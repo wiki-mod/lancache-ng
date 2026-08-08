@@ -2,10 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Coverage for #849 bug-hunt finding observability.md#8: services/watchdog/
-# watchdog.sh's syslog-ng healthcheck (part of the combined syslog+fluent-bit
-# container's own dual-process HEALTHCHECK) was real but orphaned -- nothing
-# in the stack consumed it (no autoheal, and watchdog.sh's own
+# Coverage for services/watchdog/watchdog.sh's syslog-ng healthcheck (part
+# of the combined syslog+fluent-bit container's own dual-process
+# HEALTHCHECK): real but orphaned -- nothing in the stack consumed it (no
+# autoheal, and watchdog.sh's own
 # check_and_maybe_restart() loop only ever monitored three hardcoded
 # containers). This adds alert-only monitoring (never restart-capable --
 # scripts/docker-socket-proxy.sh's safe_service_restart ACL does not permit
@@ -79,7 +79,7 @@ setup() {
     done
 }
 
-@test "C_SYSLOG stays empty when LOGGING_ENABLED is truthy but SYSLOG_ENABLED is falsy (the real Codex finding)" {
+@test "C_SYSLOG stays non-empty when LOGGING_ENABLED is truthy but SYSLOG_ENABLED is falsy" {
     # Real bug this test guards against: LOGGING_ENABLED and SYSLOG_ENABLED
     # are deliberately separate flags (see this file's header and
     # watchdog.sh's own C_SYSLOG comment) -- a normal install with central
@@ -178,8 +178,8 @@ setup() {
 }
 
 @test "check_alert_only resets the failure counter on an intervening 'starting'/'none' reading, not only 'healthy'" {
-    # Real Codex finding: a prior version only reset F_SYSLOG in the
-    # "healthy" branch, so a failure streak survived untouched through an
+    # Resetting the counter only in the "healthy" branch would let a
+    # failure streak survive untouched through an
     # intervening "starting"/"none" reading -- unhealthy -> starting ->
     # unhealthy reported the second event as "2 consecutive failures" even
     # though the container was never actually observed failing twice in a

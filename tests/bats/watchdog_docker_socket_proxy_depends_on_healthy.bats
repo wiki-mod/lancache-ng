@@ -2,12 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Drift guard for #849 bug-hunt finding watchdog.md#14: the `watchdog` and
-# `ui` services' `depends_on` for `docker-socket-proxy` used the plain list
-# form, which only waits for that container to *start*, not for HAProxy
-# inside it to actually be accepting connections on :2375 -- even though
-# docker-socket-proxy has carried a real HTTP healthcheck since #1169 (see
-# its own service block in each compose file). Covers all three real
+# Drift guard: the `watchdog` and `ui` services' `depends_on` for
+# `docker-socket-proxy` used the plain list form, which only waits for that
+# container to *start*, not for HAProxy inside it to actually be accepting
+# connections on :2375 -- even though docker-socket-proxy carries a real
+# HTTP healthcheck (see its own service block in each compose file). Covers
+# all three real
 # compose files that define a `watchdog` service (prod, quickstart, and
 # full-setup's CI validation harness): full-setup's docker-socket-proxy
 # carries the identical healthcheck, so leaving it on the old

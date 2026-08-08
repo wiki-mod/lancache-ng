@@ -225,8 +225,8 @@ to the operator anywhere in this project:**
   `netdata-net`'s bridge, regardless of whether it is ever declared a
   member of that network. This means a compromise of any of these three
   containers retains a path to Netdata's unauthenticated HTTP API
-  (`/api/v1/allmetrics`, `/api/v1/alarms`, etc.) even after this PR's
-  network-level isolation change. Closing this gap for real would require
+  (`/api/v1/allmetrics`, `/api/v1/alarms`, etc.) even after the
+  network-level isolation change above. Closing this gap for real would require
   either an application-level auth layer in front of Netdata itself (this
   project's Netdata image ships none, and adding one is a materially
   larger, separate undertaking) or outbound firewall rules inside these
