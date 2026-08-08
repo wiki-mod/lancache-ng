@@ -51,87 +51,29 @@
 # (#1065). Grouping does not change WHAT gets updated -- only how many separate
 # PRs/merges/pushes it takes to land the same set of updates.
 #
-# `schedule.day` is deliberately staggered across the three blocks below
+# `schedule.day` is staggered across the three blocks below
 # (Monday/Wednesday/Friday) rather than left at the shared implicit default
-# (Monday for all three). Without this, a routine weekly run would still open
-# all ~3 grouped PRs on the same day, and merging them still lands 3 pushes to
-# `current_dev` in quick succession, each triggering the same scarce-runner-pool
-# build/scan matrix this note already flags as the actual bottleneck (#1065,
-# AG-CI-016/AG-CI-017's shared-runner-contention concerns) -- grouping bounds
-# the PR *count*, staggering bounds how many of those pushes can land the same
-# day.
+# (Monday for all three), so a routine weekly run does not open all ~3
+# grouped PRs the same day. This bounds how many of those PRs can be *opened*
+# on the same day -- it does NOT by itself bound same-day *merges*: a PR
+# opened Monday can still sit open and be merged the same day as Wednesday's
+# or Friday's PR, reproducing the same-day push burst this note's own
+# grouping (below) already reduces the PR *count* for. A real execution-time
+# bound on concurrent runner-pool contention (AG-CI-016/AG-CI-017) needs a
+# source-level control such as a workflow concurrency group, which this file
+# cannot express on its own -- staggering here is a cheap partial mitigation
+# on the open side, not a substitute for that.
 #
-# `groups.<name>.group-by: dependency-name` was evaluated and deliberately
-# NOT added, despite real, confirmed cross-directory dependency overlap in
-# both the `rust-deps` group (tokio/reqwest/serde/serde_json shared across
-# all three crates; async-nats and axum shared by two of them) and the
-# `docker-base-images` group (all six Dockerfiles pin the identical
-# `alpine:3.24` base image). GitHub's own tutorial example for this option
-# (see the `groups` reference page's "Grouping updates across directories in
-# a monorepo" section) names the resulting PR after a single dependency
-# ("Bump lodash in monorepo-dependencies group"), not after the group as a
-# whole the way an ordinary multi-dependency grouped PR is titled ("Bump the
-# X group with N updates") -- a real, structural signal that `group-by` may
-# key PR creation per dependency name rather than per named group, which
-# would fan a single already-grouped PR back out into one PR per updated
-# dependency the moment more than one dependency in the same group needs
-# updating in the same week. That is the exact opposite of this file's
-# BURST-FAN-OUT CONTROL goal above, and the documentation available does not
-# resolve the ambiguity for a `patterns: ["*"]` catch-all group with more
-# than one dependency changing at once. Given the downside (silently
-# reintroducing the #1065 fan-out this file exists to prevent) outweighs the
-# upside (deduplicating a same-dependency line item across directories
-# within an already-single PR), this was left out rather than shipped on an
-# unconfirmed reading -- revisit only with a real, observed multi-dependency
-# grouped run confirming the actual PR count `group-by` produces.
-#
-# Systematic pass against GitHub's full Dependabot options reference (F-18,
-# issue #1095, prompted by real `@dependabot rebase` friction on PR #1399):
-# the one real change applied is the `schedule.day` staggering above; the
-# rest of the options considered (including `group-by` above) are recorded
-# here specifically because the reasoning is not obvious from the option's
-# mere absence, and because F-18 asked for the "why not" to be captured, not
-# just the "what changed":
-#
-# * `rebase-strategy`: NOT set (kept at default). PR #1399's "Looks like this
-#   PR has been edited by someone other than Dependabot" refusal is
-#   Dependabot's unconditional default behavior the moment a non-Dependabot
-#   commit lands on its branch -- it is independent of `rebase-strategy`,
-#   which only controls Dependabot's own *automatic* rebase triggers (a
-#   schedule run, a PR reopen, a `target-branch` change, or a conflict
-#   discovered after a push to the target branch). Setting
-#   `rebase-strategy: disabled` would not have prevented PR #1399's refusal,
-#   and would cost this project the useful "auto-rebase on target-branch
-#   conflict" behavior for every future PR. The real, better fix for next
-#   time: a manual commit pushed onto a Dependabot branch that includes
-#   `[dependabot skip]` (or `[skip dependabot]`/`[dependabot-skip]`/
-#   `[skip-dependabot]`) in its own commit message lets Dependabot force-push
-#   over it and keep rebasing normally -- a narrower, non-destructive
-#   alternative to `@dependabot recreate` (which discards the PR's history).
-# * `commit-message`: NOT set. This looked like a plausible fix for AG-GH-018
-#   (Conventional-Commit PR titles) compliance, since Dependabot's own
-#   PR-title heuristic has no way to match this project's `type(scope):
-#   subject` taxonomy or its documented scope list. Checked
-#   `scripts/check-pr-title-convention.sh` directly: it already
-#   unconditionally exempts `PR_AUTHOR == "dependabot[bot]"` from the title
-#   check (`pr-title-convention-check` job in build-push.yml), specifically
-#   because Dependabot cannot conform to this taxonomy on its own. There is
-#   no real compliance gap here to close with `commit-message.prefix`.
-# * `open-pull-requests-limit`: NOT set (kept at the documented default of 5
-#   per block). Each block already opens at most one grouped PR per branch
-#   per week and that PR's branch is reused (rebased in place) by the next
-#   scheduled run rather than opening a second one, so hitting the default
-#   ceiling of 5 concurrent version-update PRs for a single block would
-#   require several weeks of a PR sitting unmerged -- not a real constraint
-#   this repo's actual review cadence has hit.
-# * `ignore`: NOT set. No dependency in any of the three ecosystems currently
-#   has a documented reason to be excluded from updates; adding a speculative
-#   `ignore` entry with no real justification would violate this file's own
-#   "don't add options blindly" mandate as much as leaving a real gap would.
-# * `registries`: NOT applicable. This project uses only public package
-#   registries (crates.io, Docker Hub / GHCR mirrors, the GitHub Actions
-#   marketplace) -- there is no private registry for Dependabot to need
-#   access-configuration for.
+# Every other option in Dependabot's reference docs was checked against this
+# repo's real needs and left at its default -- no evidenced gap to close.
+# One exception evaluated and specifically rejected: `groups.<name>.group-by:
+# dependency-name`. Despite real cross-directory dependency overlap in both
+# groups below, GitHub's own docs suggest this option may key PR creation per
+# dependency rather than per named group, which would silently reintroduce
+# the multi-PR-per-week burst this file's grouping exists to prevent, for an
+# `["*"]` catch-all group with more than one dependency changing at once.
+# Revisit only given a real observed multi-dependency grouped run confirming
+# the actual PR count this option produces.
 version: 2
 updates:
   # GitHub Actions -- one grouped PR per target branch (single directory: /).
