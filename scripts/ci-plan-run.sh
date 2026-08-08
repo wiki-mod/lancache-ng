@@ -4,8 +4,9 @@
 #
 # Produces one matrix row per service/platform. A service is reused only when
 # an accepted baseline lock exists, the baseline source is an ancestor of the
-# candidate source, classify-image-impact proves that service unchanged, and
-# the accepted lock contains both required child digests. Any uncertainty builds.
+# candidate source, classify-image-impact proves that service unchanged, the
+# source-controlled Docker inputs have the same source fingerprint, and the
+# accepted lock contains both required child digests. Any uncertainty builds.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -39,6 +40,8 @@ while IFS= read -r entry; do
     source_path="$(jq -r '.source' <<<"$entry")"
     context="$(jq -r '.context' <<<"$entry")"
     build_contexts="$(jq -r '.build_contexts' <<<"$entry")"
+    source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha")"
+    ci_ai_require_digest "$source_fingerprint"
 
     mode=build
     if [[ "$baseline_usable" == true ]]; then
@@ -47,15 +50,20 @@ while IFS= read -r entry; do
         if [[ -z "$changed" ]]; then
             changed="$(awk -F= -v key="${key}_image" '$1 == key { print $2; exit }' <<<"$classification")"
         fi
-        if [[ "$changed" == false ]]; then
+
+        baseline_fingerprint="$(jq -r --arg scope "$entry_scope" --arg service "$service" '.[$scope][$service].source_fingerprint // empty' "$baseline_lock")"
+        if [[ "$changed" == false && "$baseline_fingerprint" == "$source_fingerprint" ]]; then
             if jq -e --arg scope "$entry_scope" --arg service "$service" '
                 .[$scope][$service].digest
                 and .[$scope][$service].artifact_source_sha
+                and .[$scope][$service].source_fingerprint
                 and .[$scope][$service].platforms["linux/amd64"]
                 and .[$scope][$service].platforms["linux/arm64"]
               ' "$baseline_lock" >/dev/null; then
                 mode=reuse
             fi
+        elif [[ "$changed" == false && -n "$baseline_fingerprint" ]]; then
+            echo "::notice::$service path classification is unchanged but source fingerprint differs; rebuilding fail-closed." >&2
         fi
     fi
 
@@ -87,6 +95,7 @@ while IFS= read -r entry; do
             --arg mode "$mode" \
             --arg reused_digest "$reused_digest" \
             --arg artifact_source_sha "$artifact_source_sha" \
+            --arg source_fingerprint "$source_fingerprint" \
             --argjson runner "$runner" \
             '{
               scope: $scope,
@@ -100,6 +109,7 @@ while IFS= read -r entry; do
               mode: $mode,
               reused_digest: $reused_digest,
               artifact_source_sha: $artifact_source_sha,
+              source_fingerprint: $source_fingerprint,
               runner: $runner
             }'
         )"
