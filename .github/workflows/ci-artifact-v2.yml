@@ -28,18 +28,32 @@ on:
 permissions:
   contents: read
 
-# A new first-attempt PR head makes every older PR candidate from that ref
-# obsolete, so reclaim the whole quarantine-only run at once. Explicit reruns
-# are isolated by run id/attempt, and workflow_dispatch is always isolated:
-# protected-branch acceptance must never be torn down by a later run.
+# A new first-attempt PR head makes every older V2 candidate from that ref
+# obsolete, but only an event that is itself eligible to run V2 may supersede
+# it. An unrelated label event, or a synchronize after ci-v2-test was removed,
+# receives a unique group and cannot cancel the deliberate V2 run already in
+# progress. Explicit reruns and workflow_dispatch are always isolated too.
 concurrency:
   group: >-
     ${{
-      (github.event_name == 'pull_request' && github.run_attempt == 1) &&
+      (
+        github.event_name == 'pull_request' &&
+        github.run_attempt == 1 &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'ci-v2-test') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'ci-v2-test')
+      ) &&
       format('{0}-pr-{1}', github.workflow, github.ref) ||
       format('{0}-run-{1}-{2}', github.workflow, github.run_id, github.run_attempt)
     }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}
+  cancel-in-progress: >-
+    ${{
+      github.event_name == 'pull_request' &&
+      github.run_attempt == 1 &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      contains(github.event.pull_request.labels.*.name, 'ci-v2-test') &&
+      (github.event.action != 'labeled' || github.event.label.name == 'ci-v2-test')
+    }}
 
 env:
   CANDIDATE_TAG: candidate-v2-${{ github.run_id }}-${{ github.run_attempt }}
@@ -52,7 +66,8 @@ jobs:
       (
         github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
-        contains(github.event.pull_request.labels.*.name, 'ci-v2-test')
+        contains(github.event.pull_request.labels.*.name, 'ci-v2-test') &&
+        (github.event.action != 'labeled' || github.event.label.name == 'ci-v2-test')
       )
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
