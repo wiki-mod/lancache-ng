@@ -45,7 +45,7 @@ write_reused_record() {
 
 @test "reused service keeps accepted index and never creates replacement index" {
   records="$BATS_TEST_TMPDIR/records"
-  output="$BATS_TEST_TMPDIR/index.json"
+  index_record="$BATS_TEST_TMPDIR/index.json"
   fake_bin="$BATS_TEST_TMPDIR/bin"
   docker_log="$BATS_TEST_TMPDIR/docker.log"
   mkdir -p "$records" "$fake_bin"
@@ -84,14 +84,16 @@ SH
       proxy ghcr.io/wiki-mod/lancache-ng/proxy \
       1111111111111111111111111111111111111111 \
       candidate-v2-unused \
-      "$records" "$output"
+      "$records" "$index_record"
 
   if [ "$status" -ne 0 ]; then
-    printf 'ci-assemble-service-index failed with status %s:\n%s\n' "$status" "$output" >&2
-    if [ -f "$docker_log" ]; then
-      printf '%s\n' 'docker invocations before failure:' >&2
-      cat "$docker_log" >&2
-    fi
+    {
+      printf 'ci-assemble-service-index failed with status %s:\n%s\n' "$status" "$output"
+      if [ -f "$docker_log" ]; then
+        printf '%s\n' 'docker invocations before failure:'
+        cat "$docker_log"
+      fi
+    } >&3
   fi
   [ "$status" -eq 0 ]
   run jq -e --arg index "$index" '
@@ -99,7 +101,7 @@ SH
     and .candidate_ref == ("ghcr.io/wiki-mod/lancache-ng/proxy@" + $index)
     and .platforms["linux/amd64"] == "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     and .platforms["linux/arm64"] == "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
-  ' "$output"
+  ' "$index_record"
   [ "$status" -eq 0 ]
 
   run grep -F 'imagetools create' "$docker_log"
