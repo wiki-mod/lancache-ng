@@ -811,11 +811,11 @@ Secrets in `.env` follow a simple rule: they are generated once on first install
 - If the value is a placeholder (empty or the literal string `<generate-a-secret>`), a new secret is generated.
 - If a real value is already present, it is preserved unchanged — even across multiple updates.
 
-Secret formats vary by key:
+Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASSWORD` names, generation kind is assigned per key in `setup.sh`, and the two families are not generated the same way as each other:
 
-- `*_KEY` secrets (e.g. `DDNS_TSIG_KEY`): 32 hex characters
-- `*_PASSWORD` secrets (e.g. `NATS_UI_PASSWORD`): 32 base64 characters
-- `SECONDARY_REGISTRATION_TOKEN`: 20 alphanumeric characters
+- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_DNS_REPLICA_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
+- 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
+- 20 alphanumeric characters: `UI_AUTH_PASSWORD`
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 

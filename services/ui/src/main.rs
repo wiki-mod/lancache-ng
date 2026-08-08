@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI service entry point. Wires up the axum HTTP server, shared
@@ -738,7 +739,13 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
 // This is a length floor only -- rate-limiting the registration endpoint
 // itself against online brute-forcing is a separate, larger undertaking
 // (shared per-route state, a rate-limiting strategy decision) requiring
-// its own maintainer decision, tracked on issue #849.
+// its own maintainer decision.
+//
+// The minimum is a character count, not a byte count: token.chars().count()
+// below, not token.len(). A byte-length check would let a short string of
+// multi-byte UTF-8 characters (e.g. 8 four-byte emoji, 32 bytes total) pass
+// this floor despite being only 8 characters -- far below the intended
+// entropy floor for a value that gates remote secondary registration.
 const MIN_SECONDARY_REGISTRATION_TOKEN_LEN: usize = 32;
 
 fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
@@ -756,13 +763,13 @@ fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
              openssl rand -hex 32"
         ));
     }
-    if token.len() < MIN_SECONDARY_REGISTRATION_TOKEN_LEN {
+    let token_char_len = token.chars().count();
+    if token_char_len < MIN_SECONDARY_REGISTRATION_TOKEN_LEN {
         return Err(format!(
-            "SECONDARY_REGISTRATION_TOKEN is only {} character(s), below the required \
-             minimum of {MIN_SECONDARY_REGISTRATION_TOKEN_LEN} — refusing to start. This \
-             token is the only thing gating remote secondary registration; a short value \
-             is practical to brute-force. Generate a real secret with: openssl rand -hex 32",
-            token.chars().count()
+            "SECONDARY_REGISTRATION_TOKEN is only {token_char_len} character(s), below the \
+             required minimum of {MIN_SECONDARY_REGISTRATION_TOKEN_LEN} — refusing to start. \
+             This token is the only thing gating remote secondary registration; a short value \
+             is practical to brute-force. Generate a real secret with: openssl rand -hex 32"
         ));
     }
     Ok(())
@@ -1450,6 +1457,31 @@ mod tests {
 
         let exactly_min = "b".repeat(MIN_SECONDARY_REGISTRATION_TOKEN_LEN);
         assert!(validate_secondary_registration_token(&exactly_min).is_ok());
+    }
+
+    // The length floor must count characters, not bytes: a multi-byte UTF-8
+    // string can have far more bytes than characters (8 four-byte emoji is
+    // 32 bytes but only 8 characters). A byte-count check would silently
+    // accept this short, low-entropy value; a character-count check
+    // correctly rejects it.
+    #[test]
+    fn secondary_registration_token_length_floor_counts_characters_not_bytes() {
+        let eight_emoji = "\u{1F600}".repeat(8);
+        assert_eq!(
+            eight_emoji.len(),
+            32,
+            "test fixture assumption: 8 four-byte emoji = 32 bytes"
+        );
+        assert_eq!(eight_emoji.chars().count(), 8);
+        let err = validate_secondary_registration_token(&eight_emoji).unwrap_err();
+        assert!(err.contains("below the required minimum"));
+
+        // Exactly MIN_SECONDARY_REGISTRATION_TOKEN_LEN multi-byte characters
+        // (4x the byte length of the ASCII equivalent) must still pass,
+        // proving the floor is a real character-count boundary rather than
+        // accidentally stricter for multi-byte input.
+        let min_chars_emoji = "\u{1F600}".repeat(MIN_SECONDARY_REGISTRATION_TOKEN_LEN);
+        assert!(validate_secondary_registration_token(&min_chars_emoji).is_ok());
     }
 
     // Cross-language parity coverage for secret/token placeholder detection
