@@ -5,7 +5,7 @@
 # Shared retry wrapper for external read-only network operations that are
 # expected to be deterministic once the remote endpoint is reachable, such as
 # downloading one checksum-pinned release asset. This exists so callers do not
-# grow their own ad-hoc `curl --retry` policies and so the retry contract is
+# grow their own ad-hoc retry policies and so the retry contract is
 # reviewable/testable in one place.
 #
 # Unlike build-retry.sh, this wrapper is not suitable for a compilation/build
@@ -13,10 +13,11 @@
 # a GHCR wrapper: registry reads/writes must continue to use ghcr-retry.sh so
 # they get the established fresh-login behavior between attempts.
 #
-# A wrapped command can return NETWORK_RETRY_PERMANENT_FAILURE_EXIT_CODE to
-# stop immediately. Callers should use that for a conclusively non-retryable
-# condition they classify themselves. Other failures are retried because the
-# wrapper is intentionally scoped only to read-only external network commands.
+# A wrapped command must classify conclusively non-retryable failures by
+# returning NETWORK_RETRY_PERMANENT_FAILURE_EXIT_CODE. Curl callers should use
+# the classifier functions below for transport and HTTP results. The wrapper
+# retries every other nonzero result because it is intentionally scoped only
+# to read-only external network operations.
 #
 # Pure functions only. Do not enable shell options here because this file is
 # sourced into callers that own their own strict-mode policy.
@@ -24,6 +25,32 @@
 NETWORK_RETRY_MAX_ATTEMPTS="${NETWORK_RETRY_MAX_ATTEMPTS:-4}"
 NETWORK_RETRY_BACKOFF_SECONDS="${NETWORK_RETRY_BACKOFF_SECONDS:-30}"
 NETWORK_RETRY_PERMANENT_FAILURE_EXIT_CODE="${NETWORK_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
+
+# network_retry_curl_exit_is_transient <curl-exit-code>
+# Curl's transport-layer exit codes are stable API. These cases describe
+# DNS/connect/TLS-session/timeout/partial-transfer/HTTP2 transport failures
+# that can succeed unchanged on a later attempt. Local I/O, malformed URL,
+# certificate trust, redirect-loop and option errors are deliberately absent
+# and therefore permanent.
+network_retry_curl_exit_is_transient() {
+    case "${1:-}" in
+        5|6|7|16|18|28|35|52|55|56|92) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+
+# network_retry_http_status_is_transient <http-status>
+# Retry request-timeout, too-early, rate-limit and server-side failures. Other
+# 4xx responses represent a deterministic request/auth/path problem and must
+# fail immediately instead of being hidden behind the retry budget.
+network_retry_http_status_is_transient() {
+    local status="${1:-}"
+    [[ "$status" =~ ^[0-9]{3}$ ]] || return 1
+    case "$status" in
+        408|425|429|5??) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 # network_retry -- <command> [args...]
 network_retry() {
