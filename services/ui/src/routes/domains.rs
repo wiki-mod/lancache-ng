@@ -662,20 +662,19 @@ fn ddns_tsig_key_file_is_real(path: &Path) -> bool {
 }
 
 const MIN_TTL: u32 = 1;
-// Finding #14 (docs/bug-hunt/ui-routes.md, issue #849): RFC 2181 SS8
-// specifies the resource-record TTL as "an unsigned number, with a minimum
-// value of 0, and a maximum value of 2147483647" (2^31-1) -- the field is
-// transmitted in the less significant 31 bits of its 32-bit wire slot, with
-// the most significant (sign) bit fixed at zero; RFC 2181 SS8 directs a
-// receiver to treat any value with that bit set as zero. `u32::MAX`
-// (4294967295) has that bit set, so the Admin UI previously let an operator
-// submit a TTL a compliant resolver is specified to reinterpret as 0
-// (cache nothing) rather than the huge value the operator actually typed --
-// silently wrong, not merely oversized. PowerDNS's own zone API
+// RFC 2181 SS8 specifies the resource-record TTL as "an unsigned number,
+// with a minimum value of 0, and a maximum value of 2147483647" (2^31-1) --
+// the field is transmitted in the less significant 31 bits of its 32-bit
+// wire slot, with the most significant (sign) bit fixed at zero; RFC 2181
+// SS8 directs a receiver to treat any value with that bit set as zero.
+// `u32::MAX` (4294967295) has that bit set, so accepting it here would let
+// an operator submit a TTL a compliant resolver is specified to reinterpret
+// as 0 (cache nothing) rather than the huge value the operator actually
+// typed -- silently wrong, not merely oversized. PowerDNS's own zone API
 // (doc.powerdns.com/authoritative/http-api/zone.html) documents `ttl` only
 // as a plain integer field with no additional upper bound of its own, so
-// RFC 2181's protocol-level ceiling is the correct, non-arbitrary bound
-// here, not a value invented for this fix.
+// RFC 2181's protocol-level ceiling is the correct, non-arbitrary bound to
+// enforce here, not an invented one.
 const MAX_TTL: u32 = 2_147_483_647;
 const LINUX_ERRNO_EBUSY: i32 = 16;
 
@@ -760,9 +759,9 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
     is_valid_dns_fqdn_allow_underscore(name) && is_lan_zone_name(name)
 }
 
-// Finding #15 (docs/bug-hunt/ui-routes.md, issue #849): this previously had
-// no upper bound at all. Confirmed against PowerDNS's own documented TXT
-// behavior (doc.powerdns.com/authoritative/appendices/types.html): "Text is
+// This must have an upper bound: without one, an operator could submit a
+// TXT value with no real ceiling at all. Confirmed against PowerDNS's own
+// documented TXT behavior (doc.powerdns.com/authoritative/appendices/types.html): "Text is
 // stored plainly, PowerDNS understands content not enclosed in quotes,"
 // and "When a TXT record is longer than 255 characters/bytes ... PowerDNS
 // will cut up the content into 255 character/byte chunks for transmission"
@@ -1282,10 +1281,9 @@ fn write_domain_file_in_place(path: &Path, content: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
-// Finding #16 (docs/bug-hunt/ui-routes.md, issue #849) decision logic,
-// pulled out of fetch_lan_records below so it has a unit test independent
-// of a live PowerDNS connection: this used to be reached unconditionally,
-// regardless of the HTTP status PowerDNS actually returned. A non-2xx
+// Response-interpretation decision logic, pulled out of fetch_lan_records
+// below so it has a unit test independent of a live PowerDNS connection.
+// The HTTP status must be checked before trusting the body: a non-2xx
 // response (e.g. the "lan" zone not existing yet, an auth failure, or
 // PowerDNS being briefly unavailable) commonly still carries a JSON error
 // body (`{"error": "..."}`) that would parse successfully as `Value` but
@@ -1355,14 +1353,13 @@ async fn fetch_lan_records(state: &AppState) -> Vec<RRset> {
     }
 }
 
-// Finding #13 (docs/bug-hunt/ui-routes.md, issue #849): the bare zone-root
-// name "lan" fell through to the final `else` branch (nothing before this
-// fix matched it: it doesn't end with '.' and doesn't end with the
-// four-character suffix ".lan", since "lan" itself is only three
-// characters), producing "lan.lan." instead of the correct zone-root FQDN
-// "lan.". The `trimmed == "lan"` case must be checked explicitly alongside
-// the ".lan"-suffix case; every other bare label (e.g. "www") is unaffected
-// and still correctly becomes "www.lan.".
+// The bare zone-root name "lan" needs its own explicit case: it doesn't end
+// with '.' and doesn't end with the four-character suffix ".lan" (it is
+// only three characters), so without the `trimmed == "lan"` check below it
+// falls through to the generic label branch and becomes "lan.lan." instead
+// of the correct zone-root FQDN "lan.". The `trimmed == "lan"` case must be
+// checked explicitly alongside the ".lan"-suffix case; every other bare
+// label (e.g. "www") is unaffected and still correctly becomes "www.lan.".
 fn normalize_lan_name(name: &str) -> String {
     let trimmed = name.trim().to_lowercase();
     if trimmed.ends_with('.') {
@@ -1776,11 +1773,10 @@ mod tests {
         assert!(validate_lan_record("api.lan.", "SRV", "0 0 443 api.lan.", 300).is_none());
     }
 
-    // Finding #14 (docs/bug-hunt/ui-routes.md, issue #849): RFC 2181 SS8
-    // caps a real, RFC-compliant TTL at 2^31-1 (2147483647), not u32::MAX --
-    // a value with the sign bit set is specified to be reinterpreted as 0
-    // by a compliant resolver. Locks the exact boundary rather than just
-    // "some large value is rejected."
+    // RFC 2181 SS8 caps a real, RFC-compliant TTL at 2^31-1 (2147483647),
+    // not u32::MAX -- a value with the sign bit set is specified to be
+    // reinterpreted as 0 by a compliant resolver. Locks the exact boundary
+    // rather than just "some large value is rejected."
     #[test]
     fn ttl_upper_bound_matches_rfc_2181_not_u32_max() {
         assert_eq!(MAX_TTL, 2_147_483_647);
@@ -1789,11 +1785,10 @@ mod tests {
         assert!(validate_lan_record("api.lan.", "A", "192.0.2.10", u32::MAX).is_none());
     }
 
-    // Finding #15 (docs/bug-hunt/ui-routes.md, issue #849): is_valid_txt_content
-    // previously had no upper bound at all. Locks the RFC 1035 SS3.2.1
-    // RDLENGTH-derived ceiling (65535 bytes) as the real boundary, while
-    // confirming the pre-existing 512-byte case (validated above via
-    // PowerDNS's own documented TXT auto-chunking) still passes.
+    // Locks the RFC 1035 SS3.2.1 RDLENGTH-derived ceiling (65535 bytes) as
+    // is_valid_txt_content's real boundary, while confirming the
+    // pre-existing 512-byte case (validated above via PowerDNS's own
+    // documented TXT auto-chunking) still passes.
     #[test]
     fn txt_content_upper_bound_matches_rdlength_ceiling() {
         assert!(is_valid_txt_content(&"x".repeat(MAX_TXT_CONTENT_BYTES)));
@@ -1805,10 +1800,10 @@ mod tests {
         assert!(!is_valid_txt_content("has\ncontrol\tchars"));
     }
 
-    // Finding #13 (docs/bug-hunt/ui-routes.md, issue #849): the bare
-    // zone-root name "lan" must normalize to "lan.", not "lan.lan." --
-    // the actual bug this fix closes. Every other shape stays exactly as
-    // before.
+    // The bare zone-root name "lan" must normalize to "lan.", not
+    // "lan.lan." -- see normalize_lan_name's own header comment for why
+    // this specific label needs an explicit case. Every other shape stays
+    // unaffected.
     #[test]
     fn normalize_lan_name_handles_the_bare_zone_root() {
         assert_eq!(normalize_lan_name("lan"), "lan.");
@@ -1821,11 +1816,10 @@ mod tests {
         assert_eq!(normalize_lan_name("printer"), "printer.lan.");
     }
 
-    // Finding #16 (docs/bug-hunt/ui-routes.md, issue #849): a non-success
-    // HTTP status must short-circuit to an empty result without ever
-    // looking at the body, even when that body happens to parse as valid
-    // JSON with no "rrsets" key -- the actual bug this fix closes (the old
-    // code could not tell "real error" apart from "genuinely empty zone").
+    // A non-success HTTP status must short-circuit to an empty result
+    // without ever looking at the body, even when that body happens to
+    // parse as valid JSON with no "rrsets" key -- otherwise a real PowerDNS
+    // error is indistinguishable from a genuinely empty zone.
     #[test]
     fn parse_lan_records_response_rejects_non_success_status_regardless_of_body() {
         let error_body: serde_json::Value = serde_json::json!({"error": "Not Found"});
