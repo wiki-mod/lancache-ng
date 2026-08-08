@@ -89,6 +89,7 @@ ci_ai_validate_acceptance() {
       .schema == "stack-acceptance/v1"
       and .accepted == true
       and (.source_sha | test("^[0-9a-f]{40}$"))
+      and (.source_ref | type == "string" and test("^refs/(heads|tags)/[A-Za-z0-9._/-]+$"))
       and (.stack_lock_sha256 | test("^[0-9a-f]{64}$"))
       and (.accepted_tag | type == "string" and startswith("accepted-v2-"))
       and .gates.identity_complete == true
