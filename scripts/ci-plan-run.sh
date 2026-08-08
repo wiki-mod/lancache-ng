@@ -2,12 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Produces one matrix row per service/platform. A service is reused only when
-# an accepted baseline lock exists, the baseline source is an ancestor of the
-# candidate source, classify-image-impact proves that service unchanged, the
-# source-controlled Docker inputs have the same source fingerprint, and the
-# accepted lock contains the complete index plus both required child digests.
-# Any uncertainty builds.
+# Produces one matrix row per service/platform. Reuse requires accepted identity,
+# source/path equivalence and identical frozen external build inputs.
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
@@ -40,8 +36,23 @@ while IFS= read -r entry; do
     image="$(jq -r '.image' <<<"$entry")"
     source_path="$(jq -r '.source' <<<"$entry")"
     context="$(jq -r '.context' <<<"$entry")"
-    build_contexts="$(jq -r '.build_contexts' <<<"$entry")"
-    source_fingerprint="$(bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha")"
+    catalog_build_contexts="$(jq -r '.build_contexts' <<<"$entry")"
+
+    build_inputs="$(bash "$repo_root/scripts/ci-build-inputs.sh" "$service" json)"
+    build_args="$(bash "$repo_root/scripts/ci-build-inputs.sh" "$service" build-args)"
+    external_build_contexts="$(bash "$repo_root/scripts/ci-build-inputs.sh" "$service" build-contexts)"
+    build_contexts="$catalog_build_contexts"
+    if [[ -n "$external_build_contexts" ]]; then
+        if [[ -n "$build_contexts" ]]; then
+            build_contexts+=$'\n'
+        fi
+        build_contexts+="$external_build_contexts"
+    fi
+
+    source_fingerprint="$(
+        CI_SOURCE_BUILD_INPUTS_JSON="$build_inputs" \
+            bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha"
+    )"
     ci_ai_require_digest "$source_fingerprint"
 
     mode=build
@@ -59,6 +70,7 @@ while IFS= read -r entry; do
                 .[$scope][$service].digest
                 and .[$scope][$service].artifact_source_sha
                 and .[$scope][$service].source_fingerprint
+                and (.[$scope][$service].build_inputs | type == "object")
                 and .[$scope][$service].platforms["linux/amd64"]
                 and .[$scope][$service].platforms["linux/arm64"]
               ' "$baseline_lock" >/dev/null; then
@@ -67,7 +79,7 @@ while IFS= read -r entry; do
                 mode=reuse
             fi
         elif [[ "$changed" == false && -n "$baseline_fingerprint" ]]; then
-            echo "::notice::$service path classification is unchanged but source fingerprint differs; rebuilding fail-closed." >&2
+            echo "::notice::$service path classification is unchanged but effective build fingerprint differs; rebuilding fail-closed." >&2
         fi
     fi
 
@@ -95,6 +107,8 @@ while IFS= read -r entry; do
             --arg source "$source_path" \
             --arg context "$context" \
             --arg build_contexts "$build_contexts" \
+            --arg build_args "$build_args" \
+            --argjson build_inputs "$build_inputs" \
             --arg platform "$platform" \
             --arg arch "$arch" \
             --arg mode "$mode" \
@@ -110,6 +124,8 @@ while IFS= read -r entry; do
               source: $source,
               context: $context,
               build_contexts: $build_contexts,
+              build_args: $build_args,
+              build_inputs: $build_inputs,
               platform: $platform,
               arch: $arch,
               mode: $mode,
