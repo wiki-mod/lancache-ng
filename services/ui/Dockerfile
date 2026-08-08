@@ -52,7 +52,16 @@ RUN set -eu; \
       arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
       *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
     esac; \
-    rustup target list --installed | grep -qx "$(cat /tmp/musl-target)"; \
+    # Captured into a variable first, then grepped via a here-string
+    # (AG-VAL-032): a live `rustup target list --installed | grep -qx`
+    # pipe is the exact SIGPIPE-under-pipefail shape confirmed in a real CI
+    # failure for tools/build-tools/Dockerfile's identical check -- this
+    # RUN block itself only uses `set -eu` (no pipefail), so it is not
+    # exploitable today, but the fix costs nothing and removes any risk of
+    # this line becoming a real 141 the next time a pipefail-scanning tool
+    # or a copy-pasted RUN block adds it.
+    installed_musl_targets="$(rustup target list --installed)"; \
+    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"; \
     distcc_bin="$(command -v distcc)"; \
     distcc_real_bin="/usr/local/bin/distcc-real"; \
     cp "$distcc_bin" "$distcc_real_bin"; \

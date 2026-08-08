@@ -221,6 +221,43 @@ write_script() {
     [[ "$output" == *"early-exiting consumer"* ]]
 }
 
+@test "fails on the exact real-incident shape reproduced in a services/*/Dockerfile-style file" {
+    # Real Codex finding on PR #1506: the services/** widening above only
+    # ever added 'services/*.sh'/'services/**/*.sh' to scan_files, so a
+    # service's own Dockerfile (services/ui/Dockerfile, services/dns/
+    # Dockerfile -- both genuinely contained this exact `rustup target
+    # list --installed | grep -qx ...` shape) was never scanned at all,
+    # producing "OK (0 scanned scripts/Dockerfiles)" regardless of what a
+    # service Dockerfile actually contained. Pins 'services/*/Dockerfile*'
+    # the same way the existing tools/build-tools/Dockerfile fixture pins
+    # 'tools/*/Dockerfile*'.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'FROM scratch\n'
+        printf 'RUN set -euo pipefail; \\\n'
+        printf '    rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "passes on a services/*/Dockerfile-style file using the capture-into-here-string pattern" {
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'FROM scratch\n'
+        printf 'RUN set -euo pipefail; \\\n'
+        printf '    installed_targets="$(rustup target list --installed)"; \\\n'
+        printf '    grep -qx "x86_64-unknown-linux-musl" <<<"${installed_targets}"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
 @test "an untracked scripts/**-style file (never git add-ed) is invisible to the guard" {
     # Documents scan_files' own real discovery mechanism (git ls-files): a
     # file that exists on disk but was never committed to the fixture repo

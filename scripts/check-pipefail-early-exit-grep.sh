@@ -26,12 +26,18 @@
 # independent of that governance rule.
 #
 # SCOPE: repo-wide, per issue #1377 -- every tracked shell script under
-# scripts/**, tools/**, and services/**, plus setup.sh (the production
-# installer). `services/**` matters just as much as `scripts/**`/`tools/**`:
-# a service entrypoint commonly runs under its own `set -e`/`pipefail` and
-# can pipe a captured multi-line value (e.g. via `printf`) into an
-# early-exiting consumer such as `grep -qi`, the exact SIGPIPE-under-pipefail
-# hazard this guard exists to catch. This was originally scoped to only
+# scripts/**, tools/**, and services/**, every tools/*/Dockerfile* and
+# services/*/Dockerfile*, plus setup.sh (the production installer).
+# Dockerfiles are in scope for exactly the same reason shell scripts are: a
+# multi-stage service builder Dockerfile commonly runs under `set -o
+# pipefail` (`tools/build-tools/Dockerfile`'s confirmed real incident, see
+# above) and can pipe a producer into an early-exiting consumer inside a
+# single `RUN` instruction just as easily as a standalone script can.
+# `services/**` matters just as much as `scripts/**`/`tools/**`: a service
+# entrypoint commonly runs under its own `set -e`/`pipefail` and can pipe a
+# captured multi-line value (e.g. via `printf`) into an early-exiting
+# consumer such as `grep -qi`, the exact SIGPIPE-under-pipefail hazard this
+# guard exists to catch. This was originally scoped to only
 # `tools/build-tools/Dockerfile` (the exact
 # file the confirmed incident occurred in) because a first wide scan found
 # 41 preexisting instances of the same raw pattern across the codebase with
@@ -94,6 +100,7 @@ if ! tracked_scan_files="$(git ls-files -- \
   'tools/*.sh' 'tools/**/*.sh' \
   'tools/*/Dockerfile*' \
   'services/*.sh' 'services/**/*.sh' \
+  'services/*/Dockerfile*' \
   'setup.sh')"; then
   printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Not treating this as a clean pass.\n' "$repo_root" >&2
   exit 1
