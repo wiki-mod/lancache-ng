@@ -84,12 +84,30 @@ pub struct ZoneInfo {
 /// anything is sent to PowerDNS, so a structurally well-formed but
 /// unrecognized `action` value fails here rather than silently no-op'ing or
 /// panicking downstream.
+// Bug-hunt finding #7 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+// PowerDNS's PATCH API requires a TTL whenever changetype=REPLACE; this
+// crate's own `RRset` skips serializing `ttl` at all when it's `None`
+// (`skip_serializing_if = "Option::is_none"`), so a "replace" DNSRecord
+// with no ttl used to produce a PATCH body PowerDNS would reject with a
+// 4xx -- which `handle_dns_record` then Acks (won't retry) as an
+// unrecoverable client error, silently dropping the update. Every current
+// caller of this function always supplies a ttl for "replace" today (see
+// `services/ui/src/routes/domains.rs`'s own `ttl.unwrap_or(DEFAULT_TTL)`),
+// so this was a latent landmine rather than a live bug -- but nothing in
+// *this* function enforced that invariant, leaving it one new/future
+// caller (or a malformed/crafted NATS message on this least-trusted
+// external-input boundary, see this module's own doc comment) away from
+// triggering. Default it here instead, so the invariant this module's own
+// header comment already documents ("ttl is absent only for a delete
+// action") is actually enforced at this boundary, not merely assumed.
+const DEFAULT_REPLACE_TTL: i32 = 300;
+
 pub fn dns_record_to_zone_update(record: &DNSRecord) -> Result<ZoneUpdate, String> {
     let (changetype, ttl_val, records_val) = match record.action.as_str() {
         "delete" => (Some("DELETE".to_string()), None, None),
         "replace" => (
             Some("REPLACE".to_string()),
-            record.ttl,
+            Some(record.ttl.unwrap_or(DEFAULT_REPLACE_TTL)),
             record.records.clone(),
         ),
         action => {
