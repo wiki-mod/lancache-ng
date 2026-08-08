@@ -1,17 +1,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Release publication consumes an accepted runtime lock. Runtime services are
-# reference-moved only. The governance-required tag-scoped build-tools image is
-# consumed from build-tools:<release tag>, which the existing build-tools
-# release workflow is responsible for building from that tag.
+# Release publication consumes a positively accepted runtime lock. Runtime
+# services are never rebuilt here. The governance-required tag-scoped
+# build-tools image is consumed from build-tools:<release tag>, freshly
+# scanned/smoked, and inserted into the release lock by exact digest.
 name: Release Accepted Stack v2
 
 on:
   workflow_dispatch:
     inputs:
       accepted_stack_tag:
-        description: Immutable accepted stack tag providing the tested runtime lock.
+        description: Immutable accepted-v2-* stack tag providing the tested runtime lock.
         required: true
         type: string
       release_tag:
@@ -43,14 +43,37 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-      - name: Validate release tag
+          fetch-tags: true
+
+      - name: Validate release inputs
         env:
+          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
+          set -euo pipefail
+          [[ "$ACCEPTED_STACK_TAG" == accepted-v2-* ]] \
+            || { echo "::error::accepted_stack_tag must be an immutable accepted-v2-* tag"; exit 1; }
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
             || { echo "::error::invalid release tag: $RELEASE_TAG"; exit 1; }
-      - name: Extract accepted runtime lock
-        run: bash scripts/ci-extract-stack-lock.sh "ghcr.io/wiki-mod/lancache-ng/stack:${{ inputs.accepted_stack_tag }}" "$RUNNER_TEMP/stack-lock.json"
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Extract positively accepted runtime lock
+        env:
+          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci-extract-stack-lock.sh \
+            "ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}" \
+            "$RUNNER_TEMP/stack-lock.json"
+
       - id: release-source
         name: Require release tag to identify the accepted source commit
         env:
@@ -64,8 +87,7 @@ jobs:
             exit 1
           }
           printf 'source_sha=%s\n' "$accepted_sha" >> "$GITHUB_OUTPUT"
-      - id: buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
       - id: build-tools
         name: Require governance-built release build-tools image
         env:
@@ -78,30 +100,43 @@ jobs:
           amd64="$(ci_ai_platform_digest "ghcr.io/wiki-mod/lancache-ng/build-tools@${digest}" linux/amd64)"
           arm64="$(ci_ai_platform_digest "ghcr.io/wiki-mod/lancache-ng/build-tools@${digest}" linux/arm64)"
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-          jq --arg digest "$digest" --arg amd64 "$amd64" --arg arm64 "$arm64" '
-            .tooling["build-tools"].digest = $digest
-            | .tooling["build-tools"].platforms["linux/amd64"] = $amd64
-            | .tooling["build-tools"].platforms["linux/arm64"] = $arm64
-            | .tooling["build-tools"].candidate_ref = ("ghcr.io/wiki-mod/lancache-ng/build-tools@" + $digest)
-            | .tooling["build-tools"].artifact_source_sha = .source_sha
-          ' "$RUNNER_TEMP/stack-lock.json" > "$RUNNER_TEMP/release-lock.json"
+          jq \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg digest "$digest" \
+            --arg amd64 "$amd64" \
+            --arg arm64 "$arm64" '
+              .candidate_tag = $release_tag
+              | .tooling["build-tools"].digest = $digest
+              | .tooling["build-tools"].platforms["linux/amd64"] = $amd64
+              | .tooling["build-tools"].platforms["linux/arm64"] = $arm64
+              | .tooling["build-tools"].candidate_ref = ("ghcr.io/wiki-mod/lancache-ng/build-tools@" + $digest)
+              | .tooling["build-tools"].artifact_source_sha = .source_sha
+            ' "$RUNNER_TEMP/stack-lock.json" > "$RUNNER_TEMP/release-lock.json"
+          ci_ai_validate_stack_lock "$RUNNER_TEMP/release-lock.json"
+
       - id: matrix
-        run: printf 'matrix=%s\n' "$(bash scripts/ci-lock-matrix.sh "$RUNNER_TEMP/release-lock.json" platform)" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          printf 'matrix=%s\n' "$(bash scripts/ci-lock-matrix.sh "$RUNNER_TEMP/release-lock.json" platform)" >> "$GITHUB_OUTPUT"
+
       - id: mode
         env:
           CONFIRM: ${{ inputs.confirm }}
         run: |
+          set -euo pipefail
           if [[ "$CONFIRM" == PUBLISH ]]; then
             echo 'publish=true' >> "$GITHUB_OUTPUT"
           else
             echo 'publish=false' >> "$GITHUB_OUTPUT"
             echo "::notice::Release workflow is in validation/SBOM-only mode. No OCI release tag will move."
           fi
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-v2-release-lock
           path: ${{ runner.temp }}/release-lock.json
           retention-days: 30
+
       - name: Remove Buildx builder
         if: always()
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
@@ -115,14 +150,22 @@ jobs:
     timeout-minutes: 45
     permissions:
       contents: read
-      packages: read
+      packages: write
       id-token: write
       attestations: write
       artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
       - id: freshness
         run: printf 'bucket=%s\n' "$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
       - name: Re-scan exact release child digest
         uses: ./.github/actions/trivy-scan-with-cache
         with:
@@ -130,11 +173,13 @@ jobs:
           digest: ${{ matrix.digest }}
           cache-key-scope: release-${{ matrix.service }}-${{ matrix.arch }}
           freshness-bucket: ${{ steps.freshness.outputs.bucket }}
+
       - name: Native release smoke on exact child digest
         run: |
           set -euo pipefail
           timeout --kill-after=30 300 docker pull "${{ matrix.image }}@${{ matrix.digest }}"
           timeout --kill-after=30 120 docker run --rm --entrypoint /bin/sh "${{ matrix.image }}@${{ matrix.digest }}" -c 'true'
+
       - name: Generate SPDX SBOM from exact release digest
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -144,12 +189,16 @@ jobs:
           hide-progress: true
           cache: "false"
           timeout: 10m
-      - name: Attest SBOM to exact digest
-        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+
+      - name: Attest SBOM to exact digest with GHCR retry
+        uses: ./.github/actions/ghcr-sbom-attest-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ matrix.image }}
           subject-digest: ${{ matrix.digest }}
           sbom-path: sbom.spdx.json
+
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: sbom-${{ matrix.service }}-${{ matrix.arch }}-${{ inputs.release_tag }}
@@ -169,17 +218,32 @@ jobs:
       artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: ci-v2-release-lock
           path: release
+
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Re-resolve governance build-tools tag before publication
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/ci-artifact-identity.sh
+          expected="$(jq -r '.tooling["build-tools"].digest' release/release-lock.json)"
+          actual="$(ci_ai_ref_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}")"
+          [[ "$actual" == "$expected" ]] \
+            || ci_ai_fail "build-tools:${RELEASE_TAG} moved after release planning: expected $expected, got $actual"
+
       - name: Move runtime release references only
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
@@ -192,38 +256,57 @@ jobs:
             ci_ai_require_digest "$digest"
             metadata="$(mktemp)"
             ghcr_retry ghcr.io "$GITHUB_ACTOR" "$GITHUB_TOKEN" -- \
-              docker buildx imagetools create --tag "${image}:${RELEASE_TAG}" "${image}@${digest}" --metadata-file "$metadata"
+              docker buildx imagetools create \
+                --tag "${image}:${RELEASE_TAG}" \
+                "${image}@${digest}" \
+                --metadata-file "$metadata"
             published="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
             rm -f "$metadata"
             [[ "$published" == "$digest" ]] || ci_ai_fail "release tagging changed digest for $image"
           done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' release/release-lock.json)
-      - name: Prepare release stack metadata pointer
+
+      - name: Prepare immutable release stack pointer
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
+          source scripts/lib/ci-artifact-identity.sh
           mkdir -p release-pointer
           cp release/release-lock.json release-pointer/stack-lock.json
           lock_hash="$(sha256sum release-pointer/stack-lock.json | awk '{print $1}')"
+          accepted_tag="accepted-v2-release-${RELEASE_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           jq -n \
             --arg source_sha "$(jq -r '.source_sha' release-pointer/stack-lock.json)" \
             --arg lock_hash "$lock_hash" \
-            --arg release_tag "${{ inputs.release_tag }}" \
-            --arg published_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --arg accepted_tag "$accepted_tag" \
+            --arg release_tag "$RELEASE_TAG" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg accepted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{
               schema:"stack-acceptance/v1",
               accepted:true,
               source_sha:$source_sha,
               stack_lock_sha256:$lock_hash,
+              accepted_tag:$accepted_tag,
               release_tag:$release_tag,
-              published_at:$published_at,
+              run_url:$run_url,
+              accepted_at:$accepted_at,
               gates:{
+                identity_complete:true,
+                platform_complete:true,
+                provenance:true,
                 exact_digest_security:true,
                 native_platform_smoke:true,
                 exact_locked_stack:true,
-                supplemental_full_setup:true
+                supplemental_full_setup:true,
+                publication_policy:true
               }
             }' > release-pointer/acceptance.json
+          ci_ai_validate_acceptance release-pointer/acceptance.json
           cp release/stack-pointer/Dockerfile release-pointer/Dockerfile
-      - name: Build release stack pointer
+          printf 'RELEASE_ACCEPTED_TAG=%s\n' "$accepted_tag" >> "$GITHUB_ENV"
+
+      - name: Build release stack pointer without embedded provenance wrapper
         id: stack
         uses: ./.github/actions/ghcr-build-push-retry
         with:
@@ -232,10 +315,22 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: release-pointer
           push: "true"
-          tags: ghcr.io/wiki-mod/lancache-ng/stack:${{ inputs.release_tag }}
+          tags: |
+            ghcr.io/wiki-mod/lancache-ng/stack:${{ inputs.release_tag }}
+            ghcr.io/wiki-mod/lancache-ng/stack:${{ env.RELEASE_ACCEPTED_TAG }}
           build-args: SOURCE_SHA=${{ needs.plan.outputs.source_sha }}
-          provenance: mode=max
-      - name: Attest release stack acceptance
+          platforms: linux/amd64,linux/arm64
+          provenance: "false"
+
+      - name: Attest release stack-pointer build provenance
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/wiki-mod/lancache-ng/stack
+          subject-digest: ${{ steps.stack.outputs.digest }}
+
+      - name: Attest release acceptance last
         uses: ./.github/actions/ghcr-custom-attest-retry
         with:
           username: ${{ github.actor }}
@@ -244,6 +339,7 @@ jobs:
           subject-digest: ${{ steps.stack.outputs.digest }}
           predicate-type: https://wiki-mod.github.io/lancache-ng/attestations/release/v1
           predicate-path: release-pointer/acceptance.json
+
       - name: Remove Buildx builder
         if: always()
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
