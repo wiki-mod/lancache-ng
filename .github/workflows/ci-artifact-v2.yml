@@ -1,17 +1,11 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Opt-in v2 candidate pipeline. It runs beside build-push.yml while the
-# matching-numbers architecture is validated. It never moves nightly/latest
-# or release tags. A same-repository PR can opt in through the temporary
-# ci-v2-test label so the candidate lifecycle can be exercised before this
-# workflow exists on the default branch.
-#
-# IMPORTANT TRUST BOUNDARY: PR runs may build, scan and deeply validate
-# quarantine candidates, but they can never publish a reusable ACCEPTED stack
-# pointer. Final reusable acceptance is restricted to an explicitly dispatched
-# run on a protected current_dev/master branch. The signed acceptance predicate
-# records that exact protected source ref and commit, and reuse verifies both.
+# Opt-in immutable-artifact candidate pipeline. PR runs may build, scan and
+# deeply validate quarantine candidates, but they can never publish a reusable
+# accepted pointer. Reusable acceptance is restricted to an explicitly
+# dispatched run on protected current_dev/master and is signed against that
+# exact protected source ref and commit.
 name: CI Artifact Identity v2
 
 on:
@@ -89,13 +83,18 @@ jobs:
         run: |
           set -euo pipefail
           image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
-          [[ "$image" == *@sha256:* ]] || { echo "::error::build-tools verifier is not digest-qualified: $image"; exit 1; }
+          [[ "$image" == *@sha256:* ]] || {
+            echo "::error::build-tools verifier is not digest-qualified: $image"
+            exit 1
+          }
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
 
       - name: Extract accepted baseline lock
         if: steps.config.outputs.reuse_tag != 'none'
         env:
           REUSE_STACK_TAG: ${{ steps.config.outputs.reuse_tag }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           repo="${GITHUB_REPOSITORY,,}"
@@ -105,7 +104,7 @@ jobs:
             rm -f "$RUNNER_TEMP/baseline-stack-lock.json"
           fi
 
-      - name: Validate v2 scripts/workflows and create plan inside immutable build-tools
+      - name: Validate v2 scripts and workflows, then create plan
         id: plan
         run: |
           set -euo pipefail
@@ -114,7 +113,9 @@ jobs:
             baseline_args=(-e BASELINE_STACK_LOCK=/tmp/out/baseline.json)
           fi
           mkdir -p "$RUNNER_TEMP/ci-v2-out"
-          [[ -f "$RUNNER_TEMP/baseline-stack-lock.json" ]] && cp "$RUNNER_TEMP/baseline-stack-lock.json" "$RUNNER_TEMP/ci-v2-out/baseline.json"
+          if [[ -f "$RUNNER_TEMP/baseline-stack-lock.json" ]]; then
+            cp "$RUNNER_TEMP/baseline-stack-lock.json" "$RUNNER_TEMP/ci-v2-out/baseline.json"
+          fi
           docker run --rm \
             -u "$(id -u):$(id -g)" \
             -e SOURCE_SHA="$GITHUB_SHA" \
@@ -131,14 +132,21 @@ jobs:
                 .github/workflows/ci-artifact-v2.yml \
                 .github/workflows/ci-promote-accepted-v2.yml \
                 .github/workflows/ci-security-refresh-v2.yml \
-                .github/workflows/ci-release-accepted-v2.yml
+                .github/workflows/ci-release-accepted-v2.yml \
+                .github/workflows/full-setup-sims.yml
               bash scripts/check-workflow-line-limit.sh
-              bats tests/bats/ci_artifact_identity.bats tests/bats/network_retry.bats
+              bats \
+                tests/bats/ci_artifact_identity.bats \
+                tests/bats/ci_release_identity.bats \
+                tests/bats/network_retry.bats
               bash scripts/query-stack-images.sh all >/tmp/out/catalog.json
               bash scripts/ci-plan-run.sh >/tmp/out/plan.json
             '
           matrix="$(jq -c '{include}' "$RUNNER_TEMP/ci-v2-out/plan.json")"
-          [[ "$(jq '.include | length' <<<"$matrix")" -gt 0 ]] || { echo "::error::candidate plan is empty"; exit 1; }
+          [[ "$(jq '.include | length' <<<"$matrix")" -gt 0 ]] || {
+            echo "::error::candidate plan is empty"
+            exit 1
+          }
           printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
@@ -195,14 +203,12 @@ jobs:
           fi
           printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
 
-      # DO NOT ENABLE YET. A project-specific GHCR run still has to prove
-      # anonymous digest pushes remain pullable and preserve retry plus
-      # attestation behavior before quarantine tags can be replaced by:
+      # DO NOT ENABLE YET. The project-specific GHCR path must first prove that
+      # anonymous digest pushes remain pullable and preserve retry/attestation
+      # behavior. Until then, a unique quarantine tag is transport only; all
+      # downstream gates consume the digest returned by Buildx.
       #
       # outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
-      #
-      # Until then the quarantine tag is transport only. Every later gate
-      # reads the exact digest returned by Buildx.
       - name: Build and push quarantine candidate exactly once
         if: matrix.mode == 'build'
         id: build
@@ -225,12 +231,6 @@ jobs:
           cache-from: type=gha,scope=ci-v2-${{ matrix.service }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ci-v2-${{ matrix.service }}-${{ matrix.arch }}
 
-      # Buildx provenance enabled on a one-platform build changes the returned
-      # digest into an OCI index containing the runtime manifest plus an
-      # unknown/unknown attestation manifest. That wrapper digest is not the
-      # runtime child digest later assembled into the multi-platform index.
-      # Keep the candidate digest as the real image manifest and attach build
-      # provenance separately to that exact identity instead.
       - name: Attest build provenance to exact child digest
         if: matrix.mode == 'build'
         uses: ./.github/actions/ghcr-attest-retry
@@ -255,14 +255,24 @@ jobs:
           fi
           mkdir -p candidate-record
           bash scripts/ci-write-candidate-record.sh \
-            "${{ matrix.scope }}" "${{ matrix.service }}" "${{ matrix.image }}" "$GITHUB_SHA" \
-            "${{ matrix.artifact_source_sha }}" "${{ matrix.source_fingerprint }}" \
-            "${{ matrix.platform }}" "$digest" "$mode" \
+            "${{ matrix.scope }}" \
+            "${{ matrix.service }}" \
+            "${{ matrix.image }}" \
+            "$GITHUB_SHA" \
+            "${{ matrix.artifact_source_sha }}" \
+            "${{ matrix.source_fingerprint }}" \
+            "${{ matrix.platform }}" \
+            "$digest" \
+            "$mode" \
             "candidate-record/${{ matrix.service }}__${{ matrix.arch }}.json"
 
-      - name: Remove persistent amd64 Buildx builder
+      - name: Remove amd64 Buildx builder
         if: always() && matrix.mode == 'build' && matrix.arch == 'amd64'
         run: docker buildx rm "${{ steps.buildx-self.outputs.name }}" || true
+
+      - name: Remove arm64 Buildx builder
+        if: always() && matrix.mode == 'build' && matrix.arch == 'arm64'
+        run: docker buildx rm "${{ steps.buildx-arm.outputs.name }}" || true
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -302,7 +312,10 @@ jobs:
         run: |
           set -euo pipefail
           digest="$(jq -r '.digest' "$RECORD")"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid candidate digest $digest"; exit 1; }
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::invalid candidate digest $digest"
+            exit 1
+          }
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
           printf 'image_ref=%s@%s\n' "${{ matrix.image }}" "$digest" >> "$GITHUB_OUTPUT"
           printf 'freshness=%s\n' "$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
@@ -320,7 +333,8 @@ jobs:
         run: |
           set -euo pipefail
           timeout --kill-after=30 300 docker pull "${{ steps.identity.outputs.image_ref }}"
-          timeout --kill-after=30 120 docker run --rm --entrypoint /bin/sh "${{ steps.identity.outputs.image_ref }}" -c 'true'
+          timeout --kill-after=30 120 docker run --rm --entrypoint /bin/sh \
+            "${{ steps.identity.outputs.image_ref }}" -c 'true'
 
       - name: Write digest-bound security and smoke evidence
         env:
@@ -334,7 +348,7 @@ jobs:
             --arg digest "${{ steps.identity.outputs.digest }}" \
             --arg cache_hit "${CACHE_HIT:-false}" \
             --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:"candidate-evidence/v1", service:$service, platform:$platform, digest:$digest, trivy:"passed", trivy_cache_hit:($cache_hit == "true"), native_smoke:"passed", observed_at:$observed_at}' \
+            '{schema:"candidate-evidence/v1",service:$service,platform:$platform,digest:$digest,trivy:"passed",trivy_cache_hit:($cache_hit == "true"),native_smoke:"passed",observed_at:$observed_at}' \
             > "evidence/${{ matrix.service }}__${{ matrix.arch }}.json"
 
       - name: Attest exact-digest security and smoke evidence
@@ -416,10 +430,15 @@ jobs:
         with:
           name: candidate-indexes
           path: image-indexes
-      - run: |
+      - name: Assemble stack lock
+        run: |
           set -euo pipefail
           mkdir -p stack-lock
-          bash scripts/ci-assemble-stack-lock.sh "$GITHUB_SHA" "${{ needs.plan.outputs.candidate_tag }}" image-indexes stack-lock/stack-lock.json
+          bash scripts/ci-assemble-stack-lock.sh \
+            "$GITHUB_SHA" \
+            "${{ needs.plan.outputs.candidate_tag }}" \
+            image-indexes \
+            stack-lock/stack-lock.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: stack-lock
@@ -468,14 +487,14 @@ jobs:
           path: stack-lock
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Prove candidate tags match the frozen lock before NTP simulation
+      - name: Prove transport tags match frozen lock before NTP simulation
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
-      - name: Run real NTP CAP_SYS_TIME simulation against exact locked digest
+      - name: Run NTP CAP_SYS_TIME simulation against exact locked digest
         run: timeout --kill-after=30 900 bash scripts/ci-run-locked-ntp-simulation.sh stack-lock/stack-lock.json
-      - name: Prove candidate tags still match the frozen lock after NTP simulation
+      - name: Prove transport tags still match frozen lock after NTP simulation
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -505,19 +524,22 @@ jobs:
           path: stack-lock
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-      - name: Prove candidate tags match the frozen lock before quickstart simulation
+      - name: Prove transport tags match frozen lock before quickstart simulation
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
-      - name: Resolve exact build-tools identity from the stack lock
+      - name: Resolve exact build-tools identity from stack lock
         run: |
           set -euo pipefail
           image="$(jq -r '.tooling["build-tools"].image' stack-lock/stack-lock.json)"
           digest="$(jq -r '.tooling["build-tools"].digest' stack-lock/stack-lock.json)"
-          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid build-tools digest in stack lock"; exit 1; }
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::invalid build-tools digest in stack lock"
+            exit 1
+          }
           printf 'BUILD_TOOLS_IMAGE=%s@%s\n' "$image" "$digest" >> "$GITHUB_ENV"
-      - name: Run complete quickstart logging simulation on exact locked runtime set
+      - name: Run complete quickstart/logging simulation on exact locked runtime
         env:
           SETUP_SIM_IMAGE_CHANNEL: pinned
           SETUP_SIM_IMAGE_TAG: ${{ needs.stack-lock.outputs.candidate_tag }}
@@ -536,7 +558,7 @@ jobs:
             -e GITHUB_RUN_ATTEMPT \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 2400 bash scripts/ci-run-locked-quickstart-simulation.sh stack-lock/stack-lock.json
-      - name: Prove candidate tags still match the frozen lock after quickstart simulation
+      - name: Prove transport tags still match frozen lock after quickstart simulation
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -555,6 +577,7 @@ jobs:
       should_run: "true"
       pr_staging_available: "true"
       build_tools_touched: "true"
+      stack_lock_artifact: stack-lock
     secrets: inherit
 
   pr-validation-proof:
@@ -595,23 +618,8 @@ jobs:
             --arg lock_hash "$lock_hash" \
             --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{
-              schema:"candidate-validation/v1",
-              accepted:false,
-              promotion_eligible:false,
-              source_sha:$source_sha,
-              source_ref:$source_ref,
-              stack_lock_sha256:$lock_hash,
-              run_url:$run_url,
-              observed_at:$observed_at,
-              gates:{
-                exact_digest_security:true,
-                native_platform_smoke:true,
-                exact_locked_stack:true,
-                runtime_deep_validation:true,
-                supplemental_full_setup:true
-              }
-            }' > validation-proof/pr-validation.json
+            '{schema:"candidate-validation/v1",accepted:false,promotion_eligible:false,source_sha:$source_sha,source_ref:$source_ref,stack_lock_sha256:$lock_hash,run_url:$run_url,observed_at:$observed_at,gates:{exact_digest_security:true,native_platform_smoke:true,exact_locked_stack:true,runtime_deep_validation:true,supplemental_full_setup:true}}' \
+            > validation-proof/pr-validation.json
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-v2-pr-validation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
@@ -671,18 +679,25 @@ jobs:
           source scripts/lib/ci-artifact-identity.sh
           expected="$(( $(bash scripts/query-stack-images.sh all | jq '.include | length') * 2 ))"
           mapfile -t files < <(find evidence -maxdepth 1 -type f -name '*.json' -print | sort)
-          [[ "${#files[@]}" -eq "$expected" ]] || ci_ai_fail "expected $expected platform evidence records, found ${#files[@]}"
+          [[ "${#files[@]}" -eq "$expected" ]] \
+            || ci_ai_fail "expected $expected platform evidence records, found ${#files[@]}"
           for file in "${files[@]}"; do
             service="$(jq -r '.service' "$file")"
             platform="$(jq -r '.platform' "$file")"
             digest="$(jq -r '.digest' "$file")"
-            [[ "$(jq -r '.trivy' "$file")" == passed ]] || ci_ai_fail "Trivy evidence is not passed in $file"
-            [[ "$(jq -r '.native_smoke' "$file")" == passed ]] || ci_ai_fail "native smoke evidence is not passed in $file"
+            [[ "$(jq -r '.trivy' "$file")" == passed ]] \
+              || ci_ai_fail "Trivy evidence is not passed in $file"
+            [[ "$(jq -r '.native_smoke' "$file")" == passed ]] \
+              || ci_ai_fail "native smoke evidence is not passed in $file"
             locked="$(jq -r --arg service "$service" --arg platform "$platform" '(.runtime[$service] // .tooling[$service]).platforms[$platform] // empty' stack-lock/stack-lock.json)"
-            [[ -n "$locked" && "$locked" == "$digest" ]] || ci_ai_fail "evidence digest $digest does not match stack lock for $service/$platform"
+            [[ -n "$locked" && "$locked" == "$digest" ]] \
+              || ci_ai_fail "evidence digest $digest does not match stack lock for $service/$platform"
           done
 
-      - name: Re-resolve every candidate tag before acceptance
+      - name: Re-resolve every candidate transport tag before acceptance
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
 
       - name: Write final protected-branch acceptance record
@@ -697,31 +712,12 @@ jobs:
             --arg accepted_tag "$accepted_tag" \
             --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg accepted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{
-              schema:"stack-acceptance/v1",
-              accepted:true,
-              source_sha:$source_sha,
-              source_ref:$source_ref,
-              stack_lock_sha256:$lock_hash,
-              accepted_tag:$accepted_tag,
-              run_url:$run_url,
-              accepted_at:$accepted_at,
-              gates:{
-                identity_complete:true,
-                platform_complete:true,
-                provenance:true,
-                exact_digest_security:true,
-                native_platform_smoke:true,
-                exact_locked_stack:true,
-                runtime_deep_validation:true,
-                supplemental_full_setup:true,
-                publication_policy:true
-              }
-            }' > stack-lock/acceptance.json
+            '{schema:"stack-acceptance/v1",accepted:true,source_sha:$source_sha,source_ref:$source_ref,stack_lock_sha256:$lock_hash,accepted_tag:$accepted_tag,run_url:$run_url,accepted_at:$accepted_at,gates:{identity_complete:true,platform_complete:true,provenance:true,exact_digest_security:true,native_platform_smoke:true,exact_locked_stack:true,runtime_deep_validation:true,supplemental_full_setup:true,publication_policy:true}}' \
+            > stack-lock/acceptance.json
           bash -c 'source scripts/lib/ci-artifact-identity.sh; ci_ai_validate_acceptance stack-lock/acceptance.json'
           printf 'ACCEPTED_TAG=%s\n' "$accepted_tag" >> "$GITHUB_ENV"
 
-      - name: Prepare accepted stack pointer context
+      - name: Prepare accepted stack-pointer context
         run: cp release/stack-pointer/Dockerfile stack-lock/Dockerfile
 
       - name: Build immutable accepted stack pointer
