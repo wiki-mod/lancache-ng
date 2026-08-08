@@ -226,6 +226,19 @@ JSON
   [ "$status" -ne 0 ]
 }
 
+@test "deep runtime gates execute through digest-lock wrappers" {
+  workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
+  run grep -F 'bash scripts/ci-run-locked-ntp-simulation.sh stack-lock/stack-lock.json' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F 'bash scripts/ci-run-locked-quickstart-simulation.sh stack-lock/stack-lock.json' "$workflow"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'CI_LOCKED_NTP_DIGEST_REF' "$REPO_ROOT/scripts/ci-run-locked-ntp-simulation.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'actual="$(command docker inspect --format' "$REPO_ROOT/scripts/ci-run-locked-quickstart-simulation.sh"
+  [ "$status" -eq 0 ]
+}
+
 @test "release pointer is attested before mutable release references move" {
   workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
   pointer_line="$(grep -n 'name: Build immutable release stack pointer before mutable publication' "$workflow" | cut -d: -f1)"
