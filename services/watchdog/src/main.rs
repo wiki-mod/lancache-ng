@@ -219,6 +219,28 @@ fn load_settings() -> Settings {
     // two that could drift (the exact class of bug #877 already fixed once
     // for SYSLOG_ENABLED's truthy-parsing between the Admin UI and
     // watchdog.sh).
+    //
+    // KNOWN LIMITATION, not yet fixed here: SYSLOG_ENABLED is a deliberately
+    // separate, narrower "double opt-in" that only gates the storage-budget
+    // retention/pruning engine (see deploy/prod/.env's own comment on it),
+    // not "is the syslog container part of this stack." A normal install
+    // with central logging on (LOGGING_ENABLED=1/`--profile logging`
+    // active) but retention/pruning never separately opted into legitimately
+    // runs the syslog container while SYSLOG_ENABLED stays at its default
+    // "false" -- gating alert-only monitoring on SYSLOG_ENABLED alone leaves
+    // that common case unmonitored. watchdog.sh (the bash entrypoint this
+    // crate has not yet replaced) had the identical bug, fixed there by
+    // gating on LOGGING_ENABLED instead and passing that as a new env var
+    // from every deploy/*/docker-compose.yml `watchdog:` block. This crate
+    // is currently dormant (not yet this service's ENTRYPOINT, see lib.rs's
+    // module doc comment), so the equivalent fix here -- read LOGGING_ENABLED instead
+    // of/in addition to SYSLOG_ENABLED, once this crate goes live -- is
+    // deliberately deferred to whichever change wires this crate up as the
+    // real entrypoint, rather than fixed blind with no way to build/test it
+    // as part of that change today. STATUS: as of 2026-08-08, this crate is
+    // not built or exercised in this stack, so this gap has no live
+    // operator-facing impact yet; it will if this crate goes live before
+    // this line is corrected.
     let syslog_enabled = config::resolve_bool(env("SYSLOG_ENABLED").as_deref(), false);
 
     Settings {

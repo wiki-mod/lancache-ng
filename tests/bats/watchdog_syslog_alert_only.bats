@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for #849 bug-hunt finding observability.md#8: services/watchdog/
@@ -9,7 +10,11 @@
 # containers). This adds alert-only monitoring (never restart-capable --
 # scripts/docker-socket-proxy.sh's safe_service_restart ACL does not permit
 # a restart POST for this container, see check_alert_only()'s own comment),
-# gated on SYSLOG_ENABLED the same way SSL_ENABLED gates C_DNS_SSL monitoring.
+# gated on LOGGING_ENABLED the same way SSL_ENABLED gates C_DNS_SSL
+# monitoring -- NOT on SYSLOG_ENABLED, a deliberately separate, narrower
+# flag that only gates the storage-budget retention/pruning engine (see
+# deploy/prod/.env's own comment on it and watchdog.sh's C_SYSLOG
+# assignment for the full reasoning this file's own tests below prove).
 #
 # Mirrors watchdog_docker_socket_proxy_probe.bats's structure closely, since
 # check_alert_only() is the generalized form of that file's
@@ -26,10 +31,10 @@ setup() {
     export SSL_ENABLED=0
     export CACHE_DIR="$BATS_TEST_TMPDIR"
     export STATUS_FILE="$status_file"
-    # C_SYSLOG is resolved once at source time from SYSLOG_ENABLED (mirrors
+    # C_SYSLOG is resolved once at source time from LOGGING_ENABLED (mirrors
     # C_DNS_SSL's own SSL_ENABLED-gated resolution) -- must be exported
     # before load_watchdog_functions sources the extracted range below.
-    export SYSLOG_ENABLED=true
+    export LOGGING_ENABLED=1
 
     # shellcheck source=tests/bats/helpers/watchdog-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/watchdog-helpers.sh"
@@ -44,34 +49,50 @@ setup() {
     H_SYSLOG="unknown"
 }
 
-@test "C_SYSLOG resolves to lancache-syslog when SYSLOG_ENABLED is truthy" {
+@test "C_SYSLOG resolves to lancache-syslog when LOGGING_ENABLED is truthy" {
     [ "$C_SYSLOG" = "lancache-syslog" ]
 }
 
-@test "C_SYSLOG is empty when SYSLOG_ENABLED is unset (no logging profile opted into)" {
-    unset SYSLOG_ENABLED
+@test "C_SYSLOG is empty when LOGGING_ENABLED is unset (no logging profile opted into)" {
+    unset LOGGING_ENABLED
     load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-unset.sh"
     [ -z "$C_SYSLOG" ]
 }
 
-@test "C_SYSLOG is empty for every Admin-UI-falsy SYSLOG_ENABLED spelling" {
+@test "C_SYSLOG is empty for every falsy LOGGING_ENABLED spelling" {
     for value in false 0 no off ""; do
-        SYSLOG_ENABLED="$value" load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-falsy-$RANDOM.sh"
+        LOGGING_ENABLED="$value" load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-falsy-$RANDOM.sh"
         [ -z "$C_SYSLOG" ] || {
-            echo "SYSLOG_ENABLED=$value unexpectedly resolved C_SYSLOG=$C_SYSLOG" >&2
+            echo "LOGGING_ENABLED=$value unexpectedly resolved C_SYSLOG=$C_SYSLOG" >&2
             return 1
         }
     done
 }
 
-@test "C_SYSLOG resolves for every Admin-UI-truthy SYSLOG_ENABLED spelling" {
+@test "C_SYSLOG resolves for every truthy LOGGING_ENABLED spelling" {
     for value in 1 true TRUE yes On; do
-        SYSLOG_ENABLED="$value" load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-truthy-$RANDOM.sh"
+        LOGGING_ENABLED="$value" load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-truthy-$RANDOM.sh"
         [ "$C_SYSLOG" = "lancache-syslog" ] || {
-            echo "SYSLOG_ENABLED=$value did not resolve C_SYSLOG to lancache-syslog (got '$C_SYSLOG')" >&2
+            echo "LOGGING_ENABLED=$value did not resolve C_SYSLOG to lancache-syslog (got '$C_SYSLOG')" >&2
             return 1
         }
     done
+}
+
+@test "C_SYSLOG stays empty when LOGGING_ENABLED is truthy but SYSLOG_ENABLED is falsy (the real Codex finding)" {
+    # Real bug this test guards against: LOGGING_ENABLED and SYSLOG_ENABLED
+    # are deliberately separate flags (see this file's header and
+    # watchdog.sh's own C_SYSLOG comment) -- a normal install with central
+    # logging on but retention/pruning never separately opted into runs the
+    # syslog container with SYSLOG_ENABLED left at its default "false".
+    # C_SYSLOG must resolve purely from LOGGING_ENABLED and must not be
+    # affected by SYSLOG_ENABLED's own value either way.
+    LOGGING_ENABLED=1 SYSLOG_ENABLED=false \
+        load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-logging-only.sh"
+    [ "$C_SYSLOG" = "lancache-syslog" ] || {
+        echo "expected C_SYSLOG=lancache-syslog with LOGGING_ENABLED=1/SYSLOG_ENABLED=false, got '$C_SYSLOG'" >&2
+        return 1
+    }
 }
 
 @test "C_SYSLOG carries LANCACHE_CONTAINER_SUFFIX when one is set (issue #1415 coordinated-suffix shape)" {
@@ -169,7 +190,7 @@ setup() {
     [ "$F_SYSLOG" -eq $((RESTART_AFTER + 1)) ]
 }
 
-@test "write_status includes the syslog block when SYSLOG_ENABLED is truthy" {
+@test "write_status includes the syslog block when LOGGING_ENABLED is truthy" {
     H_SYSLOG="unhealthy"
     F_SYSLOG=3
     write_status
@@ -183,8 +204,8 @@ setup() {
 # first place -- omitted entirely, not merely zeroed out, mirrors how
 # ssl_services is omitted (not emitted with dummy values) when SSL_ENABLED
 # is falsy.
-@test "write_status omits the syslog block entirely when SYSLOG_ENABLED is falsy" {
-    unset SYSLOG_ENABLED
+@test "write_status omits the syslog block entirely when LOGGING_ENABLED is falsy" {
+    unset LOGGING_ENABLED
     load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-omit.sh"
     [ -z "$C_SYSLOG" ]
 

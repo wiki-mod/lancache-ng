@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Drift guard for #849 bug-hunt finding observability.md#20: netdata's own
@@ -84,6 +85,37 @@ extract_service_block() {
             echo "ui service block in $f does not list netdata-net -- it would lose access to NETDATA_URL" >&2
             return 1
         }
+    done
+}
+
+@test "nats does not join netdata-net (no real collector needs it, checked against the pinned image)" {
+    # Regression guard for a real incident: a prior revision of this stack
+    # put `nats` on both `default` and `netdata-net`, on the premise that
+    # netdata's go.d.plugin runs an active NATS collector against
+    # `nats:8222` that would otherwise lose its route once netdata was
+    # scoped off the shared network. That premise was checked directly
+    # against the real pinned netdata image (netdata/netdata@sha256:
+    # a130dbbf...) and found false: /usr/lib/netdata/conf.d/go.d/nats.conf
+    # ships with every job commented out by default (no active job at all),
+    # and even an operator-enabled default job targets `127.0.0.1`, never
+    # the `nats` Compose DNS name, so it could never reach this container
+    # over any network regardless. Putting `nats` on `netdata-net` would
+    # only widen the access surface this file's other tests exist to close
+    # (bridge-network membership is bidirectional), so it must stay off
+    # that network.
+    for f in "${compose_files[@]}"; do
+        block="$(extract_service_block "$f" nats)"
+        [ -n "$block" ]
+        # Matches the real YAML membership shapes only (list-item or
+        # map-key), not a bare substring -- this service's own block
+        # carries an explanatory comment that mentions "netdata-net" in
+        # prose several times (documenting exactly why it must NOT be a
+        # member), which a naive substring check would misread as the
+        # network entry itself.
+        if grep -qE '^      (- netdata-net$|netdata-net:)' <<< "$block"; then
+            echo "nats service block in $f lists netdata-net -- this is an unnecessary widening of netdata's isolated network, not a required route (checked against the real pinned netdata image, see this test's own comment)" >&2
+            return 1
+        fi
     done
 }
 

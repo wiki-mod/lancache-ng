@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Drift guard for #849 bug-hunt finding watchdog.md#14: the `watchdog` and
@@ -8,10 +9,9 @@
 # docker-socket-proxy has carried a real HTTP healthcheck since #1169 (see
 # its own service block in each compose file). Covers all three real
 # compose files that define a `watchdog` service (prod, quickstart, and
-# full-setup's CI validation harness -- the finding's own text explicitly
-# scopes to "all three real compose files", and full-setup's
-# docker-socket-proxy carries the identical healthcheck, so leaving it on
-# the old ordering-only form would just be the same gap in a third file).
+# full-setup's CI validation harness): full-setup's docker-socket-proxy
+# carries the identical healthcheck, so leaving it on the old
+# ordering-only form would leave the same gap in a third file.
 # This is a structural text scan of the real compose files, same extraction
 # approach as tests/bats/netdata_network_isolation.bats and
 # scripts/check-compose-healthchecks.sh (docker compose config needs a

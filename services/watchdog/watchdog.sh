@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Health monitor and auto-restart-on-failure daemon.
 #
@@ -11,15 +12,18 @@
 # CACHE_DIR is one exception, still read here for disk_info()'s unrelated
 # disk-usage-percentage reporting into status.json, resolved independently of
 # retention.sh's own copy (see that file's resolve_cache_dir() comment for
-# why this is deliberate duplication, not shared state). SYSLOG_ENABLED is
+# why this is deliberate duplication, not shared state). LOGGING_ENABLED is
 # the other exception (#849 bug-hunt finding observability.md#8, 2026-08-06):
 # this file DOES now read it, gating alert-only health monitoring of the
 # combined syslog+fluent-bit container -- see check_alert_only()'s own
 # comment below for why that container is alert-only rather than
-# restart-capable, and why SYSLOG_ENABLED/DHCP_MODE were already present in
-# every deploy/*/docker-compose.yml's `watchdog:` environment block (added
-# ahead of this change for the not-yet-wired-up Rust rewrite -- see
-# services/watchdog/src/lib.rs's module doc comment).
+# restart-capable, and C_SYSLOG's own assignment further below for why
+# LOGGING_ENABLED (not the similarly-named but semantically distinct
+# SYSLOG_ENABLED) is the correct gate. DHCP_MODE/SYSLOG_ENABLED were already
+# present in every deploy/*/docker-compose.yml's `watchdog:` environment
+# block (added ahead of this change for the not-yet-wired-up Rust rewrite --
+# see services/watchdog/src/lib.rs's module doc comment); LOGGING_ENABLED is
+# newly added here.
 
 set -euo pipefail
 
@@ -174,13 +178,20 @@ C_DOCKER_PROXY="lancache-docker-socket-proxy"
 # startup) both carry it -- referenced directly from the raw environment
 # variable here since LANCACHE_CONTAINER_SUFFIX itself is not normalized
 # until further below, and this assignment runs first. Gated on
-# SYSLOG_ENABLED, matching resolve_alert_only_targets()'s own `if
-# syslog_enabled { targets.push(...) }` gate exactly -- an install that
-# never opted into `docker compose --profile logging` never starts this
-# container at all, so monitoring it unconditionally would report a
-# permanent false "unhealthy" for a container that was never supposed to
-# exist.
-if is_truthy "${SYSLOG_ENABLED:-false}"; then
+# LOGGING_ENABLED, NOT SYSLOG_ENABLED: an install that never opted into
+# `docker compose --profile logging` never starts this container at all, so
+# monitoring it unconditionally would report a permanent false "unhealthy"
+# for a container that was never supposed to exist -- LOGGING_ENABLED is
+# the flag that actually governs whether the `logging` profile (and
+# therefore this container) is active. SYSLOG_ENABLED is a deliberately
+# separate, narrower "double opt-in" that only gates the storage-budget
+# retention/pruning engine (maybe_prune_syslog(), see deploy/prod/.env's
+# own comment on it) -- a normal install with central logging on but
+# retention/pruning never separately opted into legitimately runs this
+# container with SYSLOG_ENABLED still at its default "false", and gating
+# health monitoring on SYSLOG_ENABLED alone left that common case silently
+# unmonitored (a real Codex finding on this PR, not a hypothetical).
+if is_truthy "${LOGGING_ENABLED:-0}"; then
     C_SYSLOG="lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}"
 else
     C_SYSLOG=""
@@ -229,10 +240,11 @@ fi
 # Anything else (including 0/false/no/off, empty, or unrecognized garbage)
 # is treated as not-truthy; callers combine this with their own
 # `${VAR:-default}` fallback for the "unset" case, same as env_bool()'s
-# `unwrap_or(default)`. Only used for boolean-style env vars (currently
-# SYSLOG_ENABLED); introduced as a single shared function specifically so a
-# second flag can reuse it instead of re-implementing its own truthy check
-# that could drift from this one the way SYSLOG_ENABLED's did.
+# `unwrap_or(default)`. Used for this file's boolean-style env vars
+# (SSL_ENABLED, LOGGING_ENABLED); introduced as a single shared function
+# specifically so each new flag reuses it instead of re-implementing its own
+# truthy check that could drift from this one the way SYSLOG_ENABLED's
+# Admin-UI/watchdog truthy-parsing mismatch once did (issue #877).
 is_truthy() {
     local v="$1"
     # Trim leading/trailing whitespace (mirrors Rust's `.trim()`).
@@ -513,9 +525,10 @@ write_status() {
 
     # #849 bug-hunt finding observability.md#8: same conditional-inclusion
     # shape as ssl_services above -- omitted entirely (not just "unknown")
-    # when SYSLOG_ENABLED is falsy, so an install that never opted into
-    # central logging doesn't show a permanently "unhealthy"/never-existed
-    # container in the dashboard's service list.
+    # when C_SYSLOG is empty (LOGGING_ENABLED falsy, see that assignment's
+    # own comment above), so an install that never opted into central
+    # logging doesn't show a permanently "unhealthy"/never-existed container
+    # in the dashboard's service list.
     local syslog_service=""
     if [ -n "$C_SYSLOG" ]; then
         syslog_service=",
@@ -558,9 +571,9 @@ while true; do
     # check_alert_only, not check_and_maybe_restart -- see that function's
     # own comment for why restart-capable monitoring is not implementable
     # for this container without a separate allowlist-widening decision.
-    # Skipped entirely (not called with an empty name) when SYSLOG_ENABLED
-    # is falsy, matching every other SSL_ENABLED-style conditional monitor
-    # above.
+    # Skipped entirely (not called with an empty name) when C_SYSLOG is
+    # empty (LOGGING_ENABLED falsy), matching every other SSL_ENABLED-style
+    # conditional monitor above.
     if [ -n "$C_SYSLOG" ]; then
         check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
     fi

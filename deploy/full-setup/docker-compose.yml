@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Full-setup validation harness: deterministic compose configuration with
@@ -237,13 +238,11 @@ services:
       # Issue #870: shared with `ui` below (read-only) so this validation
       # stack exercises the same status.json hand-off dev/prod/quickstart use.
       - watchdog-status:/var/run/watchdog
-    # #849 bug-hunt finding watchdog.md#14: same gap, same fix, as
-    # deploy/prod/docker-compose.yml's identical change -- docker-socket-proxy
-    # above already carries a real HTTP healthcheck, so this validation
-    # harness's own watchdog waits for genuine readiness instead of a bare
-    # "container exists" signal too, rather than being the one real
-    # watchdog-service compose file left on the old plain-list ordering-only
-    # form.
+    # docker-socket-proxy above already carries a real HTTP healthcheck, so
+    # this validation harness's own watchdog waits for genuine readiness
+    # instead of a bare "container exists" signal -- see
+    # deploy/prod/docker-compose.yml's identical `depends_on:` for the full
+    # reasoning.
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -547,14 +546,14 @@ services:
       validation:
         ipv4_address: ${VALIDATION_UI_IP:-172.30.99.9}
       validation-api:
-    # #849 bug-hunt finding watchdog.md#14: same gap, same fix, as
-    # deploy/prod/docker-compose.yml's identical change for its own `ui`
-    # service -- this validation harness's Admin UI also makes its own
-    # Docker API calls (restart-service buttons) through docker-socket-proxy,
-    # so it waits for genuine readiness instead of a bare "container exists"
-    # signal too. proxy/nats keep `service_started` -- the exact behavior the
-    # plain list form already had -- since Compose's map form requires every
-    # entry in one `depends_on:` block to use the same syntax.
+    # This validation harness's Admin UI also makes its own Docker API calls
+    # (restart-service buttons) through docker-socket-proxy, so it waits for
+    # genuine readiness instead of a bare "container exists" signal -- see
+    # deploy/prod/docker-compose.yml's identical `depends_on:` for its own
+    # `ui` service for the full reasoning. proxy/nats keep `service_started`
+    # -- the exact behavior the plain list form already had -- since
+    # Compose's map form requires every entry in one `depends_on:` block to
+    # use the same syntax.
     depends_on:
       docker-socket-proxy:
         condition: service_healthy

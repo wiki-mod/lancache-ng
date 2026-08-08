@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
 # tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
@@ -219,15 +220,14 @@ on:
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
-      # deploy/full-setup/docker-compose.yml (#849 bug-hunt finding
-      # watchdog.md#14 follow-up): tests/bats/
+      # deploy/full-setup/docker-compose.yml: tests/bats/
       # watchdog_docker_socket_proxy_depends_on_healthy.bats' structural
-      # guard now also scans this file (all three real compose files that
-      # define a `watchdog` service, per the finding's own scope) --
-      # without this entry, a PR touching only full-setup's compose file
-      # would not already match any other path above and so would never
-      # run that suite. Found by scripts/check-bats-path-filter-coverage.sh's
-      # own existence-filtered dependency scan against the real repo tree.
+      # guard scans all three real compose files that define a `watchdog`
+      # service, including this one -- without this entry, a PR touching
+      # only full-setup's compose file would not already match any other
+      # path above and so would never run that suite. Found by
+      # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
+      # dependency scan against the real repo tree.
       - "deploy/full-setup/docker-compose.yml"
   pull_request:
     # Mirrors build-tools.yml's own branches list (#709).
@@ -324,15 +324,14 @@ on:
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
-      # deploy/full-setup/docker-compose.yml (#849 bug-hunt finding
-      # watchdog.md#14 follow-up): tests/bats/
+      # deploy/full-setup/docker-compose.yml: tests/bats/
       # watchdog_docker_socket_proxy_depends_on_healthy.bats' structural
-      # guard now also scans this file (all three real compose files that
-      # define a `watchdog` service, per the finding's own scope) --
-      # without this entry, a PR touching only full-setup's compose file
-      # would not already match any other path above and so would never
-      # run that suite. Found by scripts/check-bats-path-filter-coverage.sh's
-      # own existence-filtered dependency scan against the real repo tree.
+      # guard scans all three real compose files that define a `watchdog`
+      # service, including this one -- without this entry, a PR touching
+      # only full-setup's compose file would not already match any other
+      # path above and so would never run that suite. Found by
+      # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
+      # dependency scan against the real repo tree.
       - "deploy/full-setup/docker-compose.yml"
 
 permissions:

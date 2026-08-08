@@ -289,8 +289,12 @@ record changes, or subscribes to read cache/DNS metadata.
 **Mitigations** (verified in `deploy/quickstart/docker-compose.yml`):
 - NATS is **not published on the host** in the default deployment — it is only
   reachable on the internal Docker network. This also covers nats-server's own
-  HTTP monitor endpoint (`http_port: 8222`, added for the Docker healthcheck
-  and Netdata's NATS collector): it carries no credentials of its own
+  HTTP monitor endpoint (`http_port: 8222`, added for the Docker healthcheck --
+  corrected 2026-08-08: this previously also credited this port to "Netdata's
+  NATS collector", checked against the real pinned netdata image and found
+  false, see `docs/capability-inventory/SoT-observability.md`'s network
+  section for the full correction; `nats` is not on netdata's own isolated
+  network and does not need to be): it carries no credentials of its own
   (nats-server's monitor has no built-in auth), so any container reachable on
   the same internal Docker network can read `/varz`/`/healthz` without a NATS
   role credential — but it is read-only server metadata (version, connection

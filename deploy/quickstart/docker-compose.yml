@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # LanCache-NG — Quickstart (no repo clone needed)
@@ -220,15 +221,19 @@ services:
           store_dir: /data
         }
         # Monitor endpoint: nats-server shipped with no HTTP monitor
-        # listening (no http_port set), so the Docker healthcheck below and
-        # Netdata's go.d NATS collector both saw a hard connection refused
-        # against :8222 on every attempt -- not a timing issue, the port
-        # simply never opened. Verified live against this pinned image
-        # (nats-server 2.14.3): once set, /healthz and /varz answer
-        # immediately after "Server is ready". Only reachable from other
-        # containers on this compose network -- not published to the host --
-        # and carries no secrets of its own (nats-server's monitor endpoint
-        # has no built-in auth).
+        # listening (no http_port set), so the Docker healthcheck below saw
+        # a hard connection refused against :8222 on every attempt -- not a
+        # timing issue, the port simply never opened. Verified live against
+        # this pinned image (nats-server 2.14.3): once set, /healthz and
+        # /varz answer immediately after "Server is ready". Only reachable
+        # from other containers on this compose network -- not published to
+        # the host -- and carries no secrets of its own (nats-server's
+        # monitor endpoint has no built-in auth). (Corrected: this comment
+        # previously also credited this port to "Netdata's go.d NATS
+        # collector" -- checked against the real pinned netdata image and
+        # found false, see the nats service's own `networks:` comment below
+        # for the full correction; this endpoint's only real consumer is the
+        # Docker healthcheck.)
         http_port: 8222
         # Central logging pipeline (#633): nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
@@ -436,14 +441,17 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # #849 bug-hunt finding observability.md#20 (netdata network isolation)
-    # re-verification: see deploy/prod/docker-compose.yml's identical nats
-    # networks: comment for the full reasoning -- netdata's own go.d.plugin
-    # NATS collector needs this endpoint, which scoping netdata to
-    # netdata-net alone would otherwise silently break.
+    # Corrected: see deploy/prod/docker-compose.yml's identical nats
+    # `networks:` comment for the full correction -- a prior revision put
+    # nats on netdata-net too, on the unverified premise that netdata's
+    # go.d NATS collector needs this endpoint. Checked against the real
+    # pinned netdata image: that collector ships with no active job by
+    # default and would only ever target 127.0.0.1 (not the `nats` Compose
+    # DNS name) even if manually enabled, so nats does not need netdata-net
+    # membership -- keeping it off that network is the correct, narrower
+    # isolation this stack's netdata-network-scoping change intends.
     networks:
       - default
-      - netdata-net
     restart: always
     logging:
       driver: json-file
@@ -750,18 +758,18 @@ services:
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
-      # deploy/prod/docker-compose.yml's identical addition. DHCP_MODE is
-      # still unused by watchdog.sh (the bash entrypoint this ENTRYPOINT
-      # still runs) -- only the Rust crate's resolve_alert_only_targets()
-      # reads it, once that becomes this service's actual ENTRYPOINT.
-      # SYSLOG_ENABLED is genuinely consumed by watchdog.sh today: bug-hunt
-      # finding observability.md#8 (2026-08-06) added alert-only monitoring
-      # of the combined syslog+fluent-bit container, gated on this var --
-      # see deploy/prod/docker-compose.yml's identical comment for the full
-      # reasoning.
+      # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED (issue #842/#849): matches
+      # deploy/prod/docker-compose.yml's identical addition -- see that
+      # file's own comment on this same environment block for the full
+      # reasoning, including why LOGGING_ENABLED (not SYSLOG_ENABLED) is the
+      # correct gate for whether watchdog.sh considers the syslog container
+      # part of this stack at all. DHCP_MODE is still unused by watchdog.sh
+      # (the bash entrypoint this ENTRYPOINT still runs) -- only the Rust
+      # crate's resolve_alert_only_targets() reads it, once that becomes
+      # this service's actual ENTRYPOINT.
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see
@@ -781,8 +789,9 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
-    # #849 bug-hunt finding watchdog.md#14: matches deploy/prod's identical
-    # change -- see that file's comment for the full reasoning.
+    # See deploy/prod/docker-compose.yml's identical `depends_on:` for this
+    # service for the full reasoning (waits for docker-socket-proxy's real
+    # HTTP healthcheck instead of a bare "container exists" signal).
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -1177,11 +1186,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # #849 bug-hunt finding watchdog.md#14: matches deploy/prod's identical
-    # change -- see that file's comment for the full reasoning. proxy/netdata/
-    # nats keep `service_started` (the exact behavior the plain list form
-    # already had); Compose's map form requires every entry in one
-    # `depends_on:` block to use the same syntax.
+    # See deploy/prod/docker-compose.yml's identical `depends_on:` for this
+    # service for the full reasoning (waits for docker-socket-proxy's real
+    # HTTP healthcheck instead of a bare "container exists" signal).
+    # proxy/netdata/nats keep `service_started` (the exact behavior the
+    # plain list form already had); Compose's map form requires every entry
+    # in one `depends_on:` block to use the same syntax.
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -1283,9 +1293,10 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    # #849 bug-hunt finding observability.md#20: matches deploy/prod's
-    # identical change -- netdata never publishes a host port, but with no
-    # explicit `networks:` it implicitly joined the same shared `default`
+    # See deploy/prod/docker-compose.yml's identical `networks:` for this
+    # service for the full reasoning -- netdata never publishes a host
+    # port, but with no explicit `networks:` it implicitly joined the same
+    # shared `default`
     # network as every other real service, so any of them could reach its
     # full, unauthenticated HTTP API directly. Only the Admin UI (below,
     # NETDATA_URL) actually needs to reach it.

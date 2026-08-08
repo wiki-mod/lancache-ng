@@ -184,13 +184,20 @@ to the operator anywhere in this project:**
   application-level allowlisting. `netdata-net` is deliberately not
   `internal: true` (unlike `docker-api`) since netdata's own image may
   still need outbound internet access for its own operation — this finding
-  was about *inter-container* exposure, not netdata's own egress. One
-  exception, not a regression: `nats` is a member of both `default` and
-  `netdata-net`, since netdata's own go.d.plugin runs an active NATS
-  collector against `nats:8222` — that endpoint was already reachable from
-  every `default`-network container before this fix and remains so
-  unchanged; only netdata's own broad HTTP API (port 19999) is the surface
-  this finding closed.
+  was about *inter-container* exposure, not netdata's own egress. `nats`
+  stays on `default` only, not on `netdata-net`: an earlier revision of
+  this fix added `nats` to `netdata-net` too, on the premise that
+  netdata's go.d.plugin runs an active NATS collector against `nats:8222`
+  that would otherwise lose its route. That premise does not hold against
+  the real pinned netdata image — its shipped go.d NATS collector config
+  has every job commented out by default (no active job at all), and even
+  an operator-enabled default job targets `127.0.0.1`, never the `nats`
+  Compose DNS name, so it could never reach this container over any
+  network regardless. Putting `nats` on `netdata-net` would only have been
+  a real widening of the access surface this finding closes (Compose
+  bridge-network membership is bidirectional, so a compromised `nats`
+  container would gain a route to `netdata:19999`), corrected before
+  landing.
 
 ## 3. Central logging pipeline (`syslog-ng` / `fluent-bit`) — status per #453/#632/#633
 
