@@ -4,7 +4,10 @@
 #
 # Renders the full-setup Compose model with every first-party runtime image
 # replaced by its exact stack-lock digest. External digest-pinned services are
-# left unchanged.
+# left unchanged. The full-setup harness is intentionally a subset of the
+# production runtime catalog, so the invariant is "every first-party image
+# present in this Compose model is locked", not "every runtime image must be
+# present in this validation harness".
 set -euo pipefail
 
 [[ $# -eq 2 ]] || { echo "usage: ci-render-locked-compose.sh LOCK OUTPUT" >&2; exit 2; }
@@ -20,9 +23,12 @@ override="$work_dir/override.json"
 
 base_json="$(LANCACHE_IMAGE_TAG=ci-lock-render docker compose -f "$base" config --format json)"
 override_json='{"services":{}}'
+matched_first_party=0
 
 while IFS=$'\t' read -r compose_service compose_image; do
     [[ -n "$compose_service" && -n "$compose_image" ]] || continue
+    [[ "$compose_image" == ghcr.io/wiki-mod/lancache-ng/* ]] || continue
+
     locked_ref=""
     while IFS=$'\t' read -r locked_image locked_digest; do
         if [[ "$compose_image" == "${locked_image}:"* || "$compose_image" == "${locked_image}@"* ]]; then
@@ -31,15 +37,16 @@ while IFS=$'\t' read -r compose_service compose_image; do
             break
         fi
     done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' "$lock")
-    if [[ -n "$locked_ref" ]]; then
-        override_json="$(jq -c --arg service "$compose_service" --arg image "$locked_ref" '.services[$service].image = $image' <<<"$override_json")"
-    fi
+
+    [[ -n "$locked_ref" ]] \
+        || ci_ai_fail "first-party Compose service $compose_service uses $compose_image, but no matching runtime digest exists in the stack lock"
+
+    override_json="$(jq -c --arg service "$compose_service" --arg image "$locked_ref" '.services[$service].image = $image' <<<"$override_json")"
+    matched_first_party=$((matched_first_party + 1))
 done < <(jq -r '.services | to_entries[] | [.key, (.value.image // "")] | @tsv' <<<"$base_json")
 
-runtime_count="$(jq '.runtime | length' "$lock")"
-overridden_images="$(jq '[.services[] | select(.image != null)] | length' <<<"$override_json")"
-[[ "$overridden_images" -ge "$runtime_count" ]] \
-    || ci_ai_fail "only $overridden_images compose services were digest-locked for $runtime_count runtime images"
+[[ "$matched_first_party" -gt 0 ]] \
+    || ci_ai_fail "full-setup Compose model contained no first-party runtime images to lock"
 
 printf '%s\n' "$override_json" >"$override"
 mkdir -p "$(dirname "$output")"
