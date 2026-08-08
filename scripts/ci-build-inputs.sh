@@ -37,15 +37,12 @@ validate_json() {
 
     case "$service" in
         dns|ui)
-            [[ "$(jq '.build_args | length' <<<"$value")" -eq 0 ]] || return 1
-            key='ghcr.io/wiki-mod/lancache-ng/build-tools:latest'
-            [[ "$(jq -r '.build_contexts | keys | join(",")' <<<"$value")" == "$key" ]] || {
-                echo "ci-build-inputs: $service must carry exactly the build-tools:latest context override" >&2
+            [[ "$(jq -r '.build_args | keys | sort | join(",")' <<<"$value")" == BUILD_TOOLS_IMAGE ]] || {
+                echo "ci-build-inputs: $service must carry exactly BUILD_TOOLS_IMAGE as external build arg" >&2
                 return 1
             }
-            context="$(jq -r --arg key "$key" '.build_contexts[$key]' <<<"$value")"
-            [[ "$context" == docker-image://* ]] || return 1
-            require_digest_ref BUILD_TOOLS_IMAGE "${context#docker-image://}"
+            [[ "$(jq '.build_contexts | length' <<<"$value")" -eq 0 ]] || return 1
+            require_digest_ref BUILD_TOOLS_IMAGE "$(jq -r '.build_args.BUILD_TOOLS_IMAGE' <<<"$value")"
             ;;
         build-tools)
             [[ "$(jq '.build_args | length' <<<"$value")" -eq 0 ]] || return 1
@@ -90,8 +87,7 @@ case "$service" in
     dns|ui)
         bootstrap="${CI_BOOTSTRAP_BUILD_TOOLS_IMAGE:-}"
         require_digest_ref CI_BOOTSTRAP_BUILD_TOOLS_IMAGE "$bootstrap"
-        build_contexts="$(jq -cn --arg value "docker-image://$bootstrap" \
-            '{"ghcr.io/wiki-mod/lancache-ng/build-tools:latest":$value}')"
+        build_args="$(jq -cn --arg value "$bootstrap" '{BUILD_TOOLS_IMAGE:$value}')"
         ;;
     build-tools)
         golang="${CI_GOLANG_BASE_IMAGE:-}"
