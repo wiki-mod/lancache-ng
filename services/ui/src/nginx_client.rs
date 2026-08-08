@@ -145,9 +145,9 @@ pub fn parse_log_tail(path: &str, limit: usize) -> Vec<LogEntry> {
         .collect()
 }
 
-// Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): parses nginx's fixed
-// $time_local format (e.g. "10/Aug/2026:13:55:36 +0200") into Unix epoch
-// seconds, so two log entries from different source files can be compared
+// Parses nginx's fixed $time_local format (e.g. "10/Aug/2026:13:55:36
+// +0200") into Unix epoch seconds, so two log entries from different
+// source files can be compared
 // by real timestamp instead of by which file/source they happened to come
 // from. Deliberately hand-parsed rather than adding a date/time crate as a
 // new direct dependency: the format nginx emits here is fixed by this
@@ -227,17 +227,15 @@ fn days_from_civil(year: i64, month: i64, day: i64) -> Option<i64> {
     Some(era * 146_097 + day_of_era - 719_468)
 }
 
-// Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug fix
-// this function closes. Merges two per-source log-entry lists (each
-// already in file order -- oldest first, per parse_log_tail's own
-// documented contract) into one combined list ordered oldest-first by real
-// timestamp, instead of naively concatenating one source's entire block
-// before the other's (which is what routes/logs.rs's
-// `standard_logs.into_iter().chain(ssl_logs).collect()` used to do,
-// silently misordering the result whenever the two sources' time ranges
-// interleave -- the normal case for two nginx instances logging
-// concurrently). A classic merge-sort-style merge (linear in the combined
-// length) is sufficient since each input is already individually sorted.
+// Merges two per-source log-entry lists (each already in file order --
+// oldest first, per parse_log_tail's own documented contract) into one
+// combined list ordered oldest-first by real timestamp, rather than
+// naively concatenating one source's entire block before the other's (a
+// plain `.chain(...)` silently misorders the result whenever the two
+// sources' time ranges interleave -- the normal case for two nginx
+// instances logging concurrently). A classic merge-sort-style merge
+// (linear in the combined length) is sufficient since each input is
+// already individually sorted.
 // An entry whose $time_local fails to parse is treated as timestamp 0
 // (sorts first) -- parse_log_line only ever produces entries via
 // log_regex's own capture group, so a genuinely unparseable timestamp here
@@ -819,10 +817,9 @@ mod tests {
         fs::remove_file(path).expect("remove temp log");
     }
 
-    // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): locks the exact
-    // conversion for a real nginx $time_local sample, including the UTC
-    // offset arithmetic (the value nginx would emit for a proxy configured
-    // with TZ=Europe/Berlin in August, UTC+2).
+    // Locks the exact conversion for a real nginx $time_local sample,
+    // including the UTC offset arithmetic (the value nginx would emit for
+    // a proxy configured with TZ=Europe/Berlin in August, UTC+2).
     #[test]
     fn parse_nginx_time_local_converts_a_real_sample_correctly() {
         // 2026-08-10T13:55:36+02:00 == 2026-08-10T11:55:36Z.
@@ -859,15 +856,17 @@ mod tests {
         assert_eq!(parse_nginx_time_local("10/Aug/2026:13:55:36 +2"), None);
     }
 
-    // Regression test: the sign check used to be a bare `&offset[0..1]`
-    // byte-slice, which panics (not just returns `None`) if the offset's
+    // Regression test for a char-boundary panic risk: a bare `&offset[0..1]`
+    // byte-slice would panic (not just return `None`) if the offset's
     // first character is multi-byte UTF-8, since `offset.len() != 5` only
     // guards byte length, not char boundaries. "é020" is exactly 5 bytes
-    // ('é' encodes to 2 bytes, followed by 3 ASCII digits), so the old
-    // length guard would have let this reach the panicking slice at byte
-    // index 1, which falls inside 'é''s 2-byte encoding. No real nginx log
-    // ever produces a non-ASCII offset, but this parser must not be able
-    // to crash the process on any input shape, only ever return `None`.
+    // ('é' encodes to 2 bytes, followed by 3 ASCII digits), so a
+    // byte-length-only guard lets this reach a panicking slice at byte
+    // index 1, which falls inside 'é''s 2-byte encoding -- exactly the
+    // trap `offset.get(0..1)?`-style bounds-checked access avoids. No real
+    // nginx log ever produces a non-ASCII offset, but this parser must not
+    // be able to crash the process on any input shape, only ever return
+    // `None`.
     #[test]
     fn parse_nginx_time_local_rejects_multibyte_offset_without_panicking() {
         assert_eq!(
@@ -876,10 +875,9 @@ mod tests {
         );
     }
 
-    // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
-    // fix this test locks in. Two interleaved sources must come out
-    // genuinely merged by timestamp, not as two contiguous blocks -- the
-    // exact failure shape `standard_logs.into_iter().chain(ssl_logs)` had.
+    // Two interleaved sources must come out genuinely merged by timestamp,
+    // not as two contiguous blocks -- the exact failure shape a plain
+    // `standard_logs.into_iter().chain(ssl_logs)` produces.
     #[test]
     fn merge_log_entries_chronologically_interleaves_by_real_timestamp() {
         fn entry(time: &str, host: &str) -> LogEntry {

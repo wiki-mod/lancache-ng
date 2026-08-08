@@ -39,18 +39,18 @@ fn watchdog_status_json(result: watchdog_status::WatchdogStatusReadResult) -> se
     }
 }
 
-// Finding #2 (docs/bug-hunt/ui-routes.md, issue #849): the actual decision
-// logic behind the dashboard's recent-activity widget, pulled out of the
-// `tokio::task::spawn_blocking` closure below so it has a unit test
-// independent of real log files. When standard_log and ssl_log differ (the
-// normal case for a real dual-mode deployment, not an edge case), the
-// caller used to read *only* ssl_log's tail -- every Standard-mode entry
-// was silently absent from this widget, with no indication anything was
-// being dropped. Merges both sources chronologically
+// The decision logic behind the dashboard's recent-activity widget, pulled
+// out of the `tokio::task::spawn_blocking` closure below so it has a unit
+// test independent of real log files. When standard_log and ssl_log
+// differ (the normal case for a real dual-mode deployment, not an edge
+// case), both sources must be fetched and merged -- reading only one
+// source's tail would leave every entry from the other mode silently
+// absent from this widget, with no indication anything was being dropped.
+// Merges both sources chronologically
 // (nginx_client::merge_log_entries_chronologically, the same helper
-// routes/logs.rs's own log-source merge uses for finding #5) and keeps only
-// the most recent `limit` entries overall, rather than one source's entire
-// block plus a truncated fragment of the other's.
+// routes/logs.rs's own log-source merge uses) and keeps only the most
+// recent `limit` entries overall, rather than one source's entire block
+// plus a truncated fragment of the other's.
 fn merge_recent_logs(
     standard_entries: Vec<nginx_client::LogEntry>,
     ssl_entries: Vec<nginx_client::LogEntry>,
@@ -319,13 +319,11 @@ mod tests {
         }
     }
 
-    // Finding #2 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
-    // this test locks in. When Standard and SSL entries interleave by real
-    // timestamp, the merged, limit-truncated result must contain entries
-    // from BOTH sources, not just SSL's -- the old bug silently dropped
-    // every Standard-mode entry whenever standard_log != ssl_log (the
-    // normal case), which this test would have caught immediately (the
-    // old code would only ever return ssl-tagged hosts here).
+    // When Standard and SSL entries interleave by real timestamp, the
+    // merged, limit-truncated result must contain entries from BOTH
+    // sources, not just SSL's -- a widget that reads only one source's
+    // tail whenever standard_log != ssl_log (the normal case) would only
+    // ever return ssl-tagged hosts here.
     #[test]
     fn merge_recent_logs_includes_both_sources_when_they_interleave() {
         let standard = vec![

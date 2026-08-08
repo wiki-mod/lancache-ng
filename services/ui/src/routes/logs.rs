@@ -118,9 +118,8 @@ pub async fn logs_page(
             entry.source = "SSL".to_string();
         }
 
-        // Finding #5 (docs/bug-hunt/ui-routes.md, issue #849): a plain
-        // `.chain()` put every Standard entry before every SSL entry (or
-        // vice versa, depending on iteration order) regardless of their
+        // A plain `.chain()` would put every Standard entry before every
+        // SSL entry (or vice versa, depending on iteration order) regardless of their
         // real timestamps -- after the `.reverse()` below, that means one
         // source's entire block always displayed before the other's,
         // rather than the two interleaving by actual recency. Both inputs
