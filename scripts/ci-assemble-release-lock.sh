@@ -3,10 +3,8 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Creates the release stack lock without rebuilding any accepted runtime image.
-# The only identity replaced is build-tools, which repository governance
-# requires to be freshly built from the release-tag source. The replacement is
-# an already assembled image-candidate-index/v1 record, so this operation only
-# combines recorded identities and never performs another image build.
+# The only identity replaced is build-tools, which is freshly built from the
+# release-tag source and already represented by an image-candidate-index record.
 set -euo pipefail
 
 [[ $# -eq 5 ]] || {
@@ -20,7 +18,6 @@ release_tag="$3"
 release_candidate_tag="$4"
 output="$5"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-# shellcheck source=scripts/lib/ci-artifact-identity.sh
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 
 ci_ai_validate_stack_lock "$accepted_lock"
@@ -44,6 +41,7 @@ ci_ai_require_sha "$source_sha"
 image="$(jq -r '.image' "$build_tools_index")"
 digest="$(jq -r '.digest' "$build_tools_index")"
 fingerprint="$(jq -r '.source_fingerprint' "$build_tools_index")"
+build_inputs="$(jq -cS '.build_inputs' "$build_tools_index")"
 amd64="$(jq -r '.platforms["linux/amd64"]' "$build_tools_index")"
 arm64="$(jq -r '.platforms["linux/arm64"]' "$build_tools_index")"
 candidate_ref="$(jq -r '.candidate_ref' "$build_tools_index")"
@@ -63,6 +61,7 @@ jq \
   --arg image "$image" \
   --arg artifact_source_sha "$source_sha" \
   --arg source_fingerprint "$fingerprint" \
+  --argjson build_inputs "$build_inputs" \
   --arg digest "$digest" \
   --arg candidate_ref "$candidate_ref" \
   --arg amd64 "$amd64" \
@@ -80,6 +79,7 @@ jq \
         image: $image,
         artifact_source_sha: $artifact_source_sha,
         source_fingerprint: $source_fingerprint,
+        build_inputs: $build_inputs,
         digest: $digest,
         candidate_ref: $candidate_ref,
         platforms: {
