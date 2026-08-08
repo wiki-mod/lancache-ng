@@ -51,6 +51,9 @@ if [[ "${1:-}" == compose ]]; then
   shift
   args=("$@")
   if [[ " ${args[*]} " == *" config --format json "* ]]; then
+    if [[ "${FAKE_CONFIG_FAILURE:-false}" == true ]]; then
+      exit 23
+    fi
     cat <<'JSON'
 {"services":{"proxy":{"image":"ghcr.io/wiki-mod/lancache-ng/proxy:candidate-v2-test"},"external":{"image":"busybox:latest"}}}
 JSON
@@ -110,6 +113,23 @@ SH
   [ -f "$OVERRIDE_COPY" ]
   run jq -e '.services.proxy.image == "ghcr.io/wiki-mod/lancache-ng/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$OVERRIDE_COPY"
   [ "$status" -eq 0 ]
+}
+
+@test "compose render failure preserves the real failing status" {
+  base="$BATS_TEST_TMPDIR/base-failure.yml"
+  printf 'services: {}\n' >"$base"
+
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    FAKE_CONFIG_FAILURE=true \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      compose -f "$base" pull
+
+  [ "$status" -eq 23 ]
 }
 
 @test "v2 caller passes the same stack-lock artifact into reusable simulations" {
