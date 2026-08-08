@@ -257,9 +257,10 @@ findings that overlap with it are still listed (for completeness) with a note.
     request's own mutation") -- so this is a known, accepted gap rather than an oversight, but it
     remains unfixed and operator-visible.
 
-13. **`normalize_lan_name` cannot produce the exact zone-apex name `"lan."` from the bare input
-    `"lan"` (no trailing dot) -- it mangles it into `"lan.lan."` instead.**
-    (`routes/domains.rs:771-780`)
+13. **~~`normalize_lan_name` cannot produce the exact zone-apex name `"lan."` from the bare input
+    `"lan"` (no trailing dot) -- it mangles it into `"lan.lan."` instead.~~ FIXED by #1470
+    (commit `b84d6ccb`).**
+    (`routes/domains.rs:771-780`, original code before the fix)
     ```rust
     fn normalize_lan_name(name: &str) -> String {
         let trimmed = name.trim().to_lowercase();
@@ -279,31 +280,62 @@ findings that overlap with it are still listed (for completeness) with a note.
     dot themselves (`"lan."`) to get the intended name; every existing unit test that exercises
     the apex (`validate_lan_record("lan.", ...)`) already passes the trailing dot in directly,
     so this normalization edge case has no test coverage either way.
+    **Fix**: `normalize_lan_name` now checks `trimmed == "lan"` explicitly alongside the
+    `.lan`-suffix case, so the bare zone-root label correctly normalizes to `"lan."`. Regression
+    test: `normalize_lan_name_handles_the_bare_zone_root`.
 
-14. **`MAX_TTL` is `u32::MAX` (4294967295), which exceeds PowerDNS/RFC 2181's signed-32-bit TTL
-    range (0..=2147483647).** (`routes/domains.rs:357-358`, used by `validate_lan_record` at
-    line 469) A TTL value between `2147483648` and `4294967295` passes this route's own
-    validation and gets published to NATS/`nats-subscriber`, which then presumably forwards it
-    to PowerDNS's API -- whether PowerDNS accepts, silently truncates/wraps, or rejects such a
-    value was not traced further in this file (out of this file's own code), but the UI-level
-    validation itself allows a value the DNS protocol/PowerDNS doesn't support, pushing a
-    possible failure downstream into the same fire-and-log NATS publish path already flagged as
-    silent (`add_lan_record`, line ~188-197) -- i.e. this could compound into a record silently
-    never actually being written with the TTL the operator entered.
+14. **~~`MAX_TTL` is `u32::MAX` (4294967295), which exceeds PowerDNS/RFC 2181's signed-32-bit TTL
+    range (0..=2147483647).~~ FIXED by #1470 (commit `b84d6ccb`).** (`routes/domains.rs:357-358`,
+    original code before the fix, used by `validate_lan_record` at line 469) A TTL value between
+    `2147483648` and `4294967295` passes this route's own validation and gets published to
+    NATS/`nats-subscriber`, which then presumably forwards it to PowerDNS's API -- whether
+    PowerDNS accepts, silently truncates/wraps, or rejects such a value was not traced further in
+    this file (out of this file's own code), but the UI-level validation itself allows a value the
+    DNS protocol/PowerDNS doesn't support, pushing a possible failure downstream into the same
+    fire-and-log NATS publish path already flagged as silent (`add_lan_record`, line ~188-197) --
+    i.e. this could compound into a record silently never actually being written with the TTL the
+    operator entered.
+    **Fix**: `MAX_TTL` corrected to `2_147_483_647`, matching RFC 2181 SS8's actual ceiling (a
+    value with the sign bit set is specified to be reinterpreted as 0 by a compliant resolver, not
+    accepted as a real TTL). Regression test: `ttl_upper_bound_matches_rfc_2181_not_u32_max`.
+    Follow-up: `templates/domains.html`'s TTL field had no matching `max` attribute, so the browser
+    still accepted a value above the new server-side ceiling and `add_lan_record` silently redirected
+    back to `/domains` with no visible error once the server rejected it. Fixed: added
+    `max="2147483647"` plus a visible client-side validation message.
 
-15. `is_valid_txt_content` (`routes/domains.rs:442-446`) has no upper length bound on TXT record
-    content -- only rejects empty and control characters. Combined with `LanRecordForm` having
-    no visible request body size cap traced in this file, an operator (or, since this route
-    requires authentication+CSRF, at least an authenticated session) could submit an arbitrarily
-    large TXT value that this route accepts and forwards via NATS before any PowerDNS-side limit
-    is hit. Low severity given the route requires an authenticated admin session already.
+15. **~~`is_valid_txt_content` (`routes/domains.rs:442-446`) has no upper length bound on TXT
+    record content -- only rejects empty and control characters.~~ FIXED by #1470 (commit
+    `b84d6ccb`).** Combined with `LanRecordForm` having no visible request body size cap traced in
+    this file, an operator (or, since this route requires authentication+CSRF, at least an
+    authenticated session) could submit an arbitrarily large TXT value that this route accepts and
+    forwards via NATS before any PowerDNS-side limit is hit. Low severity given the route requires
+    an authenticated admin session already.
+    **Fix**: added `MAX_TXT_CONTENT_BYTES = 64_986` (RFC 1035 SS4.2.2's 65535-byte DNS message
+    ceiling -- not RDLENGTH alone -- adjusted for both the per-255-byte-chunk length-prefix
+    overhead PowerDNS's own documented TXT auto-chunking adds on the wire, and the surrounding DNS
+    header/question/answer-frame bytes and the mandatory option-free EDNS response OPT record that
+    must also fit in the same message; see that constant's own header comment for the exact
+    arithmetic). The form applies the same UTF-8 byte-aware ceiling through browser custom validity;
+    HTML `maxlength` is unsuitable because it counts UTF-16 code units instead. Regression test:
+    `txt_content_upper_bound_matches_message_ceiling`.
 
-16. `fetch_lan_records` (`routes/domains.rs:741-769`) doesn't check `resp.status().is_success()`
-    before calling `.json()`, unlike `flush_recursor_cache` in the same file which does check
-    success. A non-2xx response from PowerDNS Authoritative still gets parsed as JSON; if it
-    happens to be a JSON error body without an `rrsets` key the function correctly falls back to
-    `vec![]`, so this is not currently a crash/panic risk, just an inconsistency with the
-    success-checking pattern used elsewhere in the same file.
+16. **~~`fetch_lan_records` (`routes/domains.rs:741-769`) doesn't check
+    `resp.status().is_success()` before calling `.json()`, unlike `flush_recursor_cache` in the
+    same file which does check success.~~ FIXED by #1470 (commit `b84d6ccb`).** A non-2xx response
+    from PowerDNS Authoritative still gets parsed as JSON; if it happens to be a JSON error body
+    without an `rrsets` key the function correctly falls back to `vec![]`, so this is not
+    currently a crash/panic risk, just an inconsistency with the success-checking pattern used
+    elsewhere in the same file.
+    **Fix**: the response-interpretation logic was extracted into a pure `parse_lan_records_response`
+    helper that checks `status.is_success()` before ever looking at the body, and logs on both a
+    non-success status and a body-parse failure so a real PowerDNS failure is now distinguishable
+    from a genuinely empty zone. `fetch_lan_records` itself also checks the status before awaiting
+    `resp.json()` (not just inside the helper), so a slow/non-terminating non-2xx response no
+    longer blocks on reading a body the outcome never depended on. Regression tests:
+    `parse_lan_records_response_rejects_non_success_status_regardless_of_body`,
+    `parse_lan_records_response_returns_empty_for_a_real_empty_zone`,
+    `parse_lan_records_response_parses_real_rrsets_on_success`,
+    `parse_lan_records_response_returns_empty_on_body_parse_error`.
 
 ---
 
@@ -476,4 +508,3 @@ This document is the raw, unfiltered output of the collection phase for issue #8
 no self-verification during collection, per the maintainer-agreed methodology for this sweep).
 Severity judgments in the accompanying tool-call findings are the collecting agent's own
 first-pass estimate, not a verified ranking -- verification is a separate, later phase.
-
