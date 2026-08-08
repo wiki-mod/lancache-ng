@@ -182,7 +182,9 @@ ci_lock_run_compose() {
     # itself overwrite the status we are trying to preserve. A failed override
     # render removes the temporary file before returning, while all later paths
     # remove it after the real Compose call and identity assertion.
-    if ! ci_lock_compose_override "$override" "${globals[@]}"; then
+    if ci_lock_compose_override "$override" "${globals[@]}"; then
+        :
+    else
         status=$?
         rm -f "$override"
         return "$status"
@@ -194,7 +196,9 @@ ci_lock_run_compose() {
         status=$?
     fi
     if (( status == 0 )) && [[ "${compose_command[0]}" == up ]]; then
-        if ! ci_lock_assert_compose_runtime "$override" "${globals[@]}"; then
+        if ci_lock_assert_compose_runtime "$override" "${globals[@]}"; then
+            :
+        else
             status=$?
         fi
     fi
