@@ -86,11 +86,11 @@ ci_ai_validate_stack_lock() {
 }
 
 # Structural acceptance schema. A release pointer and a reusable branch
-# acceptance share the same gate set, but they do not share the same trust
-# policy. In particular, only candidate acceptances from protected product
-# branches may be reused/promoted as a baseline. Keep that stronger rule in
-# ci_ai_validate_reusable_acceptance rather than making release records pretend
-# they were signed from a branch ref they did not use.
+# acceptance share the same base gate set, but they do not share the same
+# trust policy. In particular, only candidate acceptances from protected
+# product branches may be reused/promoted as a baseline. Keep that stronger
+# rule in ci_ai_validate_reusable_acceptance rather than making release
+# records pretend they were signed from a product branch ref.
 ci_ai_validate_acceptance() {
     local file="$1"
     jq -e '
@@ -122,6 +122,25 @@ ci_ai_validate_reusable_acceptance() {
       .source_ref == "refs/heads/current_dev"
       or .source_ref == "refs/heads/master"
     ' "$file" >/dev/null || ci_ai_fail "acceptance is not reusable from a protected product branch: $file"
+}
+
+# A release acceptance inherits the already-proven runtime gates only because
+# the runtime digests are copied unchanged from the accepted stack. It has an
+# additional producer boundary for the governance-required release build-tools
+# artifact, so its record must explicitly prove that fresh tooling build and
+# the release-wide exact-digest evidence. This record is never a candidate
+# reuse credential.
+ci_ai_validate_release_acceptance() {
+    local file="$1"
+    ci_ai_validate_acceptance "$file" || return 1
+    jq -e '
+      (.release_tag | type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$"))
+      and .source_ref == ("refs/tags/" + .release_tag)
+      and .gates.accepted_runtime_identity_preserved == true
+      and .gates.release_build_tools_built == true
+      and .gates.release_build_tools_provenance == true
+      and .gates.release_exact_digest_evidence == true
+    ' "$file" >/dev/null || ci_ai_fail "invalid release acceptance record: $file"
 }
 
 # Registry identity reads are correctness-critical and are inherently network
