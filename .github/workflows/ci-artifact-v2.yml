@@ -3,9 +3,15 @@
 #
 # Opt-in v2 candidate pipeline. It runs beside build-push.yml while the
 # matching-numbers architecture is validated. It never moves nightly/latest
-# or release tags. A PR can opt in by adding the ci-v2-test label, which is
-# necessary because GitHub only exposes workflow_dispatch for workflow files
-# already present on the default branch.
+# or release tags. A same-repository PR can opt in through the temporary
+# ci-v2-test label so the candidate lifecycle can be exercised before this
+# workflow exists on the default branch.
+#
+# IMPORTANT TRUST BOUNDARY: PR runs may build, scan and deeply validate
+# quarantine candidates, but they can never publish a reusable ACCEPTED stack
+# pointer. Final reusable acceptance is restricted to an explicitly dispatched
+# run on a protected current_dev/master branch. The signed acceptance predicate
+# records that exact protected source ref and commit, and reuse verifies both.
 name: CI Artifact Identity v2
 
 on:
@@ -36,7 +42,11 @@ jobs:
     name: plan immutable image candidates
     if: >-
       github.event_name == 'workflow_dispatch' ||
-      contains(github.event.pull_request.labels.*.name, 'ci-v2-test')
+      (
+        github.event_name == 'pull_request' &&
+        github.event.pull_request.head.repo.full_name == github.repository &&
+        contains(github.event.pull_request.labels.*.name, 'ci-v2-test')
+      )
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     outputs:
@@ -95,7 +105,7 @@ jobs:
             rm -f "$RUNNER_TEMP/baseline-stack-lock.json"
           fi
 
-      - name: Validate v2 scripts and create plan inside immutable build-tools
+      - name: Validate v2 scripts/workflows and create plan inside immutable build-tools
         id: plan
         run: |
           set -euo pipefail
@@ -117,6 +127,12 @@ jobs:
               set -euo pipefail
               bash -n scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh
               shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh
+              actionlint \
+                .github/workflows/ci-artifact-v2.yml \
+                .github/workflows/ci-promote-accepted-v2.yml \
+                .github/workflows/ci-security-refresh-v2.yml \
+                .github/workflows/ci-release-accepted-v2.yml
+              bash scripts/check-workflow-line-limit.sh
               bats tests/bats/ci_artifact_identity.bats
               bash scripts/query-stack-images.sh all >/tmp/out/catalog.json
               bash scripts/ci-plan-run.sh >/tmp/out/plan.json
@@ -240,7 +256,8 @@ jobs:
           mkdir -p candidate-record
           bash scripts/ci-write-candidate-record.sh \
             "${{ matrix.scope }}" "${{ matrix.service }}" "${{ matrix.image }}" "$GITHUB_SHA" \
-            "${{ matrix.artifact_source_sha }}" "${{ matrix.platform }}" "$digest" "$mode" \
+            "${{ matrix.artifact_source_sha }}" "${{ matrix.source_fingerprint }}" \
+            "${{ matrix.platform }}" "$digest" "$mode" \
             "candidate-record/${{ matrix.service }}__${{ matrix.arch }}.json"
 
       - name: Remove persistent amd64 Buildx builder
@@ -543,8 +560,8 @@ jobs:
       build_tools_touched: "true"
     secrets: inherit
 
-  accept:
-    name: final candidate acceptance
+  pr-validation-proof:
+    name: record non-promotable PR validation proof
     needs:
       - plan
       - stack-lock
@@ -554,6 +571,70 @@ jobs:
       - supplemental-full-setup
     if: >-
       always() &&
+      github.event_name == 'pull_request' &&
+      needs.plan.outputs.supplemental == 'true' &&
+      needs['stack-lock'].result == 'success' &&
+      needs['exact-locked-stack'].result == 'success' &&
+      needs['runtime-deep-ntp'].result == 'success' &&
+      needs['runtime-deep-quickstart'].result == 'success' &&
+      needs['supplemental-full-setup'].result == 'success'
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stack-lock
+          path: stack-lock
+      - name: Write explicitly non-promotable PR proof
+        run: |
+          set -euo pipefail
+          mkdir -p validation-proof
+          lock_hash="$(sha256sum stack-lock/stack-lock.json | awk '{print $1}')"
+          jq -n \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg source_ref "$GITHUB_REF" \
+            --arg lock_hash "$lock_hash" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg observed_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schema:"candidate-validation/v1",
+              accepted:false,
+              promotion_eligible:false,
+              source_sha:$source_sha,
+              source_ref:$source_ref,
+              stack_lock_sha256:$lock_hash,
+              run_url:$run_url,
+              observed_at:$observed_at,
+              gates:{
+                exact_digest_security:true,
+                native_platform_smoke:true,
+                exact_locked_stack:true,
+                runtime_deep_validation:true,
+                supplemental_full_setup:true
+              }
+            }' > validation-proof/pr-validation.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-v2-pr-validation-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: validation-proof/pr-validation.json
+          retention-days: 30
+
+  accept:
+    name: final protected-branch candidate acceptance
+    needs:
+      - plan
+      - stack-lock
+      - exact-locked-stack
+      - runtime-deep-ntp
+      - runtime-deep-quickstart
+      - supplemental-full-setup
+    if: >-
+      always() &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref_protected == true &&
+      (github.ref == 'refs/heads/current_dev' || github.ref == 'refs/heads/master') &&
       needs.plan.outputs.supplemental == 'true' &&
       needs['stack-lock'].result == 'success' &&
       needs['exact-locked-stack'].result == 'success' &&
@@ -607,13 +688,14 @@ jobs:
       - name: Re-resolve every candidate tag before acceptance
         run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
 
-      - name: Write final acceptance record
+      - name: Write final protected-branch acceptance record
         run: |
           set -euo pipefail
           lock_hash="$(sha256sum stack-lock/stack-lock.json | awk '{print $1}')"
           accepted_tag="accepted-v2-${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           jq -n \
             --arg source_sha "$GITHUB_SHA" \
+            --arg source_ref "$GITHUB_REF" \
             --arg lock_hash "$lock_hash" \
             --arg accepted_tag "$accepted_tag" \
             --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
@@ -622,6 +704,7 @@ jobs:
               schema:"stack-acceptance/v1",
               accepted:true,
               source_sha:$source_sha,
+              source_ref:$source_ref,
               stack_lock_sha256:$lock_hash,
               accepted_tag:$accepted_tag,
               run_url:$run_url,
