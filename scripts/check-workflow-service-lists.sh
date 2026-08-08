@@ -31,10 +31,16 @@
 # This same #822 recurrence shape was found again, beyond build-push.yml's 4
 # internal copies (issue #935's original scope), in 3 more real files that
 # duplicate the same service list with no sync mechanism:
-#   - .github/workflows/gc-pr-staging-images.yml: a `services=(...)` copy
-#     that must equal the full canonical set (its own comment: "Every
-#     service build-push.yml's build/build-arm64 jobs can push a PR staging
-#     tag for").
+#   - scripts/gc-pr-staging-images.sh: a `services=(...)` copy that must
+#     equal the full canonical set (its own comment: "Every service
+#     build-push.yml's build/build-arm64 jobs can push a PR staging tag
+#     for"). Until #1095 (2026-08-06) this array lived inline in
+#     .github/workflows/gc-pr-staging-images.yml's own `run:` block, which is
+#     why this guard originally pointed at the workflow file; the reap/
+#     orphan-classification logic (array included) moved into this
+#     standalone, bats-testable script, and this guard's target moved with
+#     it. gc-pr-staging-images.yml itself no longer declares any
+#     services=(...) array at all -- it only checks out and runs the script.
 #   - .github/workflows/backfill-stack-latest.yml: a `services=(...)` copy
 #     that is a deliberate, documented SUBSET excluding build-tools (its own
 #     comment: "Product stack latest backfill intentionally excludes
@@ -78,7 +84,7 @@ else
     cd "$repo_root"
     workflow=".github/workflows/build-push.yml"
     extra_files=(
-        ".github/workflows/gc-pr-staging-images.yml"
+        "scripts/gc-pr-staging-images.sh"
         ".github/workflows/backfill-stack-latest.yml"
         "scripts/ensure-pr-staging-images.sh"
     )
@@ -143,7 +149,7 @@ canonical_minus() {
 # Files where a `services=(...)` array is a deliberate, documented SUBSET of
 # the canonical set rather than the full build matrix -- unlike every
 # `services=(...)` copy inside build-push.yml itself (and inside
-# gc-pr-staging-images.yml), which must always equal the full set. Keyed by
+# scripts/gc-pr-staging-images.sh), which must always equal the full set. Keyed by
 # basename so this stays readable regardless of a file's full path. The value
 # is the EXACT, documented exclusion set (newline-separated), not just a
 # boolean flag: checking only "no phantom members" would accept a real
@@ -162,7 +168,7 @@ declare -A SUBSET_SERVICES_FILES=(
 # SUBSET_SERVICES_FILES above. $2 ("required" or "optional") controls whether
 # finding zero arrays in this file is itself a failure: "required" for files
 # where a `services=(...)` array is known to always exist (build-push.yml,
-# gc-pr-staging-images.yml, backfill-stack-latest.yml) so a rename/refactor
+# scripts/gc-pr-staging-images.sh, backfill-stack-latest.yml) so a rename/refactor
 # that silently removes it is caught; "optional" for files that legitimately
 # never declare one (e.g. ensure-pr-staging-images.sh only has
 # full_setup_services=(...), checked separately below).
@@ -313,7 +319,7 @@ check_full_setup_arrays() {
 # under-requiring (silently accepting the array vanishing from a file that
 # should always have it).
 declare -A REQUIRES_SERVICES_ARRAY=(
-    ["gc-pr-staging-images.yml"]=1
+    ["gc-pr-staging-images.sh"]=1
     ["backfill-stack-latest.yml"]=1
 )
 declare -A REQUIRES_FULL_SETUP_ARRAY=(

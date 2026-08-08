@@ -59,10 +59,13 @@ teardown() {
 
 # ── logbundle_secret_env_keys ─────────────────────────────────────────────────
 
-@test "logbundle_secret_env_keys lists the ten keys this script generates/manages" {
+@test "logbundle_secret_env_keys lists the eleven keys this script generates/manages" {
     run logbundle_secret_env_keys
     [ "$status" -eq 0 ]
-    expected=$(printf '%s\n' KEA_CTRL_TOKEN DDNS_TSIG_KEY PDNS_API_KEY \
+    # Bug hunt #849, observability.md finding #3: NETDATA_ALARM_TOKEN joined
+    # this list once setup.sh started generating/managing it (gating POST
+    # /api/netdata-alarms), the same way PDNS_API_KEY already does.
+    expected=$(printf '%s\n' KEA_CTRL_TOKEN DDNS_TSIG_KEY PDNS_API_KEY NETDATA_ALARM_TOKEN \
         NATS_UI_PASSWORD NATS_DNS_WRITER_PASSWORD NATS_DNS_REPLICA_PASSWORD \
         NATS_CALLOUT_PASSWORD NATS_SYS_PASSWORD SECONDARY_REGISTRATION_TOKEN UI_AUTH_PASSWORD)
     [ "$(echo "$output" | sort)" = "$(echo "$expected" | sort)" ]

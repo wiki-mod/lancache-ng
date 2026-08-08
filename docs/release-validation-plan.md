@@ -826,11 +826,12 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   superseded commit than the workflow run's own reported head; remediated only by
   forcing a fresh, uncontested re-run, not by a code-level guard.
 - **C-7 / container-scan vs. published-digest scan mismatch** (issue #1348,
-  consolidated into #1095, **known accepted limitation** — see Coverage Assessment
-  below) — `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
-  actually-pushed image are two independent `docker buildx build` invocations that
-  never produce matching digests, even for byte-identical inputs, because each
-  build stamps its own fresh `created` timestamp into the image config.
+  consolidated into #1095, **fixed** — see Coverage Assessment below) —
+  `container-scan`'s throwaway pre-build image and `build`/`build-arm64`'s
+  actually-pushed image used to be two independent `docker buildx build`
+  invocations that never produced matching digests; `container-scan`'s redundant
+  rebuild-and-scan branch was removed, leaving `build`/`build-arm64`'s own
+  pushed-digest scan as the sole, matching-numbers-correct vulnerability gate.
 - **`build-push.yml` self-modification trigger bug** (PR #1367 POC, **open, not yet
   resolved** — see Coverage Assessment below) — a PR that itself modifies
   `build-push.yml` may not reliably receive a `pull_request`-triggered run of the
@@ -875,6 +876,52 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `AG-VAL-030`, since claimed by an unrelated rule; landed as `AG-VAL-032` via
   issue #1377, which also fixed the repo-wide instances and widened this
   script's scope -- see the Standing check row above).
+
+### Additions dated 2026-08-07 (real incident since the 2026-08-01 survey above)
+
+- **`gc-pr-staging-images.yml` narrow-checkout runner corruption** (issue #1095,
+  fixed) — `actions/checkout@v7.0.1`'s `sparseCheckoutNonConeMode()` (selected by
+  this workflow's `sparse-checkout-cone-mode: false`) sets `core.sparseCheckout`
+  via `git config` but writes the narrow path patterns by appending directly to
+  `.git/info/sparse-checkout`, never through the `git sparse-checkout set`
+  porcelain command. Reproduced repeatedly, live, on a self-hosted runner host
+  (git 2.47.3, `.240`), both against a real shallow clone of this repository and
+  throwaway synthetic repositories of varying size: a sparse-checkout state set
+  up that way does not reliably clear on a later job's plain `git
+  sparse-checkout disable`, nor on `git sparse-checkout init` immediately
+  followed by `disable` — both report success, but across repeated runs the
+  actual outcome varied between full recovery and index skip-worktree bits
+  staying set on every path outside the narrow set; the exact trigger for the
+  variation was not isolated. Self-hosted runners reuse one working directory
+  across unrelated jobs/workflows, and no other workflow in this repo passes a
+  sparse-checkout input at all, so whatever state a `gc-pr-staging-images.yml`
+  run leaves behind is inherited by the next job scheduled onto the same
+  runner instance — traced via one such runner's own `_diag` worker logs (a
+  "reap closed-PR staging tags and orphaned versions" run, followed without an
+  intervening second reap run by a `build-push.yml` job that failed) to real
+  "No such file or directory" / "Can't find 'action.yml'" failures observed
+  across several unrelated `build-push.yml` jobs, on multiple runner hosts, on
+  2026-08-07. Because `disable`'s own exit code proved unreliable as a success
+  signal, the fix does not trust it: after the reap script runs, it sweeps any
+  remaining index skip-worktree bits directly via `git update-index
+  --no-skip-worktree` and asserts (failing the job loudly) that none remain,
+  rather than assuming the restore worked. The count itself is computed with
+  `awk` rather than `grep -c`, and only after capturing `git ls-files -v`'s
+  output into a variable first — a real git failure at that point must trip
+  `set -e` immediately via the plain assignment, and the count must never end
+  up empty (an empty `[ "$x" -ne 0 ]` comparison is a runtime error, not a
+  `set -e`-fatal one, inside an `if` condition, so it would otherwise silently
+  skip the check instead of failing it); confirmed with a real run against a
+  non-git directory that the step now exits non-zero rather than silently
+  succeeding. New standing check:
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
+  the fix including the always-reproducible case of a skip-worktree bit that
+  `disable` alone does not clear, and the fail-closed behavior itself, against
+  a throwaway local git repository — no network or real clone needed. A
+  durable guard against a *future* self-hosted workflow reintroducing a narrow
+  `sparse-checkout` input without a matching restore step does not exist yet;
+  recorded as an open gap in Coverage Assessment below.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 
@@ -923,9 +970,26 @@ explicit pass:**
   a known, open, non-blocking bug that produces a false-negative warning log on a
   slow-to-stop container — validators must know to cross-check `StartedAt` rather
   than trusting the warning literally.
-- **Netdata-alarm → Admin UI notification integration** remains entirely unbuilt (PR
-  #1165 explicitly marks this half of the original dashboard vision as still open,
-  `docs/bug-hunt/observability.md` finding #3 "PARTIALLY FIXED").
+- **Netdata-alarm → Admin UI notification integration** (`docs/bug-hunt/
+  observability.md` finding #3, PR #1165's remaining open half) has been built:
+  the `netdata` container's `custom_sender()` integration
+  (`deploy/*/docker-compose.yml`'s `netdata:` service, all three real profiles)
+  POSTs each Netdata health.d alarm event to the Admin UI's new
+  `POST /api/netdata-alarms` (`services/ui/src/routes/netdata_alarms.rs`,
+  `services/ui/src/netdata_alarms.rs`), gated by a shared `NETDATA_ALARM_TOKEN`
+  (issue #858 pattern) and rendered on the dashboard's new "Netdata alarms"
+  card. Durable coverage added: `docker compose -f <file> config --quiet` for
+  all three deployment profiles (catching a real Compose `$`-interpolation
+  parse bug during this work, not merely asserted clean), plus unit tests for
+  the storage module's bounded history, idempotent-append-on-duplicate-
+  `unique_id`, and malformed/missing-file tolerance, and for the ingest route's
+  fail-closed constant-time token check. **Still unproven**: whether
+  `SEND_CUSTOM="YES"`/`DEFAULT_RECIPIENT_CUSTOM="lancache-ui"` alone actually
+  cause Netdata's real `custom_sender()` to fire for a genuine alarm depends on
+  Netdata's own per-role recipient resolution, which this pass could not
+  exercise end-to-end — the wiring is written to Netdata's documented
+  `health_alarm_notify.conf` contract, but a live `alarm-notify.sh ... test`
+  run against a real deployed stack is the still-needed follow-up proof.
 - **The DNS reset-to-known-good E2E** (PR #1152) has only ever been run with two
   environment deviations in place (a locally built image, a patched healthcheck probe
   domain) due to the since-fixed #1150 bug — the *unmodified* real CI path for this
@@ -992,25 +1056,35 @@ explicit pass:**
   explicit decision to split this into a separate live-stack milestone rather than
   compress it into this pass.
 
+- **AG-VAL-034's GNU/BusyBox construct audit for Alpine-migrated services has no
+  standing mechanical check yet, despite recurring four times** (`services/watchdog`
+  #1346, `services/dhcp`/`dhcp-proxy` #1347, `services/dns` #1425, `services/proxy`
+  issue #815/this migration pass) — each occurrence was caught only by a human/agent
+  reading the entrypoint script line-by-line and cross-checking against a real
+  `alpine:3.24` container, exactly the standing-check gap `AG-VAL-029` exists to close.
+  `AG-VAL-034`'s own rule text already names the missing piece: "a mechanical guard
+  for `services/*/entrypoint.sh` against an Alpine final stage is proposed future
+  work, not yet built." Recorded here rather than silently deferred a fifth time: a
+  low-false-positive version would grep each Alpine-based service's `entrypoint.sh`
+  for the confirmed-recurring pattern shapes (`find[^|]*-printf`, `date[^|]*%N`,
+  `grep[^|]*-[a-zA-Z]*P\b`) and assert the corresponding fix package
+  (`findutils`/`coreutils`/`grep`) is present in that service's `Dockerfile` — the
+  same shape as `scripts/check-pipefail-early-exit-grep.sh`'s existing pattern/fix-package
+  cross-check. Not built in this pass; a future PR should add it as its own standing
+  check rather than relying on the fifth migration's agent to re-derive this list from
+  scratch again.
+
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
 omitted):**
 
-- **C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
-  never share a digest** (issue #1348, consolidated into #1095, see
-  `build-push.yml`'s own comment at the `container-scan` job header, roughly lines
-  5003-5011) — both are independent `docker buildx build` invocations of the same
-  Dockerfile/commit; a fresh build stamps a new `created` timestamp into the image
-  config every time, so the two builds' digests never match even given
-  byte-identical inputs. **This is not currently a correctness/provenance gap**: the
-  "Scan pushed service digest with Trivy" step (`build-push.yml`'s `build` and
-  `build-arm64` jobs, per issue #1095 Step 3) already scans the exact digest that
-  gets pushed for all 8 services, not just `build-tools` as before — so the
-  security-relevant claim ("the scanned image is the shipped image") is verified
-  independently of `container-scan`'s throwaway build. What remains unfixed is a
-  **cost/redundancy** problem only: every changed service's Dockerfile gets built
-  twice per run (once to scan, once to push), tracked under the larger #1095
-  CI-pipeline rework, not expected to be resolved by a small, targeted fix.
+- ~~C-7: `container-scan`'s throwaway image and `build`/`build-arm64`'s pushed image
+  never share a digest~~ — **fixed** (issue #1348/#1095's G8 finding; no longer an
+  accepted limitation, see the 2026-08-01 entry above and `container-scan`'s own
+  job-header comment in `build-push.yml`). `container-scan`'s redundant
+  rebuild-and-scan branch for a changed service was removed entirely;
+  `build`/`build-arm64`'s existing "Scan pushed service digest with Trivy" step is
+  now the sole vulnerability scan, and it always scans the exact pushed digest.
 - **`build-push.yml` self-modification trigger bug** (open, unresolved as of
   2026-08-01; maintainer's own POC is PR #1367, `Refs #1095`, `Refs #1356`) — a PR
   that itself modifies `build-push.yml` does not reliably receive a real
@@ -1058,6 +1132,40 @@ omitted):**
   permanently-running script either). The depth-2 real-backend-certificate
   assertion that remains in the committed script carries the ongoing regression
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
+- **No repo-wide guard against a future workflow reintroducing an unrestored
+  narrow `sparse-checkout` on a self-hosted job** (2026-08-07, issue #1095) —
+  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
+  specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
+  this repo that currently sets a `sparse-checkout` input), but nothing checks
+  the repo's workflow files themselves for a *new* `sparse-checkout` input added
+  to some other self-hosted job without an equivalent restore step. A grep-based
+  guard (flag any `sparse-checkout:` input in `.github/workflows/**` whose job
+  does not also contain a matching config-unset/pattern-file-removal step) is
+  plausible but not yet built — this is a real, currently-open gap, not a
+  silently-assumed-covered case.
+- **Recorded exception (2026-08-08, Rule-Ref: AG-CC-004): third-party
+  automated-reviewer output language cannot be checked by a durable, repeatable
+  CI test.**
+  - **Scope**: Rule-Ref: AG-CC-004's requirement that a third-party automated tool's
+    GitHub-bound output (e.g. Codex's PR review comments) be English.
+  - **Reason**: checking this mechanically would require either scripting a
+    real trigger of that external tool's review inside CI (not something this
+    repository controls or can invoke on demand) or scraping its
+    already-posted comments after the fact on a schedule with no fixed timing
+    guarantee — neither is a genuine standing check in the sense this
+    document's other entries mean.
+  - **Tracking**: `AGENTS.md`'s Rule-Ref: AG-CC-004 rule text and its Rule Enforcement
+    Matrix entry; issue #1507 (the language-rules rework this exception was
+    recorded alongside).
+  - **Validation**: manual-review-only — spot-check an automated reviewer's
+    GitHub-bound output language against Rule-Ref: AG-GH-001 whenever a review is
+    observed; no automated pass/fail signal exists for this today.
+  - **Non-Expansion**: this exception covers only automated-reviewer output
+    language checking. It does not extend to any other AG-CC-*/AG-GH-*
+    requirement, and does not exempt a human contributor's or an agent's own
+    GitHub-bound output from Rule-Ref: AG-GH-001 in any way. Revisit if this tool (or
+    a future one) ever exposes an on-demand, scriptable review trigger that
+    would make a real CI check practical.
 
 ---
 
