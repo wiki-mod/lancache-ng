@@ -35,6 +35,17 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "source fingerprint is stable and digest-shaped for the same commit" {
+  sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  run bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" proxy "$sha"
+  [ "$status" -eq 0 ]
+  first="$output"
+  [[ "$first" =~ ^sha256:[0-9a-f]{64}$ ]]
+  run bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" proxy "$sha"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$first" ]
+}
+
 @test "stack lock validator rejects a tag in place of a digest" {
   source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
   lock="$BATS_TEST_TMPDIR/lock.json"
@@ -47,7 +58,34 @@ setup() {
     "proxy":{
       "image":"ghcr.io/wiki-mod/lancache-ng/proxy",
       "artifact_source_sha":"1111111111111111111111111111111111111111",
+      "source_fingerprint":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
       "digest":"latest",
+      "platforms":{
+        "linux/amd64":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "linux/arm64":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      }
+    }
+  },
+  "tooling":{}
+}
+JSON
+  run ci_ai_validate_stack_lock "$lock"
+  [ "$status" -ne 0 ]
+}
+
+@test "stack lock validator rejects missing source fingerprint" {
+  source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
+  lock="$BATS_TEST_TMPDIR/missing-fingerprint.json"
+  cat >"$lock" <<'JSON'
+{
+  "schema":"stack-lock/v1",
+  "source_sha":"1111111111111111111111111111111111111111",
+  "candidate_tag":"candidate-v2-test",
+  "runtime":{
+    "proxy":{
+      "image":"ghcr.io/wiki-mod/lancache-ng/proxy",
+      "artifact_source_sha":"1111111111111111111111111111111111111111",
+      "digest":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
       "platforms":{
         "linux/amd64":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
         "linux/arm64":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
