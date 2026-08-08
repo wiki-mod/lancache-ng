@@ -110,6 +110,17 @@ setup() {
     # many samples ran. A real file's content survives past the subshell
     # exit, since it is a genuine filesystem side effect, not process memory.
     docker() {
+        # Fakes the regressed-service log dump (wait_for_stack_health's own
+        # `docker logs --tail 50 "$container_id"` call) with a recognizable
+        # line, so a test can assert the dump actually reached the output
+        # instead of merely not crashing -- the earlier version of this mock
+        # returned 0 with no output for any non-"inspect" subcommand, which
+        # made the log-dump feature untestable by construction: 11/11 tests
+        # passed identically whether the dump worked or was silently gutted.
+        if [[ "$1" = "logs" ]]; then
+            printf 'FAKE_CRASH_LINE\n'
+            return 0
+        fi
         [[ "$1" = "inspect" ]] || return 0
         local fmt="$3" cid="$4" svc_for_cid=""
         for svc_for_cid in "${!FAKE_CONTAINER_ID[@]}"; do
@@ -233,6 +244,22 @@ setup() {
     [ "$status" -eq 1 ]
     [[ "$output" == *"regressed from healthy to unhealthy"* ]]
     [[ "$output" == *"proxy"* ]]
+    [[ "$output" == *"Last 50 log lines for regressed service 'proxy' (container c-proxy)"* ]]
+    [[ "$output" == *"    FAKE_CRASH_LINE"* ]]
+}
+
+@test "wait_for_stack_health reports no container found when a regressed service's container is already gone" {
+    # Deliberately no FAKE_CONTAINER_ID entry: the fake dc_update "ps -a -q"
+    # lookup above returns empty for any unlisted service, exactly like a
+    # container docker compose can no longer find (already removed/recreated
+    # by the time the gate's failure path runs).
+    _UPDATE_HEALTH_BASELINE=([ghost]="1")
+
+    run wait_for_stack_health 2 ghost
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"regressed from healthy to unhealthy"* ]]
+    [[ "$output" == *"No container found for regressed service 'ghost'; cannot dump its logs."* ]]
+    [[ "$output" != *"Last 50 log lines"* ]]
 }
 
 @test "wait_for_stack_health fails closed on a service with no baseline entry at all (fresh install / brand-new service)" {
