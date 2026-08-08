@@ -2,21 +2,9 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Releases consume an already accepted runtime stack without rebuilding any
-# runtime service. Repository governance requires a release-tag-scoped
-# build-tools artifact, so this workflow creates that tooling artifact once per
-# native platform, records its exact build inputs and digests, assembles one
-# multi-platform index without rebuilding it, and inserts that truthful new
-# tooling identity into the release lock.
-#
-# Publication is deliberately split from evidence generation. The default mode
-# builds/scans/smokes/SBOM-attests exact identities but moves no release ref.
-# PUBLISH first creates and attests an immutable release stack pointer, then
-# enters the same repository-wide promotion mutex used by channel promotion.
-# Runtime/tooling release refs move first and the coherent stack pointer moves
-# last. A failed partial write attempts to restore every ref that had a previous
-# digest; a newly created ref with no predecessor is left non-authoritative
-# because the stack release pointer never advances after a failed critical
-# section, and the failure is reported loudly for cleanup/retry.
+# runtime service. Release build-tools is a separate freshly-built tooling
+# identity whose complete external build inputs are frozen before either native
+# platform build starts.
 name: Release Accepted Stack v2
 
 on:
@@ -118,19 +106,30 @@ jobs:
           printf 'source_sha=%s\n' "$tag_sha" >> "$GITHUB_OUTPUT"
 
       - id: matrix
-        name: Derive release build-tools platform matrix from canonical catalog
+        name: Derive release build-tools matrix with frozen external bases
         run: |
           set -euo pipefail
           entry="$(bash scripts/query-stack-images.sh tooling | jq -c '.include[] | select(.service == "build-tools")')"
           [[ -n "$entry" ]] || { echo "::error::canonical catalog has no build-tools entry"; exit 1; }
+
+          golang="$(timeout --kill-after=30 300 bash scripts/ci-resolve-image-ref.sh golang:latest)"
+          rust="$(timeout --kill-after=30 300 bash scripts/ci-resolve-image-ref.sh rust:latest)"
+          build_inputs="$(CI_GOLANG_BASE_IMAGE="$golang" CI_RUST_BASE_IMAGE="$rust" bash scripts/ci-build-inputs.sh build-tools json)"
+          build_contexts="$(CI_GOLANG_BASE_IMAGE="$golang" CI_RUST_BASE_IMAGE="$rust" bash scripts/ci-build-inputs.sh build-tools build-contexts)"
+
           matrix="$(
-            jq -cn --argjson entry "$entry" '{
+            jq -cn \
+              --argjson entry "$entry" \
+              --argjson build_inputs "$build_inputs" \
+              --arg build_contexts "$build_contexts" '{
               include: [
                 $entry.platforms[] as $platform
                 | $entry + {
                     platform:$platform,
                     arch:(if $platform == "linux/arm64" then "arm64" else "amd64" end),
-                    runner:(if $platform == "linux/arm64" then "ubuntu-24.04-arm" else ["self-hosted","linux","lancache","lancache-heavy"] end)
+                    runner:(if $platform == "linux/arm64" then "ubuntu-24.04-arm" else ["self-hosted","linux","lancache","lancache-heavy"] end),
+                    build_inputs:$build_inputs,
+                    build_contexts:$build_contexts
                   }
                 | del(.platforms)
               ]
@@ -234,6 +233,8 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
 
       - name: Record exact release build-tools producer identity
+        env:
+          CI_SOURCE_BUILD_INPUTS_JSON: ${{ toJSON(matrix.build_inputs) }}
         run: |
           set -euo pipefail
           mkdir -p candidate-record
@@ -415,6 +416,7 @@ jobs:
               shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
               bats \
                 tests/bats/ci_artifact_identity.bats \
+                tests/bats/ci_build_inputs.bats \
                 tests/bats/ci_release_identity.bats \
                 tests/bats/ci_docker_lock_shim.bats \
                 tests/bats/network_retry.bats
@@ -648,7 +650,7 @@ jobs:
           digest_for_ref() {
             local ref="$1" manifest digest
             if ! manifest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>/dev/null)"; then
+              docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}')"; then
               return 1
             fi
             digest="$(jq -r '.digest // empty' <<<"$manifest")"
@@ -677,10 +679,6 @@ jobs:
           }
           trap rollback_release_refs EXIT
 
-          # Freeze every source identity again inside the actual mutation lock.
-          # Runtime candidate_ref values are digest-qualified; build-tools uses
-          # the unique release candidate tag. A moved/missing source therefore
-          # stops before any release target changes.
           bash scripts/ci-verify-lock-tags.sh release/release-lock.json
 
           while IFS=$'\t' read -r image digest; do
@@ -699,9 +697,6 @@ jobs:
             promoted_targets+=("$target")
           done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' release/release-lock.json)
 
-          # The stack pointer is the release's coherence marker and moves last.
-          # Until this succeeds, any newly-created component tag from a failed
-          # run is explicitly non-authoritative and cannot represent a release.
           stack_target="ghcr.io/wiki-mod/lancache-ng/stack:${RELEASE_TAG}"
           previous_refs["$stack_target"]="$(digest_for_ref "$stack_target" || true)"
           metadata="$(mktemp)"
