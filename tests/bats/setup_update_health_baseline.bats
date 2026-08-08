@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression coverage for the pre-update health-baseline gate (issue #1391's
@@ -112,12 +113,16 @@ setup() {
     docker() {
         # Fakes the regressed-service log dump (wait_for_stack_health's own
         # `docker logs --tail 50 "$container_id"` call) with a recognizable
-        # line, so a test can assert the dump actually reached the output
-        # instead of merely not crashing -- the earlier version of this mock
-        # returned 0 with no output for any non-"inspect" subcommand, which
-        # made the log-dump feature untestable by construction: 11/11 tests
-        # passed identically whether the dump worked or was silently gutted.
+        # line by default, so a test can assert the dump actually reached the
+        # output instead of merely not crashing. Set FAKE_LOGS_SHOULD_FAIL=1
+        # to instead simulate `docker logs` itself failing (e.g. the
+        # container was removed between the health check and the dump), for
+        # the test proving the `|| print_warn` fallback fires under this
+        # script's real `set -euo pipefail`.
         if [[ "$1" = "logs" ]]; then
+            if [[ "${FAKE_LOGS_SHOULD_FAIL:-0}" = "1" ]]; then
+                return 1
+            fi
             printf 'FAKE_CRASH_LINE\n'
             return 0
         fi
@@ -246,6 +251,106 @@ setup() {
     [[ "$output" == *"proxy"* ]]
     [[ "$output" == *"Last 50 log lines for regressed service 'proxy' (container c-proxy)"* ]]
     [[ "$output" == *"    FAKE_CRASH_LINE"* ]]
+}
+
+@test "wait_for_stack_health's log-dump fallback fires when docker logs itself fails, under real set -euo pipefail" {
+    # setup.sh's own top-level option set (line 15) is set -euo pipefail --
+    # this test enables exactly that (bats runs each @test in its own
+    # process, so it cannot leak into any other test) before calling `run`,
+    # since the `docker logs ... | sed ... || print_warn ...` line's
+    # fallback is only reachable at all when a failing producer's status
+    # actually propagates through the pipe, which plain `set -e` alone does
+    # not provide.
+    set -euo pipefail
+    FAKE_CONTAINER_ID[proxy]="c-proxy"
+    FAKE_HEALTH[c-proxy]="unhealthy"
+    _UPDATE_HEALTH_BASELINE=([proxy]="1")
+    FAKE_LOGS_SHOULD_FAIL=1
+
+    run wait_for_stack_health 2 proxy
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"regressed from healthy to unhealthy"* ]]
+    [[ "$output" == *"Last 50 log lines for regressed service 'proxy' (container c-proxy)"* ]]
+    [[ "$output" == *"Could not retrieve logs for 'proxy' (container may already be gone)."* ]]
+    [[ "$output" != *"FAKE_CRASH_LINE"* ]]
+}
+
+# ── _REGRESSED_SERVICE_SYSLOG_HOST / dump_service_syslog_ng_tail ──────────────
+# nats/dhcp-proxy/syslog are the three services docs/architecture-ng.md's
+# logging matrix documents as having no dual stdout+file log mode -- once
+# LOGGING_ENABLED redirects their one available destination to a file,
+# `docker logs` alone (the FAKE_CRASH_LINE dump above) goes permanently
+# quiet for them. These tests point INSTALL_DIR/_UPDATE_ENV_FILE at a throwaway
+# tmp tree instead of touching the real filesystem's default
+# /opt/lancache-ng, so they need no root/real-install access.
+
+@test "wait_for_stack_health also tails today's forwarded syslog-ng file for a known-quiet regressed service" {
+    INSTALL_DIR="$BATS_TEST_TMPDIR/install"
+    _UPDATE_ENV_FILE="$BATS_TEST_TMPDIR/.env"
+    : > "$_UPDATE_ENV_FILE"
+    local today; today="$(date -u +%Y%m%d)"
+    mkdir -p "$INSTALL_DIR/syslog-ng/lancache-nats"
+    printf 'FAKE_NATS_SYSLOG_LINE\n' > "$INSTALL_DIR/syslog-ng/lancache-nats/$today.log"
+
+    FAKE_CONTAINER_ID[nats]="c-nats"
+    FAKE_HEALTH[c-nats]="unhealthy"
+    _UPDATE_HEALTH_BASELINE=([nats]="1")
+
+    run wait_for_stack_health 2 nats
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"Last 50 forwarded log lines for 'nats'"* ]]
+    [[ "$output" == *"    FAKE_NATS_SYSLOG_LINE"* ]]
+}
+
+@test "wait_for_stack_health skips the syslog-ng tail entirely when LOGGING_ENABLED is 0" {
+    INSTALL_DIR="$BATS_TEST_TMPDIR/install"
+    _UPDATE_ENV_FILE="$BATS_TEST_TMPDIR/.env"
+    printf 'LOGGING_ENABLED=0\n' > "$_UPDATE_ENV_FILE"
+    local today; today="$(date -u +%Y%m%d)"
+    mkdir -p "$INSTALL_DIR/syslog-ng/lancache-nats"
+    printf 'FAKE_NATS_SYSLOG_LINE\n' > "$INSTALL_DIR/syslog-ng/lancache-nats/$today.log"
+
+    FAKE_CONTAINER_ID[nats]="c-nats"
+    FAKE_HEALTH[c-nats]="unhealthy"
+    _UPDATE_HEALTH_BASELINE=([nats]="1")
+
+    run wait_for_stack_health 2 nats
+    [ "$status" -eq 1 ]
+    # The file exists and would produce a match if read -- proving this is a
+    # real "skipped because LOGGING_ENABLED=0" outcome, not an accidental
+    # miss from a wrong path.
+    [[ "$output" != *"Last 50 forwarded log lines"* ]]
+    [[ "$output" != *"FAKE_NATS_SYSLOG_LINE"* ]]
+}
+
+@test "wait_for_stack_health warns instead of crashing when no syslog-ng file exists yet for a known-quiet service" {
+    INSTALL_DIR="$BATS_TEST_TMPDIR/install"
+    _UPDATE_ENV_FILE="$BATS_TEST_TMPDIR/.env"
+    : > "$_UPDATE_ENV_FILE"
+    # Deliberately no mkdir/file: a freshly-updated stack whose syslog-ng
+    # bind mount has not received any forwarded lines for this service yet.
+
+    FAKE_CONTAINER_ID[nats]="c-nats"
+    FAKE_HEALTH[c-nats]="unhealthy"
+    _UPDATE_HEALTH_BASELINE=([nats]="1")
+
+    run wait_for_stack_health 2 nats
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"No forwarded syslog-ng log file found for 'nats' yet at"* ]]
+}
+
+@test "wait_for_stack_health does not attempt a syslog-ng tail for a service outside the known-quiet set" {
+    INSTALL_DIR="$BATS_TEST_TMPDIR/install"
+    _UPDATE_ENV_FILE="$BATS_TEST_TMPDIR/.env"
+    : > "$_UPDATE_ENV_FILE"
+
+    FAKE_CONTAINER_ID[proxy]="c-proxy"
+    FAKE_HEALTH[c-proxy]="unhealthy"
+    _UPDATE_HEALTH_BASELINE=([proxy]="1")
+
+    run wait_for_stack_health 2 proxy
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"forwarded"* ]]
 }
 
 @test "wait_for_stack_health reports no container found when a regressed service's container is already gone" {
