@@ -4205,6 +4205,28 @@ wait_for_stack_health() {
 
     if (( ${#regressed_services[@]} > 0 )); then
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
+        # Diagnosing this gate's own failure previously required a live SSH
+        # session against a still-running (or already-recreated-and-gone)
+        # container, since neither this script nor CI's use of it captured
+        # any container output on this exact path -- a real incident traced
+        # a silent entrypoint crash back to this gap. Dump each regressed
+        # service's own recent log output here, once, right where the
+        # failure is detected, so both a real operator and CI's own captured
+        # output have the actual cause without needing separate live access.
+        for svc in "${regressed_services[@]}"; do
+            local container_id
+            # Guarded as an `if` condition, not a bare assignment (AG-VAL-032
+            # class): service_container_id's own `docker compose ps` call can
+            # exit non-zero, and this script runs under set -e -- a bare
+            # `container_id=$(...)` here would abort the whole update instead
+            # of just skipping the log dump for this one service.
+            if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
+                print_warn "Last 50 log lines for regressed service '$svc' (container $container_id):"
+                docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
+            else
+                print_warn "No container found for regressed service '$svc'; cannot dump its logs."
+            fi
+        done
     fi
     return 1
 }
