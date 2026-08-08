@@ -3,8 +3,9 @@
 #
 # Release publication consumes a positively accepted runtime lock. Runtime
 # services are never rebuilt here. The governance-required tag-scoped
-# build-tools image is consumed from build-tools:<release tag>, freshly
-# scanned/smoked, and inserted into the release lock by exact digest.
+# build-tools image must currently resolve to the already-accepted build-tools
+# digest; support for a distinct release rebuild stays fail-closed until that
+# producer emits its own source-fingerprint-bearing identity record.
 name: Release Accepted Stack v2
 
 on:
@@ -89,7 +90,7 @@ jobs:
           printf 'source_sha=%s\n' "$accepted_sha" >> "$GITHUB_OUTPUT"
 
       - id: build-tools
-        name: Require governance-built release build-tools image
+        name: Require governance build-tools tag to preserve accepted identity
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
@@ -97,21 +98,27 @@ jobs:
           source scripts/lib/ci-artifact-identity.sh
           ref="ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}"
           digest="$(ci_ai_ref_digest "$ref")"
+          accepted_digest="$(jq -r '.tooling["build-tools"].digest' "$RUNNER_TEMP/stack-lock.json")"
+          ci_ai_require_digest "$accepted_digest"
+          [[ "$digest" == "$accepted_digest" ]] || {
+            echo "::error::build-tools:${RELEASE_TAG} resolves to $digest, while the accepted stack contains $accepted_digest." >&2
+            echo "::error::V2 will not copy the old source_fingerprint onto a different release build-tools digest. A distinct release rebuild must first provide its own signed identity record carrying the exact source/build-input fingerprint." >&2
+            exit 1
+          }
+
           amd64="$(ci_ai_platform_digest "ghcr.io/wiki-mod/lancache-ng/build-tools@${digest}" linux/amd64)"
           arm64="$(ci_ai_platform_digest "ghcr.io/wiki-mod/lancache-ng/build-tools@${digest}" linux/arm64)"
+          accepted_amd64="$(jq -r '.tooling["build-tools"].platforms["linux/amd64"]' "$RUNNER_TEMP/stack-lock.json")"
+          accepted_arm64="$(jq -r '.tooling["build-tools"].platforms["linux/arm64"]' "$RUNNER_TEMP/stack-lock.json")"
+          [[ "$amd64" == "$accepted_amd64" && "$arm64" == "$accepted_arm64" ]] \
+            || ci_ai_fail "release build-tools tag does not preserve the accepted platform child digests"
+
           printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
-          jq \
-            --arg release_tag "$RELEASE_TAG" \
-            --arg digest "$digest" \
-            --arg amd64 "$amd64" \
-            --arg arm64 "$arm64" '
-              .candidate_tag = $release_tag
-              | .tooling["build-tools"].digest = $digest
-              | .tooling["build-tools"].platforms["linux/amd64"] = $amd64
-              | .tooling["build-tools"].platforms["linux/arm64"] = $arm64
-              | .tooling["build-tools"].candidate_ref = ("ghcr.io/wiki-mod/lancache-ng/build-tools@" + $digest)
-              | .tooling["build-tools"].artifact_source_sha = .source_sha
-            ' "$RUNNER_TEMP/stack-lock.json" > "$RUNNER_TEMP/release-lock.json"
+          jq --arg release_tag "$RELEASE_TAG" '
+            .candidate_tag = $release_tag
+            | .runtime |= with_entries(.value.candidate_ref = (.value.image + "@" + .value.digest))
+            | .tooling |= with_entries(.value.candidate_ref = (.value.image + "@" + .value.digest))
+          ' "$RUNNER_TEMP/stack-lock.json" > "$RUNNER_TEMP/release-lock.json"
           ci_ai_validate_stack_lock "$RUNNER_TEMP/release-lock.json"
 
       - id: matrix
@@ -298,6 +305,7 @@ jobs:
                 exact_digest_security:true,
                 native_platform_smoke:true,
                 exact_locked_stack:true,
+                runtime_deep_validation:true,
                 supplemental_full_setup:true,
                 publication_policy:true
               }
