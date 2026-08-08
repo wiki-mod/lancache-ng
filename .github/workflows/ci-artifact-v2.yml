@@ -28,11 +28,6 @@ on:
 permissions:
   contents: read
 
-# A new first-attempt PR head makes every older V2 candidate from that ref
-# obsolete, but only an event that is itself eligible to run V2 may supersede
-# it. An unrelated label event, or a synchronize after ci-v2-test was removed,
-# receives a unique group and cannot cancel the deliberate V2 run already in
-# progress. Explicit reruns and workflow_dispatch are always isolated too.
 concurrency:
   group: >-
     ${{
@@ -108,6 +103,9 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve immutable bootstrap build-tools verifier
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
@@ -116,6 +114,15 @@ jobs:
             exit 1
           }
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+          printf 'CI_BOOTSTRAP_BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+
+      - name: Freeze exact external builder base identities
+        run: |
+          set -euo pipefail
+          golang="$(timeout --kill-after=30 300 bash scripts/ci-resolve-image-ref.sh golang:latest)"
+          rust="$(timeout --kill-after=30 300 bash scripts/ci-resolve-image-ref.sh rust:latest)"
+          printf 'CI_GOLANG_BASE_IMAGE=%s\n' "$golang" >> "$GITHUB_ENV"
+          printf 'CI_RUST_BASE_IMAGE=%s\n' "$rust" >> "$GITHUB_ENV"
 
       - name: Extract accepted baseline lock
         if: steps.config.outputs.reuse_tag != 'none'
@@ -147,6 +154,9 @@ jobs:
           docker run --rm \
             -u "$(id -u):$(id -g)" \
             -e SOURCE_SHA="$GITHUB_SHA" \
+            -e CI_BOOTSTRAP_BUILD_TOOLS_IMAGE \
+            -e CI_GOLANG_BASE_IMAGE \
+            -e CI_RUST_BASE_IMAGE \
             "${baseline_args[@]}" \
             -v "$PWD:/work:ro" \
             -v "$RUNNER_TEMP/ci-v2-out:/tmp/out" \
@@ -165,11 +175,13 @@ jobs:
               bash scripts/check-workflow-line-limit.sh
               bats \
                 tests/bats/ci_artifact_identity.bats \
+                tests/bats/ci_build_inputs.bats \
                 tests/bats/ci_docker_lock_shim.bats \
                 tests/bats/ci_plan_run_invocation.bats \
                 tests/bats/ci_release_identity.bats \
                 tests/bats/ci_reused_index_identity.bats \
-                tests/bats/network_retry.bats
+                tests/bats/network_retry.bats \
+                tests/bats/select_build_tools_runtime_contract.bats
               bash scripts/query-stack-images.sh all >/tmp/out/catalog.json
               bash scripts/ci-plan-run.sh >/tmp/out/plan.json
             '
@@ -221,18 +233,24 @@ jobs:
         id: buildx-arm
         uses: ./.github/actions/buildx-setup-retry
 
-      - name: Resolve cache-busting build arguments
+      - name: Resolve effective build arguments
         if: matrix.mode == 'build'
         id: build-args
         env:
           SOURCE_DOCKERFILE: ${{ matrix.source }}
+          MATRIX_BUILD_ARGS: ${{ matrix.build_args }}
         run: |
           set -euo pipefail
-          args=""
-          if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$SOURCE_DOCKERFILE"; then
-            args="APT_CACHE_BUST=$(date -u +%G-W%V)"
-          fi
-          printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
+          {
+            echo 'args<<EOF'
+            if [[ -n "$MATRIX_BUILD_ARGS" ]]; then
+              printf '%s\n' "$MATRIX_BUILD_ARGS"
+            fi
+            if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$SOURCE_DOCKERFILE"; then
+              printf 'APT_CACHE_BUST=%s\n' "$(date -u +%G-W%V)"
+            fi
+            echo EOF
+          } >> "$GITHUB_OUTPUT"
 
       # DO NOT ENABLE YET. The project-specific GHCR path must first prove that
       # anonymous digest pushes remain pullable and preserve retry/attestation
@@ -277,6 +295,7 @@ jobs:
           REUSED_DIGEST: ${{ matrix.reused_digest }}
           MATRIX_MODE: ${{ matrix.mode }}
           REUSED_INDEX_DIGEST: ${{ matrix.reused_index_digest }}
+          CI_SOURCE_BUILD_INPUTS_JSON: ${{ toJSON(matrix.build_inputs) }}
         run: |
           set -euo pipefail
           digest="$BUILT_DIGEST"
