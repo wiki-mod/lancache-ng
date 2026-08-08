@@ -36,10 +36,17 @@ trap cleanup EXIT
 timeout --kill-after=30 600 "${compose[@]}" pull --quiet
 timeout --kill-after=30 300 "${compose[@]}" up -d
 
+# `config --services` also describes profile-gated services that a plain
+# `compose up -d` did not start. Query the real compose project after bring-up
+# so the health loop cannot wait forever for an intentionally inactive profile.
+mapfile -t active_services < <("${compose[@]}" ps --services)
+[[ "${#active_services[@]}" -gt 0 ]] || ci_ai_fail "compose started no services"
+
+rendered_json="$("${compose[@]}" config --format json)"
 deadline=$((SECONDS + 180))
 while (( SECONDS < deadline )); do
     all_ready=true
-    while IFS= read -r service; do
+    for service in "${active_services[@]}"; do
         if ! cid="$("${compose[@]}" ps -q "$service")"; then
             echo "::error::Could not resolve container id for $service." >&2
             exit 1
@@ -50,12 +57,12 @@ while (( SECONDS < deadline )); do
         if [[ "$state" != running || ( "$health" != none && "$health" != healthy ) ]]; then
             all_ready=false
         fi
-    done < <("${compose[@]}" config --services)
+    done
     [[ "$all_ready" == true ]] && break
     sleep 5
 done
 
-while IFS= read -r service; do
+for service in "${active_services[@]}"; do
     cid="$("${compose[@]}" ps -q "$service")"
     [[ -n "$cid" ]] || ci_ai_fail "$service has no running container"
     state="$(docker inspect --format '{{.State.Status}}' "$cid")"
@@ -63,13 +70,13 @@ while IFS= read -r service; do
     [[ "$state" == running ]] || ci_ai_fail "$service is not running (state=$state)"
     [[ "$health" == none || "$health" == healthy ]] || ci_ai_fail "$service is not healthy (health=$health)"
 
-    expected_ref="$(docker compose -f "$rendered" config --format json | jq -r --arg service "$service" '.services[$service].image // empty')"
+    expected_ref="$(jq -r --arg service "$service" '.services[$service].image // empty' <<<"$rendered_json")"
     if [[ "$expected_ref" == ghcr.io/wiki-mod/lancache-ng/*@sha256:* ]]; then
         actual_ref="$(docker inspect --format '{{.Config.Image}}' "$cid")"
         [[ "$actual_ref" == "$expected_ref" ]] \
             || ci_ai_fail "$service running image ref differs from locked ref: expected $expected_ref, got $actual_ref"
     fi
-done < <("${compose[@]}" config --services)
+done
 
 build_tools_image="$(jq -r '.tooling["build-tools"] | .image + "@" + .digest' "$lock")"
 [[ "$build_tools_image" == *@sha256:* ]] || ci_ai_fail "stack lock has no digest-qualified build-tools image"
