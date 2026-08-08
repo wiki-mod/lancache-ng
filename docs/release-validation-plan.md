@@ -1137,6 +1137,18 @@ omitted):**
   does not also contain a matching config-unset/pattern-file-removal step) is
   plausible but not yet built — this is a real, currently-open gap, not a
   silently-assumed-covered case.
+- **Recorded exception (2026-08-08, `AGENTS.md`'s `AG-CC-004`): third-party
+  automated-reviewer output language cannot be checked by a durable, repeatable
+  CI test.** `AG-CC-004` requires a third-party tool's GitHub-bound output (e.g.
+  Codex's PR review comments) to be English. Checking this mechanically would
+  require either scripting a real trigger of that external tool's review inside
+  CI (not something this repository controls or can invoke on demand) or scraping
+  its already-posted comments after the fact on a schedule with no fixed timing
+  guarantee — neither is a genuine standing check in the sense this document's
+  other entries mean. This stays manual-review-only (per the rule's own matrix
+  entry): spot-check an automated reviewer's language against `AG-GH-001` when a
+  review happens to be observed. Revisit if this tool (or a future one) ever
+  exposes an on-demand, scriptable review trigger.
 
 ---
 
