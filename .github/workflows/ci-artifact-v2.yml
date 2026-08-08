@@ -1,0 +1,459 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Opt-in v2 candidate pipeline. It runs alongside build-push.yml while the
+# matching-numbers architecture is validated. No channel or release tag moves
+# occur here. Final success publishes only an immutable accepted-<source SHA>
+# stack pointer after all exact-digest gates have passed.
+name: CI Artifact Identity v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      reuse_stack_tag:
+        description: Accepted stack tag to reuse unchanged service digests from, or "none".
+        required: false
+        default: none
+        type: string
+      run_supplemental_full_setup:
+        description: Run the complete reusable full-setup simulation suite. Acceptance is impossible when disabled.
+        required: false
+        default: true
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CANDIDATE_TAG: candidate-v2-${{ github.run_id }}-${{ github.run_attempt }}
+
+jobs:
+  plan:
+    name: plan immutable image candidates
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 30
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      candidate_tag: ${{ steps.tag.outputs.candidate_tag }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - id: tag
+        run: printf 'candidate_tag=%s\n' "$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
+      - name: Resolve immutable build-tools verifier
+        run: |
+          set -euo pipefail
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          [[ "$image" == *@sha256:* ]] || { echo "::error::build-tools verifier is not digest-qualified: $image"; exit 1; }
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+      - name: Extract accepted baseline lock
+        if: inputs.reuse_stack_tag != 'none'
+        env:
+          REUSE_STACK_TAG: ${{ inputs.reuse_stack_tag }}
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY,,}"
+          stack_ref="ghcr.io/${repo}/stack:${REUSE_STACK_TAG}"
+          if ! timeout --kill-after=30 300 bash scripts/ci-extract-stack-lock.sh "$stack_ref" "$RUNNER_TEMP/baseline-stack-lock.json"; then
+            echo "::warning::Could not prove $stack_ref is a valid accepted stack pointer. Reuse is disabled and every image will build."
+            rm -f "$RUNNER_TEMP/baseline-stack-lock.json"
+          fi
+      - name: Validate v2 scripts and create plan
+        id: plan
+        run: |
+          set -euo pipefail
+          baseline_args=()
+          if [[ -f "$RUNNER_TEMP/baseline-stack-lock.json" ]]; then
+            baseline_args=(-e BASELINE_STACK_LOCK=/tmp/out/baseline.json)
+          fi
+          mkdir -p "$RUNNER_TEMP/ci-v2-out"
+          [[ -f "$RUNNER_TEMP/baseline-stack-lock.json" ]] && cp "$RUNNER_TEMP/baseline-stack-lock.json" "$RUNNER_TEMP/ci-v2-out/baseline.json"
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -e SOURCE_SHA="$GITHUB_SHA" \
+            "${baseline_args[@]}" \
+            -v "$PWD:/work:ro" \
+            -v "$RUNNER_TEMP/ci-v2-out:/tmp/out" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -lc '
+              set -euo pipefail
+              bash -n scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh
+              shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh
+              bash scripts/query-stack-images.sh all >/tmp/out/catalog.json
+              bash scripts/ci-plan-run.sh >/tmp/out/plan.json
+            '
+          matrix="$(jq -c '{include}' "$RUNNER_TEMP/ci-v2-out/plan.json")"
+          [[ "$(jq '.include | length' <<<"$matrix")" -gt 0 ]] || { echo "::error::candidate plan is empty"; exit 1; }
+          printf 'matrix=%s\n' "$matrix" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ci-v2-plan
+          path: ${{ runner.temp }}/ci-v2-out/
+          retention-days: 14
+
+  platform-candidate:
+    name: candidate ${{ matrix.service }} ${{ matrix.arch }}
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Login to GHCR
+        if: matrix.mode == 'build'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Set up Buildx on persistent amd64 runner
+        if: matrix.mode == 'build' && matrix.arch == 'amd64'
+        id: buildx-self
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Set up Buildx with hosted-arm retry
+        if: matrix.mode == 'build' && matrix.arch == 'arm64'
+        id: buildx-arm
+        uses: ./.github/actions/buildx-setup-retry
+      - name: Build exactly once or adopt accepted child digest
+        env:
+          SERVICE: ${{ matrix.service }}
+          PLATFORM: ${{ matrix.platform }}
+          MODE: ${{ matrix.mode }}
+          REUSED_DIGEST: ${{ matrix.reused_digest }}
+        run: |
+          set -euo pipefail
+          if [[ "$MODE" == reuse ]]; then
+            [[ "$REUSED_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid reused digest for $SERVICE/$PLATFORM"; exit 1; }
+            echo "::notice::Reusing positively accepted $SERVICE $PLATFORM digest $REUSED_DIGEST."
+          fi
+      - name: Resolve cache-busting build arguments
+        if: matrix.mode == 'build'
+        id: build-args
+        env:
+          SOURCE_DOCKERFILE: ${{ matrix.source }}
+        run: |
+          set -euo pipefail
+          args=""
+          if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$SOURCE_DOCKERFILE"; then
+            args="APT_CACHE_BUST=$(date -u +%G-W%V)"
+          fi
+          printf 'args=%s\n' "$args" >> "$GITHUB_OUTPUT"
+
+      # DO NOT ENABLE YET. A project-specific GHCR run still has to prove
+      # anonymous digest pushes remain pullable and preserve retry plus
+      # attestation behavior before quarantine tags can be replaced by:
+      #
+      # outputs: type=image,name=${{ matrix.image }},push-by-digest=true,name-canonical=true,push=true
+      #
+      # Until that proof exists, the unique quarantine tag is transport only;
+      # every later gate reads the digest returned by Buildx.
+      - name: Build and push quarantine candidate
+        if: matrix.mode == 'build'
+        id: build
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ matrix.arch == 'amd64' && steps.buildx-self.outputs.name || steps.buildx-arm.outputs.name }}
+          context: ${{ matrix.context }}
+          build-contexts: ${{ matrix.build_contexts }}
+          build-args: ${{ steps.build-args.outputs.args }}
+          push: "true"
+          tags: ${{ matrix.image }}:${{ needs.plan.outputs.candidate_tag }}-${{ matrix.arch }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            io.lancache-ng.candidate=${{ needs.plan.outputs.candidate_tag }}
+          platforms: ${{ matrix.platform }}
+          provenance: mode=max
+          pull: "true"
+          cache-from: type=gha,scope=ci-v2-${{ matrix.service }}-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=ci-v2-${{ matrix.service }}-${{ matrix.arch }}
+      - name: Write immutable platform record
+        env:
+          BUILT_DIGEST: ${{ steps.build.outputs.digest }}
+          REUSED_DIGEST: ${{ matrix.reused_digest }}
+          MATRIX_MODE: ${{ matrix.mode }}
+        run: |
+          set -euo pipefail
+          digest="$BUILT_DIGEST"
+          mode=built
+          if [[ "$MATRIX_MODE" == reuse ]]; then
+            digest="$REUSED_DIGEST"
+            mode=reused
+          fi
+          mkdir -p candidate-record
+          bash scripts/ci-write-candidate-record.sh \
+            "${{ matrix.scope }}" "${{ matrix.service }}" "${{ matrix.image }}" "$GITHUB_SHA" \
+            "${{ matrix.artifact_source_sha }}" "${{ matrix.platform }}" "$digest" "$mode" \
+            "candidate-record/${{ matrix.service }}__${{ matrix.arch }}.json"
+      - name: Remove persistent amd64 Buildx builder
+        if: always() && matrix.mode == 'build' && matrix.arch == 'amd64'
+        run: docker buildx rm "${{ steps.buildx-self.outputs.name }}" || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-platform-${{ matrix.service }}-${{ matrix.arch }}
+          path: candidate-record/*.json
+          retention-days: 14
+
+  security-smoke:
+    name: secure and smoke ${{ matrix.service }} ${{ matrix.arch }}
+    needs: [plan, platform-candidate]
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-platform-${{ matrix.service }}-${{ matrix.arch }}
+          path: candidate-record
+      - id: evidence
+        env:
+          RECORD: candidate-record/${{ matrix.service }}__${{ matrix.arch }}.json
+        run: |
+          set -euo pipefail
+          digest="$(jq -r '.digest' "$RECORD")"
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+          printf 'image_ref=%s@%s\n' "${{ matrix.image }}" "$digest" >> "$GITHUB_OUTPUT"
+          printf 'freshness=%s\n' "$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - name: Trivy exact child digest
+        uses: ./.github/actions/trivy-scan-with-cache
+        with:
+          image-ref: ${{ steps.evidence.outputs.image_ref }}
+          digest: ${{ steps.evidence.outputs.digest }}
+          cache-key-scope: ci-v2-${{ matrix.service }}-${{ matrix.arch }}
+          freshness-bucket: ${{ steps.evidence.outputs.freshness }}
+      - name: Native-platform smoke on exact digest
+        run: |
+          set -euo pipefail
+          timeout --kill-after=30 300 docker pull "${{ steps.evidence.outputs.image_ref }}"
+          timeout --kill-after=30 120 docker run --rm --entrypoint /bin/sh "${{ steps.evidence.outputs.image_ref }}" -c 'true'
+      - name: Write digest-bound security and smoke evidence
+        run: |
+          set -euo pipefail
+          mkdir -p evidence
+          jq -n \
+            --arg service "${{ matrix.service }}" \
+            --arg platform "${{ matrix.platform }}" \
+            --arg digest "${{ steps.evidence.outputs.digest }}" \
+            --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schema:"candidate-evidence/v1", service:$service, platform:$platform, digest:$digest, trivy:"passed", native_smoke:"passed", observed_at:$scanned_at}' \
+            > evidence/evidence.json
+      - name: Attest exact-digest security and smoke evidence
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ steps.evidence.outputs.digest }}
+          predicate-type: https://wiki-mod.github.io/lancache-ng/attestations/security-smoke/v1
+          predicate-path: evidence/evidence.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-evidence-${{ matrix.service }}-${{ matrix.arch }}
+          path: evidence/evidence.json
+          retention-days: 14
+
+  assemble-indexes:
+    name: assemble exact multi-platform indexes
+    needs: [plan, security-smoke]
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          pattern: candidate-platform-*
+          merge-multiple: true
+          path: candidate-platforms
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Assemble without rebuilding
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          CANDIDATE_TAG_VALUE: ${{ needs.plan.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          mkdir -p image-indexes
+          catalog="$(bash scripts/query-stack-images.sh all)"
+          while IFS= read -r entry; do
+            service="$(jq -r '.service' <<<"$entry")"
+            image="$(jq -r '.image' <<<"$entry")"
+            bash scripts/ci-assemble-service-index.sh \
+              "$service" "$image" "$GITHUB_SHA" "$CANDIDATE_TAG_VALUE" \
+              candidate-platforms "image-indexes/${service}.json"
+          done < <(jq -c '.include[]' <<<"$catalog")
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-indexes
+          path: image-indexes/*.json
+          retention-days: 14
+
+  stack-lock:
+    name: freeze exact stack lock
+    needs: [plan, assemble-indexes]
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
+    outputs:
+      candidate_tag: ${{ needs.plan.outputs.candidate_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: candidate-indexes
+          path: image-indexes
+      - run: |
+          set -euo pipefail
+          mkdir -p stack-lock
+          bash scripts/ci-assemble-stack-lock.sh "$GITHUB_SHA" "${{ needs.plan.outputs.candidate_tag }}" image-indexes stack-lock/stack-lock.json
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: stack-lock
+          path: stack-lock/stack-lock.json
+          retention-days: 30
+
+  exact-locked-stack:
+    name: validate exact digest-locked stack
+    needs: stack-lock
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stack-lock
+          path: stack-lock
+      - run: timeout --kill-after=30 2400 bash scripts/ci-validate-locked-stack.sh stack-lock/stack-lock.json
+
+  supplemental-full-setup:
+    name: supplemental full-setup simulations
+    needs: stack-lock
+    if: inputs.run_supplemental_full_setup
+    uses: ./.github/workflows/full-setup-sims.yml
+    with:
+      image_tag: ${{ needs.stack-lock.outputs.candidate_tag }}
+      should_run: "true"
+      pr_staging_available: "true"
+      build_tools_touched: "true"
+    secrets: inherit
+
+  accept:
+    name: final candidate acceptance
+    needs: [stack-lock, exact-locked-stack, supplemental-full-setup]
+    if: >-
+      always() &&
+      inputs.run_supplemental_full_setup &&
+      needs['stack-lock'].result == 'success' &&
+      needs['exact-locked-stack'].result == 'success' &&
+      needs['supplemental-full-setup'].result == 'success'
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stack-lock
+          path: stack-lock
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Re-resolve every candidate tag before acceptance
+        run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
+      - name: Write final acceptance record
+        run: |
+          set -euo pipefail
+          lock_hash="$(sha256sum stack-lock/stack-lock.json | awk '{print $1}')"
+          jq -n \
+            --arg source_sha "$GITHUB_SHA" \
+            --arg lock_hash "$lock_hash" \
+            --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
+            --arg accepted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{
+              schema:"stack-acceptance/v1",
+              accepted:true,
+              source_sha:$source_sha,
+              stack_lock_sha256:$lock_hash,
+              run_url:$run_url,
+              accepted_at:$accepted_at,
+              gates:{
+                exact_digest_security:true,
+                native_platform_smoke:true,
+                exact_locked_stack:true,
+                supplemental_full_setup:true
+              }
+            }' > stack-lock/acceptance.json
+      - name: Prepare accepted stack pointer context
+        run: cp release/stack-pointer/Dockerfile stack-lock/Dockerfile
+      - name: Build immutable accepted stack pointer
+        id: pointer
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ steps.buildx.outputs.name }}
+          context: stack-lock
+          push: "true"
+          tags: ghcr.io/wiki-mod/lancache-ng/stack:accepted-${{ github.sha }}
+          build-args: SOURCE_SHA=${{ github.sha }}
+          provenance: mode=max
+      - name: Attest final acceptance last
+        uses: ./.github/actions/ghcr-custom-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/wiki-mod/lancache-ng/stack
+          subject-digest: ${{ steps.pointer.outputs.digest }}
+          predicate-type: https://wiki-mod.github.io/lancache-ng/attestations/acceptance/v1
+          predicate-path: stack-lock/acceptance.json
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+      - name: Publish accepted records for review
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: accepted-stack-${{ github.sha }}
+          path: |
+            stack-lock/stack-lock.json
+            stack-lock/acceptance.json
+          retention-days: 90

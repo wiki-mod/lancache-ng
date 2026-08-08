@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# Re-scans accepted child digests against the current vulnerability database.
+# A stale security verdict causes a re-scan of the same identity, never rebuild.
+name: Refresh Accepted Security Evidence v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      accepted_stack_tag:
+        description: Immutable accepted stack tag to re-scan.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 20
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: bash scripts/ci-extract-stack-lock.sh "ghcr.io/wiki-mod/lancache-ng/stack:${{ inputs.accepted_stack_tag }}" "$RUNNER_TEMP/stack-lock.json"
+      - id: matrix
+        run: printf 'matrix=%s\n' "$(bash scripts/ci-lock-matrix.sh "$RUNNER_TEMP/stack-lock.json" platform)" >> "$GITHUB_OUTPUT"
+
+  scan:
+    needs: plan
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - id: time
+        run: printf 'bucket=%s\n' "$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - uses: ./.github/actions/trivy-scan-with-cache
+        with:
+          image-ref: ${{ matrix.image }}@${{ matrix.digest }}
+          digest: ${{ matrix.digest }}
+          cache-key-scope: security-refresh-${{ matrix.service }}-${{ matrix.platform }}
+          freshness-bucket: ${{ steps.time.outputs.bucket }}
+      - run: |
+          mkdir -p evidence
+          jq -n \
+            --arg service "${{ matrix.service }}" \
+            --arg platform "${{ matrix.platform }}" \
+            --arg digest "${{ matrix.digest }}" \
+            --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '{schema:"security-refresh/v1", service:$service, platform:$platform, digest:$digest, trivy:"passed", scanned_at:$scanned_at}' \
+            > evidence/security-refresh.json
+      - uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+        with:
+          subject-name: ${{ matrix.image }}
+          subject-digest: ${{ matrix.digest }}
+          predicate-type: https://wiki-mod.github.io/lancache-ng/attestations/security-refresh/v1
+          predicate-path: evidence/security-refresh.json

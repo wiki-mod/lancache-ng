@@ -1,0 +1,103 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# Manual reference-only promotion for a positively accepted stack pointer.
+name: Promote Accepted Stack v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      accepted_stack_tag:
+        description: Immutable accepted-<40-char source SHA> stack tag.
+        required: true
+        type: string
+      channel:
+        description: Mutable channel to move to the accepted digests.
+        required: true
+        type: choice
+        options: [nightly, latest]
+      confirm:
+        description: Type PROMOTE to move mutable channel references.
+        required: true
+        default: "NO"
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  promote:
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - name: Require explicit confirmation
+        env:
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          [[ "$CONFIRM" == PROMOTE ]] || { echo "::error::confirm must be exactly PROMOTE"; exit 1; }
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Prove accepted pointer and extract lock
+        env:
+          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
+        run: |
+          set -euo pipefail
+          bash scripts/ci-extract-stack-lock.sh "ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}" "$RUNNER_TEMP/stack-lock.json"
+      - name: Prove accepted source is the current channel branch tip
+        env:
+          CHANNEL: ${{ inputs.channel }}
+        run: |
+          set -euo pipefail
+          source_sha="$(jq -r '.source_sha' "$RUNNER_TEMP/stack-lock.json")"
+          case "$CHANNEL" in
+            nightly) branch=current_dev ;;
+            latest) branch=master ;;
+            *) echo "::error::unsupported channel $CHANNEL"; exit 1 ;;
+          esac
+          git fetch --no-tags origin "$branch"
+          branch_tip="$(git rev-parse "origin/${branch}^{commit}")"
+          [[ "$source_sha" == "$branch_tip" ]] || {
+            echo "::error::Accepted source $source_sha is not current origin/$branch tip $branch_tip. Refusing stale or cross-branch promotion."
+            exit 1
+          }
+      - name: Move channel references without rebuild
+        env:
+          CHANNEL: ${{ inputs.channel }}
+          ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/ci-artifact-identity.sh
+          source scripts/lib/ghcr-retry.sh
+          while IFS=$'\t' read -r image digest; do
+            ci_ai_require_digest "$digest"
+            metadata="$(mktemp)"
+            ghcr_retry ghcr.io "$GITHUB_ACTOR" "$GITHUB_TOKEN" -- \
+              docker buildx imagetools create --tag "${image}:${CHANNEL}" "${image}@${digest}" --metadata-file "$metadata"
+            promoted="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
+            rm -f "$metadata"
+            [[ "$promoted" == "$digest" ]] || ci_ai_fail "promotion changed digest for $image"
+          done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' "$RUNNER_TEMP/stack-lock.json")
+
+          stack_source="ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}"
+          stack_digest="$(ci_ai_ref_digest "$stack_source")"
+          metadata="$(mktemp)"
+          ghcr_retry ghcr.io "$GITHUB_ACTOR" "$GITHUB_TOKEN" -- \
+            docker buildx imagetools create --prefer-index=false \
+              --tag "ghcr.io/wiki-mod/lancache-ng/stack:${CHANNEL}" \
+              "ghcr.io/wiki-mod/lancache-ng/stack@${stack_digest}" \
+              --metadata-file "$metadata"
+          promoted_stack="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
+          rm -f "$metadata"
+          [[ "$promoted_stack" == "$stack_digest" ]] || ci_ai_fail "stack pointer promotion changed digest"
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
