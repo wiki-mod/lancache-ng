@@ -4660,11 +4660,111 @@ jobs:
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
+  # Issue #1095 G7: build's and build-arm64's should-build admission decision used to
+  # be a byte-identical copy of the same long `if:` expression, maintained independently
+  # in both jobs -- a future fix applied to only one copy would silently leave the other
+  # architecture leg running (or not running) under a different rule with no CI signal
+  # that they had diverged. This job computes that decision exactly once and exposes it
+  # as a plain output both legs read, the same "single upstream job, plain output,
+  # provably-agreeing consumers" shape `determine-push-reuse-scope` already uses above
+  # for a different decision.
+  #
+  # Deliberately its own job with `if: always()` and NO other conditional logic of its
+  # own (same shape as push-supersession-check): it can only ever resolve
+  # success/failure/cancelled, never "skipped", so build/build-arm64's own consumption
+  # of its result does not reintroduce the implicit-success()-over-a-skippable-dependency
+  # hazard documented on container-scan/promote's `if:` blocks elsewhere in this file.
+  # Runs on the light tier: it only evaluates already-computed `needs.*.result` values
+  # and one boolean expression, no real work of its own.
+  determine-build-admission:
+    name: determine build/build-arm64 admission (G7)
+    needs:
+      - shellcheck
+      - validate-compose
+      - ci_scope_policy
+      - line-endings
+      - container-scan
+      - file-headers
+      - compose-healthchecks
+      - pr-template-check
+      - pr-tracking-metadata-check
+      - pr-title-convention-check
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
+    outputs:
+      admitted: ${{ steps.decide.outputs.admitted }}
+    steps:
+      - name: Decide whether build/build-arm64 may run
+        id: decide
+        env:
+          # Mirrors the exact expression build/build-arm64 each carried independently
+          # before this job existed -- see this job's own top comment. Read as plain env
+          # strings rather than interpolated straight into the shell logic below, so a
+          # malformed value (e.g. a typo'd result string) fails the `case` pattern match
+          # below loudly instead of being silently accepted by a raw `[[ ... ]]` expansion.
+          SHELLCHECK_RESULT: ${{ needs.shellcheck.result }}
+          VALIDATE_COMPOSE_RESULT: ${{ needs['validate-compose'].result }}
+          CI_SCOPE_POLICY_RESULT: ${{ needs.ci_scope_policy.result }}
+          LINE_ENDINGS_RESULT: ${{ needs['line-endings'].result }}
+          CONTAINER_SCAN_RESULT: ${{ needs['container-scan'].result }}
+          FILE_HEADERS_RESULT: ${{ needs['file-headers'].result }}
+          COMPOSE_HEALTHCHECKS_RESULT: ${{ needs['compose-healthchecks'].result }}
+          PR_TEMPLATE_CHECK_RESULT: ${{ needs['pr-template-check'].result }}
+          PR_TRACKING_METADATA_CHECK_RESULT: ${{ needs['pr-tracking-metadata-check'].result }}
+          PR_TITLE_CONVENTION_CHECK_RESULT: ${{ needs['pr-title-convention-check'].result }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+
+          is_success() { [ "$1" = "success" ]; }
+
+          admitted=true
+
+          # Unconditional gates -- must pass regardless of event type.
+          is_success "$SHELLCHECK_RESULT" || admitted=false
+          is_success "$VALIDATE_COMPOSE_RESULT" || admitted=false
+          is_success "$CI_SCOPE_POLICY_RESULT" || admitted=false
+          is_success "$LINE_ENDINGS_RESULT" || admitted=false
+
+          # A metadata-only pull_request event (label/milestone changed, no new commit)
+          # never carries new image content -- see build's own top comment for why this
+          # skips cleanly rather than treating it as a gate failure.
+          case "$EVENT_NAME" in
+            pull_request)
+              case "$EVENT_ACTION" in
+                labeled | unlabeled | milestoned | demilestoned)
+                  admitted=false
+                  ;;
+              esac
+              ;;
+          esac
+
+          # pull_request-only gates: these jobs only run on a pull_request event, so a
+          # push/tag/workflow_dispatch run must not require their result at all (a plain
+          # `is_success` check would fail closed on a non-pull_request event where the
+          # job never even ran, i.e. "skipped").
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            is_success "$FILE_HEADERS_RESULT" || admitted=false
+            is_success "$COMPOSE_HEALTHCHECKS_RESULT" || admitted=false
+            is_success "$PR_TEMPLATE_CHECK_RESULT" || admitted=false
+            is_success "$PR_TRACKING_METADATA_CHECK_RESULT" || admitted=false
+            is_success "$PR_TITLE_CONVENTION_CHECK_RESULT" || admitted=false
+          else
+            # container-scan is the inverse shape: it only matters OFF a pull_request
+            # event (see build's own if: block, which is what this mirrors).
+            is_success "$CONTAINER_SCAN_RESULT" || admitted=false
+          fi
+
+          echo "admitted=$admitted" >> "$GITHUB_OUTPUT"
+
   build:
     # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
-    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push -- a prior run already published the sha-*/pr-<N>-sha-<short> tags for this exact commit, and merge-manifests/full-setup-validate downstream already tolerate a skipped build/build-arm64 cleanly via their own `needs.build.result == 'success'` gates.
-    # From: Issue #1095 | PR #1532
+    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. Issue #1095 G7: the admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
+    # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
     needs:
+      - determine-build-admission
       - shellcheck
       - validate-compose
       - container-scan
@@ -4678,24 +4778,7 @@ jobs:
       - pr-title-convention-check
       - line-endings
       - push-supersession-check
-    if: >-
-      ${{
-        always() &&
-        needs.shellcheck.result == 'success' &&
-        needs['validate-compose'].result == 'success' &&
-        needs.ci_scope_policy.result == 'success' &&
-        needs['line-endings'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
-      }}
+    if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
     # What: Selects the runner per matrix service via `${{ fromJSON(matrix.runner) }}`, mirroring container-scan's own pattern.
     # Why: An AG-CI-002 measured exception; see this job's matrix comment above for which services route to light vs heavy and why.
     # From: Issue #1095 | PR #1532
@@ -5587,7 +5670,14 @@ jobs:
     #
     # Also skipped on a metadata-only pull_request event -- see `build`'s identical
     # comment above.
+    #
+    # Issue #1095 G7: same admission-consolidation change as `build` above, and for the
+    # identical reason -- see determine-build-admission's own top comment. `needs:` stays
+    # the same superset for the same reason `build`'s own comment explains (several of
+    # these jobs' outputs, e.g. validate-compose's build_tools_image below, are consumed
+    # elsewhere in this job).
     needs:
+      - determine-build-admission
       - shellcheck
       - validate-compose
       - container-scan
@@ -5601,24 +5691,7 @@ jobs:
       - pr-title-convention-check
       - line-endings
       - push-supersession-check
-    if: >-
-      ${{
-        always() &&
-        needs.shellcheck.result == 'success' &&
-        needs['validate-compose'].result == 'success' &&
-        needs.ci_scope_policy.result == 'success' &&
-        needs['line-endings'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
-      }}
+    if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     # Job-level concurrency, mirroring `build` (the amd64 leg) exactly, and for the same
