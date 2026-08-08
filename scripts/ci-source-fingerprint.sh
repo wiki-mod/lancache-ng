@@ -13,6 +13,12 @@
 # this, an accepted image could be reused forever across week boundaries and
 # silently bypass the repository's intentional package-refresh mechanism.
 #
+# CI_SOURCE_APT_CACHE_BUST may pin that refresh value to the exact value a build
+# already consumed. This matters at an ISO-week boundary: recomputing wall-clock
+# time after a long image build could otherwise record Monday's fingerprint for
+# an image that was actually built with Sunday's value. When the override is
+# absent the current ISO week remains the planning/reuse default.
+#
 # This is a source/build-input equivalence fingerprint, not a claim that a
 # fresh rebuild at an arbitrary later date would be byte-identical. Reuse is
 # allowed only for a previously accepted digest and only when this fingerprint
@@ -74,8 +80,12 @@ fi
 
 refresh_inputs='{}'
 if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' <<<"$dockerfile_text"; then
-    # Must remain byte-identical to ci-artifact-v2.yml's build-args step.
-    apt_cache_bust="$(date -u +%G-W%V)"
+    apt_cache_bust="${CI_SOURCE_APT_CACHE_BUST:-}"
+    if [[ -z "$apt_cache_bust" ]]; then
+        apt_cache_bust="$(date -u +%G-W%V)"
+    fi
+    [[ "$apt_cache_bust" =~ ^[0-9]{4}-W[0-9]{2}$ ]] \
+        || ci_ai_fail "invalid APT_CACHE_BUST fingerprint input: $apt_cache_bust"
     refresh_inputs="$(jq -cn --arg value "$apt_cache_bust" '{APT_CACHE_BUST:$value}')"
 fi
 
