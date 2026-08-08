@@ -10,23 +10,30 @@ fi
 
 scope="$1"; service="$2"; image="$3"; candidate_source_sha="$4"; artifact_source_sha="$5"
 if [[ $# -eq 10 ]]; then
-    source_fingerprint="$6"; platform="$7"; digest="$8"; mode="$9"; output="${10}"
+    planned_source_fingerprint="$6"; platform="$7"; digest="$8"; mode="$9"; output="${10}"
 else
-    # Compatibility with the workflow call shape: derive the fingerprint from
-    # the candidate source at the last responsible moment rather than trusting
-    # another matrix field to carry it correctly.
     platform="$6"; digest="$7"; mode="$8"; output="$9"
-    source_fingerprint=""
+    planned_source_fingerprint=""
 fi
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 
 ci_ai_require_sha "$candidate_source_sha"
 ci_ai_require_sha "$artifact_source_sha"
-if [[ -z "$source_fingerprint" ]]; then
-    source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
-fi
+
+# Recompute at record-write time instead of blindly trusting the planner.
+# ci-source-fingerprint includes effective refresh inputs such as the ISO-week
+# APT_CACHE_BUST value. If a build crosses that refresh boundary between plan
+# and execution, accepting the planner's old fingerprint would claim the wrong
+# build-input identity. Fail closed and require a fresh run instead.
+source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
 ci_ai_require_digest "$source_fingerprint"
+if [[ -n "$planned_source_fingerprint" ]]; then
+    ci_ai_require_digest "$planned_source_fingerprint"
+    [[ "$planned_source_fingerprint" == "$source_fingerprint" ]] \
+        || ci_ai_fail "effective source fingerprint changed after planning for $service: planned $planned_source_fingerprint, now $source_fingerprint"
+fi
+
 ci_ai_require_digest "$digest"
 [[ "$scope" == runtime || "$scope" == tooling ]] || ci_ai_fail "invalid scope $scope"
 [[ "$platform" == linux/amd64 || "$platform" == linux/arm64 ]] || ci_ai_fail "invalid platform $platform"
