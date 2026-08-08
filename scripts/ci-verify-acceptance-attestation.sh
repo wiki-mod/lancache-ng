@@ -4,12 +4,14 @@
 #
 # Verifies the custom final-acceptance attestation for one digest-qualified
 # stack-pointer image. The verifier is checksum-pinned by
-# ci-install-gh-attestation-verifier.sh. Verification is restricted to this
-# repository, the final-acceptance predicate type, and the workflow that is
-# allowed to sign candidate acceptance. The signed predicate must also equal
-# the acceptance.json embedded in the stack pointer byte-for-byte as JSON data
-# after canonical jq parsing; merely finding some valid attestation for the
-# same digest is not sufficient.
+# ci-install-gh-attestation-verifier.sh. Reusable acceptance is restricted to
+# this repository, the final-acceptance predicate type, the candidate workflow,
+# and a protected product branch source identity. The signer certificate must
+# name the same source commit and source ref carried by acceptance.json.
+#
+# A PR validation run may build and exercise candidate content, but its
+# refs/pull/* identity can never satisfy this verifier and therefore can never
+# become a reusable/promotion-eligible accepted baseline.
 set -euo pipefail
 
 [[ $# -eq 2 ]] || {
@@ -29,6 +31,20 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
   exit 1
 }
 
+source_sha="$(jq -r '.source_sha // empty' "$acceptance_file")"
+source_ref="$(jq -r '.source_ref // empty' "$acceptance_file")"
+[[ "$source_sha" =~ ^[0-9a-f]{40}$ ]] || {
+  echo "ci-verify-acceptance-attestation: invalid acceptance source SHA: ${source_sha:-<empty>}" >&2
+  exit 1
+}
+case "$source_ref" in
+  refs/heads/current_dev|refs/heads/master) ;;
+  *)
+    echo "ci-verify-acceptance-attestation: reusable acceptance is allowed only from protected product branches, got ${source_ref:-<empty>}" >&2
+    exit 1
+    ;;
+esac
+
 work_dir="$(mktemp -d)"
 trap 'rm -rf "$work_dir"' EXIT
 gh_bin="$(bash "$repo_root/scripts/ci-install-gh-attestation-verifier.sh" "$work_dir/gh")"
@@ -38,6 +54,8 @@ verification_json="$work_dir/verification.json"
   --repo wiki-mod/lancache-ng \
   --predicate-type https://wiki-mod.github.io/lancache-ng/attestations/acceptance/v1 \
   --signer-workflow wiki-mod/lancache-ng/.github/workflows/ci-artifact-v2.yml \
+  --source-ref "$source_ref" \
+  --source-digest "$source_sha" \
   --bundle-from-oci \
   --format json >"$verification_json"
 
@@ -50,4 +68,4 @@ if ! jq -e --argjson expected "$expected" '
   exit 1
 fi
 
-printf 'Verified final acceptance attestation for %s\n' "$stack_ref"
+printf 'Verified protected-branch final acceptance attestation for %s\n' "$stack_ref"
