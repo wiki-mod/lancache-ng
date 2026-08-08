@@ -27,3 +27,10 @@ runs:
     - name: Check for review-chronology comments (AG-CODE-003)
       shell: bash
       run: bash scripts/check-review-chronology-comments.sh
+
+    # See scripts/check-dependabot-docker-base-consistency.sh's own header
+    # comment for the real drift incident (a stale "shared base image"
+    # comment) this guards against.
+    - name: Check dependabot.yml's docker-group base-image assumption still holds
+      shell: bash
+      run: bash scripts/check-dependabot-docker-base-consistency.sh

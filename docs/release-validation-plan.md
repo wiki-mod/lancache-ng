@@ -1156,8 +1156,19 @@ omitted):**
     #815 migrated every listed service to an identical Alpine base image).
   - **Validation**: found and fixed only by a human/agent reading the
     comment against the real `FROM` lines during an unrelated audit, not by
-    any CI check; the point fix for this specific instance shipped alongside
-    this entry.
+    any CI check when first found. **Updated 2026-08-08**: this specific
+    recurring claim (that every Docker directory `.github/dependabot.yml`
+    groups into one PR shares an identical final-stage base image) is
+    concrete and mechanically checkable, unlike the general class this
+    exception covers -- `scripts/check-dependabot-docker-base-consistency.sh`
+    (wired into the `file-headers-check` composite action) now fails CI if
+    any listed Dockerfile's final `FROM` line ever diverges from the
+    others, with bats coverage (`tests/bats/
+    check_dependabot_docker_base_consistency.bats`, 7 cases including a
+    real-repository self-check) proving both the passing and failing path.
+    The general exception below still stands for any *other* config-file
+    comment's factual claim, which remains genuinely hard to check
+    mechanically.
   - **Non-Expansion**: this exception covers only the general
     "comment-vs-code drift is hard to check mechanically" class. It does not
     exempt any single already-known-stale comment from being fixed once
