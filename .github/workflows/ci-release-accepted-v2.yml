@@ -413,7 +413,11 @@ jobs:
               set -euo pipefail
               bash -n scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
               shellcheck --severity=warning scripts/ci-*.sh scripts/query-stack-images.sh scripts/lib/ci-artifact-identity.sh scripts/lib/network-retry.sh
-              bats tests/bats/ci_artifact_identity.bats tests/bats/network_retry.bats
+              bats \
+                tests/bats/ci_artifact_identity.bats \
+                tests/bats/ci_release_identity.bats \
+                tests/bats/ci_docker_lock_shim.bats \
+                tests/bats/network_retry.bats
             '
 
       - name: Generate SPDX SBOM from exact release digest
@@ -421,7 +425,7 @@ jobs:
         with:
           image-ref: ${{ matrix.image }}@${{ matrix.digest }}
           format: spdx-json
-          output: sbom.spdx.json
+          output: sbom-${{ matrix.service }}-${{ matrix.arch }}.spdx.json
           hide-progress: true
           cache: "false"
           timeout: 10m
@@ -433,7 +437,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
           subject-name: ${{ matrix.image }}
           subject-digest: ${{ matrix.digest }}
-          sbom-path: sbom.spdx.json
+          sbom-path: sbom-${{ matrix.service }}-${{ matrix.arch }}.spdx.json
 
       - name: Write exact-digest release evidence record
         run: |
@@ -453,14 +457,14 @@ jobs:
               native_smoke:"passed",
               sbom_attested:true,
               observed_at:$observed_at
-            }' > "evidence/${{ matrix.service }}__${{ matrix.arch }}.json"
+            }' > "evidence/${{ matrix.service }}__${{ matrix.arch }}.evidence.json"
 
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-evidence-${{ matrix.service }}-${{ matrix.arch }}
           path: |
-            evidence/${{ matrix.service }}__${{ matrix.arch }}.json
-            sbom.spdx.json
+            evidence/${{ matrix.service }}__${{ matrix.arch }}.evidence.json
+            sbom-${{ matrix.service }}-${{ matrix.arch }}.spdx.json
           retention-days: 90
 
   publish:
@@ -508,7 +512,7 @@ jobs:
           source scripts/lib/ci-artifact-identity.sh
           ci_ai_validate_stack_lock release/release-lock.json
           expected="$(( $(bash scripts/query-stack-images.sh all | jq '.include | length') * 2 ))"
-          mapfile -t files < <(find release/evidence -type f -name '*.json' -print | sort)
+          mapfile -t files < <(find release/evidence -type f -name '*.evidence.json' -print | sort)
           [[ "${#files[@]}" -eq "$expected" ]] \
             || ci_ai_fail "expected $expected release evidence records, found ${#files[@]}"
           for file in "${files[@]}"; do
