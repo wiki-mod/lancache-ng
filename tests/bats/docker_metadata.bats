@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free unit coverage for scripts/lib/docker-metadata.sh (issue #1095
@@ -11,6 +12,11 @@ setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     # shellcheck source=scripts/lib/docker-metadata.sh
     source "$repo_root/scripts/lib/docker-metadata.sh"
+}
+
+fail() {
+    echo "$1" >&2
+    return 1
 }
 
 @test "dmeta_short_sha: truncates to DOCKER_METADATA_SHORT_SHA_LENGTH when set" {
@@ -70,6 +76,32 @@ setup() {
     run dmeta_short_sha "abcdef0123456789"
     [ "$status" -ne 0 ]
     [[ "$output" == *"must be a positive integer"* ]]
+}
+
+@test "dmeta_short_sha real caller shape: build-push-hosted-fallback.yml's short-sha step aborts under set -euo pipefail on a malformed length, before writing value=" {
+    # Reproduces build-push-hosted-fallback.yml's "Resolve short commit SHA"
+    # step verbatim (bare assignment, then a separate printf into
+    # GITHUB_OUTPUT) under the exact shell options that real step runs with,
+    # per AG-VAL-030: a `set -e`-dependent construct must be proven under the
+    # real caller's own option set, not only via a direct call to the helper
+    # function in isolation (the tests above already cover that).
+    local fake_output
+    fake_output="$(mktemp)"
+    run bash -c '
+        set -euo pipefail
+        source "$1"
+        export DOCKER_METADATA_SHORT_SHA_LENGTH="not-a-number"
+        export GITHUB_SHA="abcdef0123456789"
+        export GITHUB_OUTPUT="$2"
+        short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+        printf "value=%s\n" "$short_sha" >> "$GITHUB_OUTPUT"
+    ' _ "$repo_root/scripts/lib/docker-metadata.sh" "$fake_output"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"must be a positive integer"* ]] || fail "did not surface dmeta_short_sha's own fail-closed message: $output"
+    [ ! -s "$fake_output" ] || fail "GITHUB_OUTPUT was written to despite the malformed length -- the bare assignment's set -e propagation did not abort the step before the printf line: $(cat "$fake_output")"
+
+    rm -f "$fake_output"
 }
 
 @test "dmeta_ghcr_repo: lowercases an already-lowercase GITHUB_REPOSITORY (no-op case)" {

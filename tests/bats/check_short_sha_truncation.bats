@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Exercises scripts/check-short-sha-truncation.sh (issue #1095 G2) against
@@ -67,6 +68,36 @@ EOF
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 1 ]
+}
+
+@test "fails on a *_sha_short-named assignment, not only short_sha itself" {
+    # Real shape this widening exists to catch: scripts/lib/staging-ancestor-
+    # fallback.sh named its own local variables base_sha_short/
+    # ancestor_sha_short rather than short_sha, which an earlier, narrower
+    # version of this guard (exact-match on the identifier "short_sha") could
+    # not see at all.
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+base_sha_short="${base_sha:0:7}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
+}
+
+@test "fails on a bare interpolation, not only a dedicated assignment" {
+    # Real shape this widening exists to catch: a hardcoded slice embedded
+    # directly inside a larger string (e.g. a candidate tag) rather than
+    # assigned to its own short_sha-named variable first.
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+candidate_tag="ghcr.io/example/svc:sha-${ancestor_sha:0:7}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
 }
 
 @test "passes when the site reads dmeta_short_sha() instead" {

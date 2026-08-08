@@ -126,16 +126,15 @@ vit_resolve_tag() {
     fi
 
     if [[ "$(vit_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
-        # Issue #1095 G2 (AG-VAL-030 follow-up): read the one declared
-        # short-SHA derivation instead of independently hardcoding the
-        # truncation length -- assigned to its own local first, checked
-        # explicitly with ||, rather than embedded inside printf's argument
-        # list. printf's OWN exit status would stay 0 even if the command
-        # substitution inside its argument failed, so this file's caller
-        # having `set -e` could not have caught it either -- a malformed
-        # DOCKER_METADATA_SHORT_SHA_LENGTH would have silently resolved to
-        # "pr-<N>-sha-" instead of failing, exactly the tag build-push.yml
-        # never pushed.
+        # Read the one declared short-SHA derivation instead of
+        # independently hardcoding the truncation length -- assigned to its
+        # own local first, checked explicitly with ||, rather than embedded
+        # inside printf's argument list. printf's OWN exit status would stay
+        # 0 even if the command substitution inside its argument failed, so
+        # this file's caller having `set -e` could not have caught it either
+        # -- a malformed DOCKER_METADATA_SHORT_SHA_LENGTH would have
+        # silently resolved to "pr-<N>-sha-" instead of failing, exactly the
+        # tag build-push.yml never pushed (Rule-Ref: AG-VAL-030).
         local pr_short_sha
         pr_short_sha="$(dmeta_short_sha "$build_sha")" || return 1
         printf 'pr-%s-sha-%s\n' "$pr_number" "$pr_short_sha"
