@@ -84,11 +84,8 @@ STUB
 }
 
 @test "legacy pre-upgrade snapshot missing the stream-ACL file is backfilled and becomes usable for rollback again" {
-    # Simulates an install that already has a known-good snapshot from
-    # before this PR added STREAM_CLIENT_ACL_FILE (00-stream-client-acl.conf)
-    # to the candidate list -- only the two older candidate files exist in
-    # the snapshot, exactly as kgs_snapshot_create would have left it under
-    # the old 4-file (here reduced to 2 for test brevity) candidate set.
+    # A snapshot made with the shorter legacy candidate set has no stream ACL;
+    # the test uses two legacy files instead of four to keep the fixture small.
     local params_conf="$live_dir/proxy-params.conf"
     printf 'legacy nginx.conf v1\n' > "$nginx_conf"
     printf 'legacy proxy-params v1\n' > "$params_conf"
@@ -98,16 +95,15 @@ STUB
     [ -n "$legacy_id" ]
     [ ! -f "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
 
-    # This boot's freshly-generated ACL file (deterministic from
-    # PROXY_ALLOWED_CLIENT_CIDRS, unrelated to whether the legacy snapshot's
-    # own nginx.conf/proxy-params.conf are still valid).
+    # A malformed ACL represents an invalid environment value on the first
+    # boot with the larger candidate set.
     local acl_file="$live_dir/00-stream-client-acl.conf"
-    printf 'allow 10.0.0.0/8;\ndeny all;\n' > "$acl_file"
+    printf 'allow definitely-not-a-cidr;\ndeny all;\n' > "$acl_file"
 
-    _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR" "$acl_file"
+    _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR"
 
     [ -f "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
-    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf")" = "$(cat "$acl_file")" ]
+    [ ! -s "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
 
     # The migrated snapshot's original two files are untouched byte-for-byte
     # (the backfill must not re-derive or alter what was already validated
@@ -115,16 +111,14 @@ STUB
     [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/nginx.conf")" = "legacy nginx.conf v1" ]
     [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/proxy-params.conf")" = "legacy proxy-params v1" ]
 
-    # Now a full 5-candidate-style rollback (nginx.conf + proxy-params.conf +
-    # the newly-backfilled ACL file) can actually select this migrated
-    # snapshot instead of finding zero usable snapshots.
+    # A full candidate-set rollback can select the migrated snapshot without
+    # importing the invalid ACL that caused the current boot to fail.
     printf 'BROKEN config\n' > "$nginx_conf"
     printf 'BROKEN proxy-params\n' > "$params_conf"
     printf 'BROKEN acl\n' > "$acl_file"
     run kgs_snapshot_apply "$PROXY_CONFIG_SNAPSHOT_DIR" "proxy" "true" "$nginx_conf" "$params_conf" "$acl_file"
     [ "$status" -eq 0 ]
-    [ "$(cat "$acl_file")" = "allow 10.0.0.0/8;
-deny all;" ]
+    [ ! -s "$acl_file" ]
 }
 
 @test "migration is a no-op for a snapshot that already has the stream-ACL file" {
@@ -138,7 +132,7 @@ deny all;" ]
     original_mtime="$(stat -c '%Y' "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")"
 
     printf 'allow 172.16.0.0/12;\ndeny all;\n' > "$acl_file"
-    run _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR" "$acl_file"
+    run _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR"
     [ "$status" -eq 0 ]
 
     # Untouched: still the ORIGINAL snapshotted content, not overwritten by
