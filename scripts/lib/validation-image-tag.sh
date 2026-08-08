@@ -29,13 +29,26 @@
 #
 # Issue #1095 G2: vit_resolve_tag() below needs the single declared
 # short-SHA derivation (dmeta_short_sha()), not its own independent
-# hardcode -- self-source it the same way scripts/lib/run-in-validation-
-# subnet.sh already sources scripts/lib/reserve-validation-subnet.sh,
-# rather than relying on every caller of this file to have sourced
-# docker-metadata.sh first.
-script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# hardcode -- self-source it, rather than relying on every caller of this
+# file to have sourced docker-metadata.sh first. Deliberately NOT using
+# scripts/lib/run-in-validation-subnet.sh's own named `script_dir` variable
+# convention here: that script is always DIRECTLY EXECUTED (its own process,
+# its own shell), never sourced, so a bare top-level variable it sets cannot
+# collide with anything. This file is SOURCED by other scripts (see the
+# header above) -- `source` runs in the CALLING script's own shell, so a
+# bare `script_dir=...` here would silently overwrite an identically-named
+# variable already in scope there. That real regression shipped once already
+# in this exact PR: scripts/plan-deep-validation.sh sets its own `script_dir`
+# at its own top level, then sources this file -- a `script_dir=` assignment
+# here clobbered it, so plan-deep-validation.sh's later
+# `$script_dir/detect-full-setup-changes.sh` resolved to
+# `scripts/lib/detect-full-setup-changes.sh` (this file's own directory)
+# instead of `scripts/detect-full-setup-changes.sh` (the caller's directory),
+# failing with "No such file or directory" on a real PR run. Resolving the
+# path inline, with no intermediate variable at all, avoids the collision
+# entirely rather than picking a "probably unique enough" variable name.
 # shellcheck source=scripts/lib/docker-metadata.sh
-source "$script_dir/docker-metadata.sh"
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"
 
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
 # channel it publishes to. Mirrors build-push.yml's promote/validate mapping
