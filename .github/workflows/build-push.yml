@@ -4964,6 +4964,8 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -4987,7 +4989,9 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          short_sha="${COMMIT_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-amd64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
@@ -5046,7 +5050,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${BUILD_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
           {
@@ -5825,6 +5834,8 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -5848,7 +5859,9 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          short_sha="${COMMIT_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-arm64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
@@ -5892,7 +5905,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${BUILD_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
           {
@@ -6141,9 +6159,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
 
           # Same wording as this same file's build/build-arm64 matrix.description entries --
@@ -6251,9 +6273,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${BUILD_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
           # Same helper as the trusted-ref step above (and promote's own
@@ -6570,9 +6596,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
           channel_tags=()
@@ -7033,9 +7063,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # Issue #1095 G2: read the one declared short-SHA derivation instead of
+          # independently hardcoding the truncation length.
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
           if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
