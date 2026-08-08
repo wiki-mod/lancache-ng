@@ -20,6 +20,7 @@ write_reused_record() {
       candidate_source_sha:"1111111111111111111111111111111111111111",
       artifact_source_sha:"1111111111111111111111111111111111111111",
       source_fingerprint:"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      build_inputs:{build_args:{},build_contexts:{}},
       platform:$platform,
       digest:$child_digest,
       mode:"reused",
@@ -99,6 +100,7 @@ SH
   run jq -e --arg index "$index" '
     .digest == $index
     and .candidate_ref == ("ghcr.io/wiki-mod/lancache-ng/proxy@" + $index)
+    and .build_inputs == {build_args:{},build_contexts:{}}
     and .platforms["linux/amd64"] == "sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
     and .platforms["linux/arm64"] == "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
   ' "$index_record"
