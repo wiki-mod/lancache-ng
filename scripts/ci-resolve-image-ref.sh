@@ -27,10 +27,20 @@ _inspect_once() {
     local output_file="$1" error_file="$2" image_ref="$3" status=0
     : >"$output_file"
     : >"$error_file"
-    if docker buildx imagetools inspect "$image_ref" --format '{{json .Manifest.Digest}}' >"$output_file" 2>"$error_file"; then
+    if timeout --kill-after=10 45 \
+        docker buildx imagetools inspect "$image_ref" --format '{{json .Manifest.Digest}}' \
+        >"$output_file" 2>"$error_file"; then
         return 0
     else
         status=$?
+    fi
+
+    # timeout(1) uses 124 when the individual probe exceeded its own budget.
+    # That is transient for this resolver and should consume another bounded
+    # retry attempt rather than being reclassified as a deterministic failure.
+    if [[ "$status" -eq 124 ]]; then
+        echo "ci-resolve-image-ref: manifest probe timed out for $image_ref" >&2
+        return "$status"
     fi
 
     # Retry only transport, throttling, timeout and server-side failure shapes.
@@ -47,8 +57,10 @@ _inspect_once() {
 
 raw_file="$tmp_dir/digest"
 error_file="$tmp_dir/error"
+# Four 45-second probes plus three 20-second backoffs remain below the
+# workflow-level 300-second resolver budget even in the worst retry case.
 NETWORK_RETRY_MAX_ATTEMPTS="${NETWORK_RETRY_MAX_ATTEMPTS:-4}" \
-NETWORK_RETRY_BACKOFF_SECONDS="${NETWORK_RETRY_BACKOFF_SECONDS:-30}" \
+NETWORK_RETRY_BACKOFF_SECONDS="${NETWORK_RETRY_BACKOFF_SECONDS:-20}" \
     network_retry -- _inspect_once "$raw_file" "$error_file" "$ref"
 
 digest="$(tr -d '"[:space:]' <"$raw_file")"
