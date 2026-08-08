@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for _dns_ensure_zone_exists (services/dns/entrypoint.sh),
@@ -57,11 +58,10 @@ pdnsutil() {
 # because the zone is already there. Must stay non-fatal, exactly like the
 # old blanket `|| true` was for this specific case.
 #
-# Message wording (issue #1505): the real pdnsutil binary's own message is
-# "Zone '<name>' exists already" -- "exists already", not "already exists"
-# -- confirmed empirically against the actual binary (2026-08-08), not
-# assumed. The original version of this test used the reversed wording,
-# which never matched the real tool and would have masked this exact
+# Message wording: the real pdnsutil binary's own message is "Zone
+# '<name>' exists already" -- "exists already", not "already exists" --
+# confirmed empirically against the actual binary, not assumed. The
+# reversed wording never matches the real tool and would mask this exact
 # never-tolerated-in-practice failure mode.
 @test "an already-existing zone (create-zone fails with pdnsutil's real 'exists already' message) is not fatal" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
@@ -96,8 +96,8 @@ pdnsutil() {
     [[ "$output" == *"Unable to open database connection"* ]]
 }
 
-# Issue #1505, the actual regression: bats' `run` does not run the command
-# under `set -e` the way the real entrypoint.sh does (services/dns/
+# The actual regression this guards against: bats' `run` does not run the
+# command under `set -e` the way the real entrypoint.sh does (services/dns/
 # entrypoint.sh line 11: `set -euo pipefail`), so every test above -- while
 # a genuinely correct check of the function's own logic -- could not have
 # caught the real bug: a bare `create_output=$(...)` assignment statement
@@ -113,7 +113,7 @@ pdnsutil() {
 # already exists (the routine restart case), then once more (a canary
 # call) to prove the script is still alive afterward, not merely dead but
 # reporting exit 0.
-@test "_dns_ensure_zone_exists does not silently abort the whole script under real set -euo pipefail (issue #1505)" {
+@test "_dns_ensure_zone_exists does not silently abort the whole script under real set -euo pipefail" {
     local script="$BATS_TEST_TMPDIR/set-e-repro.sh"
     cat > "$script" <<SCRIPT
 #!/usr/bin/env bash

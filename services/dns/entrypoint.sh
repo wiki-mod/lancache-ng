@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
@@ -1140,29 +1141,33 @@ echo "[lancache-dns] Creating LAN zones in authoritative database..."
 # closing the original gap without depending on an unverified second
 # command's contract.
 #
-# Issue #1505: the command substitution below must sit in the `if`
-# condition itself, not a bare `create_output=$(...)` assignment statement
-# followed by a separate `create_status=$?` line. This script runs under
-# `set -euo pipefail` (see the top of this file); a bare assignment whose
-# right-hand command substitution fails is a failing simple command in its
-# own right, which `errexit` aborts on immediately -- before the next line
-# ever runs. That silently killed the entrypoint on every restart once the
-# zones already existed (the exact, expected, documented case this
-# function exists to tolerate), with neither the "already exists" check
-# nor the FATAL message ever reached. Testing the assignment as the `if`
-# condition exempts it from `errexit` (per AG-VAL-030) while still binding
+# The command substitution below must sit in the `if` condition itself,
+# not a bare `create_output=$(...)` assignment statement followed by a
+# separate `create_status=$?` line. This script runs under `set -euo
+# pipefail` (see the top of this file); a bare assignment whose right-hand
+# command substitution fails is a failing simple command in its own right,
+# which `errexit` aborts on immediately -- before the next line ever runs.
+# That silently killed the entrypoint on every restart once the zones
+# already existed (the exact, expected, documented case this function
+# exists to tolerate), with neither the "already exists" check nor the
+# FATAL message ever reached. Testing the assignment as the `if` condition
+# exempts it from `errexit` (per AG-VAL-030) while still binding
 # `create_output` for the checks below.
 _dns_ensure_zone_exists() {
     local zone="$1" create_output
     if create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1); then
         return 0
     fi
-    # Issue #1505: pdnsutil's real message is "Zone '<name>' exists
-    # already" (confirmed empirically against the actual binary, 2026-08-08)
-    # -- "already exists" (the reverse word order) never matches it, so
-    # this tolerance check silently never fired even once the set -e bug
-    # above was fixed.
-    if printf '%s' "$create_output" | grep -qi "exists already"; then
+    # pdnsutil's real message is "Zone '<name>' exists already" (confirmed
+    # empirically against the actual binary) -- "already exists" (the
+    # reverse word order) never matches it, so this tolerance check would
+    # silently never fire even with the errexit issue above fixed. Matched
+    # via a here-string (not `printf ... | grep -qi`, per AG-VAL-032): a
+    # multi-line create_output piped live into `grep -q` can let grep exit
+    # after an early match while printf is still writing, which under
+    # `pipefail` reports the whole pipeline as failed even though grep
+    # itself matched.
+    if grep -qi "exists already" <<< "$create_output"; then
         return 0
     fi
     echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2
