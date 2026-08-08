@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Nginx proxy entrypoint. Generates TLS interception certificates, renders
@@ -865,8 +866,8 @@ if [ "${SSL_ENABLED}" = "1" ]; then
         # this script runs under `set -o pipefail`, and a multi-line $san
         # could let grep exit after an early match while echo is still
         # writing, which pipefail would report as failure even though grep
-        # matched -- the same failure class found and fixed in
-        # services/dns/entrypoint.sh's zone-creation error handling.
+        # matched -- the general SIGPIPE-under-pipefail hazard that
+        # scripts/check-pipefail-early-exit-grep.sh guards against repo-wide.
         grep -q "DNS:" <<< "$san" || return 0
         if [ -n "${IP_SSL}" ]; then
             # `grep -q "IP Address:${IP_SSL}"` would be an unanchored substring

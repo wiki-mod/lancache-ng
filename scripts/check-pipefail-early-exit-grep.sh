@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing guard (AG-VAL-029) for a confirmed real CI failure: a shell
@@ -26,12 +27,11 @@
 #
 # SCOPE: repo-wide, per issue #1377 -- every tracked shell script under
 # scripts/**, tools/**, and services/**, plus setup.sh (the production
-# installer). `services/**` was added later: this file's own header had
-# claimed "repo-wide" coverage while its glob list actually omitted every
-# service entrypoint, which is exactly where a real, previously-undetected
-# instance of this failure class was later found and fixed (a `set -e`
-# script silently dying on an unguarded `printf ... | grep -qi` after a
-# multi-line capture). This was originally scoped to only
+# installer). `services/**` matters just as much as `scripts/**`/`tools/**`:
+# a service entrypoint commonly runs under its own `set -e`/`pipefail` and
+# can pipe a captured multi-line value (e.g. via `printf`) into an
+# early-exiting consumer such as `grep -qi`, the exact SIGPIPE-under-pipefail
+# hazard this guard exists to catch. This was originally scoped to only
 # `tools/build-tools/Dockerfile` (the exact
 # file the confirmed incident occurred in) because a first wide scan found
 # 41 preexisting instances of the same raw pattern across the codebase with
