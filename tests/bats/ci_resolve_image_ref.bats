@@ -29,7 +29,12 @@ SH
         bash "$REPO_ROOT/scripts/ci-resolve-image-ref.sh" golang:latest
 
     [ "$status" -eq 0 ]
-    [ "$output" = 'golang@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' ]
+    # Bats captures stderr together with stdout. Retry diagnostics are part of
+    # the desired operator-visible behavior, so assert the final identity is
+    # present instead of silencing those diagnostics to make an equality test
+    # convenient.
+    [[ "$output" == *'golang@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'* ]]
+    [[ "$output" == *'unexpected EOF while reading registry response'* ]]
     [ "$(cat "$count_file")" -eq 3 ]
 }
 
