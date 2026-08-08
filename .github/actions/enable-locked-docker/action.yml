@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Enable stack-lock Docker boundary
+description: Download one stack lock and route first-party Docker/Compose image use through exact recorded OCI digests.
+inputs:
+  artifact-name:
+    description: Actions artifact containing stack-lock.json. Empty disables the lock boundary.
+    required: false
+    default: ""
+outputs:
+  build-tools-image:
+    description: Exact digest-qualified build-tools index from the lock, or empty when disabled.
+    value: ${{ steps.enable.outputs.build-tools-image }}
+runs:
+  using: composite
+  steps:
+    - name: Download stack lock
+      if: inputs.artifact-name != ''
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: ${{ inputs.artifact-name }}
+        path: ${{ github.workspace }}/.ci-locked-stack
+
+    - id: enable
+      if: inputs.artifact-name != ''
+      shell: bash
+      run: |
+        set -euo pipefail
+        lock="$GITHUB_WORKSPACE/.ci-locked-stack/stack-lock.json"
+        [[ -f "$lock" ]] || {
+          echo "::error::Stack-lock artifact does not contain stack-lock.json at the expected path." >&2
+          exit 1
+        }
+        bash -c 'source scripts/lib/ci-artifact-identity.sh; ci_ai_validate_stack_lock "$1"' _ "$lock"
+
+        real_docker="$(command -v docker)"
+        [[ -n "$real_docker" && -x "$real_docker" ]] || {
+          echo "::error::Docker CLI is unavailable before installing the lock shim." >&2
+          exit 1
+        }
+
+        shim_dir="$GITHUB_WORKSPACE/.ci-locked-stack/bin"
+        mkdir -p "$shim_dir"
+        cat > "$shim_dir/docker" <<'SHIM'
+        #!/usr/bin/env bash
+        set -euo pipefail
+        exec bash "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}/scripts/ci-docker-lock-shim.sh" "$@"
+        SHIM
+        chmod +x "$shim_dir/docker"
+
+        # Nested build-tools validation containers mount the workspace at the
+        # same absolute path. BASH_ENV makes their non-interactive Bash entry
+        # points inherit the same Docker boundary without requiring every
+        # simulation script to grow a private lock implementation.
+        bash_env="$GITHUB_WORKSPACE/.ci-locked-stack/bash-env"
+        cat > "$bash_env" <<'BASHENV'
+        if [[ -n "${CI_LOCKED_DOCKER_SHIM_DIR:-}" ]]; then
+          case ":$PATH:" in
+            *":${CI_LOCKED_DOCKER_SHIM_DIR}:"*) ;;
+            *) export PATH="${CI_LOCKED_DOCKER_SHIM_DIR}:$PATH" ;;
+          esac
+        fi
+        BASHENV
+
+        image="$(jq -r '.tooling["build-tools"].image' "$lock")"
+        digest="$(jq -r '.tooling["build-tools"].digest' "$lock")"
+        [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+          echo "::error::Stack lock has no valid build-tools digest." >&2
+          exit 1
+        }
+
+        printf 'CI_LOCKED_STACK_FILE=%s\n' "$lock" >> "$GITHUB_ENV"
+        printf 'CI_LOCKED_DOCKER_SHIM_DIR=%s\n' "$shim_dir" >> "$GITHUB_ENV"
+        printf 'CI_LOCKED_REAL_DOCKER=%s\n' "$real_docker" >> "$GITHUB_ENV"
+        printf 'CI_LOCKED_BASH_ENV=%s\n' "$bash_env" >> "$GITHUB_ENV"
+        printf '%s\n' "$shim_dir" >> "$GITHUB_PATH"
+        printf 'build-tools-image=%s@%s\n' "$image" "$digest" >> "$GITHUB_OUTPUT"
+
+        echo "::notice::First-party Docker image resolution is locked to $lock."
