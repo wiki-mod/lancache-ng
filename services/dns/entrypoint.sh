@@ -1139,14 +1139,30 @@ echo "[lancache-dns] Creating LAN zones in authoritative database..."
 # non-fatal exactly as before; any other failure is now surfaced and fatal,
 # closing the original gap without depending on an unverified second
 # command's contract.
+#
+# Issue #1505: the command substitution below must sit in the `if`
+# condition itself, not a bare `create_output=$(...)` assignment statement
+# followed by a separate `create_status=$?` line. This script runs under
+# `set -euo pipefail` (see the top of this file); a bare assignment whose
+# right-hand command substitution fails is a failing simple command in its
+# own right, which `errexit` aborts on immediately -- before the next line
+# ever runs. That silently killed the entrypoint on every restart once the
+# zones already existed (the exact, expected, documented case this
+# function exists to tolerate), with neither the "already exists" check
+# nor the FATAL message ever reached. Testing the assignment as the `if`
+# condition exempts it from `errexit` (per AG-VAL-030) while still binding
+# `create_output` for the checks below.
 _dns_ensure_zone_exists() {
-    local zone="$1" create_output create_status
-    create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1)
-    create_status=$?
-    if [ "$create_status" -eq 0 ]; then
+    local zone="$1" create_output
+    if create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1); then
         return 0
     fi
-    if printf '%s' "$create_output" | grep -qi "already exists"; then
+    # Issue #1505: pdnsutil's real message is "Zone '<name>' exists
+    # already" (confirmed empirically against the actual binary, 2026-08-08)
+    # -- "already exists" (the reverse word order) never matches it, so
+    # this tolerance check silently never fired even once the set -e bug
+    # above was fixed.
+    if printf '%s' "$create_output" | grep -qi "exists already"; then
         return 0
     fi
     echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2

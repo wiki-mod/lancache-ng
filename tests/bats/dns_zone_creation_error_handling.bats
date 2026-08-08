@@ -56,9 +56,16 @@ pdnsutil() {
 # The routine, expected case on every container restart: create-zone fails
 # because the zone is already there. Must stay non-fatal, exactly like the
 # old blanket `|| true` was for this specific case.
-@test "an already-existing zone (create-zone fails with an 'already exists' message) is not fatal" {
+#
+# Message wording (issue #1505): the real pdnsutil binary's own message is
+# "Zone '<name>' exists already" -- "exists already", not "already exists"
+# -- confirmed empirically against the actual binary (2026-08-08), not
+# assumed. The original version of this test used the reversed wording,
+# which never matched the real tool and would have masked this exact
+# never-tolerated-in-practice failure mode.
+@test "an already-existing zone (create-zone fails with pdnsutil's real 'exists already' message) is not fatal" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' already exists"
+    PDNSUTIL_CREATE_ZONE_STDERR="Zone 'lan' exists already"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -67,9 +74,9 @@ pdnsutil() {
 # Case-insensitivity: PowerDNS's own real message casing has varied across
 # versions/locales in this project's own experience elsewhere -- the check
 # must not be brittle to exact case.
-@test "an 'already exists' match is case-insensitive" {
+@test "an 'exists already' match is case-insensitive" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="ALREADY EXISTS"
+    PDNSUTIL_CREATE_ZONE_STDERR="EXISTS ALREADY"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -87,4 +94,42 @@ pdnsutil() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"FATAL: failed to create zone 'lan'"* ]]
     [[ "$output" == *"Unable to open database connection"* ]]
+}
+
+# Issue #1505, the actual regression: bats' `run` does not run the command
+# under `set -e` the way the real entrypoint.sh does (services/dns/
+# entrypoint.sh line 11: `set -euo pipefail`), so every test above -- while
+# a genuinely correct check of the function's own logic -- could not have
+# caught the real bug: a bare `create_output=$(...)` assignment statement
+# (not gated by an `if`/`while` condition) is itself a failing simple
+# command when the substituted command fails, which `errexit` aborts on
+# immediately, before the very next line (let alone the "exists already"
+# tolerance check) ever runs. This test (per AG-VAL-030: prove a
+# set-e/pipefail-dependent construct by executing it under the exact
+# options its real caller uses, not by reasoning about it) builds a real
+# standalone script, sources the *actual* extracted function body, enables
+# `set -euo pipefail` itself, and calls the function exactly the way
+# entrypoint.sh's own zone-creation loop does -- once for a zone that
+# already exists (the routine restart case), then once more (a canary
+# call) to prove the script is still alive afterward, not merely dead but
+# reporting exit 0.
+@test "_dns_ensure_zone_exists does not silently abort the whole script under real set -euo pipefail (issue #1505)" {
+    local script="$BATS_TEST_TMPDIR/set-e-repro.sh"
+    cat > "$script" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+pdnsutil() {
+    echo "\$*" >&2
+    echo "Zone 'lan' exists already" >&2
+    return 1
+}
+source "$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh"
+_dns_ensure_zone_exists "lan"
+echo "CANARY: reached the line after the already-exists call"
+SCRIPT
+    chmod +x "$script"
+    run bash "$script"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"CANARY: reached the line after the already-exists call"* ]]
 }
