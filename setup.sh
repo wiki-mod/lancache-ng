@@ -176,7 +176,22 @@ is_valid_dhcp_proxy_domain() {
 is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
-    [[ "$filename" != *[[:space:],]* ]]
+    [[ "$filename" != *[[:space:],]* ]] || return 1
+    # Every accepted value here is later written to .env, which
+    # validate_env_value()/validate_env_values_for_initial_write() reject if
+    # it contains a newline, $, backtick, ", ', \, or # -- accepting a
+    # filename here that fails that later check would let the wizard walk
+    # the operator through several more install steps (Docker/Compose
+    # provisioning, other prompts) before dying on a value this function
+    # could have rejected immediately. Reject the identical character set
+    # here so every value this function accepts is also guaranteed
+    # writable.
+    case "$filename" in
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
+            return 1
+            ;;
+    esac
+    return 0
 }
 
 # True (exit 0) only when a PXE boot-pointer answer set has both a boot
@@ -1808,24 +1823,47 @@ sync_dhcp_proxy_config_prod_env() {
     local dhcp_ntp_servers="$5" dhcp_proxy_domain="$6" dhcp_proxy_boot_filename="$7"
     local dhcp_proxy_boot_server="$8" dhcp_proxy_pxe_boot_server="$9" dhcp_proxy_pxe_boot_filename_bios="${10}"
     local dhcp_proxy_pxe_boot_filename_uefi="${11}"
-    local repo_root config_prod_env
+    local repo_root config_prod_env key fallback existing kv
 
     is_deploy_prod_install_dir "$install_dir" || return 0
     repo_root=$(deploy_prod_repo_root "$install_dir")
     config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
     [[ -f "$config_prod_env" ]] || return 0
 
-    set_env_key DHCP_RELAY_LOCAL_ADDR "$dhcp_relay_local_addr" "$config_prod_env"
-    set_env_key DHCP_PROXY_INTERFACE "$dhcp_proxy_interface" "$config_prod_env"
-    set_env_key DHCP_PROXY_ROUTER "$dhcp_proxy_router" "$config_prod_env"
-    set_env_key DHCP_NTP_SERVERS "$dhcp_ntp_servers" "$config_prod_env"
-    set_env_key DHCP_PROXY_DOMAIN "$dhcp_proxy_domain" "$config_prod_env"
-    set_env_key DHCP_PROXY_BOOT_FILENAME "$dhcp_proxy_boot_filename" "$config_prod_env"
-    set_env_key DHCP_PROXY_BOOT_SERVER "$dhcp_proxy_boot_server" "$config_prod_env"
-    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "$dhcp_proxy_pxe_boot_server" "$config_prod_env"
-    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$config_prod_env"
-    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$config_prod_env"
-    print_ok "Synced dnsmasq-proxy/PXE values to $config_prod_env (deploy/prod's dhcp-proxy container reads this file directly, not .env/.env.local)."
+    # config_prod_env, not $env_file (.env/.env.local), is what deploy/prod's
+    # real dhcp-proxy container reads -- see this function's own header
+    # comment. Its OWN existing value for each key must win whenever it is
+    # already non-empty: $env_file's resolved value here is at best a stale
+    # duplicate (it was never the value the container actually used) and at
+    # worst genuinely empty (an install_dir that never had these keys in
+    # .env/.env.local at all), so writing it unconditionally would silently
+    # blank out a real operator-set value already sitting in config_prod_env.
+    # Only fall back to the $env_file-resolved value when config_prod_env
+    # doesn't already have a non-empty value of its own -- this still
+    # converges a key that is missing from both files to a safe default
+    # (usually empty), without ever overwriting a real existing value.
+    for kv in \
+        "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
+        "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
+        "DHCP_PROXY_ROUTER:$dhcp_proxy_router" \
+        "DHCP_NTP_SERVERS:$dhcp_ntp_servers" \
+        "DHCP_PROXY_DOMAIN:$dhcp_proxy_domain" \
+        "DHCP_PROXY_BOOT_FILENAME:$dhcp_proxy_boot_filename" \
+        "DHCP_PROXY_BOOT_SERVER:$dhcp_proxy_boot_server" \
+        "DHCP_PROXY_PXE_BOOT_SERVER:$dhcp_proxy_pxe_boot_server" \
+        "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:$dhcp_proxy_pxe_boot_filename_bios" \
+        "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:$dhcp_proxy_pxe_boot_filename_uefi"
+    do
+        key="${kv%%:*}"
+        fallback="${kv#*:}"
+        existing=$(get_env_var "$key" "$config_prod_env")
+        if [[ -n "$existing" ]]; then
+            set_env_key "$key" "$existing" "$config_prod_env"
+        else
+            set_env_key "$key" "$fallback" "$config_prod_env"
+        fi
+    done
+    print_ok "Converged dnsmasq-proxy/PXE keys in $config_prod_env (deploy/prod's dhcp-proxy container reads this file directly, not .env/.env.local); any value already set there was preserved."
 }
 
 # Full .env rewrites keep the original owner/mode because the file contains
@@ -2920,18 +2958,19 @@ migrate_env_for_update() {
             # pxe_boot_pointer_answers_are_complete's own header comment) -- a
             # server with no filename, or a filename with no server, produces
             # no pxe-service directive at all (a silent, always-on startup
-            # WARNING, not a fatal error). The interactive wizard already
-            # enforces this combined invariant at entry time; converge an
-            # existing install the same way instead of carrying an
-            # inconsistent combination forward untouched.
+            # WARNING, not a fatal error). Unlike the interactive wizard (which
+            # can safely auto-correct because it is mid-conversation with the
+            # operator), `setup.sh update` runs unattended -- silently clearing
+            # an operator-set value here would discard their input with no
+            # chance to notice or fix it before it's gone. Fail closed instead,
+            # matching every other validation in this block: leave the .env
+            # untouched and require the operator to fix the inconsistency
+            # themselves.
             if [[ -n "$dhcp_proxy_pxe_boot_server" ]] \
                 && ! pxe_boot_pointer_answers_are_complete "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" "$dhcp_proxy_pxe_boot_filename_uefi"; then
-                print_warn "DHCP_PROXY_PXE_BOOT_SERVER is set in $env_file but neither boot filename is; PXE boot-pointer support cannot activate without at least one. Clearing DHCP_PROXY_PXE_BOOT_SERVER."
-                dhcp_proxy_pxe_boot_server=""
+                die "DHCP_PROXY_PXE_BOOT_SERVER is set in $env_file but neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS nor DHCP_PROXY_PXE_BOOT_FILENAME_UEFI is; PXE boot-pointer support needs at least one boot filename to activate. Set one of them, or clear DHCP_PROXY_PXE_BOOT_SERVER, then re-run update."
             elif [[ -z "$dhcp_proxy_pxe_boot_server" && ( -n "$dhcp_proxy_pxe_boot_filename_bios" || -n "$dhcp_proxy_pxe_boot_filename_uefi" ) ]]; then
-                print_warn "A DHCP_PROXY_PXE_BOOT_FILENAME_* value is set in $env_file but DHCP_PROXY_PXE_BOOT_SERVER is empty; PXE boot-pointer support cannot activate without a boot server. Clearing the boot filename value(s)."
-                dhcp_proxy_pxe_boot_filename_bios=""
-                dhcp_proxy_pxe_boot_filename_uefi=""
+                die "A DHCP_PROXY_PXE_BOOT_FILENAME_* value is set in $env_file but DHCP_PROXY_PXE_BOOT_SERVER is empty; PXE boot-pointer support needs a boot server to activate. Set DHCP_PROXY_PXE_BOOT_SERVER, or clear both boot filename values, then re-run update."
             fi
             ;;
         dnsmasq-relay)
