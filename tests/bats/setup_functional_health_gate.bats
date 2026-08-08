@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression coverage for verify_stack_functional_health()'s fail-closed
@@ -13,6 +14,14 @@
 # (the mechanism that keeps curl/dig actually installed on a real run, so
 # the fail-closed branch above stays the rare exception) closes out the
 # same failure class.
+#
+# Also covers the healthz probe's own split into a TCP-reachability step and
+# a container-loopback content step (see _verify_healthz_endpoint and
+# _tcp_port_reachable in setup.sh): each half must independently fail closed
+# (unreachable port with a perfectly healthy container behind it; a healthy
+# port with no proxy container to exec into), and neither depends on the
+# externally published address's own source-IP ACL, since the content probe
+# only ever runs against the container's own loopback.
 #
 # PATH is fully replaced per test with a minimal sandbox containing only the
 # one external command this function chain actually shells out to (awk, via
@@ -38,6 +47,35 @@ setup() {
     ln -s "$(command -v awk)" "$sandbox/awk"
 
     env_file="$BATS_TEST_TMPDIR/lancache.env"
+
+    # Default fakes for the split TCP-reachability / container-loopback
+    # probe _verify_healthz_endpoint now performs in addition to curl/dig:
+    # "port reachable, proxy container present, its loopback /healthz call
+    # succeeds" -- so every existing test that only cares about the curl/dig
+    # fail-closed behavior doesn't have to know these exist at all. Only the
+    # tests that specifically target the new split (TCP unreachable, no
+    # container running) override them.
+    #
+    # _tcp_port_reachable is a real function this project's setup.sh defines
+    # (see setup.sh); overriding it here instead of exercising a real network
+    # connection keeps this test hermetic against a made-up test IP like
+    # "10.0.0.10", the same reason dc_update/docker are overridden as fake
+    # functions rather than real binaries in
+    # tests/bats/setup_update_health_baseline.bats.
+    _tcp_port_reachable() { return 0; }
+    service_container_id() { printf '%s' "fake-proxy-container-id"; }
+    # Delegates "docker exec <id> <cmd...>" to the real command on PATH
+    # (curl, in this file's case) so the existing curl-success/failure stubs
+    # below drive the container-loopback probe's outcome too, exactly like
+    # they drove the old single external curl call.
+    docker() {
+        if [[ "$1" = "exec" ]]; then
+            shift 2
+            "$@"
+            return $?
+        fi
+        return 0
+    }
 }
 
 # Tests below replace PATH with the sandbox for the `run` call and never
@@ -124,6 +162,28 @@ EOF
     hash -r
     run verify_stack_functional_health
     [ "$status" -eq 0 ]
+}
+
+@test "fails when the published port's TCP connect fails, independent of the container's own health" {
+    write_env "10.0.0.10" "" "0"
+    stub_tool dig 0 "1.2.3.4"
+    _tcp_port_reachable() { return 1; }
+    PATH="$sandbox"
+    hash -r
+    run verify_stack_functional_health
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"TCP connect"* ]]
+}
+
+@test "fails when no proxy container is running to probe healthz through" {
+    write_env "10.0.0.10" "" "0"
+    stub_tool dig 0 "1.2.3.4"
+    service_container_id() { printf ''; }
+    PATH="$sandbox"
+    hash -r
+    run verify_stack_functional_health
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no running 'proxy' container"* ]]
 }
 
 @test "does not require curl or dig when no IP is configured" {
