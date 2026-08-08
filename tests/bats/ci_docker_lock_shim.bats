@@ -19,6 +19,7 @@ setup() {
       "image":"ghcr.io/wiki-mod/lancache-ng/proxy",
       "artifact_source_sha":"1111111111111111111111111111111111111111",
       "source_fingerprint":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "build_inputs":{"build_args":{},"build_contexts":{}},
       "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
       "platforms":{
         "linux/amd64":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
@@ -31,6 +32,7 @@ setup() {
       "image":"ghcr.io/wiki-mod/lancache-ng/build-tools",
       "artifact_source_sha":"1111111111111111111111111111111111111111",
       "source_fingerprint":"sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "build_inputs":{"build_args":{},"build_contexts":{}},
       "digest":"sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
       "platforms":{
         "linux/amd64":"sha256:1212121212121212121212121212121212121212121212121212121212121212",
