@@ -35,23 +35,36 @@ ci_lock_real_docker() {
         clean_path="${clean_path:+${clean_path}:}${dir}"
     done
     candidate="$(PATH="$clean_path" command -v docker || true)"
-    [[ -n "$candidate" && -x "$candidate" && "$candidate" != "$shim_dir/docker" ]] \
-        || ci_ai_fail "could not locate the real Docker CLI outside $shim_dir"
+    if [[ -z "$candidate" || ! -x "$candidate" || "$candidate" == "$shim_dir/docker" ]]; then
+        ci_ai_fail "could not locate the real Docker CLI outside $shim_dir"
+        return 1
+    fi
     printf '%s\n' "$candidate"
 }
 
-real_docker="$(ci_lock_real_docker)"
-candidate_tag="$(jq -r '.candidate_tag' "$lock")"
-[[ -n "$candidate_tag" ]] || ci_ai_fail "stack lock has no candidate tag"
+if real_docker="$(ci_lock_real_docker)"; then
+    :
+else
+    exit $?
+fi
+if candidate_tag="$(jq -r '.candidate_tag' "$lock")"; then
+    :
+else
+    exit $?
+fi
+if [[ -z "$candidate_tag" ]]; then
+    ci_ai_fail "stack lock has no candidate tag"
+    exit 1
+fi
 
 ci_lock_digest_ref_for_transport() {
     local ref="$1" image digest transport
     while IFS=$'\t' read -r image digest; do
         transport="${image}:${candidate_tag}"
         if [[ "$ref" == "$transport" ]]; then
-            ci_ai_require_digest "$digest"
+            ci_ai_require_digest "$digest" || return 1
             printf '%s@%s\n' "$image" "$digest"
-            return 0
+            return $?
         fi
     done < <(jq -r '(.runtime + .tooling)[] | [.image,.digest] | @tsv' "$lock")
     return 1
@@ -82,8 +95,10 @@ ci_lock_split_compose_args() {
         arg="${input_ref[$i]}"
         case "$arg" in
             -f|--file|--project-directory|--env-file|--project-name|--profile|--ansi|--progress)
-                (( i + 1 < ${#input_ref[@]} )) \
-                    || ci_ai_fail "docker compose option $arg is missing its value"
+                if (( i + 1 >= ${#input_ref[@]} )); then
+                    ci_ai_fail "docker compose option $arg is missing its value"
+                    return 1
+                fi
                 globals_ref+=("$arg" "${input_ref[$((i + 1))]}")
                 i=$((i + 2))
                 ;;
@@ -106,27 +121,30 @@ ci_lock_split_compose_args() {
     done
 
     command_ref=("${input_ref[@]:$i}")
-    (( ${#command_ref[@]} > 0 )) \
-        || ci_ai_fail "docker compose invocation has no subcommand"
+    if (( ${#command_ref[@]} == 0 )); then
+        ci_ai_fail "docker compose invocation has no subcommand"
+        return 1
+    fi
 }
 
 ci_lock_compose_override() {
     local output="$1"
     shift
     local -a globals=("$@")
-    local rendered override service compose_image image digest locked_ref status
+    local rendered override compose_rows service compose_image image digest locked_ref status
     local matched=0
 
-    # Keep the real Compose exit code. Converting every render failure to the
-    # generic ci_ai_fail status would still fail closed, but would erase the
-    # diagnostic/status contract required by callers and by the strict shell
-    # regression coverage for this trust boundary.
     if rendered="$("$real_docker" compose "${globals[@]}" config --format json)"; then
         :
     else
         status=$?
         echo "ci-artifact-identity: could not render Compose model before applying stack lock (exit $status)" >&2
         return "$status"
+    fi
+    if compose_rows="$(jq -r '.services | to_entries[] | [.key,(.value.image // "")] | @tsv' <<<"$rendered")"; then
+        :
+    else
+        return $?
     fi
     override='{"services":{}}'
 
@@ -139,20 +157,28 @@ ci_lock_compose_override() {
             if [[ "$compose_image" == "$image" \
                 || "$compose_image" == "${image}:"* \
                 || "$compose_image" == "${image}@"* ]]; then
-                ci_ai_require_digest "$digest"
+                ci_ai_require_digest "$digest" || return 1
                 locked_ref="${image}@${digest}"
                 break
             fi
         done < <(jq -r '.runtime[] | [.image,.digest] | @tsv' "$lock")
 
-        [[ -n "$locked_ref" ]] \
-            || ci_ai_fail "Compose service $service uses first-party image $compose_image without a runtime lock entry"
-        override="$(jq -c --arg service "$service" --arg image "$locked_ref" '.services[$service].image=$image' <<<"$override")"
+        if [[ -z "$locked_ref" ]]; then
+            ci_ai_fail "Compose service $service uses first-party image $compose_image without a runtime lock entry"
+            return 1
+        fi
+        if override="$(jq -c --arg service "$service" --arg image "$locked_ref" '.services[$service].image=$image' <<<"$override")"; then
+            :
+        else
+            return $?
+        fi
         matched=$((matched + 1))
-    done < <(jq -r '.services | to_entries[] | [.key,(.value.image // "")] | @tsv' <<<"$rendered")
+    done <<<"$compose_rows"
 
-    (( matched > 0 )) \
-        || ci_ai_fail "Compose model contains no first-party runtime image to lock"
+    if (( matched == 0 )); then
+        ci_ai_fail "Compose model contains no first-party runtime image to lock"
+        return 1
+    fi
     printf '%s\n' "$override" >"$output"
 }
 
@@ -160,37 +186,72 @@ ci_lock_assert_compose_runtime() {
     local override="$1"
     shift
     local -a globals=("$@")
-    local rendered service cid expected actual asserted=0
+    local rendered running_services service cid expected actual status asserted=0
 
-    rendered="$("$real_docker" compose "${globals[@]}" -f "$override" config --format json)"
+    if rendered="$("$real_docker" compose "${globals[@]}" -f "$override" config --format json)"; then
+        :
+    else
+        return $?
+    fi
+    if running_services="$("$real_docker" compose "${globals[@]}" -f "$override" ps --services --status running)"; then
+        :
+    else
+        return $?
+    fi
+
     while IFS= read -r service; do
         [[ -n "$service" ]] || continue
-        expected="$(jq -r --arg service "$service" '.services[$service].image // empty' <<<"$rendered")"
+        if expected="$(jq -r --arg service "$service" '.services[$service].image // empty' <<<"$rendered")"; then
+            :
+        else
+            return $?
+        fi
         [[ "$expected" == ghcr.io/wiki-mod/lancache-ng/*@sha256:* ]] || continue
-        cid="$("$real_docker" compose "${globals[@]}" -f "$override" ps -q "$service")"
-        [[ -n "$cid" ]] || ci_ai_fail "Compose service $service has no running container after up"
-        actual="$("$real_docker" inspect --format '{{.Config.Image}}' "$cid")"
-        [[ "$actual" == "$expected" ]] \
-            || ci_ai_fail "Compose service $service runs $actual instead of locked $expected"
-        asserted=$((asserted + 1))
-    done < <("$real_docker" compose "${globals[@]}" -f "$override" ps --services --status running)
 
-    (( asserted > 0 )) \
-        || ci_ai_fail "Compose up produced no running first-party identity assertion"
+        if cid="$("$real_docker" compose "${globals[@]}" -f "$override" ps -q "$service")"; then
+            :
+        else
+            status=$?
+            return "$status"
+        fi
+        if [[ -z "$cid" ]]; then
+            ci_ai_fail "Compose service $service has no running container after up"
+            return 1
+        fi
+        if actual="$("$real_docker" inspect --format '{{.Config.Image}}' "$cid")"; then
+            :
+        else
+            status=$?
+            return "$status"
+        fi
+        if [[ "$actual" != "$expected" ]]; then
+            ci_ai_fail "Compose service $service runs $actual instead of locked $expected"
+            return 1
+        fi
+        asserted=$((asserted + 1))
+    done <<<"$running_services"
+
+    if (( asserted == 0 )); then
+        ci_ai_fail "Compose up produced no running first-party identity assertion"
+        return 1
+    fi
 }
 
 ci_lock_run_compose() {
     local -a input=("$@") globals=() compose_command=()
     local override status
-    ci_lock_split_compose_args input globals compose_command
-    override="$(mktemp)"
 
-    # Avoid a RETURN trap here. This function is part of the validation trust
-    # boundary and runs under strict mode; cleanup that depends on RETURN-trap
-    # scope/inheritance is harder to prove than explicit control flow and can
-    # itself overwrite the status we are trying to preserve. A failed override
-    # render removes the temporary file before returning, while all later paths
-    # remove it after the real Compose call and identity assertion.
+    if ci_lock_split_compose_args input globals compose_command; then
+        :
+    else
+        return $?
+    fi
+    if override="$(mktemp)"; then
+        :
+    else
+        return $?
+    fi
+
     if ci_lock_compose_override "$override" "${globals[@]}"; then
         :
     else
@@ -217,8 +278,11 @@ ci_lock_run_compose() {
 
 if [[ "${1:-}" == compose ]]; then
     shift
-    ci_lock_run_compose "$@"
-    exit $?
+    if ci_lock_run_compose "$@"; then
+        exit 0
+    else
+        exit $?
+    fi
 fi
 
 args=("$@")
