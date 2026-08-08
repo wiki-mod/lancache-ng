@@ -1063,6 +1063,40 @@ omitted):**
   permanently-running script either). The depth-2 real-backend-certificate
   assertion that remains in the committed script carries the ongoing regression
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
+- **Netdata network isolation does not, and structurally cannot, cover
+  `network_mode: host` containers (2026-08-08, observability.md#20's
+  netdata-net fix).**
+  - **Scope**: `dhcp`, `dhcp-proxy`, and `dhcp-probe` -- all three run with
+    `network_mode: host` for real, load-bearing reasons (DHCP broadcast on
+    port 67 for the first two; host-network link-state detection for the
+    third), unrelated to observability.
+  - **Reason**: a host-networked container shares the host's entire network
+    stack and routing table directly; Compose `networks:` membership is not
+    consulted for it at all. It can reach any host-routable address,
+    including whatever subnet Docker assigns `netdata-net`'s bridge,
+    regardless of whether it is declared a member of that network or not.
+    Scoping netdata to a dedicated bridge network (this fix's main change)
+    therefore has no effect on these three containers' access to it.
+  - **Tracking**: found during PR #1489's own second Codex review round
+    (2026-08-08); `docs/capability-inventory/SoT-observability.md`'s
+    network-isolation section carries the matching narrative record.
+  - **Validation**: none exists today. Closing this for real needs either
+    an application-level auth layer in front of Netdata itself (this
+    project's Netdata image ships none) or outbound firewall rules inside
+    these three containers specifically blocking `netdata-net`'s subnet
+    (`dhcp`/`dhcp-proxy` already carry `NET_ADMIN` and manage their own
+    `iptables` rules for an unrelated purpose, see
+    `services/dhcp/entrypoint.sh`'s Kea Control Agent `INPUT` restriction,
+    so the capability exists -- but the subnet would need pinning to a
+    known value and the rule would need live testing against a real DHCP
+    flow to confirm no regression).
+  - **Non-Expansion**: this exception covers only `network_mode: host`
+    containers' access to Netdata specifically. It does not extend to any
+    other network-isolation claim in this document, and does not excuse a
+    *bridge-networked* container regaining access to Netdata by any other
+    means -- that remains a real regression this fix's other checks (Rule-
+    Ref: AG-VAL-029's own standing bats coverage in
+    `tests/bats/netdata_network_isolation.bats`) still catch.
 
 ---
 

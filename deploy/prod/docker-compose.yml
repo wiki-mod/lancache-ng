@@ -290,26 +290,26 @@ services:
     # is a static, non-templated file (see its own header), so these
     # top-level .env values -- which do vary per install -- are passed the
     # same way the `retention` service below already passes SYSLOG_ENABLED
-    # for its own syslog-ng retention gate. DHCP_MODE is still read only by
-    # the Rust crate's own resolve_alert_only_targets() (services/watchdog/
-    # src/main.rs), currently unused until that crate becomes this service's
-    # actual ENTRYPOINT (see services/watchdog/src/lib.rs's module doc
-    # comment) -- but SYSLOG_ENABLED and LOGGING_ENABLED are no longer in
-    # that "unused until the Rust rewrite lands" bucket: bug-hunt finding
-    # observability.md#8 (2026-08-06) ported the same alert-only
-    # syslog-container monitoring into watchdog.sh (the bash entrypoint this
-    # ENTRYPOINT still runs) directly, so both vars are genuinely consumed
-    # today. LOGGING_ENABLED specifically gates whether watchdog.sh
-    # considers the syslog container part of this stack at all -- it must
-    # NOT reuse SYSLOG_ENABLED for that, since SYSLOG_ENABLED is a
-    # deliberately separate, narrower "double opt-in" for the storage-budget
-    # retention/pruning engine only (see deploy/prod/.env's own comment on
-    # it): a normal install with central logging on
-    # (LOGGING_ENABLED=1/`--profile logging` active) but retention/pruning
-    # never separately opted into (SYSLOG_ENABLED left at its default
-    # "false") legitimately runs the syslog container without ever setting
-    # SYSLOG_ENABLED, so gating health monitoring on SYSLOG_ENABLED alone
-    # left that container unmonitored by default on the common path.
+    # for its own syslog-ng retention gate. This container's own `command:`
+    # above execs watchdog.sh (bash), not the Rust crate, so in this LIVE
+    # container only watchdog.sh's own reads of these vars are actually
+    # exercised today; the Rust crate (services/watchdog/src/main.rs) reads
+    # DHCP_MODE and LOGGING_ENABLED too, but only its own `cargo test`
+    # suite exercises that until it becomes this service's real ENTRYPOINT
+    # (see services/watchdog/src/lib.rs's module doc comment) -- passing
+    # both here now means no further compose change is needed on that day.
+    # LOGGING_ENABLED gates whether the syslog container is considered part
+    # of this stack at all for alert-only monitoring, in both watchdog.sh
+    # and the Rust crate -- it must NOT be SYSLOG_ENABLED for that, since
+    # SYSLOG_ENABLED is a deliberately separate, narrower "double opt-in"
+    # for the storage-budget retention/pruning engine only (see
+    # deploy/prod/.env's own comment on it): a normal install with central
+    # logging on (LOGGING_ENABLED=1/`--profile logging` active) but
+    # retention/pruning never separately opted into (SYSLOG_ENABLED left at
+    # its default "false") legitimately runs the syslog container without
+    # ever setting SYSLOG_ENABLED, so gating health monitoring on
+    # SYSLOG_ENABLED alone left that container unmonitored by default on
+    # the common path.
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}

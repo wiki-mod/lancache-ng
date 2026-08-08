@@ -20,7 +20,7 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 /// Issue #842's five alert-only monitored services (never restarted -- see
 /// `lib.rs`'s module doc comment and [`HealthReading::is_alert_ok`]'s own
 /// doc comment for why). Built once at startup from [`Settings`] rather
-/// than re-derived every loop iteration, since `DHCP_MODE`/`SYSLOG_ENABLED`
+/// than re-derived every loop iteration, since `DHCP_MODE`/`LOGGING_ENABLED`
 /// never change for the lifetime of this process.
 ///
 /// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
@@ -98,7 +98,7 @@ struct Settings {
     // resolve_alert_only_targets()) are actually deployed. Read once here
     // (not re-read per loop iteration) since neither knob can change for
     // the lifetime of this process -- an operator changing DHCP_MODE or
-    // SYSLOG_ENABLED requires a `setup.sh update` + container recreate,
+    // LOGGING_ENABLED requires a `setup.sh update` + container recreate,
     // which restarts this process anyway.
     dhcp_mode: String,
     syslog_enabled: bool,
@@ -212,36 +212,23 @@ fn load_settings() -> Settings {
     // unrecognized value also falls back to "monitor neither", not a guess.
     let dhcp_mode = env("DHCP_MODE").unwrap_or_else(|| "disabled".to_string());
 
-    // SYSLOG_ENABLED (issue #842): same env var and same default (false)
-    // retention.sh already uses for its own syslog-ng retention gate --
-    // reusing it here rather than inventing a second toggle keeps one
-    // enable/disable knob for the whole central-logging feature rather than
-    // two that could drift (the exact class of bug #877 already fixed once
-    // for SYSLOG_ENABLED's truthy-parsing between the Admin UI and
-    // watchdog.sh).
-    //
-    // KNOWN LIMITATION, not yet fixed here: SYSLOG_ENABLED is a deliberately
-    // separate, narrower "double opt-in" that only gates the storage-budget
+    // LOGGING_ENABLED, NOT SYSLOG_ENABLED: mirrors watchdog.sh's own
+    // C_SYSLOG gate fix. SYSLOG_ENABLED is a deliberately separate,
+    // narrower "double opt-in" that only gates the storage-budget
     // retention/pruning engine (see deploy/prod/.env's own comment on it),
-    // not "is the syslog container part of this stack." A normal install
-    // with central logging on (LOGGING_ENABLED=1/`--profile logging`
-    // active) but retention/pruning never separately opted into legitimately
-    // runs the syslog container while SYSLOG_ENABLED stays at its default
-    // "false" -- gating alert-only monitoring on SYSLOG_ENABLED alone leaves
-    // that common case unmonitored. watchdog.sh (the bash entrypoint this
-    // crate has not yet replaced) had the identical bug, fixed there by
-    // gating on LOGGING_ENABLED instead and passing that as a new env var
-    // from every deploy/*/docker-compose.yml `watchdog:` block. This crate
-    // is currently dormant (not yet this service's ENTRYPOINT, see lib.rs's
-    // module doc comment), so the equivalent fix here -- read LOGGING_ENABLED instead
-    // of/in addition to SYSLOG_ENABLED, once this crate goes live -- is
-    // deliberately deferred to whichever change wires this crate up as the
-    // real entrypoint, rather than fixed blind with no way to build/test it
-    // as part of that change today. STATUS: as of 2026-08-08, this crate is
-    // not built or exercised in this stack, so this gap has no live
-    // operator-facing impact yet; it will if this crate goes live before
-    // this line is corrected.
-    let syslog_enabled = config::resolve_bool(env("SYSLOG_ENABLED").as_deref(), false);
+    // not "is the syslog container part of this stack." An earlier version
+    // of this function read SYSLOG_ENABLED here (reasoning that reusing
+    // retention.sh's existing toggle would avoid a second knob that could
+    // drift) -- but a normal install with central logging on
+    // (LOGGING_ENABLED=1/`--profile logging` active) and retention/pruning
+    // never separately opted into legitimately runs the syslog container
+    // while SYSLOG_ENABLED stays at its default "false", so gating
+    // alert-only monitoring on SYSLOG_ENABLED alone left that common case
+    // unmonitored -- the exact bug #877 already fixed once for a different
+    // pair of drifted toggles. LOGGING_ENABLED is passed into this
+    // service's environment from every deploy/*/docker-compose.yml
+    // `watchdog:` block, the same way DHCP_MODE/SYSLOG_ENABLED already are.
+    let syslog_enabled = config::resolve_bool(env("LOGGING_ENABLED").as_deref(), false);
 
     Settings {
         docker_proxy_url,

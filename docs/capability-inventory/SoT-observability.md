@@ -176,12 +176,25 @@ to the operator anywhere in this project:**
   shared only with the Admin UI (the sole real caller of `NETDATA_URL`) —
   it is **not** on the `docker-api` internal network (that's only for the
   Admin UI's socket-proxy path) and, since this fix, not on `default`
-  either. Every other container that used to be able to reach
-  `http://netdata:19999` directly (proxy, dns, dhcp, watchdog, ...) no
-  longer has network-level routing to it at all; the allowlisting in
+  either. Every other *bridge-networked* container that used to be able to
+  reach `http://netdata:19999` directly (proxy, dns, watchdog, nats, ...)
+  no longer has network-level routing to it at all; the allowlisting in
   `netdata_proxy.rs` was already correct for the Admin UI's own outbound
   path and is now backed by real network isolation too, not just
-  application-level allowlisting. `netdata-net` is deliberately not
+  application-level allowlisting. **Known, accepted limitation (not closed
+  by this isolation): `dhcp`, `dhcp-proxy`, and `dhcp-probe` all run with
+  `network_mode: host`** (required for DHCP broadcast on port 67 and for
+  `dhcp-probe`'s host-network link-detection), which shares the host's
+  entire network stack directly and is not subject to Compose `networks:`
+  membership at all -- a host-networked container can reach any
+  host-routable address, including `netdata-net`'s bridge subnet, with no
+  regard for which Compose networks it does or doesn't declare. A
+  compromise of `dhcp`/`dhcp-proxy`/`dhcp-probe` therefore still has a path
+  to Netdata's unauthenticated API despite this fix; see this document's
+  own Known Limitations note below (and `docs/release-validation-plan.md`'s
+  matching Coverage Assessment entry) for the full reasoning and why this
+  is recorded as an accepted gap rather than silently implied as closed.
+  `netdata-net` is deliberately not
   `internal: true` (unlike `docker-api`) since netdata's own image may
   still need outbound internet access for its own operation — this finding
   was about *inter-container* exposure, not netdata's own egress. `nats`
@@ -198,6 +211,36 @@ to the operator anywhere in this project:**
   bridge-network membership is bidirectional, so a compromised `nats`
   container would gain a route to `netdata:19999`), corrected before
   landing.
+- **Known limitation: `network_mode: host` containers are not covered by
+  `netdata-net`'s isolation, and cannot be made to be.** `dhcp` (DHCP
+  broadcast needs port 67 reachable on the host's real interface, which a
+  bridge-networked container cannot receive), `dhcp-proxy` (same broadcast
+  requirement for its relay role), and `dhcp-probe` (needs host-network
+  link-state to detect the LAN's real DHCP topology) all run with
+  `network_mode: host` for real, load-bearing technical reasons unrelated
+  to observability. A host-networked container shares the host's entire
+  network stack and routing table directly -- Compose `networks:`
+  membership is not consulted for it at all, so it can reach any
+  host-routable address, including whatever subnet Docker assigns
+  `netdata-net`'s bridge, regardless of whether it is ever declared a
+  member of that network. This means a compromise of any of these three
+  containers retains a path to Netdata's unauthenticated HTTP API
+  (`/api/v1/allmetrics`, `/api/v1/alarms`, etc.) even after this PR's
+  network-level isolation change. Closing this gap for real would require
+  either an application-level auth layer in front of Netdata itself (this
+  project's Netdata image ships none, and adding one is a materially
+  larger, separate undertaking) or outbound firewall rules inside these
+  three containers specifically blocking traffic to `netdata-net`'s subnet
+  (technically possible -- both `dhcp` and `dhcp-proxy` already carry
+  `NET_ADMIN` and manage their own `iptables` rules for an unrelated
+  purpose, see `services/dhcp/entrypoint.sh`'s Kea Control Agent INPUT
+  restriction -- but would need the subnet pinned to a known value and live
+  testing against a real DHCP flow to confirm no regression, which is
+  outside what this specific network-isolation PR can responsibly verify
+  in the same pass). Recorded here rather than silently implied closed by
+  the bullet above; see `docs/release-validation-plan.md`'s matching
+  Coverage Assessment entry for the formal Scope/Reason/Tracking/
+  Validation/Non-Expansion record.
 
 ## 3. Central logging pipeline (`syslog-ng` / `fluent-bit`) — status per #453/#632/#633
 

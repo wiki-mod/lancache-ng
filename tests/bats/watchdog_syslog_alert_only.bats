@@ -177,6 +177,37 @@ setup() {
     done
 }
 
+@test "check_alert_only resets the failure counter on an intervening 'starting'/'none' reading, not only 'healthy'" {
+    # Real Codex finding: a prior version only reset F_SYSLOG in the
+    # "healthy" branch, so a failure streak survived untouched through an
+    # intervening "starting"/"none" reading -- unhealthy -> starting ->
+    # unhealthy reported the second event as "2 consecutive failures" even
+    # though the container was never actually observed failing twice in a
+    # row without an intervening non-failure reading. Matches the Rust
+    # rewrite's AlertCounter::record(), which resets on every
+    # is_alert_ok() reading (Healthy/Starting/None all count equally).
+    for intervening in starting none; do
+        F_SYSLOG=0
+        get_health() { printf 'unhealthy\n'; }
+        check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+        [ "$F_SYSLOG" -eq 1 ]
+
+        get_health() { printf '%s\n' "$intervening"; }
+        check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+        [ "$F_SYSLOG" -eq 0 ] || {
+            echo "intervening health=$intervening did not reset F_SYSLOG (got $F_SYSLOG)" >&2
+            return 1
+        }
+
+        get_health() { printf 'unhealthy\n'; }
+        check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+        [ "$F_SYSLOG" -eq 1 ] || {
+            echo "expected F_SYSLOG=1 after a fresh failure post-$intervening, got $F_SYSLOG (counter was not reset)" >&2
+            return 1
+        }
+    done
+}
+
 @test "check_alert_only's failure counter does not cap or reset at RESTART_AFTER" {
     get_health() { printf 'unhealthy\n'; }
 

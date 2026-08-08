@@ -497,7 +497,14 @@ check_alert_only() {
     if [ "$health" = "unhealthy" ] || [ "$health" = "unreachable" ]; then
         _fcount=$((_fcount + 1))
         log "UNHEALTHY $name (${_fcount} consecutive failures, health=${health}) -- alert only, watchdog does not restart this service (issue #842)"
-    elif [ "$health" = "healthy" ]; then
+    elif [ "$health" = "healthy" ] || [ "$health" = "starting" ] || [ "$health" = "none" ]; then
+        # Reset (and log recovery) on ANY non-failure reading, not just
+        # "healthy" -- matches the Rust rewrite's AlertCounter::record(),
+        # which resets on every is_alert_ok() reading (Healthy/Starting/
+        # None all count). Without this, a failure streak survived through
+        # an intervening "starting"/"none" reading untouched, so a later
+        # "unhealthy" reading kept incrementing the SAME counter as if the
+        # outage had never actually recovered in between.
         [ "$_fcount" -gt 0 ] && log "RECOVERED $name"
         _fcount=0
     fi
