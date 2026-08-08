@@ -6,6 +6,12 @@
 # build-tools image must currently resolve to the already-accepted build-tools
 # digest; support for a distinct release rebuild stays fail-closed until that
 # producer emits its own source-fingerprint-bearing identity record.
+#
+# No mutable release reference moves until the release pointer itself has been
+# built under a unique immutable tag and both its provenance and release
+# acceptance attestations have been published. The final multi-reference move
+# joins the repository's existing global promotion mutex and rolls back any
+# already-moved references on failure.
 name: Release Accepted Stack v2
 
 on:
@@ -216,15 +222,19 @@ jobs:
     needs: [plan, sbom]
     if: needs.plan.outputs.publish == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
+    timeout-minutes: 60
     permissions:
-      contents: read
+      # scripts/lib/promote-lock.sh uses one dedicated git ref as the existing
+      # cross-workflow mutex for every channel/reference promotion path.
+      contents: write
       packages: write
       id-token: write
       attestations: write
       artifact-metadata: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
@@ -240,7 +250,7 @@ jobs:
       - id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
-      - name: Re-resolve governance build-tools tag before publication
+      - name: Re-resolve governance build-tools tag before pointer staging
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
@@ -250,27 +260,6 @@ jobs:
           actual="$(ci_ai_ref_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}")"
           [[ "$actual" == "$expected" ]] \
             || ci_ai_fail "build-tools:${RELEASE_TAG} moved after release planning: expected $expected, got $actual"
-
-      - name: Move runtime release references only
-        env:
-          RELEASE_TAG: ${{ inputs.release_tag }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set -euo pipefail
-          source scripts/lib/ci-artifact-identity.sh
-          source scripts/lib/ghcr-retry.sh
-          while IFS=$'\t' read -r image digest; do
-            ci_ai_require_digest "$digest"
-            metadata="$(mktemp)"
-            ghcr_retry ghcr.io "$GITHUB_ACTOR" "$GITHUB_TOKEN" -- \
-              docker buildx imagetools create \
-                --tag "${image}:${RELEASE_TAG}" \
-                "${image}@${digest}" \
-                --metadata-file "$metadata"
-            published="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
-            rm -f "$metadata"
-            [[ "$published" == "$digest" ]] || ci_ai_fail "release tagging changed digest for $image"
-          done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' release/release-lock.json)
 
       - name: Prepare immutable release stack pointer
         env:
@@ -314,7 +303,7 @@ jobs:
           cp release/stack-pointer/Dockerfile release-pointer/Dockerfile
           printf 'RELEASE_ACCEPTED_TAG=%s\n' "$accepted_tag" >> "$GITHUB_ENV"
 
-      - name: Build release stack pointer without embedded provenance wrapper
+      - name: Build immutable release stack pointer before mutable publication
         id: stack
         uses: ./.github/actions/ghcr-build-push-retry
         with:
@@ -323,14 +312,12 @@ jobs:
           builder: ${{ steps.buildx.outputs.name }}
           context: release-pointer
           push: "true"
-          tags: |
-            ghcr.io/wiki-mod/lancache-ng/stack:${{ inputs.release_tag }}
-            ghcr.io/wiki-mod/lancache-ng/stack:${{ env.RELEASE_ACCEPTED_TAG }}
+          tags: ghcr.io/wiki-mod/lancache-ng/stack:${{ env.RELEASE_ACCEPTED_TAG }}
           build-args: SOURCE_SHA=${{ needs.plan.outputs.source_sha }}
           platforms: linux/amd64,linux/arm64
           provenance: "false"
 
-      - name: Attest release stack-pointer build provenance
+      - name: Attest immutable release pointer provenance
         uses: ./.github/actions/ghcr-attest-retry
         with:
           username: ${{ github.actor }}
@@ -338,7 +325,7 @@ jobs:
           subject-name: ghcr.io/wiki-mod/lancache-ng/stack
           subject-digest: ${{ steps.stack.outputs.digest }}
 
-      - name: Attest release acceptance last
+      - name: Attest immutable release acceptance before mutable publication
         uses: ./.github/actions/ghcr-custom-attest-retry
         with:
           username: ${{ github.actor }}
@@ -347,6 +334,130 @@ jobs:
           subject-digest: ${{ steps.stack.outputs.digest }}
           predicate-type: https://wiki-mod.github.io/lancache-ng/attestations/release/v1
           predicate-path: release-pointer/acceptance.json
+
+      - name: Acquire the cross-workflow promote lock
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
+          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
+
+      - name: Publish release references as one rollback-protected critical section
+        env:
+          RELEASE_TAG: ${{ inputs.release_tag }}
+          RELEASE_STACK_DIGEST: ${{ steps.stack.outputs.digest }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/ci-artifact-identity.sh
+          source scripts/lib/ghcr-retry.sh
+
+          ci_ai_require_digest "$RELEASE_STACK_DIGEST"
+          declare -A previous_refs=()
+          promoted_targets=()
+
+          digest_for_ref() {
+            local ref="$1" manifest digest
+            if ! manifest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>/dev/null)"; then
+              return 1
+            fi
+            digest="$(jq -r '.digest // empty' <<<"$manifest")"
+            ci_ai_require_digest "$digest" >/dev/null 2>&1 || return 1
+            printf '%s\n' "$digest"
+          }
+
+          rollback_release_refs() {
+            local status=$? target previous
+            if [[ "$status" -eq 0 || "${#promoted_targets[@]}" -eq 0 ]]; then
+              exit "$status"
+            fi
+            echo "::error::Release publication failed after one or more mutable refs moved; attempting best-effort rollback."
+            for target in "${promoted_targets[@]}"; do
+              previous="${previous_refs[$target]:-}"
+              if [[ -n "$previous" ]]; then
+                ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+                  docker buildx imagetools create --prefer-index=false \
+                    --tag "$target" "${target%:*}@${previous}" \
+                  || echo "::error::Could not restore previous digest for $target."
+              else
+                echo "::error::No previous digest existed for $target; manual GHCR inspection is required."
+              fi
+            done
+            exit "$status"
+          }
+          trap rollback_release_refs EXIT
+
+          # Freeze the tag-scoped build-tools producer once more inside the
+          # actual mutation critical section. It is not moved here, but it is
+          # part of the release lock and therefore cannot be allowed to drift
+          # after SBOM/smoke validation and before coherent publication.
+          expected_build_tools="$(jq -r '.tooling["build-tools"].digest' release/release-lock.json)"
+          actual_build_tools="$(digest_for_ref "ghcr.io/wiki-mod/lancache-ng/build-tools:${RELEASE_TAG}")"
+          [[ "$actual_build_tools" == "$expected_build_tools" ]] \
+            || ci_ai_fail "build-tools:${RELEASE_TAG} moved before final release publication"
+
+          while IFS=$'\t' read -r image digest; do
+            ci_ai_require_digest "$digest"
+            target="${image}:${RELEASE_TAG}"
+            previous_refs["$target"]="$(digest_for_ref "$target" || true)"
+            metadata="$(mktemp)"
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+              docker buildx imagetools create --prefer-index=false \
+                --tag "$target" \
+                "${image}@${digest}" \
+                --metadata-file "$metadata"
+            published="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
+            rm -f "$metadata"
+            [[ "$published" == "$digest" ]] || ci_ai_fail "release tagging changed digest for $image"
+            promoted_targets+=("$target")
+          done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' release/release-lock.json)
+
+          # The stack pointer is the coherent release reference and is moved
+          # last, only after all runtime refs reached their recorded digests.
+          stack_target="ghcr.io/wiki-mod/lancache-ng/stack:${RELEASE_TAG}"
+          previous_refs["$stack_target"]="$(digest_for_ref "$stack_target" || true)"
+          metadata="$(mktemp)"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create --prefer-index=false \
+              --tag "$stack_target" \
+              "ghcr.io/wiki-mod/lancache-ng/stack@${RELEASE_STACK_DIGEST}" \
+              --metadata-file "$metadata"
+          published_stack="$(jq -r '."containerimage.descriptor".digest' "$metadata")"
+          rm -f "$metadata"
+          [[ "$published_stack" == "$RELEASE_STACK_DIGEST" ]] \
+            || ci_ai_fail "release stack tag changed pointer digest"
+          promoted_targets+=("$stack_target")
+
+          # Read all refs back after the complete write sequence. This catches
+          # both a failed move and any concurrent/remote drift before success
+          # is reported. The shared promote lock prevents this repository's
+          # own other promotion workflows from racing this section.
+          while IFS=$'\t' read -r image digest; do
+            actual="$(digest_for_ref "${image}:${RELEASE_TAG}")"
+            [[ "$actual" == "$digest" ]] || ci_ai_fail "post-publication digest mismatch for ${image}:${RELEASE_TAG}"
+          done < <(jq -r '.runtime[] | [.image, .digest] | @tsv' release/release-lock.json)
+          [[ "$(digest_for_ref "$stack_target")" == "$RELEASE_STACK_DIGEST" ]] \
+            || ci_ai_fail "post-publication stack pointer digest mismatch"
+
+      - name: Release the cross-workflow promote lock
+        if: always()
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          promote_lock_release origin "$holder_note" || true
 
       - name: Remove Buildx builder
         if: always()
