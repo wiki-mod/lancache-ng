@@ -8,11 +8,12 @@
 # relevant source and frozen external inputs are identical.
 #
 # Source-controlled inputs are the Docker context tree, Dockerfile blob and
-# named source contexts. Non-source inputs are supplied through the exact
-# service contract in ci-build-inputs.sh, or explicitly as
-# CI_SOURCE_BUILD_INPUTS_JSON when recording/rechecking an already-planned
-# candidate. Refresh inputs that intentionally vary over time are recorded
-# separately.
+# named source contexts. CI_SOURCE_BUILD_INPUTS_JSON optionally adds the exact
+# non-source inputs frozen by an artifact-producing pipeline. When it is
+# supplied, the service-specific contract in ci-build-inputs.sh is enforced.
+# When omitted, an empty external-input object preserves this helper's existing
+# standalone source-only use by older validation/tests; artifact production is
+# responsible for always supplying the explicit service contract.
 set -euo pipefail
 
 [[ $# -eq 2 ]] || {
@@ -67,10 +68,10 @@ fi
 
 if [[ -v CI_SOURCE_BUILD_INPUTS_JSON ]]; then
     build_inputs_raw="$CI_SOURCE_BUILD_INPUTS_JSON"
+    bash "$repo_root/scripts/ci-build-inputs.sh" "$service" validate "$build_inputs_raw"
 else
-    build_inputs_raw="$(bash "$repo_root/scripts/ci-build-inputs.sh" "$service" json)"
+    build_inputs_raw='{"build_args":{},"build_contexts":{}}'
 fi
-bash "$repo_root/scripts/ci-build-inputs.sh" "$service" validate "$build_inputs_raw"
 build_inputs="$(jq -cS . <<<"$build_inputs_raw")"
 
 refresh_inputs='{}'
