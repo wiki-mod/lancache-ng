@@ -111,9 +111,10 @@ on:
       # re-derive it):
       #
       # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
-      # every other test-only path below (scripts/check-idempotence-test-
-      # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries, the
-      # individual services/**/*.{sh,conf,template,txt} entries) are in this
+      # every other test-only path below (scripts/tracked/check-idempotence-
+      # test-coverage.sh, scripts/lib/**, the individual scripts/tracked/**
+      # and scripts/untracked/** entries, the individual
+      # services/**/*.{sh,conf,template,txt} entries) are in this
       # workflow's path filter so the suites below actually run when one of
       # those changes -- each one is a real dependency of at least one
       # tests/bats/*.bats suite (#873: the filter previously covered only

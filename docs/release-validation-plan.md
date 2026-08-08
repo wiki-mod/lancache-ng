@@ -198,8 +198,8 @@ as proof of it:**
   known-good, syslog forwarding, etc.), "repeatable CI validation" for
   `full-setup-validate.yml` specifically means actually invoking it —
   `gh workflow run full-setup-validate.yml --repo wiki-mod/lancache-ng --ref
-  <branch>` — or running the underlying `scripts/*-simulation.sh` script directly
-  against a real stack over SSH on a Linux host, not assuming a green `current_dev`
+  <branch>` — or running the underlying `scripts/untracked/simulations/*-simulation.sh`
+  script directly against a real stack over SSH on a Linux host, not assuming a green `current_dev`
   PR check already covered it. Note also: `gh workflow run`'s own `image_tag` input
   defaults to `nightly` — before trusting that dispatch as evidence for a specific
   commit, confirm the `nightly` channel tag has actually been rebuilt from that
@@ -350,8 +350,9 @@ use a real Linux host, e.g. over SSH to a self-hosted runner, per
   `docker build -t ghcr.io/wiki-mod/lancache-ng/dns:<local-tag> services/dns` with the
   matching `BUILD_TOOLS_IMAGE`/`additional_contexts` build args that service's Dockerfile
   needs, then point `LANCACHE_IMAGE_TAG` at `<local-tag>`) or wait for a fresh
-  `build-push.yml` run against that exact commit. This applies to `scripts/*-simulation.sh`
-  invocations too — `nats-secondary-auth-callout-simulation.sh` and
+  `build-push.yml` run against that exact commit. This applies to
+  `scripts/untracked/simulations/*-simulation.sh` invocations too —
+  `nats-secondary-auth-callout-simulation.sh` and
   `syslog-forwarding-simulation.sh` both default `LANCACHE_IMAGE_TAG` to a mutable channel
   and need the same treatment; the DHCP simulation scripts
   (`dhcp-kea-lease-flow-simulation.sh`, `dhcp-proxy-pxe-simulation.sh`,

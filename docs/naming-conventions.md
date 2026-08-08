@@ -216,7 +216,8 @@ as an unrelated rename would:
 `services/ui/src/docker_client.rs`'s `container_name_for_service()` is
 **deliberately not wired to this suffix**: no CI simulation drives the
 Admin UI's Docker-API-backed restart/start/stop routes today (verified by
-grepping every `scripts/*-simulation.sh` for a call into those routes), and
+grepping every `scripts/untracked/simulations/*-simulation.sh` for a call
+into those routes), and
 a real production install never sets a suffix, so there is no reachable
 path where this gap could produce incorrect behavior. Revisit this if a
 future simulation starts exercising those routes.
