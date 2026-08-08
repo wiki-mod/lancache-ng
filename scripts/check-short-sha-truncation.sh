@@ -76,10 +76,31 @@ is_self_reference() {
 # anywhere after that, so a name like `commit1_sha` still matches.
 SHORT_SHA_HARDCODE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?[Ss][Hh][Aa][A-Za-z0-9_]*(::[0-9]+|:0:[0-9]+)\}'
 
+
+# Captured via command substitution, not a `mapfile -t files < <(...)`
+# process substitution: a process substitution's own exit status is
+# invisible to the reading command (mapfile here) and to `set -e`/
+# `pipefail` alike -- if `git ls-files` (or the find/sed pipeline) fails
+# outright (invalid ownership, an unreadable index, a malformed .git
+# directory, and so on), `files` would silently end up empty and this
+# blocking guard would report a false clean pass instead of failing
+# closed. `$(...)` command substitution's own exit status IS checkable via
+# a plain assignment's `if !`, which is what makes the explicit failure
+# check below possible at all.
 if [ -e "$target_root/.git" ]; then
-    mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' 'scripts/lib/*.sh')
+    if ! files_raw="$(git ls-files -- '.github/workflows/*.yml' 'scripts/lib/*.sh')"; then
+        echo "::error::check-short-sha-truncation: \`git ls-files\` itself failed -- is $target_root a real git work tree? Not treating this as a clean pass." >&2
+        exit 1
+    fi
 else
-    mapfile -t files < <(find . \( -path './.github/workflows/*.yml' -o -path './scripts/lib/*.sh' \) -type f -print | sed 's#^\./##')
+    if ! files_raw="$(find . \( -path './.github/workflows/*.yml' -o -path './scripts/lib/*.sh' \) -type f -print | sed 's#^\./##')"; then
+        echo "::error::check-short-sha-truncation: file enumeration (find/sed) failed. Not treating this as a clean pass." >&2
+        exit 1
+    fi
+fi
+files=()
+if [ -n "$files_raw" ]; then
+    mapfile -t files <<< "$files_raw"
 fi
 
 violations=()

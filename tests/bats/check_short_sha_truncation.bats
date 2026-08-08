@@ -162,3 +162,27 @@ EOF
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
 }
+
+@test "fails closed, with a diagnostic, when git ls-files itself fails" {
+    # Real Codex finding: `mapfile -t files < <(git ls-files ...)` (the
+    # script's prior form) cannot see a failure inside its own process
+    # substitution -- not even under `set -euo pipefail`, since pipefail
+    # only covers `|` pipelines, not `<(...)`. A broken `.git` (present as
+    # a path, satisfying the `[ -e "$target_root/.git" ]` branch check, but
+    # not a real repository) makes `git ls-files` fail with "fatal: not a
+    # git repository" -- reproduced here with a plain empty directory named
+    # `.git` (no real git metadata inside it), the exact minimal shape that
+    # triggers this. The old code would have silently scanned zero files
+    # and reported a false clean pass instead of failing loudly.
+    rm -rf "$fixture_root/.git"
+    mkdir -p "$fixture_root/.git"
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+short_sha="${GITHUB_SHA::7}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"git ls-files"*"failed"* ]] || fail "did not diagnose the git ls-files failure: $output"
+    [[ "$output" != *"No hardcoded"* ]] || fail "reported a false clean pass despite git ls-files failing: $output"
+}
