@@ -333,3 +333,40 @@ write_legacy_env_fixture() {
     duplicate_keys=$(awk -F= '{print $1}' "$env_file" | sort | uniq -d)
     [ -z "$duplicate_keys" ]
 }
+
+@test "migrate_env_for_update on a deploy/prod install with no PXE keys in .env yet preserves an existing config/prod/dhcp-proxy.env PXE value (the confirmed real bug)" {
+    # A pre-#705 (or even pre-#450) deploy/prod install: .env has never heard
+    # of these keys at all, but the operator already configured PXE
+    # boot-pointer support the only way that existed before setup.sh gained
+    # this wizard/migration -- hand-editing config/prod/dhcp-proxy.env
+    # directly. append_env_key_if_missing below backfills these keys into
+    # .env as empty placeholders during this very run; before the fix, that
+    # backfill made env_key_exists() report "operator explicitly set this",
+    # so sync_dhcp_proxy_config_prod_env() overwrote the real value below
+    # with an empty string on this install's very first update after
+    # upgrading past the version that introduced these keys.
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    # The backfill actually happened -- proves this test exercises the race
+    # rather than accidentally skipping the PXE keys entirely.
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=' "$env_file"
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.9.9.9" ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$config_prod_env"
+    [ "$output" = "real-pxelinux.0" ]
+}

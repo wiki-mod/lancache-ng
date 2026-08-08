@@ -223,9 +223,17 @@ this section or the "Optional (issue #450)" one above changes.
 > wiring three new form fields through `services/ui/src/routes/dhcp.rs`,
 > which is a separate, larger piece of work than the setup.sh side. Until
 > that lands, changing these three values after initial setup means editing
-> `.env` directly and restarting. STATUS: as of 2026-08-06, `setup.sh`
-> coverage is done; Admin UI coverage is open (AG-FEAT-002 UI delivery
-> debt).
+> `.env` and restarting for **quickstart** (`deploy/quickstart/docker-compose.yml`
+> wires each of these three keys as `environment: - KEY=${KEY:-}`, so the
+> running container reads whatever `.env` holds at `docker compose up` time).
+> **`deploy/prod` does not work this way**: its dhcp-proxy service reads
+> `config/prod/dhcp-proxy.env` via `env_file:`, never `.env`/`.env.local`
+> directly, so editing `.env` and restarting has no effect there. For
+> `deploy/prod`, either run `setup.sh update` (which converges these three
+> keys from `.env` into `config/prod/dhcp-proxy.env` via
+> `sync_dhcp_proxy_config_prod_env()`) or edit `config/prod/dhcp-proxy.env`
+> directly and restart. STATUS: as of 2026-08-06, `setup.sh` coverage is
+> done; Admin UI coverage is open (AG-FEAT-002 UI delivery debt).
 
 | Key | Meaning | Example |
 |---|---|---|

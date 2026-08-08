@@ -2672,6 +2672,13 @@ migrate_env_for_update() {
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
     local dhcp_proxy_boot_filename dhcp_proxy_boot_server _dhcp_ntp_check _dhcp_ntp_ip
+    # dhcp_proxy_pxe_boot_server/_bios/_uefi were previously missing from this
+    # local list -- get_env_var's assignment to them below still worked (bash
+    # does not require prior declaration), but each one silently leaked as a
+    # global for the rest of the script's process lifetime instead of staying
+    # scoped to this function like every other migration temp variable here.
+    local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
+    local pxe_sync_pre_env_snapshot pxe_sync_pre_env_file
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
@@ -2891,6 +2898,22 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
+    # decides whether an operator's .env answer should override
+    # config/prod/dhcp-proxy.env by checking whether the key exists in
+    # $env_file at all -- an explicit empty counts as "operator cleared it",
+    # a missing key means "preserve config/prod/dhcp-proxy.env's own value".
+    # The append_env_key_if_missing() invocations below backfill each of these ten
+    # keys with an empty placeholder on an install that never had them, so
+    # checking $env_file's *current* state at sync time would make every
+    # first-time migration look exactly like an explicit clear -- silently
+    # wiping a real, already-configured config/prod/dhcp-proxy.env value the
+    # very first time an existing deploy/prod install runs `setup.sh update`
+    # after these keys were introduced. Snapshotting the file before any of
+    # the appends run preserves the real "did the operator actually already
+    # have this key" signal for sync_dhcp_proxy_config_prod_env to check
+    # instead.
+    pxe_sync_pre_env_snapshot=$(cat "$env_file")
     # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
     # forwarded as giaddr). Required in dnsmasq-relay mode, ignored otherwise.
     append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "" "$env_file"
@@ -2954,15 +2977,15 @@ migrate_env_for_update() {
             [[ -z "$dhcp_proxy_domain" ]] || is_valid_dhcp_proxy_domain "$dhcp_proxy_domain" \
                 || die "DHCP_PROXY_DOMAIN in $env_file must be a valid DNS domain name or empty."
             [[ -z "$dhcp_proxy_boot_filename" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_boot_filename" \
-                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace or commas."
+                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             [[ -z "$dhcp_proxy_pxe_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_pxe_boot_server" \
                 || die "DHCP_PROXY_PXE_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
             [[ -z "$dhcp_proxy_pxe_boot_filename_bios" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_bios" \
-                || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace or commas."
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
             [[ -z "$dhcp_proxy_pxe_boot_filename_uefi" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_uefi" \
-                || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace or commas."
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
             # The three PXE boot-pointer fields above are validated individually,
             # but entrypoint.sh's pxe-service rendering needs the server AND at
             # least one boot filename together (see
@@ -3078,11 +3101,22 @@ migrate_env_for_update() {
     # write in this function that reaches a container's live config outside
     # $env_file, so an aborted update must not leave it applied while $env_file
     # itself stays at its pre-update state.
-    sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
+    # Pass the pre-migration snapshot captured above, not $env_file itself --
+    # by this point every one of the ten keys below has already been
+    # backfilled with an empty placeholder if it was missing, so checking
+    # $env_file's current state here would make sync_dhcp_proxy_config_prod_env
+    # treat that backfill as an operator's explicit clear (see this
+    # function's own comment above the snapshot for the full incident).
+    pxe_sync_pre_env_file=$(mktemp) \
+        || die "Failed to create a temporary pre-migration .env snapshot for PXE-pointer sync."
+    printf '%s' "$pxe_sync_pre_env_snapshot" > "$pxe_sync_pre_env_file" \
+        || { rm -f "$pxe_sync_pre_env_file"; die "Failed to write the pre-migration .env snapshot for PXE-pointer sync."; }
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$pxe_sync_pre_env_file" \
         "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
         "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
         "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
         "$dhcp_proxy_pxe_boot_filename_uefi"
+    rm -f "$pxe_sync_pre_env_file"
 
     print_ok ".env is complete for the current quickstart template"
 }
@@ -7051,7 +7085,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             DHCP_PROXY_BOOT_FILENAME="$REPLY"
             [[ -z "$DHCP_PROXY_BOOT_FILENAME" ]] && break
             is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_BOOT_FILENAME" && break
-            print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_BOOT_FILENAME"
+            print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_BOOT_FILENAME"
             ask "PXE boot filename (blank = skip PXE boot info)" ""
         done
 
@@ -7101,7 +7135,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
                 DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="$REPLY"
                 [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && break
                 is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && break
-                print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
                 ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" ""
             done
 
@@ -7110,7 +7144,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
                 DHCP_PROXY_PXE_BOOT_FILENAME_UEFI="$REPLY"
                 [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && break
                 is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" && break
-                print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
+                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
                 ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" ""
             done
 
