@@ -62,13 +62,13 @@ if [[ "$mode" == built ]]; then
     source_fingerprint="$(
         CI_SOURCE_APT_CACHE_BUST="$apt_cache_bust" \
         CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
-        "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
+        bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
     )"
 else
     # Reuse has no new producer. It is valid only while the current effective
     # inputs still equal the fingerprint the planner compared with the accepted
     # baseline. Recompute now as a final fail-closed check before recording it.
-    source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
+    source_fingerprint="$(bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
     [[ -n "$planned_source_fingerprint" ]] \
         || ci_ai_fail "reused candidate is missing its planned source fingerprint"
     [[ "$planned_source_fingerprint" == "$source_fingerprint" ]] \
