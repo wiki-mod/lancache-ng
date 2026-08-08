@@ -1403,24 +1403,35 @@ _proxy_validate_snapshot_or_rollback() {
 # rollback protection exists for. A one-time backfill is therefore scoped to
 # proxy only (not added to the shared kgs_* library itself, which stays a
 # generic, service-agnostic contract also embedded verbatim in dhcp-proxy/
-# dns): any existing snapshot that already has the two other expected
-# candidate basenames (nginx.conf, proxy-params.conf) but is missing
-# 00-stream-client-acl.conf gets an empty file. The empty ACL preserves the
-# unrestricted stream behavior under which the legacy snapshot was actually
-# validated; copying this boot's generated ACL would let a malformed current
-# PROXY_ALLOWED_CLIENT_CIDRS corrupt every otherwise-usable rollback target
-# before nginx validates the new configuration. The migration is idempotent
-# and a no-op for snapshots that already contain the file (already migrated,
-# or created under the current candidate list).
+# dns). The saved nginx.conf is the schema marker: only a configuration that
+# predates the stream-ACL include may legitimately omit the ACL candidate.
+# Such a snapshot gets an empty file, preserving the unrestricted stream
+# behavior under which it was actually validated. A newer snapshot whose
+# nginx.conf includes the ACL but whose ACL file is missing stays incomplete;
+# recreating that file empty would turn filesystem damage into a silent
+# allowlist bypass. Copying this boot's generated ACL is unsafe too, because
+# a malformed current PROXY_ALLOWED_CLIENT_CIDRS could corrupt every usable
+# rollback target before nginx validates the new configuration. The migration
+# is idempotent and a no-op for snapshots that already contain the file.
 _migrate_legacy_proxy_snapshots_for_stream_acl() {
     local snapshot_root="$1"
-    local id snap_dir
+    local id snap_dir schema_status
     while IFS= read -r id; do
         [ -n "$id" ] || continue
         snap_dir="${snapshot_root}/${id}"
         [ -f "${snap_dir}/nginx.conf" ] || continue
         [ -f "${snap_dir}/proxy-params.conf" ] || continue
         [ -f "${snap_dir}/00-stream-client-acl.conf" ] && continue
+        if grep -Fq 'stream.d/access.d/00-stream-client-acl.conf' "${snap_dir}/nginx.conf"; then
+            kgs_log WARN "proxy" "snapshot $id declares the stream ACL but is missing 00-stream-client-acl.conf; leaving it incomplete rather than weakening its saved allowlist"
+            continue
+        else
+            schema_status=$?
+        fi
+        if [ "$schema_status" -ne 1 ]; then
+            kgs_log WARN "proxy" "could not inspect nginx.conf in snapshot $id; leaving it incomplete because its schema cannot be identified safely"
+            continue
+        fi
         if : > "${snap_dir}/00-stream-client-acl.conf" 2>/dev/null; then
             kgs_log MIGRATE "proxy" "backfilled legacy unrestricted 00-stream-client-acl.conf into pre-existing known-good snapshot $id"
         else
