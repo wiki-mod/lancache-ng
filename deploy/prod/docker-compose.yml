@@ -451,6 +451,13 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      # #849 bug-hunt finding observability.md#21: without this entry,
+      # retention.sh's own "${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}" default
+      # would be the only value the container ever sees -- Compose does not
+      # pass an arbitrary host/`.env` variable into a container unless it is
+      # named here, so an operator setting this in their `.env` would
+      # silently have no effect without this line.
+      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
