@@ -355,6 +355,7 @@ setup() {
         printf '{"status":"ahead","ahead_by":1,"behind_by":0}\n'
     }
     export -f gh
+    # shellcheck disable=SC2034 # passed by name to gcps_commit_branch_relation, which writes into it via a nameref -- never dereferenced directly in this scope, invisible to shellcheck's static analysis
     declare -A cache=()
     gcps_commit_branch_relation wiki-mod/lancache-ng cafe123 current_dev cache >/dev/null
     gcps_commit_branch_relation wiki-mod/lancache-ng cafe123 current_dev cache >/dev/null
