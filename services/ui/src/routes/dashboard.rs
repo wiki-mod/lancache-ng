@@ -1,10 +1,12 @@
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! Main dashboard route displaying cache statistics and connection metrics.
 
-use crate::{AppState, config::DhcpMode, nginx_client, syslog_client, watchdog_status};
+use crate::{
+    AppState, config::DhcpMode, netdata_alarms, nginx_client, syslog_client, watchdog_status,
+};
 use axum::extract::State;
 use axum::http::HeaderMap;
-use axum::response::{Html, Json};
+use axum::response::{IntoResponse, Json};
 use serde_json::json;
 use std::sync::Arc;
 use tera::Context;
@@ -39,7 +41,10 @@ fn watchdog_status_json(result: watchdog_status::WatchdogStatusReadResult) -> se
     }
 }
 
-pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+pub async fn dashboard(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let cfg = &state.config;
 
     // PROXY_STANDARD_URL and PROXY_SSL_URL default to the same value and
@@ -128,6 +133,19 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         move || watchdog_status::read_status(&path)
     });
 
+    // Bug hunt #849, observability.md finding #3: Netdata's health.d alarms
+    // forwarded by the netdata container's custom_sender() integration
+    // (routes/netdata_alarms.rs's POST handler is the write side). Same
+    // spawn_blocking shape as watchdog_status_task above -- fs::read_to_string
+    // is a blocking call -- and unconditional for the same reason: the
+    // ui-data volume this file lives on is always present, and "no alarms
+    // yet" is itself a meaningful, always-worth-showing state, not an
+    // opt-in feature.
+    let netdata_alarms_task = tokio::task::spawn_blocking({
+        let path = cfg.netdata_alarms_file.clone();
+        move || netdata_alarms::read_alarms(&path)
+    });
+
     let (
         standard_status,
         distinct_ssl_status,
@@ -137,6 +155,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         syslog_size_result,
         syslog_stats_result,
         watchdog_status_result,
+        netdata_alarms_result,
     ) = tokio::join!(
         standard_status_future,
         ssl_status_future,
@@ -146,6 +165,7 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
         syslog_size_task,
         syslog_stats_task,
         watchdog_status_task,
+        netdata_alarms_task,
     );
     let ssl_status = if !cfg.ssl_enabled {
         None
@@ -164,6 +184,10 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     // the whole dashboard render over one optional health widget.
     let watchdog_status =
         watchdog_status_result.unwrap_or(watchdog_status::WatchdogStatusReadResult::Unavailable);
+    // Same JoinError-as-empty fallback as the other collectors above -- a
+    // panicked read must degrade to "no alarms" rather than fail the whole
+    // dashboard render.
+    let netdata_alarms = netdata_alarms_result.unwrap_or_default();
 
     // The percentage bar stays tied to cfg.cache_max_gb (the container's own
     // raw startup value, i.e. what nginx is ACTUALLY enforcing right now),
@@ -204,6 +228,10 @@ pub async fn dashboard(State(state): State<Arc<AppState>>, headers: HeaderMap) -
     ctx.insert("syslog_max_gb", &cfg.syslog_max_gb);
     ctx.insert("syslog_stats", &syslog_stats);
     ctx.insert("watchdog_status", &watchdog_status_json(watchdog_status));
+    ctx.insert(
+        "netdata_alarms",
+        &netdata_alarms::alarm_views(&netdata_alarms),
+    );
     ctx.insert("active_page", "dashboard");
     crate::routes::insert_csrf_token(&mut ctx, &headers);
 

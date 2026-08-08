@@ -170,11 +170,22 @@ fn b64url(bytes: &[u8]) -> String {
     base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
 }
 
-fn now_unix() -> i64 {
+// Finding #4 (docs/bug-hunt/ui-core.md, issue #849): the previous
+// `.unwrap_or_default()` silently turned a broken system clock (any
+// `SystemTime::now()` reading before the Unix epoch) into `0`, which would
+// have issued an auth-callout JWT with `iat`/`exp` timestamps in 1970 --
+// wrong in a way that is security-relevant (a JWT's validity window is a
+// real access-control boundary here, not a display value) and, worse,
+// completely silent: nothing in the resulting JWT distinguishes "clock is
+// fine, this really is timestamp 0" from "clock read failed". Failing
+// closed instead means a broken clock surfaces as an auth-callout error
+// response (see build_response's own `Result` propagation below) rather
+// than a JWT with a nonsensical, unflagged validity window.
+fn now_unix() -> Result<i64, String> {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_secs() as i64
+        .map(|d| d.as_secs() as i64)
+        .map_err(|e| format!("system clock is set before the Unix epoch: {e}"))
 }
 
 /// Computes the `jti` claim NATS JWT v2 uses: base32(no-padding) of the
@@ -407,8 +418,8 @@ fn build_response(
                 "sub": user_nkey,
                 "aud": TARGET_ACCOUNT,
                 "name": name,
-                "iat": now_unix(),
-                "exp": now_unix() + USER_JWT_TTL_SECS,
+                "iat": now_unix()?,
+                "exp": now_unix()? + USER_JWT_TTL_SECS,
                 "jti": "",
                 "nats": secondary_permissions()
             });
@@ -424,7 +435,7 @@ fn build_response(
         "iss": issuer.public_key(),
         "sub": user_nkey,
         "aud": server_id,
-        "iat": now_unix(),
+        "iat": now_unix()?,
         "jti": "",
         "nats": nats_field
     });
@@ -483,6 +494,19 @@ fn seal_response_if_needed(
     }
 }
 
+// Doubles `delay` up to `max_delay`, shared by both the connect-failure and
+// subscribe-failure retry branches in `run_auth_callout` below (Rule-Ref:
+// AG-WF-011: the same backoff-growth step, so both branches stay correct
+// together rather than one silently drifting back to a flat retry
+// interval the way the subscribe branch once did -- see Finding #3,
+// docs/bug-hunt/ui-core.md, issue #849). Pulled out as a pure function so
+// the arithmetic itself has a unit test independent of a live NATS
+// connection, which the surrounding loop cannot practically be tested
+// against in this codebase.
+fn grow_backoff(delay: std::time::Duration, max_delay: std::time::Duration) -> std::time::Duration {
+    std::cmp::min(delay * 2, max_delay)
+}
+
 /// Runs the auth-callout responder loop: connects as the callout account's
 /// static bypass user, subscribes to `$SYS.REQ.USER.AUTH`, and answers every
 /// request until the connection drops (at which point `main.rs`'s caller is
@@ -523,7 +547,7 @@ pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>, xkey: 
                     delay
                 );
                 tokio::time::sleep(delay).await;
-                delay = std::cmp::min(delay * 2, max_delay);
+                delay = grow_backoff(delay, max_delay);
                 continue;
             }
         };
@@ -535,6 +559,17 @@ pub async fn run_auth_callout(state: Arc<AppState>, issuer: Arc<KeyPair>, xkey: 
                     "auth-callout: failed to subscribe to {REQUEST_AUTH_SUBJECT}: {err}"
                 );
                 tokio::time::sleep(delay).await;
+                // Finding #3 (docs/bug-hunt/ui-core.md, issue #849): unlike
+                // the connect-failure branch above, this used to leave
+                // `delay` unchanged before retrying. Since a successful
+                // connect resets `delay` back to 1s, a persistent
+                // subscribe-only failure (e.g. a permissions problem that
+                // lets the connection succeed but denies this subscription)
+                // would loop reconnect-then-fail-subscribe at a flat 1s
+                // interval forever instead of backing off -- the same
+                // failure-class fix as the connect branch's own backoff
+                // (Rule-Ref: AG-WF-011), applied here too.
+                delay = grow_backoff(delay, max_delay);
                 continue;
             }
         };
@@ -928,6 +963,48 @@ mod tests {
         let payload = decode_jwt_payload(&response).expect("outer envelope decodes");
         assert_eq!(payload["nats"]["error"], "invalid secondary credentials");
         assert!(payload["nats"].get("jwt").is_none());
+    }
+
+    // Finding #3 (docs/bug-hunt/ui-core.md, issue #849): locks the shared
+    // backoff-growth step both the connect-failure and subscribe-failure
+    // retry branches in run_auth_callout now use, so a future edit to one
+    // branch cannot silently drift back to a flat, non-backing-off retry
+    // interval the way the subscribe branch once did.
+    #[test]
+    fn grow_backoff_doubles_then_caps_at_max_delay() {
+        use std::time::Duration;
+        let max = Duration::from_secs(30);
+        assert_eq!(
+            grow_backoff(Duration::from_secs(1), max),
+            Duration::from_secs(2)
+        );
+        assert_eq!(
+            grow_backoff(Duration::from_secs(16), max),
+            Duration::from_secs(30)
+        );
+        assert_eq!(
+            grow_backoff(Duration::from_secs(30), max),
+            Duration::from_secs(30)
+        );
+    }
+
+    // Finding #4 (docs/bug-hunt/ui-core.md, issue #849): now_unix() must
+    // return a real, current-looking timestamp on the normal (working
+    // clock) path -- this is the smoke-test half of the fail-closed fix.
+    // The actual clock-error branch (SystemTime::now() before UNIX_EPOCH)
+    // cannot be exercised portably in a unit test without mocking the
+    // system clock itself, which this codebase does not do anywhere else
+    // either; build_response_success_contains_signed_user_jwt above already
+    // proves the `?`-propagation compiles and the success path still
+    // produces valid `iat`/`exp` claims end to end.
+    #[test]
+    fn now_unix_returns_a_current_looking_timestamp_on_a_working_clock() {
+        let now = now_unix().expect("system clock must be readable in test environments");
+        // Any real, non-mocked test environment reads a timestamp well past
+        // this project's own 2026 development window -- a loose sanity bound
+        // that would fail loudly if now_unix() ever regressed back to
+        // silently returning 0 on a working clock.
+        assert!(now > 1_700_000_000);
     }
 
     #[test]
