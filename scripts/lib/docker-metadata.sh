@@ -54,6 +54,13 @@ dmeta_short_sha() {
         return 1
     fi
 
+    # Force base-10 interpretation: a decimal literal with a leading zero
+    # (e.g. "08") is otherwise read as octal by bash's arithmetic-context
+    # substring slice below, and "08"/"09" are not valid octal digits at
+    # all, aborting the whole step with "value too great for base" instead
+    # of returning the intended 8/9-character short SHA.
+    length=$((10#${length}))
+
     printf '%s\n' "${full_sha:0:length}"
 }
 

@@ -1327,10 +1327,22 @@ omitted):**
     top-level-variable-collision shape: `scripts/lib/validation-image-tag.sh`
     self-sourcing `scripts/lib/docker-metadata.sh` and clobbering
     `scripts/plan-deep-validation.sh`'s own `script_dir`) are each fixed and
-    covered by their own bats regression case (see `tests/bats/
-    docker_metadata.bats` and `tests/bats/validation_image_tag.bats`). No
-    standing CI guard exists against a *future* instance of either shape;
-    manual code review is the only current check.
+    covered by their own bats regression case. The embedded-call shape is
+    covered directly by `tests/bats/docker_metadata.bats` (the
+    `set -euo pipefail` reproduction of the hosted-fallback workflow's own
+    shell shape) and `tests/bats/validation_image_tag.bats` (`vit_resolve_tag()`
+    exercised in isolation). The `script_dir` collision specifically is
+    **not** covered by either of those two files -- both source the affected
+    libraries directly and never set a caller-owned `script_dir` first, so
+    neither can observe a clobber of it. That collision's actual regression
+    coverage is `tests/bats/plan_deep_validation.bats`, which runs
+    `scripts/plan-deep-validation.sh` end to end as a real subprocess (not a
+    sourced function call) and therefore does set `script_dir` before
+    sourcing `validation-image-tag.sh`, then still depends on that same
+    `script_dir` afterward for `detect-full-setup-changes.sh` -- a clobber
+    would make that later step resolve the wrong path and fail the test's
+    `status -eq 0` assertion. No standing CI guard exists against a *future*
+    instance of either shape; manual code review is the only current check.
   - **Non-Expansion**: this exception covers only these two named call-site
     shapes as they exist today. A future instance of either shape found
     elsewhere in the repo is a new occurrence to fix on its own merits

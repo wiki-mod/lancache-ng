@@ -100,6 +100,24 @@ EOF
     [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
 }
 
+@test "fails on a digit before sha in the variable name, e.g. commit1_sha" {
+    # Real shape a Codex finding on PR #1503 caught: a multi-candidate
+    # comparison naming its variables commit1_sha/commit2_sha (or similarly
+    # base2_sha) is still a valid bash identifier despite the digit, but the
+    # widened pattern's earlier prefix class ([A-Za-z_]* only) rejected any
+    # digit anywhere before "sha", so this exact shape passed the guard
+    # silently even though it independently hardcodes the truncation length
+    # just like every other flagged shape.
+    cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
+#!/usr/bin/env bash
+candidate="${commit1_sha:0:7}"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
+}
+
 @test "passes when the site reads dmeta_short_sha() instead" {
     cat > "$fixture_root/.github/workflows/example.yml" <<'EOF'
 jobs:

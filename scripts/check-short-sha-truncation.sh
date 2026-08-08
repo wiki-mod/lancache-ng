@@ -20,29 +20,22 @@
 # Detection matches any `${VAR::N}`/`${VAR:0:N}` bash substring slice with a
 # literal numeric length where VAR's own name contains "sha" (case-insensitive
 # substring match, e.g. short_sha, base_sha_short, ancestor_sha_short,
-# GITHUB_SHA, full_sha) -- not a broad ban on the substring-slice syntax
-# itself (which has many legitimate, unrelated uses this guard must not
-# flag), and not limited to an assignment context: a bare interpolation like
-# "sha-${ancestor_sha:0:7}" is caught exactly the same as a
+# commit1_sha, GITHUB_SHA, full_sha) -- not a broad ban on the substring-slice
+# syntax itself (which has many legitimate, unrelated uses this guard must
+# not flag), and not limited to an assignment context: a bare interpolation
+# like "sha-${ancestor_sha:0:7}" is caught exactly the same as a
 # short_sha="${VAR::7}" assignment, since both independently hardcode the
-# truncation length instead of calling dmeta_short_sha(). Widened from an
-# earlier, narrower version of this guard that matched only a variable
-# literally named `short_sha` in assignment position -- that version passed
-# this project's own real tree cleanly (0 violations) while remaining
-# structurally unable to catch the exact `base_sha_short`/`ancestor_sha_short`
-# assignment shapes and bare-interpolation shapes this same effort had just
-# migrated in scripts/lib/staging-ancestor-fallback.sh, which is the same
-# "declared value not actually read at every site" risk AG-CI-022 exists to
-# close -- a guard for that class should not itself have a shape-based blind
-# spot. scripts/lib/docker-metadata.sh's OWN internal `${full_sha:0:length}`
-# slice (length is a variable, not a literal digit) stays exempt by
-# construction -- the regex below only matches a literal digit run, never a
-# bare identifier -- since that line IS the single declared implementation
-# this guard exists to make everyone else call, not a violation of it. A
-# repo-wide grep confirmed zero non-comment `*sha*::N`/`*sha*:0:N` matches
-# remain anywhere in this guard's current file scope before this widening
-# shipped, so it starts from a real, verified-clean baseline rather than an
-# assumed one.
+# truncation length instead of calling dmeta_short_sha(). The portion of
+# VAR's name before "sha" may itself contain digits (e.g. `commit1_sha`,
+# `base2_sha`) as long as VAR still starts with a valid bash identifier
+# character (a letter or underscore, never a leading digit) -- matching only
+# letters/underscores there would miss any sha-named variable whose prefix
+# happens to include a digit. scripts/lib/docker-metadata.sh's OWN internal
+# `${full_sha:0:length}` slice (length is a variable, not a literal digit)
+# stays exempt by construction -- the regex below only matches a literal
+# digit run, never a bare identifier -- since that line IS the single
+# declared implementation this guard exists to make everyone else call, not
+# a violation of it.
 #
 # Scoped to .github/workflows/*.yml and scripts/lib/*.sh: the two file
 # classes every confirmed instance above was found in. A prose mention of
@@ -77,8 +70,11 @@ is_self_reference() {
 # interpolation), where VAR's name contains "sha" case-insensitively, with a
 # literal numeric length (never a bare identifier -- see the header comment
 # for why that keeps scripts/lib/docker-metadata.sh's own implementation
-# line, whose length is a variable, from ever matching this pattern).
-SHORT_SHA_HARDCODE_PATTERN='\$\{[A-Za-z_]*[Ss][Hh][Aa][A-Za-z0-9_]*(::[0-9]+|:0:[0-9]+)\}'
+# line, whose length is a variable, from ever matching this pattern). The
+# optional prefix group before "sha" requires a valid bash identifier's
+# leading character (letter/underscore, never a digit) but allows digits
+# anywhere after that, so a name like `commit1_sha` still matches.
+SHORT_SHA_HARDCODE_PATTERN='\$\{([A-Za-z_][A-Za-z0-9_]*)?[Ss][Hh][Aa][A-Za-z0-9_]*(::[0-9]+|:0:[0-9]+)\}'
 
 if [ -e "$target_root/.git" ]; then
     mapfile -t files < <(git ls-files -- '.github/workflows/*.yml' 'scripts/lib/*.sh')
