@@ -21,3 +21,25 @@ setup() {
   run grep -F '$("$repo_root/scripts/ci-source-fingerprint.sh"' "$planner"
   [ "$status" -ne 0 ]
 }
+
+@test "v2 workflow supersedes only first-attempt PR runs" {
+  workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
+
+  run grep -F "(github.event_name == 'pull_request' && github.run_attempt == 1)" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "format('{0}-pr-{1}', github.workflow, github.ref)" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "format('{0}-run-{1}-{2}', github.workflow, github.run_id, github.run_attempt)" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "cancel-in-progress: \${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}" "$workflow"
+  [ "$status" -eq 0 ]
+}
+
+@test "v2 reuse carries the accepted service index digest into platform records" {
+  workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
+
+  run grep -F 'REUSED_INDEX_DIGEST: ${{ matrix.reused_index_digest }}' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F 'reused_index_digest: $reused_index_digest' "$REPO_ROOT/scripts/ci-plan-run.sh"
+  [ "$status" -eq 0 ]
+}
