@@ -1,0 +1,106 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Attest SBOM to GHCR with retry
+description: Attests an SBOM to one exact OCI digest and retries transient GHCR publication failures.
+inputs:
+  registry:
+    required: false
+    default: ghcr.io
+  username:
+    required: true
+  password:
+    required: true
+  subject-name:
+    required: true
+  subject-digest:
+    required: true
+  sbom-path:
+    required: true
+  backoff-seconds:
+    required: false
+    default: "30"
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        sbom-path: ${{ inputs.sbom-path }}
+        push-to-registry: true
+
+    - if: steps.attempt1.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - if: steps.attempt1.outcome == 'failure'
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure'
+      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        sbom-path: ${{ inputs.sbom-path }}
+        push-to-registry: true
+
+    - if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        sbom-path: ${{ inputs.sbom-path }}
+        push-to-registry: true
+
+    - if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    - id: attempt4
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4.2.0
+      continue-on-error: true
+      with:
+        subject-name: ${{ inputs.subject-name }}
+        subject-digest: ${{ inputs.subject-digest }}
+        sbom-path: ${{ inputs.sbom-path }}
+        push-to-registry: true
+
+    - name: Resolve SBOM attestation outcome
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        for outcome in "${{ steps.attempt1.outcome }}" "${{ steps.attempt2.outcome }}" "${{ steps.attempt3.outcome }}" "${{ steps.attempt4.outcome }}"; do
+          [[ "$outcome" == success ]] && exit 0
+        done
+        echo "::error::All SBOM attestation attempts failed for ${{ inputs.subject-name }}@${{ inputs.subject-digest }}." >&2
+        exit 1
