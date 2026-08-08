@@ -73,12 +73,10 @@ impl IntoResponse for SettingsError {
             "<!DOCTYPE html>\n<html>\n<head><title>Settings Error</title></head>\n\
              <body><h1>Settings Error</h1>\n<p>{}</p>\n\
              <p><a href=\"/setup\">Return to setup</a></p>\n</body>\n</html>",
-            // Finding #9 (docs/bug-hunt/ui-routes.md, issue #849) correction:
-            // this used to say "both error paths ... use fixed messages" --
-            // there are actually three SettingsError::new(...) construction
-            // sites in update_stack_settings below (a CSRF failure, an
-            // invalid-channel rejection, and a settings-persist failure), not
-            // two, and the third one is not a fixed string at all -- it
+            // There are three SettingsError::new(...) construction sites in
+            // update_stack_settings below (a CSRF failure, an
+            // invalid-channel rejection, and a settings-persist failure),
+            // and the third one is not a fixed string at all -- it
             // formats `err.to_string()` from persist_stack_settings'
             // Result::Err. That value is still safe to leave unescaped today
             // (it's an io::Error-derived message describing a local file-write

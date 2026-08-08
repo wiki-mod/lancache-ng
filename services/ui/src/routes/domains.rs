@@ -115,7 +115,6 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              -- this toggle would have no effect. Configure DDNS_TSIG_KEY first (see \
              docs/threat-model.md), then try again.",
         ),
-        // Finding #10 (docs/bug-hunt/ui-routes.md, issue #849):
         // routes/dns_snapshots.rs::rollback_zone_snapshot uses this same
         // mechanism for the specific case where the rollback request either
         // never reached nats-subscriber, or was rejected outright (non-2xx)
@@ -1796,9 +1795,9 @@ mod tests {
                  wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\")."
             )
         );
-        // Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): the new code
-        // rollback_zone_snapshot uses must resolve to a real, fixed message
-        // too, following the same allowlist contract as every other code.
+        // The code rollback_zone_snapshot uses must resolve to a real,
+        // fixed message too, following the same allowlist contract as
+        // every other code.
         assert!(domains_page_error_message("zone_rollback_failed").is_some());
         assert_eq!(domains_page_error_message("unknown_code"), None);
         assert_eq!(domains_page_error_message(""), None);

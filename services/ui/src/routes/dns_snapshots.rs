@@ -126,15 +126,14 @@ fn parse_zone_snapshot_summaries(snapshots: &Value) -> Vec<ZoneSnapshotSummary> 
 /// CSRF verification (this project's own per-session token, unrelated to
 /// the listener's own `X-API-Key` requirement) and relaying the result.
 ///
-/// Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): this used to always
-/// redirect to a plain `/domains` regardless of outcome, logging a non-2xx
-/// response or a network failure server-side but giving the operator no
-/// visible signal on the page itself that the rollback they just clicked
-/// never actually happened. Now reuses `domains.rs`'s existing
-/// `?error=<code>` banner mechanism (`domains_page_error_message`) for that
-/// specific case -- the same mechanism `add_dns`'s own validation-failure
-/// redirect already uses, just not previously wired up here. Deliberately
-/// scoped to the two *hard* failure cases only (non-2xx status, or the
+/// A hard rollback failure (a non-2xx response, or the request never
+/// reaching `nats-subscriber` at all) must surface as a visible signal on
+/// the page itself, not only a server-side log line the operator has no
+/// reason to go looking for after clicking "roll back." Reuses
+/// `domains.rs`'s existing `?error=<code>` banner mechanism
+/// (`domains_page_error_message`) for that specific case -- the same
+/// mechanism `add_dns`'s own validation-failure redirect already uses.
+/// Deliberately scoped to the two *hard* failure cases only (non-2xx status, or the
 /// request never reaching `nats-subscriber` at all): the softer case just
 /// below (a 2xx response whose body reports `flush_ok: false` or
 /// `zone_check_passed: false` -- the rollback itself was applied, but a
@@ -161,10 +160,10 @@ pub async fn rollback_zone_snapshot(
         .send()
         .await;
 
-    // Finding #10: tracks whether the rollback request itself reached
-    // nats-subscriber and was accepted (2xx) -- the redirect target below
-    // depends on this, separate from the softer flush_ok/zone_check_passed
-    // nuance handled entirely within the success arm's own logging.
+    // Tracks whether the rollback request itself reached nats-subscriber
+    // and was accepted (2xx) -- the redirect target below depends on this,
+    // separate from the softer flush_ok/zone_check_passed nuance handled
+    // entirely within the success arm's own logging.
     let rollback_request_succeeded = matches!(&result, Ok(resp) if resp.status().is_success());
 
     match result {
@@ -241,11 +240,10 @@ pub async fn rollback_zone_snapshot(
     )))
 }
 
-// Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): the actual
-// success/failure redirect decision, pulled out as a pure function so it
-// has a unit test independent of a live nats-subscriber connection (which
-// the surrounding handler cannot practically be tested against without a
-// mock HTTP server this codebase does not otherwise use).
+// The success/failure redirect decision, pulled out as a pure function so
+// it has a unit test independent of a live nats-subscriber connection
+// (which the surrounding handler cannot practically be tested against
+// without a mock HTTP server this codebase does not otherwise use).
 fn zone_rollback_redirect_location(succeeded: bool) -> &'static str {
     if succeeded {
         "/domains"
@@ -258,11 +256,10 @@ fn zone_rollback_redirect_location(succeeded: bool) -> &'static str {
 mod tests {
     use super::*;
 
-    // Finding #10 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
-    // this test locks in -- a failed rollback must redirect with the
-    // error-banner query parameter, not the plain success URL, so the
-    // operator gets a visible signal instead of a silent, misleadingly
-    // "successful"-looking redirect.
+    // A failed rollback must redirect with the error-banner query
+    // parameter, not the plain success URL, so the operator gets a
+    // visible signal instead of a silent, misleadingly "successful"-looking
+    // redirect.
     #[test]
     fn zone_rollback_redirect_location_signals_failure_via_query_param() {
         assert_eq!(zone_rollback_redirect_location(true), "/domains");
