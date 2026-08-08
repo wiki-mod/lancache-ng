@@ -46,6 +46,53 @@ setup() {
   [ "$output" = "$first" ]
 }
 
+@test "build-tools source fingerprint is bound to the exact refresh bucket" {
+  sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  run env CI_SOURCE_APT_CACHE_BUST=2026-W31 \
+    bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" build-tools "$sha"
+  [ "$status" -eq 0 ]
+  week31="$output"
+
+  run env CI_SOURCE_APT_CACHE_BUST=2026-W32 \
+    bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" build-tools "$sha"
+  [ "$status" -eq 0 ]
+  week32="$output"
+  [ "$week31" != "$week32" ]
+
+  run env CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
+    bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" build-tools "$sha"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"exact APT_CACHE_BUST build input is required"* ]]
+}
+
+@test "built candidate record uses producer refresh evidence instead of planned fingerprint" {
+  sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+  digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+  runner_temp="$BATS_TEST_TMPDIR/runner-temp"
+  marker_dir="$runner_temp/lancache-build-inputs"
+  output_file="$BATS_TEST_TMPDIR/build-tools-record.json"
+  mkdir -p "$marker_dir"
+  printf 'APT_CACHE_BUST=2026-W31\n' > "$marker_dir/${digest#sha256:}.env"
+
+  run env CI_SOURCE_APT_CACHE_BUST=2026-W31 \
+    bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" build-tools "$sha"
+  [ "$status" -eq 0 ]
+  expected="$output"
+
+  # Deliberately pass a different but well-formed planner fingerprint. A
+  # build that crossed the refresh boundary is still a valid new artifact;
+  # its record must describe what the producer actually consumed.
+  planned="sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+  run env RUNNER_TEMP="$runner_temp" \
+    bash "$REPO_ROOT/scripts/ci-write-candidate-record.sh" \
+      tooling build-tools ghcr.io/wiki-mod/lancache-ng/build-tools \
+      "$sha" "$sha" "$planned" linux/amd64 "$digest" built "$output_file"
+  [ "$status" -eq 0 ]
+
+  run jq -e --arg expected "$expected" '.source_fingerprint == $expected and .mode == "built"' "$output_file"
+  [ "$status" -eq 0 ]
+}
+
 @test "stack lock validator rejects a tag in place of a digest" {
   source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
   lock="$BATS_TEST_TMPDIR/lock.json"
