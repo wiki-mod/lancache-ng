@@ -750,7 +750,25 @@ DDNS_UPDATE_ZONES=("${LAN_ZONES[@]}" "${PRIVATE_REVERSE_ZONES[@]}")
 
 configure_ddns_tsig() {
     if [ -z "$DDNS_TSIG_KEY" ]; then
-        echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured."
+        # Bug-hunt finding #9 (docs/bug-hunt/dns.md, re-verified 2026-08-06):
+        # this used to just log and return here, leaving any
+        # TSIG-ALLOW-DNSUPDATE authorization from a *previous* run with
+        # DDNS_TSIG_KEY set still active on every zone -- an operator who
+        # unsets the var believing they've disabled DDNS would find DNS
+        # UPDATE requests signed with the old key still accepted. Revoke the
+        # per-zone authorization (and the now-orphaned key itself) so
+        # unsetting the var actually turns DDNS off, not just stops
+        # re-announcing it. `set-meta <zone> <kind>` with no value clears
+        # that metadata kind entirely (confirmed against PowerDNS's own
+        # pdnsutil documentation, AG-VAL-023) -- safe to call even when
+        # nothing was ever configured, so this revoke path is unconditional
+        # rather than gated on "was previously enabled" state this container
+        # doesn't otherwise track.
+        for zone in "${DDNS_UPDATE_ZONES[@]}"; do
+            pdnsutil --config-dir=/etc/pdns/auth set-meta "$zone" TSIG-ALLOW-DNSUPDATE >/dev/null 2>&1 || true
+        done
+        pdnsutil --config-dir=/etc/pdns/auth delete-tsig-key "$DDNS_TSIG_NAME" >/dev/null 2>&1 || true
+        echo "[lancache-dns] DDNS_TSIG_KEY is not set; TSIG-authenticated DNS updates are not configured (any prior authorization has been revoked)."
         return
     fi
     if secret_is_placeholder "$DDNS_TSIG_KEY"; then
@@ -1098,90 +1116,150 @@ fi
 # ── 6. Create LAN Zones ──────────────────────────────────────────────────────
 echo "[lancache-dns] Creating LAN zones in authoritative database..."
 
-# Create LAN zones (will not error if already exist)
+# _dns_ensure_zone_exists <zone>
+# Bug-hunt finding #6 (docs/bug-hunt/dns.md, re-verified 2026-08-06): the
+# previous "pdnsutil ... create-zone \"$zone\" || true" swallowed every
+# failure indiscriminately, not just the expected "zone already exists"
+# error on a container restart -- a genuine backend failure (a malformed
+# zone name, a permissions problem, a corrupt auth database) would be
+# silently ignored too, leaving the zone unusably absent with no error
+# surfaced anywhere.
+#
+# Deliberately does NOT probe existence with a separate `pdnsutil list-zone`
+# call first: PowerDNS's docs/manpage do not document that command's exit
+# code for a nonexistent zone (confirmed 2026-08-06, doc.powerdns.com's
+# pdnsutil manpage only describes what it prints, not its exit status), and
+# getting that assumption wrong in either direction is a real risk -- if
+# `list-zone` happened to exit 0 even for a missing zone, this function
+# would wrongly conclude the zone "exists" and never call `create-zone` at
+# all, silently breaking DNS on every fresh install (worse than the bug
+# this fixes). Instead this inspects `create-zone`'s own real stderr, the
+# exact command already being called: a failure whose message names the
+# already-documented, expected condition (the zone already existing) stays
+# non-fatal exactly as before; any other failure is now surfaced and fatal,
+# closing the original gap without depending on an unverified second
+# command's contract.
+_dns_ensure_zone_exists() {
+    local zone="$1" create_output create_status
+    create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1)
+    create_status=$?
+    if [ "$create_status" -eq 0 ]; then
+        return 0
+    fi
+    if printf '%s' "$create_output" | grep -qi "already exists"; then
+        return 0
+    fi
+    echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2
+    exit 1
+}
+
+# Create LAN zones (idempotent across restarts via the existence check above)
 for zone in "${LAN_ZONES[@]}"; do
-    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" || true
+    _dns_ensure_zone_exists "$zone"
 done
 
 # Create empty reverse zones for privacy (prevent external PTR leakage)
 for zone in "${PRIVATE_REVERSE_ZONES[@]}"; do
-    pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" || true
+    _dns_ensure_zone_exists "$zone"
 done
 
 configure_ddns_tsig
 
 # ── 7. Generate RPZ Zone from cdn-domains.txt ────────────────────────────────
-echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
-SERIAL=$(date +%s | tail -c 11)
-RPZ_FILE="/var/lib/powerdns/rpz.zone"
+# Bug-hunt finding #8 (docs/bug-hunt/dns.md, re-verified 2026-08-06): this
+# logic used to live only as inline top-level script here, while
+# tests/bats/helpers/dns-zone-helpers.sh kept a hand-extracted, independently
+# drifting copy for testability. Extracted into a real function so
+# tests/bats/helpers/dns-zone-helpers.sh's load_dns_zone_helpers() can pull
+# this exact function body out with awk and source it directly at test time
+# -- the same single-file extraction technique already used by
+# tests/bats/helpers/dns-known-good-snapshot-helpers.sh for
+# _dns_recursor_validate_snapshot_or_rollback below, which eliminates the
+# drift risk entirely rather than merely detecting it after the fact.
+_dns_generate_rpz_zone() {
+    local domains_file="$1" output_file="$2" proxy_ip="$3" proxy_ipv6="${4:-}"
+    local serial
 
-# Preserve monotonic RPZ SOA serials: ensure SERIAL doesn't go backwards
-if [ -f "$RPZ_FILE" ]; then
-    OLD_SERIAL=$(grep -oP '^\s*@\s+SOA\s+[^\s]+\s+[^\s]+\s+\K\d+' "$RPZ_FILE" 2>/dev/null || echo 0)
-    if [ "$SERIAL" -le "$OLD_SERIAL" ]; then
-        SERIAL=$(( OLD_SERIAL + 1 ))
-        echo "[lancache-dns] Monotonic serial: new=$SERIAL (was $OLD_SERIAL)"
+    # Generate serial from current timestamp (last 10 digits)
+    serial=$(date +%s | tail -c 11)
+
+    # Preserve monotonic RPZ SOA serials: ensure serial doesn't go backwards
+    if [ -f "$output_file" ]; then
+        local old_serial
+        old_serial=$(grep -oP '^\s*@\s+SOA\s+[^\s]+\s+[^\s]+\s+\K\d+' "$output_file" 2>/dev/null || echo 0)
+        if [ "$serial" -le "$old_serial" ]; then
+            serial=$(( old_serial + 1 ))
+            echo "[lancache-dns] Monotonic serial: new=$serial (was $old_serial)"
+        fi
     fi
-fi
 
-{
-    echo "\$ORIGIN rpz."
-    echo "\$TTL 60"
-    # SOA fields after the serial, in standard RFC 1035 order:
-    # refresh=3600s (1h) retry=900s (15m) expire=604800s (7d) minimum-ttl=60s (1m)
-    echo "@ SOA localhost. admin.rpz. $SERIAL 3600 900 604800 60"
-    echo "@ NS localhost."
-    echo ""
-    while IFS= read -r domain || [ -n "$domain" ]; do
-        domain="${domain#"${domain%%[![:space:]]*}"}"
-        domain="${domain%"${domain##*[![:space:]]}"}"
-        [[ -z "$domain" || "$domain" == \#* ]] && continue
-        # A leading "!" marks an entry the Admin UI's per-domain toggle has
-        # deliberately disabled (#1073) -- skip it silently, with no WARNING
-        # and no effect on the RPZ zone, since this is an intentional
-        # operator choice rather than a malformed or degraded
-        # cdn-domains.txt row. Mirrors services/proxy/entrypoint.sh's
-        # _collect_domain_rows handling of the same marker on the same file.
-        [[ "$domain" == !* ]] && continue
-        is_wildcard_only=0
-        if [[ "$domain" == .* ]]; then
-            is_wildcard_only=1
-            domain="${domain#.}"
-        fi
-        [[ -z "$domain" ]] && continue
-        # Reject a malformed or overly-broad entry (bare TLD, single label
-        # like "localhost", "*", control/special characters) before it ever
-        # becomes an RPZ rule: an unvalidated entry here could redirect far
-        # more DNS traffic than intended (e.g. a bare "com" would generate
-        # "*.com", matching almost every .com domain). Mirrors
-        # services/proxy/entrypoint.sh's _collect_domain_rows validation of
-        # the same cdn-domains.txt file.
-        if ! _is_valid_domain "$domain"; then
-            echo "[lancache-dns] WARNING: skipping invalid domain entry in RPZ zone: $domain" >&2
-            continue
-        fi
-        domain="$(_normalize_domain "$domain")"
-        [[ -z "$domain" ]] && continue
-        # Three non-overlapping match modes selected by how the entry is
-        # written (issue #1072): a bare entry ("domain.com" or
-        # "sub.domain.com") matches only that exact host and must never also
-        # emit a wildcard record for what's underneath it; only a
-        # leading-dot entry (".domain.com") opts into wildcard coverage, and
-        # in that case the bare root itself is deliberately not emitted.
-        if [ "$is_wildcard_only" -eq 0 ]; then
-            printf "%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
-        else
-            printf "*.%s 60 IN A %s\n" "${domain}" "${PROXY_IP}"
-        fi
-        if [ -n "$PROXY_IPV6" ]; then
-            if [ "$is_wildcard_only" -eq 0 ]; then
-                printf "%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
-            else
-                printf "*.%s 60 IN AAAA %s\n" "${domain}" "${PROXY_IPV6}"
+    # Generate the zone file with header and records
+    {
+        echo "\$ORIGIN rpz."
+        echo "\$TTL 60"
+        # SOA fields after the serial, in standard RFC 1035 order:
+        # refresh=3600s (1h) retry=900s (15m) expire=604800s (7d) minimum-ttl=60s (1m)
+        echo "@ SOA localhost. admin.rpz. $serial 3600 900 604800 60"
+        echo "@ NS localhost."
+        echo ""
+        # For each domain, emit exactly one RPZ A (and AAAA if proxy_ipv6 is set) record set:
+        # a bare entry (no leading dot) matches only that exact host and emits a base-domain
+        # record; a leading-dot entry (wildcard-only marker) matches only *.domain and emits
+        # a wildcard record instead. The two are mutually exclusive (#1072) -- a bare entry
+        # must never also emit a wildcard for what's underneath it.
+        while IFS= read -r domain || [ -n "$domain" ]; do
+            # Strip leading and trailing whitespace
+            domain="${domain#"${domain%%[![:space:]]*}"}"
+            domain="${domain%"${domain##*[![:space:]]}"}"
+            # Skip empty lines and comments
+            [[ -z "$domain" || "$domain" == \#* ]] && continue
+            # A leading "!" marks an entry the Admin UI's per-domain toggle has
+            # deliberately disabled (#1073) -- skip it silently, with no WARNING
+            # and no effect on the RPZ zone, since this is an intentional
+            # operator choice rather than a malformed or degraded
+            # cdn-domains.txt row. Mirrors services/proxy/entrypoint.sh's
+            # _collect_domain_rows handling of the same marker on the same file.
+            [[ "$domain" == !* ]] && continue
+            # Check if domain starts with . (wildcard-only flag)
+            local is_wildcard_only=0
+            if [[ "$domain" == .* ]]; then
+                is_wildcard_only=1
+                domain="${domain#.}"
             fi
-        fi
-    done < /etc/pdns/cdn-domains.txt
-} > "$RPZ_FILE"
+            [[ -z "$domain" ]] && continue
+            # Reject a malformed or overly-broad entry (bare TLD, single label
+            # like "localhost", "*", control/special characters) before it ever
+            # becomes an RPZ rule: an unvalidated entry here could redirect far
+            # more DNS traffic than intended (e.g. a bare "com" would generate
+            # "*.com", matching almost every .com domain). Mirrors
+            # services/proxy/entrypoint.sh's _collect_domain_rows validation of
+            # the same cdn-domains.txt file.
+            if ! _is_valid_domain "$domain"; then
+                echo "[lancache-dns] WARNING: skipping invalid domain entry in RPZ zone: $domain" >&2
+                continue
+            fi
+            domain="$(_normalize_domain "$domain")"
+            [[ -z "$domain" ]] && continue
+            # Emit records: exact-match base domain XOR wildcard, never both.
+            if [ "$is_wildcard_only" -eq 0 ]; then
+                printf "%s 60 IN A %s\n" "${domain}" "${proxy_ip}"
+            else
+                printf "*.%s 60 IN A %s\n" "${domain}" "${proxy_ip}"
+            fi
+            if [ -n "$proxy_ipv6" ]; then
+                if [ "$is_wildcard_only" -eq 0 ]; then
+                    printf "%s 60 IN AAAA %s\n" "${domain}" "${proxy_ipv6}"
+                else
+                    printf "*.%s 60 IN AAAA %s\n" "${domain}" "${proxy_ipv6}"
+                fi
+            fi
+        done < "$domains_file"
+    } > "$output_file"
+}
+
+echo "[lancache-dns] Generating RPZ zone from cdn-domains.txt..."
+RPZ_FILE="/var/lib/powerdns/rpz.zone"
+_dns_generate_rpz_zone /etc/pdns/cdn-domains.txt "$RPZ_FILE" "$PROXY_IP" "$PROXY_IPV6"
 
 count=$(grep -c "^[a-zA-Z*]" "$RPZ_FILE" 2>/dev/null || true)
 echo "[lancache-dns] RPZ zone: ${count:-0} records written."

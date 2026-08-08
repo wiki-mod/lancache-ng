@@ -85,6 +85,21 @@ WRITER_TEST_EVIDENCE=(
     # generating one, so it is not a config-writer in this sense.
     "deploy/prod/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
     "deploy/quickstart/docker-compose.yml|tests/bats/nats_conf_entrypoint_idempotence.bats"
+    # netdata_alarms.rs (bug hunt #849, observability.md finding #3): a
+    # genuine concurrent-write path (routes/netdata_alarms.rs's POST handler
+    # appends to a shared history file). Its own inline tests are the
+    # evidence, same self-referential shape as zone_snapshots.rs above --
+    # append_is_idempotent_for_the_same_unique_id drives append_alarm twice
+    # with the same unique_id and asserts the history does not grow, the
+    # concrete idempotence property AG-OP-006 requires. The netdata
+    # container's own compose-side write (deploy/*/docker-compose.yml's
+    # health_alarm_notify.conf heredoc) is deliberately NOT listed here: it is
+    # a static, non-env-templated heredoc with no per-write drift risk, unlike
+    # nats.conf's dynamic env-interpolated template above -- its only dynamic
+    # input (NETDATA_ALARM_TOKEN) goes through resolve_shared_secret, whose
+    # own first-writer-wins convergence is already covered by the shared
+    # shared-secret-bootstrap.sh library's existing tests, not per-consumer.
+    "services/ui/src/netdata_alarms.rs|services/ui/src/netdata_alarms.rs"
 )
 
 # A marker substring is required inside a *test name*, not just anywhere in

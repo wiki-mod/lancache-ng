@@ -16,15 +16,25 @@
 #
 # The remaining tests cover the guard's extension (#822 pattern audit, beyond
 # issue #935's original build-push.yml-only scope) to 3 more real files that
-# duplicate the same service-list class: gc-pr-staging-images.yml,
+# duplicate the same service-list class: scripts/gc-pr-staging-images.sh,
 # backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh. These
 # invoke the script with a matrix-source fixture PLUS additional fixture
 # files, mirroring the script's own `[primary] [extra]...` argument shape.
-
+#
+# gc_fixture is named gc-pr-staging-images.sh, not .yml (#1095, 2026-08-06):
+# it used to model the array as it looked embedded in
+# .github/workflows/gc-pr-staging-images.yml's own `run:` block, before that
+# logic moved into scripts/gc-pr-staging-images.sh as a real, standalone
+# script. check_services_arrays() in the script under test keys
+# REQUIRES_SERVICES_ARRAY/SUBSET_SERVICES_FILES by `basename "$file"` -- a
+# fixture still named *.yml here would silently stop being treated as
+# "required" the moment the real script's own map keys moved to *.sh,
+# letting every "no services=(...) array found"/"diverges" test below pass
+# for the wrong reason (or not fail at all) without anyone noticing.
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-workflow-service-lists.sh"
     fixture="$BATS_TEST_TMPDIR/build-push.yml"
-    gc_fixture="$BATS_TEST_TMPDIR/gc-pr-staging-images.yml"
+    gc_fixture="$BATS_TEST_TMPDIR/gc-pr-staging-images.sh"
     backfill_fixture="$BATS_TEST_TMPDIR/backfill-stack-latest.yml"
     ensure_fixture="$BATS_TEST_TMPDIR/ensure-pr-staging-images.sh"
 }
@@ -182,13 +192,19 @@ EOF
 }
 
 # Writes correct, in-sync content for all 3 extended-scope fixtures, modeled
-# on the real files: gc-pr-staging-images.yml equals the canonical set;
-# backfill-stack-latest.yml deliberately excludes build-tools (a documented
-# subset, matching its own "intentionally excludes build-tools" comment);
+# on the real files: scripts/gc-pr-staging-images.sh equals the canonical
+# set, declared at column 0 like ensure-pr-staging-images.sh below (it is a
+# plain shell script, not indented inside a YAML `run:` block -- unlike
+# before #1095, 2026-08-06, when this array still lived embedded in
+# .github/workflows/gc-pr-staging-images.yml's own `run:` block and this
+# fixture was indented to match); backfill-stack-latest.yml deliberately
+# excludes build-tools (a documented subset, matching its own "intentionally
+# excludes build-tools" comment) and stays YAML-embedded/indented, since that
+# real file's array genuinely is still inline in a `run:` block;
 # ensure-pr-staging-images.sh declares full_setup_services=(...) at column 0
 # (a plain shell script, not indented inside a YAML `run:` block).
 write_good_extra_fixtures() {
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)' > "$gc_fixture"
+    echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)' > "$gc_fixture"
     echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)' > "$backfill_fixture"
     # #1296 (2026-07-30): dhcp/dhcp-proxy moved from excluded to required
     # first (ensure-pr-staging-images.sh started ensuring both -- see that
@@ -219,13 +235,13 @@ write_matrix_source_with_services() {
     [[ "$output" == *"consistent"* ]]
 }
 
-# The exact #822 recurrence shape, now in gc-pr-staging-images.yml specifically:
-# a service silently missing from its (must-equal-canonical) services=(...)
-# copy must fail and name the file.
-@test "multi-file: fails when gc-pr-staging-images.yml's services=() diverges from canonical" {
+# The exact #822 recurrence shape, now in scripts/gc-pr-staging-images.sh
+# specifically: a service silently missing from its (must-equal-canonical)
+# services=(...) copy must fail and name the file.
+@test "multi-file: fails when gc-pr-staging-images.sh's services=() diverges from canonical" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)' > "$gc_fixture"
+    echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)' > "$gc_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -338,11 +354,17 @@ write_matrix_source_with_services() {
     [[ "$output" == *"$ensure_fixture"* ]]
 }
 
-# gc-pr-staging-images.yml and backfill-stack-latest.yml are both "required"
-# services=(...) files (see REQUIRES_SERVICES_ARRAY in the script): if the
-# array vanishes entirely (renamed, refactored away), the guard must fail
-# closed instead of silently no-op'ing on that file.
-@test "multi-file: fails closed when gc-pr-staging-images.yml's services=() array is gone entirely" {
+# scripts/gc-pr-staging-images.sh and backfill-stack-latest.yml are both
+# "required" services=(...) files (see REQUIRES_SERVICES_ARRAY in the
+# script): if the array vanishes entirely (renamed, refactored away), the
+# guard must fail closed instead of silently no-op'ing on that file. This is
+# the specific test that would have gone quietly toothless if gc_fixture's
+# own filename had not been renamed alongside REQUIRES_SERVICES_ARRAY's key
+# above (basename-keyed lookup, see setup()'s own comment) -- a fixture named
+# gc-pr-staging-images.yml here would no longer match any "required" entry,
+# so this exact "array gone entirely" case would silently start passing with
+# status 0 instead of failing closed as asserted below.
+@test "multi-file: fails closed when gc-pr-staging-images.sh's services=() array is gone entirely" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
     echo '# no services array here anymore' > "$gc_fixture"
@@ -384,7 +406,7 @@ write_matrix_source_with_services() {
 
 # Defense-in-depth: proves the guard's default zero-argument production
 # invocation -- the exact way build-push.yml's CI step calls it, covering
-# the real build-push.yml plus the real gc-pr-staging-images.yml,
+# the real build-push.yml plus the real scripts/gc-pr-staging-images.sh,
 # backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh -- is
 # actually green today. Without this, a real drift in any of the 3 extended
 # files could sit undetected by this suite (which otherwise only exercises

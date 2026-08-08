@@ -117,7 +117,54 @@ jobs:
             // an optional colon, then a same-repo `#123` reference. `Refs
             // #N` is intentionally NOT matched -- those are non-closing
             // references the PR author left open on purpose (see #1137).
-            const keywordPattern = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
+            //
+            // Negative lookbehind rejects a match preceded by a negation
+            // marker (not/never/cannot/n't) within a bounded, SAME-SENTENCE
+            // window before the keyword (up to 20 characters, never crossing
+            // '.', '!', '?', or a newline) -- e.g. "does not close #N",
+            // "won't fix #N", "This PR does not close #N". `n't` deliberately
+            // has no `\b` in front of it: it sits mid-word in a contraction
+            // ("doesn't", "won't"), and the word-character 's' immediately
+            // followed by word-character 'n' is not a `\b` position at all,
+            // so requiring one there would silently never match a real
+            // contraction. Confirmed live incident (2026-08-07): this
+            // workflow auto-closed issue #1095 when PR #1443 merged into
+            // current_dev, solely because its body's sentence "This PR does
+            // not close #1095" contains the substring "close #1095" -- an
+            // unbounded keyword match with no negation awareness matches
+            // that substring exactly like a real `Closes #1095`. Verified
+            // against the real PR #1443 body (produces zero matches with
+            // this pattern, one false match without the negative lookbehind)
+            // and a battery of synthetic positive/negative cases (still
+            // matches every real closing-keyword shape; does not match
+            // "does not close", "won't fix", "never closes", "cannot
+            // resolve", "doesn't close", "isn't going to fix").
+            //
+            // The sentence-boundary cap is deliberate, not incidental: a
+            // negation-detection gap that matches ANY whitespace including
+            // newlines (e.g. `(?:\w+\s+){0,2}`) crosses sentence and
+            // paragraph boundaries -- "This is not ideal.\n\nCloses #123"
+            // would then silently suppress a real, unrelated Closes
+            // reference several sentences later. That failure direction is
+            // worse than an unbounded false-positive match: a false close is
+            // loud and reversible (a comment + closed issue, easy to spot
+            // and undo); an over-wide negation match produces a silent
+            // non-close -- nothing fires, nothing looks wrong, and nobody
+            // notices an issue that should have closed just... didn't. The
+            // 20-character same-sentence bound avoids that failure
+            // direction while still catching the common negation phrasings
+            // above.
+            //
+            // This is a heuristic, not full NLP negation detection: a
+            // negation separated from the keyword by more than ~20
+            // characters within the same sentence (e.g. "does not currently
+            // intend to fix #N") still matches, same residual gap the
+            // pattern always had for every other unanticipated phrasing --
+            // PR authors should keep using the project's own `Refs #N`
+            // convention (see #1137) for any non-closing reference rather
+            // than relying on this heuristic to catch every possible way of
+            // saying "not this one."
+            const keywordPattern = /(?<!\b(?:not|never|cannot)\b[^.!?\n]{0,20}|n't\b[^.!?\n]{0,20})\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
             const issueNumbers = new Set();
             let match;
             while ((match = keywordPattern.exec(prBody)) !== null) {

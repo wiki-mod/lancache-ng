@@ -483,12 +483,43 @@ maybe_prune_syslog() {
     done < "$size_sorted"
     rm -f "$size_sorted"
     log "Size-based syslog prune: removed $size_count file(s), size now ${size_bytes} bytes (budget ${budget_bytes} bytes)"
-    if [ "$size_bytes" -gt "$budget_bytes" ]; then
-        log "WARNING: syslog size budget still exceeded after pruning -- today's active per-host log files are never deleted to avoid unlinking a file syslog-ng still has open; will retry once they age out or syslog-ng rotates them"
-    fi
 
     mkdir -p "$(dirname "$SYSLOG_PRUNE_STAMP")"
-    echo "$now" > "$SYSLOG_PRUNE_STAMP"
+    if [ "$size_bytes" -gt "$budget_bytes" ]; then
+        # #849 bug-hunt finding observability.md#21: this branch used to
+        # stamp $now unconditionally, exactly like the success path below --
+        # since the gate at the top of this function only re-enters once
+        # 86400s have elapsed since the stamp, that made the very retry the
+        # WARNING below promises wait up to a full 24h even when syslog-ng
+        # rotates today's active file (making it prunable) minutes later.
+        # Back-dating the stamp by (86400 - SYSLOG_PRUNE_RETRY_COOLDOWN)
+        # seconds reuses that same top-of-function comparison completely
+        # unchanged, but makes it become eligible again after
+        # SYSLOG_PRUNE_RETRY_COOLDOWN seconds (default 1h) instead of the
+        # full day -- a real, bounded retry cadence rather than a comment
+        # that merely claims one exists.
+        local retry_cooldown="${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}"
+        case "$retry_cooldown" in
+            ''|*[!0-9]*)
+                log "Invalid SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-}; using default 3600"
+                retry_cooldown=3600
+                ;;
+        esac
+        # `10#` forces base-10 evaluation -- see this file's other numeric
+        # knobs for the identical leading-zero-as-octal incident this guards
+        # against. Clamped to the normal 86400s cadence as an upper bound: a
+        # cooldown longer than that would make the still-exceeded branch
+        # retry LESS often than the already-converged success path above,
+        # which is backwards for a "budget still exceeded" state.
+        if [ "$((10#$retry_cooldown))" -gt 86400 ]; then
+            log "SYSLOG_PRUNE_RETRY_COOLDOWN=${retry_cooldown} exceeds the normal 86400s cadence; clamping to 86400"
+            retry_cooldown=86400
+        fi
+        log "WARNING: syslog size budget still exceeded after pruning -- today's active per-host log files are never deleted to avoid unlinking a file syslog-ng still has open; will retry in ${retry_cooldown}s once they age out or syslog-ng rotates them"
+        echo "$(( now - 86400 + 10#$retry_cooldown ))" > "$SYSLOG_PRUNE_STAMP"
+    else
+        echo "$now" > "$SYSLOG_PRUNE_STAMP"
+    fi
 }
 
 # Bounds fluent-bit's own operational self-log file (issue #1236). See

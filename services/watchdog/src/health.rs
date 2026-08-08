@@ -54,6 +54,23 @@ pub enum HealthReading {
     /// fidelity rather than silently coercing an unexpected value into one
     /// of the known variants.
     Other(String),
+    /// A container that Docker itself reports "healthy" (it is running and
+    /// functioning, and must never be mistaken for broken/needing a
+    /// restart -- Docker's own health ternary has no fourth state to
+    /// express this directly), but which has told watchdog through its own
+    /// healthcheck output that it is intentionally operating with reduced
+    /// guarantees. First used by `ntp` (issue #1296, maintainer decision:
+    /// a plain "healthy" dot was explicitly rejected for this case): a
+    /// nested/LXC host that denies `CAP_SYS_TIME` makes `chronyd` start in
+    /// `-x` mode (never step/slew the clock) instead of crash-looping --
+    /// genuinely working as an NTP relay, but never disciplining the host
+    /// clock, a real, ongoing difference from full health that must stay
+    /// visible in the dashboard, not just a one-time startup log line. See
+    /// [`crate::docker_client::DockerProxyClient::get_health`] for how
+    /// this is detected (a `DEGRADED: <reason>` line in the healthcheck's
+    /// own captured output, re-checked every cycle). The `String` is the
+    /// reason text after that prefix, verbatim.
+    Degraded(String),
 }
 
 impl HealthReading {
@@ -85,6 +102,17 @@ impl HealthReading {
             Self::None => "none",
             Self::Unreachable => "unreachable",
             Self::Other(s) => s,
+            // Fixed constant, not the carried reason text: keeps
+            // status.json's `health` field a short, stable enum-like value
+            // (matching every other variant here) rather than embedding a
+            // free-text sentence a future consumer might not expect. The
+            // full reason stays real, visible data in `docker inspect`'s
+            // `.State.Health.Log` and this project's own container logs --
+            // exactly where an operator digging into "why is this dot
+            // amber" already knows to look, the same way a plain Docker
+            // "unhealthy" dot also does not carry its own failure reason
+            // inline.
+            Self::Degraded(_) => "degraded",
         }
     }
 
@@ -93,49 +121,68 @@ impl HealthReading {
     /// synthetic `none`/`unreachable`, and any unexpected `Other` string)
     /// falls through to the bash's `*) echo "yellow"` default -- "not
     /// known-good, not known-bad" is the correct, cautious default for an
-    /// operator dashboard.
+    /// operator dashboard. `Degraded` deliberately gets its OWN color
+    /// (`amber`), not `yellow`: `yellow` means "unknown, transitional, not
+    /// yet classified" (the container might turn out green or red any
+    /// moment), whereas `Degraded` is a KNOWN, deliberate, stable state --
+    /// conflating the two would hide a real, ongoing reduced-security
+    /// condition behind a color an operator already reads as "wait and
+    /// see," exactly the maintainer feedback (issue #1296) this variant
+    /// exists to address. `services/ui/src/templates/dashboard.html` (both
+    /// the server-rendered Tera markup and the `refreshWatchdogStatus()`
+    /// JS poller) must recognize this color explicitly -- update both
+    /// together with any future change here.
     pub fn color(&self) -> &'static str {
         match self {
             Self::Healthy => "green",
             Self::Unhealthy => "red",
             Self::Starting | Self::None | Self::Unreachable | Self::Other(_) => "yellow",
+            Self::Degraded(_) => "amber",
         }
     }
 
     /// Collapses a reading into the simple "is this alert-only service okay
     /// right now" boolean [`AlertCounter`] needs (issue #842: `ui`, `dhcp`,
-    /// `dhcp-proxy`, `netdata`, `syslog`, `syslog-ng` -- monitored for
-    /// dashboard visibility only, never auto-restarted; see `main.rs`'s own
-    /// alert-only loop for why these six never go through
+    /// `dhcp-proxy`, `netdata`, `syslog` -- plus `ntp`, issue #1296 -- all
+    /// monitored for dashboard visibility only, never auto-restarted; see
+    /// `main.rs`'s own alert-only loop for why none of these go through
     /// [`FailureCounter`]/[`Action::Restart`] at all). `Healthy` and
     /// `Starting` are both "not currently a problem", matching how
     /// [`FailureCounter::record`] already treats `Starting` as inert rather
     /// than alarm-worthy. `None` (no Docker `HEALTHCHECK` configured, but
     /// the container inspect itself succeeded) is also treated as okay --
-    /// confirmed against every one of these six services' actual compose
-    /// definitions before writing this: all six (`ui`'s `/health` curl
-    /// probe, `dhcp`'s Kea control-API check, `dhcp-proxy`'s `dnsmasq
-    /// --test`, `netdata`'s REST-API curl probe, `syslog`'s `fluent-bit
-    /// -V`, `syslog-ng`'s `syslog-ng-ctl healthcheck`) already have a real
-    /// `healthcheck:` block, so `None` is not actually reachable for any of
-    /// them in practice -- but treating it as "okay" rather than "alarm" is
-    /// still the right default if that ever changes (a missing healthcheck
-    /// is a documentation/compose gap to fix, not something this alert-only
+    /// confirmed against every one of these services' actual compose
+    /// definitions before writing this (`ui`'s `/health` curl probe,
+    /// `dhcp`'s Kea control-API check, `dhcp-proxy`'s `dnsmasq --test`,
+    /// `netdata`'s REST-API curl probe, `syslog`'s dual-process
+    /// fluent-bit+syslog-ng healthcheck, `ntp`'s `chronyc tracking` probe
+    /// added by issue #1296) already have a real `healthcheck:` block, so
+    /// `None` is not actually reachable for any of them in practice -- but
+    /// treating it as "okay" rather than "alarm" is still the right
+    /// default if that ever changes (a missing healthcheck is a
+    /// documentation/compose gap to fix, not something this alert-only
     /// probe should misrepresent as a live service outage). `Unreachable`
     /// (container doesn't exist, or docker-socket-proxy rejected/couldn't
     /// answer the inspect call) and `Unhealthy` are the only two "something
     /// is actually wrong" cases -- for a service this function is called on
     /// at all, its container is expected to exist (callers only add a
-    /// profile-gated service, e.g. `dhcp`/`dhcp-proxy`/`syslog`/
-    /// `syslog-ng`, to the alert-only set once its enabling env var already
-    /// confirms it should be deployed), so `Unreachable` here means "should
-    /// be running and isn't", not "legitimately not deployed". `Other` is
+    /// profile-gated service, e.g. `dhcp`/`dhcp-proxy`/`syslog`/`ntp`, to
+    /// the alert-only set once its enabling env var already confirms it
+    /// should be deployed), so `Unreachable` here means "should be running
+    /// and isn't", not "legitimately not deployed". `Other` is
     /// never produced by a real Docker health string (see this enum's own
     /// doc comment) but is treated as alarm-worthy on the cautious
     /// assumption that an unrecognized value is more likely a real problem
-    /// than a benign one.
+    /// than a benign one. `Degraded` is also "ok" for this purpose: it is a
+    /// known, expected, non-crashed state (see this variant's own doc
+    /// comment) -- exactly the kind of "not currently a problem" condition
+    /// `Healthy`/`Starting`/`None` already represent, not a new failure
+    /// mode this alert-only probe should page on.
     pub fn is_alert_ok(&self) -> bool {
-        matches!(self, Self::Healthy | Self::Starting | Self::None)
+        matches!(
+            self,
+            Self::Healthy | Self::Starting | Self::None | Self::Degraded(_)
+        )
     }
 }
 
@@ -202,12 +249,19 @@ impl FailureCounter {
                     Action::None
                 }
             }
-            // Starting/None/Unreachable/Other: the bash's if/elif matches
-            // neither branch, so the counter and status stay untouched.
+            // Starting/None/Unreachable/Other/Degraded: the bash's if/elif
+            // matches neither branch, so the counter and status stay
+            // untouched. Degraded added here for the same reason as
+            // is_alert_ok() above: get_health() only ever produces it when
+            // the real Docker Status is "healthy" underneath, so treating
+            // it as inert rather than restart-triggering is correct --
+            // there is nothing to restart, the container is running
+            // exactly as intended for the environment it detected.
             HealthReading::Starting
             | HealthReading::None
             | HealthReading::Unreachable
-            | HealthReading::Other(_) => Action::None,
+            | HealthReading::Other(_)
+            | HealthReading::Degraded(_) => Action::None,
         }
     }
 }
@@ -302,6 +356,17 @@ mod tests {
     }
 
     #[test]
+    // Degraded (issue #1296) must render as its own distinct "amber" color,
+    // never collapsed into "yellow" (transitional/unknown) or "green"
+    // (fully healthy) -- see the variant's own doc comment for why
+    // conflating it with yellow would defeat the point of adding it.
+    fn degraded_gets_its_own_amber_color_and_status_string() {
+        let reading = HealthReading::Degraded("CAP_SYS_TIME denied".to_string());
+        assert_eq!(reading.color(), "amber");
+        assert_eq!(reading.as_status_str(), "degraded");
+    }
+
+    #[test]
     // Only literal healthy/unhealthy readings ever touch the counter --
     // this is the single most important behavioral quirk to pin, since a
     // typed rewrite "helpfully" collapsing Unreachable into Unhealthy (they
@@ -313,6 +378,7 @@ mod tests {
             HealthReading::None,
             HealthReading::Unreachable,
             HealthReading::Other("huh".into()),
+            HealthReading::Degraded("CAP_SYS_TIME denied".into()),
         ] {
             let mut counter = FailureCounter(2);
             let action = counter.record(&reading, 3);
@@ -382,6 +448,9 @@ mod tests {
         assert!(!HealthReading::Unhealthy.is_alert_ok());
         assert!(!HealthReading::Unreachable.is_alert_ok());
         assert!(!HealthReading::Other("huh".into()).is_alert_ok());
+        // Degraded (issue #1296): a known, deliberate reduced-guarantee
+        // state, not a failure -- see the variant's own doc comment.
+        assert!(HealthReading::Degraded("CAP_SYS_TIME denied".into()).is_alert_ok());
     }
 
     #[test]
