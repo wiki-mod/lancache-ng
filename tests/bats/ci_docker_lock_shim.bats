@@ -95,6 +95,37 @@ SH
   [ "$status" -ne 0 ]
 }
 
+@test "direct mutable first-party tag is rejected under stack lock" {
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      pull ghcr.io/wiki-mod/lancache-ng/proxy:latest
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"mutable first-party tag is forbidden"* ]]
+  [ ! -s "$LOG" ]
+}
+
+@test "direct wrong first-party digest is rejected under stack lock" {
+  wrong="sha256:9999999999999999999999999999999999999999999999999999999999999999"
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      pull "ghcr.io/wiki-mod/lancache-ng/proxy@$wrong"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"first-party digest differs from stack lock"* ]]
+  [ ! -s "$LOG" ]
+}
+
 @test "compose candidate image receives a last-wins digest override" {
   base="$BATS_TEST_TMPDIR/base.yml"
   printf 'services: {}\n' >"$base"
