@@ -38,8 +38,46 @@ rm -rf "$extract_dir"
 mkdir -p "$extract_dir"
 
 url="https://github.com/cli/cli/releases/download/v${version}/gh_${version}_linux_${arch}.tar.gz"
-network_retry -- \
-  curl --fail --location --silent --show-error "$url" -o "$archive"
+
+# One attempt deliberately does not use curl's own retry switch. The shared
+# wrapper owns the retry budget and this function classifies the result first,
+# so a deterministic 404, certificate-trust error, malformed request, or local
+# write failure fails immediately instead of being blindly retried.
+download_release_asset_once() {
+  local http_status curl_status
+  if http_status="$(
+    curl --location --silent --show-error \
+      --output "$archive" \
+      --write-out '%{http_code}' \
+      "$url"
+  )"; then
+    curl_status=0
+  else
+    curl_status=$?
+  fi
+
+  if (( curl_status != 0 )); then
+    if network_retry_curl_exit_is_transient "$curl_status"; then
+      return "$curl_status"
+    fi
+    echo "::error::GitHub CLI download failed with non-retryable curl exit $curl_status." >&2
+    return "$NETWORK_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+  fi
+
+  if [[ "$http_status" == 200 ]]; then
+    return 0
+  fi
+  if network_retry_http_status_is_transient "$http_status"; then
+    # Use a normal nonzero status distinct from the permanent sentinel so the
+    # shared wrapper performs its documented retry/backoff sequence.
+    return 75
+  fi
+
+  echo "::error::GitHub CLI download returned non-retryable HTTP status ${http_status:-<empty>}." >&2
+  return "$NETWORK_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+}
+
+network_retry -- download_release_asset_once
 printf '%s  %s\n' "$expected_sha256" "$archive" | sha256sum -c - >/dev/null
 
 tar -xzf "$archive" -C "$extract_dir"
