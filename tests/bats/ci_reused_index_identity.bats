@@ -86,6 +86,13 @@ SH
       candidate-v2-unused \
       "$records" "$output"
 
+  if [ "$status" -ne 0 ]; then
+    printf 'ci-assemble-service-index failed with status %s:\n%s\n' "$status" "$output" >&2
+    if [ -f "$docker_log" ]; then
+      printf '%s\n' 'docker invocations before failure:' >&2
+      cat "$docker_log" >&2
+    fi
+  fi
   [ "$status" -eq 0 ]
   run jq -e --arg index "$index" '
     .digest == $index
