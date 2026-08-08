@@ -15,7 +15,10 @@ setup() {
   run grep -F 'classification="$(bash "$repo_root/scripts/classify-image-impact.sh" "$baseline_sha" "$source_sha")"' "$planner"
   [ "$status" -eq 0 ]
 
-  run grep -F 'source_fingerprint="$(bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha")"' "$planner"
+  run grep -F 'bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha"' "$planner"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'bash "$repo_root/scripts/ci-build-inputs.sh" "$service" json' "$planner"
   [ "$status" -eq 0 ]
 
   run grep -F '$("$repo_root/scripts/ci-source-fingerprint.sh"' "$planner"
