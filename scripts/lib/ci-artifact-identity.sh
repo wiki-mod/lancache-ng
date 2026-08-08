@@ -57,6 +57,7 @@ ci_ai_validate_index_record() {
       and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
       and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
+      and (.platforms | type == "object" and (keys | sort) == ["linux/amd64","linux/arm64"])
       and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
       and (.platforms["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
     ' "$file" >/dev/null || ci_ai_fail "invalid image index candidate record: $file"
@@ -76,6 +77,7 @@ ci_ai_validate_stack_lock() {
           and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
           and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
           and (.digest | test("^sha256:[0-9a-f]{64}$"))
+          and (.platforms | type == "object" and (keys | sort) == ["linux/amd64","linux/arm64"])
           and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
           and (.platforms["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
         ] | all
@@ -122,9 +124,21 @@ ci_ai_validate_reusable_acceptance() {
     ' "$file" >/dev/null || ci_ai_fail "acceptance is not reusable from a protected product branch: $file"
 }
 
+# Registry identity reads are correctness-critical and are inherently network
+# operations. Use the repository's established GHCR retry wrapper rather than
+# letting a transient registry/login failure masquerade as a missing/moved
+# digest. The helper is loaded lazily so sourcing this library remains side
+# effect free for tests that never touch the registry.
 ci_ai_manifest_json() {
     local ref="$1"
-    docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'
+    local lib_dir
+    lib_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    if ! declare -F ghcr_retry >/dev/null 2>&1; then
+        # shellcheck source=scripts/lib/ghcr-retry.sh
+        source "$lib_dir/ghcr-retry.sh"
+    fi
+    ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- \
+        docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}'
 }
 
 ci_ai_ref_digest() {
