@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Extracts a stack lock only from a positively accepted stack-pointer image.
-# Existence of a package/tag alone is never treated as acceptance evidence.
-# The input tag is first frozen to its exact OCI digest, then the embedded
-# record/hash relationship and the GitHub-signed final-acceptance predicate
-# are both verified before any lock is returned to a caller.
+# Extracts a stack lock only from a positively accepted, reusable stack-pointer
+# image. Existence of a package/tag alone is never treated as acceptance
+# evidence. The input tag is first frozen to its exact OCI digest, then the
+# embedded record/hash relationship, protected-branch reuse policy, and the
+# GitHub-signed final-acceptance predicate are all verified before any lock is
+# returned to a caller.
 set -euo pipefail
 
 [[ $# -eq 2 ]] || { echo "usage: ci-extract-stack-lock.sh STACK_REF OUTPUT" >&2; exit 2; }
@@ -43,7 +44,7 @@ trap cleanup EXIT
 docker cp "$cid:/stack-lock.json" "$work_dir/stack-lock.json"
 docker cp "$cid:/acceptance.json" "$work_dir/acceptance.json"
 ci_ai_validate_stack_lock "$work_dir/stack-lock.json"
-ci_ai_validate_acceptance "$work_dir/acceptance.json"
+ci_ai_validate_reusable_acceptance "$work_dir/acceptance.json"
 
 expected_hash="$(jq -r '.stack_lock_sha256' "$work_dir/acceptance.json")"
 actual_hash="$(sha256sum "$work_dir/stack-lock.json" | awk '{print $1}')"
@@ -51,11 +52,11 @@ actual_hash="$(sha256sum "$work_dir/stack-lock.json" | awk '{print $1}')"
 [[ "$(jq -r '.source_sha' "$work_dir/stack-lock.json")" == "$(jq -r '.source_sha' "$work_dir/acceptance.json")" ]] \
     || ci_ai_fail "stack lock and acceptance source SHA differ"
 
-# This is the trust boundary: a self-consistent JSON record can still be
-# forged by anyone able to replace a package tag. Verify the custom predicate
-# cryptographically against GitHub's attestation trust root, pin the signer to
-# this repository's candidate workflow, and require the signed predicate to
-# equal the embedded acceptance.json before exposing the lock to the caller.
+# This is the cryptographic trust boundary: a self-consistent JSON record can
+# still be forged by anyone able to replace a package tag. Verify the custom
+# predicate against GitHub's attestation trust root, pin the signer workflow,
+# source branch and source commit, and require the signed predicate to equal
+# the embedded acceptance.json before exposing the lock to the caller.
 bash "$repo_root/scripts/ci-verify-acceptance-attestation.sh" \
   "$frozen_ref" "$work_dir/acceptance.json"
 
