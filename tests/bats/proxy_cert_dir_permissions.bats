@@ -51,13 +51,18 @@ setup() {
 # mode a second time either.
 @test "_ensure_ca_cert does nothing when the CA already exists" {
     _ensure_ca_cert
-    first_key_mtime="$(stat -c '%Y' "$CA_DIR/ca.key")"
+    # Content hash, not stat -c '%Y' (whole-second resolution): a
+    # regression that rewrites ca.key within the same wall-clock second as
+    # the first generation would otherwise leave both mtimes equal and this
+    # test still green. sha256sum over the actual bytes catches a rewrite
+    # regardless of timing.
+    first_key_hash="$(sha256sum "$CA_DIR/ca.key" | awk '{print $1}')"
 
     run _ensure_ca_cert
     [ "$status" -eq 0 ]
 
-    second_key_mtime="$(stat -c '%Y' "$CA_DIR/ca.key")"
-    [ "$first_key_mtime" = "$second_key_mtime" ]
+    second_key_hash="$(sha256sum "$CA_DIR/ca.key" | awk '{print $1}')"
+    [ "$first_key_hash" = "$second_key_hash" ]
     mode="$(stat -c '%a' "$CA_DIR/ca.key")"
     [ "$mode" = "600" ]
 }

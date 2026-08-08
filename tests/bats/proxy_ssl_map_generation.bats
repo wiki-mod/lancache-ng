@@ -34,7 +34,13 @@ setup() {
     run _render_ssl_map
     [ "$status" -eq 0 ]
     [[ "$output" == *'map $host $cdn_host_allowed {'* ]]
-    [[ "$output" == *'default 1;'* ]]
+    # Isolated to cdn_host_allowed's own body, not the full $output: with no
+    # PROXY_ALLOWED_CLIENT_CIDRS set, $lancache_client_allowed's own geo
+    # block also emits "default 1;" further down, which would let this
+    # assertion pass by accident even if lazy mode's own host map regressed
+    # to "default 0;".
+    body="$(awk '/map \$host \$cdn_host_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
+    [[ "$body" == *'default 1;'* ]]
 }
 
 @test "strict mode denies every host by default in cdn_host_allowed" {
@@ -57,7 +63,13 @@ setup() {
     [ "$status" -eq 0 ]
     body="$(awk '/map \$host \$cdn_host_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
     [[ "$body" == *'*.steamcontent.com'*' 1;'* ]]
-    [[ "$body" == *'steamcontent.com'*' 1;'* ]]
+    # A substring check here (e.g. *'steamcontent.com'*' 1;'*) would also
+    # match inside the "*.steamcontent.com ... 1;" wildcard line just
+    # asserted above, since that line itself contains "steamcontent.com"
+    # followed eventually by " 1;" -- passing even if _render_ssl_map
+    # stopped emitting the exact-root entry entirely. Matched as a
+    # complete, anchored map line instead.
+    grep -qE '^[[:space:]]*steamcontent\.com[[:space:]]+1;' <<<"$body"
 }
 
 @test "strict mode does NOT allowlist an unlisted host in cdn_host_allowed" {

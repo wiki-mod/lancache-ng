@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
 # tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
@@ -203,9 +204,8 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
-      # services/proxy/public_suffix_list.dat (bug-hunt #849, finding #9's
-      # third sub-part): tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
+      # points PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
       # _registrable_domain's PSL-driven derivation runs against the exact
       # rule shapes upstream ships (compound-label suffixes like co.uk,
       # exception rules like !city.kawasaki.jp), not a hand-written
@@ -215,10 +215,10 @@ on:
       # scripts/check-bats-path-filter-coverage.sh's own existence-
       # filtered dependency scan against the real repo tree. Deliberately
       # anchored here (after watchdog/retention.sh), not right after
-      # services/proxy/entrypoint.sh above, so this addition doesn't land
-      # on the identical anchor line as a sibling bug-hunt #849 PR's own
-      # unrelated addition there and force an avoidable merge conflict
-      # between two sibling PRs from the same pass.
+      # services/proxy/entrypoint.sh above, to keep this addition off an
+      # anchor line another unrelated entrypoint.sh-adjacent addition might
+      # also target, avoiding an avoidable merge conflict between unrelated
+      # concurrent changes.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
@@ -304,9 +304,8 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
-      # services/proxy/public_suffix_list.dat (bug-hunt #849, finding #9's
-      # third sub-part): tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
+      # points PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
       # _registrable_domain's PSL-driven derivation runs against the exact
       # rule shapes upstream ships (compound-label suffixes like co.uk,
       # exception rules like !city.kawasaki.jp), not a hand-written
@@ -316,10 +315,10 @@ on:
       # scripts/check-bats-path-filter-coverage.sh's own existence-
       # filtered dependency scan against the real repo tree. Deliberately
       # anchored here (after watchdog/retention.sh), not right after
-      # services/proxy/entrypoint.sh above, so this addition doesn't land
-      # on the identical anchor line as a sibling bug-hunt #849 PR's own
-      # unrelated addition there and force an avoidable merge conflict
-      # between two sibling PRs from the same pass.
+      # services/proxy/entrypoint.sh above, to keep this addition off an
+      # anchor line another unrelated entrypoint.sh-adjacent addition might
+      # also target, avoiding an avoidable merge conflict between unrelated
+      # concurrent changes.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"

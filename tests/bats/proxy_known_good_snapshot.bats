@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Adapter-level tests for the proxy (nginx) known-good-snapshot integration
@@ -83,17 +84,21 @@ STUB
 }
 
 # The real entrypoint.sh call site passes multiple candidate files
-# (PROXY_CANDIDATE_FILES: nginx.conf, proxy-params.conf, the ssl-map, the
-# stream-targets map, and the stream client ACL -- five as of the N1 stream
-# client-ACL addition), but every test above this point exercises the
-# function with only ONE. This left the multi-file "incomplete snapshot"
-# rejection branch (kgs_snapshot_apply's own "missing at least one
-# candidate file" check) completely untested for the proxy adapter.
+# (PROXY_CANDIDATE_FILES: nginx.conf, proxy-params.conf, the ssl-map, and
+# the stream-targets map -- four as of this commit), but every test above
+# this point exercises the function with only ONE. This left the multi-file
+# "incomplete snapshot" rejection branch (kgs_snapshot_apply's own "missing
+# at least one candidate file" check) completely untested for the proxy
+# adapter. Exercised here with two files rather than all four: enough to
+# prove the rejection/fallback branch itself, without needing this test to
+# track PROXY_CANDIDATE_FILES's exact real-world size (a future addition to
+# that list needs no update here).
 @test "a snapshot missing a candidate file (taken before it existed) is rejected during rollback, falling back to an earlier complete snapshot" {
     params_conf="$live_dir/proxy-params.conf"
 
     # Snapshot 1 (older): both files valid -- a complete two-file candidate
-    # set, matching today's real PROXY_CANDIDATE_FILES shape.
+    # set, sufficient to prove the rejection/fallback branch regardless of
+    # PROXY_CANDIDATE_FILES's own real, larger size.
     printf 'OK nginx v1\n' > "$nginx_conf"
     printf 'OK params v1\n' > "$params_conf"
     run _proxy_validate_snapshot_or_rollback "$nginx_conf" "$params_conf"
