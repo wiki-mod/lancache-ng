@@ -771,14 +771,22 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
 // enforce), and its own zone API docs state no separate content-length cap.
 // The real, protocol-level ceiling that does exist is RFC 1035 SS3.2.1's
 // RDLENGTH field: a 16-bit unsigned value, capping any single resource
-// record's total RDATA (and therefore a TXT record's total content, after
-// PowerDNS's chunking) at 65535 bytes -- a value larger than that could
-// never be encoded into a valid DNS message no matter how PowerDNS chunks
-// it. Deliberately NOT the 255-byte figure some callers might expect: this
-// module's own existing test (validates_supported_lan_record_edge_cases)
+// record's total RDATA at 65535 bytes. A TXT record's wire RDATA is one or
+// more <character-string>s (RFC 1035 SS3.3/3.3.14), each a 1-byte length
+// prefix followed by up to 255 content bytes -- PowerDNS's chunking above
+// means a C-byte content value costs C content bytes PLUS ceil(C / 255)
+// length-prefix bytes on the wire, not just C bytes. Content of exactly
+// 65279 bytes needs ceil(65279 / 255) = 256 length-prefix bytes, for a
+// total RDATA of 65279 + 256 = 65535 bytes -- exactly RDLENGTH's ceiling.
+// One byte more (65280) needs the same 256 prefixes (255 * 256 = 65280) for
+// a total of 65536, one byte over the limit. 65279 is therefore the real
+// maximum content length this validator can accept, not 65535 -- the
+// difference is exactly the chunking overhead RDLENGTH must also account
+// for. Deliberately NOT the 255-byte figure some callers might expect:
+// this module's own existing test (validates_supported_lan_record_edge_cases)
 // already asserts a 512-byte TXT content is valid, which is correct given
 // PowerDNS's own documented auto-chunking behavior above.
-const MAX_TXT_CONTENT_BYTES: usize = 65_535;
+const MAX_TXT_CONTENT_BYTES: usize = 65_279;
 
 fn is_valid_txt_content(content: &str) -> bool {
     let content = content.trim();
@@ -1340,6 +1348,15 @@ async fn fetch_lan_records(state: &AppState) -> Vec<RRset> {
     {
         Ok(resp) => {
             let status = resp.status();
+            // Check the status before awaiting the body: parse_lan_records_response
+            // already discards the body entirely for a non-success status, so
+            // awaiting resp.json() first would mean a slow or non-terminating
+            // error response (e.g. a hung upstream on a 5xx) blocks this request
+            // until the HTTP client's own timeout, even though the outcome is
+            // already fully determined by the status alone.
+            if !status.is_success() {
+                return parse_lan_records_response(status, Err(String::new()));
+            }
             let body = resp
                 .json::<serde_json::Value>()
                 .await
@@ -1785,10 +1802,11 @@ mod tests {
         assert!(validate_lan_record("api.lan.", "A", "192.0.2.10", u32::MAX).is_none());
     }
 
-    // Locks the RFC 1035 SS3.2.1 RDLENGTH-derived ceiling (65535 bytes) as
-    // is_valid_txt_content's real boundary, while confirming the
-    // pre-existing 512-byte case (validated above via PowerDNS's own
-    // documented TXT auto-chunking) still passes.
+    // Locks MAX_TXT_CONTENT_BYTES (65279, the chunking-overhead-adjusted
+    // RFC 1035 SS3.2.1 RDLENGTH ceiling -- see that constant's own header
+    // comment for the exact arithmetic) as is_valid_txt_content's real
+    // boundary, while confirming the pre-existing 512-byte case (validated
+    // above via PowerDNS's own documented TXT auto-chunking) still passes.
     #[test]
     fn txt_content_upper_bound_matches_rdlength_ceiling() {
         assert!(is_valid_txt_content(&"x".repeat(MAX_TXT_CONTENT_BYTES)));
@@ -1829,8 +1847,8 @@ mod tests {
     }
 
     // A success status with a genuinely empty zone (no "rrsets" key, or an
-    // empty array) must still correctly return no records -- proving the
-    // fix didn't turn a real empty zone into a false "fetch failed."
+    // empty array) must still correctly return no records, not be
+    // mistaken for a fetch failure.
     #[test]
     fn parse_lan_records_response_returns_empty_for_a_real_empty_zone() {
         let empty_zone: serde_json::Value = serde_json::json!({"rrsets": []});
@@ -1838,8 +1856,8 @@ mod tests {
     }
 
     // A success status with real rrsets data must still parse and return
-    // the records -- proving the added status check doesn't accidentally
-    // swallow the success path it must let through unchanged.
+    // the records -- the status check must not swallow the success path
+    // it needs to let through unchanged.
     #[test]
     fn parse_lan_records_response_parses_real_rrsets_on_success() {
         let body: serde_json::Value = serde_json::json!({
