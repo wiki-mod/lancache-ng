@@ -107,6 +107,73 @@ EOF
     [[ "$output" == *"OK"* ]] || fail "flagged a builder-stage-only difference: $output"
 }
 
+@test "treats a named final stage as equal to an unnamed one for the same image" {
+    # FROM alpine:3.24 AS runtime and FROM alpine:3.24 ship the identical
+    # image -- comparing the raw FROM line text (including the stage alias)
+    # would false-positive on the name alone.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM golang:1.24 AS builder
+RUN go build ./...
+FROM alpine:3.24 AS runtime
+COPY --from=builder /app /app
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+COPY . /app
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "flagged a named-vs-unnamed final stage as a divergence: $output"
+}
+
+@test "validates two docker-ecosystem blocks independently, not merged together" {
+    # Reproduces this guard's own documented remediation: splitting a
+    # diverged directory into its own separate dependabot.yml block must
+    # actually make the check pass again, proving each block's own grouped-
+    # PR premise on its own terms rather than comparing across block
+    # boundaries.
+    cat > "$fixture_root/.github/dependabot.yml" <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories:
+      - /services/a
+      - /services/b
+    schedule:
+      interval: weekly
+    groups:
+      docker-base-images:
+        patterns: ["*"]
+  - package-ecosystem: docker
+    directories:
+      - /services/c
+    schedule:
+      interval: weekly
+    groups:
+      docker-base-images-c:
+        patterns: ["*"]
+EOF
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b" "$fixture_root/services/c"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+EOF
+    # services/c is a deliberately different image, in its OWN block --
+    # this must not be compared against block #1's alpine:3.24 at all.
+    cat > "$fixture_root/services/c/Dockerfile" <<'EOF'
+FROM debian:12-slim
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "compared across separate blocks instead of validating each independently: $output"
+}
+
 @test "fails closed when a listed directory has no Dockerfile at all" {
     write_dependabot_docker_block
     mkdir -p "$fixture_root/services/a"

@@ -1,14 +1,19 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
-name: File header / workflow size / review-chronology checks
+name: File header / workflow size / review-chronology / dependabot-docker-base checks
 description: >-
-  The three plain bash/grep checks build-push.yml's self-hosted `file-headers`
-  job runs. Extracted (issue #1095 duplication finding) after finding that
-  `file-headers-hosted`, the GitHub-hosted fallback for when self-hosted
-  runners are down, only ever mirrored the first of these three checks --
-  the "workflow line-count ceiling" (AG-CI-021) and "review-chronology
+  The four plain bash/grep/awk checks build-push.yml's self-hosted
+  `file-headers` job runs. Extracted (issue #1095 duplication finding) after
+  finding that `file-headers-hosted`, the GitHub-hosted fallback for when
+  self-hosted runners are down, only ever mirrored the first of these checks
+  -- the "workflow line-count ceiling" (AG-CI-021) and "review-chronology
   comments" (AG-CODE-003) checks silently never ran at all on the fallback
   path, a real coverage gap rather than duplication, fixed by adding them
-  here so both jobs now run the same three checks.
+  here so both jobs now run the same checks. A fourth check
+  (dependabot.yml's docker-group base-image consistency, AG-VAL-029) was
+  added later for the same reason: a cheap, host-runnable bash/awk/grep
+  script with no build-tools-image dependency of its own, matching this
+  action's own established shape exactly.
 runs:
   using: composite
   steps:
