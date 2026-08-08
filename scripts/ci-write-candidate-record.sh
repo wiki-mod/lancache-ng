@@ -15,6 +15,7 @@ else
     platform="$6"; digest="$7"; mode="$8"; output="$9"
     planned_source_fingerprint=""
 fi
+reused_index_digest="${REUSED_INDEX_DIGEST:-}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 
@@ -26,6 +27,14 @@ ci_ai_require_digest "$digest"
 [[ "$mode" == built || "$mode" == reused ]] || ci_ai_fail "invalid mode $mode"
 if [[ "$mode" == built && "$artifact_source_sha" != "$candidate_source_sha" ]]; then
     ci_ai_fail "a newly built candidate must originate from the candidate source SHA"
+fi
+if [[ "$mode" == reused ]]; then
+    [[ -n "$reused_index_digest" ]] \
+        || ci_ai_fail "reused candidate is missing the accepted multi-platform index digest"
+    ci_ai_require_digest "$reused_index_digest"
+else
+    [[ -z "$reused_index_digest" ]] \
+        || ci_ai_fail "newly built candidate must not carry a reused index digest"
 fi
 
 if [[ -n "$planned_source_fingerprint" ]]; then
@@ -78,6 +87,7 @@ jq -n \
   --arg platform "$platform" \
   --arg digest "$digest" \
   --arg mode "$mode" \
+  --arg reused_index_digest "$reused_index_digest" \
   '{
     schema: "image-candidate-platform/v1",
     scope: $scope,
@@ -88,6 +98,7 @@ jq -n \
     source_fingerprint: $source_fingerprint,
     platform: $platform,
     digest: $digest,
-    mode: $mode
+    mode: $mode,
+    reused_index_digest: $reused_index_digest
   }' >"$output"
 ci_ai_validate_platform_record "$output"
