@@ -2,8 +2,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Creates one multi-platform candidate index from already-built or reused child
-# digests. This is a reference assembly operation, never a rebuild.
+# Produces one multi-platform candidate index identity from platform records.
+# Newly built services assemble an index from their recorded child digests.
+# Fully reused services retain the exact accepted index digest and never create
+# a replacement wrapper around unchanged children.
 set -euo pipefail
 
 [[ $# -eq 6 ]] || {
@@ -40,24 +42,42 @@ arm64_digest="$(jq -r '.digest' "$arm64_file")"
 ci_ai_require_digest "$amd64_digest"
 ci_ai_require_digest "$arm64_digest"
 
-target="${image}:${candidate_tag}"
-metadata="$(mktemp)"
-trap 'rm -f "$metadata"' EXIT
+amd64_mode="$(jq -r '.mode' "$amd64_file")"
+arm64_mode="$(jq -r '.mode' "$arm64_file")"
+[[ "$amd64_mode" == "$arm64_mode" ]] \
+    || ci_ai_fail "platform records mix built/reused identity for $service"
+mode="$amd64_mode"
 
-ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- \
-    docker buildx imagetools create \
-      --tag "$target" \
-      "${image}@${amd64_digest}" \
-      "${image}@${arm64_digest}" \
-      --metadata-file "$metadata"
+if [[ "$mode" == reused ]]; then
+    amd64_index="$(jq -r '.reused_index_digest' "$amd64_file")"
+    arm64_index="$(jq -r '.reused_index_digest' "$arm64_file")"
+    ci_ai_require_digest "$amd64_index"
+    ci_ai_require_digest "$arm64_index"
+    [[ "$amd64_index" == "$arm64_index" ]] \
+        || ci_ai_fail "reused platform records disagree on accepted index digest for $service"
+    index_digest="$amd64_index"
+    candidate_ref="${image}@${index_digest}"
+else
+    target="${image}:${candidate_tag}"
+    metadata="$(mktemp)"
+    trap 'rm -f "$metadata"' EXIT
 
-index_digest="$(jq -r '."containerimage.descriptor".digest // empty' "$metadata")"
-ci_ai_require_digest "$index_digest"
+    ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- \
+        docker buildx imagetools create \
+          --tag "$target" \
+          "${image}@${amd64_digest}" \
+          "${image}@${arm64_digest}" \
+          --metadata-file "$metadata"
+
+    index_digest="$(jq -r '."containerimage.descriptor".digest // empty' "$metadata")"
+    ci_ai_require_digest "$index_digest"
+    candidate_ref="$target"
+fi
 
 actual_amd64="$(ci_ai_platform_digest "${image}@${index_digest}" linux/amd64)"
 actual_arm64="$(ci_ai_platform_digest "${image}@${index_digest}" linux/arm64)"
-[[ "$actual_amd64" == "$amd64_digest" ]] || ci_ai_fail "$service amd64 digest changed during index assembly"
-[[ "$actual_arm64" == "$arm64_digest" ]] || ci_ai_fail "$service arm64 digest changed during index assembly"
+[[ "$actual_amd64" == "$amd64_digest" ]] || ci_ai_fail "$service amd64 digest differs from index identity"
+[[ "$actual_arm64" == "$arm64_digest" ]] || ci_ai_fail "$service arm64 digest differs from index identity"
 
 mkdir -p "$(dirname "$output")"
 jq -n \
@@ -70,7 +90,7 @@ jq -n \
   --arg digest "$index_digest" \
   --arg amd64 "$amd64_digest" \
   --arg arm64 "$arm64_digest" \
-  --arg candidate_ref "$target" \
+  --arg candidate_ref "$candidate_ref" \
   '{
     schema: "image-candidate-index/v1",
     scope: $scope,
