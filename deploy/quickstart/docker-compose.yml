@@ -810,6 +810,13 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      # #849 bug-hunt finding observability.md#21: without this entry,
+      # retention.sh's own "${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}" default
+      # would be the only value the container ever sees -- Compose does not
+      # pass an arbitrary host/`.env` variable into a container unless it is
+      # named here, so an operator setting this in their `.env` would
+      # silently have no effect without this line.
+      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
@@ -1246,13 +1253,23 @@ services:
         # services/ directory to bind-mount services/syslog/netdata-web_log.conf
         # from (same constraint as netdata.conf itself, above), so the job
         # config is generated inline instead. Keep this content byte-identical
-        # to services/syslog/netdata-web_log.conf if that file ever changes.
+        # to services/syslog/netdata-web_log.conf if that file ever changes
+        # -- mechanically enforced by scripts/check-logging-matrix.sh
+        # (#849 bug-hunt finding observability.md#16), because this inline
+        # copy is independent of the real file (not a bind-mount), so a
+        # change applied only there never propagates here on its own:
+        # services/syslog/netdata-web_log.conf's own header records that its
+        # `log_type: nginx` field was removed 2026-07-31 after causing a real
+        # "check failed: failed to create parser" job failure, a change that
+        # prod (which bind-mounts the real file directly) picked up
+        # automatically while this standalone copy did not. The
+        # byte-identical check exists precisely to catch that class of
+        # silent divergence for every quickstart install going forward.
         mkdir -p /etc/netdata/go.d
         cat > /etc/netdata/go.d/web_log.conf <<'CONF'
         jobs:
           - name: nginx_proxy
             path: /var/log/lancache/nginx-proxy.log
-            log_type: nginx
         CONF
         # Netdata alarm -> Admin UI forwarding (bug hunt #849, observability.md
         # finding #3). Same shared-secret-bootstrap (#858) resolution and
