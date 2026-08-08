@@ -44,14 +44,17 @@ runs:
         cat > "$shim_dir/docker" <<'SHIM'
         #!/usr/bin/env bash
         set -euo pipefail
-        exec bash "${GITHUB_WORKSPACE:?GITHUB_WORKSPACE is required}/scripts/ci-docker-lock-shim.sh" "$@"
+        repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+        exec bash "$repo_root/scripts/ci-docker-lock-shim.sh" "$@"
         SHIM
         chmod +x "$shim_dir/docker"
 
         # Nested build-tools validation containers mount the workspace at the
         # same absolute path. BASH_ENV makes their non-interactive Bash entry
         # points inherit the same Docker boundary without requiring every
-        # simulation script to grow a private lock implementation.
+        # simulation script to grow a private lock implementation. The launcher
+        # derives the workspace from its own path so it does not depend on the
+        # runner-only GITHUB_WORKSPACE variable existing inside that container.
         bash_env="$GITHUB_WORKSPACE/.ci-locked-stack/bash-env"
         cat > "$bash_env" <<'BASHENV'
         if [[ -n "${CI_LOCKED_DOCKER_SHIM_DIR:-}" ]]; then
