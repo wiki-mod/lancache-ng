@@ -4266,7 +4266,7 @@ require_functional_check_tool() {
     return 0
 }
 
-# Probes one published proxy IP in two separate steps rather than a single
+# Probes one published proxy IP in three separate steps rather than a single
 # `curl http://$ip/healthz`, because that single combined call conflates
 # three different properties and a fix for one host-networking mode broke it
 # for another:
@@ -4277,16 +4277,17 @@ require_functional_check_tool() {
 #      proxy: any listener that accepts the connection satisfies it,
 #      including one of this stack's OTHER services if a broken compose
 #      update remapped port 80 onto it instead.
-#   2. An HTTP request to the same published address, checked only for
-#      nginx's own `Server:` response header -- proves the published port
-#      specifically reaches this project's nginx-based proxy, not merely
-#      that a listener exists (step 1) or that the proxy container itself is
-#      healthy on its own loopback (step 3). /healthz's `allow`/`deny` ACL
-#      is evaluated only once nginx has already produced a response, so a
-#      403 from that ACL still carries the `Server:` header this step reads
-#      -- an ACL-denied caller is not a probe failure here, only a
-#      connection failure, malformed response, or a non-nginx `Server`
-#      header is.
+#   2. Docker's own port-binding table for the 'proxy' container is checked
+#      directly (`docker port`), not an HTTP-level identity probe: an HTTP
+#      response can only ever prove "an nginx answered", never "the intended
+#      container specifically" -- any other nginx reachable on the same
+#      address (this stack's own services are not nginx-based, but nothing
+#      stops an operator from running an unrelated one on the same host)
+#      would satisfy an HTTP-level check just as well as a broken mapping
+#      would fail to. Docker's binding table has no such ambiguity: it is
+#      the authoritative record of which container a published host
+#      address/port actually forwards to, checked without any network round
+#      trip and independent of the /healthz ACL entirely.
 #   3. The /healthz content itself is fetched via `docker exec` against the
 #      proxy container's OWN loopback (127.0.0.1) instead of the externally
 #      published address. This is exactly the caller /healthz's ACL already
@@ -4298,14 +4299,13 @@ require_functional_check_tool() {
 #      host, a single external curl call that also required a 2xx status
 #      would fail this gate (and roll back an otherwise-healthy update)
 #      purely because the ACL rejected that specific caller, not because the
-#      proxy was unhealthy -- exactly why step 2 above never checks for a
-#      2xx status, only the identifying header every nginx response carries
-#      regardless of the ACL's verdict.
+#      proxy was unhealthy.
 #
 # Together the three steps still prove what a single 2xx-or-fail call used
 # to assume (Docker forwards the port to THIS proxy specifically, AND the
 # service behind it actually answers /healthz) without depending on a
-# specific userland-proxy setting or ACL-source-IP outcome for either.
+# specific userland-proxy setting, ACL-source-IP outcome, or an HTTP-level
+# identity heuristic for either.
 
 # Bare TCP connect (no HTTP request sent), split into its own function purely
 # so tests can replace it with a canned success/failure instead of depending
@@ -4317,18 +4317,20 @@ _tcp_port_reachable() {
     timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ip" "$port" 2>/dev/null
 }
 
-# Identifies this project's own nginx-based proxy on the published address,
-# split into its own function for the same testability reason as
-# _tcp_port_reachable above. Deliberately checks only the `Server:` header,
-# never the HTTP status: see step 2 in this function group's header comment
-# for why requiring a 2xx here would reintroduce the ACL-source-IP failure
-# this split was built to avoid.
-_external_healthz_response_is_nginx() {
-    local ip="$1" headers line
-    headers=$(curl --max-time 5 -sI "http://$ip/healthz" 2>/dev/null) || return 1
-    while IFS= read -r line; do
-        [[ "$line" =~ ^[Ss]erver:\ *[Nn]ginx ]] && return 0
-    done <<< "$headers"
+# Confirms Docker itself considers this specific container the owner of the
+# published address/port, split into its own function for the same
+# testability reason as _tcp_port_reachable above. `docker port` lists every
+# host binding for the given container port, one per line (e.g. dual-stack
+# IPv4+IPv6, or this project's own IP_STANDARD/IP_SSL each separately
+# publishing container port 80 -- see deploy/prod/docker-compose.yml); any
+# one of them matching is sufficient.
+_proxy_container_publishes_port() {
+    local container_id="$1" ip="$2" port="$3" binding
+    while IFS= read -r binding; do
+        case "$binding" in
+            "0.0.0.0:${port}"|"${ip}:${port}"|"[::]:${port}") return 0 ;;
+        esac
+    done < <(docker port "$container_id" "${port}/tcp" 2>/dev/null)
     return 1
 }
 
@@ -4340,17 +4342,17 @@ _verify_healthz_endpoint() {
         return 1
     fi
 
-    require_functional_check_tool curl "the published-address nginx-identity probe" || return 1
-    if ! _external_healthz_response_is_nginx "$ip"; then
-        print_error "Functional check failed: ${ip}:80 did not answer as this project's nginx proxy (no 'Server: nginx' header) -- the published port may be mapped to the wrong service"
-        return 1
-    fi
-
     proxy_container_id=$(service_container_id proxy)
     if [[ -z "$proxy_container_id" ]]; then
         print_error "Functional check failed: no running 'proxy' container to probe /healthz through"
         return 1
     fi
+
+    if ! _proxy_container_publishes_port "$proxy_container_id" "$ip" 80; then
+        print_error "Functional check failed: the 'proxy' container's own Docker port binding does not include ${ip}:80 -- the published port may be mapped to a different service"
+        return 1
+    fi
+
     require_functional_check_tool curl "the proxy-container-loopback /healthz probe" || return 1
     if ! docker exec "$proxy_container_id" curl -sf "http://127.0.0.1/healthz" >/dev/null; then
         print_error "Functional check failed: http://127.0.0.1/healthz inside the proxy container"
@@ -4364,8 +4366,8 @@ _verify_healthz_endpoint() {
 # actually serves what a real client needs. Reuses this project's own
 # established real-probe idioms rather than inventing new ones: the proxy
 # /healthz check already used by cmd_debug's "Health checks" step (now split
-# into a reachability + loopback-content pair, see _verify_healthz_endpoint
-# above), and a real dig-based DNS query in the same style
+# into a reachability + Docker-binding-identity + loopback-content trio, see
+# _verify_healthz_endpoint above), and a real dig-based DNS query in the same style
 # scripts/dns-zone-rollback-simulation.sh already uses. `ping`/`ss` are
 # deliberately not used here -- neither proves the service actually answers a
 # real request.
