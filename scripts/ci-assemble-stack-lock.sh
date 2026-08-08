@@ -29,7 +29,7 @@ while IFS= read -r entry; do
     ci_ai_validate_index_record "$index_file"
     [[ "$(jq -r '.candidate_source_sha' "$index_file")" == "$source_sha" ]] || ci_ai_fail "candidate source SHA mismatch for $service"
     [[ "$(jq -r '.scope' "$index_file")" == "$scope" ]] || ci_ai_fail "scope mismatch for $service"
-    record="$(jq -c '{image, digest, platforms, candidate_ref, artifact_source_sha, source_fingerprint}' "$index_file")"
+    record="$(jq -c '{image, digest, platforms, candidate_ref, artifact_source_sha, source_fingerprint, build_inputs}' "$index_file")"
     lock="$(jq -c --arg scope "$scope" --arg service "$service" --argjson record "$record" '.[$scope][$service] = $record' <<<"$lock")"
 done < <(jq -c '.include[]' <<<"$catalog")
 
