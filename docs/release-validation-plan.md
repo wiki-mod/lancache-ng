@@ -1139,16 +1139,27 @@ omitted):**
   silently-assumed-covered case.
 - **Recorded exception (2026-08-08, `AGENTS.md`'s `AG-CC-004`): third-party
   automated-reviewer output language cannot be checked by a durable, repeatable
-  CI test.** `AG-CC-004` requires a third-party tool's GitHub-bound output (e.g.
-  Codex's PR review comments) to be English. Checking this mechanically would
-  require either scripting a real trigger of that external tool's review inside
-  CI (not something this repository controls or can invoke on demand) or scraping
-  its already-posted comments after the fact on a schedule with no fixed timing
-  guarantee — neither is a genuine standing check in the sense this document's
-  other entries mean. This stays manual-review-only (per the rule's own matrix
-  entry): spot-check an automated reviewer's language against `AG-GH-001` when a
-  review happens to be observed. Revisit if this tool (or a future one) ever
-  exposes an on-demand, scriptable review trigger.
+  CI test.**
+  - **Scope**: `AG-CC-004`'s requirement that a third-party automated tool's
+    GitHub-bound output (e.g. Codex's PR review comments) be English.
+  - **Reason**: checking this mechanically would require either scripting a
+    real trigger of that external tool's review inside CI (not something this
+    repository controls or can invoke on demand) or scraping its
+    already-posted comments after the fact on a schedule with no fixed timing
+    guarantee — neither is a genuine standing check in the sense this
+    document's other entries mean.
+  - **Tracking**: `AGENTS.md`'s `AG-CC-004` rule text and its Rule Enforcement
+    Matrix entry; issue #1507 (the language-rules rework this exception was
+    recorded alongside).
+  - **Validation**: manual-review-only — spot-check an automated reviewer's
+    GitHub-bound output language against `AG-GH-001` whenever a review is
+    observed; no automated pass/fail signal exists for this today.
+  - **Non-Expansion**: this exception covers only automated-reviewer output
+    language checking. It does not extend to any other AG-CC-*/AG-GH-*
+    requirement, and does not exempt a human contributor's or an agent's own
+    GitHub-bound output from `AG-GH-001` in any way. Revisit if this tool (or
+    a future one) ever exposes an on-demand, scriptable review trigger that
+    would make a real CI check practical.
 
 ---
 
