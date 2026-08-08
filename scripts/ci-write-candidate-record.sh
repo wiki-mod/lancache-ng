@@ -20,20 +20,6 @@ source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 
 ci_ai_require_sha "$candidate_source_sha"
 ci_ai_require_sha "$artifact_source_sha"
-
-# Recompute at record-write time instead of blindly trusting the planner.
-# ci-source-fingerprint includes effective refresh inputs such as the ISO-week
-# APT_CACHE_BUST value. If a build crosses that refresh boundary between plan
-# and execution, accepting the planner's old fingerprint would claim the wrong
-# build-input identity. Fail closed and require a fresh run instead.
-source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
-ci_ai_require_digest "$source_fingerprint"
-if [[ -n "$planned_source_fingerprint" ]]; then
-    ci_ai_require_digest "$planned_source_fingerprint"
-    [[ "$planned_source_fingerprint" == "$source_fingerprint" ]] \
-        || ci_ai_fail "effective source fingerprint changed after planning for $service: planned $planned_source_fingerprint, now $source_fingerprint"
-fi
-
 ci_ai_require_digest "$digest"
 [[ "$scope" == runtime || "$scope" == tooling ]] || ci_ai_fail "invalid scope $scope"
 [[ "$platform" == linux/amd64 || "$platform" == linux/arm64 ]] || ci_ai_fail "invalid platform $platform"
@@ -41,6 +27,45 @@ ci_ai_require_digest "$digest"
 if [[ "$mode" == built && "$artifact_source_sha" != "$candidate_source_sha" ]]; then
     ci_ai_fail "a newly built candidate must originate from the candidate source SHA"
 fi
+
+if [[ -n "$planned_source_fingerprint" ]]; then
+    ci_ai_require_digest "$planned_source_fingerprint"
+fi
+
+if [[ "$mode" == built ]]; then
+    # The build action writes a digest-keyed marker after the successful push.
+    # Read that producer evidence rather than recomputing a time-dependent
+    # refresh value here. A build that begins before an ISO-week boundary and
+    # finishes after it therefore keeps the exact APT_CACHE_BUST it actually
+    # consumed, while the next run still sees the new week and rebuilds.
+    marker="${RUNNER_TEMP:?RUNNER_TEMP is required}/lancache-build-inputs/${digest#sha256:}.env"
+    [[ -f "$marker" ]] \
+        || ci_ai_fail "exact build-input marker is missing for built digest $digest"
+
+    mapfile -t apt_values < <(sed -n 's/^APT_CACHE_BUST=//p' "$marker")
+    (( ${#apt_values[@]} <= 1 )) \
+        || ci_ai_fail "build-input marker contains multiple APT_CACHE_BUST values for $digest"
+    apt_cache_bust=""
+    if (( ${#apt_values[@]} == 1 )); then
+        apt_cache_bust="${apt_values[0]}"
+    fi
+
+    source_fingerprint="$(
+        CI_SOURCE_APT_CACHE_BUST="$apt_cache_bust" \
+        CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
+        "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha"
+    )"
+else
+    # Reuse has no new producer. It is valid only while the current effective
+    # inputs still equal the fingerprint the planner compared with the accepted
+    # baseline. Recompute now as a final fail-closed check before recording it.
+    source_fingerprint="$("$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$candidate_source_sha")"
+    [[ -n "$planned_source_fingerprint" ]] \
+        || ci_ai_fail "reused candidate is missing its planned source fingerprint"
+    [[ "$planned_source_fingerprint" == "$source_fingerprint" ]] \
+        || ci_ai_fail "effective source fingerprint changed after planning for reused $service: planned $planned_source_fingerprint, now $source_fingerprint"
+fi
+ci_ai_require_digest "$source_fingerprint"
 
 mkdir -p "$(dirname "$output")"
 jq -n \
