@@ -672,7 +672,7 @@ jobs:
     # directly and needs no staging tag. This is where dhcp coverage lands in
     # the automatic gate (it was absent from the shallow check). dhcp-proxy's
     # own real, live-Docker PXE simulation now exists too
-    # (scripts/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
+    # (scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
     # currently runs only as a manual-dispatch job in full-setup-validate.yml,
     # not as part of THIS automatic per-PR gate -- wiring it in here (mirroring
     # this job's own shape) is a real, separate CI-trigger-behavior change,

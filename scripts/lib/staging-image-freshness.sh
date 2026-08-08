@@ -213,7 +213,7 @@ _sif_inspect_attempt() {
 # optional -- see ghcr_retry's own header for the credential-less case) and
 # must already be sourced by the caller (scripts/lib/ghcr-retry.sh, the same
 # convention every other dual script/workflow-step caller in this project
-# already follows -- see e.g. scripts/require-image-platforms.sh).
+# already follows -- see e.g. scripts/untracked/require-image-platforms.sh).
 #
 # Echoes stdout on success (return 0). On failure, echoes nothing and
 # returns 2 for a confirmed absence, 1 for everything else -- this is the

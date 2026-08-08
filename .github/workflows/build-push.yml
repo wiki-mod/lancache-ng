@@ -179,7 +179,7 @@ jobs:
   # the determine-push-reuse-scope job provides the cross-run-ordering-safe
   # per-service reuse decision those three jobs actually key off (channel
   # image revision label + real git ancestry + a real content diff via
-  # scripts/classify-image-impact.sh, see scripts/lib/push-reuse.sh), for
+  # scripts/untracked/classify-image-impact.sh, see scripts/lib/push-reuse.sh), for
   # all 8 first-party product/tooling services. workflow_dispatch is left
   # unscoped (detect-changes does not run for it); the six jobs' own if: fail
   # safe to running whenever this job did not produce a successful
@@ -5213,7 +5213,7 @@ jobs:
           # services go through the identical decide_one() call below, with
           # no per-service branching -- each gets the same three-part
           # verification (channel image revision label + real git ancestry +
-          # a real content diff via scripts/classify-image-impact.sh) that
+          # a real content diff via scripts/untracked/classify-image-impact.sh) that
           # scripts/lib/push-reuse.sh's own header documents in full.
           # build-tools shares this same allowlist (rather than keeping the
           # separate, hand-rolled verification it originally had, built
