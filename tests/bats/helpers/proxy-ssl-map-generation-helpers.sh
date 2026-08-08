@@ -10,8 +10,7 @@
 # (PROXY_SECURITY_MODE strict/lazy) and $lancache_client_allowed
 # (PROXY_ALLOWED_CLIENT_CIDRS) maps -- neither the strict-mode 403 code path
 # nor the CIDR-allowlist 403 code path had any automated test coverage
-# anywhere in the suite before this file (bug-hunt #849, finding #9's fourth
-# sub-part).
+# anywhere in the suite before this file.
 
 load_proxy_ssl_map_generation_helpers() {
     local repo_root="$1" helper_file="$2"

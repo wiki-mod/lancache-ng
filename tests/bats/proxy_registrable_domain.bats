@@ -11,7 +11,7 @@
 # _registrable_domain as a plain identity function, so this exact PSL
 # matching algorithm -- compound-label public suffixes (co.uk-style) and the
 # PSL's own exception-rule interplay (!city.kawasaki.jp-style) -- had zero
-# real test coverage anywhere (bug-hunt #849, finding #9's third sub-part).
+# real test coverage anywhere.
 
 bats_require_minimum_version 1.5.0
 

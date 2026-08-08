@@ -8,8 +8,7 @@
 # (PROXY_ALLOWED_CLIENT_CIDRS). Before this file, neither the strict-mode
 # code path nor the CIDR-allowlist code path had any automated test
 # coverage anywhere in the suite -- confirmed via `git grep` across
-# tests/bats for both variable names before writing this file (bug-hunt
-# #849, finding #9's fourth sub-part). Asserts against the real generated
+# tests/bats for both variable names. Asserts against the real generated
 # nginx map text (the same text conf.d/http.conf's `location /` block's
 # `if ($cdn_host_allowed = 0) { return 403; }` and
 # `if ($lancache_client_allowed = 0) { return 403; }` actually evaluate at

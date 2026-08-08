@@ -4,12 +4,12 @@
 #
 # Regression tests for services/proxy/entrypoint.sh's _ensure_ca_cert() and
 # _harden_cert_dir(): the ca.key chmod 600 hardening (#1031) and the
-# CERT_DIR chgrp/chmod 2750 hardening. Neither had any test coverage before
-# this file -- #1031's own chmod fix landed with nothing guarding it against
-# a future accidental deletion (bug-hunt #849, finding #9's second
-# sub-part). Uses the real functions (extracted via
-# tests/bats/helpers/proxy-cert-dir-permissions-helpers.sh), a real `openssl
-# req` call, and real `stat`/`chmod`/`chgrp` -- not a reimplementation.
+# CERT_DIR chgrp/chmod 2750 hardening. Both are security-relevant file-mode
+# invariants with no other guard against a future accidental deletion, so
+# they need their own regression coverage. Uses the real functions
+# (extracted via tests/bats/helpers/proxy-cert-dir-permissions-helpers.sh),
+# a real `openssl req` call, and real `stat`/`chmod`/`chgrp` -- not a
+# reimplementation.
 
 bats_require_minimum_version 1.5.0
 

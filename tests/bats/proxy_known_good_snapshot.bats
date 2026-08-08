@@ -84,12 +84,11 @@ STUB
 
 # The real entrypoint.sh call site passes multiple candidate files
 # (PROXY_CANDIDATE_FILES: nginx.conf, proxy-params.conf, the ssl-map, the
-# stream-targets map, and the stream client ACL -- five as of bug-hunt #849's
-# N1 fix), but every test above this point exercises the function with only
-# ONE. This left the multi-file "incomplete snapshot" rejection branch
-# (kgs_snapshot_apply's own "missing at least one candidate file" check)
-# completely untested for the proxy adapter (bug-hunt #849, finding #9's
-# first sub-part).
+# stream-targets map, and the stream client ACL -- five as of the N1 stream
+# client-ACL addition), but every test above this point exercises the
+# function with only ONE. This left the multi-file "incomplete snapshot"
+# rejection branch (kgs_snapshot_apply's own "missing at least one
+# candidate file" check) completely untested for the proxy adapter.
 @test "a snapshot missing a candidate file (taken before it existed) is rejected during rollback, falling back to an earlier complete snapshot" {
     params_conf="$live_dir/proxy-params.conf"
 

@@ -16,8 +16,7 @@
 # derivation (see that helper's own comment). Before this file, the real,
 # PSL-backed _registrable_domain was untested anywhere in the suite for a
 # compound-label public suffix (co.uk-style) or the PSL's own exception-rule
-# interplay (!city.kawasaki.jp-style) -- bug-hunt #849, finding #9's third
-# sub-part.
+# interplay (!city.kawasaki.jp-style).
 
 load_proxy_registrable_domain_helpers() {
     local repo_root="$1" helper_file="$2"
