@@ -40,6 +40,9 @@ ci_ai_validate_platform_record() {
       and (.candidate_source_sha | test("^[0-9a-f]{40}$"))
       and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
       and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
+      and (.build_inputs | type == "object")
+      and (.build_inputs.build_args | type == "object")
+      and (.build_inputs.build_contexts | type == "object")
       and (.platform == "linux/amd64" or .platform == "linux/arm64")
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
       and (.mode == "built" or .mode == "reused")
@@ -63,6 +66,9 @@ ci_ai_validate_index_record() {
       and (.candidate_source_sha | test("^[0-9a-f]{40}$"))
       and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
       and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
+      and (.build_inputs | type == "object")
+      and (.build_inputs.build_args | type == "object")
+      and (.build_inputs.build_contexts | type == "object")
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
       and (.platforms | type == "object" and (keys | sort) == ["linux/amd64","linux/arm64"])
       and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
@@ -83,6 +89,9 @@ ci_ai_validate_stack_lock() {
           (.image | type == "string" and startswith("ghcr.io/"))
           and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
           and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
+          and (.build_inputs | type == "object")
+          and (.build_inputs.build_args | type == "object")
+          and (.build_inputs.build_contexts | type == "object")
           and (.digest | test("^sha256:[0-9a-f]{64}$"))
           and (.platforms | type == "object" and (keys | sort) == ["linux/amd64","linux/arm64"])
           and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
@@ -92,12 +101,6 @@ ci_ai_validate_stack_lock() {
     ' "$file" >/dev/null || ci_ai_fail "invalid stack lock: $file"
 }
 
-# Structural acceptance schema. A release pointer and a reusable branch
-# acceptance share the same base gate set, but they do not share the same
-# trust policy. In particular, only candidate acceptances from protected
-# product branches may be reused/promoted as a baseline. Keep that stronger
-# rule in ci_ai_validate_reusable_acceptance rather than making release
-# records pretend they were signed from a product branch ref.
 ci_ai_validate_acceptance() {
     local file="$1"
     jq -e '
@@ -131,12 +134,6 @@ ci_ai_validate_reusable_acceptance() {
     ' "$file" >/dev/null || ci_ai_fail "acceptance is not reusable from a protected product branch: $file"
 }
 
-# A release acceptance inherits the already-proven runtime gates only because
-# the runtime digests are copied unchanged from the accepted stack. It has an
-# additional producer boundary for the governance-required release build-tools
-# artifact, so its record must explicitly prove that fresh tooling build and
-# the release-wide exact-digest evidence. This record is never a candidate
-# reuse credential.
 ci_ai_validate_release_acceptance() {
     local file="$1"
     ci_ai_validate_acceptance "$file" || return 1
