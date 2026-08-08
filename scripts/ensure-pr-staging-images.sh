@@ -145,6 +145,8 @@ source "$script_dir/lib/ghcr-retry.sh"
 source "$script_dir/lib/staging-image-freshness.sh"
 # shellcheck source=scripts/lib/staging-ancestor-fallback.sh
 source "$script_dir/lib/staging-ancestor-fallback.sh"
+# shellcheck source=scripts/lib/staging-poll-defaults.sh
+source "$script_dir/lib/staging-poll-defaults.sh"
 
 : "${REPOSITORY:?REPOSITORY is required}"
 : "${PR_TAG:?PR_TAG (pr-<N>-sha-<short>) is required}"
@@ -191,15 +193,17 @@ pr_head_sha="${PR_HEAD_SHA:-}"
 # they can legitimately take many minutes; past this budget we start asking
 # whether build-push's own run is still active rather than failing outright
 # (see #895 note above). Overridable for tests.
-poll_timeout_seconds="${STAGING_POLL_TIMEOUT_SECONDS:-1500}"
+staging_poll_set_defaults_for_workflow_changed "$workflow_changed"
+poll_timeout_seconds="${STAGING_POLL_TIMEOUT_SECONDS:-$default_poll_timeout_seconds}"
 poll_interval_seconds="${STAGING_POLL_INTERVAL_SECONDS:-15}"
 
 # #895: absolute hard ceiling, independent of the congestion probe -- even a
 # genuinely hung build-push run must not hold this runner forever. 1200s:
 # maintainer-directed cut from 5400s (2026-08-02); the real fix for how often
 # this ceiling gets hit is #1378's Step 4 reuse mechanism cutting unnecessary
-# rebuilds, not a bigger number here.
-poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-1200}"
+# rebuilds, not a bigger number here. (The workflow_changed exception above is
+# a different, narrower category, not a reversal of that cut.)
+poll_hard_ceiling_seconds="${STAGING_POLL_HARD_CEILING_SECONDS:-$default_poll_hard_ceiling_seconds}"
 # Clamp up so a misconfigured ceiling below the timeout can't produce a
 # negative wait window.
 if (( poll_hard_ceiling_seconds < poll_timeout_seconds )); then

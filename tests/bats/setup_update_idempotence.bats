@@ -134,6 +134,7 @@ write_converged_env_fixture() {
         'KEA_CTRL_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
         'DDNS_TSIG_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
         'PDNS_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
+        'NETDATA_ALARM_TOKEN=jjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjjj' \
         'NATS_UI_USER=lancache-ui' \
         'NATS_UI_PASSWORD=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc' \
         'NATS_DNS_WRITER_USER=lancache-dns-writer' \
@@ -285,7 +286,7 @@ write_legacy_env_fixture() {
     grep -qx 'PROXY_SECURITY_MODE=lazy' "$env_file"
 
     after_first_run=$(cat "$env_file")
-    secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
+    secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
     # Second run against the now-converged file must not change anything --
     # in particular it must not rotate any of the secrets it just generated.
@@ -293,7 +294,7 @@ write_legacy_env_fixture() {
     [ "$status" -eq 0 ]
 
     after_second_run=$(cat "$env_file")
-    secrets_after_second_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
+    secrets_after_second_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
     [ "$after_first_run" = "$after_second_run" ]
     [ "$secrets_after_first_run" = "$secrets_after_second_run" ]

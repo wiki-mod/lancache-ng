@@ -19,6 +19,7 @@ mod kea_snapshots;
 mod nats_auth_callout;
 mod nats_config;
 mod nats_kick;
+mod netdata_alarms;
 mod nginx_client;
 mod reverse_dns;
 mod routes;
@@ -56,6 +57,11 @@ pub struct AppState {
     pub docker: Docker,
     pub http_client: reqwest::Client,
     pub file_lock: std::sync::Mutex<()>,
+    // Guards the read-modify-write in netdata_alarms::append_alarm -- see
+    // that function's own doc comment for why a dedicated lock (not
+    // file_lock above, which already serializes the unrelated
+    // cdn-domains.txt writes in routes/domains.rs) is required here.
+    pub netdata_alarms_lock: std::sync::Mutex<()>,
     pub kea_config_lock: tokio::sync::Mutex<()>,
     pub dhcp_probe_lock: tokio::sync::Mutex<()>,
     pub nats: async_nats::Client,
@@ -267,6 +273,22 @@ fn migrate_secondaries_table_for_auth_callout(conn: &Connection) -> rusqlite::Re
     if !existing_columns.iter().any(|c| c == "address") {
         conn.execute("ALTER TABLE secondaries ADD COLUMN address TEXT", [])?;
     }
+    // Finding #5 (docs/bug-hunt/ui-core.md, issue #849) defense-in-depth:
+    // routes/secondaries.rs::register_secondary always sets nats_user equal
+    // to `name`, this table's own PRIMARY KEY, so two rows cannot collide
+    // today as long as every write path keeps that invariant -- but nothing
+    // in the schema itself enforced it independently of that application
+    // logic. A UNIQUE index closes that gap at the database level: a future
+    // write path that ever decouples nats_user from name (or a bug in this
+    // one) now fails the write instead of silently letting two secondaries
+    // authenticate to NATS as the same identity. SQLite treats every NULL as
+    // distinct from every other NULL under a UNIQUE index, so pre-#583
+    // legacy rows (nats_user still NULL until re-registration) are
+    // unaffected by this.
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_secondaries_nats_user ON secondaries(nats_user)",
+        [],
+    )?;
     Ok(())
 }
 
@@ -757,6 +779,33 @@ fn preflight_startup_config(cfg: &config::Config) -> Result<Duration, String> {
 // best-effort: installs that never mount the shared log volume (i.e. never
 // opt into the `logging` compose profile) must still start and log to
 // stdout only -- a missing/unwritable log path is never a hard failure.
+// Finding #10 (docs/bug-hunt/ui-core.md, issue #849): staying best-effort
+// here is intentional -- an install that never mounts the shared log volume
+// must still start on stdout-only logging (see init_tracing's own doc
+// comment). But the previous inline `.ok()` swallowed every open failure
+// identically, including ones that have nothing to do with "the volume
+// isn't mounted" (permission denied, disk full, the path already existing
+// as a directory), with zero signal anywhere. `eprintln!`, not
+// `tracing::warn!`, because tracing isn't initialized yet at the point
+// init_tracing calls this -- that is the exact reason init_tracing reads
+// UI_LOG_FILE directly from the environment instead of through Config.
+// Pulled out of init_tracing as its own function so the open-vs-log
+// decision has a unit test independent of `tracing_subscriber::registry()
+// ::init()`, which panics if called more than once per process and so
+// cannot be exercised directly in a test.
+fn open_ui_log_file(path: &str) -> Option<std::fs::File> {
+    match OpenOptions::new().create(true).append(true).open(path) {
+        Ok(file) => Some(file),
+        Err(e) => {
+            eprintln!(
+                "warning: could not open UI_LOG_FILE at {path:?}: {e} \
+                 (continuing with stdout-only logging)"
+            );
+            None
+        }
+    }
+}
+
 fn init_tracing() {
     let filter = tracing_subscriber::EnvFilter::try_from_default_env()
         .unwrap_or_else(|_| "lancache_ui=info,warn".parse().unwrap());
@@ -764,16 +813,11 @@ fn init_tracing() {
 
     let ui_log_file =
         std::env::var("UI_LOG_FILE").unwrap_or_else(|_| "/var/log/lancache-ui/ui.log".to_string());
-    let file_layer = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&ui_log_file)
-        .ok()
-        .map(|file| {
-            tracing_subscriber::fmt::layer()
-                .with_ansi(false)
-                .with_writer(Mutex::new(file))
-        });
+    let file_layer = open_ui_log_file(&ui_log_file).map(|file| {
+        tracing_subscriber::fmt::layer()
+            .with_ansi(false)
+            .with_writer(Mutex::new(file))
+    });
 
     tracing_subscriber::registry()
         .with(filter)
@@ -947,6 +991,7 @@ async fn main() -> Result<()> {
         docker,
         http_client,
         file_lock: std::sync::Mutex::new(()),
+        netdata_alarms_lock: std::sync::Mutex::new(()),
         kea_config_lock: tokio::sync::Mutex::new(()),
         dhcp_probe_lock: tokio::sync::Mutex::new(()),
         nats,
@@ -1028,6 +1073,16 @@ async fn main() -> Result<()> {
         .route(
             "/api/secondary/register",
             post(routes::secondaries::register_secondary),
+        )
+        // Machine webhook from the netdata container's custom_sender()
+        // integration (bug hunt #849, observability.md finding #3) -- no
+        // browser session, so no CSRF token is available. Gated by its own
+        // X-Netdata-Alarm-Token header check instead (see
+        // routes/netdata_alarms.rs's module doc comment), the same
+        // token-gated-public-route shape as /api/secondary/register above.
+        .route(
+            "/api/netdata-alarms",
+            post(routes::netdata_alarms::ingest_alarm),
         )
         // Not behind basic_auth on purpose: these are non-sensitive brand
         // assets, not gated content. Serving them through the protected
@@ -1274,6 +1329,107 @@ mod tests {
             )
             .unwrap();
         assert_eq!(stored.as_deref(), Some("192.168.1.20"));
+    }
+
+    // Finding #5 (docs/bug-hunt/ui-core.md, issue #849): the migration adds a
+    // UNIQUE index on nats_user as an independent, database-level backstop.
+    // routes/secondaries.rs::register_secondary always sets nats_user equal
+    // to `name` (already the PRIMARY KEY), so this cannot fire through that
+    // normal write path today -- this test proves the index itself is real
+    // and would actually reject a duplicate nats_user if a future write path
+    // ever let two different `name` rows end up with the same nats_user.
+    #[test]
+    fn migration_adds_unique_index_rejecting_duplicate_nats_user() {
+        let conn = Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE secondaries (
+                name TEXT PRIMARY KEY,
+                nats_token TEXT NOT NULL,
+                consumer_name TEXT NOT NULL UNIQUE,
+                registered_at INTEGER NOT NULL,
+                last_seen INTEGER
+            );",
+        )
+        .unwrap();
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+        // Applying the migration twice (a real container-restart scenario)
+        // must not error on "index already exists".
+        migrate_secondaries_table_for_auth_callout(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at, nats_user)
+             VALUES ('sec-a', 'sec-a', '', 0, 'shared-identity')",
+            [],
+        )
+        .unwrap();
+
+        // A second row that (incorrectly) reuses the same nats_user must be
+        // rejected by the index itself, independent of any name collision.
+        let result = conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at, nats_user)
+             VALUES ('sec-b', 'sec-b', '', 0, 'shared-identity')",
+            [],
+        );
+        assert!(result.is_err());
+
+        // Legacy pre-#583 rows with nats_user still NULL are unaffected:
+        // SQLite treats every NULL as distinct under a UNIQUE index, so
+        // multiple such rows must coexist without error.
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at)
+             VALUES ('legacy-a', 'legacy-a', 'old-token', 0)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO secondaries (name, consumer_name, nats_token, registered_at)
+             VALUES ('legacy-b', 'legacy-b', 'old-token', 0)",
+            [],
+        )
+        .unwrap();
+    }
+
+    // A writable path must still open successfully and produce a usable
+    // `File` -- the diagnostic eprintln! only fires on the failure branch,
+    // never on this happy path.
+    #[test]
+    fn open_ui_log_file_succeeds_for_a_writable_path() {
+        let path = std::env::temp_dir().join(format!(
+            "lancache-ui-log-file-test-{}.log",
+            std::process::id()
+        ));
+        let path_str = path.to_str().unwrap();
+        let _ = std::fs::remove_file(&path);
+
+        assert!(open_ui_log_file(path_str).is_some());
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    // Finding #10 (docs/bug-hunt/ui-core.md, issue #849): the actual bug fix
+    // this test locks in -- opening a path that cannot possibly be a
+    // writable log file (a directory, not a file) must still return `None`
+    // (never panic, never crash startup) exactly as the old `.ok()` did.
+    // This test cannot observe the new eprintln! diagnostic directly
+    // (capturing stderr from within the test process is not portable), but
+    // it does prove open_ui_log_file's own fail-open contract survived the
+    // refactor: a real reviewer can additionally run the binary with
+    // UI_LOG_FILE pointed at a directory and see the warning on stderr.
+    #[test]
+    fn open_ui_log_file_fails_open_for_an_unwritable_path() {
+        let dir = std::env::temp_dir().join(format!(
+            "lancache-ui-log-file-test-dir-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        // Opening a directory with OpenOptions::open always fails on Linux
+        // (EISDIR) -- exactly the "unwritable/misconfigured path" case this
+        // fix adds a diagnostic for.
+        assert!(open_ui_log_file(dir.to_str().unwrap()).is_none());
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     // X-Forwarded-Proto can carry a comma-separated chain when multiple
@@ -1563,7 +1719,7 @@ mod tests {
         // CACHE_MAX_GB, and their legacy split-key fallbacks). Hold the same
         // lock config.rs's own env-mutating tests use so this test never
         // observes another thread's in-flight legacy values and hits
-        // `resolve_cache_dir`/`resolve_cache_max_gb`'s fail-closed panic.
+        // `resolve_cache_dir`/`resolve_cache_max_gb`'s fail-closed error.
         let _guard = config::env_test_lock().lock().unwrap();
         let mut cfg = config::Config::from_env().unwrap();
         cfg.ui_session_ttl_seconds = 0;
@@ -1777,6 +1933,7 @@ mod tests {
             docker,
             http_client: reqwest::Client::new(),
             file_lock: std::sync::Mutex::new(()),
+            netdata_alarms_lock: std::sync::Mutex::new(()),
             kea_config_lock: tokio::sync::Mutex::new(()),
             dhcp_probe_lock: tokio::sync::Mutex::new(()),
             nats,

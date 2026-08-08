@@ -302,9 +302,15 @@ fn is_allowed_cache_path(path: &str) -> bool {
         "/var/cache/proxy",
         "/data/lancache",
     ];
+    // A plain `path.starts_with(prefix)` has no path-boundary check: it
+    // would also accept a sibling directory that merely shares the prefix
+    // string, e.g. "/opt/lancache-ng/cache-evil" or
+    // "/opt/lancache-ng/cacheXYZ", neither of which is actually inside the
+    // allowed cache directory. Require an exact match or a `/`-bounded
+    // subpath so only genuine descendants of an allowed prefix pass.
     allowed_prefixes
         .iter()
-        .any(|prefix| path.starts_with(prefix))
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
 }
 
 pub fn get_cache_size_gb(path: &str) -> f64 {
@@ -478,7 +484,13 @@ fn parse_log_line(re: &Regex, line: &str) -> Option<LogEntry> {
     })
 }
 
-fn format_bytes(b: u64) -> String {
+// pub(crate), not private: syslog_client.rs's get_syslog_stats() (#849
+// bug-hunt finding observability.md#13) reuses this exact formatting for its
+// own per-host SyslogHostStats.size_human field, rather than duplicating an
+// independent byte-formatting implementation that could drift from this
+// one's thresholds/precision (AG-CODE-011's "the same decision must share
+// code" principle).
+pub(crate) fn format_bytes(b: u64) -> String {
     const KB: u64 = 1_024;
     const MB: u64 = 1_048_576;
     const GB: u64 = 1_073_741_824;
@@ -579,6 +591,21 @@ mod tests {
         assert!(is_allowed_cache_path("/var/cache/proxy"));
         assert!(is_allowed_cache_path("/opt/lancache-ng/cache"));
         assert!(is_allowed_cache_path("/data/lancache"));
+    }
+
+    // Finding #6 (docs/bug-hunt/ui-core.md, issue #849): a bare
+    // `path.starts_with(prefix)` has no path-boundary check, so a sibling
+    // directory that merely shares the prefix *string* -- not the actual
+    // path component -- would incorrectly pass and let `du` run against a
+    // directory this allowlist was never meant to cover.
+    #[test]
+    fn allowed_cache_path_rejects_prefix_string_collision_without_path_boundary() {
+        assert!(!is_allowed_cache_path("/opt/lancache-ng/cache-evil"));
+        assert!(!is_allowed_cache_path("/opt/lancache-ng/cacheXYZ"));
+        assert!(!is_allowed_cache_path("/var/cache/proxy-not-really"));
+        assert!(!is_allowed_cache_path("/data/lancache2"));
+        // A real subpath under an allowed prefix must still be accepted.
+        assert!(is_allowed_cache_path("/opt/lancache-ng/cache/sub"));
     }
 
     #[test]
