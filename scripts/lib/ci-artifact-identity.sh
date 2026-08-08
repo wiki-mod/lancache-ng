@@ -43,6 +43,13 @@ ci_ai_validate_platform_record() {
       and (.platform == "linux/amd64" or .platform == "linux/arm64")
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
       and (.mode == "built" or .mode == "reused")
+      and (
+        if .mode == "reused" then
+          (.reused_index_digest | test("^sha256:[0-9a-f]{64}$"))
+        else
+          (.reused_index_digest == "")
+        end
+      )
     ' "$file" >/dev/null || ci_ai_fail "invalid platform candidate record: $file"
 }
 
