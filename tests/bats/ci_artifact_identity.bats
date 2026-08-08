@@ -314,3 +314,15 @@ JSON
   [[ "$stack_line" =~ ^[0-9]+$ ]]
   [ "$service_line" -lt "$stack_line" ]
 }
+
+@test "CodeQL analysis concurrency cancels superseded first-attempt PR jobs per language" {
+  workflow="$REPO_ROOT/.github/workflows/codeql.yml"
+  run grep -F "format('{0}-analyze-{1}-{2}', github.workflow, matrix.language, github.ref)" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "format('{0}-analyze-{1}-{2}-{3}', github.workflow, matrix.language, github.ref, github.run_id)" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "(github.event_name != 'pull_request' || github.run_attempt != '1')" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "cancel-in-progress: \${{ github.event_name == 'pull_request' && github.run_attempt == '1' }}" "$workflow"
+  [ "$status" -eq 0 ]
+}
