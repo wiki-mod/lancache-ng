@@ -150,12 +150,10 @@ runs:
       # exits as soon as it matches, closing the pipe while a still-writing
       # producer (`rustc -vV`, `rustup target list --installed`) receives
       # SIGPIPE -- `pipefail` then reports that as the pipeline's failure
-      # even though the consumer itself matched. Deliberately scoped to
-      # only tools/build-tools/Dockerfile, not the whole repo -- see the
-      # script's own header comment for why a wider scan is a separate,
-      # larger follow-up (41 preexisting instances found across scripts/**,
-      # each needing individual triage). Pure text scan, no Docker/LAN
-      # dependency of its own.
+      # even though the consumer itself matched. Repo-wide per issue #1377
+      # (scripts/**, tools/**, services/**, setup.sh) -- see the script's
+      # own header comment for the full scope history. Pure text scan, no
+      # Docker/LAN dependency of its own.
       shell: bash
       run: |
         set -euo pipefail
@@ -165,3 +163,23 @@ runs:
           -w /work \
           "${{ inputs.build-tools-image }}" \
           bash scripts/check-pipefail-early-exit-grep.sh
+
+    - name: Check pipefail guard's own scope coverage (issue #1510)
+      # Standing guard on the guard above: verifies
+      # tests/bats/check_pipefail_early_exit_grep.bats has a fixture
+      # exercising every top-level path prefix check-pipefail-early-exit-
+      # grep.sh's own scan_files currently scans -- see
+      # scripts/check-pipefail-scope-coverage.sh's own header for why (a
+      # real instance of scan_files being narrower than its scope claim
+      # survived undetected in services/dns/entrypoint.sh, issue #1505,
+      # because no fixture proved the missing prefix was ever covered).
+      # Pure text scan, no Docker/LAN dependency of its own.
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$PWD:/work:ro" \
+          -w /work \
+          "${{ inputs.build-tools-image }}" \
+          bash scripts/check-pipefail-scope-coverage.sh

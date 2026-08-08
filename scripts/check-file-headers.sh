@@ -6,12 +6,35 @@
 # "File Headers" section) and, separately, for the SPDX-License-Identifier
 # line (AG-HDR-008). By default scans the whole repository; pass file paths
 # as arguments to scan only those (used by CI to check just a PR's diff, and
-# by developers to check a file before committing it).
+# by developers to check a file before committing it). The SPDX check is
+# hard-enforced (exit 1) when explicit file paths are given, since the
+# repo-wide backfill exception does not cover a file someone is actively
+# touching; it stays soft/informational for a whole-repo scan, where the
+# backfill is still incomplete.
 set -euo pipefail
 
-script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
-cd "$repo_root"
+# Tracked separately from $# after this point ($files gets reassigned via
+# mapfile in the whole-repo branch): whether the caller passed explicit
+# paths determines whether a missing SPDX line below is a hard failure
+# (this invocation is scanning a known, currently-being-touched file set --
+# a PR's diff, or a developer checking one file before committing) or the
+# existing soft/informational report (a whole-repo scan, where the backfill
+# is deliberately still incomplete -- see AG-HDR-008's own text). Computed
+# up front, before any `cd`, so it reflects the caller's real invocation.
+explicit_files=0
+[ "$#" -gt 0 ] && explicit_files=1
+
+# Only the whole-repo scan (git ls-files) needs cwd forced to this script's
+# own repo root -- an explicit-file invocation resolves its given paths
+# relative to wherever the caller actually ran from, which is what makes an
+# isolated bats fixture directory (a throwaway git repo elsewhere on disk,
+# never the real repo) usable for testing the explicit-file mode without
+# ever touching this repo's own tracked files.
+if [ "$explicit_files" -eq 0 ]; then
+    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+    repo_root=$(cd "$script_dir/.." && pwd)
+    cd "$repo_root"
+fi
 
 HEADER_TEXT='lancache-ng (https://github.com/wiki-mod/lancache-ng)'
 SPDX_TEXT='SPDX-License-Identifier: AGPL-3.0-or-later'
@@ -69,7 +92,7 @@ is_excluded() {
     esac
 }
 
-if [ "$#" -gt 0 ]; then
+if [ "$explicit_files" -eq 1 ]; then
     files=("$@")
 else
     mapfile -t files < <(git ls-files)
@@ -97,16 +120,28 @@ fi
 
 # AG-HDR-008 (decided 2026-08-02): every in-scope file should carry the SPDX
 # line too, added incrementally ("touch a file, verify the line is there, add
-# it if not" -- not a one-shot repo-wide backfill). Reported but NOT yet
-# enforced (no exit 1) here: as of this check's own introduction, this line
-# exists in only a handful of files, so failing on it in whole-repo scan mode
-# (how build-push.yml's own file-headers job invokes this script today, no
-# path arguments) would immediately block every PR on pre-existing files it
-# never touched. Flip this to a hard failure only once the repo-wide backfill
-# is tracked and materially underway -- see AG-HDR-008's own text for the
-# same two-step rollout AG-HDR-009 already used for the header line itself.
+# it if not" -- not a one-shot repo-wide backfill). A whole-repo scan (no
+# path arguments, how build-push.yml's own file-headers/file-headers-hosted
+# jobs invoke this script) stays soft/informational: as of this check's own
+# introduction, this line exists in only a handful of files, so failing here
+# would immediately block every PR on pre-existing files it never touched --
+# see AG-HDR-008's own text for the same two-step rollout AG-HDR-009 already
+# used for the header line itself.
+#
+# An explicit-file invocation is different: AG-HDR-008 already requires the
+# line on "any file you are otherwise already editing," and this script's
+# own top comment has documented an explicit-path mode as "used by CI to
+# check just a PR's diff" since before this hard-fail branch existed. A
+# diff-scoped CI step passing this script the PR's own changed files closes
+# a real, previously-unenforced gap: a file actively being touched could
+# still merge without this line, caught only by manual/external review.
 if [ "${#missing_spdx[@]}" -gt 0 ]; then
-    echo "Missing the SPDX-License-Identifier line (AGENTS.md AG-HDR-008) -- not yet enforced, backfill in progress:" >&2
+    if [ "$explicit_files" -eq 1 ]; then
+        echo "Missing the SPDX-License-Identifier line (AGENTS.md AG-HDR-008) on a file you are touching:" >&2
+        printf '  %s\n' "${missing_spdx[@]}" >&2
+        exit 1
+    fi
+    echo "Missing the SPDX-License-Identifier line (AGENTS.md AG-HDR-008) -- not yet enforced repo-wide, backfill in progress:" >&2
     printf '  %s\n' "${missing_spdx[@]}" >&2
 fi
 
