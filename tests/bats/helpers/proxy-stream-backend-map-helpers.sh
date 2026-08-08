@@ -26,6 +26,7 @@ load_proxy_stream_backend_map_helpers() {
     # The real file assigns this immediately before defining the function
     # (see entrypoint.sh's own comment there); the awk range above starts at
     # the function definition itself, so the caller sets it explicitly.
+    # shellcheck disable=SC2034 # read by the dynamically-sourced $helper_file's own _render_stream_backend_map(), invisible to shellcheck's static analysis
     STREAM_EMPTY_SNI_BACKEND="127.0.0.1:9"
     declare -ag _UNIQUE_DOMAINS=()
     declare -Ag _DOMAIN_IS_ROOT=()
