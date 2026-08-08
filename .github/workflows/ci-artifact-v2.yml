@@ -430,6 +430,107 @@ jobs:
           path: stack-lock
       - run: timeout --kill-after=30 2400 bash scripts/ci-validate-locked-stack.sh stack-lock/stack-lock.json
 
+  runtime-deep-ntp:
+    name: validate candidate NTP clock-discipline path
+    needs: stack-lock
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stack-lock
+          path: stack-lock
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Prove candidate tags match the frozen lock before NTP simulation
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
+      - name: Run real NTP CAP_SYS_TIME simulation against this candidate tag
+        env:
+          REPOSITORY: ${{ github.repository }}
+          IMAGE_TAG: ${{ needs.stack-lock.outputs.candidate_tag }}
+        run: timeout --kill-after=30 900 bash scripts/ntp-cap-sys-time-simulation.sh
+      - name: Prove candidate tags still match the frozen lock after NTP simulation
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+  runtime-deep-quickstart:
+    name: validate complete candidate quickstart/logging runtime
+    needs: stack-lock
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: stack-lock
+          path: stack-lock
+      - id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+      - name: Prove candidate tags match the frozen lock before quickstart simulation
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
+      - name: Resolve exact build-tools identity from the stack lock
+        run: |
+          set -euo pipefail
+          image="$(jq -r '.tooling["build-tools"].image' stack-lock/stack-lock.json)"
+          digest="$(jq -r '.tooling["build-tools"].digest' stack-lock/stack-lock.json)"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "::error::invalid build-tools digest in stack lock"; exit 1; }
+          printf 'BUILD_TOOLS_IMAGE=%s@%s\n' "$image" "$digest" >> "$GITHUB_ENV"
+      - name: Run complete quickstart logging simulation on candidate runtime set
+        env:
+          SETUP_SIM_IMAGE_CHANNEL: pinned
+          SETUP_SIM_IMAGE_TAG: ${{ needs.stack-lock.outputs.candidate_tag }}
+        run: |
+          set -euo pipefail
+          source scripts/lib/quickstart-compose-lock.sh
+          quickstart_compose_lock_acquire
+          docker run --rm \
+            -v /var/run/docker.sock:/var/run/docker.sock \
+            -v "$PWD:$PWD" \
+            -w "$PWD" \
+            -e BUILD_TOOLS_IMAGE \
+            -e SETUP_SIM_IMAGE_CHANNEL \
+            -e SETUP_SIM_IMAGE_TAG \
+            -e GITHUB_RUN_ID \
+            -e GITHUB_RUN_ATTEMPT \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 2400 bash scripts/syslog-forwarding-simulation.sh
+      - name: Prove candidate tags still match the frozen lock after quickstart simulation
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/ci-verify-lock-tags.sh stack-lock/stack-lock.json
+      - name: Remove Buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
   supplemental-full-setup:
     name: supplemental full-setup simulations
     needs: [plan, stack-lock]
@@ -444,12 +545,20 @@ jobs:
 
   accept:
     name: final candidate acceptance
-    needs: [plan, stack-lock, exact-locked-stack, supplemental-full-setup]
+    needs:
+      - plan
+      - stack-lock
+      - exact-locked-stack
+      - runtime-deep-ntp
+      - runtime-deep-quickstart
+      - supplemental-full-setup
     if: >-
       always() &&
       needs.plan.outputs.supplemental == 'true' &&
       needs['stack-lock'].result == 'success' &&
       needs['exact-locked-stack'].result == 'success' &&
+      needs['runtime-deep-ntp'].result == 'success' &&
+      needs['runtime-deep-quickstart'].result == 'success' &&
       needs['supplemental-full-setup'].result == 'success'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -524,6 +633,7 @@ jobs:
                 exact_digest_security:true,
                 native_platform_smoke:true,
                 exact_locked_stack:true,
+                runtime_deep_validation:true,
                 supplemental_full_setup:true,
                 publication_policy:true
               }
