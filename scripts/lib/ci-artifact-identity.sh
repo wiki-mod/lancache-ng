@@ -97,6 +97,7 @@ ci_ai_validate_acceptance() {
       and .gates.exact_digest_security == true
       and .gates.native_platform_smoke == true
       and .gates.exact_locked_stack == true
+      and .gates.runtime_deep_validation == true
       and .gates.supplemental_full_setup == true
       and .gates.publication_policy == true
     ' "$file" >/dev/null || ci_ai_fail "invalid acceptance record: $file"
