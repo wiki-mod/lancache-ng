@@ -22,16 +22,22 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
-@test "v2 workflow supersedes only first-attempt PR runs" {
+@test "v2 workflow supersedes only eligible first-attempt PR runs" {
   workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
 
-  run grep -F "(github.event_name == 'pull_request' && github.run_attempt == 1)" "$workflow"
+  run grep -F "github.run_attempt == 1" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "github.event.pull_request.head.repo.full_name == github.repository" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "contains(github.event.pull_request.labels.*.name, 'ci-v2-test')" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "(github.event.action != 'labeled' || github.event.label.name == 'ci-v2-test')" "$workflow"
   [ "$status" -eq 0 ]
   run grep -F "format('{0}-pr-{1}', github.workflow, github.ref)" "$workflow"
   [ "$status" -eq 0 ]
   run grep -F "format('{0}-run-{1}-{2}', github.workflow, github.run_id, github.run_attempt)" "$workflow"
   [ "$status" -eq 0 ]
-  run grep -F "cancel-in-progress: \${{ github.event_name == 'pull_request' && github.run_attempt == 1 }}" "$workflow"
+  run grep -F 'cancel-in-progress: >-' "$workflow"
   [ "$status" -eq 0 ]
 }
 
