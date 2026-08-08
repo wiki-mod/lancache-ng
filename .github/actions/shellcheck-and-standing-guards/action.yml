@@ -152,9 +152,12 @@ runs:
       # producer (`rustc -vV`, `rustup target list --installed`) receives
       # SIGPIPE -- `pipefail` then reports that as the pipeline's failure
       # even though the consumer itself matched. Repo-wide per issue #1377
-      # (scripts/**, tools/**, services/**, setup.sh) -- see the script's
-      # own header comment for the full scope history. Pure text scan, no
-      # Docker/LAN dependency of its own.
+      # (scripts/**, tools/**, setup.sh as of this scope's own current
+      # state -- see the script's own header comment for the full scope
+      # history; a services/** widening is real, separate, in-progress
+      # work, not yet reflected in scan_files itself, so it must not be
+      # listed here as already covered). Pure text scan, no Docker/LAN
+      # dependency of its own.
       shell: bash
       run: |
         set -euo pipefail
@@ -165,16 +168,23 @@ runs:
           "${{ inputs.build-tools-image }}" \
           bash scripts/check-pipefail-early-exit-grep.sh
 
-    - name: Check pipefail guard's own scope coverage (issue #1510)
+    - name: Check pipefail guard's own scope coverage
       # Standing guard on the guard above: verifies
       # tests/bats/check_pipefail_early_exit_grep.bats has a fixture
       # exercising every top-level path prefix check-pipefail-early-exit-
-      # grep.sh's own scan_files currently scans -- see
-      # scripts/check-pipefail-scope-coverage.sh's own header for why (a
-      # real instance of scan_files being narrower than its scope claim
-      # survived undetected in services/dns/entrypoint.sh, issue #1505,
-      # because no fixture proved the missing prefix was ever covered).
-      # Pure text scan, no Docker/LAN dependency of its own.
+      # grep.sh's own scan_files currently scans, AND that scan_files itself
+      # has not narrowed below this project's independently-pinned required
+      # minimum -- see scripts/check-pipefail-scope-coverage.sh's own header
+      # for why (a real instance of scan_files being narrower than its scope
+      # claim survived undetected in services/dns/entrypoint.sh, issue
+      # #1505, because no fixture proved the missing prefix was ever
+      # covered). Pure text scan, no Docker/LAN dependency of its own, but
+      # still wrapped in an unignorable kill-timeout (AG-CI-016): a
+      # signal-deaf or deadlocked process in this container would otherwise
+      # only be reachable by the job's outer `timeout-minutes`, which sends
+      # SIGTERM to the `docker run` client rather than into the container
+      # itself and cannot reliably reap it -- the same reasoning the
+      # ShellCheck/ActionLint step above already documents in full.
       shell: bash
       run: |
         set -euo pipefail
@@ -183,4 +193,4 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-pipefail-scope-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-pipefail-scope-coverage.sh

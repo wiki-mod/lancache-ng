@@ -30,9 +30,9 @@ explicit_files=0
 # isolated bats fixture directory (a throwaway git repo elsewhere on disk,
 # never the real repo) usable for testing the explicit-file mode without
 # ever touching this repo's own tracked files.
+script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
+repo_root=$(cd "$script_dir/.." && pwd)
 if [ "$explicit_files" -eq 0 ]; then
-    script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    repo_root=$(cd "$script_dir/.." && pwd)
     cd "$repo_root"
 fi
 
@@ -95,19 +95,70 @@ is_excluded() {
 if [ "$explicit_files" -eq 1 ]; then
     files=("$@")
 else
-    mapfile -t files < <(git ls-files)
+    # Command substitution (not `mapfile -t files < <(git ls-files)`) so a
+    # real `git ls-files` failure (a broken/missing .git, corrupted index)
+    # is actually checkable: a process substitution's own exit status is
+    # invisible to the reading command and to `set -e`/pipefail alike, which
+    # would otherwise leave `files` silently empty and this scan reporting a
+    # false "all checked files carry the header" instead of failing closed.
+    if ! files_raw="$(git ls-files)"; then
+        echo "::error::check-file-headers: \`git ls-files\` itself failed -- is $repo_root a real git work tree? Not treating this as a clean pass." >&2
+        exit 1
+    fi
+    files=()
+    if [ -n "$files_raw" ]; then
+        mapfile -t files <<<"$files_raw"
+    fi
 fi
 
 missing=()
 missing_spdx=()
 for path in "${files[@]}"; do
     [ -f "$path" ] || continue
-    is_excluded "$path" && continue
-    scanned="$(head -n "$HEADER_SCAN_LINES" "$path")"
+
+    # is_excluded()'s case patterns are repository-relative literals (e.g.
+    # "services/dhcp/kea-dhcp4.conf"), but an explicit-file invocation keeps
+    # the caller's own working directory (see the cwd comment above) rather
+    # than repo_root, so $path can be spelled relative to wherever the
+    # caller ran from (e.g. "../../services/dhcp/kea-dhcp4.conf" from inside
+    # services/dhcp) -- a spelling none of those literals match, which would
+    # silently stop excluding a JSON/vendored file the exclusion list exists
+    # specifically to protect. Normalize to repo_root-relative for the
+    # exclusion check only; $path itself (whatever the caller passed) is
+    # still what every read below (head/grep) uses, unchanged. Falls back to
+    # the raw $path unchanged when it does not resolve under repo_root at
+    # all (e.g. this script's own bats fixtures, isolated throwaway git
+    # repos elsewhere on disk that were never meant to be repo_root-relative
+    # in the first place).
+    exclusion_key="$path"
+    if abs_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd); then
+        abs_path="$abs_dir/$(basename "$path")"
+        case "$abs_path" in
+            "$repo_root"/*) exclusion_key="${abs_path#"$repo_root"/}" ;;
+        esac
+    fi
+    is_excluded "$exclusion_key" && continue
+
+    # The SPDX-License-Identifier line (AG-HDR-008) is a positional
+    # requirement, not a bare presence check: "placed immediately after the
+    # shebang line (if there is one) and before the lancache-ng (...) header
+    # line." A file with the right text buried later in the scanned window
+    # (after real content, after the header itself, or inside a string
+    # literal that happens to contain it) would satisfy a plain grep across
+    # the whole window but does not actually satisfy the rule.
+    if ! scanned="$(head -n "$HEADER_SCAN_LINES" "$path")"; then
+        echo "::error::check-file-headers: could not read $path" >&2
+        exit 1
+    fi
+    mapfile -t scanned_lines <<<"$scanned"
     if ! grep -qF "$HEADER_TEXT" <<<"$scanned"; then
         missing+=("$path")
     fi
-    if ! grep -qF "$SPDX_TEXT" <<<"$scanned"; then
+    spdx_line_index=0
+    if [[ "${scanned_lines[0]-}" == '#!'* ]]; then
+        spdx_line_index=1
+    fi
+    if [[ "${scanned_lines[$spdx_line_index]-}" != *"$SPDX_TEXT"* ]]; then
         missing_spdx+=("$path")
     fi
 done

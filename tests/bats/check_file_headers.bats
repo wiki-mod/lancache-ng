@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Coverage for scripts/check-file-headers.sh's explicit-file mode (issue
-# #1510): AG-HDR-008's SPDX-License-Identifier line is hard-enforced when
+# Coverage for scripts/check-file-headers.sh's explicit-file mode:
+# AG-HDR-008's SPDX-License-Identifier line is hard-enforced when
 # the script is given explicit file paths (CI's diff-scoped invocation, or
 # a developer checking one file before committing), while a whole-repo scan
 # (no arguments) stays soft/informational since the repo-wide backfill is
@@ -43,6 +43,41 @@ setup() {
     printf '# hello\n' > "$fixture_dir/example.md"
     run bash "$script" "$fixture_dir/example.md"
     [ "$status" -eq 0 ]
+}
+
+@test "explicit-file mode fails when the SPDX line is present but not immediately after the shebang" {
+    # AG-HDR-008 requires the SPDX line "immediately after the shebang line
+    # (if there is one) and before the lancache-ng (...) header line" -- a
+    # file with both required lines present, but in the wrong order (header
+    # line first), does not actually satisfy that positional requirement
+    # even though a plain substring-presence scan across the window would
+    # wrongly call it clean.
+    printf '#!/usr/bin/env bash\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\necho hi\n' > "$fixture_dir/example.sh"
+    run bash "$script" "$fixture_dir/example.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"SPDX-License-Identifier"* ]]
+}
+
+@test "explicit-file mode accepts the SPDX line at line 1 when the file has no shebang" {
+    printf '# SPDX-License-Identifier: AGPL-3.0-or-later\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\nkey: value\n' > "$fixture_dir/example.yml"
+    run bash "$script" "$fixture_dir/example.yml"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"All checked files"* ]]
+}
+
+@test "explicit-file mode normalizes a caller-relative path before applying the exclusion list" {
+    # services/dhcp/kea-dhcp4.conf is a real tracked file, excluded by exact
+    # repo-relative literal (JSON despite the .conf extension -- a header
+    # would corrupt its syntax). Invoked here from inside services/dhcp
+    # itself, so the path this script actually receives is the bare
+    # "kea-dhcp4.conf" -- a spelling that does not match the exclusion
+    # list's repo-relative literal at all unless normalized first. Before
+    # the fix, this would have hard-failed the JSON file for a "missing"
+    # header/SPDX line it must never carry.
+    repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
+    run bash -c "cd '$repo_root/services/dhcp' && bash '$script' 'kea-dhcp4.conf'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"All checked files"* ]]
 }
 
 @test "whole-repo mode (no arguments) stays soft on missing SPDX lines in the real repository" {

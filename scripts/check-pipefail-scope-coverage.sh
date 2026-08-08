@@ -61,6 +61,18 @@ for f in "$guard_script" "$guard_bats"; do
     fi
 done
 
+# Independently pinned -- deliberately NOT derived from the guard's own
+# current source. Deriving "required" from the exact same file this check
+# is supposed to police is a tautology: narrowing the guard's own scope
+# would narrow this check's expectation right along with it, so a
+# recurrence of the issue #1505 class of regression (scan_files silently
+# missing a whole path class) would keep passing this check indefinitely
+# instead of ever failing it. This is the project's own documented minimum
+# scope for AG-VAL-032 enforcement (see AGENTS.md's enforcement-matrix row
+# for that rule) and must be updated by hand, deliberately, whenever that
+# documented scope changes -- never automatically re-derived from the guard.
+REQUIRED_PREFIXES=(scripts/ tools/ setup.sh services/)
+
 # Extract the quoted pathspec literals from the guard's own `git ls-files --
 # ...` discovery block, then reduce each to its top-level prefix: a leading
 # directory name, or the literal filename for a bare file like setup.sh.
@@ -80,10 +92,39 @@ for pattern in "${raw_patterns[@]}"; do
     fi
 done
 
+# The guard's own scope must not have narrowed below REQUIRED_PREFIXES --
+# checked independently of, and before, the bats-fixture-coverage check
+# below (a fixture cannot cover a prefix the guard does not even scan).
+missing_required=()
+for required in "${REQUIRED_PREFIXES[@]}"; do
+    if [ -z "${prefixes[$required]-}" ]; then
+        missing_required+=("$required")
+    fi
+done
+
+if [ "${#missing_required[@]}" -gt 0 ]; then
+    printf '::error::check-pipefail-scope-coverage: %s no longer scans these required prefixes:\n' "$guard_script" >&2
+    printf '  %s\n' "${missing_required[@]}" >&2
+    echo "This is a real narrowing of AG-VAL-032 enforcement (the exact issue #1505 failure class this check exists to catch), not a bats-fixture gap -- widen scan_files in $guard_script itself before this can pass." >&2
+    exit 1
+fi
+
 # Full comment lines are excluded the same way the guard itself excludes
 # them when scanning for violations, so a prefix only mentioned in prose
 # (e.g. this guard's own header comment) does not count as a real fixture.
-non_comment_bats="$(grep -v '^[[:space:]]*#' "$guard_bats")"
+# `grep -v` exits 1 (not just "empty output") when EVERY line matched the
+# excluded pattern -- a comments-only or empty bats file -- and a plain
+# top-level `var=$(cmd)` assignment's failure aborts this script outright
+# under `set -e`, before any of this check's own diagnostics ever run.
+# Status 1 here is a legitimate "nothing left after excluding comments"
+# result, not a real failure; only a status >1 (grep itself erroring, e.g.
+# an unreadable file) should propagate as a hard error.
+grep_status=0
+non_comment_bats="$(grep -v '^[[:space:]]*#' "$guard_bats")" || grep_status=$?
+if [ "$grep_status" -gt 1 ]; then
+    printf '::error::check-pipefail-scope-coverage: could not read %s (grep exit %s)\n' "$guard_bats" "$grep_status" >&2
+    exit 1
+fi
 
 missing=()
 for prefix in "${!prefixes[@]}"; do
