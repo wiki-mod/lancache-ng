@@ -22,6 +22,15 @@ setup() {
   [ "$status" -ne 0 ]
 }
 
+@test "source fingerprint invokes the canonical catalog through bash" {
+  script="$REPO_ROOT/scripts/ci-source-fingerprint.sh"
+
+  run grep -F 'catalog="$(bash "$repo_root/scripts/query-stack-images.sh" all)"' "$script"
+  [ "$status" -eq 0 ]
+  run grep -F '$("$repo_root/scripts/query-stack-images.sh"' "$script"
+  [ "$status" -ne 0 ]
+}
+
 @test "v2 workflow supersedes only eligible first-attempt PR runs" {
   workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
 
