@@ -268,6 +268,23 @@ write_script() {
     [[ "$output" == *"early-exiting consumer"* ]]
 }
 
+@test "fails when a service Dockerfile inherits pipefail from build-tools via an indented FROM" {
+    # The Dockerfile format reference documents leading whitespace before an
+    # instruction as ignored, so an indented FROM must retain the same
+    # inherited-pipefail coverage as one starting at column 0.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
+        printf '  FROM ${BUILD_TOOLS_IMAGE} AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
 @test "fails when a service Dockerfile inherits pipefail from build-tools via a lowercase from" {
     # Dockerfile instruction names are case-insensitive -- Docker accepts
     # `from`/`From`/`FROM` identically -- so a differently-cased instruction

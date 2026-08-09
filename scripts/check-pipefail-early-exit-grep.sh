@@ -146,8 +146,10 @@ for file in "${scan_files[@]}"; do
       # build-tools' pipefail SHELL. Matched case-insensitively (`-i`):
       # Dockerfile instruction names are themselves case-insensitive (Docker
       # accepts `from`/`From`/`FROM` identically), so a case-sensitive-only
-      # match would miss a valid, differently-cased FROM line.
-      if grep -Eqi '^FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools([:@][^[:space:]]+)?|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
+      # match would miss a valid, differently-cased FROM line. Leading
+      # `[[:space:]]*` allows optional indentation before the instruction,
+      # which the Dockerfile format reference documents as ignored.
+      if grep -Eqi '^[[:space:]]*FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools([:@][^[:space:]]+)?|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
         inherits_build_tools_pipefail=true
       fi
       ;;
