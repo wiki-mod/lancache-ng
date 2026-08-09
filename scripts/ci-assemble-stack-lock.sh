@@ -24,9 +24,12 @@ lock="$(jq -n --arg source_sha "$source_sha" --arg candidate_tag "$candidate_tag
 while IFS= read -r entry; do
     service="$(jq -r '.service' <<<"$entry")"
     scope="$(jq -r '.scope' <<<"$entry")"
+    image="$(jq -r '.image' <<<"$entry")"
     index_file="$index_dir/${service}.json"
     [[ -f "$index_file" ]] || ci_ai_fail "missing index record for $service"
     ci_ai_validate_index_record "$index_file"
+    [[ "$(jq -r '.service' "$index_file")" == "$service" ]] || ci_ai_fail "service identity mismatch for $service"
+    [[ "$(jq -r '.image' "$index_file")" == "$image" ]] || ci_ai_fail "image identity mismatch for $service"
     [[ "$(jq -r '.candidate_source_sha' "$index_file")" == "$source_sha" ]] || ci_ai_fail "candidate source SHA mismatch for $service"
     [[ "$(jq -r '.scope' "$index_file")" == "$scope" ]] || ci_ai_fail "scope mismatch for $service"
     record="$(jq -c '{image, digest, platforms, candidate_ref, artifact_source_sha, source_fingerprint, build_inputs}' "$index_file")"
