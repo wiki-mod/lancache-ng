@@ -12,6 +12,8 @@ setup() {
     lib="$BATS_TEST_DIRNAME/../../scripts/lib/git-fetch-retry.sh"
     # shellcheck source=/dev/null
     source "$lib"
+    # shellcheck disable=SC2034 # read by git_fetch_retry() in scripts/lib/git-fetch-retry.sh,
+    # sourced above -- shellcheck cannot see the cross-file read.
     GIT_FETCH_RETRY_BACKOFF_SECONDS=0
 }
 
@@ -117,7 +119,7 @@ setup() {
     [[ "$output" == *"retrying"* ]]
 }
 
-@test "retries a rate-limit response but leaves permanent HTTP 4xx failures immediate" {
+@test "retries a rate-limit response and succeeds after recovery" {
     call_count_file="$BATS_TEST_TMPDIR/calls"
     printf '0' > "$call_count_file"
     git() {
@@ -126,15 +128,31 @@ setup() {
         printf '%s' "$n" > "$call_count_file"
         if [ "$n" -eq 1 ]; then
             echo "fatal: unable to access 'https://github.com/example/repo/': The requested URL returned error: 429" >&2
-        else
-            echo "fatal: unable to access 'https://github.com/example/repo/': The requested URL returned error: 404" >&2
+            return 1
         fi
+        echo "ok"
+        return 0
+    }
+    run git_fetch_retry origin main
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 2 ]
+    [ "$(grep -c 'retrying' <<<"$output")" -eq 1 ]
+}
+
+@test "leaves a permanent HTTP 4xx failure immediate" {
+    call_count_file="$BATS_TEST_TMPDIR/calls"
+    printf '0' > "$call_count_file"
+    git() {
+        local n; n=$(<"$call_count_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$call_count_file"
+        echo "fatal: unable to access 'https://github.com/example/repo/': The requested URL returned error: 404" >&2
         return 1
     }
     run git_fetch_retry origin main
     [ "$status" -eq 1 ]
-    [ "$(cat "$call_count_file")" -eq 2 ]
-    [ "$(grep -c 'retrying' <<<"$output")" -eq 1 ]
+    [ "$(cat "$call_count_file")" -eq 1 ]
+    [[ "$output" != *"retrying"* ]]
 }
 
 @test "does not retry a non-transient failure -- fails immediately on attempt 1" {
@@ -154,6 +172,8 @@ setup() {
 }
 
 @test "gives up and returns failure once GIT_FETCH_RETRY_MAX_ATTEMPTS is exhausted" {
+    # shellcheck disable=SC2034 # read by git_fetch_retry() in scripts/lib/git-fetch-retry.sh,
+    # sourced in setup() -- shellcheck cannot see the cross-file read.
     GIT_FETCH_RETRY_MAX_ATTEMPTS=3
     call_count_file="$BATS_TEST_TMPDIR/calls"
     printf '0' > "$call_count_file"

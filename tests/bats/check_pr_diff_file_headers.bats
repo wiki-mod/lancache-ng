@@ -34,7 +34,7 @@ setup() {
     cp "$BATS_TEST_DIRNAME/../../scripts/lib/git-fetch-retry.sh" "$work_dir/scripts/lib/git-fetch-retry.sh"
 
     (
-        cd "$work_dir"
+        cd "$work_dir" || exit 1
         git config user.email test@example.invalid
         git config user.name "Test"
         git remote add origin "$origin_dir"
@@ -88,33 +88,39 @@ teardown() {
     [ "$status" -eq 0 ]
 }
 
-@test "correctly captures and checks a changed file whose name contains a space" {
+@test "correctly captures and checks a changed file whose name Git C-quotes" {
     # `git diff --name-only`'s default output C-quotes an unusual pathname,
-    # which
-    # `mapfile -t x < <(...)` would store as the literal quoted string
+    # which `mapfile -t x < <(...)` would store as the literal quoted string
     # rather than the real path -- `-z` plus NUL-delimited reading must
     # produce the real, usable filename instead.
     (
         cd "$work_dir"
-        printf 'echo no header\n' > "file with space.sh"
-        git add "file with space.sh"
-        git commit --quiet -m "add a file with a space in its name"
+        quoted_name=$'file\twith-tab.sh'
+        printf 'echo no header\n' > "$quoted_name"
+        git add "$quoted_name"
+        git commit --quiet -m "add a file with a tab in its name"
     )
     head_sha="$(cd "$work_dir" && git rev-parse HEAD)"
     run bash -c "cd '$work_dir' && SPDX_BASE_SHA='$base_sha' SPDX_BASE_REF=main GITHUB_SHA='$head_sha' bash scripts/check-pr-diff-file-headers.sh"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"file with space.sh"* ]]
+    [[ "$output" == *$'file\twith-tab.sh'* ]]
 }
 
-@test "fails closed with a diagnostic, not a false clean pass, on an unreachable GITHUB_SHA" {
-    # A garbage/unreachable SHA fails the script's own `git cat-file -e`
-    # reachability guard before `git diff` is even reached (exit 128, `set
-    # -euo pipefail` propagating it as-is) -- proving the overall script
-    # fails loudly on a bad commit reference rather than the `git diff`
-    # line silently reporting an empty changed-file set for one.
-    run bash -c "cd '$work_dir' && SPDX_BASE_SHA='$base_sha' SPDX_BASE_REF=main GITHUB_SHA='0000000000000000000000000000000000000000' bash scripts/check-pr-diff-file-headers.sh"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"fatal"* ]]
+@test "fails closed when git diff itself fails after both reachability checks pass" {
+    real_git="$(command -v git)"
+    mkdir -p "$fixture_root/bin"
+    cat > "$fixture_root/bin/git" <<EOF
+#!/usr/bin/env bash
+if [ "\${1-}" = diff ]; then
+    echo "synthetic git diff failure" >&2
+    exit 73
+fi
+exec "$real_git" "\$@"
+EOF
+    chmod +x "$fixture_root/bin/git"
+    run bash -c "cd '$work_dir' && PATH='$fixture_root/bin:$PATH' SPDX_BASE_SHA='$base_sha' SPDX_BASE_REF=main GITHUB_SHA='$base_sha' bash scripts/check-pr-diff-file-headers.sh"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"git diff\` itself failed"* ]]
 }
 
 @test "fails closed with a clear diagnostic when a required environment variable is missing" {

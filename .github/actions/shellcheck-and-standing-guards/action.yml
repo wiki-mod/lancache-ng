@@ -153,12 +153,9 @@ runs:
       # producer (`rustc -vV`, `rustup target list --installed`) receives
       # SIGPIPE -- `pipefail` then reports that as the pipeline's failure
       # even though the consumer itself matched. The scan is repo-wide
-      # (scripts/**, tools/**, setup.sh as of this scope's own current
-      # state -- see the script's own header comment for the full scope
-      # history; a services/** widening is real, separate, in-progress
-      # work, not yet reflected in scan_files itself, so it must not be
-      # listed here as already covered). Pure text scan, no Docker/LAN
-      # dependency of its own.
+      # (scripts/**, tools/**, services/**, and setup.sh -- see the
+      # script's own header comment for the full scope history). Pure
+      # text scan, no Docker/LAN dependency of its own.
       shell: bash
       run: |
         set -euo pipefail

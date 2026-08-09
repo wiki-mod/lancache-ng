@@ -65,17 +65,32 @@ setup() {
     [[ "$output" == *"All checked files"* ]]
 }
 
+@test "explicit-file mode rejects SPDX text embedded in executable content" {
+    printf 'const license = "SPDX-License-Identifier: AGPL-3.0-or-later";\n// lancache-ng (https://github.com/wiki-mod/lancache-ng)\n' > "$fixture_dir/example.js"
+    run bash "$script" "$fixture_dir/example.js"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"SPDX-License-Identifier"* ]]
+}
+
 @test "explicit-file mode normalizes a caller-relative path before applying the exclusion list" {
     # services/dhcp/kea-dhcp4.conf is a real tracked file, excluded by exact
     # repo-relative literal (JSON despite the .conf extension -- a header
     # would corrupt its syntax). Invoked here from inside services/dhcp
     # itself, so the path this script actually receives is the bare
     # "kea-dhcp4.conf" -- a spelling that does not match the exclusion
-    # list's repo-relative literal at all unless normalized first. Before
-    # the fix, this would have hard-failed the JSON file for a "missing"
+    # list's repo-relative literal at all unless normalized first. Without
+    # normalization, this hard-fails the JSON file for a "missing"
     # header/SPDX line it must never carry.
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     run bash -c "cd '$repo_root/services/dhcp' && bash '$script' 'kea-dhcp4.conf'"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"All checked files"* ]]
+}
+
+@test "explicit-file mode treats an option-like root filename as a path" {
+    fixture_file="$fixture_dir/-valid.sh"
+    printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\necho hi\n' > "$fixture_file"
+    run bash -c "cd '$fixture_dir' && bash '$script' '-valid.sh'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"All checked files"* ]]
 }

@@ -131,8 +131,8 @@ for path in "${files[@]}"; do
     # repos elsewhere on disk that were never meant to be repo_root-relative
     # in the first place).
     exclusion_key="$path"
-    if abs_dir=$(cd "$(dirname "$path")" 2>/dev/null && pwd); then
-        abs_path="$abs_dir/$(basename "$path")"
+    if abs_dir=$(cd "$(dirname -- "$path")" 2>/dev/null && pwd); then
+        abs_path="$abs_dir/$(basename -- "$path")"
         case "$abs_path" in
             "$repo_root"/*) exclusion_key="${abs_path#"$repo_root"/}" ;;
         esac
@@ -146,7 +146,7 @@ for path in "${files[@]}"; do
     # (after real content, after the header itself, or inside a string
     # literal that happens to contain it) would satisfy a plain grep across
     # the whole window but does not actually satisfy the rule.
-    if ! scanned="$(head -n "$HEADER_SCAN_LINES" "$path")"; then
+    if ! scanned="$(head -n "$HEADER_SCAN_LINES" -- "$path")"; then
         echo "::error::check-file-headers: could not read $path" >&2
         exit 1
     fi
@@ -158,7 +158,18 @@ for path in "${files[@]}"; do
     if [[ "${scanned_lines[0]-}" == '#!'* ]]; then
         spdx_line_index=1
     fi
-    if [[ "${scanned_lines[$spdx_line_index]-}" != *"$SPDX_TEXT"* ]]; then
+    expected_spdx_line=""
+    for scanned_line in "${scanned_lines[@]}"; do
+        if [[ "$scanned_line" == *"$HEADER_TEXT"* ]]; then
+            # The repository header already establishes the comment syntax
+            # valid for this file type, so deriving the SPDX form from that
+            # exact line avoids accepting license text inside executable
+            # content while keeping language-specific syntax in one place.
+            expected_spdx_line="${scanned_line/"$HEADER_TEXT"/"$SPDX_TEXT"}"
+            break
+        fi
+    done
+    if [ -z "$expected_spdx_line" ] || [ "${scanned_lines[$spdx_line_index]-}" != "$expected_spdx_line" ]; then
         missing_spdx+=("$path")
     fi
 done

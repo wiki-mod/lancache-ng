@@ -344,6 +344,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/file-headers-check
       - name: Select build-tools image
+        if: github.event_name == 'pull_request'
         # No `needs: validate-compose` here on purpose, mirroring
         # compose-healthchecks/pr-template-check's own deliberate choice to
         # stay independent of validate-compose's image selection (see this
@@ -379,13 +380,14 @@ jobs:
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work" \
-            -w /work \
+            -v "$PWD:/source:ro" \
+            -w /tmp \
             -e SPDX_BASE_SHA \
             -e SPDX_BASE_REF \
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
-            bash scripts/check-pr-diff-file-headers.sh
+            timeout --kill-after=30 --signal=KILL 300 bash -c \
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks:
     # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
@@ -755,6 +757,7 @@ jobs:
       # same three checks as the self-hosted file-headers job above.
       - uses: ./.github/actions/file-headers-check
       - name: Select build-tools image
+        if: github.event_name == 'pull_request'
         # This fallback job must resolve its own image rather than depending
         # on validate-compose's output (like the self-hosted job above does)
         # -- it exists specifically for when self-hosted runners (and
@@ -778,13 +781,14 @@ jobs:
           set -euo pipefail
           docker run --rm \
             --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work" \
-            -w /work \
+            -v "$PWD:/source:ro" \
+            -w /tmp \
             -e SPDX_BASE_SHA \
             -e SPDX_BASE_REF \
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
-            bash scripts/check-pr-diff-file-headers.sh
+            timeout --kill-after=30 --signal=KILL 300 bash -c \
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
@@ -1132,7 +1136,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Step content (ShellCheck/ActionLint plus 5 standing text/YAML guards) extracted
+      # Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted
       # into a composite action (issue #1095 duplication finding): this job and
       # shellcheck-hosted below used to carry the identical steps twice. Job-level
       # scheduling (needs/if/concurrency/permissions, and the docs-only skip in this

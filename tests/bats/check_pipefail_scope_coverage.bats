@@ -27,7 +27,7 @@ write_guard() {
         printf '#!/usr/bin/env bash\n'
         printf 'if ! tracked_scan_files="$(git ls-files -- \\\n'
         printf "  'scripts/*.sh' 'scripts/**/*.sh' \\\\\n"
-        printf "  'tools/*.sh' 'tools/**/*.sh' \\\\\n"
+        printf "  'tools/*.sh' 'tools/**/*.sh' 'tools/*/Dockerfile*' \\\\\n"
         local line
         for line in "$@"; do
             printf '%s\n' "$line"
@@ -43,12 +43,13 @@ write_bats() {
 }
 
 @test "passes when every required prefix (scripts, tools, setup.sh, services) has a matching fixture" {
-    write_guard "  'services/*.sh' 'services/**/*.sh' \\\\"
+    write_guard "  'services/*.sh' 'services/**/*.sh' 'services/*/Dockerfile*' \\\\"
     write_bats \
         'write_script "scripts/example.sh"' \
         'write_dockerfile "tools/build-tools/Dockerfile"' \
         'write_script "setup.sh"' \
-        'write_script "services/example-service/entrypoint.sh"'
+        'write_script "services/example-service/entrypoint.sh"' \
+        'write_dockerfile "services/example-service/Dockerfile"'
     run bash "$script" "$fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
@@ -56,10 +57,8 @@ write_bats() {
 
 @test "fails when the guard's own scope is missing a required prefix entirely -- not just uncovered by a fixture" {
     # REQUIRED_PREFIXES is pinned independently of the guard's own source
-    # specifically so this shape (the guard's real scan_files not yet
-    # scanning services/ at all, the actual confirmed state on this
-    # project's own repo before the sibling services/** scope-widening
-    # fix lands) fails loudly instead of silently agreeing with whatever
+    # specifically so a guard that does not scan services/ at all fails
+    # loudly instead of silently agreeing with whatever
     # the guard's own current text happens to say. A guard genuinely
     # missing a required prefix is a materially different, more serious
     # problem than merely lacking a bats fixture for a prefix it does
@@ -72,12 +71,12 @@ write_bats() {
         'write_script "setup.sh"'
     run bash "$script" "$fixture"
     [ "$status" -eq 1 ]
-    [[ "$output" == *"no longer scans these required prefixes"* ]]
+    [[ "$output" == *"no longer scans these required pathspec classes"* ]]
     [[ "$output" == *"services/"* ]]
 }
 
 @test "fails when a newly-widened scope prefix (services/) has no fixture -- the confirmed real gap" {
-    write_guard "  'services/*.sh' 'services/**/*.sh' \\\\"
+    write_guard "  'services/*.sh' 'services/**/*.sh' 'services/*/Dockerfile*' \\\\"
     write_bats \
         'write_script "scripts/example.sh"' \
         'write_dockerfile "tools/build-tools/Dockerfile"' \
@@ -88,19 +87,20 @@ write_bats() {
 }
 
 @test "passes once the services/ fixture is added alongside the widened scope" {
-    write_guard "  'services/*.sh' 'services/**/*.sh' \\\\"
+    write_guard "  'services/*.sh' 'services/**/*.sh' 'services/*/Dockerfile*' \\\\"
     write_bats \
         'write_script "scripts/example.sh"' \
         'write_dockerfile "tools/build-tools/Dockerfile"' \
         'write_script "setup.sh"' \
-        'write_script "services/example-service/entrypoint.sh"'
+        'write_script "services/example-service/entrypoint.sh"' \
+        'write_dockerfile "services/example-service/Dockerfile"'
     run bash "$script" "$fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
 }
 
 @test "does not count a prefix only mentioned in a comment line as covered" {
-    write_guard "  'services/*.sh' 'services/**/*.sh' \\\\"
+    write_guard "  'services/*.sh' 'services/**/*.sh' 'services/*/Dockerfile*' \\\\"
     write_bats \
         '# services/ coverage is intentionally not implemented yet' \
         'write_script "scripts/example.sh"' \
@@ -119,12 +119,25 @@ write_bats() {
     # run, silently exiting 1 with no explanation at all instead of the
     # real "missing scripts/, tools/, setup.sh, services/" report this test
     # asserts on.
-    write_guard "  'services/*.sh' 'services/**/*.sh' \\\\"
+    write_guard "  'services/*.sh' 'services/**/*.sh' 'services/*/Dockerfile*' \\\\"
     write_bats '# no real fixtures here, only this comment line'
     run bash "$script" "$fixture"
     [ "$status" -eq 1 ]
     [[ "$output" == *"no fixture exercising"* ]]
     [[ "$output" == *"scripts/"* ]]
+}
+
+@test "fails when service shell paths remain but the service Dockerfile class is removed" {
+    write_guard "  'services/*.sh' 'services/**/*.sh' \\"
+    write_bats \
+        'write_script "scripts/example.sh"' \
+        'write_dockerfile "tools/build-tools/Dockerfile"' \
+        'write_script "setup.sh"' \
+        'write_script "services/example-service/entrypoint.sh"' \
+        'write_dockerfile "services/example-service/Dockerfile"'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/*/Dockerfile*"* ]]
 }
 
 @test "fails closed when the guard script itself is missing from the given directory" {

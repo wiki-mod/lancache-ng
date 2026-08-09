@@ -72,6 +72,12 @@ done
 # for that rule) and must be updated by hand, deliberately, whenever that
 # documented scope changes -- never automatically re-derived from the guard.
 REQUIRED_PREFIXES=(scripts/ tools/ setup.sh services/)
+REQUIRED_PATTERNS=(
+    'scripts/*.sh' 'scripts/**/*.sh'
+    'tools/*.sh' 'tools/**/*.sh' 'tools/*/Dockerfile*'
+    'services/*.sh' 'services/**/*.sh' 'services/*/Dockerfile*'
+    'setup.sh'
+)
 
 # Extract the quoted pathspec literals from the guard's own `git ls-files --
 # ...` discovery block, then reduce each to its top-level prefix: a leading
@@ -80,6 +86,28 @@ mapfile -t raw_patterns < <(grep -oE "'[a-zA-Z0-9_.*/-]+'" "$guard_script" | tr 
 
 if [ "${#raw_patterns[@]}" -eq 0 ]; then
     printf '::error::check-pipefail-scope-coverage: found no scan_files pathspecs in %s -- did its git ls-files block change shape?\n' "$guard_script" >&2
+    exit 1
+fi
+
+# Prefix coverage alone cannot distinguish service shell scripts from
+# service Dockerfiles. Preserve every policy-required pathspec verbatim so
+# retaining one services/** class cannot conceal removal of the other.
+missing_patterns=()
+for required_pattern in "${REQUIRED_PATTERNS[@]}"; do
+    found=0
+    for actual_pattern in "${raw_patterns[@]}"; do
+        if [ "$actual_pattern" = "$required_pattern" ]; then
+            found=1
+            break
+        fi
+    done
+    if [ "$found" -eq 0 ]; then
+        missing_patterns+=("$required_pattern")
+    fi
+done
+if [ "${#missing_patterns[@]}" -gt 0 ]; then
+    printf '::error::check-pipefail-scope-coverage: %s no longer scans these required pathspec classes:\n' "$guard_script" >&2
+    printf '  %s\n' "${missing_patterns[@]}" >&2
     exit 1
 fi
 
@@ -132,6 +160,13 @@ for prefix in "${!prefixes[@]}"; do
         missing+=("$prefix")
     fi
 done
+
+# A services shell fixture does not exercise the separate service-Dockerfile
+# discovery path. Require both forms explicitly in addition to the general
+# prefix check above.
+if ! grep -qF 'services/example-service/Dockerfile' <<<"$non_comment_bats"; then
+    missing+=("services/*/Dockerfile*")
+fi
 
 if [ "${#missing[@]}" -gt 0 ]; then
     printf '::error::check-pipefail-scope-coverage: %s has no fixture exercising these scan_files prefixes from %s:\n' "$guard_bats" "$guard_script" >&2
