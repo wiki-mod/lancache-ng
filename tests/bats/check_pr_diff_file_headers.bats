@@ -89,8 +89,8 @@ teardown() {
 }
 
 @test "correctly captures and checks a changed file whose name contains a space" {
-    # The real-world shape Xd2L4 exists for: `git diff --name-only`'s
-    # default output C-quotes an unusual pathname, which
+    # `git diff --name-only`'s default output C-quotes an unusual pathname,
+    # which
     # `mapfile -t x < <(...)` would store as the literal quoted string
     # rather than the real path -- `-z` plus NUL-delimited reading must
     # produce the real, usable filename instead.
