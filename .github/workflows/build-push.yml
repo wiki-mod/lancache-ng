@@ -342,7 +342,13 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select immutable build-tools image
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - uses: ./.github/actions/file-headers-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
   compose-healthchecks:
     # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
@@ -703,16 +709,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select immutable build-tools image
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Coverage fix (issue #1095): this used to only run "Check repository header on all
-      # tracked files", silently never running the workflow line-count ceiling, the
-      # review-chronology, or the dependabot-docker-base-consistency checks at all when
-      # self-hosted runners were down. Now runs the same checks as the self-hosted
-      # file-headers job above -- see that composite action's own name/description for
-      # the current count, rather than restating it here where it can go stale again.
+      # Use the same composite action as the self-hosted job so runner fallback cannot
+      # silently weaken repository-hygiene coverage. The action metadata is the single
+      # source of truth for its current checks, avoiding a count that can drift here.
       - uses: ./.github/actions/file-headers-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)

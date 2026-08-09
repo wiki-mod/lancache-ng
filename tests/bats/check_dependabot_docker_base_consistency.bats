@@ -489,8 +489,8 @@ EOF
 }
 
 @test "accepts lowercase global ARG instructions without awk-specific extensions" {
-    # Dockerfile instructions are case-insensitive, and this host-run guard
-    # must behave consistently across the awk implementations on CI runners.
+    # Dockerfile instructions are case-insensitive, so parsing must not rely
+    # on an awk implementation's optional case-folding extensions.
     write_dependabot_docker_block
     mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
     cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
