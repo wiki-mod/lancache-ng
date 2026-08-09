@@ -8,6 +8,7 @@ setup() {
   FAKE_DOCKER="$BATS_TEST_TMPDIR/docker-real"
   LOG="$BATS_TEST_TMPDIR/docker.log"
   OVERRIDE_COPY="$BATS_TEST_TMPDIR/override.json"
+  MODEL_COPY="$BATS_TEST_TMPDIR/model.json"
 
   cat >"$LOCK" <<'JSON'
 {
@@ -57,23 +58,25 @@ if [[ "${1:-}" == compose ]]; then
       exit 23
     fi
     cat <<'JSON'
-{"services":{"proxy":{"image":"ghcr.io/wiki-mod/lancache-ng/proxy:candidate-v2-test"},"external":{"image":"busybox:latest"}}}
+{"name":"fixture-project","services":{"proxy":{"image":"ghcr.io/wiki-mod/lancache-ng/proxy:candidate-v2-test"},"external":{"image":"busybox:latest"}}}
 JSON
     exit 0
   fi
 
-  override=""
   for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[$i]}" == -f && $((i + 1)) -lt ${#args[@]} ]]; then
       candidate="${args[$((i + 1))]}"
-      if [[ -f "$candidate" ]] && jq -e '.services.proxy.image? // empty' "$candidate" >/dev/null 2>&1; then
-        override="$candidate"
+      if [[ -f "$candidate" && -n "${FAKE_MODEL_COPY:-}" ]] \
+          && jq -e '.services.external.image? // empty' "$candidate" >/dev/null 2>&1; then
+        cp "$candidate" "$FAKE_MODEL_COPY"
+      fi
+      if [[ -f "$candidate" && -n "${FAKE_OVERRIDE_COPY:-}" ]] \
+          && jq -e '.services.proxy.image? // empty' "$candidate" >/dev/null 2>&1 \
+          && ! jq -e '.services.external.image? // empty' "$candidate" >/dev/null 2>&1; then
+        cp "$candidate" "$FAKE_OVERRIDE_COPY"
       fi
     fi
   done
-  if [[ -n "$override" && -n "${FAKE_OVERRIDE_COPY:-}" ]]; then
-    cp "$override" "$FAKE_OVERRIDE_COPY"
-  fi
 fi
 exit 0
 SH
@@ -139,13 +142,47 @@ SH
     CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
     FAKE_DOCKER_LOG="$LOG" \
     FAKE_OVERRIDE_COPY="$OVERRIDE_COPY" \
+    FAKE_MODEL_COPY="$MODEL_COPY" \
     bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
       compose -f "$base" pull
 
   [ "$status" -eq 0 ]
+  [ -f "$MODEL_COPY" ]
   [ -f "$OVERRIDE_COPY" ]
+  run jq -e '.services.external.image == "busybox:latest"' "$MODEL_COPY"
+  [ "$status" -eq 0 ]
   run jq -e '.services.proxy.image == "ghcr.io/wiki-mod/lancache-ng/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$OVERRIDE_COPY"
   [ "$status" -eq 0 ]
+}
+
+@test "bare compose keeps the complete discovered model before the digest override" {
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    FAKE_OVERRIDE_COPY="$OVERRIDE_COPY" \
+    FAKE_MODEL_COPY="$MODEL_COPY" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      compose pull
+
+  [ "$status" -eq 0 ]
+  [ -f "$MODEL_COPY" ]
+  [ -f "$OVERRIDE_COPY" ]
+
+  run jq -e '.services.external.image == "busybox:latest"' "$MODEL_COPY"
+  [ "$status" -eq 0 ]
+  run jq -e '.services.proxy.image == "ghcr.io/wiki-mod/lancache-ng/proxy:candidate-v2-test"' "$MODEL_COPY"
+  [ "$status" -eq 0 ]
+  run jq -e '.services.proxy.image == "ghcr.io/wiki-mod/lancache-ng/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"' "$OVERRIDE_COPY"
+  [ "$status" -eq 0 ]
+
+  mapfile -t calls <"$LOG"
+  [ "${#calls[@]}" -eq 2 ]
+  [[ "${calls[0]}" == *"compose config --format json"* ]]
+  file_flag_count="$(grep -o -- '-f ' <<<"${calls[1]}" | wc -l | tr -d ' ')"
+  [ "$file_flag_count" -eq 2 ]
 }
 
 @test "compose render failure preserves the real failing status" {
