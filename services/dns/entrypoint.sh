@@ -1156,7 +1156,11 @@ _dns_ensure_zone_exists() {
     if [ "$create_status" -eq 0 ]; then
         return 0
     fi
-    if printf '%s' "$create_output" | grep -qi "already exists"; then
+    # pdnsutil's real message is "Zone '<name>' exists already" (confirmed
+    # empirically against the actual binary) -- "already exists" never
+    # matches that word order, so this tolerance never actually fired and
+    # every restart against an existing zone fell through to the fatal branch.
+    if printf '%s' "$create_output" | grep -qi "exists already"; then
         return 0
     fi
     echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2

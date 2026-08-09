@@ -56,9 +56,9 @@ pdnsutil() {
 # The routine, expected case on every container restart: create-zone fails
 # because the zone is already there. Must stay non-fatal, exactly like the
 # old blanket `|| true` was for this specific case.
-@test "an already-existing zone (create-zone fails with an 'already exists' message) is not fatal" {
+@test "an already-existing zone (create-zone fails with pdnsutil's real 'exists already' message) is not fatal" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' already exists"
+    PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' exists already"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -67,9 +67,9 @@ pdnsutil() {
 # Case-insensitivity: PowerDNS's own real message casing has varied across
 # versions/locales in this project's own experience elsewhere -- the check
 # must not be brittle to exact case.
-@test "an 'already exists' match is case-insensitive" {
+@test "an 'exists already' match is case-insensitive" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="ALREADY EXISTS"
+    PDNSUTIL_CREATE_ZONE_STDERR="EXISTS ALREADY"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -114,7 +114,7 @@ pdnsutil() {
 @test "the already-exists tolerance still holds when set -e is actually active, like in the real entrypoint" {
     export -f pdnsutil
     export PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    export PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' already exists"
+    export PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' exists already"
     export pdnsutil_calls
     run bash -c "set -euo pipefail; source '$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh'; _dns_ensure_zone_exists lan; echo REACHED_AFTER_CALL"
 
