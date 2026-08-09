@@ -140,7 +140,7 @@ ci_lock_split_compose_args() {
     while (( i < ${#input_ref[@]} )); do
         arg="${input_ref[$i]}"
         case "$arg" in
-            -f|--file|--project-directory|--env-file|--project-name|--profile|--ansi|--progress)
+            -f|--file|-p|--project-name|--project-directory|--env-file|--profile|--ansi|--progress|--parallel)
                 if (( i + 1 >= ${#input_ref[@]} )); then
                     ci_ai_fail "docker compose option $arg is missing its value"
                     return 1
@@ -148,17 +148,17 @@ ci_lock_split_compose_args() {
                 globals_ref+=("$arg" "${input_ref[$((i + 1))]}")
                 i=$((i + 2))
                 ;;
-            --file=*|--project-directory=*|--env-file=*|--project-name=*|--profile=*|--ansi=*|--progress=*)
+            --file=*|-p=*|--project-name=*|--project-directory=*|--env-file=*|--profile=*|--ansi=*|--progress=*|--parallel=*)
                 globals_ref+=("$arg")
                 i=$((i + 1))
                 ;;
-            --compatibility|--dry-run|--all-resources)
+            --compatibility|--dry-run|--all-resources|--verbose)
                 globals_ref+=("$arg")
                 i=$((i + 1))
                 ;;
             -*)
-                globals_ref+=("$arg")
-                i=$((i + 1))
+                ci_ai_fail "unsupported docker compose global option under stack lock: $arg"
+                return 1
                 ;;
             *)
                 break
