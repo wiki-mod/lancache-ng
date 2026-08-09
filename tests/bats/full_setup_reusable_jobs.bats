@@ -4,33 +4,42 @@
 #
 # The reusable full-setup workflow intentionally centralizes repeated setup
 # logic. This guard keeps that deduplication from silently deleting a mature
-# simulation job while still allowing new jobs to be added without maintaining
-# another exact-count constant.
+# simulation while allowing compatible simulations to share one stack job.
 
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   WORKFLOW="$REPO_ROOT/.github/workflows/full-setup-sims.yml"
 }
 
-@test "reusable full-setup suite retains every established simulation job" {
+@test "reusable suite retains the shared-stack owner and isolated topology jobs" {
   required_jobs=(
-    compute-validation-network
-    full-setup-validate
-    ssl-mitm-cache-simulation
+    shared-full-setup-stack
     proxy-deep-wildcard-tls-simulation
     proxy-standard-mode-sni-routing-simulation
     proxy-ssl-mode-two-relay-dispatch-simulation
-    ui-nats-dns-integration-simulation
     setup-cli-simulation
     dhcp-kea-lease-flow-simulation
-    nats-auth-callout-simulation
-    ui-reachability-crash-loop-simulation
     setup-reset-kea-config-simulation
-    setup-reset-dns-config-simulation
   )
 
   for job in "${required_jobs[@]}"; do
     run grep -Eq "^  ${job}:$" "$WORKFLOW"
+    [ "$status" -eq 0 ]
+  done
+}
+
+@test "mature compatible simulations remain present inside the shared-stack job" {
+  required_scripts=(
+    full-setup-client-simulation.sh
+    ssl-mitm-cache-simulation.sh
+    ui-nats-dns-integration-simulation.sh
+    setup-reset-dns-config-simulation.sh
+    nats-secondary-auth-callout-simulation.sh
+    ui-reachability-crash-loop-simulation.sh
+  )
+
+  for script in "${required_scripts[@]}"; do
+    run grep -F "bash scripts/$script" "$WORKFLOW"
     [ "$status" -eq 0 ]
   done
 }
