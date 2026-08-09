@@ -100,3 +100,48 @@ runs:
         done
         echo "::error::All custom attestation attempts failed for ${{ inputs.subject-name }}@${{ inputs.subject-digest }}." >&2
         exit 1
+
+    - name: Verify final acceptance attestation roundtrip
+      if: >-
+        inputs.predicate-type == 'https://wiki-mod.github.io/lancache-ng/attestations/acceptance/v1' ||
+        inputs.predicate-type == 'https://wiki-mod.github.io/lancache-ng/attestations/release/v1'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.password }}
+        SUBJECT_NAME: ${{ inputs.subject-name }}
+        SUBJECT_DIGEST: ${{ inputs.subject-digest }}
+        PREDICATE_TYPE: ${{ inputs.predicate-type }}
+        PREDICATE_PATH: ${{ inputs.predicate-path }}
+      run: |
+        set -euo pipefail
+        : "${GITHUB_WORKFLOW_REF:?GITHUB_WORKFLOW_REF is required}"
+        : "${GITHUB_REF:?GITHUB_REF is required}"
+        : "${GITHUB_SHA:?GITHUB_SHA is required}"
+        signer_workflow="${GITHUB_WORKFLOW_REF%@*}"
+        [[ "$signer_workflow" == "$GITHUB_REPOSITORY/.github/workflows/"* ]] || {
+          echo "::error::Could not derive caller workflow identity from GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" >&2
+          exit 1
+        }
+
+        work_dir="$(mktemp -d)"
+        trap 'rm -rf "$work_dir"' EXIT
+        gh_bin="$(timeout --kill-after=30 600 bash "$GITHUB_WORKSPACE/scripts/ci-install-gh-attestation-verifier.sh" "$work_dir/gh")"
+        verification_json="$work_dir/verification.json"
+        timeout --kill-after=30 300 "$gh_bin" attestation verify \
+          "oci://${SUBJECT_NAME}@${SUBJECT_DIGEST}" \
+          --repo "$GITHUB_REPOSITORY" \
+          --predicate-type "$PREDICATE_TYPE" \
+          --signer-workflow "$signer_workflow" \
+          --source-ref "$GITHUB_REF" \
+          --source-digest "$GITHUB_SHA" \
+          --bundle-from-oci \
+          --format json >"$verification_json"
+
+        expected="$(jq -cS '.' "$PREDICATE_PATH")"
+        jq -e --argjson expected "$expected" '
+          length > 0
+          and any(.[]; .verificationResult.statement.predicate == $expected)
+        ' "$verification_json" >/dev/null || {
+          echo "::error::No verified final-acceptance predicate exactly matches $PREDICATE_PATH" >&2
+          exit 1
+        }
