@@ -48,21 +48,6 @@ jobs:
           [[ "$ACCEPTED_STACK_TAG" == accepted-v2-* ]] \
             || { echo "::error::accepted_stack_tag must be an immutable accepted-v2-* tag"; exit 1; }
 
-      # Promotion/backfill correctness already has one repository-wide mutex.
-      # V2 joins that same critical section rather than inventing a second lock
-      # that could race the existing production promote path.
-      - name: Acquire the cross-workflow promote lock
-        env:
-          GITHUB_RUN_ID: ${{ github.run_id }}
-          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
-          RUNNER_NAME: ${{ runner.name }}
-        run: |
-          set -euo pipefail
-          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
-          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
-          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
-          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
-
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -103,6 +88,36 @@ jobs:
           branch_tip="$(git rev-parse "origin/${branch}^{commit}")"
           [[ "$source_sha" == "$branch_tip" ]] || {
             echo "::error::Accepted source $source_sha is not current origin/$branch tip $branch_tip. Refusing stale or cross-branch promotion."
+            exit 1
+          }
+          printf 'CHANNEL_BRANCH=%s\n' "$branch" >> "$GITHUB_ENV"
+
+      # Keep the global cross-workflow mutex around the mutable publication
+      # section only. Cryptographic acceptance verification and the first
+      # branch-tip proof above are read-only and do not need to block another
+      # promotion/backfill writer. The branch tip is fetched and checked again
+      # immediately after acquisition before any GHCR reference is moved.
+      - name: Acquire the cross-workflow promote lock
+        env:
+          GITHUB_RUN_ID: ${{ github.run_id }}
+          GITHUB_RUN_ATTEMPT: ${{ github.run_attempt }}
+          RUNNER_NAME: ${{ runner.name }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/promote-lock.sh"
+          holder_note="$(promote_lock_holder_note "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" "$RUNNER_NAME")"
+          echo "Acquiring $PROMOTE_LOCK_REF as: $holder_note"
+          promote_lock_acquire_with_retry origin "$holder_note" 40 15 900
+
+      - name: Re-prove accepted source after promote lock acquisition
+        run: |
+          set -euo pipefail
+          : "${CHANNEL_BRANCH:?CHANNEL_BRANCH is required}"
+          source_sha="$(jq -r '.source_sha' "$RUNNER_TEMP/stack-lock.json")"
+          git fetch --no-tags origin "$CHANNEL_BRANCH"
+          branch_tip="$(git rev-parse "origin/${CHANNEL_BRANCH}^{commit}")"
+          [[ "$source_sha" == "$branch_tip" ]] || {
+            echo "::error::origin/$CHANNEL_BRANCH moved to $branch_tip before publication; accepted source $source_sha is now stale."
             exit 1
           }
 
