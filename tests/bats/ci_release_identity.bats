@@ -206,6 +206,20 @@ JSON
   done
 }
 
+@test "promotion and release roll back mutable refs in reverse publication order" {
+  reverse_loop='for ((index=${#promoted_targets[@]} - 1; index >= 0; index--)); do'
+  forward_loop='for target in "${promoted_targets[@]}"; do'
+
+  for workflow in \
+    "$REPO_ROOT/.github/workflows/ci-promote-accepted-v2.yml" \
+    "$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"; do
+    run grep -F "$reverse_loop" "$workflow"
+    [ "$status" -eq 0 ]
+    run grep -F "$forward_loop" "$workflow"
+    [ "$status" -ne 0 ]
+  done
+}
+
 @test "release evidence artifacts are collision-free and SBOM JSON cannot be counted as gate evidence" {
   workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
 
