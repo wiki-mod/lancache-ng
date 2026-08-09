@@ -1,6 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Resolves one exact Git remote ref with bounded retries for transient failures.
 
 set -euo pipefail
