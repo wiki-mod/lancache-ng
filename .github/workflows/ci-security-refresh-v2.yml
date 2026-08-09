@@ -85,7 +85,8 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: time
         run: printf 'bucket=%s\n' "$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
-      - name: Re-scan accepted child digest
+      - id: trivy
+        name: Re-scan accepted child digest
         uses: ./.github/actions/trivy-scan-with-cache
         with:
           image-ref: ${{ matrix.image }}@${{ matrix.digest }}
@@ -100,8 +101,9 @@ jobs:
             --arg service "${{ matrix.service }}" \
             --arg platform "${{ matrix.platform }}" \
             --arg digest "${{ matrix.digest }}" \
+            --arg trivy_db_freshness_bucket "${{ steps.trivy.outputs.db-freshness-bucket }}" \
             --arg scanned_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-            '{schema:"security-refresh/v1", service:$service, platform:$platform, digest:$digest, trivy:"passed", scanned_at:$scanned_at}' \
+            '{schema:"security-refresh/v1", service:$service, platform:$platform, digest:$digest, trivy:"passed", trivy_db_freshness_bucket:$trivy_db_freshness_bucket, scanned_at:$scanned_at}' \
             > evidence/security-refresh.json
       - name: Attest refreshed evidence to exact digest with GHCR retry
         uses: ./.github/actions/ghcr-custom-attest-retry
