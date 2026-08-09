@@ -38,7 +38,7 @@ setup() {
         git config user.email test@example.invalid
         git config user.name "Test"
         git remote add origin "$origin_dir"
-        printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\necho hi\n' > example.sh
+        printf '#!/usr/bin/env bash\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\necho hi\n' > example.sh
         git add example.sh scripts
         git commit --quiet -m "base commit"
         git push --quiet origin main
@@ -58,8 +58,7 @@ teardown() {
     # informational "From ... -> FETCH_HEAD" line even for a real, expected,
     # no-op fetch of an already-present ref/SHA. The actual contract is "no
     # header-violation diagnostic," not total silence.
-    [[ "$output" != *"Missing the required"* ]]
-    [[ "$output" != *"SPDX-License-Identifier"* ]]
+    [[ "$output" != *"Invalid repository file header layout"* ]]
 }
 
 @test "checks a real changed file and fails on one missing the required header" {
@@ -73,13 +72,13 @@ teardown() {
     run bash -c "cd '$work_dir' && SPDX_BASE_SHA='$base_sha' SPDX_BASE_REF=main GITHUB_SHA='$head_sha' bash scripts/check-pr-diff-file-headers.sh"
     [ "$status" -eq 1 ]
     [[ "$output" == *"bad.sh"* ]]
-    [[ "$output" == *"Missing the required repository header"* ]]
+    [[ "$output" == *"Invalid repository file header layout"* ]]
 }
 
-@test "passes on a real changed file that carries both required lines" {
+@test "passes on a real changed file that carries the canonical three-line header" {
     (
         cd "$work_dir"
-        printf '#!/usr/bin/env bash\n# SPDX-License-Identifier: AGPL-3.0-or-later\n# lancache-ng (https://github.com/wiki-mod/lancache-ng)\necho compliant\n' > good.sh
+        printf '#!/usr/bin/env bash\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\necho compliant\n' > good.sh
         git add good.sh
         git commit --quiet -m "add a compliant file"
     )
