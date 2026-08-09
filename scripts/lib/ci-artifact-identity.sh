@@ -203,10 +203,11 @@ ci_ai_ref_digest_optional() {
         status=$?
     fi
 
-    # Buildx/registry implementations use several equivalent forms for a
-    # genuinely missing manifest/tag. Keep the allow-list narrow: only these
-    # explicit absence responses are converted to the dedicated status.
-    if grep -Eiq '(manifest unknown|name unknown|404[[:space:]]+not[[:space:]]+found|(^|[^[:alpha:]])not found([^[:alpha:]]|$))' "$error_file"; then
+    # Only registry-shaped absence messages may become the dedicated absent
+    # state. A generic "not found" is deliberately insufficient because it can
+    # also describe a missing credential helper, executable or local file.
+    if grep -Eiq '(manifest unknown|name unknown|404[[:space:]]+not[[:space:]]+found)' "$error_file" \
+        || grep -Eiq 'ghcr\.io/[[:alnum:]./_-]+(:[^[:space:]]+|@sha256:[0-9a-f]{64}):[[:space:]]+not[[:space:]]+found' "$error_file"; then
         rm -f "$error_file"
         return "$CI_AI_REF_ABSENT_STATUS"
     fi
