@@ -48,3 +48,29 @@ export PATH="$shim_dir:$PATH"
 # execution, with running first-party identities asserted after every `up`.
 # shellcheck source=scripts/syslog-forwarding-simulation.sh
 source "$repo_root/scripts/syslog-forwarding-simulation.sh"
+
+# Independent final readback from Docker itself. The behavioral script leaves
+# its stack running until its EXIT trap fires, so every Compose-owned container
+# is still observable here. This does not trust the transport tag or Compose
+# source model: it reads .Config.Image from each live container and compares
+# every first-party reference to the exact runtime digest in the stack lock.
+asserted=0
+while IFS= read -r cid; do
+    [[ -n "$cid" ]] || continue
+    actual="$(command docker inspect --format '{{.Config.Image}}' "$cid")"
+    [[ "$actual" == ghcr.io/wiki-mod/lancache-ng/* ]] || continue
+    [[ "$actual" == *@sha256:* ]] \
+        || ci_ai_fail "quickstart container $cid is first-party but not digest-qualified: $actual"
+    image="${actual%@*}"
+    digest="${actual#*@}"
+    expected="$(jq -r --arg image "$image" '.runtime[] | select(.image == $image) | .digest' "$lock")"
+    ci_ai_require_digest "$expected" \
+        || ci_ai_fail "quickstart container $cid uses first-party image $image with no valid lock digest"
+    [[ "$digest" == "$expected" ]] \
+        || ci_ai_fail "quickstart container $cid runs $actual instead of $image@$expected"
+    asserted=$((asserted + 1))
+done < <(command docker ps --filter "label=com.docker.compose.project=${compose_project:?compose_project is required}" -q)
+
+(( asserted > 0 )) \
+    || ci_ai_fail "quickstart simulation ended with no live first-party container identity to verify"
+printf 'Quickstart deep validation final readback asserted %d locked first-party container identities.\n' "$asserted"
