@@ -118,7 +118,11 @@ setup() {
 # silently disables or duplicates the other's map when both are configured
 # together, the realistic "maximum hardening" deployment shape.
 @test "strict mode and a client CIDR allowlist combine independently without interfering" {
+    # The real function body is extracted and sourced at runtime, so ShellCheck
+    # cannot connect these globals to the reads inside _render_ssl_map.
+    # shellcheck disable=SC2034
     PROXY_SECURITY_MODE="strict"
+    # shellcheck disable=SC2034
     PROXY_ALLOWED_CLIENT_CIDRS="192.168.1.0/24"
     _UNIQUE_DOMAINS=(steamcontent.com)
     _DOMAIN_IS_ROOT[steamcontent.com]=1

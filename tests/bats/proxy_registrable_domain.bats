@@ -26,6 +26,9 @@ setup() {
     # Real vendored PSL data, not a fixture -- if upstream ever removes or
     # reshapes the specific rules these tests key on (co.uk, kawasaki.jp),
     # that is itself useful signal, not a false failure to work around.
+    # ShellCheck cannot see that the dynamically extracted function reads this
+    # global after the helper sources it.
+    # shellcheck disable=SC2034
     PUBLIC_SUFFIX_LIST_FILE="$repo_root/services/proxy/public_suffix_list.dat"
     _load_public_suffix_list
 }

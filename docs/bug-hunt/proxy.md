@@ -325,12 +325,15 @@ inside the cache path tree itself, so nothing ever writes to
 - `tests/bats/proxy_cert_dir_permissions.bats` now drives the real CA and
   certificate-directory hardening functions. It proves the explicit key-mode
   correction with an insecure-key stub and records the requested group, so
-  the assertions depend on the production `chmod` and `chgrp` calls.
+  the assertions depend on the production `chmod` and `chgrp` calls. The later
+  per-certificate `*.key` ownership and mode pass remains uncovered: this suite
+  does not exercise the `find "$CERT_DIR" ... -exec chmod 0640` command.
 - `tests/bats/proxy_registrable_domain.bats` now covers compound-label public
   suffixes, bare-suffix rejection, and PSL wildcard/exception precedence.
 - `tests/bats/proxy_ssl_map_generation.bats` now isolates the strict/lazy host
-  map and client-CIDR map syntax. Request-level 403 behavior remains covered
-  only by the full-stack simulations rather than this unit suite.
+  map and client-CIDR map syntax. No automated request traverses either map's
+  HTTP/HTTPS denial path and asserts the resulting 403; the full-stack
+  simulation's denied client is rejected earlier by the stream ACL.
 
 **Severity assessment**: info (test-coverage gaps, collected per the
 methodology even though several are restatements of the SoT's own findings
@@ -578,11 +581,14 @@ are appended after the verdicts.
    keeps temp files in the cache tree, so nothing writes there.
 
 9. **Test-coverage gaps** — PARTIALLY CLOSED (info). Dedicated Bats suites now
-   cover incomplete multi-file snapshots, CA/key and certificate-directory
+   cover incomplete multi-file snapshots, CA-key and certificate-directory
    hardening, PSL compound/exception behavior, and generated strict/lazy and
    client-CIDR policy maps. The snapshot tests still use a reduced candidate
-   fixture and do not exercise the degraded-domain-row branch; request-level
-   403 behavior remains an integration concern rather than a unit assertion.
+   fixture and do not exercise the degraded-domain-row branch. The later
+   per-certificate `*.key` ownership/`0640` pass remains untested, as do the
+   HTTP/HTTPS request paths that consume either generated policy map and return
+   403; the full-stack simulation rejects its denied client at the stream ACL
+   before a request reaches those maps.
 
 10. **`/nginx_status` ACL IPv4-only** — CONFIRMED (info, latent). `http.conf:25`
     `allow 172.16.0.0/12`. No `enable_ipv6` on any deploy network (grep
