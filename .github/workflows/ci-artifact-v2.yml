@@ -69,6 +69,7 @@ jobs:
     outputs:
       matrix: ${{ steps.plan.outputs.matrix }}
       candidate_tag: ${{ steps.config.outputs.candidate_tag }}
+      refresh_bucket: ${{ steps.config.outputs.refresh_bucket }}
       supplemental: ${{ steps.config.outputs.supplemental }}
     permissions:
       contents: read
@@ -87,12 +88,14 @@ jobs:
           set -euo pipefail
           reuse_tag=none
           supplemental=true
+          refresh_bucket="$(date -u +%G-W%V)"
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch ]]; then
             reuse_tag="${DISPATCH_REUSE_STACK_TAG:-none}"
             supplemental="${DISPATCH_SUPPLEMENTAL:-true}"
           fi
           printf 'candidate_tag=%s\n' "$CANDIDATE_TAG" >> "$GITHUB_OUTPUT"
           printf 'reuse_tag=%s\n' "$reuse_tag" >> "$GITHUB_OUTPUT"
+          printf 'refresh_bucket=%s\n' "$refresh_bucket" >> "$GITHUB_OUTPUT"
           printf 'supplemental=%s\n' "$supplemental" >> "$GITHUB_OUTPUT"
 
       - name: Login to GHCR for accepted-baseline reads
@@ -157,6 +160,8 @@ jobs:
             -e CI_BOOTSTRAP_BUILD_TOOLS_IMAGE \
             -e CI_GOLANG_BASE_IMAGE \
             -e CI_RUST_BASE_IMAGE \
+            -e CI_SOURCE_APT_CACHE_BUST="${{ steps.config.outputs.refresh_bucket }}" \
+            -e CI_SOURCE_REQUIRE_APT_CACHE_BUST=true \
             "${baseline_args[@]}" \
             -v "$PWD:/work:ro" \
             -v "$RUNNER_TEMP/ci-v2-out:/tmp/out" \
@@ -239,15 +244,20 @@ jobs:
         env:
           SOURCE_DOCKERFILE: ${{ matrix.source }}
           MATRIX_BUILD_ARGS: ${{ matrix.build_args }}
+          REFRESH_BUCKET: ${{ needs.plan.outputs.refresh_bucket }}
         run: |
           set -euo pipefail
+          [[ "$REFRESH_BUCKET" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || {
+            echo "::error::invalid frozen refresh bucket: ${REFRESH_BUCKET:-<empty>}"
+            exit 1
+          }
           {
             echo 'args<<EOF'
             if [[ -n "$MATRIX_BUILD_ARGS" ]]; then
               printf '%s\n' "$MATRIX_BUILD_ARGS"
             fi
             if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$SOURCE_DOCKERFILE"; then
-              printf 'APT_CACHE_BUST=%s\n' "$(date -u +%G-W%V)"
+              printf 'APT_CACHE_BUST=%s\n' "$REFRESH_BUCKET"
             fi
             echo EOF
           } >> "$GITHUB_OUTPUT"
@@ -296,6 +306,8 @@ jobs:
           MATRIX_MODE: ${{ matrix.mode }}
           REUSED_INDEX_DIGEST: ${{ matrix.reused_index_digest }}
           CI_SOURCE_BUILD_INPUTS_JSON: ${{ toJSON(matrix.build_inputs) }}
+          CI_SOURCE_APT_CACHE_BUST: ${{ needs.plan.outputs.refresh_bucket }}
+          CI_SOURCE_REQUIRE_APT_CACHE_BUST: "true"
         run: |
           set -euo pipefail
           digest="$BUILT_DIGEST"
