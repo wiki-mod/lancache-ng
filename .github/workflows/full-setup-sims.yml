@@ -133,6 +133,62 @@ jobs:
             exit 1
           }
 
+      - name: Verify every active shared-stack service is present and running
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          if ! expected_output="$(docker compose config --services)"; then
+            echo "::error::Could not enumerate the active Compose service model."
+            exit 1
+          fi
+          mapfile -t expected_services <<<"$expected_output"
+          (( ${#expected_services[@]} > 0 )) || {
+            echo "::error::The active Compose model contains no services."
+            exit 1
+          }
+
+          failed=0
+          for service in "${expected_services[@]}"; do
+            if ! cid_output="$(docker compose ps -a -q "$service")"; then
+              echo "::error::Could not query container identity for active service '$service'."
+              failed=1
+              continue
+            fi
+            mapfile -t cids <<<"$cid_output"
+            if (( ${#cids[@]} != 1 )) || [[ -z "${cids[0]}" ]]; then
+              echo "::error::Active service '$service' has ${#cids[@]} container identities, expected exactly one."
+              failed=1
+              continue
+            fi
+            cid="${cids[0]}"
+            state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)"
+            restarts="$(docker inspect --format '{{.RestartCount}}' "$cid" 2>/dev/null || echo invalid)"
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo unknown)"
+
+            [[ "$state" == running ]] || {
+              echo "::error::$service is not running (state: $state)."
+              failed=1
+            }
+            [[ "$restarts" =~ ^[0-9]+$ ]] || {
+              echo "::error::$service returned an invalid restart count: $restarts."
+              failed=1
+              continue
+            }
+            (( restarts <= 1 )) || {
+              echo "::error::$service restarted $restarts times before the shared test sequence began."
+              failed=1
+            }
+            if [[ "$health" != none && "$health" != healthy ]]; then
+              echo "::error::$service has a healthcheck but is not healthy (status: $health)."
+              failed=1
+            fi
+          done
+
+          if (( failed != 0 )); then
+            docker compose ps -a || true
+            exit 1
+          fi
+
       - name: Run base client simulation
         env:
           FULL_SETUP_CLIENT_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
