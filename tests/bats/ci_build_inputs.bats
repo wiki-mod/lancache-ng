@@ -180,3 +180,25 @@ JSON
     [[ "$output" == *"invalid build inputs for dns"* ]]
     [ ! -e "$output_file" ]
 }
+
+@test "built candidate record rejects a planned fingerprint that differs from producer evidence" {
+    sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+    digest="sha256:9999999999999999999999999999999999999999999999999999999999999999"
+    marker_dir="$BATS_TEST_TMPDIR/lancache-build-inputs"
+    output_file="$BATS_TEST_TMPDIR/proxy-built.json"
+    mkdir -p "$marker_dir"
+    printf 'APT_CACHE_BUST=2026-W31\n' >"$marker_dir/${digest#sha256:}.env"
+
+    run env \
+        RUNNER_TEMP="$BATS_TEST_TMPDIR" \
+        CI_SOURCE_BUILD_INPUTS_JSON='{"build_args":{},"build_contexts":{}}' \
+        bash "$REPO_ROOT/scripts/ci-write-candidate-record.sh" \
+        runtime proxy ghcr.io/wiki-mod/lancache-ng/proxy \
+        "$sha" "$sha" \
+        sha256:eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee \
+        linux/amd64 "$digest" built "$output_file"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"effective source fingerprint changed after planning for built proxy"* ]]
+    [ ! -e "$output_file" ]
+}
