@@ -5,6 +5,7 @@
 setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
   WRAPPER="$REPO_ROOT/scripts/ci-run-locked-quickstart-simulation.sh"
+  WORKFLOW="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
 }
 
 @test "quickstart runtime gate delegates to the canonical Docker lock shim" {
@@ -29,26 +30,26 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
-@test "locked quickstart shares the host-local mutex with existing quickstart jobs" {
-  run grep -F -- '-v /tmp:/tmp' "$WRAPPER"
+@test "V2 caller acquires the canonical host-local quickstart mutex before entering build-tools" {
+  run grep -F 'source scripts/lib/quickstart-compose-lock.sh' "$WORKFLOW"
   [ "$status" -eq 0 ]
 
-  run grep -F 'source scripts/lib/quickstart-compose-lock.sh' "$WRAPPER"
-  [ "$status" -eq 0 ]
-
-  run grep -F 'quickstart_compose_lock_acquire' "$WRAPPER"
-  [ "$status" -eq 0 ]
-
-  run grep -F 'CI_QUICKSTART_LOCK_CHILD=1' "$WRAPPER"
-  [ "$status" -eq 0 ]
+  lock_line="$(grep -nF 'quickstart_compose_lock_acquire' "$WORKFLOW" | cut -d: -f1)"
+  wrapper_line="$(grep -nF 'bash scripts/ci-run-locked-quickstart-simulation.sh stack-lock/stack-lock.json' "$WORKFLOW" | cut -d: -f1)"
+  [ -n "$lock_line" ]
+  [ -n "$wrapper_line" ]
+  [ "$lock_line" -lt "$wrapper_line" ]
 }
 
-@test "host-lock child keeps the exact build-tools identity" {
-  run grep -F '[[ "$BUILD_TOOLS_IMAGE" == *@sha256:* ]]' "$WRAPPER"
-  [ "$status" -eq 0 ]
+@test "locked quickstart wrapper does not reacquire its caller-owned mutex" {
+  run grep -F 'quickstart_compose_lock_acquire' "$WRAPPER"
+  [ "$status" -eq 1 ]
 
-  run grep -F '"$BUILD_TOOLS_IMAGE" \' "$WRAPPER"
-  [ "$status" -eq 0 ]
+  run grep -F 'CI_QUICKSTART_LOCK_CHILD' "$WRAPPER"
+  [ "$status" -eq 1 ]
+
+  run grep -F -- '-v /tmp:/tmp' "$WRAPPER"
+  [ "$status" -eq 1 ]
 }
 
 @test "quickstart runtime gate performs an independent final Docker identity readback" {
