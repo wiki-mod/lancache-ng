@@ -15,7 +15,7 @@
 # claimed repo-wide coverage while its actual scan_files glob list omitted
 # services/** entirely -- a real, previously-undetected instance of the
 # exact failure class this guard exists to catch survived in
-# services/dns/entrypoint.sh as a result (issue #1505). The glob list has
+# services/dns/entrypoint.sh as a result. The glob list has
 # since been corrected, but nothing stopped a *future* edit from narrowing
 # it again with the test suite staying green throughout, since a test suite
 # proves only what it actually exercises. This closes that gap generically:
@@ -65,7 +65,7 @@ done
 # current source. Deriving "required" from the exact same file this check
 # is supposed to police is a tautology: narrowing the guard's own scope
 # would narrow this check's expectation right along with it, so a
-# recurrence of the issue #1505 class of regression (scan_files silently
+# recurrence of that class of regression (scan_files silently
 # missing a whole path class) would keep passing this check indefinitely
 # instead of ever failing it. This is the project's own documented minimum
 # scope for AG-VAL-032 enforcement (see AGENTS.md's enforcement-matrix row
@@ -105,7 +105,7 @@ done
 if [ "${#missing_required[@]}" -gt 0 ]; then
     printf '::error::check-pipefail-scope-coverage: %s no longer scans these required prefixes:\n' "$guard_script" >&2
     printf '  %s\n' "${missing_required[@]}" >&2
-    echo "This is a real narrowing of AG-VAL-032 enforcement (the exact issue #1505 failure class this check exists to catch), not a bats-fixture gap -- widen scan_files in $guard_script itself before this can pass." >&2
+    echo "This is a real narrowing of AG-VAL-032 enforcement (the exact failure class this check exists to catch), not a bats-fixture gap -- widen scan_files in $guard_script itself before this can pass." >&2
     exit 1
 fi
 

@@ -38,6 +38,10 @@ _git_fetch_retry_is_transient() {
         *'Connection timed out'* | \
         *'Could not resolve host'* | \
         *'Temporary failure in name resolution'* | \
+        *'The requested URL returned error: 429'* | \
+        *'The requested URL returned error: 5'[0-9][0-9]* | \
+        *'RPC failed; HTTP 429 '* | \
+        *'RPC failed; HTTP 5'[0-9][0-9]' '* | \
         *'RPC failed; curl 5'* | \
         *'GnuTLS recv error'* | \
         *'TLS connection'*'closed'*)

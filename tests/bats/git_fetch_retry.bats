@@ -42,6 +42,52 @@ setup() {
     [[ "$output" == *"retrying"* ]]
 }
 
+@test "retries transient GitHub HTTP status failures and succeeds after recovery" {
+    call_count_file="$BATS_TEST_TMPDIR/calls"
+    printf '0' > "$call_count_file"
+    git() {
+        local n; n=$(<"$call_count_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$call_count_file"
+        case "$n" in
+            1)
+                echo "fatal: unable to access 'https://github.com/example/repo/': The requested URL returned error: 502" >&2
+                return 1
+                ;;
+            2)
+                echo "error: RPC failed; HTTP 503 curl 22 The requested URL returned error: 503" >&2
+                return 1
+                ;;
+        esac
+        echo "ok"
+        return 0
+    }
+    run git_fetch_retry origin main
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 3 ]
+    [[ "$output" == *"retrying"* ]]
+}
+
+@test "retries a rate-limit response but leaves permanent HTTP 4xx failures immediate" {
+    call_count_file="$BATS_TEST_TMPDIR/calls"
+    printf '0' > "$call_count_file"
+    git() {
+        local n; n=$(<"$call_count_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$call_count_file"
+        if [ "$n" -eq 1 ]; then
+            echo "fatal: unable to access 'https://github.com/example/repo/': The requested URL returned error: 429" >&2
+        else
+            echo "fatal: unable to access 'https://github.com/example/repo/': The requested URL returned error: 404" >&2
+        fi
+        return 1
+    }
+    run git_fetch_retry origin main
+    [ "$status" -eq 1 ]
+    [ "$(cat "$call_count_file")" -eq 2 ]
+    [ "$(grep -c 'retrying' <<<"$output")" -eq 1 ]
+}
+
 @test "does not retry a non-transient failure -- fails immediately on attempt 1" {
     call_count_file="$BATS_TEST_TMPDIR/calls"
     printf '0' > "$call_count_file"
