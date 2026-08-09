@@ -91,10 +91,6 @@ ci_lock_rewrite_first_party_ref() {
         return 0
     fi
 
-    # ghcr.io has no port component here, so the final colon unambiguously
-    # separates an image name from its tag. Unqualified first-party names are
-    # rejected rather than allowing Docker's implicit `latest` to enter a
-    # stack-lock validation run.
     if [[ "$ref" != *:* ]]; then
         ci_ai_fail "unqualified first-party image is forbidden under stack lock: $ref"
         return 1
@@ -177,11 +173,43 @@ ci_lock_split_compose_args() {
     fi
 }
 
-ci_lock_compose_override() {
-    local output="$1"
-    shift
+# Once `docker compose config` has produced the canonical application model,
+# the original -f/--file inputs must not be re-applied during the real command.
+# The canonical model already contains their merged, interpolated and
+# path-resolved result. Re-applying them would duplicate the source model,
+# while using only the digest override would drop the source model entirely.
+ci_lock_compose_execution_globals() {
+    local -n input_ref=$1
+    local -n output_ref=$2
+    local i=0 arg
+    output_ref=()
+
+    while (( i < ${#input_ref[@]} )); do
+        arg="${input_ref[$i]}"
+        case "$arg" in
+            -f|--file)
+                if (( i + 1 >= ${#input_ref[@]} )); then
+                    ci_ai_fail "docker compose option $arg is missing its value"
+                    return 1
+                fi
+                i=$((i + 2))
+                ;;
+            --file=*)
+                i=$((i + 1))
+                ;;
+            *)
+                output_ref+=("$arg")
+                i=$((i + 1))
+                ;;
+        esac
+    done
+}
+
+ci_lock_compose_model_and_override() {
+    local model_output="$1" override_output="$2"
+    shift 2
     local -a globals=("$@")
-    local rendered override compose_rows service compose_image image digest locked_ref status
+    local rendered compose_rows service compose_image image digest locked_ref status
     local matched=0
 
     if rendered="$("$real_docker" compose "${globals[@]}" config --format json)"; then
@@ -191,6 +219,14 @@ ci_lock_compose_override() {
         echo "ci-artifact-identity: could not render Compose model before applying stack lock (exit $status)" >&2
         return "$status"
     fi
+
+    # `docker compose config` is the canonical model Docker will apply. Keep
+    # that complete model as the base for the real command so a bare
+    # `docker compose up` remains the same application after this shim adds a
+    # generated -f override. Without this base file, adding the override as the
+    # only -f file silently replaces Compose's default-file discovery.
+    printf '%s\n' "$rendered" >"$model_output"
+
     if compose_rows="$(jq -r '.services | to_entries[] | [.key,(.value.image // "")] | @tsv' <<<"$rendered")"; then
         :
     else
@@ -229,21 +265,21 @@ ci_lock_compose_override() {
         ci_ai_fail "Compose model contains no first-party runtime image to lock"
         return 1
     fi
-    printf '%s\n' "$override" >"$output"
+    printf '%s\n' "$override" >"$override_output"
 }
 
 ci_lock_assert_compose_runtime() {
-    local override="$1"
-    shift
+    local model="$1" override="$2"
+    shift 2
     local -a globals=("$@")
     local rendered running_services service cid expected actual status asserted=0
 
-    if rendered="$("$real_docker" compose "${globals[@]}" -f "$override" config --format json)"; then
+    if rendered="$("$real_docker" compose "${globals[@]}" -f "$model" -f "$override" config --format json)"; then
         :
     else
         return $?
     fi
-    if running_services="$("$real_docker" compose "${globals[@]}" -f "$override" ps --services --status running)"; then
+    if running_services="$("$real_docker" compose "${globals[@]}" -f "$model" -f "$override" ps --services --status running)"; then
         :
     else
         return $?
@@ -258,7 +294,7 @@ ci_lock_assert_compose_runtime() {
         fi
         [[ "$expected" == ghcr.io/wiki-mod/lancache-ng/*@sha256:* ]] || continue
 
-        if cid="$("$real_docker" compose "${globals[@]}" -f "$override" ps -q "$service")"; then
+        if cid="$("$real_docker" compose "${globals[@]}" -f "$model" -f "$override" ps -q "$service")"; then
             :
         else
             status=$?
@@ -290,41 +326,49 @@ ci_lock_assert_compose_runtime() {
 ci_lock_run_compose() {
     # shellcheck disable=SC2034
     # Consumed through nameref by ci_lock_split_compose_args.
-    local -a input=("$@") globals=() compose_command=()
-    local override status
+    local -a input=("$@") globals=() execution_globals=() compose_command=()
+    local model override status
 
     if ci_lock_split_compose_args input globals compose_command; then
         :
     else
         return $?
     fi
-    if override="$(mktemp)"; then
+    if ci_lock_compose_execution_globals globals execution_globals; then
         :
     else
         return $?
     fi
 
-    if ci_lock_compose_override "$override" "${globals[@]}"; then
+    if model="$(mktemp)" && override="$(mktemp)"; then
         :
     else
         status=$?
-        rm -f "$override"
+        [[ -n "${model:-}" ]] && rm -f "$model"
         return "$status"
     fi
 
-    if "$real_docker" compose "${globals[@]}" -f "$override" "${compose_command[@]}"; then
+    if ci_lock_compose_model_and_override "$model" "$override" "${globals[@]}"; then
+        :
+    else
+        status=$?
+        rm -f "$model" "$override"
+        return "$status"
+    fi
+
+    if "$real_docker" compose "${execution_globals[@]}" -f "$model" -f "$override" "${compose_command[@]}"; then
         status=0
     else
         status=$?
     fi
     if (( status == 0 )) && [[ "${compose_command[0]}" == up ]]; then
-        if ci_lock_assert_compose_runtime "$override" "${globals[@]}"; then
+        if ci_lock_assert_compose_runtime "$model" "$override" "${execution_globals[@]}"; then
             :
         else
             status=$?
         fi
     fi
-    rm -f "$override"
+    rm -f "$model" "$override"
     return "$status"
 }
 
