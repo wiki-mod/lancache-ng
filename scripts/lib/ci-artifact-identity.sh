@@ -172,6 +172,38 @@ ci_ai_ref_digest() {
     printf '%s\n' "$digest"
 }
 
+# Optional mutable references need a three-state read: present with a valid
+# digest, positively absent, or ambiguous/error. Promotion may treat only the
+# second state as "no rollback target existed". Network, authentication and
+# malformed-response failures must remain failures instead of being collapsed
+# into the same empty value. Status 3 is reserved here for positively absent.
+CI_AI_REF_ABSENT_STATUS=3
+ci_ai_ref_digest_optional() {
+    local ref="$1" manifest digest error_file status
+    error_file="$(mktemp)" || return 1
+
+    if manifest="$(ci_ai_manifest_json "$ref" 2>"$error_file")"; then
+        rm -f "$error_file"
+        digest="$(jq -r '.digest // empty' <<<"$manifest")"
+        ci_ai_require_digest "$digest" || return 1
+        printf '%s\n' "$digest"
+        return 0
+    fi
+    status=$?
+
+    # Buildx/registry implementations use several equivalent forms for a
+    # genuinely missing manifest/tag. Keep the allow-list narrow: only these
+    # explicit absence responses are converted to the dedicated status.
+    if grep -Eiq '(manifest unknown|name unknown|404[[:space:]]+not[[:space:]]+found|(^|[^[:alpha:]])not found([^[:alpha:]]|$))' "$error_file"; then
+        rm -f "$error_file"
+        return "$CI_AI_REF_ABSENT_STATUS"
+    fi
+
+    cat "$error_file" >&2
+    rm -f "$error_file"
+    return "$status"
+}
+
 ci_ai_platform_digest() {
     local ref="$1" platform="$2" manifest digest
     manifest="$(ci_ai_manifest_json "$ref")" || return 1
