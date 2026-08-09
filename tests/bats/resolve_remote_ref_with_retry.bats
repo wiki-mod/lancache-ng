@@ -15,7 +15,7 @@ setup() {
 echo attempt >> "$ATTEMPT_LOG"
 attempts="$(wc -l < "$ATTEMPT_LOG")"
 if ((attempts <= FAIL_COUNT)); then
-    exit 2
+    exit "${FAIL_EXIT_CODE:-128}"
 fi
 printf '%s\t%s\n' '0123456789abcdef0123456789abcdef01234567' 'refs/pull/1/head'
 EOF
@@ -51,4 +51,17 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"failed after 4 attempts"* ]]
     [ "$(wc -l < "$attempt_log")" -eq 4 ]
+}
+
+# `git ls-remote --exit-code` exits 2 specifically when no ref matches at all
+# (a force-deleted branch, a closed PR) -- a permanent result, not a network
+# blip, so it must not consume the retry budget or the backoff sleep.
+@test "does not retry a permanent 'ref not found' failure (exit code 2)" {
+    run env PATH="$fake_bin:$PATH" ATTEMPT_LOG="$attempt_log" FAIL_COUNT=9 \
+        FAIL_EXIT_CODE=2 REMOTE_REF_MAX_ATTEMPTS=4 REMOTE_REF_BACKOFF_SECONDS=0 \
+        bash "$script" origin refs/pull/1/head
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"does not exist"* ]]
+    [ "$(wc -l < "$attempt_log")" -eq 1 ]
 }

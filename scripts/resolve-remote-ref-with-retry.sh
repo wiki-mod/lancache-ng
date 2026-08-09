@@ -11,11 +11,25 @@ max_attempts="${REMOTE_REF_MAX_ATTEMPTS:-4}"
 backoff_seconds="${REMOTE_REF_BACKOFF_SECONDS:-30}"
 
 for ((attempt = 1; attempt <= max_attempts; attempt++)); do
-    # --exit-code distinguishes a missing ref from a successful empty query;
-    # both are retryable because a transient remote failure can present either way.
-    if output="$(git ls-remote --exit-code "$remote" "$ref")" && [[ -n "$output" ]]; then
+    # --exit-code makes git ls-remote exit 2 specifically when no matching ref
+    # exists (a permanent result -- the ref was force-deleted, the PR closed,
+    # etc.) versus any other nonzero exit for a genuine transient failure
+    # (network, DNS, auth hiccup). `status=0; ... || status=$?` -- not a bare
+    # assignment -- is required here: under `set -e`, a failing bare
+    # `output=$(cmd)` would abort the script before this exit-code check ever
+    # ran.
+    status=0
+    output="$(git ls-remote --exit-code "$remote" "$ref")" || status=$?
+
+    if ((status == 0)) && [[ -n "$output" ]]; then
         printf '%s\n' "${output%%$'\t'*}"
         exit 0
+    fi
+
+    if ((status == 2)); then
+        printf '::error::Remote ref does not exist (not a transient failure, not retrying): %s %s\n' \
+            "$remote" "$ref" >&2
+        exit 2
     fi
 
     if ((attempt == max_attempts)); then
