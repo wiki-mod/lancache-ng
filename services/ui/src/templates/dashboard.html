@@ -1,6 +1,6 @@
-{# lancache-ng (https://github.com/wiki-mod/lancache-ng)
-
-   Admin UI dashboard page: shows cache stats and service health. #}
+{# SPDX-License-Identifier: AGPL-3.0-or-later #}
+{# lancache-ng (https://github.com/wiki-mod/lancache-ng) #}
+{# Admin UI dashboard page: shows cache stats and service health. #}
 {% extends "base.html" %}
 {% block title %} – Dashboard{% endblock %}
 
@@ -296,21 +296,26 @@
   </div>
   {% endif %}
 
-  <!-- Recent requests: last N lines tailed from the access log
-       (nginx_client::parse_log_tail), newest-to-oldest is not guaranteed —
-       this is simply the tail of the file.
+  <!-- Recent requests: the most recent entries across the proxy's access
+       log(s) (recent_logs_task, routes/dashboard.rs). When standard_log and
+       ssl_log are the same file, this is simply that file's tail
+       (nginx_client::parse_log_tail). When they differ, each source is read
+       up to the same limit and merged chronologically by parsed timestamp
+       (merge_recent_logs), so the result interleaves both sources by actual
+       recency rather than showing one source's entire block before the
+       other's.
 
-       #849 bug-hunt finding observability.md#19: this tile always reads
-       nginx's own direct access log (recent_logs_task, routes/dashboard.rs),
-       even once syslog mode is enabled and /logs switches to the central
-       syslog-ng store instead -- the two pages can then show data through
-       different pipelines on the same install. This is not a data-loss bug
+       This tile always reads nginx's own direct access log(s), even once
+       syslog mode is enabled and /logs switches to the central syslog-ng
+       store instead -- the two pages can then show data through different
+       pipelines on the same install. This is not a data-loss concern
        (nginx keeps writing its own access log regardless of whether
-       syslog-ng also receives a forwarded copy), so the fix is to label the
-       source explicitly rather than merge two structurally different log
-       formats (syslog-ng's forwarded lines carry raw
+       syslog-ng also receives a forwarded copy); the two are deliberately
+       kept separate rather than merged because they are structurally
+       different log formats (syslog-ng's forwarded lines carry raw
        timestamp/host/program/message fields, not nginx's parsed
-       method/path/status/cache-status shape) into one. -->
+       method/path/status/cache-status shape) -- hence the explicit
+       "direct nginx log" label below whenever syslog mode is on. -->
   <div class="card">
     <div class="flex items-center justify-between mb-3">
       <h2 class="font-semibold text-slate-200">Recent requests (proxy)</h2>
