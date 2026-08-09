@@ -1,17 +1,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Shared full-setup and integration simulation suite. Normal callers keep the
-# historical tag/channel behavior. An immutable-artifact caller can additionally
-# provide a stack-lock artifact; every first-party Docker/Compose reference in
-# that mode is then resolved through the exact recorded OCI digest before the
-# existing behavioral simulation runs.
-#
-# Some proxy/DHCP simulations intentionally build a purpose-specific fixture
-# from the checked-out source because their negative controls cannot be expressed
-# against the stock published image. Those remain source-regression gates. They
-# are additive and never replace the exact-digest runtime gates: any first-party
-# published image they consume, including build-tools, is still lock-qualified.
+# Shared full-setup and integration simulation suite. Tests that exercise the
+# stock full-setup topology run in one heavy job on one runner against one
+# collision-reserved Compose project. Purpose-specific fixture topologies stay
+# isolated and serialized after that shared stack is torn down.
 name: Full-Setup Simulations (reusable)
 
 on:
@@ -41,48 +34,32 @@ on:
         required: false
         default: ""
         type: string
+      run_dns_zone_rollback:
+        description: "'true' adds the live DNS zone rollback proof to the shared stack sequence."
+        required: false
+        default: "false"
+        type: string
 
 permissions:
   contents: read
 
 jobs:
-  compute-validation-network:
-    name: derive per-run validation subnet
+  shared-full-setup-stack:
+    name: full-setup shared-stack simulations
     if: inputs.should_run == 'true'
-    runs-on: [self-hosted, linux, lancache, lancache-light]
-    timeout-minutes: 45
-    outputs:
-      subnet: ${{ steps.derive.outputs.subnet }}
-      gateway: ${{ steps.derive.outputs.gateway }}
-      proxy_ip: ${{ steps.derive.outputs.proxy_ip }}
-      proxy_ssl_ip: ${{ steps.derive.outputs.proxy_ssl_ip }}
-      dns_standard_ip: ${{ steps.derive.outputs.dns_standard_ip }}
-      dns_ssl_ip: ${{ steps.derive.outputs.dns_ssl_ip }}
-      watchdog_ip: ${{ steps.derive.outputs.watchdog_ip }}
-      netdata_ip: ${{ steps.derive.outputs.netdata_ip }}
-      nats_ip: ${{ steps.derive.outputs.nats_ip }}
-      ui_ip: ${{ steps.derive.outputs.ui_ip }}
-      standard_shim_ip: ${{ steps.derive.outputs.standard_shim_ip }}
-      project_name: ${{ steps.derive.outputs.project_name }}
-      ui_port: ${{ steps.derive.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: Derive validation network
-        id: derive
-        uses: ./.github/actions/derive-validation-network
-
-  full-setup-validate:
-    name: validate full-setup image
-    needs: compute-validation-network
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
+    # This replaces six former 45-minute jobs and can optionally absorb one
+    # additional rollback simulation. The cap remains below GitHub's default
+    # while preserving the old per-test upper-bound budget in one serial job.
+    timeout-minutes: 315
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
+      LANCACHE_IMAGE_REGISTRY: ghcr.io
+      LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
+      FULL_SETUP_SHARED_STACK: "1"
+      # The standard passthrough shim is part of the initial Compose model so
+      # the SSL proof does not need a second `compose up` later in the suite.
+      COMPOSE_PROFILES: ssl-mitm-proof
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -108,8 +85,8 @@ jobs:
           set -euo pipefail
           source scripts/lib/build-retry.sh
           build_retry -- docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
-            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
+            --build-arg LANCACHE_IMAGE_REGISTRY="$LANCACHE_IMAGE_REGISTRY" \
+            --build-arg LANCACHE_IMAGE_PREFIX="$LANCACHE_IMAGE_PREFIX" \
             --build-arg LANCACHE_IMAGE_TAG="$LANCACHE_IMAGE_TAG" \
             -t lancache-ng-full-setup:validation \
             deploy/full-setup
@@ -117,8 +94,6 @@ jobs:
       - name: Validate Compose configuration inside immutable build-tools
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-          LANCACHE_IMAGE_REGISTRY: ghcr.io
-          LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
         run: |
           set -euo pipefail
           docker run --rm \
@@ -127,25 +102,88 @@ jobs:
             --env LANCACHE_IMAGE_REGISTRY \
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
+            --env COMPOSE_PROFILES \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 300 docker compose -f docker-compose.yml config >/dev/null
 
-      - name: Reserve validation subnet and start stack
+      - name: Reserve one validation subnet and start one shared stack
         uses: ./.github/actions/reserve-validation-subnet-stack
         with:
           image-tag: ${{ inputs.image_tag }}
 
-      - name: Wait for stack stabilization and container health
+      - name: Wait for shared stack stabilization and container health
         uses: ./.github/actions/wait-validation-stack-health
 
-      - name: Run client simulation against same locked stack
+      - name: Verify initial passthrough shim is healthy
+        working-directory: deploy/full-setup
+        run: |
+          set -euo pipefail
+          cid="$(docker compose ps -q standard-passthrough-shim)"
+          [[ -n "$cid" ]] || {
+            echo "::error::standard-passthrough-shim was not started with the initial shared stack."
+            exit 1
+          }
+          status="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo unknown)"
+          [[ "$status" == healthy ]] || {
+            echo "::error::standard-passthrough-shim is not healthy (status: $status)."
+            docker compose logs --no-color standard-passthrough-shim || true
+            exit 1
+          }
+
+      - name: Run base client simulation
         env:
           FULL_SETUP_CLIENT_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
         run: |
           set -euo pipefail
           bash scripts/full-setup-client-simulation.sh
 
-      - name: Tear down validation stack
+      - name: Run SSL MITM cache simulation on shared stack
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/ssl-mitm-cache-simulation.sh
+
+      - name: Run UI/NATS/DNS integration simulation on shared stack
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/ui-nats-dns-integration-simulation.sh
+
+      - name: Run DNS zone rollback simulation on shared stack
+        if: inputs.run_dns_zone_rollback == 'true'
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/dns-zone-rollback-simulation.sh
+
+      - name: Run setup.sh DNS reset simulation on shared stack
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/setup-reset-dns-config-simulation.sh
+
+      - name: Run NATS auth-callout simulation on shared stack
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/nats-secondary-auth-callout-simulation.sh
+
+      # This test deliberately recreates proxy into a crash loop and tears the
+      # Compose project down in its EXIT trap, so it must remain the final test
+      # that consumes the shared stack. The outer teardown below is idempotent.
+      - name: Run Admin UI reachability during crash-loop simulation last
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          bash scripts/ui-reachability-crash-loop-simulation.sh
+
+      - name: Tear down shared validation stack and release subnet lock
         if: always()
         working-directory: deploy/full-setup
         run: |
@@ -163,61 +201,10 @@ jobs:
         if: always()
         run: docker rmi lancache-ng-full-setup:validation || true
 
-  ssl-mitm-cache-simulation:
-    name: SSL MITM cache simulation
-    needs: [compute-validation-network, full-setup-validate]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      VALIDATION_STANDARD_SHIM_IP: ${{ needs.compute-validation-network.outputs.standard_shim_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: lock
-        uses: ./.github/actions/enable-locked-docker
-        with:
-          artifact-name: ${{ inputs.stack_lock_artifact }}
-      - id: build-tools
-        uses: ./.github/actions/resolve-simulation-build-tools
-        with:
-          locked-image: ${{ steps.lock.outputs.build-tools-image }}
-          pr-staging-available: ${{ inputs.pr_staging_available }}
-          build-tools-touched: ${{ inputs.build_tools_touched }}
-          image-tag: ${{ inputs.image_tag }}
-          repository: ${{ github.repository }}
-          require-published: "true"
-      - name: Run SSL MITM cache simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-        run: |
-          set -euo pipefail
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
-
   proxy-deep-wildcard-tls-simulation:
     name: Proxy deep-wildcard TLS simulation
-    needs: [compute-validation-network, ssl-mitm-cache-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
+    needs: shared-full-setup-stack
+    if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
@@ -244,12 +231,8 @@ jobs:
 
   proxy-standard-mode-sni-routing-simulation:
     name: Proxy standard-mode SNI routing simulation
-    needs: [compute-validation-network, proxy-deep-wildcard-tls-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
+    needs: proxy-deep-wildcard-tls-simulation
+    if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
@@ -276,12 +259,8 @@ jobs:
 
   proxy-ssl-mode-two-relay-dispatch-simulation:
     name: Proxy SSL-mode two-relay dispatch simulation
-    needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
+    needs: proxy-standard-mode-sni-routing-simulation
+    if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 30
     steps:
@@ -306,55 +285,9 @@ jobs:
           set -euo pipefail
           bash scripts/proxy-ssl-mode-two-relay-dispatch-simulation.sh
 
-  ui-nats-dns-integration-simulation:
-    name: UI/NATS/DNS integration simulation
-    needs: [compute-validation-network, proxy-ssl-mode-two-relay-dispatch-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: lock
-        uses: ./.github/actions/enable-locked-docker
-        with:
-          artifact-name: ${{ inputs.stack_lock_artifact }}
-      - id: build-tools
-        uses: ./.github/actions/resolve-simulation-build-tools
-        with:
-          locked-image: ${{ steps.lock.outputs.build-tools-image }}
-          pr-staging-available: ${{ inputs.pr_staging_available }}
-          build-tools-touched: ${{ inputs.build_tools_touched }}
-          image-tag: ${{ inputs.image_tag }}
-          repository: ${{ github.repository }}
-          require-published: "true"
-      - name: Run UI/NATS/DNS integration simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-        run: |
-          set -euo pipefail
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-nats-dns-integration-simulation.sh
-
   setup-cli-simulation:
     name: setup.sh CLI simulation
-    needs: [ui-nats-dns-integration-simulation]
+    needs: proxy-ssl-mode-two-relay-dispatch-simulation
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -403,7 +336,7 @@ jobs:
 
   dhcp-kea-lease-flow-simulation:
     name: DHCP Kea lease-flow simulation
-    needs: [setup-cli-simulation]
+    needs: setup-cli-simulation
     if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
@@ -429,122 +362,14 @@ jobs:
           set -euo pipefail
           bash scripts/dhcp-kea-lease-flow-simulation.sh
 
-  nats-auth-callout-simulation:
-    name: NATS auth-callout simulation
-    needs: [compute-validation-network, dhcp-kea-lease-flow-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: lock
-        uses: ./.github/actions/enable-locked-docker
-        with:
-          artifact-name: ${{ inputs.stack_lock_artifact }}
-      - id: build-tools
-        uses: ./.github/actions/resolve-simulation-build-tools
-        with:
-          locked-image: ${{ steps.lock.outputs.build-tools-image }}
-          pr-staging-available: ${{ inputs.pr_staging_available }}
-          build-tools-touched: ${{ inputs.build_tools_touched }}
-          image-tag: ${{ inputs.image_tag }}
-          repository: ${{ github.repository }}
-          require-published: "true"
-      - name: Run NATS auth-callout simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-        run: |
-          set -euo pipefail
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/nats-secondary-auth-callout-simulation.sh
-
-  ui-reachability-crash-loop-simulation:
-    name: Admin UI reachability during dependency crash-loop
-    needs: [compute-validation-network, nats-auth-callout-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: lock
-        uses: ./.github/actions/enable-locked-docker
-        with:
-          artifact-name: ${{ inputs.stack_lock_artifact }}
-      - id: build-tools
-        uses: ./.github/actions/resolve-simulation-build-tools
-        with:
-          locked-image: ${{ steps.lock.outputs.build-tools-image }}
-          pr-staging-available: ${{ inputs.pr_staging_available }}
-          build-tools-touched: ${{ inputs.build_tools_touched }}
-          image-tag: ${{ inputs.image_tag }}
-          repository: ${{ github.repository }}
-          require-published: "true"
-      - name: Run Admin UI reachability during crash-loop simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-        run: |
-          set -euo pipefail
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-reachability-crash-loop-simulation.sh
-
   setup-reset-kea-config-simulation:
     name: setup.sh reset-to-last-known-good-config (Kea) simulation
-    needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
+    needs: dhcp-kea-lease-flow-simulation
+    if: always() && inputs.should_run == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
     timeout-minutes: 45
     env:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - id: lock
@@ -566,49 +391,3 @@ jobs:
         run: |
           set -euo pipefail
           bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
-
-  setup-reset-dns-config-simulation:
-    name: setup.sh reset-to-last-known-good-config (DNS) simulation
-    needs: [compute-validation-network, setup-reset-kea-config-simulation]
-    if: >-
-      always() &&
-      inputs.should_run == 'true' &&
-      needs['compute-validation-network'].result != 'failure' &&
-      needs['compute-validation-network'].result != 'cancelled'
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    timeout-minutes: 45
-    env:
-      LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
-      VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
-      VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
-      VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
-      VALIDATION_PROXY_SSL_IP: ${{ needs.compute-validation-network.outputs.proxy_ssl_ip }}
-      VALIDATION_DNS_STANDARD_IP: ${{ needs.compute-validation-network.outputs.dns_standard_ip }}
-      VALIDATION_DNS_SSL_IP: ${{ needs.compute-validation-network.outputs.dns_ssl_ip }}
-      VALIDATION_WATCHDOG_IP: ${{ needs.compute-validation-network.outputs.watchdog_ip }}
-      VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
-      VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
-      VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
-      VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - id: lock
-        uses: ./.github/actions/enable-locked-docker
-        with:
-          artifact-name: ${{ inputs.stack_lock_artifact }}
-      - id: build-tools
-        uses: ./.github/actions/resolve-simulation-build-tools
-        with:
-          locked-image: ${{ steps.lock.outputs.build-tools-image }}
-          pr-staging-available: ${{ inputs.pr_staging_available }}
-          build-tools-touched: ${{ inputs.build_tools_touched }}
-          image-tag: ${{ inputs.image_tag }}
-          repository: ${{ github.repository }}
-          require-published: "true"
-      - name: Run setup.sh reset-to-last-known-good-config (DNS) simulation
-        env:
-          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
-        run: |
-          set -euo pipefail
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-dns-config-simulation.sh
