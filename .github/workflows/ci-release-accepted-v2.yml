@@ -214,7 +214,7 @@ jobs:
 
       - name: Build and push release build-tools quarantine candidate exactly once
         id: build
-        uses: ./.github/actions/ghcr-build-push-retry
+        uses: ./.github/actions/ghcr-build-once-push-retry
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -222,15 +222,12 @@ jobs:
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
           build-args: APT_CACHE_BUST=${{ needs.plan.outputs.refresh_bucket }}
-          push: "true"
-          tags: ${{ matrix.image }}:${{ needs.plan.outputs.candidate_tag }}-${{ matrix.arch }}
+          tag: ${{ matrix.image }}:${{ needs.plan.outputs.candidate_tag }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.revision=${{ needs.plan.outputs.source_sha }}
             io.lancache-ng.candidate=${{ needs.plan.outputs.candidate_tag }}
             io.lancache-ng.release=${{ inputs.release_tag }}
-          outputs: type=image,oci-mediatypes=true
-          platforms: ${{ matrix.platform }}
-          provenance: "false"
+          platform: ${{ matrix.platform }}
           pull: "true"
           cache-from: type=gha,scope=ci-v2-release-build-tools-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ci-v2-release-build-tools-${{ matrix.arch }}
