@@ -370,7 +370,7 @@ range added too.
 
 ---
 
-## 11. `/healthz` has no access control at all (both `http.conf` and `https.conf`)
+## 11. ~~`/healthz` has no access control at all (both `http.conf` and `https.conf`)~~ FIXED by #1472
 
 ```nginx
 location = /healthz {
@@ -380,14 +380,22 @@ location = /healthz {
 }
 ```
 
-No `allow`/`deny`, unlike `/nginx_status`. Reachable by anyone who can route
+~~No `allow`/`deny`, unlike `/nginx_status`. Reachable by anyone who can route
 to the proxy at all, including the public internet if a port is ever
 forwarded. Low sensitivity (returns a static "ok"), but it is an
 unauthenticated fingerprint/probe surface for identifying a lancache-ng
 deployment from outside the LAN, and — unlike the `/ca.crt` endpoint
 proposal in `docs/install-ca-cert.md`, which explicitly discusses and
 accepts this exact trade-off — this one isn't discussed anywhere as an
-intentional decision.
+intentional decision.~~
+
+**Fix**: Both `conf.d/http.conf` and `conf.d/https.conf`'s `/healthz`
+locations now serve via `alias` (not a bare `return`, which runs in
+nginx's rewrite phase before `allow`/`deny` are evaluated) and carry an
+`allow 127.0.0.1/32; allow 172.16.0.0/12; deny all;` ACL, closing the
+unauthenticated fingerprint/probe surface for any client outside the
+container's own loopback and Docker bridge range. Regression test:
+`tests/bats/proxy_healthz_acl_and_hidden_headers.bats`.
 
 **Severity assessment**: info.
 
@@ -460,7 +468,7 @@ broken, flagged because no test covers it either way).
 
 ---
 
-## 15. Upstream `Cache-Control`/`Expires` are ignored for the proxy's own caching decision but not hidden from the client
+## 15. ~~Upstream `Cache-Control`/`Expires` are ignored for the proxy's own caching decision but not hidden from the client~~ FIXED by #1472
 
 ```nginx
 proxy_ignore_headers   Cache-Control Expires Vary Set-Cookie;
@@ -468,7 +476,7 @@ proxy_hide_header      Set-Cookie;
 proxy_hide_header      Vary;
 ```
 
-`Set-Cookie` and `Vary` are both ignored *and* hidden from the client
+~~`Set-Cookie` and `Vary` are both ignored *and* hidden from the client
 response. `Cache-Control`/`Expires` are ignored for nginx's own cache
 decision (so the proxy always caches per its own policy) but are **not**
 hidden — the client still receives the origin's original
@@ -478,7 +486,13 @@ means a client/game-launcher that itself honors a restrictive
 `Cache-Control` from the real origin could still choose not to reuse its
 own local disk cache, even though the LAN proxy is transparently serving
 the same bytes from its own cache underneath. Not confirmed to cause any
-concrete problem, just a design asymmetry worth having on record.
+concrete problem, just a design asymmetry worth having on record.~~
+
+**Fix**: `proxy-params.conf` now also hides `Cache-Control`/`Expires` from
+the client (`proxy_hide_header`), matching `Set-Cookie`/`Vary`, so
+"ignored for caching" and "hidden from the client" are consistent for all
+four headers. Regression test:
+`tests/bats/proxy_healthz_acl_and_hidden_headers.bats`.
 
 **Severity assessment**: info.
 
@@ -588,10 +602,10 @@ are appended after the verdicts.
     confirms), so container networking is IPv4-only today — not live. Also
     note `/nginx_status` exists only in `http.conf`, not `https.conf`.
 
-11. **`/healthz` has no access control** — CONFIRMED (info). Both
-    `http.conf:16` and `https.conf:25`; it's a `location =` block outside the
-    `$lancache_client_allowed` gate, reachable by anyone who can route to the
-    proxy. Static "ok", low sensitivity, undocumented as an intentional
+11. **`/healthz` has no access control** — CONFIRMED (info), **FIXED by #1472**.
+    Both `http.conf:16` and `https.conf:25`; it's a `location =` block outside
+    the `$lancache_client_allowed` gate, reachable by anyone who can route to
+    the proxy. Static "ok", low sensitivity, undocumented as an intentional
     decision (unlike the `/ca.crt` proposal).
 
 12. **install-ca-cert.md distribution is unimplemented** — CONFIRMED (info).
@@ -611,9 +625,10 @@ are appended after the verdicts.
     Asserted by config, exercised nowhere.
 
 15. **Upstream `Cache-Control`/`Expires` ignored but not hidden** — CONFIRMED
-    (info). `proxy-params.conf:16-18` ignores Cache-Control/Expires/Vary/
-    Set-Cookie for nginx's own cache decision and hides only Set-Cookie/Vary;
-    the origin's Cache-Control/Expires still reach the client verbatim. Design
+    (info), **FIXED by #1472**. `proxy-params.conf:16-18` ignores
+    Cache-Control/Expires/Vary/Set-Cookie for nginx's own cache decision and
+    hides only Set-Cookie/Vary; the origin's Cache-Control/Expires still
+    reach the client verbatim (fixed: now also hidden). Design
     asymmetry, no confirmed concrete failure.
 
 ## New findings (this sweep)

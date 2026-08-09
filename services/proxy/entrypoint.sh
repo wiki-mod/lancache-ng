@@ -1339,6 +1339,36 @@ if [ "${SSL_ENABLED}" = "0" ]; then
 fi
 
 # ────────────────────────────────────────────────────────────────────────────
+# 3a. Generate the static /healthz response body
+#
+# conf.d/http.conf and conf.d/https.conf's own "location = /healthz" blocks
+# deliberately serve this via a real content-phase file handler (`alias`),
+# NOT a bare `return 200 "ok\n";`: `return` is an ngx_http_rewrite_module
+# directive that runs in nginx's rewrite phase, which executes BEFORE the
+# access phase where `allow`/`deny` are evaluated. A location combining
+# `deny all;` with a bare `return` in the SAME location therefore never
+# enforces that deny at all -- reproduced on a stock, unmodified
+# nginx:1.27-alpine image (not something specific to this project's own
+# build): a bare `deny all;` alone correctly returns 403, the identical
+# `deny all;` alongside `return 200 "...";` in one location returns 200
+# regardless of source address. Serving the body via `alias` to a real
+# file instead uses ngx_http_static_module's content-phase handler, which
+# runs AFTER the access phase and therefore correctly enforces the ACL in
+# both directions (403 for a denied source, 200 with the real body for an
+# allowed one). See docs/release-validation-plan.md's Standing checks row
+# for the full differential-container reproduction.
+#
+# Deliberately NOT added to PROXY_CANDIDATE_FILES/the known-good-snapshot
+# mechanism below (section "5."): that mechanism exists to roll back a
+# CONFIG file `nginx -t` can validate/invalidate. This is a static content
+# file with fixed, entrypoint-controlled content ("ok\n") that `nginx -t`
+# has no opinion on either way -- there is nothing for a snapshot to
+# validate or a rollback to meaningfully restore here, unlike nginx.conf/
+# proxy-params.conf/the generated maps.
+# ────────────────────────────────────────────────────────────────────────────
+printf 'ok\n' > /etc/nginx/lancache-healthz-body.txt
+
+# ────────────────────────────────────────────────────────────────────────────
 # 4. Render nginx.conf and proxy-params from templates
 # ────────────────────────────────────────────────────────────────────────────
 envsubst '${CACHE_MEM_MB} ${CACHE_MAX_SIZE} ${CACHE_MIN_FREE} ${CACHE_INACTIVE} ${NGINX_UPSTREAM_RESOLVER}' \

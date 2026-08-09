@@ -262,6 +262,22 @@ found errors from DDNS or the Admin UI.
 
 **Evidence:** `services/dns/entrypoint.sh:676-684`.
 
+**STATUS: `_dns_ensure_zone_exists()` fixed, then corrected again.** The
+blanket `|| true` was replaced with a function that inspects `create-zone`'s
+own stderr to distinguish "already exists" (non-fatal) from a real failure
+(fatal, with a FATAL line). That fix itself had a second bug, found live
+(2026-08-09): it wrote `create_output=$(pdnsutil ... 2>&1)` then read
+`create_status=$?` on the next line, but under this file's own top-level
+`set -euo pipefail`, that assignment IS the command `-e` checks -- a nonzero
+create-zone exit (the everyday already-exists case on every restart against
+a persistent volume) aborted the whole entrypoint on that line, before
+`create_status` was ever read, crash-looping the container on every restart
+of an install whose zones already exist. Fixed with `|| create_status=$?`
+on the assignment itself. A dedicated regression test
+(`tests/bats/dns_zone_creation_error_handling.bats`) now proves the
+already-exists tolerance survives under a real `set -e`-active subprocess,
+not just under bats' own default options.
+
 ---
 
 ## 7. [Correctness, latent] `dns_record_to_zone_update` allows a `replace` action with `ttl: None`, which is silently unrecoverable if it ever reaches PowerDNS
