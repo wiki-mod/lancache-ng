@@ -8,7 +8,7 @@ setup() {
 }
 
 line_of() {
-  grep -nF "$1" "$WORKFLOW" | head -n1 | cut -d: -f1
+  awk -v needle="$1" 'index($0, needle) { print NR; exit }' "$WORKFLOW"
 }
 
 @test "promotion verifies accepted identity before acquiring the global writer lock" {
