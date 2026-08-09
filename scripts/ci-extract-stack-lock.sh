@@ -10,8 +10,13 @@
 # returned to a caller.
 set -euo pipefail
 
-[[ $# -eq 2 ]] || { echo "usage: ci-extract-stack-lock.sh STACK_REF OUTPUT" >&2; exit 2; }
-stack_ref="$1"; output="$2"
+if [[ $# -ne 2 && $# -ne 3 ]]; then
+    echo "usage: ci-extract-stack-lock.sh STACK_REF OUTPUT [DIGEST_OUTPUT]" >&2
+    exit 2
+fi
+stack_ref="$1"
+output="$2"
+digest_output="${3:-}"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 source "$repo_root/scripts/lib/ghcr-retry.sh"
@@ -62,3 +67,7 @@ bash "$repo_root/scripts/ci-verify-acceptance-attestation.sh" \
 
 mkdir -p "$(dirname "$output")"
 cp "$work_dir/stack-lock.json" "$output"
+if [[ -n "$digest_output" ]]; then
+    mkdir -p "$(dirname "$digest_output")"
+    printf '%s\n' "$stack_digest" >"$digest_output"
+fi
