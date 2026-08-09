@@ -1140,16 +1140,13 @@ echo "[lancache-dns] Creating LAN zones in authoritative database..."
 # closing the original gap without depending on an unverified second
 # command's contract.
 #
-# CORRECTED (real crash-loop confirmed 2026-08-09): the previous version
-# wrote `create_output=$(pdnsutil ... 2>&1)` then read `create_status=$?` on
-# the NEXT line. Under this file's own top-level `set -euo pipefail`, that
-# assignment itself is the command `-e` checks -- a nonzero create-zone exit
-# (the everyday "already exists" case on every restart against a persistent
-# volume, not just a genuine failure) aborted the whole script on that same
-# line, before create_status was ever assigned or inspected. The
-# already-exists tolerance this function exists to provide never actually
-# ran; every update/restart of an install whose zones already exist
-# crash-looped the container. `|| create_status=$?` makes the assignment
+# Under this file's own top-level `set -euo pipefail`, a bare
+# `create_output=$(pdnsutil ...)` assignment IS the command `-e` checks: a
+# nonzero create-zone exit (the everyday "already exists" case on every
+# restart against a persistent volume, not just a genuine failure) would
+# abort the whole script on that line, before create_status could ever be
+# assigned or inspected -- defeating the already-exists tolerance this
+# function exists to provide. `|| create_status=$?` makes the assignment
 # itself the tested command `-e` exempts, exactly the same pattern this
 # file's own known-good-snapshot rollback helpers already use for a command
 # substitution whose failure must be inspected rather than fatal on the spot.
