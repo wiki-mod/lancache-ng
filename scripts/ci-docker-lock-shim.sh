@@ -288,7 +288,8 @@ ci_lock_assert_compose_runtime() {
 }
 
 ci_lock_run_compose() {
-    # shellcheck disable=SC2034 -- consumed through nameref by ci_lock_split_compose_args.
+    # shellcheck disable=SC2034
+    # Consumed through nameref by ci_lock_split_compose_args.
     local -a input=("$@") globals=() compose_command=()
     local override status
 
@@ -336,7 +337,8 @@ if [[ "${1:-}" == compose ]]; then
     fi
 fi
 
-# shellcheck disable=SC2034 -- consumed through nameref by ci_lock_rewrite_direct_args.
+# shellcheck disable=SC2034
+# Consumed through nameref by ci_lock_rewrite_direct_args.
 args=("$@")
 rewritten=()
 if ci_lock_rewrite_direct_args args rewritten; then
