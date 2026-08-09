@@ -6,10 +6,11 @@ setup() {
   REPO_ROOT="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 }
 
-@test "release lock preserves accepted runtime and replaces only build-tools identity" {
+@test "release lock preserves accepted runtime and binds its verified origin" {
   accepted="$BATS_TEST_TMPDIR/accepted.json"
   tooling="$BATS_TEST_TMPDIR/build-tools-index.json"
   release="$BATS_TEST_TMPDIR/release.json"
+  accepted_pointer_digest="sha256:0101010101010101010101010101010101010101010101010101010101010101"
 
   cat >"$accepted" <<'JSON'
 {
@@ -66,11 +67,15 @@ JSON
 }
 JSON
 
+  accepted_lock_hash="$(sha256sum "$accepted" | awk '{print $1}')"
   run bash "$REPO_ROOT/scripts/ci-assemble-release-lock.sh" \
-    "$accepted" "$tooling" v0.4.0 release-v2-test "$release"
+    "$accepted" "$accepted_pointer_digest" "$tooling" \
+    v0.4.0 release-v2-test "$release"
   [ "$status" -eq 0 ]
 
-  run jq -e '
+  run jq -e \
+    --arg pointer_digest "$accepted_pointer_digest" \
+    --arg accepted_lock_hash "$accepted_lock_hash" '
     .runtime.proxy.digest == "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     and .runtime.proxy.platforms["linux/amd64"] == "sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
     and .runtime.proxy.candidate_ref == "ghcr.io/wiki-mod/lancache-ng/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
@@ -79,37 +84,37 @@ JSON
     and .tooling["build-tools"].build_inputs == {build_args:{},build_contexts:{}}
     and .release.tag == "v0.4.0"
     and .release.runtime_origin == "accepted-stack"
+    and .release.accepted_runtime_pointer_digest == $pointer_digest
+    and .release.accepted_runtime_lock_sha256 == $accepted_lock_hash
     and .release.build_tools_origin == "fresh-release-build"
   ' "$release"
   [ "$status" -eq 0 ]
 }
 
-@test "release acceptance requires tag source and release-specific evidence gates" {
+@test "release acceptance proves inherited runtime and fresh tooling without claiming rerun stack gates" {
   source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
   record="$BATS_TEST_TMPDIR/release-acceptance.json"
   cat >"$record" <<'JSON'
 {
-  "schema":"stack-acceptance/v1",
+  "schema":"release-acceptance/v1",
   "accepted":true,
   "source_sha":"1111111111111111111111111111111111111111",
   "source_ref":"refs/tags/v0.4.0",
-  "stack_lock_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "release_lock_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "accepted_tag":"accepted-v2-release-v0.4.0-test",
   "release_tag":"v0.4.0",
+  "accepted_runtime_pointer_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "accepted_runtime_lock_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
   "gates":{
-    "identity_complete":true,
-    "platform_complete":true,
-    "provenance":true,
-    "exact_digest_security":true,
-    "native_platform_smoke":true,
-    "exact_locked_stack":true,
-    "runtime_deep_validation":true,
-    "supplemental_full_setup":true,
-    "publication_policy":true,
+    "accepted_runtime_acceptance_verified":true,
     "accepted_runtime_identity_preserved":true,
     "release_build_tools_built":true,
     "release_build_tools_provenance":true,
-    "release_exact_digest_evidence":false
+    "release_exact_digest_security":true,
+    "release_native_platform_smoke":true,
+    "release_sbom_attested":true,
+    "release_build_tools_validation_contract":false,
+    "publication_policy":true
   }
 }
 JSON
@@ -117,7 +122,7 @@ JSON
   run ci_ai_validate_release_acceptance "$record"
   [ "$status" -ne 0 ]
 
-  jq '.gates.release_exact_digest_evidence = true' "$record" >"$record.tmp"
+  jq '.gates.release_build_tools_validation_contract = true' "$record" >"$record.tmp"
   mv "$record.tmp" "$record"
   run ci_ai_validate_release_acceptance "$record"
   [ "$status" -eq 0 ]
@@ -125,6 +130,42 @@ JSON
   jq '.source_ref = "refs/heads/current_dev"' "$record" >"$record.tmp"
   mv "$record.tmp" "$record"
   run ci_ai_validate_release_acceptance "$record"
+  [ "$status" -ne 0 ]
+}
+
+@test "release acceptance schema cannot impersonate reusable stack acceptance" {
+  source "$REPO_ROOT/scripts/lib/ci-artifact-identity.sh"
+  record="$BATS_TEST_TMPDIR/release-only.json"
+  cat >"$record" <<'JSON'
+{
+  "schema":"release-acceptance/v1",
+  "accepted":true,
+  "source_sha":"1111111111111111111111111111111111111111",
+  "source_ref":"refs/tags/v0.4.0",
+  "release_lock_sha256":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "accepted_tag":"accepted-v2-release-v0.4.0-test",
+  "release_tag":"v0.4.0",
+  "accepted_runtime_pointer_digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+  "accepted_runtime_lock_sha256":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+  "gates":{
+    "accepted_runtime_acceptance_verified":true,
+    "accepted_runtime_identity_preserved":true,
+    "release_build_tools_built":true,
+    "release_build_tools_provenance":true,
+    "release_exact_digest_security":true,
+    "release_native_platform_smoke":true,
+    "release_sbom_attested":true,
+    "release_build_tools_validation_contract":true,
+    "publication_policy":true
+  }
+}
+JSON
+
+  run ci_ai_validate_release_acceptance "$record"
+  [ "$status" -eq 0 ]
+  run ci_ai_validate_acceptance "$record"
+  [ "$status" -ne 0 ]
+  run ci_ai_validate_reusable_acceptance "$record"
   [ "$status" -ne 0 ]
 }
 
