@@ -51,6 +51,15 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "shared stack verifies every active compose service, not a second hardcoded list" {
+  run grep -F 'expected_output="$(docker compose config --services)"' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F 'docker compose ps -a -q "$service"' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F "'{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}'" "$WORKFLOW"
+  [ "$status" -eq 0 ]
+}
+
 @test "shared simulations execute directly and crash-loop proof is last" {
   scripts=(
     full-setup-client-simulation.sh
