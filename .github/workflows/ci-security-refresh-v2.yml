@@ -18,7 +18,10 @@ permissions:
 
 jobs:
   plan:
-    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # Read-only identity extraction and matrix planning belong on the light
+    # tier. The actual vulnerability scans below remain on their matrix's
+    # heavy/native runner profile.
+    runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 20
     outputs:
       matrix: ${{ steps.matrix.outputs.matrix }}
