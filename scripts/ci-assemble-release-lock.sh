@@ -7,20 +7,22 @@
 # release-tag source and already represented by an image-candidate-index record.
 set -euo pipefail
 
-[[ $# -eq 5 ]] || {
-    echo "usage: ci-assemble-release-lock.sh ACCEPTED_LOCK BUILD_TOOLS_INDEX RELEASE_TAG RELEASE_CANDIDATE_TAG OUTPUT" >&2
+[[ $# -eq 6 ]] || {
+    echo "usage: ci-assemble-release-lock.sh ACCEPTED_LOCK ACCEPTED_POINTER_DIGEST BUILD_TOOLS_INDEX RELEASE_TAG RELEASE_CANDIDATE_TAG OUTPUT" >&2
     exit 2
 }
 
 accepted_lock="$1"
-build_tools_index="$2"
-release_tag="$3"
-release_candidate_tag="$4"
-output="$5"
+accepted_pointer_digest="$2"
+build_tools_index="$3"
+release_tag="$4"
+release_candidate_tag="$5"
+output="$6"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 
 ci_ai_validate_stack_lock "$accepted_lock"
+ci_ai_require_digest "$accepted_pointer_digest"
 ci_ai_validate_index_record "$build_tools_index"
 [[ "$release_tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-rc\.[0-9]+)?$ ]] \
     || ci_ai_fail "invalid release tag: $release_tag"
@@ -28,7 +30,10 @@ ci_ai_validate_index_record "$build_tools_index"
     || ci_ai_fail "invalid release candidate tag: $release_candidate_tag"
 
 source_sha="$(jq -r '.source_sha' "$accepted_lock")"
+accepted_lock_hash="$(sha256sum "$accepted_lock" | awk '{print $1}')"
 ci_ai_require_sha "$source_sha"
+[[ "$accepted_lock_hash" =~ ^[0-9a-f]{64}$ ]] \
+    || ci_ai_fail "could not hash accepted runtime lock"
 [[ "$(jq -r '.service' "$build_tools_index")" == build-tools ]] \
     || ci_ai_fail "release tooling record is not build-tools"
 [[ "$(jq -r '.scope' "$build_tools_index")" == tooling ]] \
@@ -58,6 +63,8 @@ mkdir -p "$(dirname "$output")"
 jq \
   --arg release_tag "$release_tag" \
   --arg candidate_tag "$release_candidate_tag" \
+  --arg accepted_runtime_pointer_digest "$accepted_pointer_digest" \
+  --arg accepted_runtime_lock_sha256 "$accepted_lock_hash" \
   --arg image "$image" \
   --arg artifact_source_sha "$source_sha" \
   --arg source_fingerprint "$fingerprint" \
@@ -70,6 +77,8 @@ jq \
     | .release = {
         tag: $release_tag,
         runtime_origin: "accepted-stack",
+        accepted_runtime_pointer_digest: $accepted_runtime_pointer_digest,
+        accepted_runtime_lock_sha256: $accepted_runtime_lock_sha256,
         build_tools_origin: "fresh-release-build"
       }
     | .runtime |= with_entries(
@@ -90,9 +99,11 @@ jq \
   ' "$accepted_lock" >"$output"
 
 ci_ai_validate_stack_lock "$output"
-jq -e --arg release_tag "$release_tag" '
+jq -e --arg release_tag "$release_tag" --arg pointer_digest "$accepted_pointer_digest" --arg lock_hash "$accepted_lock_hash" '
   .release.tag == $release_tag
   and .release.runtime_origin == "accepted-stack"
+  and .release.accepted_runtime_pointer_digest == $pointer_digest
+  and .release.accepted_runtime_lock_sha256 == $lock_hash
   and .release.build_tools_origin == "fresh-release-build"
 ' "$output" >/dev/null \
     || ci_ai_fail "release metadata is incomplete in $output"
