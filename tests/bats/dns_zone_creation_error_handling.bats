@@ -57,9 +57,15 @@ pdnsutil() {
 # The routine, expected case on every container restart: create-zone fails
 # because the zone is already there. Must stay non-fatal, exactly like the
 # old blanket `|| true` was for this specific case.
+#
+# Message wording: the real pdnsutil binary's own message is "Zone
+# '<name>' exists already" -- "exists already", not "already exists" --
+# confirmed empirically against the actual binary, not assumed. The
+# reversed wording never matches the real tool and would mask this exact
+# never-tolerated-in-practice failure mode.
 @test "an already-existing zone (create-zone fails with pdnsutil's real 'exists already' message) is not fatal" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' exists already"
+    PDNSUTIL_CREATE_ZONE_STDERR="Zone 'lan' exists already"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -90,35 +96,40 @@ pdnsutil() {
     [[ "$output" == *"Unable to open database connection"* ]]
 }
 
-# load_dns_zone_helpers only extracts this function's own body, never
-# entrypoint.sh's top-level `set -euo pipefail` -- every test above runs
-# under bats' own default options, NOT the real ones this function executes
-# under in production. Worse, bats' own `run` wraps the tested command in a
-# subshell that does not propagate a `set -e` set earlier in the same test
-# body (verified empirically: a test that does `set -e; run some_function_
-# with_an_unguarded_failing_command_substitution` still lets that function
-# run to its own end, because `run`'s subshell starts fresh, not inheriting
-# -e) -- so simply adding `set -e` before `run` would silently prove
-# nothing. A version of _dns_ensure_zone_exists that reads
-# `create_status=$?` on a line separate from the create_output assignment
-# would pass every test above while still failing under entrypoint.sh's REAL
-# option set (a plain script, never bats/run-wrapped), because that
-# assignment is the command -e checks there, aborting before create_status
-# is ever read. This test instead spawns its OWN literal `bash -c 'set -e;
-# ...'` subprocess (bypassing `run` entirely for the -e-sensitive part),
-# sources the same extracted helper, and re-declares the stub via
-# `export -f` so the child process sees it -- the only way to actually prove
-# the already-exists tolerance survives under the exact conditions that
-# would otherwise defeat it, per this project's own standing requirement to
-# prove a set -e/-u dependent construct empirically rather than reason about
-# it.
-@test "the already-exists tolerance still holds when set -e is actually active, like in the real entrypoint" {
-    export -f pdnsutil
-    export PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    export PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' exists already"
-    export pdnsutil_calls
-    run bash -c "set -euo pipefail; source '$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh'; _dns_ensure_zone_exists lan; echo REACHED_AFTER_CALL"
+# The actual regression this guards against: bats' `run` does not run the
+# command under `set -e` the way the real entrypoint.sh does (services/dns/
+# entrypoint.sh line 11: `set -euo pipefail`), so every test above -- while
+# a genuinely correct check of the function's own logic -- could not have
+# caught the real bug: a bare `create_output=$(...)` assignment statement
+# (not gated by an `if`/`while` condition) is itself a failing simple
+# command when the substituted command fails, which `errexit` aborts on
+# immediately, before the very next line (let alone the "exists already"
+# tolerance check) ever runs. This test (per AG-VAL-030: prove a
+# set-e/pipefail-dependent construct by executing it under the exact
+# options its real caller uses, not by reasoning about it) builds a real
+# standalone script, sources the *actual* extracted function body, enables
+# `set -euo pipefail` itself, and calls the function exactly the way
+# entrypoint.sh's own zone-creation loop does -- once for a zone that
+# already exists (the routine restart case), then once more (a canary
+# call) to prove the script is still alive afterward, not merely dead but
+# reporting exit 0.
+@test "_dns_ensure_zone_exists does not silently abort the whole script under real set -euo pipefail" {
+    local script="$BATS_TEST_TMPDIR/set-e-repro.sh"
+    cat > "$script" <<SCRIPT
+#!/usr/bin/env bash
+set -euo pipefail
+pdnsutil() {
+    echo "\$*" >&2
+    echo "Zone 'lan' exists already" >&2
+    return 1
+}
+source "$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh"
+_dns_ensure_zone_exists "lan"
+echo "CANARY: reached the line after the already-exists call"
+SCRIPT
+    chmod +x "$script"
+    run bash "$script"
 
     [ "$status" -eq 0 ]
-    [[ "$output" == *"REACHED_AFTER_CALL"* ]]
+    [[ "$output" == *"CANARY: reached the line after the already-exists call"* ]]
 }

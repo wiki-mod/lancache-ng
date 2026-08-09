@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-pipefail-early-exit-grep.sh (AG-VAL-029 standing
@@ -202,6 +203,136 @@ write_script() {
     run bash "$script" "$fixture"
     [ "$status" -eq 1 ]
     [[ "$output" == *"setup.sh"* ]]
+}
+
+@test "fails on the same pattern in a services/**-style entrypoint file" {
+    # Pins the services/** pathspec itself: this is the exact class of real
+    # bug found in services/dns/entrypoint.sh (a set -e script silently
+    # dying on an unguarded printf | grep -qi). Without this fixture, an
+    # accidental narrowing of scan_files that dropped 'services/*.sh'
+    # 'services/**/*.sh' would leave the whole suite green.
+    write_script "services/example-service/entrypoint.sh" \
+        'if printf "%s" "$captured_value" | grep -qi "needle"; then' \
+        '  echo found' \
+        'fi'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/entrypoint.sh"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails on the exact real-incident shape reproduced in a services/*/Dockerfile-style file" {
+    # Service Dockerfiles need their own path fixture because shell scripts
+    # under services/** do not prove the Dockerfile pathspec is retained.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'FROM scratch\n'
+        printf 'RUN set -euo pipefail; \\\n'
+        printf '    rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails when a service Dockerfile inherits pipefail from build-tools" {
+    # BUILD_TOOLS_IMAGE supplies a Bash/pipefail SHELL to subsequent RUN
+    # instructions, so the child does not need to repeat the word pipefail.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
+        printf 'FROM ${BUILD_TOOLS_IMAGE} AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails when a service Dockerfile directly references a tagged build-tools image" {
+    # Direct image references may select a tag or digest, both of which are
+    # part of the image token and must not disable inherited-pipefail coverage.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'FROM ghcr.io/wiki-mod/lancache-ng/build-tools:latest AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails when a service Dockerfile inherits pipefail from build-tools via an indented FROM" {
+    # The Dockerfile format reference documents leading whitespace before an
+    # instruction as ignored, so an indented FROM must retain the same
+    # inherited-pipefail coverage as one starting at column 0.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
+        printf '  FROM ${BUILD_TOOLS_IMAGE} AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails when a service Dockerfile inherits pipefail from build-tools via a lowercase from" {
+    # Dockerfile instruction names are case-insensitive -- Docker accepts
+    # `from`/`From`/`FROM` identically -- so a differently-cased instruction
+    # must retain the same inherited-pipefail coverage as uppercase FROM.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
+        printf 'from ${BUILD_TOOLS_IMAGE} AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails when a service Dockerfile inherits pipefail from build-tools via a flagged FROM" {
+    # `FROM` accepts optional `--flag`/`--flag=value` tokens (e.g.
+    # `--platform=$BUILDPLATFORM`) before the image reference -- a real
+    # multi-platform service builder commonly writes exactly this shape.
+    # Valid flagged FROM instructions must retain the same inherited-pipefail
+    # coverage that the sibling fixture proves for an unflagged FROM.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
+        printf 'FROM --platform=$BUILDPLATFORM ${BUILD_TOOLS_IMAGE} AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "passes on a services/*/Dockerfile-style file using the capture-into-here-string pattern" {
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'FROM scratch\n'
+        printf 'RUN set -euo pipefail; \\\n'
+        printf '    installed_targets="$(rustup target list --installed)"; \\\n'
+        printf '    grep -qx "x86_64-unknown-linux-musl" <<<"${installed_targets}"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
 }
 
 @test "an untracked scripts/**-style file (never git add-ed) is invisible to the guard" {
