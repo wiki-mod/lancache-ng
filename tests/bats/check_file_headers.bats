@@ -130,6 +130,14 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "explicit-file mode accepts Docker parser-directive case and whitespace variants" {
+    # Docker documents directive keys as case-insensitive and permits
+    # non-line-breaking whitespace around the key/value separator.
+    printf '#  SyNtAx = docker/dockerfile:1\n# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n# SPDX-License-Identifier: AGPL-3.0-or-later\nFROM scratch\n' > "$fixture_dir/Dockerfile"
+    run bash "$script" "$fixture_dir/Dockerfile"
+    [ "$status" -eq 0 ]
+}
+
 @test "explicit-file mode rejects a second Docker parser directive occupying line 2" {
     printf '# syntax=docker/dockerfile:1\n# escape=`\n# SPDX-License-Identifier: AGPL-3.0-or-later\nFROM scratch\n' > "$fixture_dir/Dockerfile"
     run bash "$script" "$fixture_dir/Dockerfile"
