@@ -4480,6 +4480,51 @@ capture_stack_health_baseline() {
     done
 }
 
+# docker logs is a known, documented blind spot for a small set of services:
+# dhcp-proxy (dnsmasq) and nats (nats-server) each support only one log
+# destination at a time, and once LOGGING_ENABLED (default "1") activates the
+# `logging` profile, that one destination is a file, not stdout -- so
+# `docker logs` on those containers, and on `syslog`'s own fluent-bit process
+# specifically, goes quiet (see docs/architecture-ng.md's logging matrix for
+# the full per-service breakdown). Unlike the per-service source volumes
+# (Docker-managed, not directly host-readable), syslog-ng's own aggregated
+# output tree IS a host bind mount
+# (${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}, see setup.sh's own
+# pre-creation step for that same path), organized as
+# "<root>/<syslog-ng $HOST>/<YYYYMMDD>.log" per services/syslog/syslog-ng.conf's
+# destination template -- so it can be read directly here, without starting
+# any extra container. Keyed by service name (as wait_for_stack_health's
+# caller names it), value is the exact "host" field
+# services/syslog/fluent-bit.conf's record_modifier filter stamps onto that
+# service's forwarded lines.
+declare -A _REGRESSED_SERVICE_SYSLOG_HOST=(
+    [dhcp-proxy]="lancache-dhcp-proxy"
+    [nats]="lancache-nats"
+    [syslog]="lancache-syslog"
+)
+
+# Tails today's forwarded syslog-ng log file for one of the three services
+# above, as a supplement to (never a replacement for) the plain `docker logs`
+# dump in wait_for_stack_health below -- called only when that service is one
+# of _REGRESSED_SERVICE_SYSLOG_HOST's known-quiet keys AND central logging is
+# actually active, since neither the bind mount nor any forwarded content
+# exists otherwise.
+dump_service_syslog_ng_tail() {
+    local svc="$1" syslog_host="$2"
+    local syslog_ng_log_dir today_file
+
+    syslog_ng_log_dir="$(get_env_var SYSLOG_NG_LOG_DIR "$_UPDATE_ENV_FILE")"
+    syslog_ng_log_dir="${syslog_ng_log_dir:-$(production_state_root_default "$INSTALL_DIR")/syslog-ng}"
+    today_file="$syslog_ng_log_dir/$syslog_host/$(date -u +%Y%m%d).log"
+
+    if [[ -r "$today_file" ]]; then
+        print_warn "Last 50 forwarded log lines for '$svc' (docker logs is empty for this service while central logging is active -- see $today_file):"
+        tail -n 50 "$today_file" 2>&1 | sed 's/^/    /' || print_warn "Could not read $today_file (may have rotated mid-read)."
+    else
+        print_warn "No forwarded syslog-ng log file found for '$svc' yet at $today_file."
+    fi
+}
+
 # Polls every named service until each is container-healthy (see
 # service_container_is_healthy) AND the whole set passes the functional probe,
 # or the timeout elapses. This is the real decision point the removed
@@ -4535,6 +4580,39 @@ wait_for_stack_health() {
 
     if (( ${#regressed_services[@]} > 0 )); then
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
+        # Diagnosing this gate's own failure previously required a live SSH
+        # session against a still-running (or already-recreated-and-gone)
+        # container, since neither this script nor CI's use of it captured
+        # any container output on this exact path -- a real incident traced
+        # a silent entrypoint crash back to this gap. Dump each regressed
+        # service's own recent log output here, once, right where the
+        # failure is detected, so both a real operator and CI's own captured
+        # output have the actual cause without needing separate live access.
+        for svc in "${regressed_services[@]}"; do
+            local container_id
+            # Guarded as an `if` condition, not a bare assignment (Rule-Ref:
+            # AG-VAL-030 -- a `$(...)` whose failure the caller relies on;
+            # this is a command-substitution-under-set--e concern, not
+            # AG-VAL-032's pipefail/early-exiting-consumer one, since there
+            # is no pipeline here at all): service_container_id's own
+            # `docker compose ps` call can exit non-zero, and this script
+            # runs under set -e -- a bare `container_id=$(...)` here would
+            # abort the whole update instead of just skipping the log dump
+            # for this one service.
+            if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
+                print_warn "Last 50 log lines for regressed service '$svc' (container $container_id):"
+                docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
+            else
+                print_warn "No container found for regressed service '$svc'; cannot dump its logs."
+            fi
+            if [[ -n "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]-}" ]]; then
+                local logging_enabled
+                logging_enabled="$(get_env_var LOGGING_ENABLED "$_UPDATE_ENV_FILE")"
+                if [[ "${logging_enabled:-1}" = "1" ]]; then
+                    dump_service_syslog_ng_tail "$svc" "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]}"
+                fi
+            fi
+        done
     fi
     return 1
 }
