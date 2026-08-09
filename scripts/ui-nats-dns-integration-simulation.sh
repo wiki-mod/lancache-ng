@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real multi-service integration test (issue #400, sub-item of #398 priority
@@ -37,29 +38,40 @@ dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
+shared_stack="${FULL_SETUP_SHARED_STACK:-0}"
+case "$shared_stack" in
+    0 | 1) ;;
+    *) echo "::error::FULL_SETUP_SHARED_STACK must be 0 or 1, got '$shared_stack'." >&2; exit 2 ;;
+esac
 
 cleanup() {
     local status=$?
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-        down -v --remove-orphans >/dev/null 2>&1 || true
-    # `down` above can lose the "has active endpoints" race (see
-    # validation_project_networks_teardown's own comment in reserve-validation-
-    # subnet.sh) and silently leave this network non-empty, poisoning it for
-    # whichever job/run reserves this slot next -- wait for and force a
-    # real removal instead of trusting `down`'s own exit code.
-    validation_project_networks_teardown "$compose_project" || true
+    if [[ "$shared_stack" != 1 ]]; then
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+            down -v --remove-orphans >/dev/null 2>&1 || true
+        # `down` above can lose the "has active endpoints" race (see
+        # validation_project_networks_teardown's own comment in reserve-validation-
+        # subnet.sh) and silently leave this network non-empty, poisoning it for
+        # whichever job/run reserves this slot next -- wait for and force a
+        # real removal instead of trusting `down`'s own exit code.
+        validation_project_networks_teardown "$compose_project" || true
+    fi
     rm -rf "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
 
-echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
+if [[ "$shared_stack" == 1 ]]; then
+    echo "== Reusing the caller-owned full-setup stack =="
+else
+    echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
 
-# ui's own healthcheck (depends_on: docker-socket-proxy, proxy, nats) needs
-# all three running first, or it never reaches a healthy state.
-LANCACHE_IMAGE_TAG="$image_tag" \
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-    up -d proxy docker-socket-proxy dns-standard dns-ssl nats ui
+    # ui's own healthcheck (depends_on: docker-socket-proxy, proxy, nats) needs
+    # all three running first, or it never reaches a healthy state.
+    LANCACHE_IMAGE_TAG="$image_tag" \
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        up -d proxy docker-socket-proxy dns-standard dns-ssl nats ui
+fi
 
 # Mirrors the health-wait pattern already proven in ssl-mitm-cache-simulation.sh.
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
