@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
@@ -1139,14 +1140,34 @@ echo "[lancache-dns] Creating LAN zones in authoritative database..."
 # non-fatal exactly as before; any other failure is now surfaced and fatal,
 # closing the original gap without depending on an unverified second
 # command's contract.
+#
+# Under this file's own top-level `set -euo pipefail`, a bare
+# `create_output=$(pdnsutil ...)` assignment IS the command `-e` checks: a
+# nonzero create-zone exit (the everyday "already exists" case on every
+# restart against a persistent volume, not just a genuine failure) would
+# abort the whole script on that line, before create_status could ever be
+# assigned or inspected -- defeating the already-exists tolerance this
+# function exists to provide. `|| create_status=$?` makes the assignment
+# itself the tested command `-e` exempts, exactly the same pattern this
+# file's own known-good-snapshot rollback helpers already use for a command
+# substitution whose failure must be inspected rather than fatal on the spot.
 _dns_ensure_zone_exists() {
-    local zone="$1" create_output create_status
-    create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1)
-    create_status=$?
+    local zone="$1" create_output create_status=0
+    create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1) || create_status=$?
     if [ "$create_status" -eq 0 ]; then
         return 0
     fi
-    if printf '%s' "$create_output" | grep -qi "already exists"; then
+    # pdnsutil's real message is "Zone '<name>' exists already" (confirmed
+    # empirically against the actual binary) -- "already exists" never
+    # matches that word order, so this tolerance never actually fired and
+    # every restart against an existing zone fell through to the fatal branch.
+    # Tests the already-captured variable directly via a here-string, not a
+    # live `printf | grep -q` pipe: under this file's own `pipefail`, `grep
+    # -q` exiting as soon as it finds a match can race a still-writing
+    # producer into a SIGPIPE, which pipefail would then surface as the
+    # pipeline's exit status even though the match itself was found -- a
+    # here-string has no producer process to race against.
+    if grep -qi "exists already" <<< "$create_output"; then
         return 0
     fi
     echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2

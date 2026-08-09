@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for _dns_ensure_zone_exists (services/dns/entrypoint.sh),
@@ -56,9 +57,9 @@ pdnsutil() {
 # The routine, expected case on every container restart: create-zone fails
 # because the zone is already there. Must stay non-fatal, exactly like the
 # old blanket `|| true` was for this specific case.
-@test "an already-existing zone (create-zone fails with an 'already exists' message) is not fatal" {
+@test "an already-existing zone (create-zone fails with pdnsutil's real 'exists already' message) is not fatal" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' already exists"
+    PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' exists already"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -67,9 +68,9 @@ pdnsutil() {
 # Case-insensitivity: PowerDNS's own real message casing has varied across
 # versions/locales in this project's own experience elsewhere -- the check
 # must not be brittle to exact case.
-@test "an 'already exists' match is case-insensitive" {
+@test "an 'exists already' match is case-insensitive" {
     PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
-    PDNSUTIL_CREATE_ZONE_STDERR="ALREADY EXISTS"
+    PDNSUTIL_CREATE_ZONE_STDERR="EXISTS ALREADY"
     run _dns_ensure_zone_exists "lan"
 
     [ "$status" -eq 0 ]
@@ -87,4 +88,37 @@ pdnsutil() {
     [ "$status" -ne 0 ]
     [[ "$output" == *"FATAL: failed to create zone 'lan'"* ]]
     [[ "$output" == *"Unable to open database connection"* ]]
+}
+
+# load_dns_zone_helpers only extracts this function's own body, never
+# entrypoint.sh's top-level `set -euo pipefail` -- every test above runs
+# under bats' own default options, NOT the real ones this function executes
+# under in production. Worse, bats' own `run` wraps the tested command in a
+# subshell that does not propagate a `set -e` set earlier in the same test
+# body (verified empirically: a test that does `set -e; run some_function_
+# with_an_unguarded_failing_command_substitution` still lets that function
+# run to its own end, because `run`'s subshell starts fresh, not inheriting
+# -e) -- so simply adding `set -e` before `run` would silently prove
+# nothing. A version of _dns_ensure_zone_exists that reads
+# `create_status=$?` on a line separate from the create_output assignment
+# would pass every test above while still failing under entrypoint.sh's REAL
+# option set (a plain script, never bats/run-wrapped), because that
+# assignment is the command -e checks there, aborting before create_status
+# is ever read. This test instead spawns its OWN literal `bash -c 'set -e;
+# ...'` subprocess (bypassing `run` entirely for the -e-sensitive part),
+# sources the same extracted helper, and re-declares the stub via
+# `export -f` so the child process sees it -- the only way to actually prove
+# the already-exists tolerance survives under the exact conditions that
+# would otherwise defeat it, per this project's own standing requirement to
+# prove a set -e/-u dependent construct empirically rather than reason about
+# it.
+@test "the already-exists tolerance still holds when set -e is actually active, like in the real entrypoint" {
+    export -f pdnsutil
+    export PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
+    export PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' exists already"
+    export pdnsutil_calls
+    run bash -c "set -euo pipefail; source '$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh'; _dns_ensure_zone_exists lan; echo REACHED_AFTER_CALL"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"REACHED_AFTER_CALL"* ]]
 }
