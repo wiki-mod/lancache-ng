@@ -24,10 +24,24 @@ setup() {
     [ "$output" -eq 0 ]
   done
 
-  run grep -F 'FULL_SETUP_SHARED_STACK: "1"' "$WORKFLOW"
+  run grep -Fc 'uses: ./.github/actions/reserve-validation-subnet-stack' "$WORKFLOW"
   [ "$status" -eq 0 ]
-  run grep -F 'uses: ./.github/actions/reserve-validation-subnet-stack' "$WORKFLOW"
-  [ "$status" -eq 0 ]
+  [ "$output" -eq 1 ]
+}
+
+@test "shared stack owns one collision reservation for its whole lifetime" {
+  block="$(sed -n '/^  shared-full-setup-stack:$/,/^  proxy-deep-wildcard-tls-simulation:$/p' "$WORKFLOW")"
+
+  [[ "$block" == *'FULL_SETUP_SHARED_STACK: "1"'* ]]
+  [[ "$block" == *'uses: ./.github/actions/reserve-validation-subnet-stack'* ]]
+  [[ "$block" == *'validation_project_networks_teardown "$COMPOSE_PROJECT_NAME"'* ]]
+  [[ "$block" == *'kill "$VALIDATION_LOCK_HOLDER_PID"'* ]]
+
+  # The reservation action writes the final retry-selected project/subnet via
+  # GITHUB_ENV. Job-level values would override those writes on every step and
+  # reopen the collision bug the reservation action is designed to prevent.
+  run grep -E '^      (COMPOSE_PROJECT_NAME|VALIDATION_[A-Z0-9_]+):' <<<"$block"
+  [ "$status" -eq 1 ]
 }
 
 @test "shared stack starts profile-gated passthrough shim from the initial compose up" {
