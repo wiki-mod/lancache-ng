@@ -136,14 +136,25 @@ ci_ai_validate_reusable_acceptance() {
 
 ci_ai_validate_release_acceptance() {
     local file="$1"
-    ci_ai_validate_acceptance "$file" || return 1
     jq -e '
-      (.release_tag | type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$"))
+      .schema == "release-acceptance/v1"
+      and .accepted == true
+      and (.source_sha | test("^[0-9a-f]{40}$"))
+      and (.release_tag | type == "string" and test("^v[0-9]+\\.[0-9]+\\.[0-9]+(-rc\\.[0-9]+)?$"))
       and .source_ref == ("refs/tags/" + .release_tag)
+      and (.release_lock_sha256 | test("^[0-9a-f]{64}$"))
+      and (.accepted_tag | type == "string" and startswith("accepted-v2-release-"))
+      and (.accepted_runtime_pointer_digest | test("^sha256:[0-9a-f]{64}$"))
+      and (.accepted_runtime_lock_sha256 | test("^[0-9a-f]{64}$"))
+      and .gates.accepted_runtime_acceptance_verified == true
       and .gates.accepted_runtime_identity_preserved == true
       and .gates.release_build_tools_built == true
       and .gates.release_build_tools_provenance == true
-      and .gates.release_exact_digest_evidence == true
+      and .gates.release_exact_digest_security == true
+      and .gates.release_native_platform_smoke == true
+      and .gates.release_sbom_attested == true
+      and .gates.release_build_tools_validation_contract == true
+      and .gates.publication_policy == true
     ' "$file" >/dev/null || ci_ai_fail "invalid release acceptance record: $file"
 }
 
