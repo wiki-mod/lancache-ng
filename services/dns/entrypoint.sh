@@ -1,4 +1,5 @@
 #!/bin/bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
@@ -1160,7 +1161,13 @@ _dns_ensure_zone_exists() {
     # empirically against the actual binary) -- "already exists" never
     # matches that word order, so this tolerance never actually fired and
     # every restart against an existing zone fell through to the fatal branch.
-    if printf '%s' "$create_output" | grep -qi "exists already"; then
+    # Tests the already-captured variable directly via a here-string, not a
+    # live `printf | grep -q` pipe: under this file's own `pipefail`, `grep
+    # -q` exiting as soon as it finds a match can race a still-writing
+    # producer into a SIGPIPE, which pipefail would then surface as the
+    # pipeline's exit status even though the match itself was found -- a
+    # here-string has no producer process to race against.
+    if grep -qi "exists already" <<< "$create_output"; then
         return 0
     fi
     echo "[lancache-dns] FATAL: failed to create zone '$zone': $create_output" >&2
