@@ -38,6 +38,27 @@ setup() {
   [[ "$output" == *'unauthorized: authentication required'* ]]
 }
 
+@test "optional ref snapshot does not mistake missing credential helper for missing tag" {
+  ci_ai_manifest_json() {
+    echo 'exec: "docker-credential-pass": executable file not found in $PATH' >&2
+    return 31
+  }
+
+  run ci_ai_ref_digest_optional ghcr.io/wiki-mod/lancache-ng/proxy:latest
+  [ "$status" -eq 31 ]
+  [[ "$output" == *'docker-credential-pass'* ]]
+}
+
+@test "optional ref snapshot accepts GHCR ref-specific not-found as absence" {
+  ci_ai_manifest_json() {
+    echo 'failed to resolve source metadata for ghcr.io/wiki-mod/lancache-ng/proxy:first-publication: not found' >&2
+    return 17
+  }
+
+  run ci_ai_ref_digest_optional ghcr.io/wiki-mod/lancache-ng/proxy:first-publication
+  [ "$status" -eq "$CI_AI_REF_ABSENT_STATUS" ]
+}
+
 @test "promotion and release snapshot before mutation without swallowing read failures" {
   promote="$REPO_ROOT/.github/workflows/ci-promote-accepted-v2.yml"
   release="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
