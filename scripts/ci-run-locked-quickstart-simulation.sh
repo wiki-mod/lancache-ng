@@ -31,6 +31,42 @@ real_docker="$(command -v docker || true)"
 [[ -n "$real_docker" && -x "$real_docker" ]] \
     || ci_ai_fail "quickstart locked simulation requires a real Docker CLI"
 
+# The established Quickstart mutex is a host-local flock in /tmp. This script
+# itself runs inside the validation build-tools container, whose private /tmp
+# would not serialize against host-native setup/syslog jobs. Re-enter the same
+# immutable build-tools image as a Docker sibling with the HOST /tmp bind-
+# mounted at /tmp, acquire the repository's canonical Quickstart flock there,
+# and keep that shell alive for the complete simulation. The Docker daemon
+# interprets both bind sources, so the lock file and checkout are the same host
+# objects every other self-hosted job uses.
+if [[ "${CI_QUICKSTART_LOCK_CHILD:-0}" != 1 ]]; then
+    : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required for the host-locked quickstart child}"
+    [[ "$BUILD_TOOLS_IMAGE" == *@sha256:* ]] \
+        || ci_ai_fail "locked quickstart child requires digest-qualified BUILD_TOOLS_IMAGE, got $BUILD_TOOLS_IMAGE"
+
+    exec "$real_docker" run --rm \
+        --network host \
+        -v /tmp:/tmp \
+        -v /var/run/docker.sock:/var/run/docker.sock \
+        -v "$repo_root:$repo_root" \
+        -w "$repo_root" \
+        -e BUILD_TOOLS_IMAGE \
+        -e GITHUB_RUN_ID \
+        -e GITHUB_RUN_ATTEMPT \
+        -e LANCACHE_IMAGE_REGISTRY \
+        -e LANCACHE_IMAGE_PREFIX \
+        -e LANCACHE_IMAGE_TAG \
+        -e CI_QUICKSTART_LOCK_CHILD=1 \
+        -e CI_QUICKSTART_STACK_LOCK="$lock" \
+        "$BUILD_TOOLS_IMAGE" \
+        bash -lc '
+          set -euo pipefail
+          source scripts/lib/quickstart-compose-lock.sh
+          quickstart_compose_lock_acquire
+          source scripts/ci-run-locked-quickstart-simulation.sh "$CI_QUICKSTART_STACK_LOCK"
+        '
+fi
+
 shim_dir="$(mktemp -d)"
 launcher="$shim_dir/docker"
 cat >"$launcher" <<'SH'
