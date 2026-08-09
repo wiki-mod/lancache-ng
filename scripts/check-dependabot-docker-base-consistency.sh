@@ -146,14 +146,14 @@ for entry in "${tagged_directories[@]}"; do
     # while declaring genuinely different `ARG RUNTIME_BASE=...` defaults
     # above it, in which case comparing the raw `${RUNTIME_BASE}` text would
     # report both as "the same image" despite actually diverging. Only
-    # global-scope ARGs (declared before the file's own last FROM line,
-    # the only ones Docker itself makes visible to a FROM instruction's own
-    # image reference) are collected; a later same-named ARG re-declared
-    # inside a build stage does not change what an earlier FROM line reads.
+    # global-scope ARGs (declared before the file's FIRST FROM instruction,
+    # the only ARG declarations Docker makes visible to later FROM image
+    # references) are collected. ARGs after that boundary belong to a build
+    # stage, so a same-named stage-local redeclaration must not overwrite the
+    # global default used by a subsequent FROM instruction.
     # Falls back to the literal string if there is nothing to substitute.
     if [[ "$normalized_image" == *'$'* ]]; then
         declare -A arg_defaults=()
-        last_from_line_num=$(grep -niE '^[[:space:]]*FROM[[:space:]]' "$dockerfile" | tail -n1 | cut -d: -f1)
         while IFS= read -r arg_decl; do
             [ -n "$arg_decl" ] || continue
             arg_name="${arg_decl%%=*}"
@@ -164,7 +164,14 @@ for entry in "${tagged_directories[@]}"; do
                 arg_value="${arg_value%\'}"; arg_value="${arg_value#\'}"
                 arg_defaults["$arg_name"]="$arg_value"
             fi
-        done < <(head -n "$last_from_line_num" "$dockerfile" | grep -Ei '^[[:space:]]*ARG[[:space:]]+' | sed -E 's/^[[:space:]]*ARG[[:space:]]+//I')
+        done < <(awk '
+            BEGIN { IGNORECASE=1 }
+            /^[[:space:]]*FROM[[:space:]]/ { exit }
+            /^[[:space:]]*ARG[[:space:]]+/ {
+                sub(/^[[:space:]]*ARG[[:space:]]+/, "")
+                print
+            }
+        ' "$dockerfile")
 
         # Substitute every ${NAME} or $NAME this specific image reference
         # contains, using only the ARG defaults just collected -- a bash

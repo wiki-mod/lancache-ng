@@ -268,6 +268,54 @@ EOF
     [[ "$output" == *"OK"* ]] || fail "flagged two Dockerfiles resolving to the identical ARG-substituted image: $output"
 }
 
+@test "ignores stage-local ARG redeclarations when resolving a later FROM" {
+    # Only ARG declarations before the first FROM have global scope and can
+    # supply a later FROM image. A same-named declaration inside the first
+    # stage must not replace that global default for the final stage.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM busybox:1.37 AS builder
+ARG RUNTIME_BASE=debian:12-slim
+RUN echo "$RUNTIME_BASE"
+FROM ${RUNTIME_BASE}
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM ${RUNTIME_BASE}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "treated a stage-local ARG as the later FROM default: $output"
+}
+
+@test "stage-local ARG defaults cannot hide divergent global FROM defaults" {
+    # Matching stage-local defaults do not affect later FROM instructions;
+    # the different global defaults remain the effective final images and
+    # therefore must still be reported as a divergence.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM busybox:1.37 AS builder
+ARG RUNTIME_BASE=ubuntu:24.04
+FROM ${RUNTIME_BASE}
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=debian:12-slim
+FROM busybox:1.37 AS builder
+ARG RUNTIME_BASE=ubuntu:24.04
+FROM ${RUNTIME_BASE}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "let matching stage-local ARG defaults hide divergent global defaults: $output"
+}
+
 @test "fails closed on a FROM line referencing an ARG with no discoverable default" {
     # No ARG declaration precedes this FROM line at all (e.g. the value is
     # only ever supplied via --build-arg at build time, invisible to this
