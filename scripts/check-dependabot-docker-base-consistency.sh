@@ -124,7 +124,11 @@ resolve_final_image() {
         function emit_logical(    marker, candidate) {
             print logical
             candidate=logical
-            if (match(candidate, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?/)) {
+            sub(/^[[:space:]]*/, "", candidate)
+            # A comment can describe heredoc syntax without starting a
+            # heredoc; only Dockerfile instructions can own payload lines.
+            if (candidate !~ /^#/ && candidate ~ /^[A-Za-z]+[[:space:]]/ &&
+                match(candidate, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?/)) {
                 marker=substr(candidate, RSTART, RLENGTH)
                 sub(/^<<-?[[:space:]]*/, "", marker)
                 gsub(/["'"'"']/, "", marker)

@@ -557,3 +557,25 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]] || fail "treated heredoc payload as a FROM instruction: $output"
 }
+
+@test "does not enter heredoc mode for heredoc-looking text in a comment" {
+    # Dockerfile comments have no payload, so an unmatched marker described
+    # by a comment must not hide the real final-stage FROM instruction.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM busybox:1.37 AS builder
+# Prefer RUN <<EOF for generated configuration.
+FROM alpine:3.24
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM busybox:1.37 AS builder
+# Prefer RUN <<EOF for generated configuration.
+FROM debian:12-slim
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "let heredoc-looking comment text hide divergent final images: $output"
+}
