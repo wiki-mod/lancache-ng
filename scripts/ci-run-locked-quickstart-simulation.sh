@@ -141,7 +141,8 @@ docker() {
     fi
 
     shift
-    # shellcheck disable=SC2034 -- consumed through nameref by the splitter.
+    # shellcheck disable=SC2034
+    # Consumed through nameref by the splitter.
     local -a input=("$@") globals=() compose_command=()
     local status
     ci_locked_quickstart_split_compose_args input globals compose_command
