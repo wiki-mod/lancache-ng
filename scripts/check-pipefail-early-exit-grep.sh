@@ -144,7 +144,7 @@ for file in "${scan_files[@]}"; do
       # ... ${BUILD_TOOLS_IMAGE} AS builder` line would never match, silently
       # exempting that stage from this guard despite genuinely inheriting
       # build-tools' pipefail SHELL.
-      if grep -Eq '^FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
+      if grep -Eq '^FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools([:@][^[:space:]]+)?|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
         inherits_build_tools_pipefail=true
       fi
       ;;

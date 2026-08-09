@@ -253,14 +253,27 @@ write_script() {
     [[ "$output" == *"early-exiting consumer"* ]]
 }
 
+@test "fails when a service Dockerfile directly references a tagged build-tools image" {
+    # Direct image references may select a tag or digest, both of which are
+    # part of the image token and must not disable inherited-pipefail coverage.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'FROM ghcr.io/wiki-mod/lancache-ng/build-tools:latest AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
 @test "fails when a service Dockerfile inherits pipefail from build-tools via a flagged FROM" {
     # `FROM` accepts optional `--flag`/`--flag=value` tokens (e.g.
     # `--platform=$BUILDPLATFORM`) before the image reference -- a real
     # multi-platform service builder commonly writes exactly this shape.
-    # Confirmed live: before the FROM regex accounted for this, the guard
-    # reported "OK" for this exact fixture, silently exempting the stage
-    # from the inheritance check the sibling test above proves works for
-    # an unflagged FROM.
+    # Valid flagged FROM instructions must retain the same inherited-pipefail
+    # coverage that the sibling fixture proves for an unflagged FROM.
     mkdir -p "$fixture/services/example-service"
     {
         printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
