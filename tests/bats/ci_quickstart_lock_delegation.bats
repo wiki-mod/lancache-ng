@@ -29,6 +29,28 @@ setup() {
   [ "$status" -eq 1 ]
 }
 
+@test "locked quickstart shares the host-local mutex with existing quickstart jobs" {
+  run grep -F -- '-v /tmp:/tmp' "$WRAPPER"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'source scripts/lib/quickstart-compose-lock.sh' "$WRAPPER"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'quickstart_compose_lock_acquire' "$WRAPPER"
+  [ "$status" -eq 0 ]
+
+  run grep -F 'CI_QUICKSTART_LOCK_CHILD=1' "$WRAPPER"
+  [ "$status" -eq 0 ]
+}
+
+@test "host-lock child keeps the exact build-tools identity" {
+  run grep -F '[[ "$BUILD_TOOLS_IMAGE" == *@sha256:* ]]' "$WRAPPER"
+  [ "$status" -eq 0 ]
+
+  run grep -F '"$BUILD_TOOLS_IMAGE" \' "$WRAPPER"
+  [ "$status" -eq 0 ]
+}
+
 @test "quickstart runtime gate performs an independent final Docker identity readback" {
   run grep -F 'actual="$(command docker inspect --format' "$WRAPPER"
   [ "$status" -eq 0 ]
