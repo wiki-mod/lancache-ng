@@ -120,15 +120,19 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          digest_for_ref() {
-            local ref="$1" manifest digest
-            if ! manifest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' 2>/dev/null)"; then
-              return 1
+          snapshot_previous_ref() {
+            local target="$1" previous status
+            if previous="$(ci_ai_ref_digest_optional "$target")"; then
+              previous_refs["$target"]="$previous"
+              return 0
+            else
+              status=$?
             fi
-            digest="$(jq -r '.digest // empty' <<<"$manifest")"
-            ci_ai_require_digest "$digest" >/dev/null 2>&1 || return 1
-            printf '%s\n' "$digest"
+            if (( status == CI_AI_REF_ABSENT_STATUS )); then
+              previous_refs["$target"]=""
+              return 0
+            fi
+            ci_ai_fail "could not determine previous digest for $target; refusing to mutate without an unambiguous rollback snapshot"
           }
 
           rollback_promotions() {
@@ -155,7 +159,7 @@ jobs:
           while IFS=$'\t' read -r image digest; do
             ci_ai_require_digest "$digest"
             target="${image}:${CHANNEL}"
-            previous_refs["$target"]="$(digest_for_ref "$target" || true)"
+            snapshot_previous_ref "$target"
             metadata="$(mktemp)"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create \
@@ -169,7 +173,7 @@ jobs:
           done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' "$RUNNER_TEMP/stack-lock.json")
 
           stack_target="ghcr.io/wiki-mod/lancache-ng/stack:${CHANNEL}"
-          previous_refs["$stack_target"]="$(digest_for_ref "$stack_target" || true)"
+          snapshot_previous_ref "$stack_target"
           metadata="$(mktemp)"
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --prefer-index=false \
@@ -185,10 +189,10 @@ jobs:
           # last and acts as the coherent stack-channel reference, but the
           # individual service refs must still all match the same lock.
           while IFS=$'\t' read -r image digest; do
-            actual="$(digest_for_ref "${image}:${CHANNEL}")"
+            actual="$(ci_ai_ref_digest "${image}:${CHANNEL}")"
             [[ "$actual" == "$digest" ]] || ci_ai_fail "post-promotion digest mismatch for ${image}:${CHANNEL}"
           done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' "$RUNNER_TEMP/stack-lock.json")
-          [[ "$(digest_for_ref "$stack_target")" == "$ACCEPTED_STACK_DIGEST" ]] \
+          [[ "$(ci_ai_ref_digest "$stack_target")" == "$ACCEPTED_STACK_DIGEST" ]] \
             || ci_ai_fail "post-promotion stack pointer digest mismatch"
 
       - name: Remove Buildx builder
