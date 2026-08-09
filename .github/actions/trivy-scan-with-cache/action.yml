@@ -1,29 +1,22 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 name: Trivy scan with digest-bound result cache
 description: >-
-  Scans an image with Trivy, but skips the scan entirely if the exact same
-  digest was already confirmed clean within the caller-supplied freshness
-  window (issue #1095, finding G11: container-scan re-scanned an unchanged,
-  already-clean channel-image digest with Trivy on every push, with no
-  digest-bound scan-result cache at all). Callers, not this action, own the
-  freshness policy: an SBOM/dependency inventory is a pure function of image
-  content and would be safe to cache forever, but a vulnerability verdict is
-  time-dependent (Trivy's CVE database gains new disclosures over time), so
-  a stale "clean" result must not be served indefinitely -- this action only
-  honors whatever freshness-bucket token the caller passes in, it does not
-  decide how coarse that bucket is.
+  Scans one exact image digest with an explicitly fresh Trivy vulnerability DB.
+  A previous clean verdict may be reused only for the same digest, caller scope,
+  caller freshness token, and internal six-hour vulnerability-DB epoch.
 inputs:
   image-ref:
     description: Digest-qualified image reference to scan (e.g. ghcr.io/org/repo/service@sha256:...).
     required: true
   digest:
-    description: The bare digest (sha256:...) of image-ref, used verbatim in the cache key.
+    description: The bare digest (sha256:...) of image-ref, used verbatim in the cache identity.
     required: true
   cache-key-scope:
-    description: Caller-chosen scope prefix (e.g. service+platform) so unrelated matrix rows never collide on the same cache key even if a digest were ever reused.
+    description: Caller-chosen scope prefix (e.g. service+platform) so unrelated matrix rows never share a clean verdict.
     required: true
   freshness-bucket:
-    description: Caller-computed freshness window token (e.g. a UTC date). Same digest + same bucket = scan skipped; a new bucket forces a real re-scan regardless of digest.
+    description: Caller freshness token. The action additionally limits clean-result reuse to one six-hour UTC DB epoch.
     required: true
   trivyignores:
     required: false
@@ -32,22 +25,53 @@ inputs:
     required: false
     default: /usr/local/rustup/toolchains
   vuln-db-cache-dir:
-    description: Trivy's own vulnerability-database cache dir (a different concept from this action's scan-result cache above) -- passed through to trivy-action's cache-dir input unchanged.
+    description: Optional root for Trivy DB data. The action always appends a six-hour epoch so an older local DB cannot cross the freshness boundary.
     required: false
     default: ""
 outputs:
   cache-hit:
-    description: "true if a clean-scan marker already existed for this digest+bucket (the Trivy scan below was skipped)."
+    description: "true when the exact digest already has a clean result in the current six-hour DB epoch."
     value: ${{ steps.restore.outputs.cache-hit }}
+  db-freshness-bucket:
+    description: Six-hour UTC vulnerability-DB epoch used by this scan/result cache.
+    value: ${{ steps.freshness.outputs.bucket }}
 runs:
   using: composite
   steps:
-    - name: Restore scan-result marker
+    - name: Resolve six-hour Trivy freshness epoch and explicit DB path
+      id: freshness
+      shell: bash
+      env:
+        INPUT_DB_ROOT: ${{ inputs.vuln-db-cache-dir }}
+        INPUT_DIGEST: ${{ inputs.digest }}
+      run: |
+        set -euo pipefail
+        [[ "$INPUT_DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+          echo "::error::Trivy scan requires a valid sha256 digest, got '$INPUT_DIGEST'." >&2
+          exit 1
+        }
+        hour="$(date -u +%H)"
+        slot=$((10#$hour / 6 * 6))
+        bucket="$(date -u +%Y-%m-%d)-$(printf '%02d' "$slot")"
+        digest_key="${INPUT_DIGEST#sha256:}"
+        if [[ -n "$INPUT_DB_ROOT" ]]; then
+          db_root="${INPUT_DB_ROOT%/}"
+        else
+          db_root="${RUNNER_TEMP:?RUNNER_TEMP is required}/trivy-v2-db"
+        fi
+        db_dir="${db_root}/${bucket}"
+        marker_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}/trivy-scan-clean/${digest_key}/${bucket}"
+        mkdir -p "$db_dir" "$marker_dir"
+        printf 'bucket=%s\n' "$bucket" >> "$GITHUB_OUTPUT"
+        printf 'db_dir=%s\n' "$db_dir" >> "$GITHUB_OUTPUT"
+        printf 'marker_dir=%s\n' "$marker_dir" >> "$GITHUB_OUTPUT"
+
+    - name: Restore digest-bound clean-scan marker
       id: restore
       uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ runner.temp }}/trivy-scan-clean
-        key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
+        path: ${{ steps.freshness.outputs.marker_dir }}
+        key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}-${{ steps.freshness.outputs.bucket }}
 
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
@@ -61,25 +85,30 @@ runs:
         skip-dirs: ${{ inputs.skip-dirs }}
         hide-progress: true
         cache: "false"
-        cache-dir: ${{ inputs.vuln-db-cache-dir }}
+        cache-dir: ${{ steps.freshness.outputs.db_dir }}
         timeout: 10m
         exit-code: "1"
 
-    # Only reached when the Trivy step above ran AND passed (exit 0) --
-    # composite steps stop on the first failure by default, same as a job,
-    # so a vulnerable/failed scan never reaches here and never gets cached
-    # as clean. Skipped on a cache hit (nothing new to write).
-    - name: Write scan-result marker
+    # Reaching this step proves the real Trivy invocation either ran and
+    # passed, or the restore step already proved the same digest had passed in
+    # this exact six-hour epoch. A failed scan never writes a clean marker.
+    - name: Write clean-scan marker
       if: steps.restore.outputs.cache-hit != 'true'
       shell: bash
+      env:
+        MARKER_DIR: ${{ steps.freshness.outputs.marker_dir }}
+        DB_BUCKET: ${{ steps.freshness.outputs.bucket }}
       run: |
         set -euo pipefail
-        mkdir -p "${{ runner.temp }}/trivy-scan-clean"
-        date -u +%Y-%m-%dT%H:%M:%SZ > "${{ runner.temp }}/trivy-scan-clean/scanned-at"
+        mkdir -p "$MARKER_DIR"
+        {
+          printf 'scanned_at=%s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          printf 'db_freshness_bucket=%s\n' "$DB_BUCKET"
+        } > "$MARKER_DIR/result.env"
 
-    - name: Save scan-result marker
+    - name: Save digest-bound clean-scan marker
       if: steps.restore.outputs.cache-hit != 'true'
       uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
       with:
-        path: ${{ runner.temp }}/trivy-scan-clean
-        key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
+        path: ${{ steps.freshness.outputs.marker_dir }}
+        key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}-${{ steps.freshness.outputs.bucket }}
