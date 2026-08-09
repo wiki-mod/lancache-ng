@@ -15,3 +15,14 @@ setup() {
   run grep -F 'Security refresh must be dispatched from protected current_dev or master' "$WORKFLOW"
   [ "$status" -eq 0 ]
 }
+
+@test "security refresh uses a run-unique verdict key and rejects an unexpected clean-result cache hit" {
+  run grep -F "printf 'bucket=run-%s-%s" "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F 'freshness-bucket: ${{ steps.freshness.outputs.bucket }}' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F '[[ "$TRIVY_CACHE_HIT" != true ]]' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F 'trivy_db_freshness_bucket' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+}
