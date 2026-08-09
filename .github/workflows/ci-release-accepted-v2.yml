@@ -681,12 +681,13 @@ jobs:
           }
 
           rollback_release_refs() {
-            local status=$? target previous
+            local status=$? target previous index
             if [[ "$status" -eq 0 || "${#promoted_targets[@]}" -eq 0 ]]; then
               exit "$status"
             fi
-            echo "::error::Release publication failed after one or more refs moved; attempting best-effort rollback."
-            for target in "${promoted_targets[@]}"; do
+            echo "::error::Release publication failed after one or more refs moved; attempting best-effort rollback in reverse publication order."
+            for ((index=${#promoted_targets[@]} - 1; index >= 0; index--)); do
+              target="${promoted_targets[$index]}"
               previous="${previous_refs[$target]:-}"
               if [[ -n "$previous" ]]; then
                 ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
