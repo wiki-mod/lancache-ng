@@ -42,6 +42,26 @@ setup() {
     [[ "$output" == *"retrying"* ]]
 }
 
+@test "retries a connection-establishment failure and succeeds after recovery" {
+    call_count_file="$BATS_TEST_TMPDIR/calls"
+    printf '0' > "$call_count_file"
+    git() {
+        local n; n=$(<"$call_count_file")
+        n=$((n + 1))
+        printf '%s' "$n" > "$call_count_file"
+        if [ "$n" -eq 1 ]; then
+            echo "fatal: unable to access 'https://github.com/example/repo/': Failed to connect to github.com port 443 after 5 ms: Could not connect to server" >&2
+            return 1
+        fi
+        echo "ok"
+        return 0
+    }
+    run git_fetch_retry origin main
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 2 ]
+    [[ "$output" == *"retrying"* ]]
+}
+
 @test "retries transient GitHub HTTP status failures and succeeds after recovery" {
     call_count_file="$BATS_TEST_TMPDIR/calls"
     printf '0' > "$call_count_file"

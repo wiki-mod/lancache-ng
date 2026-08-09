@@ -36,6 +36,7 @@ _git_fetch_retry_is_transient() {
         *'The remote end hung up unexpectedly'* | \
         *'Connection reset by peer'* | \
         *'Connection timed out'* | \
+        *'Failed to connect '*'Could not connect to server'* | \
         *'Could not resolve host'* | \
         *'Temporary failure in name resolution'* | \
         *'The requested URL returned error: 429'* | \
