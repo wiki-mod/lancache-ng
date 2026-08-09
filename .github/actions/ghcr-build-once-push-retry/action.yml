@@ -1,0 +1,157 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+name: Build once and push exact local image with GHCR retry
+description: >-
+  Builds one single-platform image exactly once into the local Docker image
+  store, then retries only publication of that already-built image. The remote
+  digest is resolved after a successful push and becomes the artifact identity.
+
+inputs:
+  username:
+    description: GHCR username used for retry re-authentication.
+    required: true
+  password:
+    description: GHCR token used for retry re-authentication.
+    required: true
+  builder:
+    description: Buildx builder name.
+    required: false
+    default: ""
+  context:
+    description: Docker build context.
+    required: false
+    default: "."
+  build-contexts:
+    description: Buildx named contexts.
+    required: false
+    default: ""
+  build-args:
+    description: Docker build arguments.
+    required: false
+    default: ""
+  tag:
+    description: Unique quarantine transport tag for the single local image.
+    required: true
+  labels:
+    description: OCI labels for the image.
+    required: false
+    default: ""
+  platform:
+    description: Exactly one native target platform.
+    required: true
+  pull:
+    description: Always attempt to pull referenced base images during the build.
+    required: false
+    default: "true"
+  cache-from:
+    description: Buildx cache import configuration.
+    required: false
+    default: ""
+  cache-to:
+    description: Buildx cache export configuration.
+    required: false
+    default: ""
+
+outputs:
+  digest:
+    description: Exact registry digest of the pushed single-platform image.
+    value: ${{ steps.publish.outputs.digest }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate build-once inputs
+      shell: bash
+      env:
+        TARGET_TAG: ${{ inputs.tag }}
+        TARGET_PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        [[ "$TARGET_TAG" == ghcr.io/*:* ]] || {
+          echo "::error::build-once publisher requires one explicit GHCR transport tag, got '$TARGET_TAG'." >&2
+          exit 1
+        }
+        case "$TARGET_PLATFORM" in
+          linux/amd64|linux/arm64) ;;
+          *)
+            echo "::error::build-once publisher requires exactly one supported native platform, got '$TARGET_PLATFORM'." >&2
+            exit 1
+            ;;
+        esac
+
+    # This is intentionally the only build step in the action. It exports the
+    # single-platform result into Docker's local image store instead of pushing
+    # from BuildKit. A registry failure after this point can therefore retry the
+    # push without executing Dockerfile build stages again.
+    - name: Build candidate exactly once into local Docker image store
+      id: build
+      uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+      with:
+        builder: ${{ inputs.builder }}
+        context: ${{ inputs.context }}
+        build-contexts: ${{ inputs.build-contexts }}
+        build-args: ${{ inputs.build-args }}
+        push: false
+        load: true
+        tags: ${{ inputs.tag }}
+        labels: ${{ inputs.labels }}
+        platforms: ${{ inputs.platform }}
+        provenance: false
+        pull: ${{ inputs.pull }}
+        cache-from: ${{ inputs.cache-from }}
+        cache-to: ${{ inputs.cache-to }}
+
+    - name: Require the built image to exist locally before publication
+      shell: bash
+      env:
+        TARGET_TAG: ${{ inputs.tag }}
+      run: |
+        set -euo pipefail
+        docker image inspect "$TARGET_TAG" >/dev/null
+
+    - name: Push the already-built image with registry retry and freeze remote digest
+      id: publish
+      shell: bash
+      env:
+        TARGET_TAG: ${{ inputs.tag }}
+        GHCR_RETRY_USERNAME: ${{ inputs.username }}
+        GHCR_RETRY_PASSWORD: ${{ inputs.password }}
+      run: |
+        set -euo pipefail
+        source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+        source "$GITHUB_WORKSPACE/scripts/lib/ci-artifact-identity.sh"
+
+        ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+          docker image push "$TARGET_TAG"
+
+        digest="$(ci_ai_ref_digest "$TARGET_TAG")"
+        ci_ai_require_digest "$digest"
+        printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+    # Producer evidence is keyed by the remote digest because every downstream
+    # identity record is registry-addressed. The non-secret refresh value is
+    # taken from the exact build arguments used by the one build above, never
+    # recomputed from wall-clock time after publication.
+    - name: Persist exact non-secret build refresh input by remote digest
+      shell: bash
+      env:
+        BUILD_ARGS_VALUE: ${{ inputs.build-args }}
+        BUILT_DIGEST: ${{ steps.publish.outputs.digest }}
+      run: |
+        set -euo pipefail
+        marker_dir="${RUNNER_TEMP:?RUNNER_TEMP is required}/lancache-build-inputs"
+        marker="$marker_dir/${BUILT_DIGEST#sha256:}.env"
+        mapfile -t values < <(printf '%s\n' "$BUILD_ARGS_VALUE" | sed -n 's/^APT_CACHE_BUST=//p')
+        if (( ${#values[@]} > 1 )); then
+          echo "::error::APT_CACHE_BUST was supplied more than once; exact build identity is ambiguous." >&2
+          exit 1
+        fi
+        mkdir -p "$marker_dir"
+        : > "$marker"
+        if (( ${#values[@]} == 1 )); then
+          [[ "${values[0]}" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || {
+            echo "::error::APT_CACHE_BUST has an invalid value: ${values[0]}" >&2
+            exit 1
+          }
+          printf 'APT_CACHE_BUST=%s\n' "${values[0]}" > "$marker"
+        fi
