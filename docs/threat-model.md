@@ -133,12 +133,16 @@ architecture content as of 2026-07-31 — that content moved into `AGENTS.md`).
   a public certificate distributed to clients.
 - **Proxy request policy** — `PROXY_SECURITY_MODE` (`lazy` default / `strict`)
   controls whether only listed CDN hosts may be proxied; `PROXY_ALLOWED_CLIENT_CIDRS`
-  optionally restricts which client source networks the proxy answers at all
-  for HTTP/HTTPS traffic (returns 403 otherwise). Both are `http{}`/`https{}`
-  controls: the standard-mode `stream{}` SNI-passthrough listener (`:8443`)
-  enforces `PROXY_SECURITY_MODE=strict`'s domain allowlist differently (an
-  unlisted SNI is routed to a closed `127.0.0.1:9`, not a 403) and does not
-  enforce `PROXY_ALLOWED_CLIENT_CIDRS` at all — see T2.
+  optionally restricts which client source networks the proxy answers at all.
+  For HTTP/HTTPS traffic this is an `http{}`/`https{}` control (returns 403
+  otherwise). The standard-mode `stream{}` SNI-passthrough listener (`:8443`)
+  and the SSL-mode stream-level SNI dispatcher (`:443`) enforce
+  `PROXY_SECURITY_MODE=strict`'s domain allowlist differently (an unlisted
+  SNI is routed to a closed `127.0.0.1:9`, not a 403), and enforce
+  `PROXY_ALLOWED_CLIENT_CIDRS` separately via `ngx_stream_access_module`
+  plain `allow`/`deny` directives (a TCP-level accept/reject before
+  `ssl_preread`, not the `$lancache_client_allowed` geo variable, which is
+  http-context-only and structurally unusable from `stream{}`) — see T2.
 - **Admin UI** — Rust/axum service. Fail-closed auth (see T3). Reaches Docker
   only through the scoped `docker-socket-proxy`.
 - **DHCP** — optional, three mutually-exclusive modes (`disabled` / `kea` /
@@ -198,10 +202,15 @@ proxy into caching attacker-controlled content under a legitimate key.
   a closed `127.0.0.1:9`, not a 403.
 - `PROXY_ALLOWED_CLIENT_CIDRS` optionally restricts which client networks the
   proxy will answer at all for HTTP/HTTPS traffic (`$lancache_client_allowed`
-  → 403 in `conf.d/http.conf`/`https.conf`). This allowlist is **not**
-  enforced for the standard-mode `stream{}` listener (`:8443`) — it never
-  references `$lancache_client_allowed`, so client-CIDR restriction only
-  applies to HTTP/HTTPS traffic, not SNI-passthrough.
+  → 403 in `conf.d/http.conf`/`https.conf`). The externally-facing stream-level
+  SNI-passthrough listeners (`:8443` standard mode, `:443` SSL-mode dispatch)
+  enforce the same CIDR list independently, via `ngx_stream_access_module`
+  `allow`/`deny` directives generated into
+  `stream.d/access.d/00-stream-client-acl.conf` (a TCP-level accept/reject
+  ahead of `ssl_preread`, since `$lancache_client_allowed`'s geo variable
+  cannot cross the `http{}`/`stream{}` context boundary) — a denied
+  connection is refused before any TLS handshake, not answered with an
+  HTTP 403.
 
 **Residual risk**: Medium — `lazy` mode (the default) will proxy any requested
 host; strict mode and client CIDR limits are opt-in. Ultimately bounded by the
@@ -526,9 +535,11 @@ or saturating the proxy.
 - Configurable cache size limits; `proxy_cache_use_stale` keeps serving under
   pressure.
 - `PROXY_ALLOWED_CLIENT_CIDRS` can restrict which clients may drive the proxy
-  over HTTP/HTTPS — it is not enforced for the standard-mode `stream{}`
-  SNI-passthrough listener (`:8443`), so a flood over that listener is not
-  mitigated by this control (see T2).
+  over HTTP/HTTPS, and is now also enforced (via a separate `ngx_stream_
+  access_module` check) for the standard-mode `stream{}` SNI-passthrough
+  listener (`:8443`) and the SSL-mode stream-level SNI dispatcher (`:443`),
+  so a flood over either stream-level listener is rejected at the TCP level
+  before it can reach any relay or backend (see T2).
 - Disk-usage warnings/alarms via the watchdog: since issue #870, the
   watchdog-computed cache-disk yellow/red color is rendered live on the
   Admin UI dashboard's "Service health" card (`services/ui/src/

@@ -3,7 +3,8 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads the real setup.sh post-update functional health
-# gate -- require_functional_check_tool, verify_stack_functional_health,
+# gate -- require_functional_check_tool, _tcp_port_reachable,
+# _verify_healthz_endpoint, verify_stack_functional_health,
 # service_container_is_healthy, wait_for_stack_health, rollback_stack_update,
 # install_missing_tools, and package_name_for_tool -- without executing
 # setup.sh's interactive install/update entrypoint or its top-level CLI

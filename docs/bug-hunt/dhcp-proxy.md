@@ -73,6 +73,16 @@ workflow, not an edge case).
 ## 2. Feature-completeness gap: PXE boot-pointer vars are unreachable through
    `setup.sh` or the Admin UI (3 layers, not just the Admin UI as SoT flagged)
 
+**STATUS: the `setup.sh` portion of this finding is FIXED.** `setup.sh` now
+has an interactive wizard prompt for all three PXE boot-pointer variables
+(its own separate opt-in confirmation, since turning this on is a real
+DHCP-reply behavior change) plus `setup.sh update` migration/backfill and
+validation, so points 1 and the `docs/dhcp-modes.md` "setup.sh never prompts
+for them" half of the claim below no longer hold. The Admin UI portion
+(points 2 and 3, and the "Admin UI page cannot edit them" half of the claim
+below) is still an open gap — see `docs/dhcp-modes.md`'s own PXE
+boot-pointer section for the current, accurate reachability statement.
+
 The SoT doc (§6) already flagged that `services/ui/src/routes/dhcp.rs` and
 `dhcp.html` never expose `DHCP_PROXY_PXE_BOOT_SERVER` /
 `DHCP_PROXY_PXE_BOOT_FILENAME_BIOS` / `DHCP_PROXY_PXE_BOOT_FILENAME_UEFI`. This

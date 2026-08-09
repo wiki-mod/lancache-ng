@@ -176,7 +176,40 @@ is_valid_dhcp_proxy_domain() {
 is_valid_dhcp_proxy_boot_filename() {
     local filename="${1:-}"
     [[ -n "$filename" && "${#filename}" -le 255 ]] || return 1
-    [[ "$filename" != *[[:space:],]* ]]
+    [[ "$filename" != *[[:space:],]* ]] || return 1
+    # Every accepted value here is later written to .env, which
+    # validate_env_value()/validate_env_values_for_initial_write() reject if
+    # it contains a newline, $, backtick, ", ', \, or # -- accepting a
+    # filename here that fails that later check would let the wizard walk
+    # the operator through several more install steps (Docker/Compose
+    # provisioning, other prompts) before dying on a value this function
+    # could have rejected immediately. Reject the identical character set
+    # here so every value this function accepts is also guaranteed
+    # writable.
+    case "$filename" in
+        *$'\n'* | *'$'* | *'`'* | *'"'* | *"'"* | *'\'* | *'#'* )
+            return 1
+            ;;
+    esac
+    return 0
+}
+
+# True (exit 0) only when a PXE boot-pointer answer set has both a boot
+# server AND at least one boot filename -- the combination
+# services/dhcp-proxy/entrypoint.sh's _dhcp_proxy_render_pxe_service_directives
+# actually needs to render a real pxe-service directive. A server alone, or
+# a filename alone, produces no directive at all: dnsmasq just logs a
+# startup WARNING and PXE boot-pointer support stays silently inactive.
+# Shared by both the interactive install wizard (which only ever asks for a
+# filename once a server is already given, so it can only hit the
+# server-without-filename half of this check) and migrate_env_for_update
+# (which validates a possibly hand-edited existing .env/.env.local that can
+# carry either half incomplete) so the two callers can never drift apart on
+# what "complete" means for this feature.
+pxe_boot_pointer_answers_are_complete() {
+    local server="$1" filename_bios="$2" filename_uefi="$3"
+    [[ -n "$server" ]] || return 1
+    [[ -n "$filename_bios" || -n "$filename_uefi" ]]
 }
 
 # Two-tier detection for a secondary node's own LAN IP: prefer the source
@@ -1774,6 +1807,57 @@ resolve_update_ip_config_paths() {
     printf '%s\n%s\n%s\n' "$deploy_env" "$dns_standard_env" "$dns_ssl_env"
 }
 
+# deploy/prod's dhcp-proxy service (deploy/prod/docker-compose.yml) loads its
+# runtime values via `env_file: ../../config/prod/dhcp-proxy.env` -- a static
+# file Compose reads directly, with no `${VAR}` interpolation from
+# .env/.env.local at all (unlike deploy/quickstart's dhcp-proxy service,
+# which wires each value through `environment: - KEY=${KEY:-}`). Every value
+# migrate_env_for_update()/the fresh-install writer resolve for DHCP_PROXY_*
+# and DHCP_RELAY_LOCAL_ADDR therefore never reaches a real deploy/prod
+# container unless it is also written here -- a no-op for a quickstart
+# install (or any other non-deploy/prod install_dir), which has no separate
+# file to sync.
+sync_dhcp_proxy_config_prod_env() {
+    local install_dir="$1" source_env_file="$2"
+    local dhcp_relay_local_addr="$3" dhcp_proxy_interface="$4" dhcp_proxy_router="$5"
+    local dhcp_ntp_servers="$6" dhcp_proxy_domain="$7" dhcp_proxy_boot_filename="$8"
+    local dhcp_proxy_boot_server="$9" dhcp_proxy_pxe_boot_server="${10}" dhcp_proxy_pxe_boot_filename_bios="${11}"
+    local dhcp_proxy_pxe_boot_filename_uefi="${12}"
+    local repo_root config_prod_env key fallback kv
+
+    is_deploy_prod_install_dir "$install_dir" || return 0
+    repo_root=$(deploy_prod_repo_root "$install_dir")
+    config_prod_env="$repo_root/config/prod/dhcp-proxy.env"
+    [[ -f "$config_prod_env" ]] || return 0
+
+    # config_prod_env, not $source_env_file (.env/.env.local), is what
+    # deploy/prod's real dhcp-proxy container reads, so it is the permanent
+    # authority for every key below. Key presence (including an explicit
+    # empty value) must win here: migrate_env_for_update() permanently adds
+    # these keys to .env, which means .env presence cannot distinguish a later
+    # operator edit from an old migration value. The resolved .env fallback is
+    # used only to initialize a key that config_prod_env does not have yet.
+    for kv in \
+        "DHCP_RELAY_LOCAL_ADDR:$dhcp_relay_local_addr" \
+        "DHCP_PROXY_INTERFACE:$dhcp_proxy_interface" \
+        "DHCP_PROXY_ROUTER:$dhcp_proxy_router" \
+        "DHCP_NTP_SERVERS:$dhcp_ntp_servers" \
+        "DHCP_PROXY_DOMAIN:$dhcp_proxy_domain" \
+        "DHCP_PROXY_BOOT_FILENAME:$dhcp_proxy_boot_filename" \
+        "DHCP_PROXY_BOOT_SERVER:$dhcp_proxy_boot_server" \
+        "DHCP_PROXY_PXE_BOOT_SERVER:$dhcp_proxy_pxe_boot_server" \
+        "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS:$dhcp_proxy_pxe_boot_filename_bios" \
+        "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI:$dhcp_proxy_pxe_boot_filename_uefi"
+    do
+        key="${kv%%:*}"
+        fallback="${kv#*:}"
+        if ! env_key_exists "$key" "$config_prod_env"; then
+            set_env_key "$key" "$fallback" "$config_prod_env"
+        fi
+    done
+    print_ok "Converged missing dnsmasq-proxy/PXE keys in $config_prod_env from $source_env_file; existing deploy/prod values were preserved because this runtime file is authoritative."
+}
+
 # Full .env rewrites keep the original owner/mode because the file contains
 # runtime tokens and may already be locked down to 0600.
 write_env_file() {
@@ -2569,6 +2653,23 @@ migrate_env_for_update() {
     local install_dir="$1" preserve_image_tag="${2:-0}" env_file dhcp_enabled dhcp_mode
     local dhcp_proxy_interface dhcp_proxy_router dhcp_ntp_servers dhcp_proxy_domain
     local dhcp_proxy_boot_filename dhcp_proxy_boot_server _dhcp_ntp_check _dhcp_ntp_ip
+    # dhcp_proxy_pxe_boot_server/_bios/_uefi were previously missing from this
+    # local list -- get_env_var's assignment to them below still worked (bash
+    # does not require prior declaration), but each one silently leaked as a
+    # global for the rest of the script's process lifetime instead of staying
+    # scoped to this function like every other migration temp variable here.
+    local dhcp_proxy_pxe_boot_server dhcp_proxy_pxe_boot_filename_bios dhcp_proxy_pxe_boot_filename_uefi
+    # Every one of these must be initialized here, not left to plain `local
+    # name` (which leaves it unset, not empty): setup.sh runs under `set -u`,
+    # and on a quickstart install (is_deploy_prod_install_dir false below) none
+    # of them are ever assigned before their unconditional expansion in the
+    # append_env_key_if_missing() invocations that follow -- an unset
+    # expansion there would abort the far more common quickstart install
+    # path entirely.
+    local prodsync_config_env="" prodsync_default_relay_local_addr="" prodsync_default_proxy_interface=""
+    local prodsync_default_proxy_router="" prodsync_default_ntp_servers="" prodsync_default_proxy_domain=""
+    local prodsync_default_boot_filename="" prodsync_default_boot_server="" prodsync_default_pxe_boot_server=""
+    local prodsync_default_pxe_boot_filename_bios="" prodsync_default_pxe_boot_filename_uefi=""
     local allow_insecure_ui cache_dir cache_max_gb cache_max_size cache_gb cache_mem_mb ip_ssl ssl_enabled ui_generated_password ui_password ui_user
     local compose_profiles dhcp_dns_primary dhcp_dns_secondary dhcp_subnet_start ip_standard upstream_dhcp_ip
     local kea_data_default kea_data_dir nats_conf_default nats_conf_dir nats_data_default nats_data_dir
@@ -2788,26 +2889,113 @@ migrate_env_for_update() {
     dhcp_dns_primary=$(get_env_var DHCP_DNS_PRIMARY "$env_file")
     dhcp_dns_secondary=$(get_env_var DHCP_DNS_SECONDARY "$env_file")
     upstream_dhcp_ip=$(get_env_var UPSTREAM_DHCP_IP "$env_file")
+    # sync_dhcp_proxy_config_prod_env() (called near the end of this function)
+    # treats config/prod/dhcp-proxy.env as deploy/prod's permanent authority.
+    # For a deploy/prod install, seed each of the ten append_env_key_if_missing
+    # calls below from config/prod/dhcp-proxy.env's own current value instead
+    # of an unconditional "" default. Backfilling with "" would make $env_file
+    # carry an explicit empty for that key from this point on, and every LATER
+    # `setup.sh update` run -- not just the first one after a key's
+    # introduction -- would then read that backfilled empty back as "operator
+    # cleared it" and use it to wipe a real, already-configured
+    # config/prod/dhcp-proxy.env value: a one-time snapshot of $env_file taken
+    # before these appends only defers that wipe to the second run, since the
+    # snapshot itself cannot help a run that starts after the first backfill
+    # already landed. Seeding from config/prod/dhcp-proxy.env's real value
+    # instead makes $env_file converge to match it immediately, so every
+    # later run reads back the same real value from both files and is a
+    # genuine no-op, exactly like every other key in this function.
+    if is_deploy_prod_install_dir "$install_dir"; then
+        prodsync_config_env="$(deploy_prod_repo_root "$install_dir")/config/prod/dhcp-proxy.env"
+        if [[ -f "$prodsync_config_env" ]]; then
+            # config/prod/dhcp-proxy.env is a hand-edited file that has never
+            # passed through this function's own dnsmasq-proxy validation
+            # block further below (it is normally only edited directly, or
+            # converged via this exact seeding path) -- validate each
+            # candidate default the same way the read-back further down does
+            # before using it, falling back to the pre-existing "" default
+            # and a warning otherwise. Without this, a value that
+            # entrypoint.sh's own container-side rendering tolerates (e.g. a
+            # PXE boot server with no filename yet -- no pxe-service
+            # directive, a startup warning, not fatal) could newly abort a
+            # `setup.sh update` that previously worked, since this function's
+            # own dnsmasq-proxy validation block requires stricter
+            # completeness/well-formedness than the container does.
+            prodsync_default_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_relay_local_addr" || prodsync_default_relay_local_addr=""
+            prodsync_default_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$prodsync_config_env")
+            is_valid_dhcp_proxy_interface "$prodsync_default_proxy_interface" || prodsync_default_proxy_interface=""
+            prodsync_default_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_proxy_router" || prodsync_default_proxy_router=""
+            prodsync_default_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$prodsync_config_env")
+            if [[ -n "$prodsync_default_ntp_servers" ]]; then
+                IFS=',' read -r -a _dhcp_ntp_check <<< "$prodsync_default_ntp_servers"
+                for _dhcp_ntp_ip in "${_dhcp_ntp_check[@]}"; do
+                    _dhcp_ntp_ip="${_dhcp_ntp_ip//[[:space:]]/}"
+                    [[ -z "$_dhcp_ntp_ip" ]] || is_valid_ipv4 "$_dhcp_ntp_ip" || prodsync_default_ntp_servers=""
+                done
+            fi
+            prodsync_default_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$prodsync_config_env")
+            is_valid_dhcp_proxy_domain "$prodsync_default_proxy_domain" || prodsync_default_proxy_domain=""
+            prodsync_default_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$prodsync_config_env")
+            is_valid_dhcp_proxy_boot_filename "$prodsync_default_boot_filename" || prodsync_default_boot_filename=""
+            prodsync_default_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_boot_server" || prodsync_default_boot_server=""
+            prodsync_default_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_config_env")
+            is_valid_ipv4 "$prodsync_default_pxe_boot_server" || prodsync_default_pxe_boot_server=""
+            prodsync_default_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_config_env")
+            is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_bios" || prodsync_default_pxe_boot_filename_bios=""
+            prodsync_default_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_config_env")
+            is_valid_dhcp_proxy_boot_filename "$prodsync_default_pxe_boot_filename_uefi" || prodsync_default_pxe_boot_filename_uefi=""
+            # The PXE trio must be complete (server + at least one filename)
+            # or entirely empty together -- entrypoint.sh tolerates an
+            # incomplete pair by rendering no pxe-service directive, but this
+            # function's own dnsmasq-proxy validation block below requires
+            # completeness and would die on a hand-edited config/prod file
+            # caught mid-incomplete-configuration.
+            if [[ -n "$prodsync_default_pxe_boot_server$prodsync_default_pxe_boot_filename_bios$prodsync_default_pxe_boot_filename_uefi" ]] \
+                && ! pxe_boot_pointer_answers_are_complete "$prodsync_default_pxe_boot_server" "$prodsync_default_pxe_boot_filename_bios" "$prodsync_default_pxe_boot_filename_uefi"; then
+                prodsync_default_pxe_boot_server=""
+                prodsync_default_pxe_boot_filename_bios=""
+                prodsync_default_pxe_boot_filename_uefi=""
+            fi
+        fi
+    fi
     # Issue #844: DHCP-relay-mode local address (this relay's client-facing IP,
     # forwarded as giaddr). Required in dnsmasq-relay mode, ignored otherwise.
-    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "" "$env_file"
+    append_env_key_if_missing DHCP_RELAY_LOCAL_ADDR "$prodsync_default_relay_local_addr" "$env_file"
     dhcp_relay_local_addr=$(get_env_var DHCP_RELAY_LOCAL_ADDR "$env_file")
     # Issue #450: additional optional dnsmasq relay/proxy fields. Unlike the
     # four values above, none of these are required in dnsmasq-proxy mode --
     # an empty value just means entrypoint.sh renders no directive for it.
-    append_env_key_if_missing DHCP_PROXY_INTERFACE "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_ROUTER "" "$env_file"
-    append_env_key_if_missing DHCP_NTP_SERVERS "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_DOMAIN "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "" "$env_file"
-    append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_INTERFACE "$prodsync_default_proxy_interface" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_ROUTER "$prodsync_default_proxy_router" "$env_file"
+    append_env_key_if_missing DHCP_NTP_SERVERS "$prodsync_default_ntp_servers" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_DOMAIN "$prodsync_default_proxy_domain" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_BOOT_FILENAME "$prodsync_default_boot_filename" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_BOOT_SERVER "$prodsync_default_boot_server" "$env_file"
+    # Deliberately still "" here, unlike the seven keys above: this key is
+    # not one of the ten sync_dhcp_proxy_config_prod_env() converges (see
+    # that function's own `for kv in` list), so config/prod/dhcp-proxy.env
+    # has no authoritative value for it to preserve.
     append_env_key_if_missing DHCP_PROXY_CUSTOM_OPTIONS "" "$env_file"
+    # Issue #705: PXE boot-pointer fields. Without this convergence step an
+    # existing install upgrading via `setup.sh update` would never gain
+    # these keys, since the only other way to set them was hand-editing
+    # config/prod/dhcp-proxy.env directly -- converge them here just like
+    # the #450 fields above, not only for newly-generated installs.
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_SERVER "$prodsync_default_pxe_boot_server" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$prodsync_default_pxe_boot_filename_bios" "$env_file"
+    append_env_key_if_missing DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$prodsync_default_pxe_boot_filename_uefi" "$env_file"
     dhcp_proxy_interface=$(get_env_var DHCP_PROXY_INTERFACE "$env_file")
     dhcp_proxy_router=$(get_env_var DHCP_PROXY_ROUTER "$env_file")
     dhcp_ntp_servers=$(get_env_var DHCP_NTP_SERVERS "$env_file")
     dhcp_proxy_domain=$(get_env_var DHCP_PROXY_DOMAIN "$env_file")
     dhcp_proxy_boot_filename=$(get_env_var DHCP_PROXY_BOOT_FILENAME "$env_file")
     dhcp_proxy_boot_server=$(get_env_var DHCP_PROXY_BOOT_SERVER "$env_file")
+    dhcp_proxy_pxe_boot_server=$(get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$env_file")
+    dhcp_proxy_pxe_boot_filename_bios=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$env_file")
+    dhcp_proxy_pxe_boot_filename_uefi=$(get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$env_file")
 
     case "$dhcp_mode" in
         dnsmasq-proxy)
@@ -2840,9 +3028,35 @@ migrate_env_for_update() {
             [[ -z "$dhcp_proxy_domain" ]] || is_valid_dhcp_proxy_domain "$dhcp_proxy_domain" \
                 || die "DHCP_PROXY_DOMAIN in $env_file must be a valid DNS domain name or empty."
             [[ -z "$dhcp_proxy_boot_filename" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_boot_filename" \
-                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace or commas."
+                || die "DHCP_PROXY_BOOT_FILENAME in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
             [[ -z "$dhcp_proxy_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_boot_server" \
                 || die "DHCP_PROXY_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
+            [[ -z "$dhcp_proxy_pxe_boot_server" ]] || is_valid_ipv4 "$dhcp_proxy_pxe_boot_server" \
+                || die "DHCP_PROXY_PXE_BOOT_SERVER in $env_file must be a valid IPv4 address or empty."
+            [[ -z "$dhcp_proxy_pxe_boot_filename_bios" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_bios" \
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
+            [[ -z "$dhcp_proxy_pxe_boot_filename_uefi" ]] || is_valid_dhcp_proxy_boot_filename "$dhcp_proxy_pxe_boot_filename_uefi" \
+                || die "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI in $env_file must not contain whitespace, commas, or other characters unsafe in a .env value (newline, \$, \`, \", ', \\, or #)."
+            # The three PXE boot-pointer fields above are validated individually,
+            # but entrypoint.sh's pxe-service rendering needs the server AND at
+            # least one boot filename together (see
+            # pxe_boot_pointer_answers_are_complete's own header comment) -- a
+            # server with no filename, or a filename with no server, produces
+            # no pxe-service directive at all (a silent, always-on startup
+            # WARNING, not a fatal error). Unlike the interactive wizard (which
+            # can safely auto-correct because it is mid-conversation with the
+            # operator), `setup.sh update` runs unattended -- silently clearing
+            # an operator-set value here would discard their input with no
+            # chance to notice or fix it before it's gone. Fail closed instead,
+            # matching every other validation in this block: leave the .env
+            # untouched and require the operator to fix the inconsistency
+            # themselves.
+            if [[ -n "$dhcp_proxy_pxe_boot_server" ]] \
+                && ! pxe_boot_pointer_answers_are_complete "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" "$dhcp_proxy_pxe_boot_filename_uefi"; then
+                die "DHCP_PROXY_PXE_BOOT_SERVER is set in $env_file but neither DHCP_PROXY_PXE_BOOT_FILENAME_BIOS nor DHCP_PROXY_PXE_BOOT_FILENAME_UEFI is; PXE boot-pointer support needs at least one boot filename to activate. Set one of them, or clear DHCP_PROXY_PXE_BOOT_SERVER, then re-run update."
+            elif [[ -z "$dhcp_proxy_pxe_boot_server" && ( -n "$dhcp_proxy_pxe_boot_filename_bios" || -n "$dhcp_proxy_pxe_boot_filename_uefi" ) ]]; then
+                die "A DHCP_PROXY_PXE_BOOT_FILENAME_* value is set in $env_file but DHCP_PROXY_PXE_BOOT_SERVER is empty; PXE boot-pointer support needs a boot server to activate. Set DHCP_PROXY_PXE_BOOT_SERVER, or clear both boot filename values, then re-run update."
+            fi
             ;;
         dnsmasq-relay)
             # Issue #844: relay mode forwards to an upstream server and injects
@@ -2873,6 +3087,9 @@ migrate_env_for_update() {
     set_env_key DHCP_PROXY_DOMAIN "$dhcp_proxy_domain" "$env_file"
     set_env_key DHCP_PROXY_BOOT_FILENAME "$dhcp_proxy_boot_filename" "$env_file"
     set_env_key DHCP_PROXY_BOOT_SERVER "$dhcp_proxy_boot_server" "$env_file"
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "$dhcp_proxy_pxe_boot_server" "$env_file"
+    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$dhcp_proxy_pxe_boot_filename_bios" "$env_file"
+    set_env_key DHCP_PROXY_PXE_BOOT_FILENAME_UEFI "$dhcp_proxy_pxe_boot_filename_uefi" "$env_file"
 
     # Mandatory service tokens. Preserve real values; regenerate empty values
     # and known placeholders like CHANGE_ME_* or lancache-*-secret.
@@ -2924,6 +3141,29 @@ migrate_env_for_update() {
     allow_insecure_ui=false
     [[ -z "$ui_user" && -z "$ui_password" ]] && allow_insecure_ui=true
     append_env_key_if_missing ALLOW_INSECURE_UI "$allow_insecure_ui" "$env_file"
+
+    # A manual deploy/prod install's dhcp-proxy container reads
+    # config/prod/dhcp-proxy.env directly, not $env_file -- see
+    # sync_dhcp_proxy_config_prod_env's own header comment for why writing
+    # only $env_file above would leave deploy/prod's dhcp-proxy container on
+    # stale values regardless of what this function just resolved. Deliberately
+    # last in this function, after every step above that can still `die` (the
+    # ensure_secret_env_key/UI-password generation calls): this is the one
+    # write in this function that reaches a container's live config outside
+    # $env_file, so an aborted update must not leave it applied while $env_file
+    # itself stays at its pre-update state.
+    # $env_file itself is now safe to pass directly: the append_env_key_if_missing
+    # calls above already seeded each of these ten keys from
+    # config/prod/dhcp-proxy.env's own real value on a deploy/prod install
+    # (see the comment above them), so $env_file and config/prod/dhcp-proxy.env
+    # already agree by this point on a first-time migration. On later runs the
+    # runtime config remains authoritative because a migrated .env key cannot
+    # be distinguished from a deliberate edit by key presence alone.
+    sync_dhcp_proxy_config_prod_env "$install_dir" "$env_file" \
+        "$dhcp_relay_local_addr" "$dhcp_proxy_interface" "$dhcp_proxy_router" \
+        "$dhcp_ntp_servers" "$dhcp_proxy_domain" "$dhcp_proxy_boot_filename" \
+        "$dhcp_proxy_boot_server" "$dhcp_proxy_pxe_boot_server" "$dhcp_proxy_pxe_boot_filename_bios" \
+        "$dhcp_proxy_pxe_boot_filename_uefi"
 
     print_ok ".env is complete for the current quickstart template"
 }
@@ -4026,14 +4266,111 @@ require_functional_check_tool() {
     return 0
 }
 
+# Probes one published proxy IP in three separate steps rather than a single
+# `curl http://$ip/healthz`, because that single combined call conflates
+# three different properties and a fix for one host-networking mode broke it
+# for another:
+#
+#   1. A bare TCP connect to port 80 proves Docker's port-publishing actually
+#      forwards SOMEWHERE at all -- this is what a removed port mapping
+#      fails on. It does not prove that "somewhere" is this project's own
+#      proxy: any listener that accepts the connection satisfies it,
+#      including one of this stack's OTHER services if a broken compose
+#      update remapped port 80 onto it instead.
+#   2. Docker's own port-binding table for the 'proxy' container is checked
+#      directly (`docker port`), not an HTTP-level identity probe: an HTTP
+#      response can only ever prove "an nginx answered", never "the intended
+#      container specifically" -- any other nginx reachable on the same
+#      address (this stack's own services are not nginx-based, but nothing
+#      stops an operator from running an unrelated one on the same host)
+#      would satisfy an HTTP-level check just as well as a broken mapping
+#      would fail to. Docker's binding table has no such ambiguity: it is
+#      the authoritative record of which container a published host
+#      address/port actually forwards to, checked without any network round
+#      trip and independent of the /healthz ACL entirely.
+#   3. The /healthz content itself is fetched via `docker exec` against the
+#      proxy container's OWN loopback (127.0.0.1) instead of the externally
+#      published address. This is exactly the caller /healthz's ACL already
+#      allows (127.0.0.1/32), and it no longer depends on Docker's
+#      userland-proxy setting: with userland-proxy disabled, a host-
+#      originated connection to a published port is NAT'd straight through
+#      with the real host IP preserved rather than rewritten to the docker0
+#      gateway address the ACL's 172.16.0.0/12 allowance assumes. On such a
+#      host, a single external curl call that also required a 2xx status
+#      would fail this gate (and roll back an otherwise-healthy update)
+#      purely because the ACL rejected that specific caller, not because the
+#      proxy was unhealthy.
+#
+# Together the three steps still prove what a single 2xx-or-fail call used
+# to assume (Docker forwards the port to THIS proxy specifically, AND the
+# service behind it actually answers /healthz) without depending on a
+# specific userland-proxy setting, ACL-source-IP outcome, or an HTTP-level
+# identity heuristic for either.
+
+# Bare TCP connect (no HTTP request sent), split into its own function purely
+# so tests can replace it with a canned success/failure instead of depending
+# on real network reachability for a made-up test IP -- same seam pattern
+# this project's health-baseline tests already use for dc_update/docker
+# (see tests/bats/setup_update_health_baseline.bats).
+_tcp_port_reachable() {
+    local ip="$1" port="$2"
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ip" "$port" 2>/dev/null
+}
+
+# Confirms Docker itself considers this specific container the owner of the
+# published address/port, split into its own function for the same
+# testability reason as _tcp_port_reachable above. `docker port` lists every
+# host binding for the given container port, one per line (e.g. dual-stack
+# IPv4+IPv6, or this project's own IP_STANDARD/IP_SSL each separately
+# publishing container port 80 -- see deploy/prod/docker-compose.yml); any
+# one of them matching is sufficient.
+_proxy_container_publishes_port() {
+    local container_id="$1" ip="$2" port="$3" binding
+    while IFS= read -r binding; do
+        case "$binding" in
+            "0.0.0.0:${port}"|"${ip}:${port}"|"[::]:${port}") return 0 ;;
+        esac
+    done < <(docker port "$container_id" "${port}/tcp" 2>/dev/null)
+    return 1
+}
+
+_verify_healthz_endpoint() {
+    local ip="$1" proxy_container_id
+
+    if ! _tcp_port_reachable "$ip" 80; then
+        print_error "Functional check failed: TCP connect to ${ip}:80"
+        return 1
+    fi
+
+    proxy_container_id=$(service_container_id proxy)
+    if [[ -z "$proxy_container_id" ]]; then
+        print_error "Functional check failed: no running 'proxy' container to probe /healthz through"
+        return 1
+    fi
+
+    if ! _proxy_container_publishes_port "$proxy_container_id" "$ip" 80; then
+        print_error "Functional check failed: the 'proxy' container's own Docker port binding does not include ${ip}:80 -- the published port may be mapped to a different service"
+        return 1
+    fi
+
+    require_functional_check_tool curl "the proxy-container-loopback /healthz probe" || return 1
+    if ! docker exec "$proxy_container_id" curl -sf "http://127.0.0.1/healthz" >/dev/null; then
+        print_error "Functional check failed: http://127.0.0.1/healthz inside the proxy container"
+        return 1
+    fi
+    return 0
+}
+
 # Functional confirmation on top of per-container health: a container
 # reporting "healthy" only proves ITS OWN internal check passed, not that it
 # actually serves what a real client needs. Reuses this project's own
 # established real-probe idioms rather than inventing new ones: the proxy
-# /healthz check already used by cmd_debug's "Health checks" step, and a real
-# dig-based DNS query in the same style scripts/dns-zone-rollback-simulation.sh
-# already uses. `ping`/`ss` are deliberately not used here -- neither proves
-# the service actually answers a real request.
+# /healthz check already used by cmd_debug's "Health checks" step (now split
+# into a reachability + Docker-binding-identity + loopback-content trio, see
+# _verify_healthz_endpoint above), and a real dig-based DNS query in the same style
+# scripts/dns-zone-rollback-simulation.sh already uses. `ping`/`ss` are
+# deliberately not used here -- neither proves the service actually answers a
+# real request.
 #
 # Every probe below fails closed (require_functional_check_tool) when curl or
 # dig is missing rather than silently skipping that half of the check: a
@@ -4050,18 +4387,10 @@ verify_stack_functional_health() {
     ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE")
 
     if [[ -n "$ip_standard" ]]; then
-        require_functional_check_tool curl "the http://$ip_standard/healthz probe" || return 1
-        if ! curl -sf "http://$ip_standard/healthz" >/dev/null; then
-            print_error "Functional check failed: http://$ip_standard/healthz"
-            return 1
-        fi
+        _verify_healthz_endpoint "$ip_standard" || return 1
     fi
     if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]]; then
-        require_functional_check_tool curl "the http://$ip_ssl/healthz probe" || return 1
-        if ! curl -sf "http://$ip_ssl/healthz" >/dev/null; then
-            print_error "Functional check failed: http://$ip_ssl/healthz"
-            return 1
-        fi
+        _verify_healthz_endpoint "$ip_ssl" || return 1
     fi
 
     # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
@@ -6824,6 +7153,13 @@ DHCP_PROXY_DOMAIN=""
 DHCP_PROXY_BOOT_FILENAME=""
 DHCP_PROXY_BOOT_SERVER=""
 DHCP_PROXY_CUSTOM_OPTIONS=""
+# Issue #705: PXE boot-pointer (`pxe-service`) fields, separate from the
+# #450 fields above -- the only other way to set these is hand-editing
+# config/prod/dhcp-proxy.env directly, so a fresh install writes real,
+# wizard-driven values (or the empty default) here instead.
+DHCP_PROXY_PXE_BOOT_SERVER=""
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=""
+DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=""
 
 if [[ "$DHCP_MODE" = "kea" ]]; then
     DHCP_ENABLED=1
@@ -6963,7 +7299,7 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
             DHCP_PROXY_BOOT_FILENAME="$REPLY"
             [[ -z "$DHCP_PROXY_BOOT_FILENAME" ]] && break
             is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_BOOT_FILENAME" && break
-            print_error "Invalid boot filename (no whitespace or commas): $DHCP_PROXY_BOOT_FILENAME"
+            print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_BOOT_FILENAME"
             ask "PXE boot filename (blank = skip PXE boot info)" ""
         done
 
@@ -6981,6 +7317,62 @@ elif [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
         fi
 
         print_ok "Additional dnsmasq relay/proxy options configured. Custom safe options (DHCP_PROXY_CUSTOM_OPTIONS) can be added later from the Admin UI DHCP page."
+    fi
+
+    # Issue #705: PXE boot-pointer support (`pxe-service`), kept as its own
+    # separate opt-in gate rather than folded into the #450 options block
+    # above -- entrypoint.sh's own investigation (see
+    # _dhcp_proxy_render_pxe_service_directives's header comment) found this
+    # is a real behavior change, not just another optional field: dnsmasq's
+    # ProxyDHCP mode does not reply to ANY DHCPDISCOVER at all until at
+    # least one `pxe-service` directive exists, so turning this on makes an
+    # installation that previously never replied start replying to every
+    # PXE-tagged client on the segment. That deserves its own explicit,
+    # separately-worded confirmation, not a field buried in a generic
+    # "additional options" prompt. lancache-ng only points at an operator's
+    # EXISTING external PXE/TFTP boot server -- it never hosts boot files
+    # itself (docs/dhcp-modes.md).
+    print_warn "Optional: PXE boot-pointer support. This makes dnsmasq start REPLYING to every PXE-tagged client on this segment, pointing them at an EXISTING external PXE/TFTP boot server -- lancache-ng does not host boot files itself. See docs/dhcp-modes.md."
+    if confirm "Configure PXE boot-pointer support now? [y/N]" "N"; then
+        ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" "$DHCP_PROXY_PXE_BOOT_SERVER"
+        while true; do
+            DHCP_PROXY_PXE_BOOT_SERVER="$REPLY"
+            [[ -z "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && break
+            is_valid_ipv4 "$DHCP_PROXY_PXE_BOOT_SERVER" && break
+            print_error "Invalid IPv4 address: $DHCP_PROXY_PXE_BOOT_SERVER"
+            ask "External PXE/TFTP boot server address (blank = skip PXE boot-pointer support)" ""
+        done
+
+        if [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]]; then
+            ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+            while true; do
+                DHCP_PROXY_PXE_BOOT_FILENAME_BIOS="$REPLY"
+                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && break
+                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" && break
+                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+                ask "BIOS (legacy x86PC) boot filename (blank = skip BIOS clients)" ""
+            done
+
+            ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
+            while true; do
+                DHCP_PROXY_PXE_BOOT_FILENAME_UEFI="$REPLY"
+                [[ -z "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && break
+                is_valid_dhcp_proxy_boot_filename "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" && break
+                print_error "Invalid boot filename (no whitespace, commas, or other .env-unsafe characters like \$, \`, \", ', \\, #): $DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
+                ask "UEFI (x86-64/ARM64) boot filename (blank = skip UEFI clients)" ""
+            done
+
+            if pxe_boot_pointer_answers_are_complete "$DHCP_PROXY_PXE_BOOT_SERVER" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"; then
+                print_ok "PXE boot-pointer support configured (external boot server: $DHCP_PROXY_PXE_BOOT_SERVER)."
+            else
+                # Matches entrypoint.sh's own fail-safe: a boot server alone
+                # renders no pxe-service directive at all (just a WARNING on
+                # every start), so reset it here rather than persist a
+                # permanently-incomplete, warning-generating config.
+                print_warn "No BIOS or UEFI boot filename set; PXE boot-pointer support will remain inactive."
+                DHCP_PROXY_PXE_BOOT_SERVER=""
+            fi
+        fi
     fi
 
     print_ok "DHCP proxy mode enabled — subnet start: $DHCP_SUBNET_START"
@@ -7223,6 +7615,9 @@ validate_env_values_for_initial_write \
     "DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}" \
     "DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}" \
     "DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}" \
+    "DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}" \
+    "DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}" \
+    "DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}" \
     "NTP_ENABLED=${NTP_ENABLED}" \
     "NTP_DATA_DIR=${NTP_DATA_DIR}" \
     "LOGGING_ENABLED=${LOGGING_ENABLED}" \
@@ -7327,6 +7722,12 @@ DHCP_PROXY_DOMAIN=${DHCP_PROXY_DOMAIN}
 DHCP_PROXY_BOOT_FILENAME=${DHCP_PROXY_BOOT_FILENAME}
 DHCP_PROXY_BOOT_SERVER=${DHCP_PROXY_BOOT_SERVER}
 DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS}
+# Issue #705: PXE boot-pointer (\`pxe-service\`) fields, empty by default.
+# See docs/dhcp-modes.md and services/dhcp-proxy/entrypoint.sh's own
+# _dhcp_proxy_render_pxe_service_directives for the full opt-in rationale.
+DHCP_PROXY_PXE_BOOT_SERVER=${DHCP_PROXY_PXE_BOOT_SERVER}
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=${DHCP_PROXY_PXE_BOOT_FILENAME_BIOS}
+DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=${DHCP_PROXY_PXE_BOOT_FILENAME_UEFI}
 
 # ── LanCache-NG-NTP ────────────────────────────────────────────────────────────
 # Enable/disable, upstream server list, and the DHCP auto-populate toggle are
@@ -7609,6 +8010,13 @@ if [[ "$DHCP_MODE" = "dnsmasq-proxy" ]]; then
     [[ -n "$DHCP_NTP_SERVERS" ]] && printf "  %-26s %s\n" "  NTP option (PXE-scoped):" "$DHCP_NTP_SERVERS"
     [[ -n "$DHCP_PROXY_DOMAIN" ]] && printf "  %-26s %s\n" "  Domain option (PXE-scoped):" "$DHCP_PROXY_DOMAIN"
     [[ -n "$DHCP_PROXY_BOOT_FILENAME" ]] && printf "  %-26s %s\n" "  PXE boot filename:" "$DHCP_PROXY_BOOT_FILENAME"
+    # An operator-set value that never appears in this install summary looks
+    # unconfigured even when it isn't -- print it whenever it is non-empty,
+    # matching the other conditional lines in this block.
+    [[ -n "$DHCP_PROXY_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot server:" "$DHCP_PROXY_BOOT_SERVER"
+    [[ -n "$DHCP_PROXY_PXE_BOOT_SERVER" ]] && printf "  %-26s %s\n" "  PXE boot-pointer server:" "$DHCP_PROXY_PXE_BOOT_SERVER"
+    [[ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS" ]] && printf "  %-26s %s\n" "  PXE boot-pointer (BIOS):" "$DHCP_PROXY_PXE_BOOT_FILENAME_BIOS"
+    [[ -n "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI" ]] && printf "  %-26s %s\n" "  PXE boot-pointer (UEFI):" "$DHCP_PROXY_PXE_BOOT_FILENAME_UEFI"
 fi
 if [[ "$NTP_ENABLED" = "1" ]]; then
     printf "  %-26s %s\n" "LanCache-NG-NTP:" "enabled (configure upstream servers from the Admin UI)"
