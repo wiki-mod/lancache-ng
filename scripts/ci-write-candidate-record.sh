@@ -100,10 +100,11 @@ else
     source_fingerprint="$(fingerprint_reused)"
     [[ -n "$planned_source_fingerprint" ]] \
         || ci_ai_fail "reused candidate is missing its planned source fingerprint"
-    [[ "$planned_source_fingerprint" == "$source_fingerprint" ]] \
-        || ci_ai_fail "effective source fingerprint changed after planning for reused $service: planned $planned_source_fingerprint, now $source_fingerprint"
 fi
 ci_ai_require_digest "$source_fingerprint"
+if [[ -n "$planned_source_fingerprint" && "$planned_source_fingerprint" != "$source_fingerprint" ]]; then
+    ci_ai_fail "effective source fingerprint changed after planning for $mode $service: planned $planned_source_fingerprint, now $source_fingerprint"
+fi
 
 mkdir -p "$(dirname "$output")"
 jq -n \
