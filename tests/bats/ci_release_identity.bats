@@ -169,6 +169,43 @@ JSON
   [ "$status" -ne 0 ]
 }
 
+@test "release workflow carries the verified accepted pointer digest without re-resolving it" {
+  workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
+  extractor="$REPO_ROOT/scripts/ci-extract-stack-lock.sh"
+
+  run grep -F 'usage: ci-extract-stack-lock.sh STACK_REF OUTPUT [DIGEST_OUTPUT]' "$extractor"
+  [ "$status" -eq 0 ]
+  run grep -F 'accepted-stack-pointer.digest' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F 'accepted_runtime_pointer_digest: ${{ steps.accepted-runtime.outputs.pointer_digest }}' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F '"${{ needs.plan.outputs.accepted_runtime_pointer_digest }}"' "$workflow"
+  [ "$status" -eq 0 ]
+}
+
+@test "release workflow emits only truthful release-specific acceptance gates" {
+  workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
+
+  run grep -F 'schema:"release-acceptance/v1"' "$workflow"
+  [ "$status" -eq 0 ]
+  for inherited_gate in 'exact_locked_stack:true' 'runtime_deep_validation:true' 'supplemental_full_setup:true'; do
+    run grep -F "$inherited_gate" "$workflow"
+    [ "$status" -ne 0 ]
+  done
+  for release_gate in \
+    'accepted_runtime_acceptance_verified:true' \
+    'accepted_runtime_identity_preserved:true' \
+    'release_build_tools_built:true' \
+    'release_build_tools_provenance:true' \
+    'release_exact_digest_security:true' \
+    'release_native_platform_smoke:true' \
+    'release_sbom_attested:true' \
+    'release_build_tools_validation_contract:true'; do
+    run grep -F "$release_gate" "$workflow"
+    [ "$status" -eq 0 ]
+  done
+}
+
 @test "release evidence artifacts are collision-free and SBOM JSON cannot be counted as gate evidence" {
   workflow="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
 
