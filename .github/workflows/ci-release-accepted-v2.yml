@@ -98,19 +98,25 @@ jobs:
           printf 'pointer_digest=%s\n' "$pointer_digest" >> "$GITHUB_OUTPUT"
 
       - id: release-source
-        name: Require release tag to identify the accepted runtime source
+        name: Require release dispatch and tag to identify the accepted runtime source
         env:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           set -euo pipefail
+          expected_ref="refs/tags/${RELEASE_TAG}"
+          [[ "$GITHUB_REF" == "$expected_ref" ]] || {
+            echo "::error::Release workflow must be dispatched on $expected_ref so GitHub provenance identifies the release tag. Current dispatch ref is $GITHUB_REF."
+            exit 1
+          }
           tag_sha="$(git rev-list -n 1 "${RELEASE_TAG}^{commit}")"
+          [[ "$GITHUB_SHA" == "$tag_sha" ]] || {
+            echo "::error::Release dispatch SHA $GITHUB_SHA differs from $RELEASE_TAG commit $tag_sha. Refusing provenance with a mismatched workflow identity."
+            exit 1
+          }
           accepted_sha="$(jq -r '.source_sha' "$RUNNER_TEMP/ci-v2-release/accepted-stack-lock.json")"
           [[ "$tag_sha" == "$accepted_sha" ]] || {
             echo "::error::Release tag $RELEASE_TAG resolves to $tag_sha, but accepted runtime source is $accepted_sha."
             exit 1
-          }
-          [[ "$GITHUB_SHA" == "$tag_sha" ]] || {
-            echo "::notice::Workflow-dispatch source $GITHUB_SHA differs from release source $tag_sha; all release build/test checkouts stay pinned to the tag commit."
           }
           printf 'source_sha=%s\n' "$tag_sha" >> "$GITHUB_OUTPUT"
 
