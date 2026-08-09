@@ -190,9 +190,70 @@ while IFS= read -r name; do
   fi
 done <<<"$canonical_services"
 
+# --- Netdata web_log job-config parity (#849 bug-hunt finding
+# observability.md#16) -----------------------------------------------------
+# This is a DIFFERENT kind of check from everything above, and deliberately
+# so: the matrix-row check's own header explicitly disclaims checking *how*
+# a service is wired ("that's a human judgment call ... not something worth
+# encoding as a second source of truth") -- a generic prod-vs-quickstart
+# config-block diff would contradict that design stance. This check does not
+# do that; it verifies one narrow, already-self-declared invariant instead.
+# `deploy/prod`/`deploy/quickstart` bind-mount netdata's web_log collector
+# config from services/syslog/netdata-web_log.conf directly (a real file,
+# always in sync with itself by construction), but quickstart generates its
+# OWN inline copy of that exact same job config in its `netdata:` service's
+# `command:` heredoc, because quickstart's install_dir has no services/
+# directory to bind-mount from (see that heredoc's own comment). That
+# heredoc's comment already states the actual contract in prose: "Keep this
+# content byte-identical to services/syslog/netdata-web_log.conf if that
+# file ever changes" -- this section enforces that stated contract
+# mechanically instead of relying on whoever next edits the real file to
+# remember it. This is not a new source of truth invented here; it is the
+# existing comment's own promise, made self-enforcing. Confirmed via a real
+# incident this check would have caught: the real file's `log_type: nginx`
+# field was removed 2026-07-31 after it caused netdata's web_log job to fail
+# outright ("check failed: failed to create parser") on the pinned image,
+# but quickstart's independent inline copy kept the stale, broken field
+# until this check was added -- prod (bind-mounting the real file) picked up
+# the fix automatically; quickstart silently did not.
+WEB_LOG_CONF=services/syslog/netdata-web_log.conf
+QUICKSTART_COMPOSE=deploy/quickstart/docker-compose.yml
+
+if [ ! -f "$WEB_LOG_CONF" ]; then
+  fail "$WEB_LOG_CONF does not exist -- cannot verify quickstart's inline netdata web_log job config against it."
+elif [ ! -f "$QUICKSTART_COMPOSE" ]; then
+  fail "$QUICKSTART_COMPOSE does not exist -- cannot verify its inline netdata web_log job config."
+else
+  # The real file's actual go.d job config starts at its own `jobs:` line
+  # (everything above is header/rationale comments, which quickstart's
+  # inline copy intentionally does not duplicate).
+  real_web_log_jobs=$(awk '/^jobs:/{flag=1} flag{print}' "$WEB_LOG_CONF")
+  # Quickstart's heredoc body, with its fixed 8-space YAML block-scalar
+  # indent stripped so the comparison is content-for-content, not
+  # indentation-for-indentation.
+  quickstart_web_log_jobs=$(awk '
+    /cat > \/etc\/netdata\/go\.d\/web_log\.conf <<.CONF./ { capture = 1; next }
+    capture && /^        CONF$/ { capture = 0 }
+    capture { print }
+  ' "$QUICKSTART_COMPOSE" | sed 's/^        //')
+
+  if [ -z "$real_web_log_jobs" ]; then
+    fail "$WEB_LOG_CONF has no 'jobs:' section -- cannot verify quickstart's inline copy against it (did the real file's structure change?)."
+  elif [ -z "$quickstart_web_log_jobs" ]; then
+    fail "$QUICKSTART_COMPOSE's netdata service has no 'cat > /etc/netdata/go.d/web_log.conf <<...CONF ... CONF' heredoc to extract -- did its shape change? Update this script's extraction alongside it."
+  elif [ "$real_web_log_jobs" != "$quickstart_web_log_jobs" ]; then
+    fail "$QUICKSTART_COMPOSE's inline netdata web_log job config has drifted from $WEB_LOG_CONF -- that heredoc's own comment says to keep it byte-identical. Real file:
+--- $WEB_LOG_CONF ---
+$real_web_log_jobs
+--- $QUICKSTART_COMPOSE (inline, indent-stripped) ---
+$quickstart_web_log_jobs
+--- end ---"
+  fi
+fi
+
 if [ "$failures" -gt 0 ]; then
   printf '::error::check-logging-matrix: %d logging-matrix drift issue(s) found (see docs/architecture-ng.md and issue #633).\n' "$failures" >&2
   exit 1
 fi
 
-printf 'check-logging-matrix: OK (every Compose service has a logging-matrix row, and every row names a real service).\n'
+printf 'check-logging-matrix: OK (every Compose service has a logging-matrix row, every row names a real service, and quickstart'"'"'s inline netdata web_log job config matches services/syslog/netdata-web_log.conf).\n'

@@ -1,4 +1,5 @@
 #!/usr/bin/env bats
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Adapter-level tests for the proxy (nginx) known-good-snapshot integration
@@ -80,6 +81,87 @@ STUB
     [ "$status" -ne 0 ]
     [[ "$output" == *"no known-good nginx config snapshot is available"* ]]
     [ "$(cat "$nginx_conf")" = "BROKEN config" ]
+}
+
+@test "legacy pre-upgrade snapshot missing the stream-ACL file is backfilled and becomes usable for rollback again" {
+    # A snapshot made with the shorter legacy candidate set has no stream ACL;
+    # the test uses two legacy files instead of four to keep the fixture small.
+    local params_conf="$live_dir/proxy-params.conf"
+    printf 'legacy nginx.conf v1\n' > "$nginx_conf"
+    printf 'legacy proxy-params v1\n' > "$params_conf"
+    kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "$nginx_conf" "$params_conf"
+
+    legacy_id="$(kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR")"
+    [ -n "$legacy_id" ]
+    [ ! -f "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
+
+    # A malformed ACL represents an invalid environment value on the first
+    # boot with the larger candidate set.
+    local acl_file="$live_dir/00-stream-client-acl.conf"
+    printf 'allow definitely-not-a-cidr;\ndeny all;\n' > "$acl_file"
+
+    _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR"
+
+    [ -f "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
+    [ ! -s "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/00-stream-client-acl.conf" ]
+
+    # The migrated snapshot's original two files are untouched byte-for-byte
+    # (the backfill must not re-derive or alter what was already validated
+    # together).
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/nginx.conf")" = "legacy nginx.conf v1" ]
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$legacy_id/proxy-params.conf")" = "legacy proxy-params v1" ]
+
+    # A full candidate-set rollback can select the migrated snapshot without
+    # importing the invalid ACL that caused the current boot to fail.
+    printf 'BROKEN config\n' > "$nginx_conf"
+    printf 'BROKEN proxy-params\n' > "$params_conf"
+    printf 'BROKEN acl\n' > "$acl_file"
+    run kgs_snapshot_apply "$PROXY_CONFIG_SNAPSHOT_DIR" "proxy" "true" "$nginx_conf" "$params_conf" "$acl_file"
+    [ "$status" -eq 0 ]
+    [ ! -s "$acl_file" ]
+}
+
+@test "migration is a no-op for a snapshot that already has the stream-ACL file" {
+    local params_conf="$live_dir/proxy-params.conf"
+    local acl_file="$live_dir/00-stream-client-acl.conf"
+    printf 'nginx.conf v1\n' > "$nginx_conf"
+    printf 'proxy-params v1\n' > "$params_conf"
+    printf 'allow 10.0.0.0/8;\ndeny all;\n' > "$acl_file"
+    kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "$nginx_conf" "$params_conf" "$acl_file"
+    already_migrated_id="$(kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR")"
+    original_mtime="$(stat -c '%Y' "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")"
+
+    printf 'allow 172.16.0.0/12;\ndeny all;\n' > "$acl_file"
+    run _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR"
+    [ "$status" -eq 0 ]
+
+    # Untouched: still the ORIGINAL snapshotted content, not overwritten by
+    # this later, unrelated live edit to $acl_file.
+    [ "$(cat "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")" = "allow 10.0.0.0/8;
+deny all;" ]
+    [ "$(stat -c '%Y' "$PROXY_CONFIG_SNAPSHOT_DIR/$already_migrated_id/00-stream-client-acl.conf")" = "$original_mtime" ]
+}
+
+@test "migration rejects a current-schema snapshot whose stream-ACL file was lost" {
+    local params_conf="$live_dir/proxy-params.conf"
+    local acl_file="$live_dir/00-stream-client-acl.conf"
+    printf 'include /etc/nginx/stream.d/access.d/00-stream-client-acl.conf;\n' > "$nginx_conf"
+    printf 'proxy-params v1\n' > "$params_conf"
+    printf 'allow 10.0.0.0/8;\ndeny all;\n' > "$acl_file"
+    kgs_snapshot_create "$PROXY_CONFIG_SNAPSHOT_DIR" "$KEEP_KNOWN_GOOD_CONFIGS" "proxy" "$nginx_conf" "$params_conf" "$acl_file"
+    current_id="$(kgs_list_snapshots "$PROXY_CONFIG_SNAPSHOT_DIR")"
+    rm "$PROXY_CONFIG_SNAPSHOT_DIR/$current_id/00-stream-client-acl.conf"
+
+    run _migrate_legacy_proxy_snapshots_for_stream_acl "$PROXY_CONFIG_SNAPSHOT_DIR"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"declares the stream ACL but is missing"* ]]
+
+    # The missing ACL represents damage to a snapshot created under the new
+    # schema. It must remain incomplete rather than becoming unrestricted.
+    [ ! -e "$PROXY_CONFIG_SNAPSHOT_DIR/$current_id/00-stream-client-acl.conf" ]
+    run kgs_snapshot_apply "$PROXY_CONFIG_SNAPSHOT_DIR" "proxy" "true" "$nginx_conf" "$params_conf" "$acl_file"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"snapshot $current_id: incomplete"* ]]
 }
 
 @test "retention keeps only KEEP_KNOWN_GOOD_CONFIGS snapshots across repeated valid starts" {

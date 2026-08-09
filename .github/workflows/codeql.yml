@@ -65,10 +65,71 @@ jobs:
     timeout-minutes: 15
     outputs:
       rust_relevant: ${{ steps.filter.outputs.rust_relevant }}
+      superseded: ${{ steps.supersession.outputs.superseded }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+
+      # A live remote-head check keeps already-stale runs out of the serialized
+      # analyze jobs below without relying on concurrency admission order.
+      #
+      # PR-only: not applied to push. Every push already runs its analyze
+      # job independently, so scoping this to pull_request trades away
+      # reclaiming a genuinely-superseded push's analyze compute in exchange for
+      # never mis-skipping a push whose only "replacement" was excluded by
+      # paths-ignore. That trade only matters for push, because this
+      # workflow's push trigger has `paths-ignore: ["**/*.md"]`: a follow-up
+      # Markdown-only push moves the branch head without producing any
+      # replacement CodeQL run, and ls-remote can't distinguish that from a
+      # real replacement -- including push here would wrongly mark the still-
+      # current code-change push as superseded and leave it permanently
+      # unscanned until another eligible push or the daily cron.
+      # schedule/workflow_dispatch have no "newer trigger" concept either.
+      #
+      # Deliberately compares against refs/pull/<N>/head, not
+      # refs/pull/<N>/merge -- GitHub regenerates the merge ref on every
+      # base-branch change too, not just on a push to the PR's own head,
+      # which would report "superseded" for reasons unrelated to staleness.
+      - name: Check whether this run is already superseded
+        id: supersession
+        env:
+          CHECK_EVENT_NAME: ${{ github.event_name }}
+          CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          superseded=false
+          current_head=""
+
+          if [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
+            : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
+            # github.sha identifies the synthetic merge commit for PR events,
+            # while refs/pull/<N>/head identifies the contributor's head. Use
+            # like-for-like SHAs so a current PR is not rejected as stale.
+            : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
+            if ! current_head="$(bash scripts/resolve-remote-ref-with-retry.sh \
+              origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
+              current_head=""
+            fi
+
+            if [ -z "$current_head" ]; then
+              # Deliberately fails OPEN (superseded=false), same
+              # asymmetric-risk reasoning as build-push.yml's own copy of
+              # this check: an unresolvable ls-remote must never cause a
+              # real commit's analysis to be wrongly skipped, only ever an
+              # already-superseded one.
+              echo "::warning::Could not resolve the current remote head for this pull request; failing open (treating this run as NOT superseded)."
+            elif [ "$current_head" != "$CHECK_PR_HEAD_SHA" ]; then
+              echo "::notice::This PR has already moved to ${current_head} since this run was triggered for ${CHECK_PR_HEAD_SHA}; a newer run already supersedes this one."
+              superseded=true
+            fi
+          fi
+          # push/schedule/workflow_dispatch: no live self-skip here (see the
+          # comment above this step) -- superseded stays false.
+
+          echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
       - name: Determine whether this diff touches the Rust build CodeQL analyzes
         id: filter
@@ -157,6 +218,28 @@ jobs:
     runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
     timeout-minutes: 120
     needs: detect-changes
+    # Do not add a shared GitHub concurrency group here. GitHub retains only
+    # one pending member per group and does not guarantee admission order, so
+    # an older detect-changes completion could evict the latest pending SHA.
+    # Independent jobs plus the live head checks below guarantee that the
+    # current PR head still reaches analysis; stale jobs self-skip instead.
+    #
+    # Accepted residual risk: a PR pushed to repeatedly at intervals shorter
+    # than the ~2h analyze runtime but longer than detect-changes' own
+    # ~10-17s (so each push's own run genuinely is current when it starts)
+    # can have more than one of its own analyze runs occupy lancache-heavy
+    # simultaneously -- the live head checks only run once, near the start
+    # of each run, not continuously, so a run already past that check keeps
+    # running to completion even after a later push makes it stale. A
+    # source-level cap (counting this PR's other in-progress runs via the
+    # GitHub API) was considered and rejected for now: that API call needs
+    # curl, which per AG-VAL-016 must run inside the build-tools container,
+    # and detect-changes currently has no container step at all -- adding
+    # one would cost real seconds on every PR push for a scenario that is
+    # rare in practice. This is an accepted-for-now tradeoff, not a closed
+    # decision: revisit if it stops being rare, or once this workflow's CI
+    # scheduling gets reworked more broadly (at which point building this
+    # cap alongside that rework is cheaper than bolting it on separately).
     # `always()` is required here: GitHub implicitly ANDs any custom job
     # `if:` with `success()` of every `needs` job UNLESS the expression
     # itself calls one of the status-check functions -- without it, a
@@ -181,7 +264,14 @@ jobs:
     # 'actions' leg therefore always runs its analysis; the 'rust' leg spins up
     # but skips its (expensive) extraction steps unless Rust is actually
     # relevant (see the shared `if:` on the Rust setup/build/init/analyze steps).
-    if: ${{ always() }}
+    #
+    # The `superseded` check keeps a PR run that is already stale from
+    # consuming an analysis runner: `needs.detect-changes.outputs.superseded` is only ever
+    # the literal string "true" when detect-changes
+    # actually ran and found a newer PR head already landed; a skipped
+    # detect-changes (schedule/dispatch) leaves this output empty, which
+    # correctly does not match 'true' and never blocks those triggers.
+    if: ${{ always() && needs.detect-changes.outputs.superseded != 'true' }}
     strategy:
       fail-fast: false
       matrix:
@@ -213,8 +303,35 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # A run can become stale after detect-changes but before a runner admits
+      # this job. Recheck on the runner so stale work stops before CodeQL or a
+      # Rust build, without putting the latest SHA in a lossy concurrency queue.
+      - name: Recheck PR head after runner admission
+        id: admission
+        if: github.event_name == 'pull_request'
+        env:
+          CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -euo pipefail
+
+          : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
+          : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
+          current_head=""
+          if ! current_head="$(bash scripts/resolve-remote-ref-with-retry.sh \
+            origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
+            echo "::warning::Could not resolve the current remote head after retry; failing open."
+          fi
+
+          superseded=false
+          if [ -n "$current_head" ] && [ "$current_head" != "$CHECK_PR_HEAD_SHA" ]; then
+            superseded=true
+            echo "::notice::Skipping CodeQL because this queued run targets ${CHECK_PR_HEAD_SHA}, while the PR head is ${current_head}."
+          fi
+          echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
+
       - name: Isolate Rust toolchain paths
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         run: |
           {
             echo 'CARGO_HOME=${{ runner.temp }}/cargo-home/codeql-${{ matrix.language }}'
@@ -222,14 +339,14 @@ jobs:
           } >> "$GITHUB_ENV"
 
       - name: Install Rust toolchain
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
         with:
           toolchain: stable
       # Optional acceleration only: CodeQL must still run if Redis-backed sccache is unavailable.
       - name: Configure Redis-backed sccache
         if: >-
-          ${{
+          ${{ steps.admission.outputs.superseded != 'true' &&
             matrix.language == 'rust' &&
             github.actor != 'dependabot[bot]' &&
             (
@@ -247,7 +364,7 @@ jobs:
       - name: Initialize CodeQL
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
         # (or on schedule/dispatch where detect-changes is skipped).
-        if: matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true'
+        if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: github/codeql-action/init@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           languages: ${{ matrix.language }}
@@ -255,19 +372,19 @@ jobs:
           config-file: ./.github/codeql/codeql-config.yml
 
       - name: Build DNS Rust crate for CodeQL
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/dns/nats-subscriber/Cargo.toml
 
       - name: Build UI Rust crate for CodeQL
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/ui/Cargo.toml
 
       - name: Build watchdog Rust crate for CodeQL
-        if: matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
+        if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: ./.github/actions/cargo-with-sccache-fallback
         with:
           command: cargo build --locked --manifest-path services/watchdog/Cargo.toml
@@ -275,7 +392,7 @@ jobs:
       - name: Perform CodeQL Analysis
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
         # Rust is not relevant, so init and analyze stay paired.
-        if: matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true'
+        if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
         uses: github/codeql-action/analyze@f205ea1c3313d32999d8d6a48b4f6530d4437b38 # v4.37.4
         with:
           category: "/language:${{ matrix.language }}"
@@ -291,7 +408,7 @@ jobs:
       # false confidence: it always prints the standing caveat, and warns (not fails) only when
       # CodeQL itself flags low quality or when the signal cannot be read.
       - name: Report CodeQL Rust extraction-quality signal
-        if: always() && matrix.language == 'rust'
+        if: always() && steps.admission.outputs.superseded != 'true' && matrix.language == 'rust'
         env:
           SARIF_DIR: ${{ runner.temp }}/codeql-sarif
         run: |
