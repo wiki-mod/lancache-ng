@@ -63,25 +63,15 @@ findings that overlap with it are still listed (for completeness) with a note.
 
 ## dashboard.rs -- `GET /`, `GET /api/metrics`
 
-2. **The dashboard's "recent logs" preview silently drops all standard-mode traffic when
-   `STANDARD_LOG` and `SSL_LOG` are configured as two different files.** (`routes/dashboard.rs:46-53`)
-   ```rust
-   let path = if cfg.standard_log == cfg.ssl_log {
-       cfg.standard_log.clone()
-   } else {
-       cfg.ssl_log.clone()
-   };
-   move || nginx_client::parse_log_tail(&path, 10)
-   ```
-   When the logs differ (a supported, documented configuration -- see `AGENTS.md`'s "Two-Mode /
-   Two-IP Architecture" section, each mode gets its own proxy service -- corrected 2026-08-05,
-   issue #1391 doc-sweep audit: this used to cite `CLAUDE.md`, which moved this section to
-   `AGENTS.md` on 2026-07-31), this always reads only
-   `ssl_log` and never reads `standard_log` at all. Any standard-mode (HTTP passthrough / no-CA)
-   client traffic is completely invisible in the dashboard's "recent activity" section in that
-   configuration, even though `get_log_stats`/`logs.rs`'s own `/logs` page correctly read and
-   merge both files. This is an actual behavioral inconsistency between `dashboard.rs` and
-   `logs.rs` for the exact same "recent log lines" concept, not just a coverage gap.
+2. ~~**The dashboard's "recent logs" preview silently drops all standard-mode traffic when
+   `STANDARD_LOG` and `SSL_LOG` are configured as two different files.** (`routes/dashboard.rs:46-53`)~~
+   **FIXED by #1476.** `dashboard.rs` now has a `merge_recent_logs` helper: when the two log
+   paths differ, both `standard_log` and `ssl_log` are read up to the same limit and merged
+   chronologically by parsed timestamp (`nginx_client::merge_log_entries_chronologically`, the
+   same helper `logs.rs`'s own merge uses), keeping only the most recent entries overall instead
+   of reading only one source. Covered by
+   `dashboard.rs`'s own `merge_recent_logs_includes_both_sources_when_they_interleave` and
+   `merge_recent_logs_keeps_the_most_recent_entries_when_over_limit` unit tests.
 
 3. ~~**`metrics_api` (`GET /api/metrics`) is confirmed dead code from the frontend's perspective**~~
    **CORRECTED (2026-07-18 currency check): this finding was wrong, not merely stale.**
@@ -109,24 +99,17 @@ findings that overlap with it are still listed (for completeness) with a note.
 
 ## logs.rs -- `GET /logs`
 
-5. **Cross-source log merge in the non-syslog branch is not chronologically interleaved --
-   it's two blocks concatenated and reversed, not a real merge by time.** (`routes/logs.rs:64-90`)
-   `nginx_client::parse_log_tail` returns each source's own tail window oldest-first (confirmed
-   in `nginx_client.rs`'s own doc comment: "oldest-first within the tail window ... routes/
-   logs.rs reverses the result itself to show newest-first"). When `standard_log != ssl_log`,
-   `logs_page` does:
-   ```rust
-   standard_logs.into_iter().chain(ssl_logs).collect()
-   ```
-   i.e. `[standard(oldest..newest), ssl(oldest..newest)]`, and only afterward does
-   `all_logs.reverse()` on the *whole combined list*. The result is
-   `[ssl(newest..oldest), standard(newest..oldest)]` -- every SSL-log entry (regardless of its
-   actual timestamp) is placed before every standard-log entry in the rendered "most recent
-   first" list. If the standard proxy's most recent request is more recent than the SSL proxy's
-   most recent request, it will still render *below* the SSL block instead of at the top. This
-   is a real correctness bug in the split-log branch, not merely a display nuance -- an operator
-   split-log setup gets a `/logs` page whose ordering does not reflect actual chronological
-   order across the two sources.
+5. ~~**Cross-source log merge in the non-syslog branch is not chronologically interleaved --
+   it's two blocks concatenated and reversed, not a real merge by time.** (`routes/logs.rs:64-90`)~~
+   **FIXED by #1476.** `logs_page`'s split-log branch now calls
+   `nginx_client::merge_log_entries_chronologically(standard_logs, ssl_logs)` instead of
+   `.chain()`, so the two sources are interleaved by actual parsed timestamp rather than
+   concatenated as two separate blocks. The same PR also fixed a related sizing bug this merge
+   introduced: each source was initially read only up to `max_entries / 2` before merging, which
+   could still silently drop entries whenever one source supplied more than half of the globally
+   newest requests -- each source is now read up to the full `max_entries` budget, with the
+   global cap applied only after the merge (matching `routes/dashboard.rs`'s
+   `merge_recent_logs`, see finding 2 above).
 
 6. **PARTIALLY ADDRESSED, re-verified against current code.** The `?filter=<cache_status>` query
    param is still only applied in the nginx branch (`routes/logs.rs:94-96` at original writing);
