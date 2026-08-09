@@ -7,6 +7,8 @@
 # changing what the workflow claims to have validated. When the acceptance
 # job has already downloaded platform evidence beside the lock, this boundary
 # also proves that evidence is an exact one-to-one copy of the lock matrix.
+# Release locks additionally re-read the Git release tag and require it to
+# remain bound to the source commit frozen at release planning.
 set -euo pipefail
 
 [[ $# -eq 1 ]] || { echo "usage: ci-verify-lock-tags.sh STACK_LOCK" >&2; exit 2; }
@@ -14,6 +16,12 @@ lock="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 ci_ai_validate_stack_lock "$lock"
+
+release_tag="$(jq -r '.release.tag // empty' "$lock")"
+if [[ -n "$release_tag" ]]; then
+    bash "$repo_root/scripts/ci-verify-release-source-ref.sh" \
+        "$release_tag" "$(jq -r '.source_sha' "$lock")"
+fi
 
 lock_dir="$(cd "$(dirname "$lock")" && pwd)"
 lock_parent="$(cd "$lock_dir/.." && pwd)"
