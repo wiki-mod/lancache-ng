@@ -919,8 +919,13 @@ _dns_recursor_validate_snapshot_or_rollback() {
         # PDNS_API_KEY also changed. Detected here, not assumed: compare
         # what's actually on disk after the restore against the live env,
         # so this only fires when the two are genuinely out of sync.
-        local restored_api_key
-        restored_api_key=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf" | head -n1)
+        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
+        # under this script's own pipefail, a multi-match recursor.conf could
+        # let head exit after the first line while sed is still writing more,
+        # which pipefail would report as failure even though head succeeded.
+        local sed_output restored_api_key
+        sed_output=$(sed -n 's/^[[:space:]]*api_key:[[:space:]]*//p' "$recursor_conf")
+        restored_api_key=$(head -n1 <<< "$sed_output")
         if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
             echo "[lancache-dns] WARNING: the restored recursor.conf's api_key does not match the current PDNS_API_KEY. The recursor's REST API (port 8082) is now authenticating with a stale key while pdns.conf, the Admin UI, and nats-subscriber use the current one -- packet-cache flush calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
         fi
@@ -991,8 +996,13 @@ _dns_auth_validate_snapshot_or_rollback() {
         # env, so this only fires when the two are genuinely out of sync.
         # pdns.conf is flat `key=value` (no leading whitespace, no YAML
         # colon), unlike recursor.conf's indented `api_key: value`.
-        local restored_api_key
-        restored_api_key=$(sed -n 's/^api-key=//p' "$pdns_conf" | head -n1)
+        # Captured via a here-string, not `sed -n ... | head -n1` (AG-VAL-032):
+        # under this script's own pipefail, a multi-match pdns.conf could let
+        # head exit after the first line while sed is still writing more,
+        # which pipefail would report as failure even though head succeeded.
+        local sed_output restored_api_key
+        sed_output=$(sed -n 's/^api-key=//p' "$pdns_conf")
+        restored_api_key=$(head -n1 <<< "$sed_output")
         if [ -n "$restored_api_key" ] && [ "$restored_api_key" != "$PDNS_API_KEY" ]; then
             echo "[lancache-dns] WARNING: the restored pdns.conf's api-key does not match the current PDNS_API_KEY. The authoritative server's REST API (port 8081) is now authenticating with a stale key while recursor.conf, the Admin UI, and nats-subscriber use the current one -- domain writes/reconciliation calls will fail with 401 until PDNS_API_KEY is fixed and the container is restarted." >&2
         fi
@@ -1141,32 +1151,32 @@ echo "[lancache-dns] Creating LAN zones in authoritative database..."
 # closing the original gap without depending on an unverified second
 # command's contract.
 #
-# Under this file's own top-level `set -euo pipefail`, a bare
-# `create_output=$(pdnsutil ...)` assignment IS the command `-e` checks: a
-# nonzero create-zone exit (the everyday "already exists" case on every
-# restart against a persistent volume, not just a genuine failure) would
-# abort the whole script on that line, before create_status could ever be
-# assigned or inspected -- defeating the already-exists tolerance this
-# function exists to provide. `|| create_status=$?` makes the assignment
-# itself the tested command `-e` exempts, exactly the same pattern this
-# file's own known-good-snapshot rollback helpers already use for a command
-# substitution whose failure must be inspected rather than fatal on the spot.
+# The command substitution below must sit in the `if` condition itself,
+# not a bare `create_output=$(...)` assignment statement followed by a
+# separate `create_status=$?` line. This script runs under `set -euo
+# pipefail` (see the top of this file); a bare assignment whose right-hand
+# command substitution fails is a failing simple command in its own right,
+# which `errexit` aborts on immediately -- before the next line ever runs.
+# That silently killed the entrypoint on every restart once the zones
+# already existed (the exact, expected, documented case this function
+# exists to tolerate), with neither the "already exists" check nor the
+# FATAL message ever reached. Testing the assignment as the `if` condition
+# exempts it from `errexit` (per AG-VAL-030) while still binding
+# `create_output` for the checks below.
 _dns_ensure_zone_exists() {
-    local zone="$1" create_output create_status=0
-    create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1) || create_status=$?
-    if [ "$create_status" -eq 0 ]; then
+    local zone="$1" create_output
+    if create_output=$(pdnsutil --config-dir=/etc/pdns/auth create-zone "$zone" 2>&1); then
         return 0
     fi
     # pdnsutil's real message is "Zone '<name>' exists already" (confirmed
-    # empirically against the actual binary) -- "already exists" never
-    # matches that word order, so this tolerance never actually fired and
-    # every restart against an existing zone fell through to the fatal branch.
-    # Tests the already-captured variable directly via a here-string, not a
-    # live `printf | grep -q` pipe: under this file's own `pipefail`, `grep
-    # -q` exiting as soon as it finds a match can race a still-writing
-    # producer into a SIGPIPE, which pipefail would then surface as the
-    # pipeline's exit status even though the match itself was found -- a
-    # here-string has no producer process to race against.
+    # empirically against the actual binary) -- "already exists" (the
+    # reverse word order) never matches it, so this tolerance check would
+    # silently never fire even with the errexit issue above fixed. Matched
+    # via a here-string (not `printf ... | grep -qi`, per AG-VAL-032): a
+    # multi-line create_output piped live into `grep -q` can let grep exit
+    # after an early match while printf is still writing, which under
+    # `pipefail` reports the whole pipeline as failed even though grep
+    # itself matched.
     if grep -qi "exists already" <<< "$create_output"; then
         return 0
     fi
