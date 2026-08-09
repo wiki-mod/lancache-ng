@@ -59,7 +59,8 @@ ci_ai_validate_platform_record() {
 ci_ai_validate_index_record() {
     local file="$1"
     jq -e '
-      .schema == "image-candidate-index/v1"
+      . as $entry
+      | .schema == "image-candidate-index/v1"
       and (.service | type == "string" and length > 0)
       and (.scope == "runtime" or .scope == "tooling")
       and (.image | type == "string" and startswith("ghcr.io/"))
@@ -70,6 +71,14 @@ ci_ai_validate_index_record() {
       and (.build_inputs.build_args | type == "object")
       and (.build_inputs.build_contexts | type == "object")
       and (.digest | test("^sha256:[0-9a-f]{64}$"))
+      and (.candidate_ref | type == "string" and length > 0)
+      and (
+        $entry.candidate_ref == ($entry.image + "@" + $entry.digest)
+        or (
+          ($entry.candidate_ref | startswith($entry.image + ":"))
+          and (($entry.candidate_ref | ltrimstr($entry.image + ":")) | test("^[A-Za-z0-9._-]+$"))
+        )
+      )
       and (.platforms | type == "object" and (keys | sort) == ["linux/amd64","linux/arm64"])
       and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
       and (.platforms["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
@@ -79,20 +88,27 @@ ci_ai_validate_index_record() {
 ci_ai_validate_stack_lock() {
     local file="$1"
     jq -e '
-      .schema == "stack-lock/v1"
+      . as $lock
+      | .schema == "stack-lock/v1"
       and (.source_sha | test("^[0-9a-f]{40}$"))
-      and (.candidate_tag | type == "string" and length > 0)
+      and (.candidate_tag | type == "string" and test("^[A-Za-z0-9._-]+$"))
       and (.runtime | type == "object" and length > 0)
       and (.tooling | type == "object")
       and (
         [(.runtime + .tooling)[] |
-          (.image | type == "string" and startswith("ghcr.io/"))
+          . as $entry
+          | (.image | type == "string" and startswith("ghcr.io/"))
           and (.artifact_source_sha | test("^[0-9a-f]{40}$"))
           and (.source_fingerprint | test("^sha256:[0-9a-f]{64}$"))
           and (.build_inputs | type == "object")
           and (.build_inputs.build_args | type == "object")
           and (.build_inputs.build_contexts | type == "object")
           and (.digest | test("^sha256:[0-9a-f]{64}$"))
+          and (.candidate_ref | type == "string" and length > 0)
+          and (
+            $entry.candidate_ref == ($entry.image + "@" + $entry.digest)
+            or $entry.candidate_ref == ($entry.image + ":" + $lock.candidate_tag)
+          )
           and (.platforms | type == "object" and (keys | sort) == ["linux/amd64","linux/arm64"])
           and (.platforms["linux/amd64"] | test("^sha256:[0-9a-f]{64}$"))
           and (.platforms["linux/arm64"] | test("^sha256:[0-9a-f]{64}$"))
