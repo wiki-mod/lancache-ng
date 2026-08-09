@@ -190,10 +190,10 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - name: Checkout exact release source
+      - name: Checkout frozen release source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -280,10 +280,10 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - name: Checkout exact release source
+      - name: Checkout frozen release source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
@@ -379,10 +379,10 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - name: Checkout exact release source
+      - name: Checkout frozen release source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
 
       - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
@@ -492,10 +492,10 @@ jobs:
       attestations: write
       artifact-metadata: write
     steps:
-      - name: Checkout exact release source
+      - name: Checkout frozen release source commit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.release_tag }}
+          ref: ${{ needs.plan.outputs.source_sha }}
           fetch-depth: 0
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
