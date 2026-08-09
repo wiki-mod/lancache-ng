@@ -136,7 +136,7 @@ is_allowed_line1() {
     case "$path" in
         Dockerfile | */Dockerfile)
             lower_first_line="${first_line,,}"
-            [[ "$lower_first_line" =~ ^#[[:space:]]*(syntax|escape|check)[[:space:]]*= ]] && return 0
+            [[ "$lower_first_line" =~ ^#[[:space:]]*(syntax|escape|check)[[:space:]]*=[[:space:]]*.+$ ]] && return 0
             ;;
     esac
 
