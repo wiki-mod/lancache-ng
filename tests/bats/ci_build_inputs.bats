@@ -58,9 +58,42 @@ setup() {
     one_json='{"build_args":{"BUILD_TOOLS_IMAGE":"ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"},"build_contexts":{}}'
     two_json='{"build_args":{"BUILD_TOOLS_IMAGE":"ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"},"build_contexts":{}}'
 
-    one="$(env CI_SOURCE_BUILD_INPUTS_JSON="$one_json" bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
-    two="$(env CI_SOURCE_BUILD_INPUTS_JSON="$two_json" bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
+    one="$(env CI_SOURCE_BUILD_INPUTS_JSON="$one_json" CI_SOURCE_APT_CACHE_BUST=2026-W31 bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
+    two="$(env CI_SOURCE_BUILD_INPUTS_JSON="$two_json" CI_SOURCE_APT_CACHE_BUST=2026-W31 bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" dns "$sha")"
     [ "$one" != "$two" ]
+}
+
+@test "mutable package repositories participate in the weekly source fingerprint" {
+    sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+    inputs='{"build_args":{},"build_contexts":{}}'
+
+    one="$(env CI_SOURCE_BUILD_INPUTS_JSON="$inputs" CI_SOURCE_APT_CACHE_BUST=2026-W31 bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" proxy "$sha")"
+    two="$(env CI_SOURCE_BUILD_INPUTS_JSON="$inputs" CI_SOURCE_APT_CACHE_BUST=2026-W32 bash "$REPO_ROOT/scripts/ci-source-fingerprint.sh" proxy "$sha")"
+    [ "$one" != "$two" ]
+}
+
+@test "package refresh policy keeps build-tools surgical but marks legacy runtime layers no-cache" {
+    sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
+
+    run bash "$REPO_ROOT/scripts/ci-package-refresh-policy.sh" build-tools "$sha"
+    [ "$status" -eq 0 ]
+    run jq -e '.refresh_required == true and .native_cache_bust == true and .force_no_cache == false' <<<"$output"
+    [ "$status" -eq 0 ]
+
+    run bash "$REPO_ROOT/scripts/ci-package-refresh-policy.sh" proxy "$sha"
+    [ "$status" -eq 0 ]
+    run jq -e '.refresh_required == true and .native_cache_bust == false and .force_no_cache == true' <<<"$output"
+    [ "$status" -eq 0 ]
+}
+
+@test "build-once action forces no-cache only when refresh bucket is not consumed natively" {
+    action="$REPO_ROOT/.github/actions/ghcr-build-once-push-retry/action.yml"
+    run grep -F 'no-cache: ${{ steps.cache-policy.outputs.no_cache }}' "$action"
+    [ "$status" -eq 0 ]
+    run grep -F 'if ! grep -Eq' "$action"
+    [ "$status" -eq 0 ]
+    run grep -F 'Building this candidate with no-cache so stale package layers cannot be reused.' "$action"
+    [ "$status" -eq 0 ]
 }
 
 @test "candidate workflow freezes external inputs and records the same matrix object" {
