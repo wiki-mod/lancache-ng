@@ -23,40 +23,33 @@ on:
     - cron: "24 3 * * *"
   workflow_dispatch:
 
-# Workflow-level, not job-level, per Rule-Ref: AG-CI-017 (concurrency on a
-# shared, scarce runner pool must be bounded at the source): a job-level
-# group on the analyze job only claims its slot after `needs: detect-changes`
-# resolves, so two rapid PR pushes can enter that group out of order if the
-# older commit's detect-changes happens to be delayed (e.g. queued behind
-# other work on the shared lancache-light pool) while the newer commit's
-# already reached analyze. cancel-in-progress then cancels whichever run is
-# CURRENTLY in the group when the next one arrives -- not the commit-older
-# one -- so an out-of-order arrival can have the stale run cancel the fresh
-# one, exactly backwards from the intent. A workflow-level group is claimed
-# as soon as the run itself starts, before any job's `needs` can introduce
-# that scheduling-dependent reordering, so entry order tracks trigger order
-# instead. This also removes the need for `matrix.language` in the key: the
-# two matrix legs are two jobs within the SAME run, and a workflow-level
-# group only ever compares DIFFERENT runs (different commits) against each
-# other, never a run against its own jobs.
-#
-# Only pull_request events (first attempt) share the collapsible ref-only
-# group at all: push, schedule, and workflow_dispatch always get a run-id-
-# suffixed, unique key, so a baseline-producing push run is never queued
-# behind or cancelled by another run on the same ref. cancel-in-progress is
-# scoped to pull_request only for the same reason: a push run to
-# master/current_dev/v0.2.0 uploads the baseline SARIF later PRs are diffed
-# against and must survive to completion. A manual rerun of an older PR
-# attempt (github.run_attempt != '1') is isolated the same way, so it cannot
-# cancel the newest commit's own analysis.
-concurrency:
-  group: >-
-    ${{
-      (github.event_name != 'pull_request' || github.run_attempt != '1') &&
-      format('{0}-{1}-{2}', github.workflow, github.ref, github.run_id) ||
-      format('{0}-{1}', github.workflow, github.ref)
-    }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# No concurrency block: an earlier revision shared a ref-only group across
+# first-attempt PR runs (workflow-level, per Rule-Ref: AG-CI-017's "bound
+# concurrency at the source"), reasoning that claiming the group as soon as
+# the run starts -- before any job's `needs` can introduce scheduling-
+# dependent reordering -- would make cancel-in-progress cancel the actual
+# stale run instead of racing a fresh one out. That reasoning doesn't hold:
+# GitHub's own concurrency-group docs state admission is FIFO by wait-start
+# time, not dispatch time, so a genuinely older run can still be admitted
+# after a newer one and cancel it outright -- before the newer run's own
+# detect-changes job (the live "is this run superseded?" check below) ever
+# executes -- leaving the surviving, actually-stale run to then detect
+# ITSELF as superseded too, scanning neither commit. Turning off
+# cancel-in-progress while keeping the shared group closes that race but
+# opens a different one: runs then queue instead of cancelling, so a rapid
+# run of PR pushes serializes into a chain of full queue-plus-checkout-plus-
+# detect-changes waits before the actual latest commit's analyze can even
+# start -- unbounded latency on exactly the shared, scarce pool AG-CI-017
+# means to protect. A group keyed uniquely per run (matching what push/
+# schedule/workflow_dispatch/reruns already used) never groups two
+# different runs together at all, which makes both problems moot: no run is
+# ever cancelled or queued by another, so this workflow simply omits the
+# concurrency block rather than keep an always-unique one that would do
+# nothing. The live self-skip in detect-changes below is therefore the sole
+# mechanism for both correctness (never skip the actual latest commit) and
+# waste-reclamation (skip the expensive analyze job on an actually-stale
+# run) -- it needs no admission-order guarantee because it reads the
+# authoritative remote head at execution time, not at trigger time.
 
 permissions:
   contents: read
@@ -106,28 +99,38 @@ jobs:
         with:
           fetch-depth: 0
 
-      # GitHub's own concurrency-group docs state groups are FIFO by "the
-      # time each one started waiting on the group, not the time each
-      # workflow was dispatched", and that ordering is therefore not
-      # guaranteed -- so the workflow-level concurrency group above reduces
-      # but does not eliminate a race where a genuinely older run's analyze
-      # job is admitted to the group after a newer run's, letting the older
-      # one cancel the newer one instead of the reverse. This is an
-      # authoritative, ordering-independent backstop, mirroring
-      # build-push.yml's own "check for a newer push already superseding
-      # this one" job (which only covers `push`; this also covers
-      # `pull_request`, since a PR's own refs/pull/<N>/head always points at
-      # its current latest commit regardless of which push triggered this
-      # run, exactly the shape that race needs). Deliberately not
-      # refs/pull/<N>/merge -- GitHub regenerates that ref on every base-
-      # branch change too, not just on a push to the PR's own head, which
-      # would make it report "superseded" for reasons unrelated to this race.
+      # This is the sole reclamation mechanism now that the workflow has no
+      # concurrency block at all (see the removed block's comment above for
+      # why): every run -- PR, push, schedule, dispatch -- starts immediately
+      # and independently, so nothing here needs to guard against admission
+      # order. It only decides, from a live read of the actual current
+      # remote head, whether THIS run's own expensive analyze job is worth
+      # running.
+      #
+      # PR-only: not applied to push. Every push already runs its analyze
+      # job independently (no shared group to reclaim), so scoping this to
+      # pull_request trades away reclaiming a genuinely-superseded push's
+      # analyze compute (which build-push.yml's own analogous push-side
+      # supersession check still reclaims, and may share this same gap --
+      # not fixed here, out of scope for this workflow) in exchange for
+      # never mis-skipping a push whose only "replacement" was excluded by
+      # paths-ignore. That trade only matters for push, because this
+      # workflow's push trigger has `paths-ignore: ["**/*.md"]`: a follow-up
+      # Markdown-only push moves the branch head without producing any
+      # replacement CodeQL run, and ls-remote can't distinguish that from a
+      # real replacement -- including push here would wrongly mark the still-
+      # current code-change push as superseded and leave it permanently
+      # unscanned until another eligible push or the daily cron.
+      # schedule/workflow_dispatch have no "newer trigger" concept either.
+      #
+      # Deliberately compares against refs/pull/<N>/head, not
+      # refs/pull/<N>/merge -- GitHub regenerates the merge ref on every
+      # base-branch change too, not just on a push to the PR's own head,
+      # which would report "superseded" for reasons unrelated to staleness.
       - name: Check whether this run is already superseded
         id: supersession
         env:
           CHECK_EVENT_NAME: ${{ github.event_name }}
-          CHECK_GITHUB_REF: ${{ github.ref }}
-          CHECK_GITHUB_SHA: ${{ github.sha }}
           CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -135,41 +138,29 @@ jobs:
 
           superseded=false
           current_head=""
-          expected_head="$CHECK_GITHUB_SHA"
 
-          # Deliberately fails OPEN (superseded=false), same asymmetric-risk
-          # reasoning as build-push.yml's own copy of this check: an
-          # unresolvable ls-remote must never cause a real commit's analysis
-          # to be wrongly skipped, only ever an already-superseded one.
-          if [ "$CHECK_EVENT_NAME" = "push" ]; then
-            case "$CHECK_GITHUB_REF" in
-              refs/heads/*)
-                current_head="$(git ls-remote origin "$CHECK_GITHUB_REF" | cut -f1 || true)"
-                ;;
-            esac
-          elif [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
+          if [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
             : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
             # github.sha identifies the synthetic merge commit for PR events,
             # while refs/pull/<N>/head identifies the contributor's head. Use
             # like-for-like SHAs so a current PR is not rejected as stale.
             : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
-            expected_head="$CHECK_PR_HEAD_SHA"
             current_head="$(git ls-remote origin "refs/pull/${CHECK_PR_NUMBER}/head" | cut -f1 || true)"
-          fi
-          # schedule/workflow_dispatch have no "a newer trigger already
-          # landed" concept -- current_head stays empty, superseded stays false.
 
-          if [ -z "$current_head" ]; then
-            # Expected/normal for schedule/workflow_dispatch (current_head is
-            # never resolved for those above); only worth a warning when a
-            # push/pull_request run genuinely failed to resolve its ls-remote.
-            if [ "$CHECK_EVENT_NAME" = "push" ] || [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
-              echo "::warning::Could not resolve the current remote head for this trigger; failing open (treating this run as NOT superseded)."
+            if [ -z "$current_head" ]; then
+              # Deliberately fails OPEN (superseded=false), same
+              # asymmetric-risk reasoning as build-push.yml's own copy of
+              # this check: an unresolvable ls-remote must never cause a
+              # real commit's analysis to be wrongly skipped, only ever an
+              # already-superseded one.
+              echo "::warning::Could not resolve the current remote head for this pull request; failing open (treating this run as NOT superseded)."
+            elif [ "$current_head" != "$CHECK_PR_HEAD_SHA" ]; then
+              echo "::notice::This PR has already moved to ${current_head} since this run was triggered for ${CHECK_PR_HEAD_SHA}; a newer run already supersedes this one."
+              superseded=true
             fi
-          elif [ "$current_head" != "$expected_head" ]; then
-            echo "::notice::This ref/PR has already moved to ${current_head} since this run was triggered for ${expected_head}; a newer run already supersedes this one."
-            superseded=true
           fi
+          # push/schedule/workflow_dispatch: no live self-skip here (see the
+          # comment above this step) -- superseded stays false.
 
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
@@ -285,13 +276,14 @@ jobs:
     # but skips its (expensive) extraction steps unless Rust is actually
     # relevant (see the shared `if:` on the Rust setup/build/init/analyze steps).
     #
-    # The `superseded` check backstops the workflow-level concurrency group
-    # above against the ordering race documented on that group's own comment:
-    # `needs.detect-changes.outputs.superseded` is only ever the literal
-    # string "true" when detect-changes actually ran and found a newer
-    # push/PR-head already landed; a skipped detect-changes (schedule/
-    # dispatch) leaves this output empty, which correctly does not match
-    # 'true' and never blocks those triggers.
+    # The `superseded` check is this job's only gate against running the
+    # expensive analyze steps for an already-stale PR run (see the removed
+    # concurrency block's comment near the top of this file for why there is
+    # no concurrency-based gate instead): `needs.detect-changes.outputs.
+    # superseded` is only ever the literal string "true" when detect-changes
+    # actually ran and found a newer PR head already landed; a skipped
+    # detect-changes (schedule/dispatch) leaves this output empty, which
+    # correctly does not match 'true' and never blocks those triggers.
     if: ${{ always() && needs.detect-changes.outputs.superseded != 'true' }}
     strategy:
       fail-fast: false
