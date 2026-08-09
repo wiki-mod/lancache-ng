@@ -93,7 +93,7 @@ docker run --rm \
     -e VALIDATION_DNS_SSL_IP="$dns_ssl_ip" \
     -e VALIDATION_STANDARD_SHIM_IP="$standard_shim_ip" \
     "$client_tools_image" \
-    bash -ceu '
+    timeout --kill-after=30 300 bash -ceu '
         domain="${FULL_SETUP_CLIENT_DOMAIN:?}"
         proxy_ip="${VALIDATION_PROXY_IP:?}"
         standard_shim_ip="${VALIDATION_STANDARD_SHIM_IP:?}"
