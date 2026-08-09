@@ -90,3 +90,46 @@ setup() {
     run grep -F 'CI_SOURCE_BUILD_INPUTS_JSON: ${{ toJSON(matrix.build_inputs) }}' "$workflow"
     [ "$status" -eq 0 ]
 }
+
+write_dns_platform_record() {
+    local path="$1" platform="$2" digest="$3"
+    cat >"$path" <<JSON
+{
+  "schema": "image-candidate-platform/v1",
+  "scope": "runtime",
+  "service": "dns",
+  "image": "ghcr.io/wiki-mod/lancache-ng/dns",
+  "candidate_source_sha": "1111111111111111111111111111111111111111",
+  "artifact_source_sha": "1111111111111111111111111111111111111111",
+  "source_fingerprint": "sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd",
+  "build_inputs": {"build_args": {}, "build_contexts": {}},
+  "platform": "$platform",
+  "digest": "$digest",
+  "mode": "built",
+  "reused_index_digest": ""
+}
+JSON
+}
+
+@test "index assembly rejects missing required external build inputs before registry access" {
+    record_dir="$BATS_TEST_TMPDIR/platforms"
+    output_file="$BATS_TEST_TMPDIR/index.json"
+    mkdir -p "$record_dir"
+    write_dns_platform_record \
+        "$record_dir/dns__amd64.json" linux/amd64 \
+        sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+    write_dns_platform_record \
+        "$record_dir/dns__arm64.json" linux/arm64 \
+        sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+
+    run env GHCR_RETRY_MAX_ATTEMPTS=1 \
+        bash "$REPO_ROOT/scripts/ci-assemble-service-index.sh" \
+        dns ghcr.io/wiki-mod/lancache-ng/dns \
+        1111111111111111111111111111111111111111 candidate-v2-test \
+        "$record_dir" "$output_file"
+
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"dns must carry exactly BUILD_TOOLS_IMAGE as external build arg"* ]]
+    [[ "$output" == *"invalid build inputs for dns"* ]]
+    [ ! -e "$output_file" ]
+}
