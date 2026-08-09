@@ -1,5 +1,6 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
 # tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
 # image, pulled via scripts/select-build-tools-image.sh -- it never builds or

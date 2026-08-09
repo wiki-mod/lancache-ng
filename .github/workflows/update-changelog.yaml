@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Writes a published GitHub Release's name+body into CHANGELOG.md and commits
 # it back, closing the loop release-drafter.yml starts (#899, decided on
 # #894): merge PR -> release-drafter drafts/updates a release -> this fires
