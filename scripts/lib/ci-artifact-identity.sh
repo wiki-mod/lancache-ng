@@ -188,8 +188,9 @@ ci_ai_ref_digest_optional() {
         ci_ai_require_digest "$digest" || return 1
         printf '%s\n' "$digest"
         return 0
+    else
+        status=$?
     fi
-    status=$?
 
     # Buildx/registry implementations use several equivalent forms for a
     # genuinely missing manifest/tag. Keep the allow-list narrow: only these
