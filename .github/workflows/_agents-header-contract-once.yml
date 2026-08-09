@@ -56,17 +56,15 @@ jobs:
                 continue
                 ;;
               '- **[AG-HDR-001]**'*)
-                cat <<'EOF'
-- **[AG-HDR-001]** Every source/config file (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) in scope for repository headers uses one canonical physical prefix. Physical line 1 is reserved for a genuinely required interpreter/parser marker such as a shebang; when no such marker is required, line 1 is intentionally blank. Physical line 2 contains the literal project form `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` in the native comment syntax valid for that file. Physical line 3 contains `SPDX-License-Identifier: AGPL-3.0-or-later` using the same native comment syntax. Existing file-purpose documentation follows this fixed prefix and is not displaced or removed merely to satisfy the three-line contract. `scripts/check-file-headers.sh` enforces the exact capitalization, physical positions, native syntax, and uniqueness of the project/SPDX lines.
-  - Rust: `//!` inner doc comments on lines 2 and 3.
-  - Shell, Bats, YAML, Dockerfiles, TOML, PowerShell, systemd units, and genuinely plain-text `.conf`/template/config files: `#` line comments on lines 2 and 3. A shebang or supported required parser directive may occupy line 1; otherwise line 1 stays blank.
-  - HTML Tera templates under `services/ui/src/templates/`: complete standalone Tera comments, exactly `{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}` on line 2 and `{# SPDX-License-Identifier: AGPL-3.0-or-later #}` on line 3. Do not use a raw HTML `<!-- ... -->` comment there: Tera comments are safe before an `{% extends ... %}` tag, while ordinary HTML content before `extends` can break template loading. Existing Tera purpose-comment blocks follow the fixed prefix.
-  - Other HTML: `<!-- ... -->` comments.
-  - CSS (`.css`): `/* ... */` comments.
-  - JavaScript (`.js`): `//` line comments.
-  - Lua (`.lua`): `--` line comments.
-  - If a file language is not listed here, use that language own standard comment syntax only after confirming it is valid for the real parser; never default to `#` merely from the filename.
-EOF
+                printf '%s\n' '- **[AG-HDR-001]** Every source/config file (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) in scope for repository headers uses one canonical physical prefix. Physical line 1 is reserved for a genuinely required interpreter/parser marker such as a shebang; when no such marker is required, line 1 is intentionally blank. Physical line 2 contains the literal project form `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` in the native comment syntax valid for that file. Physical line 3 contains `SPDX-License-Identifier: AGPL-3.0-or-later` using the same native comment syntax. Existing file-purpose documentation follows this fixed prefix and is not displaced or removed merely to satisfy the three-line contract. `scripts/check-file-headers.sh` enforces the exact capitalization, physical positions, native syntax, and uniqueness of the project/SPDX lines.'
+                printf '%s\n' '  - Rust: `//!` inner doc comments on lines 2 and 3.'
+                printf '%s\n' '  - Shell, Bats, YAML, Dockerfiles, TOML, PowerShell, systemd units, and genuinely plain-text `.conf`/template/config files: `#` line comments on lines 2 and 3. A shebang or supported required parser directive may occupy line 1; otherwise line 1 stays blank.'
+                printf '%s\n' '  - HTML Tera templates under `services/ui/src/templates/`: complete standalone Tera comments, exactly `{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}` on line 2 and `{# SPDX-License-Identifier: AGPL-3.0-or-later #}` on line 3. Do not use a raw HTML `<!-- ... -->` comment there: Tera comments are safe before an `{% extends ... %}` tag, while ordinary HTML content before `extends` can break template loading. Existing Tera purpose-comment blocks follow the fixed prefix.'
+                printf '%s\n' '  - Other HTML: `<!-- ... -->` comments.'
+                printf '%s\n' '  - CSS (`.css`): `/* ... */` comments.'
+                printf '%s\n' '  - JavaScript (`.js`): `//` line comments.'
+                printf '%s\n' '  - Lua (`.lua`): `--` line comments.'
+                printf '%s\n' "  - If a file language is not listed here, use that language's own standard comment syntax only after confirming it is valid for the real parser; never default to \`#\` merely from the filename."
                 rule_001=$((rule_001 + 1))
                 skip_rule_001=1
                 continue
@@ -75,7 +73,7 @@ EOF
                 skip_rule_001=0
                 ;;
               '- **[AG-HDR-008]**'*)
-                printf '%s\n' '- **[AG-HDR-008]** The project adopted the GNU Affero General Public License v3.0 (or later), effective 2026-07-24 (issue #1130, PR referencing #1145); the license text lives at the repository root (`LICENSE`) and is not restated here. Every file in scope under Rule-Ref: AG-HDR-001/007 carries `SPDX-License-Identifier: AGPL-3.0-or-later` on physical line 3, immediately after the canonical `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` project header on line 2 and using that file native comment syntax. The repository-wide SPDX/project-header backfill is complete, so `scripts/check-file-headers.sh` hard-enforces the same contract in both explicit-file mode and whole-repository mode; there is no remaining soft/informational backfill exception.'
+                printf '%s\n' "- **[AG-HDR-008]** The project adopted the GNU Affero General Public License v3.0 (or later), effective 2026-07-24 (issue #1130, PR referencing #1145); the license text lives at the repository root (\`LICENSE\`) and is not restated here. Every file in scope under Rule-Ref: AG-HDR-001/007 carries \`SPDX-License-Identifier: AGPL-3.0-or-later\` on physical line 3, immediately after the canonical \`LanCache-NG (https://github.com/wiki-mod/lancache-ng)\` project header on line 2 and using that file's native comment syntax. The repository-wide SPDX/project-header backfill is complete, so \`scripts/check-file-headers.sh\` hard-enforces the same contract in both explicit-file mode and whole-repository mode; there is no remaining soft/informational backfill exception."
                 rule_008=$((rule_008 + 1))
                 continue
                 ;;
