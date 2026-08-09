@@ -42,7 +42,10 @@ load_proxy_ssl_map_generation_helpers() {
     # calling the function. Individual tests override only the policy axis
     # relevant to their assertion, just as operators may configure either
     # axis independently.
+    # shellcheck disable=SC2034 # read by _render_ssl_map, sourced above --
+    # cannot see the cross-file read.
     PROXY_SECURITY_MODE="lazy"
+    # shellcheck disable=SC2034
     PROXY_ALLOWED_CLIENT_CIDRS=""
 }
 
