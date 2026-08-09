@@ -79,6 +79,37 @@ runs:
             ;;
         esac
 
+    - name: Resolve package-layer cache policy
+      id: cache-policy
+      shell: bash
+      env:
+        BUILD_ARGS_VALUE: ${{ inputs.build-args }}
+        BUILD_CONTEXT: ${{ inputs.context }}
+      run: |
+        set -euo pipefail
+        dockerfile="${BUILD_CONTEXT%/}/Dockerfile"
+        [[ -f "$dockerfile" ]] || {
+          echo "::error::build-once publisher cannot inspect Dockerfile at $dockerfile" >&2
+          exit 1
+        }
+        mapfile -t refresh_values < <(printf '%s\n' "$BUILD_ARGS_VALUE" | sed -n 's/^APT_CACHE_BUST=//p')
+        (( ${#refresh_values[@]} <= 1 )) || {
+          echo "::error::APT_CACHE_BUST was supplied more than once; package refresh identity is ambiguous." >&2
+          exit 1
+        }
+        no_cache=false
+        if (( ${#refresh_values[@]} == 1 )); then
+          [[ "${refresh_values[0]}" =~ ^[0-9]{4}-W[0-9]{2}$ ]] || {
+            echo "::error::APT_CACHE_BUST has an invalid value: ${refresh_values[0]}" >&2
+            exit 1
+          }
+          if ! grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$dockerfile"; then
+            no_cache=true
+            echo "::notice::$dockerfile has mutable package refresh identity but no native APT_CACHE_BUST layer. Building this candidate with no-cache so stale package layers cannot be reused."
+          fi
+        fi
+        printf 'no_cache=%s\n' "$no_cache" >> "$GITHUB_OUTPUT"
+
     # This is intentionally the only build step in the action. It exports the
     # single-platform result into Docker's local image store instead of pushing
     # from BuildKit. A registry failure after this point can therefore retry the
@@ -98,6 +129,7 @@ runs:
         platforms: ${{ inputs.platform }}
         provenance: false
         pull: ${{ inputs.pull }}
+        no-cache: ${{ steps.cache-policy.outputs.no_cache }}
         cache-from: ${{ inputs.cache-from }}
         cache-to: ${{ inputs.cache-to }}
 
