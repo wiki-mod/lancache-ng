@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end proof for issue #836's CLI-fallback item: `setup.sh
@@ -88,6 +89,11 @@ ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
+shared_stack="${FULL_SETUP_SHARED_STACK:-0}"
+case "$shared_stack" in
+    0 | 1) ;;
+    *) echo "::error::FULL_SETUP_SHARED_STACK must be 0 or 1, got '$shared_stack'." >&2; exit 2 ;;
+esac
 
 # The throwaway install-dir's own .env deliberately does NOT carry this
 # stack's real PDNS_API_KEY (validation-pdns-key, deploy/full-setup/docker-
@@ -110,14 +116,16 @@ install_dir="$repo_root/deploy/full-setup"
 cleanup() {
     local status=$?
     rm -f "$install_dir/.env"
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-        down -v --remove-orphans >/dev/null 2>&1 || true
-    # `down` above can lose the "has active endpoints" race (see
-    # validation_project_networks_teardown's own comment in reserve-validation-
-    # subnet.sh) and silently leave this network non-empty, poisoning it for
-    # whichever job/run reserves this slot next -- wait for and force a real
-    # removal instead of trusting `down`'s own exit code.
-    validation_project_networks_teardown "$compose_project" || true
+    if [[ "$shared_stack" != 1 ]]; then
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+            down -v --remove-orphans >/dev/null 2>&1 || true
+        # `down` above can lose the "has active endpoints" race (see
+        # validation_project_networks_teardown's own comment in reserve-validation-
+        # subnet.sh) and silently leave this network non-empty, poisoning it for
+        # whichever job/run reserves this slot next -- wait for and force a real
+        # removal instead of trusting `down`'s own exit code.
+        validation_project_networks_teardown "$compose_project" || true
+    fi
     rm -rf "$work_dir"
     exit "$status"
 }
@@ -126,18 +134,22 @@ trap cleanup EXIT
 echo "== Writing a throwaway .env at $install_dir (intentionally wrong PDNS_API_KEY -- see header comment) =="
 printf 'PDNS_API_KEY=%s\nCOMPOSE_PROJECT_NAME=%s\n' "$install_env_pdns_api_key" "$compose_project" > "$install_dir/.env"
 
-echo "== Pulling the published $image_tag images =="
-# Without an explicit pull, Compose's pull_policy: missing would silently
-# reuse whatever image is already cached locally under this tag -- see
-# dns-zone-rollback-simulation.sh's identical step/comment (issue #809).
-LANCACHE_IMAGE_TAG="$image_tag" \
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-    pull --quiet proxy docker-socket-proxy dns-standard dns-ssl nats ui
+if [[ "$shared_stack" == 1 ]]; then
+    echo "== Reusing the caller-owned full-setup stack =="
+else
+    echo "== Pulling the published $image_tag images =="
+    # Without an explicit pull, Compose's pull_policy: missing would silently
+    # reuse whatever image is already cached locally under this tag -- see
+    # dns-zone-rollback-simulation.sh's identical step/comment (issue #809).
+    LANCACHE_IMAGE_TAG="$image_tag" \
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        pull --quiet proxy docker-socket-proxy dns-standard dns-ssl nats ui
 
-echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
-LANCACHE_IMAGE_TAG="$image_tag" \
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-    up -d proxy docker-socket-proxy dns-standard dns-ssl nats ui
+    echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
+    LANCACHE_IMAGE_TAG="$image_tag" \
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        up -d proxy docker-socket-proxy dns-standard dns-ssl nats ui
+fi
 
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 deadline=$((SECONDS + 90))
