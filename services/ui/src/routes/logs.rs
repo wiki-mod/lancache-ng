@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! Route for viewing and filtering logs: the nginx access-log tail by
 //! default, or -- once an install opts into `docker compose --profile
