@@ -48,9 +48,6 @@ source_oid="$(git -C "$repo_root" rev-parse "${source_sha}:${source_path}" 2>/de
     || ci_ai_fail "Dockerfile $source_path does not exist at $source_sha for $service"
 [[ "$source_oid" =~ ^[0-9a-f]{40,64}$ ]] || ci_ai_fail "invalid git object id for $service Dockerfile: $source_oid"
 
-dockerfile_text="$(git -C "$repo_root" show "${source_sha}:${source_path}")" \
-    || ci_ai_fail "could not read Dockerfile $source_path at $source_sha"
-
 named='[]'
 if [[ -n "$build_contexts" ]]; then
     while IFS= read -r mapping; do
@@ -74,17 +71,19 @@ else
 fi
 build_inputs="$(jq -cS . <<<"$build_inputs_raw")"
 
+refresh_policy="$(bash "$repo_root/scripts/ci-package-refresh-policy.sh" "$service" "$source_sha")"
+refresh_required="$(jq -r '.refresh_required' <<<"$refresh_policy")"
 refresh_inputs='{}'
-if grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' <<<"$dockerfile_text"; then
+if [[ "$refresh_required" == true ]]; then
     apt_cache_bust="${CI_SOURCE_APT_CACHE_BUST:-}"
     if [[ -z "$apt_cache_bust" ]]; then
         if [[ "${CI_SOURCE_REQUIRE_APT_CACHE_BUST:-false}" == true ]]; then
-            ci_ai_fail "exact APT_CACHE_BUST build input is required for $service but was not supplied"
+            ci_ai_fail "exact package refresh bucket is required for $service but was not supplied"
         fi
         apt_cache_bust="$(date -u +%G-W%V)"
     fi
     [[ "$apt_cache_bust" =~ ^[0-9]{4}-W[0-9]{2}$ ]] \
-        || ci_ai_fail "invalid APT_CACHE_BUST fingerprint input: $apt_cache_bust"
+        || ci_ai_fail "invalid package refresh fingerprint input: $apt_cache_bust"
     refresh_inputs="$(jq -cn --arg value "$apt_cache_bust" '{APT_CACHE_BUST:$value}')"
 fi
 
