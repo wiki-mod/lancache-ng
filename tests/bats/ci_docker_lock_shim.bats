@@ -106,6 +106,53 @@ SH
   [ "$status" -ne 0 ]
 }
 
+@test "locked build-tools docker run receives an inner kill timeout" {
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      run --rm ghcr.io/wiki-mod/lancache-ng/build-tools:candidate-v2-test bash -c 'echo ok'
+
+  [ "$status" -eq 0 ]
+  run grep -F 'ghcr.io/wiki-mod/lancache-ng/build-tools@sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff timeout --kill-after=30 1200 bash -c' "$LOG"
+  [ "$status" -eq 0 ]
+}
+
+@test "locked build-tools run keeps an existing timeout instead of nesting another" {
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      run --rm ghcr.io/wiki-mod/lancache-ng/build-tools:candidate-v2-test \
+      timeout --kill-after=30 60 bash -c 'echo ok'
+
+  [ "$status" -eq 0 ]
+  timeout_count="$(grep -o 'timeout ' "$LOG" | wc -l | tr -d ' ')"
+  [ "$timeout_count" -eq 1 ]
+}
+
+@test "locked build-tools entrypoint override fails closed unless it owns timeout" {
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      run --rm --entrypoint bash \
+      ghcr.io/wiki-mod/lancache-ng/build-tools:candidate-v2-test -c 'echo ok'
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"entrypoint override must provide its own timeout wrapper"* ]]
+  [ ! -s "$LOG" ]
+}
+
 @test "direct mutable first-party tag is rejected under stack lock" {
   run env \
     GITHUB_WORKSPACE="$REPO_ROOT" \
