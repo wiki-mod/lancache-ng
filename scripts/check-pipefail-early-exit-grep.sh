@@ -138,7 +138,13 @@ for file in "${scan_files[@]}"; do
   inherits_build_tools_pipefail=false
   case "$file" in
     services/*/Dockerfile*)
-      if grep -Eq '^FROM[[:space:]]+([^[:space:]]*build-tools|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
+      # `FROM` accepts optional `--flag`/`--flag=value` tokens (e.g.
+      # `--platform=$BUILDPLATFORM`) before the image reference -- without
+      # skipping over those, a multi-platform builder's own `FROM --platform=
+      # ... ${BUILD_TOOLS_IMAGE} AS builder` line would never match, silently
+      # exempting that stage from this guard despite genuinely inheriting
+      # build-tools' pipefail SHELL.
+      if grep -Eq '^FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
         inherits_build_tools_pipefail=true
       fi
       ;;

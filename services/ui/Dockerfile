@@ -56,11 +56,16 @@ RUN set -eu; \
     # Captured into a variable first, then grepped via a here-string
     # (AG-VAL-032): a live `rustup target list --installed | grep -qx`
     # pipe is the exact SIGPIPE-under-pipefail shape confirmed in a real CI
-    # failure for tools/build-tools/Dockerfile's identical check -- this
-    # RUN block itself only uses `set -eu` (no pipefail), so it is not
-    # exploitable today, but the fix costs nothing and removes any risk of
-    # this line becoming a real 141 the next time a pipefail-scanning tool
-    # or a copy-pasted RUN block adds it.
+    # failure for tools/build-tools/Dockerfile's identical check. This RUN
+    # block's own `set -eu` doesn't mention pipefail, but this stage is
+    # `FROM ${BUILD_TOOLS_IMAGE}` (see the top of this file), which sets
+    # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` -- Docker persists a
+    # base image's SHELL as that image's `Config.Shell`, and a child
+    # Dockerfile with no `SHELL` instruction of its own inherits that
+    # config as its default (confirmed empirically: a plain `FROM` with no
+    # override reports the parent's `Config.Shell`, not Docker's hardcoded
+    # `/bin/sh -c`). This RUN block was therefore already exploitable, not
+    # merely at risk of becoming exploitable later.
     installed_musl_targets="$(rustup target list --installed)"; \
     grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"; \
     distcc_bin="$(command -v distcc)"; \
