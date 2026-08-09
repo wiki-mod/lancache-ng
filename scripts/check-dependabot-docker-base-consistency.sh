@@ -69,6 +69,9 @@ resolve_final_image() {
     local seen_from=0 final_image=""
     local -A global_args=() stage_images=()
 
+    # Dockerfile heredoc bodies are data rather than instructions, while a
+    # backslash-continued instruction is one logical line. Normalize those
+    # two forms before looking for ARG and FROM instructions.
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line#"${line%%[![:space:]]*}"}"
         instruction="${line%%[[:space:]]*}"
@@ -101,6 +104,10 @@ resolve_final_image() {
             fi
             image="${image/"$token"/${global_args[$name]}}"
         done
+        if [[ "$image" == *'$'* ]]; then
+            printf '::error::check-dependabot-docker-base-consistency: unsupported or unresolved ARG expression in a FROM image in %s: %s\n' "$dockerfile" "$image" >&2
+            return 1
+        fi
 
         # A final stage may inherit from an earlier named stage; compare the
         # originating external image rather than the local alias text.
@@ -113,7 +120,36 @@ resolve_final_image() {
             stage_images["$alias"]="$image"
         fi
         final_image="$image"
-    done < "$dockerfile"
+    done < <(awk '
+        function emit_logical(    marker, candidate) {
+            print logical
+            candidate=logical
+            if (match(candidate, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?/)) {
+                marker=substr(candidate, RSTART, RLENGTH)
+                sub(/^<<-?[[:space:]]*/, "", marker)
+                gsub(/["'"'"']/, "", marker)
+                heredoc=marker
+            }
+            logical=""
+        }
+        heredoc != "" {
+            candidate=$0
+            sub(/^[[:space:]]*/, "", candidate)
+            if (candidate == heredoc) heredoc=""
+            next
+        }
+        {
+            physical=$0
+            if (physical ~ /\\[[:space:]]*$/) {
+                sub(/\\[[:space:]]*$/, "", physical)
+                logical=logical physical " "
+                next
+            }
+            logical=logical physical
+            emit_logical()
+        }
+        END { if (logical != "") emit_logical() }
+    ' "$dockerfile")
 
     if [ -z "$final_image" ]; then
         printf '::error::check-dependabot-docker-base-consistency: no FROM instruction found in %s\n' "$dockerfile" >&2

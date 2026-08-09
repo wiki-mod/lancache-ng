@@ -506,3 +506,54 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]] || fail "did not parse lowercase global ARG: $output"
 }
+
+@test "joins a continued FROM instruction before extracting its image" {
+    # Docker permits physical-line continuation in an instruction, so the
+    # operand must be read from the completed logical line.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    printf 'FROM \\\n  alpine:3.24\n' > "$fixture_root/services/a/Dockerfile"
+    printf 'FROM \\\n  debian:12-slim\n' > "$fixture_root/services/b/Dockerfile"
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "did not compare continued FROM operands: $output"
+}
+
+@test "fails closed on an unsupported ARG modifier in a FROM image" {
+    # Unsupported variable-expression syntax must never compare equal as
+    # literal text because its effective image has not been established.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    printf 'ARG BASE=alpine:3.24\nFROM ${BASE:-busybox:1.37}\n' > "$fixture_root/services/a/Dockerfile"
+    printf 'ARG BASE=debian:12-slim\nFROM ${BASE:-busybox:1.37}\n' > "$fixture_root/services/b/Dockerfile"
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"unsupported or unresolved ARG expression"* ]] || \
+        fail "did not fail closed on an ARG modifier: $output"
+}
+
+@test "ignores FROM-like text inside a Dockerfile heredoc" {
+    # Heredoc payload is data belonging to its parent instruction, not a
+    # sequence of Dockerfile stages.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM alpine:3.24
+RUN <<SCRIPT
+FROM debian:12-slim
+SCRIPT
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM alpine:3.24
+RUN <<SCRIPT
+FROM ubuntu:24.04
+SCRIPT
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "treated heredoc payload as a FROM instruction: $output"
+}

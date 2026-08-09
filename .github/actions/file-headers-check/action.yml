@@ -38,8 +38,7 @@ runs:
         bash scripts/check-review-chronology-comments.sh
 
     # See scripts/check-dependabot-docker-base-consistency.sh's own header
-    # comment for the real drift incident (a stale "shared base image"
-    # comment) this guards against.
+    # for the shared-base-image assumption this guards.
     - name: Check dependabot.yml's docker-group base-image assumption still holds
       shell: bash
       run: >-
