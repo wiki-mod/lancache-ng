@@ -103,9 +103,10 @@ runs:
             echo "::error::APT_CACHE_BUST has an invalid value: ${refresh_values[0]}" >&2
             exit 1
           }
-          if ! grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$dockerfile"; then
+          if ! grep -Eq '^ARG[[:space:]]+APT_CACHE_BUST(=|[[:space:]]|$)' "$dockerfile" \
+              || ! grep -Fq '${APT_CACHE_BUST}' "$dockerfile"; then
             no_cache=true
-            echo "::notice::$dockerfile has mutable package refresh identity but no native APT_CACHE_BUST layer. Building this candidate with no-cache so stale package layers cannot be reused."
+            echo "::notice::$dockerfile has mutable package refresh identity but does not consume APT_CACHE_BUST in its Dockerfile layer. Building this candidate with no-cache so stale package layers cannot be reused."
           fi
         fi
         printf 'no_cache=%s\n' "$no_cache" >> "$GITHUB_OUTPUT"
