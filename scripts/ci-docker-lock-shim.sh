@@ -130,6 +130,72 @@ ci_lock_rewrite_direct_args() {
     done
 }
 
+# The locked reusable suite runs its helper probes through the exact build-tools
+# digest. Those probes historically relied only on the surrounding job timeout.
+# Add an in-container kill timeout at the Docker boundary so a stuck helper
+# process tree cannot outlive its intended CI step. Commands already beginning
+# with timeout keep their caller-selected budget. An explicit entrypoint override
+# is rejected unless it already selects timeout, because inserting argv after the
+# image would otherwise become arguments to that different entrypoint rather than
+# a wrapper around it.
+ci_lock_bound_build_tools_run() {
+    local -n input_ref=$1
+    local -n output_ref=$2
+    local build_tools_digest build_tools_ref arg entrypoint_override="" i image_index=-1
+    output_ref=("${input_ref[@]}")
+    [[ "${input_ref[0]:-}" == run ]] || return 0
+
+    if build_tools_digest="$(ci_lock_expected_digest ghcr.io/wiki-mod/lancache-ng/build-tools)"; then
+        :
+    else
+        return $?
+    fi
+    build_tools_ref="ghcr.io/wiki-mod/lancache-ng/build-tools@${build_tools_digest}"
+
+    for ((i=1; i<${#input_ref[@]}; i++)); do
+        arg="${input_ref[$i]}"
+        if [[ "$arg" == "$build_tools_ref" ]]; then
+            image_index=$i
+            break
+        fi
+        case "$arg" in
+            --entrypoint)
+                if (( i + 1 >= ${#input_ref[@]} )); then
+                    ci_ai_fail "docker run --entrypoint is missing its value under stack lock"
+                    return 1
+                fi
+                entrypoint_override="${input_ref[$((i + 1))]}"
+                i=$((i + 1))
+                ;;
+            --entrypoint=*)
+                entrypoint_override="${arg#--entrypoint=}"
+                ;;
+        esac
+    done
+
+    (( image_index >= 0 )) || return 0
+    (( image_index + 1 < ${#input_ref[@]} )) || return 0
+
+    if [[ -n "$entrypoint_override" ]]; then
+        case "$entrypoint_override" in
+            timeout|*/timeout)
+                return 0
+                ;;
+            *)
+                ci_ai_fail "locked build-tools docker run with an entrypoint override must provide its own timeout wrapper"
+                return 1
+                ;;
+        esac
+    fi
+
+    [[ "${input_ref[$((image_index + 1))]}" == timeout ]] && return 0
+    output_ref=(
+        "${input_ref[@]:0:$((image_index + 1))}"
+        timeout --kill-after=30 1200
+        "${input_ref[@]:$((image_index + 1))}"
+    )
+}
+
 ci_lock_split_compose_args() {
     local -n input_ref=$1
     local -n globals_ref=$2
@@ -382,7 +448,8 @@ if [[ "${1:-}" == compose ]]; then
 fi
 
 # shellcheck disable=SC2034
-# Consumed through nameref by ci_lock_rewrite_direct_args.
+# Consumed through nameref by ci_lock_rewrite_direct_args and
+# ci_lock_bound_build_tools_run.
 args=("$@")
 rewritten=()
 if ci_lock_rewrite_direct_args args rewritten; then
@@ -390,4 +457,10 @@ if ci_lock_rewrite_direct_args args rewritten; then
 else
     exit $?
 fi
-exec "$real_docker" "${rewritten[@]}"
+bounded=()
+if ci_lock_bound_build_tools_run rewritten bounded; then
+    :
+else
+    exit $?
+fi
+exec "$real_docker" "${bounded[@]}"
