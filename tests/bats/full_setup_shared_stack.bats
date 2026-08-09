@@ -88,9 +88,9 @@ setup() {
   done
 }
 
-@test "DNS rollback can be folded into the same shared stack by callers" {
+@test "DNS rollback is shared for explicit and immutable-stack callers" {
   run grep -F 'run_dns_zone_rollback:' "$WORKFLOW"
   [ "$status" -eq 0 ]
-  run grep -F "if: inputs.run_dns_zone_rollback == 'true'" "$WORKFLOW"
+  run grep -F "if: inputs.run_dns_zone_rollback == 'true' || inputs.stack_lock_artifact != ''" "$WORKFLOW"
   [ "$status" -eq 0 ]
 }
