@@ -38,6 +38,7 @@ jobs:
       source_sha: ${{ steps.release-source.outputs.source_sha }}
       candidate_tag: ${{ steps.config.outputs.candidate_tag }}
       refresh_bucket: ${{ steps.config.outputs.refresh_bucket }}
+      accepted_runtime_pointer_digest: ${{ steps.accepted-runtime.outputs.pointer_digest }}
     permissions:
       contents: read
       packages: read
@@ -76,7 +77,8 @@ jobs:
           printf 'candidate_tag=release-v2-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
           printf 'refresh_bucket=%s\n' "$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      - name: Extract cryptographically accepted runtime lock
+      - id: accepted-runtime
+        name: Extract cryptographically accepted runtime lock and verified pointer digest
         env:
           ACCEPTED_STACK_TAG: ${{ inputs.accepted_stack_tag }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -86,7 +88,14 @@ jobs:
           mkdir -p "$RUNNER_TEMP/ci-v2-release"
           timeout --kill-after=30 300 bash scripts/ci-extract-stack-lock.sh \
             "ghcr.io/wiki-mod/lancache-ng/stack:${ACCEPTED_STACK_TAG}" \
-            "$RUNNER_TEMP/ci-v2-release/accepted-stack-lock.json"
+            "$RUNNER_TEMP/ci-v2-release/accepted-stack-lock.json" \
+            "$RUNNER_TEMP/ci-v2-release/accepted-stack-pointer.digest"
+          pointer_digest="$(cat "$RUNNER_TEMP/ci-v2-release/accepted-stack-pointer.digest")"
+          [[ "$pointer_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+            echo "::error::accepted runtime extractor returned an invalid pointer digest"
+            exit 1
+          }
+          printf 'pointer_digest=%s\n' "$pointer_digest" >> "$GITHUB_OUTPUT"
 
       - id: release-source
         name: Require release tag to identify the accepted runtime source
@@ -154,7 +163,9 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: ci-v2-accepted-runtime-lock
-          path: ${{ runner.temp }}/ci-v2-release/accepted-stack-lock.json
+          path: |
+            ${{ runner.temp }}/ci-v2-release/accepted-stack-lock.json
+            ${{ runner.temp }}/ci-v2-release/accepted-stack-pointer.digest
           retention-days: 30
 
       - name: Remove Buildx builder
@@ -328,6 +339,7 @@ jobs:
           set -euo pipefail
           bash scripts/ci-assemble-release-lock.sh \
             release/accepted-stack-lock.json \
+            "${{ needs.plan.outputs.accepted_runtime_pointer_digest }}" \
             release/index/build-tools.json \
             "${{ inputs.release_tag }}" \
             "${{ needs.plan.outputs.candidate_tag }}" \
@@ -419,6 +431,7 @@ jobs:
                 tests/bats/ci_build_inputs.bats \
                 tests/bats/ci_release_identity.bats \
                 tests/bats/ci_docker_lock_shim.bats \
+                tests/bats/ci_optional_ref_snapshot.bats \
                 tests/bats/network_retry.bats
             '
 
@@ -548,40 +561,45 @@ jobs:
           source scripts/lib/ci-artifact-identity.sh
           mkdir -p release-pointer
           cp release/release-lock.json release-pointer/stack-lock.json
-          lock_hash="$(sha256sum release-pointer/stack-lock.json | awk '{print $1}')"
+          release_lock_hash="$(sha256sum release-pointer/stack-lock.json | awk '{print $1}')"
+          accepted_runtime_pointer_digest="$(jq -r '.release.accepted_runtime_pointer_digest' release-pointer/stack-lock.json)"
+          accepted_runtime_lock_sha256="$(jq -r '.release.accepted_runtime_lock_sha256' release-pointer/stack-lock.json)"
+          ci_ai_require_digest "$accepted_runtime_pointer_digest"
+          [[ "$accepted_runtime_lock_sha256" =~ ^[0-9a-f]{64}$ ]] \
+            || ci_ai_fail "release lock has invalid accepted runtime lock hash"
           accepted_tag="accepted-v2-release-${RELEASE_TAG}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
           jq -n \
             --arg source_sha "${{ needs.plan.outputs.source_sha }}" \
             --arg source_ref "refs/tags/${RELEASE_TAG}" \
-            --arg lock_hash "$lock_hash" \
+            --arg release_lock_hash "$release_lock_hash" \
             --arg accepted_tag "$accepted_tag" \
             --arg release_tag "$RELEASE_TAG" \
+            --arg accepted_runtime_pointer_digest "$accepted_runtime_pointer_digest" \
+            --arg accepted_runtime_lock_sha256 "$accepted_runtime_lock_sha256" \
             --arg run_url "${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}" \
             --arg accepted_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
             '{
-              schema:"stack-acceptance/v1",
+              schema:"release-acceptance/v1",
               accepted:true,
               source_sha:$source_sha,
               source_ref:$source_ref,
-              stack_lock_sha256:$lock_hash,
+              release_lock_sha256:$release_lock_hash,
               accepted_tag:$accepted_tag,
               release_tag:$release_tag,
+              accepted_runtime_pointer_digest:$accepted_runtime_pointer_digest,
+              accepted_runtime_lock_sha256:$accepted_runtime_lock_sha256,
               run_url:$run_url,
               accepted_at:$accepted_at,
               gates:{
-                identity_complete:true,
-                platform_complete:true,
-                provenance:true,
-                exact_digest_security:true,
-                native_platform_smoke:true,
-                exact_locked_stack:true,
-                runtime_deep_validation:true,
-                supplemental_full_setup:true,
-                publication_policy:true,
+                accepted_runtime_acceptance_verified:true,
                 accepted_runtime_identity_preserved:true,
                 release_build_tools_built:true,
                 release_build_tools_provenance:true,
-                release_exact_digest_evidence:true
+                release_exact_digest_security:true,
+                release_native_platform_smoke:true,
+                release_sbom_attested:true,
+                release_build_tools_validation_contract:true,
+                publication_policy:true
               }
             }' > release-pointer/acceptance.json
           ci_ai_validate_release_acceptance release-pointer/acceptance.json
