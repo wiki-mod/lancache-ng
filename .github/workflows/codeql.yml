@@ -223,6 +223,23 @@ jobs:
     # an older detect-changes completion could evict the latest pending SHA.
     # Independent jobs plus the live head checks below guarantee that the
     # current PR head still reaches analysis; stale jobs self-skip instead.
+    #
+    # Accepted residual risk: a PR pushed to repeatedly at intervals shorter
+    # than the ~2h analyze runtime but longer than detect-changes' own
+    # ~10-17s (so each push's own run genuinely is current when it starts)
+    # can have more than one of its own analyze runs occupy lancache-heavy
+    # simultaneously -- the live head checks only run once, near the start
+    # of each run, not continuously, so a run already past that check keeps
+    # running to completion even after a later push makes it stale. A
+    # source-level cap (counting this PR's other in-progress runs via the
+    # GitHub API) was considered and rejected for now: that API call needs
+    # curl, which per AG-VAL-016 must run inside the build-tools container,
+    # and detect-changes currently has no container step at all -- adding
+    # one would cost real seconds on every PR push for a scenario that is
+    # rare in practice. This is an accepted-for-now tradeoff, not a closed
+    # decision: revisit if it stops being rare, or once this workflow's CI
+    # scheduling gets reworked more broadly (at which point building this
+    # cap alongside that rework is cheaper than bolting it on separately).
     # `always()` is required here: GitHub implicitly ANDs any custom job
     # `if:` with `success()` of every `needs` job UNLESS the expression
     # itself calls one of the status-check functions -- without it, a
