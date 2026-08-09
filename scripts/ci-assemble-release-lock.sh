@@ -56,6 +56,8 @@ ci_ai_require_digest "$amd64"
 ci_ai_require_digest "$arm64"
 [[ "$image" == ghcr.io/wiki-mod/lancache-ng/build-tools ]] \
     || ci_ai_fail "unexpected release build-tools image: $image"
+bash "$repo_root/scripts/ci-build-inputs.sh" build-tools validate "$build_inputs" \
+    || ci_ai_fail "release build-tools record has invalid frozen build inputs"
 [[ "$candidate_ref" == "${image}:${release_candidate_tag}" ]] \
     || ci_ai_fail "release build-tools candidate ref does not match the planned immutable transport tag"
 
