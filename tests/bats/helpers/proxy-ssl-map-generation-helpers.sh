@@ -8,9 +8,9 @@
 # tests/bats/helpers/proxy-cert-dir-permissions-helpers.sh for other disjoint
 # ranges of the same file. _render_ssl_map generates the $cdn_host_allowed
 # (PROXY_SECURITY_MODE strict/lazy) and $lancache_client_allowed
-# (PROXY_ALLOWED_CLIENT_CIDRS) maps -- neither the strict-mode 403 code path
-# nor the CIDR-allowlist 403 code path had any automated test coverage
-# anywhere in the suite before this file.
+# (PROXY_ALLOWED_CLIENT_CIDRS) maps. The wrapper below deliberately restores
+# the entrypoint's shell-option contract because the function's failure
+# behavior is part of its production behavior, not merely a Bats detail.
 
 load_proxy_ssl_map_generation_helpers() {
     local repo_root="$1" helper_file="$2"
@@ -37,4 +37,16 @@ load_proxy_ssl_map_generation_helpers() {
     declare -Ag _DOMAIN_IS_ROOT=()
     declare -ag _EXTRA_WILDCARD_BASES=()
     declare -ag _EXTRA_EXACT_HOSTS=()
+
+    # Both values are initialized because production enables nounset before
+    # calling the function. Individual tests override only the policy axis
+    # relevant to their assertion, just as operators may configure either
+    # axis independently.
+    PROXY_SECURITY_MODE="lazy"
+    PROXY_ALLOWED_CLIENT_CIDRS=""
+}
+
+run_render_ssl_map_with_production_options() {
+    set -euo pipefail
+    _render_ssl_map
 }

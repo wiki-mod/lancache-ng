@@ -31,7 +31,7 @@ setup() {
 
 @test "lazy mode (default) allows every host by default in cdn_host_allowed" {
     PROXY_SECURITY_MODE="lazy"
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     [[ "$output" == *'map $host $cdn_host_allowed {'* ]]
     # Isolated to cdn_host_allowed's own body, not the full $output: with no
@@ -45,7 +45,7 @@ setup() {
 
 @test "strict mode denies every host by default in cdn_host_allowed" {
     PROXY_SECURITY_MODE="strict"
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     # Isolate the cdn_host_allowed map's own body from ssl_cert_name's
     # (which legitimately contains a different "default default;" line
@@ -59,7 +59,7 @@ setup() {
     _UNIQUE_DOMAINS=(steamcontent.com)
     _DOMAIN_IS_ROOT[steamcontent.com]=1
 
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     body="$(awk '/map \$host \$cdn_host_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
     grep -qE '^[[:space:]]*\*\.steamcontent\.com[[:space:]]+1;' <<<"$body"
@@ -77,7 +77,7 @@ setup() {
     _UNIQUE_DOMAINS=(steamcontent.com)
     _DOMAIN_IS_ROOT[steamcontent.com]=1
 
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     body="$(awk '/map \$host \$cdn_host_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
     [[ "$body" != *'evil.example.com'* ]]
@@ -89,7 +89,7 @@ setup() {
 
 @test "empty PROXY_ALLOWED_CLIENT_CIDRS allows every client by default (lazy default, AG-OP-003/005)" {
     PROXY_ALLOWED_CLIENT_CIDRS=""
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     body="$(awk '/geo \$lancache_client_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
     [[ "$body" == *'default 1;'* ]]
@@ -97,17 +97,19 @@ setup() {
 
 @test "a configured PROXY_ALLOWED_CLIENT_CIDRS denies by default and allowlists only the listed CIDRs" {
     PROXY_ALLOWED_CLIENT_CIDRS="192.168.1.0/24 10.0.0.0/8"
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     body="$(awk '/geo \$lancache_client_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
     [[ "$body" == *'default 0;'* ]]
-    [[ "$body" == *'192.168.1.0/24'*' 1;'* ]]
-    [[ "$body" == *'10.0.0.0/8'*' 1;'* ]]
+    # Anchored lines keep one CIDR's allowed value from satisfying the other
+    # assertion after Bash's glob matcher spans the newline between them.
+    grep -qE '^[[:space:]]*192\.168\.1\.0/24[[:space:]]+1;' <<<"$body"
+    grep -qE '^[[:space:]]*10\.0\.0\.0/8[[:space:]]+1;' <<<"$body"
 }
 
 @test "a configured PROXY_ALLOWED_CLIENT_CIDRS does not allowlist an unrelated CIDR" {
     PROXY_ALLOWED_CLIENT_CIDRS="192.168.1.0/24"
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
     body="$(awk '/geo \$lancache_client_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
     [[ "$body" != *'10.0.0.0/8'* ]]
@@ -127,7 +129,7 @@ setup() {
     _UNIQUE_DOMAINS=(steamcontent.com)
     _DOMAIN_IS_ROOT[steamcontent.com]=1
 
-    run _render_ssl_map
+    run run_render_ssl_map_with_production_options
     [ "$status" -eq 0 ]
 
     host_body="$(awk '/map \$host \$cdn_host_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
