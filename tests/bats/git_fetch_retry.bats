@@ -42,6 +42,35 @@ setup() {
     [[ "$output" == *"retrying"* ]]
 }
 
+@test "retries a dropped HTTP/2 stream under the production shell options" {
+    call_count_file="$BATS_TEST_TMPDIR/calls"
+    printf '0' > "$call_count_file"
+
+    # The standalone shell matches the production caller so errexit, nounset,
+    # and pipefail exercise the command-substitution and status paths together.
+    run env LIB="$lib" CALL_COUNT_FILE="$call_count_file" \
+        GIT_FETCH_RETRY_BACKOFF_SECONDS=0 bash -euo pipefail -c '
+            # shellcheck source=/dev/null
+            source "$LIB"
+            git() {
+                local n
+                n=$(<"$CALL_COUNT_FILE")
+                n=$((n + 1))
+                printf "%s" "$n" > "$CALL_COUNT_FILE"
+                if [ "$n" -eq 1 ]; then
+                    echo "error: RPC failed; curl 92 HTTP/2 stream 5 was not closed cleanly: CANCEL (err 8)" >&2
+                    return 1
+                fi
+                echo "ok"
+            }
+            git_fetch_retry origin main
+        '
+
+    [ "$status" -eq 0 ]
+    [ "$(cat "$call_count_file")" -eq 2 ]
+    [[ "$output" == *"retrying"* ]]
+}
+
 @test "retries a connection-establishment failure and succeeds after recovery" {
     call_count_file="$BATS_TEST_TMPDIR/calls"
     printf '0' > "$call_count_file"

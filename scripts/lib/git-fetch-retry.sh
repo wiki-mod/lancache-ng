@@ -43,6 +43,7 @@ _git_fetch_retry_is_transient() {
         *'The requested URL returned error: 5'[0-9][0-9]* | \
         *'RPC failed; HTTP 429 '* | \
         *'RPC failed; HTTP 5'[0-9][0-9]' '* | \
+        *'RPC failed; curl 92 HTTP/2 stream '*'was not closed cleanly'* | \
         *'RPC failed; curl 5'* | \
         *'GnuTLS recv error'* | \
         *'TLS connection'*'closed'*)
