@@ -86,7 +86,14 @@ setup() {
 @test "explicit-file mode accepts complete standalone Tera header comments" {
     tera_dir="$fixture_dir/services/ui/src/templates"
     mkdir -p "$tera_dir"
-    printf '\n{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}\n{# SPDX-License-Identifier: AGPL-3.0-or-later #}\n{# Dashboard template purpose text. #}\n{% extends "base.html" %}\n' > "$tera_dir/dashboard.html"
+    # Keep Tera's percent-delimited tag in data arguments, never in printf's
+    # format string, so fixture creation cannot reinterpret template syntax.
+    printf '%s\n' \
+        '' \
+        '{# LanCache-NG (https://github.com/wiki-mod/lancache-ng) #}' \
+        '{# SPDX-License-Identifier: AGPL-3.0-or-later #}' \
+        '{# Dashboard template purpose text. #}' \
+        '{% extends "base.html" %}' > "$tera_dir/dashboard.html"
     run bash "$script" "$tera_dir/dashboard.html"
     [ "$status" -eq 0 ]
 }
@@ -94,7 +101,11 @@ setup() {
 @test "explicit-file mode rejects the legacy multi-line Tera header shape" {
     tera_dir="$fixture_dir/services/ui/src/templates"
     mkdir -p "$tera_dir"
-    printf '\n{# LanCache-NG (https://github.com/wiki-mod/lancache-ng)\nSPDX-License-Identifier: AGPL-3.0-or-later #}\n{% extends "base.html" %}\n' > "$tera_dir/dashboard.html"
+    printf '%s\n' \
+        '' \
+        '{# LanCache-NG (https://github.com/wiki-mod/lancache-ng)' \
+        'SPDX-License-Identifier: AGPL-3.0-or-later #}' \
+        '{% extends "base.html" %}' > "$tera_dir/dashboard.html"
     run bash "$script" "$tera_dir/dashboard.html"
     [ "$status" -eq 1 ]
     [[ "$output" == *"line 2 must be exactly"* ]]
