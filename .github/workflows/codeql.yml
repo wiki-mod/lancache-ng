@@ -218,18 +218,11 @@ jobs:
     runs-on: [self-hosted, linux, lancache, codeql, lancache-heavy]
     timeout-minutes: 120
     needs: detect-changes
-    # Serializing each PR's language leg caps a rapidly updated PR at one
-    # admitted analysis per language. cancel-in-progress stays false because
-    # GitHub does not guarantee concurrency admission order; an older waiter
-    # must never cancel a newer run. Non-PR triggers and reruns remain isolated.
-    concurrency:
-      group: >-
-        ${{
-          github.event_name == 'pull_request' && github.run_attempt == '1' &&
-          format('{0}-analyze-{1}-pr-{2}', github.workflow, matrix.language, github.event.pull_request.number) ||
-          format('{0}-analyze-{1}-run-{2}', github.workflow, matrix.language, github.run_id)
-        }}
-      cancel-in-progress: false
+    # Do not add a shared GitHub concurrency group here. GitHub retains only
+    # one pending member per group and does not guarantee admission order, so
+    # an older detect-changes completion could evict the latest pending SHA.
+    # Independent jobs plus the live head checks below guarantee that the
+    # current PR head still reaches analysis; stale jobs self-skip instead.
     # `always()` is required here: GitHub implicitly ANDs any custom job
     # `if:` with `success()` of every `needs` job UNLESS the expression
     # itself calls one of the status-check functions -- without it, a
@@ -255,8 +248,8 @@ jobs:
     # but skips its (expensive) extraction steps unless Rust is actually
     # relevant (see the shared `if:` on the Rust setup/build/init/analyze steps).
     #
-    # The `superseded` check keeps a stale PR run from entering the serialized
-    # analysis queue: `needs.detect-changes.outputs.superseded` is only ever
+    # The `superseded` check keeps a PR run that is already stale from
+    # consuming an analysis runner: `needs.detect-changes.outputs.superseded` is only ever
     # the literal string "true" when detect-changes
     # actually ran and found a newer PR head already landed; a skipped
     # detect-changes (schedule/dispatch) leaves this output empty, which
@@ -293,10 +286,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # A run can become stale after detect-changes but while waiting for this
-      # job's concurrency group. Recheck only after admission so queued stale
-      # runs release the group without starting CodeQL or a Rust build.
-      - name: Recheck PR head after concurrency admission
+      # A run can become stale after detect-changes but before a runner admits
+      # this job. Recheck on the runner so stale work stops before CodeQL or a
+      # Rust build, without putting the latest SHA in a lossy concurrency queue.
+      - name: Recheck PR head after runner admission
         id: admission
         if: github.event_name == 'pull_request'
         env:
