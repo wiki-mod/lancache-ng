@@ -318,27 +318,19 @@ inside the cache path tree itself, so nothing ever writes to
 
 ## 9. Test-coverage gaps found by direct reading of the bats files
 
-- `tests/bats/proxy_known_good_snapshot.bats` only ever calls
-  `_proxy_validate_snapshot_or_rollback` with a **single** candidate file
-  (`$nginx_conf`). The real call site in `entrypoint.sh` always passes
-  **four**: `/etc/nginx/nginx.conf /etc/nginx/proxy-params.conf
-  "$SSL_MAP_FILE" "$STREAM_TARGET_FILE"`. The "incomplete snapshot" rejection
-  branch inside `kgs_snapshot_apply` (a snapshot missing one of several
-  requested basenames must be rejected wholesale, not partially applied) has
-  no test at all for the proxy adapter against a realistic multi-file
-  candidate set.
-- No test exercises `CA_DIR`/`ca.key`'s file permissions (see finding #1),
-  nor `CERT_DIR`'s `chmod 2750`/`0640` hardening itself — the correctly
-  implemented half of that same logic is also untested.
-- Confirmed (matches SoT-proxy.md's own note, re-verified by hand-tracing
-  the algorithm rather than trusting the claim): `_registrable_domain` has
-  no dedicated test for a compound-label public suffix (`co.uk`-style) or
-  for the PSL exception-rule interplay (`!city.kawasaki.jp`-style). Hand
-  trace of the algorithm for both cases looked logically correct, but that
-  is inference from reading, not from an executed test — a future edit
-  could regress either path silently with nothing to catch it.
-- `PROXY_SECURITY_MODE=strict` and `PROXY_ALLOWED_CLIENT_CIDRS` (the 403
-  code paths) still have no automated test anywhere (matches SoT).
+- `tests/bats/proxy_known_good_snapshot.bats` now covers incomplete
+  multi-file snapshots and the candidate-set migration. Its core fixtures
+  intentionally remain smaller than the production candidate set, and the
+  degraded-domain-row branch remains uncovered.
+- `tests/bats/proxy_cert_dir_permissions.bats` now drives the real CA and
+  certificate-directory hardening functions. It proves the explicit key-mode
+  correction with an insecure-key stub and records the requested group, so
+  the assertions depend on the production `chmod` and `chgrp` calls.
+- `tests/bats/proxy_registrable_domain.bats` now covers compound-label public
+  suffixes, bare-suffix rejection, and PSL wildcard/exception precedence.
+- `tests/bats/proxy_ssl_map_generation.bats` now isolates the strict/lazy host
+  map and client-CIDR map syntax. Request-level 403 behavior remains covered
+  only by the full-stack simulations rather than this unit suite.
 
 **Severity assessment**: info (test-coverage gaps, collected per the
 methodology even though several are restatements of the SoT's own findings
@@ -571,17 +563,12 @@ are appended after the verdicts.
    returns only `Dockerfile:35`; `proxy_cache_path ... use_temp_path=off`
    keeps temp files in the cache tree, so nothing writes there.
 
-9. **Test-coverage gaps** — CONFIRMED (info). `proxy_known_good_snapshot.bats`
-   only ever drives `_proxy_validate_snapshot_or_rollback` with a SINGLE
-   candidate file; the real call site passes four
-   (`nginx.conf proxy-params.conf $SSL_MAP_FILE $STREAM_TARGET_FILE`), so the
-   multi-file "incomplete snapshot" rejection branch (entrypoint 203-214) is
-   untested for the proxy adapter. No test asserts `CA_DIR`/`ca.key` or
-   `CERT_DIR` permissions. `_registrable_domain` has no `co.uk`/exception-rule
-   test — I hand-traced the algorithm for `foo.example.co.uk` (→ example.co.uk),
-   `city.kawasaki.jp` (exception → registrable), and plain `steamcontent.com`
-   and it is logically CORRECT; the gap is purely test coverage, not a bug.
-   `strict` mode and `PROXY_ALLOWED_CLIENT_CIDRS` 403 paths remain untested.
+9. **Test-coverage gaps** — PARTIALLY CLOSED (info). Dedicated Bats suites now
+   cover incomplete multi-file snapshots, CA/key and certificate-directory
+   hardening, PSL compound/exception behavior, and generated strict/lazy and
+   client-CIDR policy maps. The snapshot tests still use a reduced candidate
+   fixture and do not exercise the degraded-domain-row branch; request-level
+   403 behavior remains an integration concern rather than a unit assertion.
 
 10. **`/nginx_status` ACL IPv4-only** — CONFIRMED (info, latent). `http.conf:25`
     `allow 172.16.0.0/12`. No `enable_ipv6` on any deploy network (grep

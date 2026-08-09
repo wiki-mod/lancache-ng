@@ -3,7 +3,7 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for services/proxy/entrypoint.sh's _ensure_ca_cert() and
-# _harden_cert_dir(): the ca.key chmod 600 hardening (#1031) and the
+# _harden_cert_dir(): the ca.key chmod 600 hardening and the
 # CERT_DIR chgrp/chmod 2750 hardening. Both are security-relevant file-mode
 # invariants with no other guard against a future accidental deletion, so
 # they need their own regression coverage. Uses the real functions
@@ -36,13 +36,27 @@ setup() {
     [ "$mode" = "600" ]
 }
 
-# openssl's own umask-following default (644) is the exact regression #1031
-# fixed once -- this proves the fix is a real chmod, not merely that SOME
-# mode ended up on the file.
-@test "_ensure_ca_cert's ca.key is not left at openssl's umask-following default (644)" {
+# Stub certificate generation with an intentionally insecure key mode so
+# this test depends on the production chmod rather than OpenSSL's version-
+# specific key-creation default.
+@test "_ensure_ca_cert hardens an insecure generated ca.key to mode 600" {
+    openssl() {
+        local key_path="" cert_path="" previous=""
+        for argument in "$@"; do
+            case "$previous" in
+                -keyout) key_path="$argument" ;;
+                -out) cert_path="$argument" ;;
+            esac
+            previous="$argument"
+        done
+        printf 'insecure test key\n' > "$key_path"
+        printf 'test certificate\n' > "$cert_path"
+        chmod 644 "$key_path"
+    }
+
     _ensure_ca_cert
     mode="$(stat -c '%a' "$CA_DIR/ca.key")"
-    [ "$mode" != "644" ]
+    [ "$mode" = "600" ]
 }
 
 # Idempotence: a second call against an already-generated CA must be a
@@ -87,8 +101,15 @@ setup() {
     local test_group
     test_group="$(id -g)"
 
+    mkdir -p "$CERT_DIR"
+    chgrp() {
+        printf '%s\n' "$1" > "$BATS_TEST_TMPDIR/chgrp-requested-group"
+        command chgrp "$@"
+    }
+
     _harden_cert_dir "$test_group"
 
+    [ "$(cat "$BATS_TEST_TMPDIR/chgrp-requested-group")" = "$test_group" ]
     actual_gid="$(stat -c '%g' "$CERT_DIR")"
     [ "$actual_gid" = "$test_group" ]
 }

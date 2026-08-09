@@ -220,16 +220,8 @@ on:
       # _registrable_domain's PSL-driven derivation runs against the exact
       # rule shapes upstream ships (compound-label suffixes like co.uk,
       # exception rules like !city.kawasaki.jp), not a hand-written
-      # fixture. Without this entry, a PR touching only this data file
-      # (e.g. a PSL vendoring update) would not already match any other
-      # path above and so would never run that suite. Found by
-      # scripts/check-bats-path-filter-coverage.sh's own existence-
-      # filtered dependency scan against the real repo tree. Deliberately
-      # anchored here (after watchdog/retention.sh), not right after
-      # services/proxy/entrypoint.sh above, to keep this addition off an
-      # anchor line another unrelated entrypoint.sh-adjacent addition might
-      # also target, avoiding an avoidable merge conflict between unrelated
-      # concurrent changes.
+      # fixture. Without this entry, a vendored PSL update would not trigger
+      # the Bats suite that validates the dependent derivation behavior.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
@@ -340,16 +332,8 @@ on:
       # _registrable_domain's PSL-driven derivation runs against the exact
       # rule shapes upstream ships (compound-label suffixes like co.uk,
       # exception rules like !city.kawasaki.jp), not a hand-written
-      # fixture. Without this entry, a PR touching only this data file
-      # (e.g. a PSL vendoring update) would not already match any other
-      # path above and so would never run that suite. Found by
-      # scripts/check-bats-path-filter-coverage.sh's own existence-
-      # filtered dependency scan against the real repo tree. Deliberately
-      # anchored here (after watchdog/retention.sh), not right after
-      # services/proxy/entrypoint.sh above, to keep this addition off an
-      # anchor line another unrelated entrypoint.sh-adjacent addition might
-      # also target, avoiding an avoidable merge conflict between unrelated
-      # concurrent changes.
+      # fixture. Without this entry, a vendored PSL update would not trigger
+      # the Bats suite that validates the dependent derivation behavior.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"

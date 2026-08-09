@@ -5,11 +5,11 @@
 # Regression tests for services/proxy/entrypoint.sh's _render_ssl_map(),
 # specifically the two 403-gating maps it generates: $cdn_host_allowed
 # (PROXY_SECURITY_MODE=strict/lazy) and $lancache_client_allowed
-# (PROXY_ALLOWED_CLIENT_CIDRS). Before this file, neither the strict-mode
-# code path nor the CIDR-allowlist code path had any automated test
-# coverage anywhere in the suite -- confirmed via `git grep` across
-# tests/bats for both variable names. Asserts against the real generated
-# nginx map text (the same text conf.d/http.conf's `location /` block's
+# (PROXY_ALLOWED_CLIENT_CIDRS). These security-relevant defaults and
+# allowlist entries need direct assertions because request-level tests can
+# otherwise conceal which generated map supplied a matching value. These
+# tests assert against the real generated nginx map text (the same text
+# conf.d/http.conf's `location /` block's
 # `if ($cdn_host_allowed = 0) { return 403; }` and
 # `if ($lancache_client_allowed = 0) { return 403; }` actually evaluate at
 # runtime), not a reimplementation of the generation logic.
@@ -62,7 +62,7 @@ setup() {
     run _render_ssl_map
     [ "$status" -eq 0 ]
     body="$(awk '/map \$host \$cdn_host_allowed/{f=1} f{print} f&&/^}$/{exit}' <<<"$output")"
-    [[ "$body" == *'*.steamcontent.com'*' 1;'* ]]
+    grep -qE '^[[:space:]]*\*\.steamcontent\.com[[:space:]]+1;' <<<"$body"
     # A substring check here (e.g. *'steamcontent.com'*' 1;'*) would also
     # match inside the "*.steamcontent.com ... 1;" wildcard line just
     # asserted above, since that line itself contains "steamcontent.com"
