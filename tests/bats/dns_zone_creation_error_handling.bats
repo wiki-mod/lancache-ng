@@ -88,3 +88,36 @@ pdnsutil() {
     [[ "$output" == *"FATAL: failed to create zone 'lan'"* ]]
     [[ "$output" == *"Unable to open database connection"* ]]
 }
+
+# Real crash-loop confirmed 2026-08-09: load_dns_zone_helpers only extracts
+# this function's own body, never entrypoint.sh's top-level `set -euo
+# pipefail` -- every test above runs under bats' own default options, NOT
+# the real ones this function executes under in production. Worse, bats'
+# own `run` wraps the tested command in a subshell that does not propagate
+# a `set -e` set earlier in the same test body (verified empirically: a
+# test that does `set -e; run some_function_with_an_unguarded_failing_
+# command_substitution` still lets that function run to its own end,
+# because `run`'s subshell starts fresh, not inheriting -e) -- so simply
+# adding `set -e` before `run` would silently prove nothing. A version that
+# wrote `create_output=$(pdnsutil ...); create_status=$?` on separate lines
+# passed every test above while still crash-looping the real container on
+# every restart against an existing zone, because that assignment is the
+# command -e checks under entrypoint.sh's REAL option set (a plain script,
+# never bats/run-wrapped), aborting before create_status was ever read.
+# This test instead spawns its OWN literal `bash -c 'set -e; ...'`
+# subprocess (bypassing `run` entirely for the -e-sensitive part), sources
+# the same extracted helper, and re-declares the stub via `export -f` so
+# the child process sees it -- the only way to actually prove the
+# already-exists tolerance survives under the exact conditions that broke
+# it, per this project's own standing requirement to prove a set -e/-u
+# dependent construct empirically rather than reason about it.
+@test "the already-exists tolerance still holds when set -e is actually active, like in the real entrypoint" {
+    export -f pdnsutil
+    export PDNSUTIL_CREATE_ZONE_EXIT_CODE=1
+    export PDNSUTIL_CREATE_ZONE_STDERR="Error: Zone 'lan' already exists"
+    export pdnsutil_calls
+    run bash -c "set -euo pipefail; source '$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh'; _dns_ensure_zone_exists lan; echo REACHED_AFTER_CALL"
+
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"REACHED_AFTER_CALL"* ]]
+}
