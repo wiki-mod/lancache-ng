@@ -27,7 +27,7 @@ jobs:
 
       - name: Normalize and validate existing repository headers only
         env:
-          BASE_SHA: 6827d78b6df658f5b195696d0ac286cf50b4b8e1
+          BASE_SHA: 5f6f04e1fb0cd8f47301bfbdd2b1cba2cb4065ef
         run: |
           set -euo pipefail
 
