@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real multi-service integration test for issue #583 (per-secondary NATS
@@ -56,7 +57,17 @@ work_dir="$repo_root/.nats-auth-callout-simulation-tmp"
 rm -rf "$work_dir"
 mkdir -p "$work_dir/shared"
 
-compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}-auth-callout"
+shared_stack="${FULL_SETUP_SHARED_STACK:-0}"
+case "$shared_stack" in
+    0 | 1) ;;
+    *) echo "::error::FULL_SETUP_SHARED_STACK must be 0 or 1, got '$shared_stack'." >&2; exit 2 ;;
+esac
+base_compose_project="${COMPOSE_PROJECT_NAME:-lancache-ng-validation}"
+if [[ "$shared_stack" == 1 ]]; then
+    compose_project="$base_compose_project"
+else
+    compose_project="${base_compose_project}-auth-callout"
+fi
 network_name="${compose_project}_validation"
 # See ssl-mitm-cache-simulation.sh's identical comment: must track
 # deploy/full-setup/docker-compose.yml's own VALIDATION_UI_IP default so this
@@ -86,24 +97,29 @@ cleanup() {
     # compose project (it's a plain `docker run`, same as run_client's
     # ephemeral clients), so `compose down` below never touches it.
     docker rm -f "$live_container_name" >/dev/null 2>&1 || true
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-        down -v --remove-orphans >/dev/null 2>&1 || true
-    # `down` above can lose the "has active endpoints" race (see
-    # validation_project_networks_teardown's own comment in reserve-validation-
-    # subnet.sh) and silently leave this network non-empty, poisoning it for
-    # whichever job/run reserves this slot next -- wait for and force a
-    # real removal instead of trusting `down`'s own exit code.
-    validation_project_networks_teardown "$compose_project" || true
+    if [[ "$shared_stack" != 1 ]]; then
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+            down -v --remove-orphans >/dev/null 2>&1 || true
+        # `down` above can lose the "has active endpoints" race (see
+        # validation_project_networks_teardown's own comment in reserve-validation-
+        # subnet.sh) and silently leave this network non-empty, poisoning it for
+        # whichever job/run reserves this slot next -- wait for and force a
+        # real removal instead of trusting `down`'s own exit code.
+        validation_project_networks_teardown "$compose_project" || true
+    fi
     rm -rf "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
 
-echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
-
-LANCACHE_IMAGE_TAG="$image_tag" \
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-    up -d proxy docker-socket-proxy dns-standard dns-ssl nats ui
+if [[ "$shared_stack" == 1 ]]; then
+    echo "== Reusing the caller-owned full-setup stack =="
+else
+    echo "== Starting proxy/docker-socket-proxy/dns-standard/dns-ssl/nats/ui from the published $image_tag images =="
+    LANCACHE_IMAGE_TAG="$image_tag" \
+        docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        up -d proxy docker-socket-proxy dns-standard dns-ssl nats ui
+fi
 
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 deadline=$((SECONDS + 90))
