@@ -647,15 +647,19 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          digest_for_ref() {
-            local ref="$1" manifest digest
-            if ! manifest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}')"; then
-              return 1
+          snapshot_previous_ref() {
+            local target="$1" previous status
+            if previous="$(ci_ai_ref_digest_optional "$target")"; then
+              previous_refs["$target"]="$previous"
+              return 0
+            else
+              status=$?
             fi
-            digest="$(jq -r '.digest // empty' <<<"$manifest")"
-            ci_ai_require_digest "$digest" >/dev/null 2>&1 || return 1
-            printf '%s\n' "$digest"
+            if (( status == CI_AI_REF_ABSENT_STATUS )); then
+              previous_refs["$target"]=""
+              return 0
+            fi
+            ci_ai_fail "could not determine previous digest for $target; refusing to publish without an unambiguous rollback snapshot"
           }
 
           rollback_release_refs() {
@@ -684,7 +688,7 @@ jobs:
           while IFS=$'\t' read -r image digest; do
             ci_ai_require_digest "$digest"
             target="${image}:${RELEASE_TAG}"
-            previous_refs["$target"]="$(digest_for_ref "$target" || true)"
+            snapshot_previous_ref "$target"
             metadata="$(mktemp)"
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
               docker buildx imagetools create --prefer-index=false \
@@ -698,7 +702,7 @@ jobs:
           done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' release/release-lock.json)
 
           stack_target="ghcr.io/wiki-mod/lancache-ng/stack:${RELEASE_TAG}"
-          previous_refs["$stack_target"]="$(digest_for_ref "$stack_target" || true)"
+          snapshot_previous_ref "$stack_target"
           metadata="$(mktemp)"
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --prefer-index=false \
@@ -712,11 +716,11 @@ jobs:
           promoted_targets+=("$stack_target")
 
           while IFS=$'\t' read -r image digest; do
-            actual="$(digest_for_ref "${image}:${RELEASE_TAG}")"
+            actual="$(ci_ai_ref_digest "${image}:${RELEASE_TAG}")"
             [[ "$actual" == "$digest" ]] \
               || ci_ai_fail "post-publication digest mismatch for ${image}:${RELEASE_TAG}"
           done < <(jq -r '(.runtime + .tooling)[] | [.image, .digest] | @tsv' release/release-lock.json)
-          [[ "$(digest_for_ref "$stack_target")" == "$RELEASE_STACK_DIGEST" ]] \
+          [[ "$(ci_ai_ref_digest "$stack_target")" == "$RELEASE_STACK_DIGEST" ]] \
             || ci_ai_fail "post-publication stack pointer digest mismatch"
 
       - name: Release cross-workflow promotion lock
