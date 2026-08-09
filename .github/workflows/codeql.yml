@@ -128,12 +128,14 @@ jobs:
           CHECK_EVENT_NAME: ${{ github.event_name }}
           CHECK_GITHUB_REF: ${{ github.ref }}
           CHECK_GITHUB_SHA: ${{ github.sha }}
+          CHECK_PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           CHECK_PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
           set -euo pipefail
 
           superseded=false
           current_head=""
+          expected_head="$CHECK_GITHUB_SHA"
 
           # Deliberately fails OPEN (superseded=false), same asymmetric-risk
           # reasoning as build-push.yml's own copy of this check: an
@@ -147,6 +149,11 @@ jobs:
             esac
           elif [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
             : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
+            # github.sha identifies the synthetic merge commit for PR events,
+            # while refs/pull/<N>/head identifies the contributor's head. Use
+            # like-for-like SHAs so a current PR is not rejected as stale.
+            : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
+            expected_head="$CHECK_PR_HEAD_SHA"
             current_head="$(git ls-remote origin "refs/pull/${CHECK_PR_NUMBER}/head" | cut -f1 || true)"
           fi
           # schedule/workflow_dispatch have no "a newer trigger already
@@ -159,8 +166,8 @@ jobs:
             if [ "$CHECK_EVENT_NAME" = "push" ] || [ "$CHECK_EVENT_NAME" = "pull_request" ]; then
               echo "::warning::Could not resolve the current remote head for this trigger; failing open (treating this run as NOT superseded)."
             fi
-          elif [ "$current_head" != "$CHECK_GITHUB_SHA" ]; then
-            echo "::notice::This ref/PR has already moved to ${current_head} since this run was triggered for ${CHECK_GITHUB_SHA}; a newer run already supersedes this one."
+          elif [ "$current_head" != "$expected_head" ]; then
+            echo "::notice::This ref/PR has already moved to ${current_head} since this run was triggered for ${expected_head}; a newer run already supersedes this one."
             superseded=true
           fi
 
