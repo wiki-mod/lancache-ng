@@ -75,6 +75,34 @@ while IFS= read -r entry; do
         build_contexts+="$external_build_contexts"
     fi
 
+    refresh_policy="$(bash "$repo_root/scripts/ci-package-refresh-policy.sh" "$service" "$source_sha")"
+    refresh_required="$(jq -r '.refresh_required' <<<"$refresh_policy")"
+    force_no_cache="$(jq -r '.force_no_cache' <<<"$refresh_policy")"
+    if [[ "$refresh_required" == true ]]; then
+        refresh_bucket="${CI_SOURCE_APT_CACHE_BUST:-}"
+        if [[ -z "$refresh_bucket" ]]; then
+            if [[ "${CI_SOURCE_REQUIRE_APT_CACHE_BUST:-false}" == true ]]; then
+                ci_ai_fail "exact package refresh bucket is required for $service but was not supplied"
+            fi
+            refresh_bucket="$(date -u +%G-W%V)"
+        fi
+        [[ "$refresh_bucket" =~ ^[0-9]{4}-W[0-9]{2}$ ]] \
+            || ci_ai_fail "invalid package refresh bucket for $service: $refresh_bucket"
+
+        # Dockerfiles that already implement the project's surgical
+        # APT_CACHE_BUST pattern consume the frozen bucket in the workflow's
+        # existing build-argument resolver. Older runtime Dockerfiles do not.
+        # For those, carry the same bucket as producer evidence and let the
+        # build-once action force no-cache rather than silently reusing an old
+        # package-manager layer.
+        if [[ "$force_no_cache" == true ]]; then
+            if [[ -n "$build_args" ]]; then
+                build_args+=$'\n'
+            fi
+            build_args+="APT_CACHE_BUST=${refresh_bucket}"
+        fi
+    fi
+
     source_fingerprint="$(
         CI_SOURCE_BUILD_INPUTS_JSON="$build_inputs" \
             bash "$repo_root/scripts/ci-source-fingerprint.sh" "$service" "$source_sha"
