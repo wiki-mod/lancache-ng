@@ -230,6 +230,14 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
+      # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
+      # points PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # _registrable_domain's PSL-driven derivation runs against the exact
+      # rule shapes upstream ships (compound-label suffixes like co.uk,
+      # exception rules like !city.kawasaki.jp), not a hand-written
+      # fixture. Without this entry, a vendored PSL update would not trigger
+      # the Bats suite that validates the dependent derivation behavior.
+      - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       # services/syslog/netdata-web_log.conf (#879 gap found by
@@ -349,6 +357,14 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
+      # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
+      # points PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # _registrable_domain's PSL-driven derivation runs against the exact
+      # rule shapes upstream ships (compound-label suffixes like co.uk,
+      # exception rules like !city.kawasaki.jp), not a hand-written
+      # fixture. Without this entry, a vendored PSL update would not trigger
+      # the Bats suite that validates the dependent derivation behavior.
+      - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       # services/syslog/netdata-web_log.conf (#879 gap found by

@@ -1031,6 +1031,37 @@ explicit pass:**
   follow-up actually switches the entrypoint, these findings describe an unused,
   parallel implementation, not validated production behavior; re-check this PR's
   merge status before adding a Standing check row for it.
+- **Proxy `slice` + a cached 301/302 response has never been exercised end-to-end**
+  (bug-hunt #849, finding #14, 2026-08-06) -- documented exception per Rule-Ref:
+  AG-DOC-011:
+  - **Scope**: The `slice`-plus-cached-redirect end-to-end path only --
+    `services/proxy/proxy-params.conf` configures `slice ${CACHE_SLICE_SIZE};`
+    alongside `proxy_cache_valid 200 206 301 302 ${CACHE_VALID_HIT};`, so a
+    redirecting origin response is both eligible for range-slicing AND for
+    being cached and re-served on a later request.
+  - **Reason**: Closing this for real needs a live nginx instance in front of
+    a controlled origin that returns a 3xx for a ranged request, which none
+    of this project's current simulation scripts provide; building one is a
+    genuinely separate undertaking from the rest of the #849 proxy pass (most
+    of which is covered by unit-level bats tests against extracted shell
+    functions, not a new live-nginx harness) -- recorded here rather than
+    rushed into an under-verified script under time pressure.
+  - **Tracking**: bug-hunt #849 finding #14 (2026-08-06). Follow-up: a
+    dedicated `scripts/proxy-slice-redirect-cache-simulation.sh` (mirroring
+    the existing `proxy-*-simulation.sh` scripts' shape) is the concrete next
+    step, not yet built.
+  - **Validation**: No automated coverage exists for this exact path today.
+    `scripts/ssl-mitm-cache-simulation.sh`'s own comment explains why *its*
+    assertions check the literal HTTP status (to guard against a redirect
+    masquerading as real content) -- that is a different check and must not
+    be read as covering this gap. Until the follow-up script lands, treat any
+    claim that "slice-plus-redirect caching works" as unverified.
+  - **Non-Expansion**: This exception covers only the slice-plus-cached-
+    redirect path. It does not cover any other proxy caching/slice behavior
+    (which has real coverage elsewhere), and it does not extend to the other
+    three finding-#9 gaps this same PR closes (multi-file known-good-snapshot
+    rejection, CA/cert-dir permission hardening, PSL-backed registrable-domain
+    derivation) -- all of those have real, non-exempted test coverage now.
 - **Five gaps confirmed by this audit pass (2026-08-05, issue #1391),
   corrected/documented here (in some cases with a concrete, code-verified recommended
   sequence) but NOT yet closed by a live run** — tracked explicitly as a follow-up
