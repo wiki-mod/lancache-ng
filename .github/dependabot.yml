@@ -8,8 +8,12 @@
 # regular-update entries.
 #
 # Each ecosystem uses one catch-all group to prevent directory-level update
-# fan-out. The weekly days are staggered to spread routine PR creation; this
-# does not control merge timing or replace workflow-level concurrency bounds.
+# fan-out. `schedule.day` is left unset (Dependabot's shared implicit
+# default, Monday) on all three blocks: staggering the *open* day was
+# considered but rejected -- it does not bound same-day *merges*, which is
+# the actual runner-pool-contention risk (AG-CI-016/AG-CI-017), so it would
+# have been a cheap-but-ineffective partial mitigation rather than a real
+# fix.
 version: 2
 updates:
   # GitHub Actions -- one grouped PR per target branch (single directory: /).
@@ -18,7 +22,6 @@ updates:
     target-branch: current_dev
     schedule:
       interval: weekly
-      day: monday
     groups:
       actions:
         patterns: ["*"]
@@ -34,7 +37,6 @@ updates:
     target-branch: current_dev
     schedule:
       interval: weekly
-      day: wednesday
     groups:
       rust-deps:
         patterns: ["*"]
@@ -56,7 +58,6 @@ updates:
     target-branch: current_dev
     schedule:
       interval: weekly
-      day: friday
     groups:
       docker-base-images:
         patterns: ["*"]
