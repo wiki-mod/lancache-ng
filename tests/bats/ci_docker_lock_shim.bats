@@ -63,20 +63,26 @@ JSON
     exit 0
   fi
 
+  compose_files=()
   for ((i=0; i<${#args[@]}; i++)); do
     if [[ "${args[$i]}" == -f && $((i + 1)) -lt ${#args[@]} ]]; then
-      candidate="${args[$((i + 1))]}"
-      if [[ -f "$candidate" && -n "${FAKE_MODEL_COPY:-}" ]] \
-          && jq -e '.services.external.image? // empty' "$candidate" >/dev/null 2>&1; then
-        cp "$candidate" "$FAKE_MODEL_COPY"
-      fi
-      if [[ -f "$candidate" && -n "${FAKE_OVERRIDE_COPY:-}" ]] \
-          && jq -e '.services.proxy.image? // empty' "$candidate" >/dev/null 2>&1 \
-          && ! jq -e '.services.external.image? // empty' "$candidate" >/dev/null 2>&1; then
-        cp "$candidate" "$FAKE_OVERRIDE_COPY"
-      fi
+      compose_files+=("${args[$((i + 1))]}")
     fi
   done
+
+  # The lock shim's execution call must contain exactly two generated files:
+  # the complete canonical Compose model first and the digest-only override
+  # second. Copy by position rather than re-parsing their contents here so
+  # this fake tests the shim's file ordering instead of duplicating its jq
+  # classification logic.
+  if (( ${#compose_files[@]} == 2 )); then
+    if [[ -n "${FAKE_MODEL_COPY:-}" ]]; then
+      cp "${compose_files[0]}" "$FAKE_MODEL_COPY"
+    fi
+    if [[ -n "${FAKE_OVERRIDE_COPY:-}" ]]; then
+      cp "${compose_files[1]}" "$FAKE_OVERRIDE_COPY"
+    fi
+  fi
 fi
 exit 0
 SH
