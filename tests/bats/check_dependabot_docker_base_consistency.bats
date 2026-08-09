@@ -579,3 +579,25 @@ EOF
     [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
         fail "let heredoc-looking comment text hide divergent final images: $output"
 }
+
+@test "does not continue a standalone comment ending in a backslash" {
+    # Docker ignores continuation markers on standalone comments, so the
+    # next physical line must remain an independently parsed instruction.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM busybox:1.37 AS builder
+# Explain the runtime choice \
+FROM alpine:3.24
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM busybox:1.37 AS builder
+# Explain the runtime choice \
+FROM debian:12-slim
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "let a comment continuation marker hide divergent final images: $output"
+}

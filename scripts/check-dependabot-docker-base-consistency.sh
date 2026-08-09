@@ -144,6 +144,15 @@ resolve_final_image() {
         }
         {
             physical=$0
+            candidate=physical
+            sub(/^[[:space:]]*/, "", candidate)
+            # Standalone comments are complete physical lines even when
+            # their text ends in a backslash; Docker does not continue them.
+            if (logical == "" && candidate ~ /^#/) {
+                logical=physical
+                emit_logical()
+                next
+            }
             if (physical ~ /\\[[:space:]]*$/) {
                 sub(/\\[[:space:]]*$/, "", physical)
                 logical=logical physical " "
