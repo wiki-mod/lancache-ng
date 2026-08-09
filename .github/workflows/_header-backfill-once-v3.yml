@@ -298,8 +298,9 @@ jobs:
             fi
             printf '%s\0%s\0' "$mode" "$path" >> .git/header-manifest.nul
           done
+          printf '%s\n' "$BASE_SHA" > .git/header-base-sha
 
-      - name: Create blobs and emit verified manifest
+      - name: Create transformed workflow blobs only
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -308,6 +309,7 @@ jobs:
             const owner = context.repo.owner;
             const repo = context.repo.repo;
             const expectedTree = fs.readFileSync('.git/header-local-tree-sha', 'utf8').trim();
+            const baseSha = fs.readFileSync('.git/header-base-sha', 'utf8').trim();
             const rawManifest = fs.readFileSync('.git/header-manifest.nul', 'utf8').split('\0');
             if (rawManifest.at(-1) === '') rawManifest.pop();
             if (rawManifest.length === 0 || rawManifest.length % 2 !== 0) {
@@ -315,23 +317,83 @@ jobs:
               return;
             }
 
-            let count = 0;
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            const createBlob = async (path) => {
+              const content = fs.readFileSync(path).toString('base64');
+              for (let attempt = 1; attempt <= 4; attempt += 1) {
+                try {
+                  return await github.rest.git.createBlob({
+                    owner,
+                    repo,
+                    content,
+                    encoding: 'base64',
+                  });
+                } catch (error) {
+                  const message = String(error?.response?.data?.message || error?.message || '');
+                  const retryAfter = Number(error?.response?.headers?.['retry-after'] || 0);
+                  const secondaryLimit = error?.status === 403 && /secondary rate limit/i.test(message);
+                  if (!secondaryLimit || attempt === 4) throw error;
+                  const delaySeconds = Math.max(retryAfter, 60);
+                  core.info(`Secondary rate limit while creating ${path}; retrying after ${delaySeconds}s (attempt ${attempt}/4).`);
+                  await sleep(delaySeconds * 1000);
+                }
+              }
+              throw new Error(`Unreachable createBlob retry state for ${path}`);
+            };
+
+            let workflowCount = 0;
             for (let i = 0; i < rawManifest.length; i += 2) {
               const mode = rawManifest[i];
               const path = rawManifest[i + 1];
-              const content = fs.readFileSync(path).toString('base64');
-              const { data: blob } = await github.rest.git.createBlob({
-                owner,
-                repo,
-                content,
-                encoding: 'base64',
-              });
-              const pathB64 = Buffer.from(path, 'utf8').toString('base64');
-              console.log(`HEADER_ENTRY\t${mode}\t${blob.sha}\t${pathB64}`);
-              count += 1;
+              if (!path.startsWith('.github/workflows/')) continue;
+
+              const { data: blob } = await createBlob(path);
+              console.log(`WORKFLOW_ENTRY\t${mode}\t${blob.sha}\t${path}`);
+              workflowCount += 1;
+              await sleep(1000);
+            }
+
+            if (workflowCount === 0) {
+              core.setFailed('No transformed workflow headers were present in the validated manifest.');
+              return;
             }
 
             console.log(`HEADER_EXPECTED_TREE=${expectedTree}`);
-            console.log(`HEADER_PARENT_SHA=${process.env.GITHUB_SHA}`);
-            console.log(`HEADER_BASE_SHA=${process.env.BASE_SHA || ''}`);
-            core.notice(`Prepared ${count} validated header blobs for connector-side tree creation.`);
+            console.log(`HEADER_SOURCE_HEAD=${process.env.GITHUB_SHA}`);
+            console.log(`HEADER_BASE_SHA=${baseSha}`);
+            core.notice(`Prepared ${workflowCount} transformed workflow blobs; non-workflow headers will be pushed separately.`);
+
+      - name: Commit and push non-workflow headers
+        env:
+          TARGET_BRANCH: agent/1517-spdx-header-backfill
+        run: |
+          set -euo pipefail
+
+          # GitHub's workflow token cannot update .github/workflows paths. Restore those
+          # paths to HEAD after the fully-normalized tree was validated and recorded.
+          git restore --source=HEAD --staged --worktree -- .github/workflows
+          git add -A
+
+          workflow_staged=$(git diff --cached --name-only -- .github/workflows)
+          if [[ -n "$workflow_staged" ]]; then
+            echo 'Workflow paths unexpectedly remain staged for the normal git push:' >&2
+            printf '%s\n' "$workflow_staged" >&2
+            exit 1
+          fi
+          if git diff --cached --quiet; then
+            echo 'No non-workflow header changes remain to commit.' >&2
+            exit 1
+          fi
+          if [[ -n "$(git diff --cached --summary)" ]]; then
+            echo 'Unexpected mode/rename/create/delete summary in non-workflow header commit.' >&2
+            git diff --cached --summary >&2
+            exit 1
+          fi
+
+          git diff --cached --check
+          git config user.name 'ChatGPT'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          timestamp=$(date +%s)
+          git commit -m "GPT-${timestamp}" -m 'chore(governance): normalize non-workflow file headers'
+          git push origin "HEAD:refs/heads/${TARGET_BRANCH}"
+          echo "NON_WORKFLOW_COMMIT=$(git rev-parse HEAD)"
