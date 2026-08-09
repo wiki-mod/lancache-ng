@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Admin UI routes for the PowerDNS zone/record known-good snapshot rollback
 //! mechanism (#628). Mirrors the existing Kea snapshot list/rollback UI

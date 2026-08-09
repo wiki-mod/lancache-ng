@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Runtime configuration for the Admin UI service: loads and validates
 //! settings from the process environment (auth, DHCP mode, HSTS mode,

@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Test setup.sh migration semantics: verify that existing non-empty .env values
 # are preserved by default and not overwritten during migrations or updates.
 # This test validates the AGENTS.md guarantee: "Existing non-empty local values

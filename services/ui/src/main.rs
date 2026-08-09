@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Admin UI service entry point. Wires up the axum HTTP server, shared
 //! `AppState` (Docker client, NATS connection, SQLite handle, Tera templates),

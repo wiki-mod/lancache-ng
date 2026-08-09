@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Reader for `services/watchdog/watchdog.sh`'s `status.json` (issue #870,
 //! bug-hunt findings #2/#3 in `docs/bug-hunt/observability.md`). Watchdog

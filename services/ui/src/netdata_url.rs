@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Pure Netdata proxy URL builder, extracted from `routes/netdata_proxy.rs`
 //! (issue #1252) so `build_netdata_url` -- the allowlisted-path builder that

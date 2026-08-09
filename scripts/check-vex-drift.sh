@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CI drift guard for the committed OpenVEX document (vex.openvex.json): fails
 # closed if that file is out of sync with .trivyignore.yaml. This is what wires
 # "regenerate the VEX document whenever .trivyignore.yaml changes" (OSPS-VM-

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for scripts/check-netdata-curl-pin.sh: the maintainer-approved
 # tracking mechanism from PR #1352 (issue #1304's "option (c)" decision) --

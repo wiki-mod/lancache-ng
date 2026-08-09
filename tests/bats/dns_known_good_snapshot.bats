@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Adapter-level tests for the DNS (PowerDNS) known-good-snapshot integration
 # in services/dns/entrypoint.sh (#615). Loads the real

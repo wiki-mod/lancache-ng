@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CI guard against a specific #822 recurrence shape: the service list that
 # drives multi-platform manifest merge, channel promotion, and release is
 # hardcoded as several independent `services=(...)` bash arrays inside

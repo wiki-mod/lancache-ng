@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 name: File header / workflow size / review-chronology checks
 description: >-
   The three plain bash/grep checks build-push.yml's self-hosted `file-headers`

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Unit coverage for services/watchdog/watchdog.sh's is_truthy() helper: the
 # canonical truthy-parsing contract shared with the Admin UI's env_bool()

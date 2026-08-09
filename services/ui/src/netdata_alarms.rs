@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Storage for Netdata alarm-notify events forwarded by the `netdata`
 //! container's `custom_sender()` integration (bug hunt #849,

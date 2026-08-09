@@ -1,5 +1,6 @@
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! HTTP client for the narrow subset of the Docker API
 //! `scripts/docker-socket-proxy.sh`'s HAProxy allowlist actually permits:

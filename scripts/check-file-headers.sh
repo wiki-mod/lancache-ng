@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Scans git-tracked files for the required repository header (see AGENTS.md's
 # "File Headers" section) and, separately, for the SPDX-License-Identifier

@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Docker API access for the Admin UI, scoped to the explicit
 //! docker-socket-proxy allowlist (no EXEC, no container list/create/remove):

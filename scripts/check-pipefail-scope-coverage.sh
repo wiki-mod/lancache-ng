@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing coverage guard for scripts/check-pipefail-early-exit-grep.sh's own
 # test suite: verifies tests/bats/check_pipefail_early_exit_grep.bats

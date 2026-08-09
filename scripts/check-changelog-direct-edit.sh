@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Warn-only CI guard (issue #893, optional follow-up to #889/#890): flags a
 # pull request that edits CHANGELOG.md directly, since #899 CHANGELOG.md is
 # normally written automatically by .github/workflows/update-changelog.yaml

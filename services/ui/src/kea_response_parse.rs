@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Pure Kea DHCPv4 API response-parsing helpers, extracted from
 //! `routes/dhcp.rs` (issue #1252) so `parse_reservation_entry` -- the read

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for #842: services/watchdog/watchdog.sh now polls and
 # auto-restarts `nats` (via C_NATS/CONTAINER_NATS) the same way it already

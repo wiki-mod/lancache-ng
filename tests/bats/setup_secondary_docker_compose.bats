@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Regression tests for setup.sh's cmd_secondary() function, which generates
 # a docker-compose.yml for secondary DNS nodes. Guards against issue #652,

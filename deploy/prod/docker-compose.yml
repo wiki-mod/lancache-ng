@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults

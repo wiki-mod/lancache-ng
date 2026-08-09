@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! Route for viewing and filtering logs: the nginx access-log tail by
 //! default, or -- once an install opts into `docker compose --profile
 //! logging` (SYSLOG_ENABLED=true) -- the central syslog-ng store instead

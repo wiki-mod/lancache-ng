@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free unit + integration coverage for
 # scripts/lib/staging-ancestor-fallback.sh, the shared ancestor-fallback

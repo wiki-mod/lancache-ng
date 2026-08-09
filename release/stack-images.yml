@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Release manifest: declares the first-party runtime/tooling/metadata images,
 # their supported platforms and source Dockerfiles, the external
 # (third-party) images used by supported deploy profiles, the mutable/

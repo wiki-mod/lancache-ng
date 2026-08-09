@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Active NATS connection termination for a removed/rotated secondary (issue
 //! #681, follow-up to #621's per-secondary auth-callout identity).

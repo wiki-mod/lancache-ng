@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Synthetic PXE-client DHCPDISCOVER probe for scripts/dhcp-proxy-pxe-
 //! simulation.sh (issue #705). No off-the-shelf DHCP client (dhclient,

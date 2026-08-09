@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression coverage for the interactive dnsmasq-proxy wizard's PXE
 # boot-pointer opt-in step and migrate_env_for_update()'s equivalent

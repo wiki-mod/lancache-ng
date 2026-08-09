@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Admin UI cache-resize control (issue #1069 part 3): lets an operator
 //! request a new `CACHE_MAX_SIZE` from the dashboard, re-validating the
