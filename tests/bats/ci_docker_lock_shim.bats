@@ -191,6 +191,43 @@ SH
   [ "$file_flag_count" -eq 2 ]
 }
 
+@test "compose short project-name option stays a global through canonicalization" {
+  base="$BATS_TEST_TMPDIR/base-project.yml"
+  printf 'services: {}\n' >"$base"
+
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      compose -p shared-project -f "$base" pull
+
+  [ "$status" -eq 0 ]
+  mapfile -t calls <"$LOG"
+  [ "${#calls[@]}" -eq 2 ]
+  [[ "${calls[0]}" == *"compose -p shared-project -f"* ]]
+  [[ "${calls[0]}" == *"config --format json"* ]]
+  [[ "${calls[1]}" == *"compose -p shared-project -f"* ]]
+  [[ "${calls[1]}" == *" pull "* ]]
+}
+
+@test "unknown compose global option fails closed instead of shifting the subcommand" {
+  run env \
+    GITHUB_WORKSPACE="$REPO_ROOT" \
+    CI_LOCKED_STACK_FILE="$LOCK" \
+    CI_LOCKED_REAL_DOCKER="$FAKE_DOCKER" \
+    CI_LOCKED_DOCKER_SHIM_DIR="$BATS_TEST_TMPDIR/shim" \
+    FAKE_DOCKER_LOG="$LOG" \
+    bash "$REPO_ROOT/scripts/ci-docker-lock-shim.sh" \
+      compose --definitely-unknown value pull
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"unsupported docker compose global option under stack lock"* ]]
+  [ ! -s "$LOG" ]
+}
+
 @test "compose render failure preserves the real failing status" {
   base="$BATS_TEST_TMPDIR/base-failure.yml"
   printf 'services: {}\n' >"$base"
