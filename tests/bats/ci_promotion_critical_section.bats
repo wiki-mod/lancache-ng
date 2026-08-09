@@ -11,6 +11,17 @@ line_of() {
   awk -v needle="$1" 'index($0, needle) { print NR; exit }' "$WORKFLOW"
 }
 
+@test "promotion dispatch is bound to the protected branch behind its channel" {
+  run grep -F 'nightly) branch=current_dev' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F 'latest) branch=master' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F '[[ "$GITHUB_REF" == "$expected_ref" ]]' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F '[[ "$REF_PROTECTED" == true ]]' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+}
+
 @test "promotion verifies accepted identity before acquiring the global writer lock" {
   extract_line="$(line_of 'bash scripts/ci-extract-stack-lock.sh')"
   first_tip_line="$(line_of 'Prove accepted source is the current channel branch tip')"
