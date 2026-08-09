@@ -143,8 +143,11 @@ for file in "${scan_files[@]}"; do
       # skipping over those, a multi-platform builder's own `FROM --platform=
       # ... ${BUILD_TOOLS_IMAGE} AS builder` line would never match, silently
       # exempting that stage from this guard despite genuinely inheriting
-      # build-tools' pipefail SHELL.
-      if grep -Eq '^FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools([:@][^[:space:]]+)?|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
+      # build-tools' pipefail SHELL. Matched case-insensitively (`-i`):
+      # Dockerfile instruction names are themselves case-insensitive (Docker
+      # accepts `from`/`From`/`FROM` identically), so a case-sensitive-only
+      # match would miss a valid, differently-cased FROM line.
+      if grep -Eqi '^FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools([:@][^[:space:]]+)?|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
         inherits_build_tools_pipefail=true
       fi
       ;;
