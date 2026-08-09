@@ -283,6 +283,37 @@ JSON
   [ "$status" -eq 0 ]
 }
 
+@test "v2 build retries publish the same local artifact instead of rerunning Dockerfile stages" {
+  action="$REPO_ROOT/.github/actions/ghcr-build-once-push-retry/action.yml"
+  candidate="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
+  release="$REPO_ROOT/.github/workflows/ci-release-accepted-v2.yml"
+
+  build_action_count="$(grep -Fc 'uses: docker/build-push-action@' "$action")"
+  [ "$build_action_count" -eq 1 ]
+  run grep -F 'load: true' "$action"
+  [ "$status" -eq 0 ]
+  run grep -F 'push: false' "$action"
+  [ "$status" -eq 0 ]
+  run grep -F 'docker image push "$TARGET_TAG"' "$action"
+  [ "$status" -eq 0 ]
+
+  candidate_block="$(awk '
+    /name: Build and push quarantine candidate exactly once/ { capture=1 }
+    capture { print }
+    /name: Attest build provenance to exact child digest/ { exit }
+  ' "$candidate")"
+  [[ "$candidate_block" == *'uses: ./.github/actions/ghcr-build-once-push-retry'* ]]
+  [[ "$candidate_block" != *'uses: ./.github/actions/ghcr-build-push-retry'* ]]
+
+  release_block="$(awk '
+    /name: Build and push release build-tools quarantine candidate exactly once/ { capture=1 }
+    capture { print }
+    /name: Attest release build-tools child provenance to exact digest/ { exit }
+  ' "$release")"
+  [[ "$release_block" == *'uses: ./.github/actions/ghcr-build-once-push-retry'* ]]
+  [[ "$release_block" != *'uses: ./.github/actions/ghcr-build-push-retry'* ]]
+}
+
 @test "locked-stack health loop uses only services that actually started" {
   script="$REPO_ROOT/scripts/ci-validate-locked-stack.sh"
   run grep -F 'mapfile -t active_services < <("${compose[@]}" ps --services)' "$script"
