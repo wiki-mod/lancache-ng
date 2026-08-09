@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real DNS/HTTP/HTTPS caching test against a genuinely fetchable target
@@ -78,52 +79,63 @@ dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
 # hardcoded literal instead of proving the answer leads somewhere real.
 build_tools_image="${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 image_tag="${LANCACHE_IMAGE_TAG:-nightly}"
+shared_stack="${FULL_SETUP_SHARED_STACK:-0}"
+case "$shared_stack" in
+    0 | 1) ;;
+    *) echo "::error::FULL_SETUP_SHARED_STACK must be 0 or 1, got '$shared_stack'." >&2; exit 2 ;;
+esac
 compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml)
 
 cleanup() {
     local status=$?
-    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-    # `down` above can lose the "has active endpoints" race (see
-    # validation_project_networks_teardown's own comment in reserve-validation-
-    # subnet.sh) and silently leave this network non-empty, poisoning it for
-    # whichever job/run reserves this slot next -- wait for and force a
-    # real removal instead of trusting `down`'s own exit code.
-    validation_project_networks_teardown "$compose_project" || true
+    if [[ "$shared_stack" != 1 ]]; then
+        "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+        # `down` above can lose the "has active endpoints" race (see
+        # validation_project_networks_teardown's own comment in reserve-validation-
+        # subnet.sh) and silently leave this network non-empty, poisoning it for
+        # whichever job/run reserves this slot next -- wait for and force a
+        # real removal instead of trusting `down`'s own exit code.
+        validation_project_networks_teardown "$compose_project" || true
+    fi
     rm -rf "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
 
-# A cancelled/crashed prior run only gets cleaned up by the EXIT trap above,
-# which never runs if the process was killed rather than exited normally.
-# That can leave the fixed-name "${compose_project}_proxy-cache" volume
-# behind with entries from that earlier run, so this run's supposedly fresh
-# first request would come back a false HIT instead of the expected MISS.
-# Clearing it before `up -d` guarantees every run starts from an empty cache.
-echo "== Clearing any leftover state from a previous run =="
-"${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-validation_project_networks_teardown "$compose_project" || true
+if [[ "$shared_stack" == 1 ]]; then
+    echo "== Reusing the caller-owned full-setup stack with its fresh shared cache volume =="
+else
+    # A cancelled/crashed prior run only gets cleaned up by the EXIT trap above,
+    # which never runs if the process was killed rather than exited normally.
+    # That can leave the fixed-name "${compose_project}_proxy-cache" volume
+    # behind with entries from that earlier run, so this run's supposedly fresh
+    # first request would come back a false HIT instead of the expected MISS.
+    # Clearing it before `up -d` guarantees every run starts from an empty cache.
+    echo "== Clearing any leftover state from a previous run =="
+    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
+    validation_project_networks_teardown "$compose_project" || true
 
-echo "== Pulling the published $image_tag images =="
+    echo "== Pulling the published $image_tag images =="
 
-# Without an explicit pull, Compose's pull_policy: missing (see
-# deploy/full-setup/docker-compose.yml) would silently reuse whatever image
-# is already cached locally under this tag instead of the one actually
-# published for this run -- matching the pull step the full-setup-validate
-# job in the same workflow already runs before its own `up -d`. Note:
-# standard-passthrough-shim (alpine, pulled straight from Docker Hub, not one
-# of our own published images) is deliberately NOT in this pull list --
-# `up -d` below pulls/starts it itself via Compose's default pull_policy.
-LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" pull --quiet proxy dns-standard dns-ssl nats
+    # Without an explicit pull, Compose's pull_policy: missing (see
+    # deploy/full-setup/docker-compose.yml) would silently reuse whatever image
+    # is already cached locally under this tag instead of the one actually
+    # published for this run -- matching the pull step the full-setup-validate
+    # job in the same workflow already runs before its own `up -d`. Note:
+    # standard-passthrough-shim (alpine, pulled straight from Docker Hub, not one
+    # of our own published images) is deliberately NOT in this pull list --
+    # `up -d` below pulls/starts it itself via Compose's default pull_policy.
+    LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" pull --quiet proxy dns-standard dns-ssl nats
 
-echo "== Starting proxy/dns-standard/dns-ssl/nats/standard-passthrough-shim from the published $image_tag images =="
+    echo "== Starting proxy/dns-standard/dns-ssl/nats/standard-passthrough-shim from the published $image_tag images =="
 
-# standard-passthrough-shim is named explicitly here because it is
-# Compose-profile-gated (see its comment in docker-compose.yml) -- an
-# explicitly-named service on the command line always starts regardless of
-# which profiles are active, so no --profile flag is needed here even though
-# no profile is enabled for this invocation.
-LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d proxy dns-standard dns-ssl nats standard-passthrough-shim
+    # standard-passthrough-shim is named explicitly here because it is
+    # Compose-profile-gated (see its comment in docker-compose.yml) -- an
+    # explicitly-named service on the command line always starts regardless of
+    # which profiles are active, so no --profile flag is needed here even though
+    # no profile is enabled for this invocation.
+    LANCACHE_IMAGE_TAG="$image_tag" "${compose[@]}" up -d proxy dns-standard dns-ssl nats standard-passthrough-shim
+fi
 
 # Mirrors the health-wait pattern already proven in full-setup-validate.yml
 # and scripts/setup-cli-simulation.sh. ("compose" is already defined above,
