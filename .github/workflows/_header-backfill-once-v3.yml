@@ -299,8 +299,7 @@ jobs:
             printf '%s\0%s\0' "$mode" "$path" >> .git/header-manifest.nul
           done
 
-      - name: Create verified Git objects without moving the branch
-        id: git_objects
+      - name: Create blobs and emit verified manifest
         uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
@@ -316,7 +315,7 @@ jobs:
               return;
             }
 
-            const entries = [];
+            let count = 0;
             for (let i = 0; i < rawManifest.length; i += 2) {
               const mode = rawManifest[i];
               const path = rawManifest[i + 1];
@@ -327,44 +326,12 @@ jobs:
                 content,
                 encoding: 'base64',
               });
-              entries.push({ path, mode, type: 'blob', sha: blob.sha });
+              const pathB64 = Buffer.from(path, 'utf8').toString('base64');
+              console.log(`HEADER_ENTRY\t${mode}\t${blob.sha}\t${pathB64}`);
+              count += 1;
             }
 
-            for (const path of [
-              '.github/workflows/_header-backfill-once.yml',
-              '.github/workflows/_header-backfill-once-v2.yml',
-              '.github/workflows/_header-backfill-once-v3.yml',
-            ]) {
-              entries.push({ path, mode: '100644', type: 'blob', sha: null });
-            }
-
-            const { data: parentCommit } = await github.rest.git.getCommit({
-              owner,
-              repo,
-              commit_sha: process.env.GITHUB_SHA,
-            });
-            const { data: remoteTree } = await github.rest.git.createTree({
-              owner,
-              repo,
-              base_tree: parentCommit.tree.sha,
-              tree: entries,
-            });
-
-            if (remoteTree.sha !== expectedTree) {
-              core.setFailed(`Remote tree ${remoteTree.sha} does not match locally validated tree ${expectedTree}.`);
-              return;
-            }
-
-            const timestamp = Math.floor(Date.now() / 1000);
-            const { data: commit } = await github.rest.git.createCommit({
-              owner,
-              repo,
-              message: `GPT-${timestamp}\n\nchore(governance): normalize LanCache-NG file headers`,
-              tree: remoteTree.sha,
-              parents: [process.env.GITHUB_SHA],
-            });
-
-            core.notice(`HEADER_TREE_SHA=${remoteTree.sha}`);
-            core.notice(`HEADER_COMMIT_SHA=${commit.sha}`);
-            core.setOutput('tree_sha', remoteTree.sha);
-            core.setOutput('commit_sha', commit.sha);
+            console.log(`HEADER_EXPECTED_TREE=${expectedTree}`);
+            console.log(`HEADER_PARENT_SHA=${process.env.GITHUB_SHA}`);
+            console.log(`HEADER_BASE_SHA=${process.env.BASE_SHA || ''}`);
+            core.notice(`Prepared ${count} validated header blobs for connector-side tree creation.`);
