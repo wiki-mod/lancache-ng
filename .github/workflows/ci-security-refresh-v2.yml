@@ -83,8 +83,9 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - id: time
-        run: printf 'bucket=%s\n' "$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+      - id: freshness
+        name: Require a run-unique security verdict
+        run: printf 'bucket=run-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
       - id: trivy
         name: Re-scan accepted child digest
         uses: ./.github/actions/trivy-scan-with-cache
@@ -92,7 +93,16 @@ jobs:
           image-ref: ${{ matrix.image }}@${{ matrix.digest }}
           digest: ${{ matrix.digest }}
           cache-key-scope: security-refresh-${{ matrix.service }}-${{ matrix.platform }}
-          freshness-bucket: ${{ steps.time.outputs.bucket }}
+          freshness-bucket: ${{ steps.freshness.outputs.bucket }}
+      - name: Require refresh to have executed Trivy in this run
+        env:
+          TRIVY_CACHE_HIT: ${{ steps.trivy.outputs.cache-hit }}
+        run: |
+          set -euo pipefail
+          [[ "$TRIVY_CACHE_HIT" != true ]] || {
+            echo "::error::Security refresh unexpectedly reused a prior clean verdict instead of executing Trivy." >&2
+            exit 1
+          }
       - name: Write refreshed digest-bound evidence
         run: |
           set -euo pipefail
