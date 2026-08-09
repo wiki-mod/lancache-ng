@@ -424,3 +424,85 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]] || fail "the real repository tree did not pass: $output"
 }
+
+@test "resolves a final-stage alias to its originating external image" {
+    # Stage aliases are local labels, so equal alias text does not prove the
+    # external images behind those labels are equal.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM alpine:3.24 AS runtime_base
+FROM runtime_base
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM debian:12-slim AS runtime_base
+FROM runtime_base
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "did not resolve stage aliases before comparison: $output"
+}
+
+@test "ends Docker directory collection at a commented non-Docker update block" {
+    # Comment prose must not influence which ecosystem owns the directories
+    # in a subsequent update block.
+    cat > "$fixture_root/.github/dependabot.yml" <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: docker
+    directories:
+      - /services/a
+  - package-ecosystem: cargo # coordinated after docker
+    directories:
+      - /cargo
+EOF
+    mkdir -p "$fixture_root/services/a"
+    printf 'FROM alpine:3.24\n' > "$fixture_root/services/a/Dockerfile"
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"cargo/Dockerfile"* ]] || fail "collected a non-Docker block's directory: $output"
+}
+
+@test "substitutes complete unbraced ARG tokens with prefix-related names" {
+    # Docker recognizes the longest variable-name token; replacing a shorter
+    # argument name inside it can conceal different effective images.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+ARG BASE=wrong
+ARG BASE_TAG=alpine:3.24
+FROM $BASE_TAG
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+ARG BASE=wrong
+ARG BASE_TAG=debian:12-slim
+FROM $BASE_TAG
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "performed prefix substitution instead of token substitution: $output"
+}
+
+@test "accepts lowercase global ARG instructions without awk-specific extensions" {
+    # Dockerfile instructions are case-insensitive, and this host-run guard
+    # must behave consistently across the awk implementations on CI runners.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+arg RUNTIME_BASE=alpine:3.24
+from $RUNTIME_BASE
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+ARG RUNTIME_BASE=alpine:3.24
+FROM $RUNTIME_BASE
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]] || fail "did not parse lowercase global ARG: $output"
+}
