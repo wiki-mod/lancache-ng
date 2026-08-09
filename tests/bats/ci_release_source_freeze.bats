@@ -25,3 +25,14 @@ setup() {
   run grep -F 'name: Checkout frozen release source commit' "$WORKFLOW"
   [ "$status" -eq 0 ]
 }
+
+@test "release provenance requires workflow dispatch on the exact release tag and commit" {
+  run grep -F 'expected_ref="refs/tags/${RELEASE_TAG}"' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F '[[ "$GITHUB_REF" == "$expected_ref" ]]' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F '[[ "$GITHUB_SHA" == "$tag_sha" ]]' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+  run grep -F 'Release workflow must be dispatched on $expected_ref so GitHub provenance identifies the release tag.' "$WORKFLOW"
+  [ "$status" -eq 0 ]
+}
