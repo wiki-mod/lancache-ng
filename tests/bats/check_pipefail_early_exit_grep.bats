@@ -222,20 +222,29 @@ write_script() {
 }
 
 @test "fails on the exact real-incident shape reproduced in a services/*/Dockerfile-style file" {
-    # Real Codex finding on PR #1506: the services/** widening above only
-    # ever added 'services/*.sh'/'services/**/*.sh' to scan_files, so a
-    # service's own Dockerfile (services/ui/Dockerfile, services/dns/
-    # Dockerfile -- both genuinely contained this exact `rustup target
-    # list --installed | grep -qx ...` shape) was never scanned at all,
-    # producing "OK (0 scanned scripts/Dockerfiles)" regardless of what a
-    # service Dockerfile actually contained. Pins 'services/*/Dockerfile*'
-    # the same way the existing tools/build-tools/Dockerfile fixture pins
-    # 'tools/*/Dockerfile*'.
+    # Service Dockerfiles need their own path fixture because shell scripts
+    # under services/** do not prove the Dockerfile pathspec is retained.
     mkdir -p "$fixture/services/example-service"
     {
         printf 'FROM scratch\n'
         printf 'RUN set -euo pipefail; \\\n'
         printf '    rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
+    } > "$fixture/services/example-service/Dockerfile"
+    fixture_add
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"services/example-service/Dockerfile"* ]]
+    [[ "$output" == *"early-exiting consumer"* ]]
+}
+
+@test "fails when a service Dockerfile inherits pipefail from build-tools" {
+    # BUILD_TOOLS_IMAGE supplies a Bash/pipefail SHELL to subsequent RUN
+    # instructions, so the child does not need to repeat the word pipefail.
+    mkdir -p "$fixture/services/example-service"
+    {
+        printf 'ARG BUILD_TOOLS_IMAGE=ghcr.io/example/build-tools:latest\n'
+        printf 'FROM ${BUILD_TOOLS_IMAGE} AS builder\n'
+        printf 'RUN rustup target list --installed | grep -qx "x86_64-unknown-linux-musl"\n'
     } > "$fixture/services/example-service/Dockerfile"
     fixture_add
     run bash "$script" "$fixture"

@@ -129,11 +129,24 @@ fail() {
 for file in "${scan_files[@]}"; do
   [ -f "$file" ] || continue
 
-  # Scope to files that use pipefail at all -- an early-exiting consumer
-  # piped from a still-writing producer is harmless without it (the
-  # pipeline's exit status would just reflect the last command's own,
-  # SIGPIPE or not, and nothing downstream treats that as a failure).
-  if ! grep -qF 'pipefail' "$file"; then
+  # Scope to files that use pipefail directly or inherit the build-tools
+  # image's Bash/pipefail SHELL. Service builders commonly select that image
+  # through BUILD_TOOLS_IMAGE, so requiring the literal word "pipefail" in
+  # each child Dockerfile would miss the effective shell used by every RUN.
+  # A direct build-tools image reference is included for fixtures and for
+  # Dockerfiles that do not need the repository's overridable ARG pattern.
+  inherits_build_tools_pipefail=false
+  case "$file" in
+    services/*/Dockerfile*)
+      if grep -Eq '^FROM[[:space:]]+([^[:space:]]*build-tools|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
+        inherits_build_tools_pipefail=true
+      fi
+      ;;
+  esac
+
+  # An early-exiting consumer piped from a still-writing producer is harmless
+  # without pipefail: the pipeline status only reflects the consumer.
+  if ! grep -qF 'pipefail' "$file" && [ "$inherits_build_tools_pipefail" != true ]; then
     continue
   fi
 
@@ -156,7 +169,7 @@ for file in "${scan_files[@]}"; do
     case "$line_content" in
       *'# pipefail-safe:'*) continue ;;
     esac
-    fail "$file:$line_num: pipes a live command into an early-exiting consumer (grep -q/-m, head, or sed -n) in a file that uses pipefail -- this can fail with an unrelated-looking SIGPIPE (exit 141) if the producer is still writing when the consumer exits. Capture the producer's output into a variable first, then apply the consumer to the variable (e.g. via a here-string), or mark the line reviewed-safe with a trailing '# pipefail-safe: <reason>' comment if the producer is provably single-line/already-finished. Line: $trimmed"
+    fail "$file:$line_num: pipes a live command into an early-exiting consumer (grep -q/-m, head, or sed -n) in a file that uses or inherits pipefail -- this can fail with an unrelated-looking SIGPIPE (exit 141) if the producer is still writing when the consumer exits. Capture the producer's output into a variable first, then apply the consumer to the variable (e.g. via a here-string), or mark the line reviewed-safe with a trailing '# pipefail-safe: <reason>' comment if the producer is provably single-line/already-finished. Line: $trimmed"
   done < <(grep -nE "$pattern" "$file" || true)
 done
 
