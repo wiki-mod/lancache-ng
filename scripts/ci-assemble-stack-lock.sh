@@ -32,6 +32,12 @@ while IFS= read -r entry; do
     [[ "$(jq -r '.image' "$index_file")" == "$image" ]] || ci_ai_fail "image identity mismatch for $service"
     [[ "$(jq -r '.candidate_source_sha' "$index_file")" == "$source_sha" ]] || ci_ai_fail "candidate source SHA mismatch for $service"
     [[ "$(jq -r '.scope' "$index_file")" == "$scope" ]] || ci_ai_fail "scope mismatch for $service"
+    digest="$(jq -r '.digest' "$index_file")"
+    candidate_ref="$(jq -r '.candidate_ref // empty' "$index_file")"
+    ci_ai_require_digest "$digest"
+    if [[ "$candidate_ref" != "${image}@${digest}" && "$candidate_ref" != "${image}:${candidate_tag}" ]]; then
+        ci_ai_fail "candidate transport reference is not bound to the recorded identity for $service"
+    fi
     record="$(jq -c '{image, digest, platforms, candidate_ref, artifact_source_sha, source_fingerprint, build_inputs}' "$index_file")"
     lock="$(jq -c --arg scope "$scope" --arg service "$service" --argjson record "$record" '.[$scope][$service] = $record' <<<"$lock")"
 done < <(jq -c '.include[]' <<<"$catalog")
