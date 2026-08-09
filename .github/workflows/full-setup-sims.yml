@@ -118,7 +118,10 @@ jobs:
         working-directory: deploy/full-setup
         run: |
           set -euo pipefail
-          cid="$(docker compose ps -q standard-passthrough-shim)"
+          if ! cid="$(docker compose ps -q standard-passthrough-shim)"; then
+            echo "::error::Could not query standard-passthrough-shim from the shared Compose project."
+            exit 1
+          fi
           [[ -n "$cid" ]] || {
             echo "::error::standard-passthrough-shim was not started with the initial shared stack."
             exit 1
@@ -152,7 +155,7 @@ jobs:
           bash scripts/ui-nats-dns-integration-simulation.sh
 
       - name: Run DNS zone rollback simulation on shared stack
-        if: inputs.run_dns_zone_rollback == 'true'
+        if: inputs.run_dns_zone_rollback == 'true' || inputs.stack_lock_artifact != ''
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
         run: |
