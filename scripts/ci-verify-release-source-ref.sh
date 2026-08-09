@@ -22,7 +22,7 @@ ci_ai_require_sha "$expected_sha"
 
 read_release_tag_once() {
     local output_file="$1" error_file="$2" status
-    if git ls-remote --exit-code origin \
+    if timeout --kill-after=10 120 git ls-remote --exit-code origin \
         "refs/tags/${release_tag}" "refs/tags/${release_tag}^{}" \
         >"$output_file" 2>"$error_file"; then
         return 0
