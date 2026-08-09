@@ -1,18 +1,17 @@
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Composite action: wait for the full-setup validation stack to stabilize and
-# assert every container is running, healthy, and not crash-looping.
+# assert every container is running, healthy when a healthcheck exists, and
+# not crash-looping.
 #
 # Single source for the "Wait for the stack to stabilize and check container
-# health" step that was copy-pasted (byte-identical apart from a comment)
-# across full-setup-validate.yml, full-setup-deep-validate.yml, build-push.yml's
-# full-setup-validate job, and channel-install-smoke.yml (issue #1014). It reads
-# COMPOSE_PROJECT_NAME (and the compose file in working-directory) from the
-# environment the reserve step already exported, so it must run AFTER
-# reserve-validation-subnet-stack in the same job.
+# health" step shared by the full-setup callers. The historical core service
+# list remains as an early readiness set, while a second model-derived pass
+# covers every currently active Compose service, including profile-gated
+# services enabled by a caller.
 name: Wait for validation stack health
 description: >-
   Poll the full-setup validation stack until healthy, then fail closed if any
-  service is missing, not running, unhealthy, or crash-looping.
+  active service is missing, not running, unhealthy, or crash-looping.
 
 inputs:
   working-directory:
@@ -29,14 +28,9 @@ runs:
       run: |
         set -euo pipefail
 
-        # Services with an explicit healthcheck report a real "healthy"
-        # status. docker-socket-proxy joined this list under #1169 (an HTTP
-        # probe against the Docker API's own /_ping, allowlisted by
-        # scripts/docker-socket-proxy.sh's own ACL) -- previously it had none
-        # at all, so all_services (below) is now identical to
-        # services_with_healthcheck; kept as a separate variable/list anyway
-        # so a future service added to this stack without a healthcheck slots
-        # into all_services-only again without restructuring this script.
+        # Keep the mature core readiness set as the fast first phase. A
+        # model-derived second phase below then covers every additional active
+        # service without introducing another hardcoded service list.
         services_with_healthcheck="proxy dns-standard dns-ssl watchdog nats ui netdata docker-socket-proxy"
         all_services="$services_with_healthcheck"
 
@@ -56,7 +50,7 @@ runs:
           sleep 5
         done
 
-        echo "::group::Final container status"
+        echo "::group::Core container status"
         docker compose ps
         echo "::endgroup::"
 
@@ -76,19 +70,14 @@ runs:
             echo "::error::$service is not running (state: $container_status)"
             failed=1
           elif (( restart_count > 1 )); then
-            # > 1, not > 0: a single restart during normal startup
-            # ordering (e.g. waiting on a dependency that wasn't healthy
-            # yet) is expected and not itself a crash loop.
             echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
             failed=1
           fi
 
-          if [[ " $services_with_healthcheck " == *" $service "* ]]; then
-            health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
-            if [[ "$health" != "healthy" ]]; then
-              echo "::error::$service did not become healthy (status: $health)"
-              failed=1
-            fi
+          health="$(docker inspect --format '{{.State.Health.Status}}' "$cid" 2>/dev/null || echo "unknown")"
+          if [[ "$health" != "healthy" ]]; then
+            echo "::error::$service did not become healthy (status: $health)"
+            failed=1
           fi
         done
 
@@ -99,4 +88,84 @@ runs:
           exit 1
         fi
 
-        echo "Full-setup stack is stable: all services running and healthy."
+        # The shared-stack caller enables a profile-gated passthrough shim,
+        # and future callers can enable other long-running profile services.
+        # `config --services` is the authoritative active model for the exact
+        # profile/env combination of this job, so wait on that model instead
+        # of assuming the historical list above is complete.
+        if ! active_output="$(docker compose config --services)"; then
+          echo "::error::Could not enumerate the active Compose service model."
+          exit 1
+        fi
+        mapfile -t active_services <<<"$active_output"
+        (( ${#active_services[@]} > 0 )) || {
+          echo "::error::Active Compose model contains no services."
+          exit 1
+        }
+
+        active_deadline=$((SECONDS + 90))
+        while (( SECONDS < active_deadline )); do
+          active_ready=1
+          for service in "${active_services[@]}"; do
+            cid="$(docker compose ps -a -q "$service" || true)"
+            if [[ -z "$cid" ]]; then
+              active_ready=0
+              continue
+            fi
+            state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)"
+            health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo unknown)"
+            if [[ "$state" != running ]]; then
+              active_ready=0
+              continue
+            fi
+            if [[ "$health" != none && "$health" != healthy ]]; then
+              active_ready=0
+            fi
+          done
+          (( active_ready == 1 )) && break
+          sleep 5
+        done
+
+        failed=0
+        for service in "${active_services[@]}"; do
+          cid_output="$(docker compose ps -a -q "$service" || true)"
+          mapfile -t cids <<<"$cid_output"
+          if (( ${#cids[@]} != 1 )) || [[ -z "${cids[0]}" ]]; then
+            echo "::error::Active service '$service' has ${#cids[@]} container identities, expected exactly one."
+            failed=1
+            continue
+          fi
+          cid="${cids[0]}"
+          state="$(docker inspect --format '{{.State.Status}}' "$cid" 2>/dev/null || echo unknown)"
+          restart_count="$(docker inspect --format '{{.RestartCount}}' "$cid" 2>/dev/null || echo invalid)"
+          health="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$cid" 2>/dev/null || echo unknown)"
+
+          [[ "$state" == running ]] || {
+            echo "::error::$service is not running (state: $state)"
+            failed=1
+          }
+          if [[ ! "$restart_count" =~ ^[0-9]+$ ]]; then
+            echo "::error::$service returned an invalid restart count: $restart_count"
+            failed=1
+          elif (( restart_count > 1 )); then
+            echo "::error::$service has restarted $restart_count times (crash-loop suspected)"
+            failed=1
+          fi
+          if [[ "$health" != none && "$health" != healthy ]]; then
+            echo "::error::$service did not become healthy (status: $health)"
+            failed=1
+          fi
+        done
+
+        echo "::group::Final active container status"
+        docker compose ps -a
+        echo "::endgroup::"
+
+        if (( failed != 0 )); then
+          echo "::group::Logs from all services (failure diagnostics)"
+          docker compose logs --no-color
+          echo "::endgroup::"
+          exit 1
+        fi
+
+        echo "Full-setup stack is stable: every active Compose service is running, healthy when applicable, and below the restart ceiling."
