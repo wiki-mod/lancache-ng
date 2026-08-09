@@ -271,7 +271,7 @@ jobs:
       - name: Build and push quarantine candidate exactly once
         if: matrix.mode == 'build'
         id: build
-        uses: ./.github/actions/ghcr-build-push-retry
+        uses: ./.github/actions/ghcr-build-once-push-retry
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
@@ -279,13 +279,11 @@ jobs:
           context: ${{ matrix.context }}
           build-contexts: ${{ matrix.build_contexts }}
           build-args: ${{ steps.build-args.outputs.args }}
-          push: "true"
-          tags: ${{ matrix.image }}:${{ needs.plan.outputs.candidate_tag }}-${{ matrix.arch }}
+          tag: ${{ matrix.image }}:${{ needs.plan.outputs.candidate_tag }}-${{ matrix.arch }}
           labels: |
             org.opencontainers.image.revision=${{ github.sha }}
             io.lancache-ng.candidate=${{ needs.plan.outputs.candidate_tag }}
-          platforms: ${{ matrix.platform }}
-          provenance: "false"
+          platform: ${{ matrix.platform }}
           pull: "true"
           cache-from: type=gha,scope=ci-v2-${{ matrix.service }}-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ci-v2-${{ matrix.service }}-${{ matrix.arch }}
