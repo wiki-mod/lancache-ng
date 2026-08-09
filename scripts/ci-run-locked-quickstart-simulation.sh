@@ -14,8 +14,15 @@ set -euo pipefail
     exit 2
 }
 
-lock="$1"
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+lock="$1"
+if [[ "$lock" != /* ]]; then
+    lock="$repo_root/$lock"
+fi
+[[ -f "$lock" ]] || {
+    echo "ci-artifact-identity: quickstart stack lock not found: $lock" >&2
+    exit 1
+}
 # shellcheck source=scripts/lib/ci-artifact-identity.sh
 source "$repo_root/scripts/lib/ci-artifact-identity.sh"
 ci_ai_validate_stack_lock "$lock"
