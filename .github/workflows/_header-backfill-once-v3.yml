@@ -1,0 +1,295 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+#
+# One-shot transport helper for the maintainer-authorized three-line header normalization.
+# All temporary transport workflows are removed before the generated header commit is pushed.
+
+name: One-shot header backfill transport v3
+
+on:
+  push:
+    branches:
+      - agent/1517-spdx-header-backfill
+    paths:
+      - .github/workflows/_header-backfill-once-v3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  normalize:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Normalize existing repository headers only
+        env:
+          BASE_SHA: 6827d78b6df658f5b195696d0ac286cf50b4b8e1
+          TARGET_BRANCH: agent/1517-spdx-header-backfill
+        run: |
+          set -euo pipefail
+
+          old_header='lancache-ng (https://github.com/wiki-mod/lancache-ng)'
+          new_header='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
+          spdx='SPDX-License-Identifier: AGPL-3.0-or-later'
+          transport_v1='.github/workflows/_header-backfill-once.yml'
+          transport_v2='.github/workflows/_header-backfill-once-v2.yml'
+          transport_v3='.github/workflows/_header-backfill-once-v3.yml'
+          changed_paths=()
+
+          is_transport() {
+            [[ "$1" == "$transport_v1" || "$1" == "$transport_v2" || "$1" == "$transport_v3" ]]
+          }
+
+          is_excluded() {
+            case "$1" in
+              *.md) return 0 ;;
+              .env | .env.example | */.env | */.env.example) return 0 ;;
+              Cargo.lock | */Cargo.lock) return 0 ;;
+              .gitkeep | */.gitkeep) return 0 ;;
+              VERSION) return 0 ;;
+              LICENSE | COPYING) return 0 ;;
+              services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
+              vex.openvex.json | */vex.openvex.json) return 0 ;;
+              docs/validation-state.json | */docs/validation-state.json) return 0 ;;
+              services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;
+              services/proxy/public_suffix_list.dat) return 0 ;;
+              services/dns/schema.sqlite3.sql) return 0 ;;
+              */fuzz/corpus/* | fuzz/corpus/*) return 0 ;;
+              *.png | *.jpg | *.jpeg | *.gif | *.ico | *.svg | *.woff | *.woff2 | *.ttf | *.eot | *.crt | *.key | *.pem) return 0 ;;
+              *) return 1 ;;
+            esac
+          }
+
+          line_at() {
+            local path=$1
+            local number=$2
+            sed -n "${number}p" -- "$path"
+          }
+
+          write_ordinary_header() {
+            local path=$1
+            local project_line_no=$2
+            local project_line=$3
+            local prefix=$4
+            local line1 expected_spdx spdx_matches spdx_line_no=0 marker='' delete_line1=0
+            local new_project new_spdx body_tmp new_tmp sed_args=()
+
+            line1=$(line_at "$path" 1)
+            expected_spdx=${project_line/"$old_header"/"$spdx"}
+            if spdx_matches=$(grep -nFx -- "$expected_spdx" <<<"$prefix"); then
+              spdx_matches=${spdx_matches%%$'\n'*}
+              spdx_line_no=${spdx_matches%%:*}
+            fi
+
+            if [[ "$line1" == '#!'* ]] \
+              || [[ "$line1" == '# syntax='* ]] \
+              || [[ "$line1" == '# escape='* ]] \
+              || [[ "$line1" == '# check='* ]]; then
+              marker=$line1
+              delete_line1=1
+            elif [[ -z "$line1" ]]; then
+              delete_line1=1
+            fi
+
+            if (( project_line_no > 3 )); then
+              echo "Unexpected project-header position in $path: line $project_line_no" >&2
+              exit 1
+            fi
+            if (( project_line_no > 1 )) && [[ -z "$marker" ]] && (( delete_line1 == 0 )) && (( spdx_line_no != 1 )); then
+              echo "Unexpected content before project header in $path" >&2
+              exit 1
+            fi
+
+            new_project=${project_line/"$old_header"/"$new_header"}
+            new_spdx=${project_line/"$old_header"/"$spdx"}
+
+            sed_args+=("${project_line_no}d")
+            if (( spdx_line_no > 0 )) && (( spdx_line_no != project_line_no )); then
+              sed_args+=("${spdx_line_no}d")
+            fi
+            if (( delete_line1 == 1 )) && (( project_line_no != 1 )) && (( spdx_line_no != 1 )); then
+              sed_args+=("1d")
+            fi
+
+            body_tmp=$(mktemp)
+            new_tmp=$(mktemp)
+            sed "${sed_args[@]/#/-e}" -- "$path" > "$body_tmp"
+            if [[ -n "$marker" ]]; then
+              printf '%s\n' "$marker" > "$new_tmp"
+            else
+              printf '\n' > "$new_tmp"
+            fi
+            printf '%s\n%s\n' "$new_project" "$new_spdx" >> "$new_tmp"
+            cat "$body_tmp" >> "$new_tmp"
+            cat "$new_tmp" > "$path"
+            rm -f -- "$body_tmp" "$new_tmp"
+          }
+
+          write_tera_header() {
+            local path=$1
+            local project_line_no=$2
+            local prefix=$3
+            local lines=() opener=0 closer=0 i line opener_residual compact new_tmp
+
+            mapfile -t lines <<<"$prefix"
+            for (( i=project_line_no; i>=1; i-- )); do
+              line=${lines[i-1]-}
+              if [[ "$line" == *'{#'* ]]; then
+                opener=$i
+                break
+              fi
+            done
+            for (( i=project_line_no; i<=${#lines[@]}; i++ )); do
+              line=${lines[i-1]-}
+              if [[ "$line" == *'#}'* ]]; then
+                closer=$i
+                break
+              fi
+            done
+
+            if (( opener == 0 || closer == 0 || opener > project_line_no || closer < project_line_no || opener > 3 )); then
+              echo "Could not safely identify Tera header block in $path" >&2
+              exit 1
+            fi
+
+            for (( i=1; i<opener; i++ )); do
+              line=${lines[i-1]-}
+              if [[ -n "$line" && "$line" != *"$spdx"* ]]; then
+                echo "Unexpected content before Tera header block in $path: line $i" >&2
+                exit 1
+              fi
+            done
+
+            opener_residual=${lines[opener-1]-}
+            opener_residual=${opener_residual#*"{#"}
+            opener_residual=${opener_residual/"$old_header"/}
+            opener_residual=${opener_residual/"$spdx"/}
+            compact=${opener_residual//[[:space:]]/}
+            if [[ -n "$compact" ]]; then
+              echo "Unexpected non-header content on Tera opener line in $path" >&2
+              exit 1
+            fi
+
+            new_tmp=$(mktemp)
+            printf '\n{# %s #}\n{# %s #}\n{#\n' "$new_header" "$spdx" > "$new_tmp"
+            for (( i=opener+1; i<=closer; i++ )); do
+              line=${lines[i-1]-}
+              if [[ "$line" == *"$spdx"* ]]; then
+                continue
+              fi
+              printf '%s\n' "$line" >> "$new_tmp"
+            done
+            tail -n "+$((closer + 1))" -- "$path" >> "$new_tmp"
+            cat "$new_tmp" > "$path"
+            rm -f -- "$new_tmp"
+          }
+
+          tracked_list=$(mktemp)
+          git ls-files -z > "$tracked_list"
+          while IFS= read -r -d '' path; do
+            is_transport "$path" && continue
+            [[ -f "$path" ]] || continue
+            is_excluded "$path" && continue
+
+            prefix=$(head -n 20 -- "$path")
+            if ! project_matches=$(grep -nF -- "$old_header" <<<"$prefix"); then
+              continue
+            fi
+            project_match=${project_matches%%$'\n'*}
+            project_line_no=${project_match%%:*}
+            project_line=${project_match#*:}
+
+            if [[ "$path" == services/ui/src/templates/*.html ]] \
+              && [[ "$project_line" == *'{#'* ]] \
+              && [[ "$project_line" != *'#}'* ]]; then
+              write_tera_header "$path" "$project_line_no" "$prefix"
+            else
+              write_ordinary_header "$path" "$project_line_no" "$project_line" "$prefix"
+            fi
+            changed_paths+=("$path")
+          done < "$tracked_list"
+          rm -f -- "$tracked_list"
+
+          if (( ${#changed_paths[@]} == 0 )); then
+            echo 'No existing repository headers were found to normalize.' >&2
+            exit 1
+          fi
+
+          rm -f -- "$transport_v1" "$transport_v2" "$transport_v3"
+
+          tracked_list=$(mktemp)
+          git ls-files -z > "$tracked_list"
+          while IFS= read -r -d '' path; do
+            is_transport "$path" && continue
+            [[ -f "$path" ]] || continue
+            is_excluded "$path" && continue
+            prefix=$(head -n 20 -- "$path")
+            if grep -qF -- "$old_header" <<<"$prefix"; then
+              echo "Legacy project header remains in $path" >&2
+              exit 1
+            fi
+          done < "$tracked_list"
+          rm -f -- "$tracked_list"
+
+          for path in "${changed_paths[@]}"; do
+            line2=$(line_at "$path" 2)
+            line3=$(line_at "$path" 3)
+            if [[ "$line2" != *"$new_header"* ]]; then
+              echo "Canonical project header is not on line 2 in $path" >&2
+              exit 1
+            fi
+            if [[ "$line3" != *"$spdx"* ]]; then
+              echo "SPDX identifier is not on line 3 in $path" >&2
+              exit 1
+            fi
+          done
+
+          name_status=$(git diff --name-status "$BASE_SHA" --)
+          while IFS=$'\t' read -r status changed_path rest; do
+            [[ -z "$status" ]] && continue
+            if [[ "$status" != M ]]; then
+              echo "Unexpected non-modification diff entry: $status $changed_path $rest" >&2
+              exit 1
+            fi
+          done <<<"$name_status"
+
+          diff_zero=$(git diff --unified=0 "$BASE_SHA" --)
+          while IFS= read -r diff_line; do
+            [[ "$diff_line" == '@@ '* ]] || continue
+            if [[ "$diff_line" =~ ^@@\ -([0-9]+)(,([0-9]+))?\ \+([0-9]+)(,([0-9]+))?\ @@ ]]; then
+              old_start=${BASH_REMATCH[1]}
+              old_count=${BASH_REMATCH[3]:-1}
+              new_start=${BASH_REMATCH[4]}
+              new_count=${BASH_REMATCH[6]:-1}
+              old_end=$((old_start + old_count - 1))
+              new_end=$((new_start + new_count - 1))
+              if (( old_end > 20 || new_end > 20 )); then
+                echo "Diff escaped the first 20 lines: $diff_line" >&2
+                exit 1
+              fi
+            else
+              echo "Could not parse diff hunk: $diff_line" >&2
+              exit 1
+            fi
+          done <<<"$diff_zero"
+
+          if [[ -n "$(git diff --summary "$BASE_SHA" --)" ]]; then
+            echo 'Unexpected mode/rename/create/delete summary in final header diff.' >&2
+            git diff --summary "$BASE_SHA" -- >&2
+            exit 1
+          fi
+
+          git diff --check "$BASE_SHA" --
+          echo "Normalized ${#changed_paths[@]} existing file headers."
+          git diff --stat "$BASE_SHA" --
+
+          git config user.name 'DoMe'
+          git config user.email '1812020+djdomi@users.noreply.github.com'
+          git add -A
+          timestamp=$(date +%s)
+          git commit -m "GPT-${timestamp}" -m 'chore(governance): normalize LanCache-NG file headers'
+          git push origin "HEAD:${TARGET_BRANCH}"
