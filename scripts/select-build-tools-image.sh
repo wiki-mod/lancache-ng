@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI helper that picks which build-tools image a job should use: prefers the
 # published ghcr.io build-tools image (smoke-tested for the required Rust/CI
@@ -68,7 +69,8 @@ smoke_test_image() {
   # needs cargo-tarpaulin) widen this check without forcing every other
   # consumer of this script (cargo-audit jobs, the plain compose-validation
   # path) to also require a tool they never use.
-  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$image" bash -lc '
+  docker run --rm -e "EXTRA_REQUIRED_TOOLS=${EXTRA_REQUIRED_TOOLS:-}" "$image" \
+    timeout --kill-after=30 --signal=KILL 300 bash -lc '
     set -euo pipefail
 
     required_tools=(

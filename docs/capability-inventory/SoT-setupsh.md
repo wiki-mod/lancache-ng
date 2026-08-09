@@ -197,8 +197,11 @@ running"):
 8. `apply_stack_update_ordered`: brings up every non-UI service first,
    `wait_for_stack_health` (per-container Docker healthcheck status if
    declared, else `running` state, AND a real functional probe —
-   `verify_stack_functional_health` curls `/healthz` and does a real `dig`
-   query, explicitly not `ping`/`ss`, per AG-VAL-018/019/020), only then
+   `verify_stack_functional_health` checks each configured IP's published
+   `/healthz` via `_verify_healthz_endpoint` (TCP reachability, Docker's own
+   port-binding table for the proxy container, then a `docker exec`
+   loopback curl for the actual content) and does a real `dig` query,
+   explicitly not `ping`/`ss`, per AG-VAL-018/019/020), only then
    recreates the Admin UI last and re-verifies. A failed health gate at
    either stage calls `rollback_stack_update` (finds the newest
    `lancache-ng-config-*.tar.gz` under `/var/backups/lancache-ng` by
