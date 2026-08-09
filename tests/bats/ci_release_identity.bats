@@ -57,7 +57,13 @@ JSON
   "candidate_source_sha":"1111111111111111111111111111111111111111",
   "artifact_source_sha":"1111111111111111111111111111111111111111",
   "source_fingerprint":"sha256:5656565656565656565656565656565656565656565656565656565656565656",
-  "build_inputs":{"build_args":{},"build_contexts":{}},
+  "build_inputs":{
+    "build_args":{},
+    "build_contexts":{
+      "golang:latest":"docker-image://golang@sha256:6767676767676767676767676767676767676767676767676767676767676767",
+      "rust:latest":"docker-image://rust@sha256:6868686868686868686868686868686868686868686868686868686868686868"
+    }
+  },
   "digest":"sha256:7878787878787878787878787878787878787878787878787878787878787878",
   "candidate_ref":"ghcr.io/wiki-mod/lancache-ng/build-tools:release-v2-test",
   "platforms":{
@@ -81,7 +87,9 @@ JSON
     and .runtime.proxy.candidate_ref == "ghcr.io/wiki-mod/lancache-ng/proxy@sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
     and .tooling["build-tools"].digest == "sha256:7878787878787878787878787878787878787878787878787878787878787878"
     and .tooling["build-tools"].source_fingerprint == "sha256:5656565656565656565656565656565656565656565656565656565656565656"
-    and .tooling["build-tools"].build_inputs == {build_args:{},build_contexts:{}}
+    and .tooling["build-tools"].build_inputs.build_args == {}
+    and .tooling["build-tools"].build_inputs.build_contexts["golang:latest"] == "docker-image://golang@sha256:6767676767676767676767676767676767676767676767676767676767676767"
+    and .tooling["build-tools"].build_inputs.build_contexts["rust:latest"] == "docker-image://rust@sha256:6868686868686868686868686868686868686868686868686868686868686868"
     and .release.tag == "v0.4.0"
     and .release.runtime_origin == "accepted-stack"
     and .release.accepted_runtime_pointer_digest == $pointer_digest
@@ -89,6 +97,64 @@ JSON
     and .release.build_tools_origin == "fresh-release-build"
   ' "$release"
   [ "$status" -eq 0 ]
+}
+
+@test "release lock rejects build-tools records without frozen base identities" {
+  accepted="$BATS_TEST_TMPDIR/accepted-invalid-inputs.json"
+  tooling="$BATS_TEST_TMPDIR/build-tools-invalid-inputs.json"
+  release="$BATS_TEST_TMPDIR/release-invalid-inputs.json"
+
+  cat >"$accepted" <<'JSON'
+{
+  "schema":"stack-lock/v1",
+  "source_sha":"1111111111111111111111111111111111111111",
+  "candidate_tag":"candidate-v2-old",
+  "runtime":{
+    "proxy":{
+      "image":"ghcr.io/wiki-mod/lancache-ng/proxy",
+      "artifact_source_sha":"1111111111111111111111111111111111111111",
+      "source_fingerprint":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "build_inputs":{"build_args":{},"build_contexts":{}},
+      "digest":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+      "candidate_ref":"ghcr.io/wiki-mod/lancache-ng/proxy:candidate-v2-old",
+      "platforms":{
+        "linux/amd64":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "linux/arm64":"sha256:dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      }
+    }
+  },
+  "tooling":{}
+}
+JSON
+
+  cat >"$tooling" <<'JSON'
+{
+  "schema":"image-candidate-index/v1",
+  "scope":"tooling",
+  "service":"build-tools",
+  "image":"ghcr.io/wiki-mod/lancache-ng/build-tools",
+  "candidate_source_sha":"1111111111111111111111111111111111111111",
+  "artifact_source_sha":"1111111111111111111111111111111111111111",
+  "source_fingerprint":"sha256:5656565656565656565656565656565656565656565656565656565656565656",
+  "build_inputs":{"build_args":{},"build_contexts":{}},
+  "digest":"sha256:7878787878787878787878787878787878787878787878787878787878787878",
+  "candidate_ref":"ghcr.io/wiki-mod/lancache-ng/build-tools:release-v2-test",
+  "platforms":{
+    "linux/amd64":"sha256:9090909090909090909090909090909090909090909090909090909090909090",
+    "linux/arm64":"sha256:abababababababababababababababababababababababababababababababab"
+  }
+}
+JSON
+
+  run bash "$REPO_ROOT/scripts/ci-assemble-release-lock.sh" \
+    "$accepted" \
+    sha256:0101010101010101010101010101010101010101010101010101010101010101 \
+    "$tooling" v0.4.0 release-v2-test "$release"
+
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"build-tools must carry exactly golang:latest and rust:latest context overrides"* ]]
+  [[ "$output" == *"release build-tools record has invalid frozen build inputs"* ]]
+  [ ! -e "$release" ]
 }
 
 @test "release acceptance proves inherited runtime and fresh tooling without claiming rerun stack gates" {
