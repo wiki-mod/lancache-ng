@@ -96,6 +96,20 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+@test "Trivy clean-result reuse and local vulnerability DB are bounded to a six-hour epoch" {
+    action="$REPO_ROOT/.github/actions/trivy-scan-with-cache/action.yml"
+    run grep -F 'slot=$((10#$hour / 6 * 6))' "$action"
+    [ "$status" -eq 0 ]
+    run grep -F 'db_dir="${db_root}/${bucket}"' "$action"
+    [ "$status" -eq 0 ]
+    run grep -F 'cache-dir: ${{ steps.freshness.outputs.db_dir }}' "$action"
+    [ "$status" -eq 0 ]
+    run grep -F '${{ steps.freshness.outputs.bucket }}' "$action"
+    [ "$status" -eq 0 ]
+    run grep -F 'cache-dir: ${{ inputs.vuln-db-cache-dir }}' "$action"
+    [ "$status" -ne 0 ]
+}
+
 @test "candidate workflow freezes external inputs and records the same matrix object" {
     workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
     run grep -F 'CI_BOOTSTRAP_BUILD_TOOLS_IMAGE=%s' "$workflow"
