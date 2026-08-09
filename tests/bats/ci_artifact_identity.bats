@@ -65,6 +65,24 @@ setup() {
   [[ "$output" == *"exact APT_CACHE_BUST build input is required"* ]]
 }
 
+@test "v2 freezes one refresh bucket across plan build and record identity" {
+  workflow="$REPO_ROOT/.github/workflows/ci-artifact-v2.yml"
+
+  refresh_clock_reads="$(grep -Fc '$(date -u +%G-W%V)' "$workflow")"
+  [ "$refresh_clock_reads" -eq 1 ]
+
+  run grep -F 'refresh_bucket: ${{ steps.config.outputs.refresh_bucket }}' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F -- '-e CI_SOURCE_APT_CACHE_BUST="${{ steps.config.outputs.refresh_bucket }}"' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F 'REFRESH_BUCKET: ${{ needs.plan.outputs.refresh_bucket }}' "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F "printf 'APT_CACHE_BUST=%s\\n' \"\$REFRESH_BUCKET\"" "$workflow"
+  [ "$status" -eq 0 ]
+  run grep -F 'CI_SOURCE_APT_CACHE_BUST: ${{ needs.plan.outputs.refresh_bucket }}' "$workflow"
+  [ "$status" -eq 0 ]
+}
+
 @test "built candidate record uses producer refresh evidence instead of planned fingerprint" {
   sha="$(git -C "$REPO_ROOT" rev-parse HEAD)"
   digest="sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
