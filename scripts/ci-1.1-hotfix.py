@@ -48,5 +48,18 @@ replacement = r'''        lines = step.splitlines(keepends=True)
         lines[marker_index] = replaced_line
         step = ''.join(lines)
 '''
-path.write_text(text[:start] + replacement + text[end:])
-print("hotfix: patcher manifest matcher updated")
+text = text[:start] + replacement + text[end:]
+
+old = '        "          matrix:\\n            service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]\\n",\n'
+new = '        "        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]\\n",\n'
+if text.count(old) != 1:
+    raise SystemExit(f"hotfix: release SBOM source literal expected once, found {text.count(old)}")
+text = text.replace(old, new)
+old = '        "          matrix:\\n            service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]\\n",\n'
+new = '        "        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]\\n",\n'
+if text.count(old) != 1:
+    raise SystemExit(f"hotfix: release SBOM replacement literal expected once, found {text.count(old)}")
+text = text.replace(old, new)
+
+path.write_text(text)
+print("hotfix: patcher source aligned")
