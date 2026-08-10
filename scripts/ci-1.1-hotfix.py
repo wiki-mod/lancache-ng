@@ -7,29 +7,46 @@ from pathlib import Path
 path = Path(__file__).with_name("ci-1.1-apply.py")
 text = path.read_text()
 start_marker = '        old = """            ghcr_retry ghcr.io'
+if start_marker not in text:
+    start_marker = '        pattern = (\n'
 end_marker = '        if trusted:\n'
 start = text.find(start_marker)
 if start < 0:
-    raise SystemExit("hotfix: old exact manifest matcher not found")
+    raise SystemExit("hotfix: manifest matcher source not found")
 end = text.find(end_marker, start)
 if end < 0:
     raise SystemExit("hotfix: trusted branch marker not found")
 
-replacement = r'''        pattern = (
-            r'(?m)^            ghcr_retry ghcr\.io .*?-- \\s*$\n'
-            r'^              docker buildx imagetools create -t "\$target_image" "\$amd64_image" "\$arm64_image" \\s*$\n'
-        )
-        new = """            amd64_digest="$(digest_for_image "$amd64_image")"
+replacement = r'''        lines = step.splitlines(keepends=True)
+        marker_indexes = [
+            i for i, line in enumerate(lines)
+            if 'docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"' in line
+        ]
+        if len(marker_indexes) != 1:
+            fail(f"merge exact child digests: expected one imagetools source line, found {len(marker_indexes)}")
+        marker_index = marker_indexes[0]
+        ghcr_index = marker_index - 1
+        if ghcr_index < 0 or "ghcr_retry ghcr.io" not in lines[ghcr_index]:
+            fail("merge exact child digests: preceding ghcr_retry line not found")
+        digest_lines = """            amd64_digest="$(digest_for_image "$amd64_image")"
             arm64_digest="$(digest_for_image "$arm64_image")"
             [[ "$amd64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest for $service: $amd64_digest"; exit 1; }
             [[ "$arm64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest for $service: $arm64_digest"; exit 1; }
             amd64_ref="ghcr.io/${REPOSITORY}/${service}@${amd64_digest}"
             arm64_ref="ghcr.io/${REPOSITORY}/${service}@${arm64_digest}"
 
-            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \\
-              docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref" \\
 """
-        step = replace_regex(step, pattern, new, label="merge exact child digests")
+        lines.insert(ghcr_index, digest_lines)
+        marker_index += 1
+        source_line = lines[marker_index]
+        replaced_line = source_line.replace(
+            '"$amd64_image" "$arm64_image"',
+            '"$amd64_ref" "$arm64_ref"',
+        )
+        if replaced_line == source_line:
+            fail("merge exact child digests: source arguments were not replaced")
+        lines[marker_index] = replaced_line
+        step = ''.join(lines)
 '''
 path.write_text(text[:start] + replacement + text[end:])
 print("hotfix: patcher manifest matcher updated")
