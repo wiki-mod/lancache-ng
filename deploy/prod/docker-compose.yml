@@ -314,6 +314,7 @@ services:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
+      - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
@@ -746,7 +747,24 @@ services:
       # flap this healthcheck unhealthy for that reason alone. Verified live:
       # a freshly started, not-yet-synchronised chronyd still returns a
       # "Reference ID" line immediately.
-      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      #
+      # Second statement (issue #1296, maintainer decision): if
+      # entrypoint.sh detected a CAP_SYS_TIME denial at startup (a nested/
+      # LXC host, `-x` degraded mode), it wrote the reason into
+      # /run/ntp-cap-sys-time-degraded. Echoing it back here, every single
+      # run (not just once at container start), makes it part of Docker's
+      # own `.State.Health.Log` -- `services/watchdog/src/docker_client.rs`
+      # reads that same field (already fetched for the Status check, no
+      # extra request) and reports a genuinely distinct amber "Degraded"
+      # dashboard state instead of a plain healthy dot, exactly what the
+      # maintainer asked this container to surface instead of silently
+      # reporting healthy while never disciplining the clock. Still exits 0
+      # overall (a real, deliberate degraded mode is not "broken" -- see
+      # HealthReading::Degraded's own doc comment for why this must not be
+      # Docker-"unhealthy" either): the `DEGRADED: ` line is additional
+      # information layered onto a still-successful probe, not a new
+      # failure condition.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
       retries: 3

@@ -770,6 +770,7 @@ services:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
+      - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see
@@ -1038,7 +1039,17 @@ services:
       # flap this healthcheck unhealthy for that reason alone. Verified live:
       # a freshly started, not-yet-synchronised chronyd still returns a
       # "Reference ID" line immediately.
-      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      #
+      # Second statement (issue #1296, maintainer decision): see
+      # deploy/prod/docker-compose.yml's matching comment on this exact
+      # line for the full rationale -- kept identical across both compose
+      # files. In short: surfaces a real CAP_SYS_TIME-denied degraded mode
+      # into Docker's own `.State.Health.Log` every healthcheck cycle, so
+      # `services/watchdog` can report a genuinely distinct amber
+      # "Degraded" state instead of a plain healthy dot, without ever
+      # making this container Docker-"unhealthy" for a real, deliberate
+      # reduced-guarantee mode.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
       retries: 3

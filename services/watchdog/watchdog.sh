@@ -34,8 +34,8 @@ DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
 DISK_ALARM_PCT="${DISK_ALARM_PCT:-95}"
 STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"
 
-F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0; F_SYSLOG=0
-H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"; H_SYSLOG="unknown"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0; F_SYSLOG=0; F_NTP=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"; H_SYSLOG="unknown"; H_NTP="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
 # Some diagnostics (resolve_cache_dir()'s fail-closed error, the CONTAINER_*
@@ -145,6 +145,31 @@ fi
 # disconnect/reconnect cycle to that loop, not a novel failure mode it was
 # never built to handle.
 C_NATS="${CONTAINER_NATS:-lancache-nats}"
+
+# ntp (issue #1296): the first of issue #842's originally-proposed five
+# alert-only services (ui, dhcp, dhcp-proxy, netdata, syslog) to actually
+# ship in THIS live bash entrypoint -- the other five exist only in
+# services/watchdog/src/ (the Rust rewrite scaffold), which is not yet
+# this container's real ENTRYPOINT (see services/watchdog/Dockerfile and
+# src/lib.rs's own module doc comment), so adding ntp only to that crate
+# would have had zero real effect on the Admin UI dashboard an operator
+# actually sees. Gated by NTP_ENABLED (same env var and default ("0"/off)
+# `setup.sh` already uses to gate the `ntp` Compose profile itself,
+# `append_env_key_if_missing NTP_ENABLED "0"`) -- an install that never
+# enabled `ntp` has no `lancache-ntp` container at all, and monitoring it
+# anyway would produce a permanent false "unreachable" alert for a
+# container that was never supposed to exist. Alert-only like
+# docker-socket-proxy below, not restart-capable like the four services
+# above: a genuinely crashed `ntp` is worth a dashboard alert, but this
+# script's restart-capable set is reserved for services whose restart is
+# an already-reviewed, safe recovery action -- see check_alert_only()'s own
+# comment for the shared alert-only pattern this reuses.
+NTP_ENABLED="${NTP_ENABLED:-0}"
+if is_truthy "$NTP_ENABLED"; then
+    C_NTP="${CONTAINER_NTP:-lancache-ntp}${LANCACHE_CONTAINER_SUFFIX:-}"
+else
+    C_NTP=""
+fi
 
 # docker-socket-proxy (issue #1170 Part 1): a fixed literal, not a
 # ${CONTAINER_*:-...}-style override like the four names above. Those four
@@ -324,8 +349,43 @@ get_health() {
     # all -- exactly the scenario this fix's --max-time is meant to surface.
     body=$(curl -sf --max-time "$CURL_MAX_TIME" "${DOCKER_PROXY_URL}/containers/${name}/json" 2>/dev/null) \
         || { echo "unreachable"; return; }
-    jq -r '.State.Health.Status // "none"' 2>/dev/null <<< "$body" \
-        || echo "unreachable"
+    local status
+    status=$(jq -r '.State.Health.Status // "none"' 2>/dev/null <<< "$body") \
+        || { echo "unreachable"; return; }
+    # Issue #1296: a container that Docker itself reports "healthy" can
+    # still tell watchdog, through its own healthcheck's captured output,
+    # that it is intentionally operating with reduced guarantees -- a
+    # `DEGRADED: <reason>` line anywhere in the MOST RECENT
+    # `.State.Health.Log` entry (already part of this exact response body;
+    # no second request). First real user: `ntp`'s CAP_SYS_TIME graceful
+    # degradation (a nested/LXC host denying real clock-stepping capability
+    # makes chronyd start in `-x` mode instead of crash-looping -- see
+    # services/ntp/entrypoint.sh and deploy/*/docker-compose.yml's `ntp`
+    # healthcheck). Reports the synthetic string "degraded" here, the same
+    # way probe_docker_socket_proxy() below already writes synthetic
+    # "healthy"/"unhealthy" strings not lifted directly from a real
+    # `.State.Health.Status` value. Only checked when Status is genuinely
+    # "healthy": a stale marker in an old log entry must never override a
+    # real unhealthy/starting reading.
+    #
+    # Deliberately `split("\n") | ... | startswith(...)`, NOT a `test("^...";
+    # "m")` regex: confirmed live that jq's regex engine (Oniguruma) does
+    # NOT make `^` match after an embedded newline under the "m" flag the
+    # way PCRE-style multi-line mode would (Oniguruma's "m" flag instead
+    # means "dot matches newline", a different axis entirely) -- a
+    # `test("^DEGRADED: "; "m")` against a real multi-line Output string
+    # reproducibly returned `false` even with a literal "DEGRADED: " line
+    # present. Splitting into lines and checking each one's prefix directly
+    # has no such ambiguity.
+    if [ "$status" = "healthy" ] && jq -e '
+            ((.State.Health.Log // [])[-1].Output // "")
+            | split("\n")
+            | any(startswith("DEGRADED: "))
+        ' >/dev/null 2>&1 <<< "$body"; then
+        echo "degraded"
+        return
+    fi
+    echo "$status"
 }
 
 restart_container() {
@@ -396,9 +456,16 @@ probe_docker_socket_proxy() {
 }
 
 health_color() {
-    # Dashboard cards consume these stable color names directly.
+    # Dashboard cards consume these stable color names directly. "degraded"
+    # (issue #1296) deliberately gets its OWN color ("amber"), not "yellow":
+    # yellow means "unknown/transitional" (the default `*` case below,
+    # matching services/watchdog/src/health.rs's identical Rust-side
+    # reasoning for HealthReading::color() -- keep both in sync), whereas
+    # degraded is a known, deliberate, stable state that must not look like
+    # "wait and see."
     case "$1" in
         healthy)   echo "green" ;;
+        degraded)  echo "amber" ;;
         starting)  echo "yellow" ;;
         unhealthy) echo "red" ;;
         *)         echo "yellow" ;;
@@ -455,27 +522,20 @@ check_and_maybe_restart() {
     fi
 }
 
-# Alert-only monitoring: unlike check_and_maybe_restart() above, this never
-# calls restart_container().
-# scripts/docker-socket-proxy.sh's safe_service_restart ACL (line 63) only
-# permits a restart POST for lancache-proxy/lancache-dns-standard/
-# lancache-dns-ssl/lancache-nats -- a restart attempt for any other
-# container, including the syslog+fluent-bit container this monitors, would
-# get an HTTP 403 from HAProxy, so restart-capable monitoring is not even
-# implementable here without a separate, deliberate allowlist-widening
-# decision (a real security-boundary change, deliberately not made in
-# passing here). This also mirrors the already-decided design in the
-# not-yet-wired-up Rust rewrite (services/watchdog/src/main.rs's
-# resolve_alert_only_targets(), services/watchdog/src/health.rs's
-# HealthReading::is_alert_ok): alert-only visibility, not auto-restart, is
-# the deliberate safe default for
-# a newly-monitored service until a per-service restart decision is
-# consciously made ("a mid-startup restart of a dependency can make a
-# dependent service's own reconnect logic worse, not better"). `_fcount`
-# climbs for as long as the container stays unhealthy/unreachable (same
-# never-resets-via-restart shape as probe_docker_socket_proxy()'s own
-# counter above) rather than resetting at RESTART_AFTER -- there is no
-# restart here for that threshold to gate.
+# Alert-only counterpart to check_and_maybe_restart() above (issue #1296):
+# updates the failure counter and last-known health string for dashboard
+# visibility, but never calls restart_container(). First real user: `ntp`
+# (see C_NTP's own comment for why restart-capable monitoring is not the
+# right fit for it). "healthy"/"starting"/"none"/"degraded" are all
+# "not currently a problem" -- matching
+# services/watchdog/src/health.rs's HealthReading::is_alert_ok() exactly
+# (keep both in sync) -- everything else (unhealthy, unreachable, or any
+# unrecognized string) increments the counter and logs an alert. Unlike
+# check_and_maybe_restart(), there is no RESTART_AFTER threshold to reach:
+# this counter climbs for as long as the condition persists, which is
+# itself useful operator-visible information (matching
+# probe_docker_socket_proxy()'s own AlertCounter-style semantics), not a
+# bug to cap.
 check_alert_only() {
     local name="$1"
     local -n _fcount="$2"
@@ -485,30 +545,16 @@ check_alert_only() {
     health=$(get_health "$name")
     _hstring="$health"
 
-    # "unreachable" (get_health()'s own fallback for a curl failure or an
-    # unparseable/empty response, see that function's header) is treated as
-    # a failure here, not just "unhealthy": the container being gone,
-    # unresponsive, or unreachable through docker-socket-proxy is exactly
-    # the "enabled but not actually running/reachable" outage this
-    # alert-only monitoring exists to surface -- silently ignoring it would
-    # leave a stopped/crashed container with zero alerting for as long as
-    # it stayed down. "starting" (Docker's own healthcheck grace period) and
-    # "none" (no healthcheck configured/reported yet) stay non-failures, the
-    # same as before, since both are normal transient states, not outages.
-    if [ "$health" = "unhealthy" ] || [ "$health" = "unreachable" ]; then
-        _fcount=$((_fcount + 1))
-        log "UNHEALTHY $name (${_fcount} consecutive failures, health=${health}) -- alert only, watchdog does not restart this service"
-    elif [ "$health" = "healthy" ] || [ "$health" = "starting" ] || [ "$health" = "none" ]; then
-        # Reset (and log recovery) on ANY non-failure reading, not just
-        # "healthy" -- matches the Rust rewrite's AlertCounter::record(),
-        # which resets on every is_alert_ok() reading (Healthy/Starting/
-        # None all count). Without this, a failure streak survived through
-        # an intervening "starting"/"none" reading untouched, so a later
-        # "unhealthy" reading kept incrementing the SAME counter as if the
-        # outage had never actually recovered in between.
-        [ "$_fcount" -gt 0 ] && log "RECOVERED $name"
-        _fcount=0
-    fi
+    case "$health" in
+        healthy|starting|none|degraded)
+            [ "$_fcount" -gt 0 ] && log "RECOVERED $name"
+            _fcount=0
+            ;;
+        *)
+            _fcount=$((_fcount + 1))
+            log "UNHEALTHY $name (${_fcount} consecutive failures) -- alert only, never auto-restarted"
+            ;;
+    esac
 }
 
 # Writes the status JSON consumed by the Admin UI dashboard. Built with
@@ -543,6 +589,12 @@ write_status() {
     \"$C_SYSLOG\":   {\"status\": \"$(health_color "$H_SYSLOG")\",   \"health\": \"$H_SYSLOG\",   \"failures\": $F_SYSLOG}"
     fi
 
+    local ntp_service=""
+    if [ -n "$C_NTP" ]; then
+        ntp_service=",
+    \"$C_NTP\":   {\"status\": \"$(health_color "$H_NTP")\",   \"health\": \"$H_NTP\",   \"failures\": $F_NTP}"
+    fi
+
     cat > "${STATUS_FILE}.tmp" <<EOF
 {
   "updated": "$ts",
@@ -550,7 +602,7 @@ write_status() {
     "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
   "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD},
   "$C_NATS":   {"status": "$(health_color "$H_NATS")",   "health": "$H_NATS",   "failures": $F_NATS},
-  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}${syslog_service}
+  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}${syslog_service}${ntp_service}
   },
   "disk": {
     "cache": ${disk_cache}
@@ -560,7 +612,7 @@ EOF
     mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
-log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY; alert-only monitored: ${C_SYSLOG:-none}"
+log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY; alert-only monitored: ${C_SYSLOG:-none}${C_NTP:+ $C_NTP}"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 
@@ -584,6 +636,9 @@ while true; do
     # conditional monitor above.
     if [ -n "$C_SYSLOG" ]; then
         check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+    fi
+    if [ -n "$C_NTP" ]; then
+        check_alert_only "$C_NTP" F_NTP H_NTP
     fi
     write_status
     sleep "$CHECK_INTERVAL"

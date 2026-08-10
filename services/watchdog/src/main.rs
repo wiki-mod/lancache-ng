@@ -41,6 +41,7 @@ use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 fn resolve_alert_only_targets(
     dhcp_mode: &str,
     syslog_enabled: bool,
+    ntp_enabled: bool,
     container_suffix: &str,
 ) -> Vec<String> {
     // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
@@ -68,6 +69,9 @@ fn resolve_alert_only_targets(
     }
     if syslog_enabled {
         targets.push(format!("{}{container_suffix}", config::CONTAINER_SYSLOG));
+    }
+    if ntp_enabled {
+        targets.push(format!("{}{container_suffix}", config::CONTAINER_NTP));
     }
     targets
 }
@@ -127,6 +131,7 @@ struct Settings {
     // which restarts this process anyway.
     dhcp_mode: String,
     syslog_enabled: bool,
+    ntp_enabled: bool,
 }
 
 fn load_settings() -> Settings {
@@ -260,6 +265,7 @@ fn load_settings() -> Settings {
     // service's environment from every deploy/*/docker-compose.yml
     // `watchdog:` block, the same way DHCP_MODE/SYSLOG_ENABLED already are.
     let syslog_enabled = config::resolve_bool(env("LOGGING_ENABLED").as_deref(), false);
+    let ntp_enabled = config::resolve_bool(env("NTP_ENABLED").as_deref(), false);
 
     Settings {
         docker_proxy_url,
@@ -275,6 +281,7 @@ fn load_settings() -> Settings {
         container_suffix,
         dhcp_mode,
         syslog_enabled,
+        ntp_enabled,
     }
 }
 
@@ -335,6 +342,7 @@ async fn main() {
     let alert_only_targets = resolve_alert_only_targets(
         &settings.dhcp_mode,
         settings.syslog_enabled,
+        settings.ntp_enabled,
         &settings.container_suffix,
     );
     let mut alert_only_counters: HashMap<String, AlertCounter> = alert_only_targets
@@ -524,7 +532,7 @@ mod tests {
     // shape, and reports a permanent false "unreachable" for a service
     // that is actually healthy.
     fn resolve_alert_only_targets_applies_the_coordinated_suffix() {
-        let targets = resolve_alert_only_targets("kea", true, "-ci1");
+        let targets = resolve_alert_only_targets("kea", true, true, "-ci1");
         assert_eq!(
             targets,
             vec![
@@ -532,6 +540,7 @@ mod tests {
                 "lancache-netdata-ci1".to_string(),
                 "lancache-dhcp-ci1".to_string(),
                 "lancache-syslog-ci1".to_string(),
+                "lancache-ntp-ci1".to_string(),
             ]
         );
     }
@@ -541,7 +550,7 @@ mod tests {
     // names this function always returned before container_suffix existed
     // -- an empty suffix must be a no-op, not merely "not crash."
     fn resolve_alert_only_targets_is_unchanged_with_no_suffix() {
-        let targets = resolve_alert_only_targets("disabled", false, "");
+        let targets = resolve_alert_only_targets("disabled", false, false, "");
         assert_eq!(
             targets,
             vec!["lancache-ui".to_string(), "lancache-netdata".to_string()]

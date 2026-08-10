@@ -419,22 +419,18 @@ inspect-only and separate from the `safe_service_restart` allowlist
 discussed per-service above -- alert-only monitoring never calls
 `restart_container`, so restart-capability for any of the five remains its
 own, separately-scoped future decision, not a byproduct of this change.
-**Watchdog's alert-only monitoring of `syslog` is gated by a second,
-separate flag, `SYSLOG_ENABLED`** (`resolve_bool`, default `false`) -- the
-same pre-existing double-opt-in `retention.sh` already used for its own
-syslog-pruning engine (see `deploy/prod/.env`'s "DOUBLE opt-in" comment),
-reused here for consistency rather than introduced fresh. **Known gap
-surfaced by reconciling this section with issue #1343's landing (not
-present when issue #842/#849 was originally written):** since
-`LOGGING_ENABLED` now defaults to `1`, a fresh default install runs the
-`syslog` container out of the box, but watchdog will *not* alert-monitor it
-unless an operator also separately sets `SYSLOG_ENABLED=true` -- these two
-flags are independent, and nothing today converges `SYSLOG_ENABLED` to
-follow `LOGGING_ENABLED`'s default. Whether `resolve_alert_only_targets()`
-should instead key off actual container liveness (or off `LOGGING_ENABLED`
-directly) rather than the separate double-opt-in flag is an open follow-up
-question, not decided or changed here -- posted as a structured decision on
-#842.
+**Watchdog's alert-only monitoring of `syslog` is gated by
+`LOGGING_ENABLED`** (`resolve_bool`, default `false`), matching the Compose
+`logging` profile that determines whether the combined syslog+fluent-bit
+container exists. Both the live Bash watchdog and the prepared Rust rewrite
+use this same gate, so a normal logging-enabled installation includes the
+container in alert-only monitoring and in `status.json` without requiring the
+separate retention opt-in. `SYSLOG_ENABLED` remains an independent, narrower
+double opt-in for the storage-budget retention/pruning engine only; it does not
+control whether watchdog monitors the running logging service. Direct manual
+profile activation must set `LOGGING_ENABLED=1` as documented in the syslog-ng
+section below, because bypassing `setup.sh` otherwise leaves the profile and
+watchdog's deployment-state input inconsistent.
 - **`docker-socket-proxy`**: this is watchdog's own gateway to the Docker
   API. If it is down or hung, watchdog cannot reach any container through
   it -- including this one -- so "restart docker-socket-proxy via
@@ -738,6 +734,21 @@ one) rather than being a given.
   (green/yellow/red) plus a cache-disk usage indicator, persistently visible
   in the dashboard's "Service health" card, live-polled every 10 seconds
   (issue #870; see the "Status" note under Watchdog above)
+- Netdata alarm forwarding (bug hunt #849, `docs/bug-hunt/observability.md`
+  finding #3): the `netdata` container's own `health.d` alarms (disk usage,
+  CPU, memory, ...) previously had no notification integration or Admin UI
+  surface of their own. The `netdata:` service's compose command block now
+  configures Netdata's `custom_sender()` alarm-notify mechanism to POST each
+  alarm event to the Admin UI's `POST /api/netdata-alarms`
+  (`services/ui/src/routes/netdata_alarms.rs`), gated by a shared
+  `NETDATA_ALARM_TOKEN` (issue #858 shared-secret pattern, same as
+  `PDNS_API_KEY`). The dashboard's "Netdata alarms" card
+  (`services/ui/src/netdata_alarms.rs`) shows the most recent alarms
+  server-rendered, not live-polled — an alarm is a discrete event, not a
+  continuously-changing gauge. This forwards alarm *events* only; Netdata's
+  full metrics dashboard (port 19999) remains unpublished, so deep
+  investigation of a forwarded alarm still needs direct Netdata access (see
+  `docs/threat-model.md`'s T9 for the residual-risk framing).
 
 ## Admin UI
 

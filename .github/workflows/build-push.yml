@@ -173,12 +173,13 @@ jobs:
   # ui_cargo_audit/watchdog_cargo_audit -- work that already ran and passed on
   # the PR that produced the push (Rule-Ref: AG-WF-004 forbids direct master pushes), so
   # skipping it on a push that did not touch the relevant crate reuses that
-  # known-good result. build/build-arm64/container-scan still run the FULL
-  # per-service set on push: their should-build/should-scan gates keep their
-  # push branch unchanged here, because per-service build/scan reuse on push
-  # additionally needs a safe way to re-tag a prior commit's already-built
-  # sha-* image, which depends on cross-run ordering this job cannot provide
-  # by itself. That is deferred to Part 1 of #1095. workflow_dispatch is left
+  # known-good result. build/build-arm64/container-scan do NOT get their
+  # should-build/should-scan gates from this job's own before..sha diff --
+  # the determine-push-reuse-scope job provides the cross-run-ordering-safe
+  # per-service reuse decision those three jobs actually key off (channel
+  # image revision label + real git ancestry + a real content diff via
+  # scripts/classify-image-impact.sh, see scripts/lib/push-reuse.sh), for
+  # all 8 first-party product/tooling services. workflow_dispatch is left
   # unscoped (detect-changes does not run for it); the six jobs' own if: fail
   # safe to running whenever this job did not produce a successful
   # classification.
@@ -342,6 +343,51 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: ./.github/actions/file-headers-check
+      - name: Select build-tools image
+        if: github.event_name == 'pull_request'
+        # No `needs: validate-compose` here on purpose, mirroring
+        # compose-healthchecks/pr-template-check's own deliberate choice to
+        # stay independent of validate-compose's image selection (see this
+        # job's own header comment: "runs before expensive Rust/image work")
+        # -- resolving locally instead keeps that property intact rather
+        # than coupling this cheap, fast-feedback job to a heavier pipeline
+        # stage.
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
+        # Diff-scoped, not repo-wide: the whole-repo call above stays soft on
+        # AG-HDR-008 (the backfill isn't complete), but a file this PR is
+        # actively touching has no such exception -- see
+        # scripts/check-file-headers.sh's own header for why explicit file
+        # arguments hard-fail. Runs inside the pinned build-tools image
+        # (scripts/check-pr-diff-file-headers.sh, which does the same
+        # shallow-safe fetch-by-exact-SHA idiom the line-endings job's "Run
+        # governance guardrails" step already uses: base.sha is a
+        # webhook-payload snapshot that can be behind the base branch's
+        # current tip on a long-lived PR, so the base commit is fetched
+        # directly by SHA rather than relying on the branch-tip fetch alone)
+        # rather than runner-local git/Bash/head/grep, so a self-hosted
+        # runner with missing or stale host tooling cannot fail this check
+        # or produce a result diverging from the project's own toolchain.
+        if: github.event_name == 'pull_request'
+        env:
+          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/source:ro" \
+            -w /tmp \
+            -e SPDX_BASE_SHA \
+            -e SPDX_BASE_REF \
+            -e GITHUB_SHA \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 bash -c \
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks:
     # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
@@ -710,6 +756,39 @@ jobs:
       # review-chronology checks at all when self-hosted runners were down. Now runs the
       # same three checks as the self-hosted file-headers job above.
       - uses: ./.github/actions/file-headers-check
+      - name: Select build-tools image
+        if: github.event_name == 'pull_request'
+        # This fallback job must resolve its own image rather than depending
+        # on validate-compose's output (like the self-hosted job above does)
+        # -- it exists specifically for when self-hosted runners (and
+        # anything that depends on them) are unavailable, so a needs:
+        # dependency on that job would defeat the fallback's purpose.
+        # Matches pr-tracking-metadata-check-hosted's own resolution step.
+        env:
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
+        # Mirrors the self-hosted file-headers job's own step above exactly,
+        # for parity between the two -- see that step's comment for the
+        # full rationale.
+        if: github.event_name == 'pull_request'
+        env:
+          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/source:ro" \
+            -w /tmp \
+            -e SPDX_BASE_SHA \
+            -e SPDX_BASE_REF \
+            -e GITHUB_SHA \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 bash -c \
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
@@ -1057,7 +1136,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Step content (ShellCheck/ActionLint plus 5 standing text/YAML guards) extracted
+      # Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted
       # into a composite action (issue #1095 duplication finding): this job and
       # shellcheck-hosted below used to carry the identical steps twice. Job-level
       # scheduling (needs/if/concurrency/permissions, and the docs-only skip in this
@@ -4924,54 +5003,58 @@ jobs:
       # #1290, build-tools-only; generalized to every service by Step 3, issue #1095):
       # when a service is unchanged this run, no local image was built to scan, but the
       # point of scanning at all is to catch a newly disclosed CVE in the already-published
-      # channel image -- skipping the scan entirely would defeat that, so this resolves the
-      # same channel image build/build-arm64's own "Retag unchanged service image" step
-      # would retag from, and scans THAT directly. No registry write happens here -- this
-      # job never gained `packages:` permissions and doesn't need them for a read-only
-      # scan.
+      # channel image -- skipping the scan entirely would defeat that, so this scans the
+      # same digest build/build-arm64's own "Retag unchanged service image" steps retag
+      # from. No registry write happens here -- this job never gained `packages:`
+      # permissions and doesn't need them for a read-only scan.
       - name: Resolve channel image for unchanged-scan retag
         id: channel-image
         # push-supersession-check gate (issue #1095 Part 1): a push that is
         # already superseded before this job started has no reason to pay
-        # for a channel-image registry read and a Trivy scan either -- the
-        # newer push that supersedes it runs this same step for real.
+        # for a Trivy scan either -- the newer push that supersedes it runs
+        # this same step for real.
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
-          CHANNEL_REF: ${{ github.ref_name }}
           MATRIX_SERVICE: ${{ matrix.service }}
-          GHCR_RETRY_USERNAME: ${{ github.actor }}
-          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          # #1095 F-21: consume determine-push-reuse-scope's own already-pinned,
+          # already-verified digest instead of independently re-resolving the mutable
+          # channel tag a second time here -- the digest TOCTOU race two Codex review
+          # threads on PR #1378 found (a channel refresh between that job's verification
+          # and this job's own later, independent re-resolution could scan a different
+          # image than what was proven safe/than build/build-arm64 end up retagging). No
+          # registry call is needed here anymore: the digest is already immutable and
+          # already verified.
+          DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
+          DIGEST_DNS: ${{ needs['determine-push-reuse-scope'].outputs.digest_dns }}
+          DIGEST_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_watchdog }}
+          DIGEST_DHCP: ${{ needs['determine-push-reuse-scope'].outputs.digest_dhcp }}
+          DIGEST_DHCP_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_dhcp_proxy }}
+          DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
+          DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
+          DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
         run: |
           set -euo pipefail
 
-          # shellcheck source=scripts/lib/build-tools-channel.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # Mirrors "Determine per-service publish scan reuse" above's own case mapping --
+          # single source for which digest_* output belongs to which matrix.service.
+          case "$MATRIX_SERVICE" in
+            proxy) digest="$DIGEST_PROXY" ;;
+            dns) digest="$DIGEST_DNS" ;;
+            watchdog) digest="$DIGEST_WATCHDOG" ;;
+            dhcp) digest="$DIGEST_DHCP" ;;
+            dhcp-proxy) digest="$DIGEST_DHCP_PROXY" ;;
+            ntp) digest="$DIGEST_NTP" ;;
+            ui) digest="$DIGEST_UI" ;;
+            build-tools) digest="$DIGEST_BUILD_TOOLS" ;;
+            *) digest="" ;;
+          esac
 
-          # resolve_build_tools_channel is plain ref-to-channel-name mapping
-          # (master -> latest, everything else -> nightly) with nothing
-          # build-tools-specific in its actual logic despite this file's
-          # name -- reused as-is here rather than duplicating the same
-          # mapping a second time, matching determine-push-reuse-scope's own
-          # reuse of it.
-          channel="$(resolve_build_tools_channel "$CHANNEL_REF")"
-          channel_image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}:${channel}"
-          # Scan by the immutable digest, never the mutable channel tag (AG-VAL-026): Trivy's
-          # own persistent result cache is keyed by image reference, not by digest, so scanning
-          # the mutable tag directly risks serving a stale cached result for whatever digest it
-          # pointed at the last time this cache dir was populated, not the digest actually
-          # published under that tag right now. Resolving to the exact digest first removes
-          # that ambiguity.
-          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$channel_image" --format '{{json .Manifest.Digest}}')"
-          digest="${digest%\"}"
-          digest="${digest#\"}"
           if [[ -z "$digest" || "$digest" == "null" ]]; then
-            echo "::error::Could not resolve a digest for $channel_image." >&2
+            echo "::error::determine-push-reuse-scope reported reuse=true for $MATRIX_SERVICE but did not export a pinned digest -- refusing to scan an unverified reference." >&2
             exit 1
           fi
           image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}@${digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push; scanning $image (resolved from the $channel channel tag) instead of rebuilding it."
+          echo "::notice::$MATRIX_SERVICE is unchanged on this push; scanning $image (the exact digest determine-push-reuse-scope already pinned and verified) instead of rebuilding it."
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
@@ -5054,6 +5137,28 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
+      # #1095 F-21: the exact immutable manifest-list digest this job pinned
+      # AND verified reuse safety against, for every service that came back
+      # reuse=true -- empty for a service that stayed reuse=false. Every
+      # downstream consumer (container-scan, build, build-arm64) reads this
+      # instead of independently re-resolving the mutable channel tag a
+      # second (or third, fourth) time, which is the digest TOCTOU race two
+      # Codex review threads on PR #1378 found: a channel refresh between
+      # this job's own verification and a much-later downstream job's
+      # independent re-resolution could scan/retag a different image than
+      # the one just proven safe. Because the verification (sif_image_revision
+      # + ancestry + content diff, all in scripts/lib/push-reuse.sh) now runs
+      # against this exact pinned digest reference rather than the mutable
+      # tag, the verified bytes and the exported bytes are provably
+      # identical -- there is no gap for the channel to move in between.
+      digest_proxy: ${{ steps.decide.outputs.digest_proxy }}
+      digest_dns: ${{ steps.decide.outputs.digest_dns }}
+      digest_ui: ${{ steps.decide.outputs.digest_ui }}
+      digest_watchdog: ${{ steps.decide.outputs.digest_watchdog }}
+      digest_dhcp: ${{ steps.decide.outputs.digest_dhcp }}
+      digest_dhcp_proxy: ${{ steps.decide.outputs.digest_dhcp_proxy }}
+      digest_ntp: ${{ steps.decide.outputs.digest_ntp }}
+      digest_build_tools: ${{ steps.decide.outputs.digest_build_tools }}
     steps:
       # fetch-depth: 0 (not the default shallow depth-1 clone) so
       # sif_is_ancestor_or_equal below can prove real git ancestry between a
@@ -5094,9 +5199,16 @@ jobs:
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
+          # #1095 F-21: needed both for push_reuse_decide's own sif_image_revision
+          # call (now ghcr_retry-wrapped, see scripts/lib/staging-image-freshness.sh)
+          # and for this step's own digest-pinning read below.
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/staging-image-freshness.sh
           source "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh"
           # shellcheck source=scripts/lib/push-reuse.sh
@@ -5112,39 +5224,22 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # Step 4 allowlist (issue #1095): started narrow -- ntp only --
-          # to prove the mechanism end-to-end with a real push before
-          # widening to the remaining services (per the original PR body's
-          # proof sequence), rather than staging this as several separate
-          # PRs (this is one shared job-matrix change, not independently
-          # splittable per service). build-tools joined next (issue #1290):
-          # its own separate, hand-rolled implementation of this exact same
-          # three-part verification (revision label + ancestry + real
-          # content diff) was built independently and in parallel with this
-          # job, before the two efforts were noticed to be duplicating each
-          # other -- reusing push_reuse_decide here instead of that parallel
-          # copy removes the duplication rather than merging it.
-          #
-          # Now widened to all 8 services (this change): the two narrow
-          # entries above already proved the decision function itself
-          # end-to-end against real push events (see PR #1331's Validation
-          # section) -- proxy/dns/watchdog/dhcp/dhcp-proxy/ui go through the
-          # identical decide_one() call below with no per-service branching,
-          # so there is no new logic for them to exercise, only a new
-          # verdict for the same already-tested function to return. NOTE
-          # (2026-08-01, issue #1095): the actual positive retag branch
-          # (push_reuse_decide returning reuse=true and a real `imagetools
-          # create` firing) has still never been observed on a real push,
-          # for ANY service including the two already allowlisted here --
-          # every real push-triggered run to date has hit a fail-closed
-          # branch instead (see #1095's 2026-08-01 audit comment). Widening
-          # this array does not change that: it only makes more services
-          # eligible for a decision that has so far always come back
-          # "rebuild for real" in practice, because the nightly channel
-          # hasn't advanced past any of these services' latest real change.
-          # Real observation of the positive path needs the nightly channel
-          # to advance first (a separate, maintainer-gated action -- see
-          # #1095), not another code change here.
+          # Step 4 allowlist (issue #1095): all 8 first-party product/tooling
+          # services go through the identical decide_one() call below, with
+          # no per-service branching -- each gets the same three-part
+          # verification (channel image revision label + real git ancestry +
+          # a real content diff via scripts/classify-image-impact.sh) that
+          # scripts/lib/push-reuse.sh's own header documents in full.
+          # build-tools shares this same allowlist (rather than keeping the
+          # separate, hand-rolled verification it originally had, built
+          # independently and in parallel with this job before the
+          # duplication between the two was noticed) so there is exactly one
+          # implementation of this check in the codebase, not two drifting
+          # copies. Real push-path verification status (which services have
+          # actually been observed taking the positive reuse=true retag
+          # branch on a live push, as opposed to only ever having been
+          # exercised in tests) belongs in the PR/issue trail, not here --
+          # see issue #1095's own comment history for current status.
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools)
 
           is_allowlisted() {
@@ -5162,8 +5257,16 @@ jobs:
           # push-reuse.sh's header for why "changed since revision" is a strict superset of
           # "changed since before" whenever revision precedes before, which the channel's own
           # once-daily refresh cadence guarantees in practice).
+          #
+          # Writes this service's own digest_<service>=<digest> line straight to
+          # $GITHUB_OUTPUT (not returned via stdout alongside the true/false verdict) whenever
+          # reuse is safe -- #1095 F-21's digest-pinning fix (see this job's own `outputs:`
+          # comment above for the full TOCTOU-race rationale). Prints only "true"/"false" on
+          # stdout, unchanged, so the existing `$(decide_one ...)` capture pattern below still
+          # works exactly as before.
           decide_one() {
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3"
+            local output_key="${matrix_service//-/_}"
 
             if [ "$WORKFLOW_CHANGED" = "true" ]; then
               echo "::notice::$matrix_service: a build-affecting workflow file changed this push; not attempting reuse." >&2
@@ -5182,7 +5285,30 @@ jobs:
             fi
 
             local channel_image="ghcr.io/${REPOSITORY}/${matrix_service}:${channel}"
-            push_reuse_decide "$classify_key" "$channel_image" "$COMMIT_SHA"
+
+            # Resolve the channel tag to its immutable manifest-list digest ONCE, right here,
+            # before any verification -- not independently, later, by container-scan/build/
+            # build-arm64 (the digest TOCTOU race; see this job's own `outputs:` comment
+            # above). push_reuse_decide below then verifies safety (revision label + ancestry
+            # + content diff) against this EXACT pinned reference instead of the mutable tag,
+            # so the verified bytes and the exported bytes are provably identical.
+            local digest
+            digest="$(ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker buildx imagetools inspect "$channel_image" --format '{{json .Manifest.Digest}}' 2>/dev/null)" || digest=""
+            digest="${digest%\"}"
+            digest="${digest#\"}"
+            if [[ -z "$digest" || "$digest" == "null" ]]; then
+              echo "::notice::$matrix_service: could not resolve a manifest digest for $channel_image; not attempting reuse (failing closed to a real rebuild)." >&2
+              printf 'false\n'
+              return
+            fi
+
+            local pinned_ref="ghcr.io/${REPOSITORY}/${matrix_service}@${digest}"
+            local reuse
+            reuse="$(push_reuse_decide "$classify_key" "$pinned_ref" "$COMMIT_SHA")"
+            if [ "$reuse" = "true" ]; then
+              printf 'digest_%s=%s\n' "$output_key" "$digest" >> "$GITHUB_OUTPUT"
+            fi
+            printf '%s\n' "$reuse"
           }
 
           {
@@ -5522,51 +5648,90 @@ jobs:
       # Step 4 (issue #1095): generalized to whichever service this matrix row is
       # currently building, including build-tools (issue #1290) -- determine-push-
       # reuse-scope already did the real verification, so this step only needs to resolve
-      # the same channel image's linux/amd64 child digest and retag it. No rebuild, no
-      # recompilation needed here. No separate Trivy scan needed here either: UPDATED
-      # (Step 3, issue #1095) -- container-scan's "Determine per-service publish scan
-      # reuse" step reads this exact same determine-push-reuse-scope decision for every
-      # service now, so whenever this step's own should-build is false for a service,
-      # container-scan's "Scan channel image with Trivy (no rebuild)" step already scanned
-      # that exact channel image directly this run. Because both steps read the identical
-      # output, the two decisions cannot disagree, so no service is ever left without a
-      # real scan on this path (issue #1095's own "Correction 1").
+      # the pinned digest's own linux/amd64 child digest and retag it. No rebuild, no
+      # recompilation needed here. No separate Trivy scan needed here either: container-
+      # scan's "Determine per-service publish scan reuse" step reads this exact same
+      # determine-push-reuse-scope decision for every service, so whenever this step's own
+      # should-build is false for a service, container-scan's "Scan channel image with
+      # Trivy (no rebuild)" step already scanned that exact digest directly this run.
+      # Because both steps read the identical output, the two decisions cannot disagree,
+      # so no service is ever left without a real scan on this path.
+      #
+      # #1095 F-21: resolves the linux/amd64 child digest from determine-push-reuse-scope's
+      # own already-pinned, already-verified manifest-list digest (DIGEST_*) instead of
+      # independently re-resolving the mutable channel tag here -- the digest TOCTOU race
+      # two Codex review threads on PR #1378 found. This registry read is now against an
+      # IMMUTABLE digest reference, so no matter when it runs, it cannot observe different
+      # content than what was verified -- unlike the old mutable-tag read, this closes the
+      # race rather than merely shrinking its window.
+      #
+      # push-supersession-check gate (issue #1095 Part 1, added here by #1095 F-21):
+      # "Determine whether this service needs building" above forces should-build to
+      # 'false' for EVERY service on a superseded push, regardless of whether
+      # determine-push-reuse-scope ever verified (and pinned a digest for) this specific
+      # service -- unlike a genuine reuse=true case, a superseded push's DIGEST_* output
+      # for this service can legitimately be empty. Without this guard, this step would
+      # still run, find no pinned digest, and hard-fail via the empty-digest check below,
+      # where the pre-#1095-F-21 code merely (silently, and separately not-quite-safely)
+      # retagged from the mutable tag directly. Matches container-scan's own "Resolve
+      # channel image for unchanged-scan retag" step, which already carries this same
+      # condition for the identical reason.
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
-        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
+        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
-          CHANNEL_REF: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
+          DIGEST_DNS: ${{ needs['determine-push-reuse-scope'].outputs.digest_dns }}
+          DIGEST_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_watchdog }}
+          DIGEST_DHCP: ${{ needs['determine-push-reuse-scope'].outputs.digest_dhcp }}
+          DIGEST_DHCP_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_dhcp_proxy }}
+          DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
+          DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
+          DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
         run: |
           set -euo pipefail
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          # shellcheck source=scripts/lib/build-tools-channel.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
             exit 1
           }
 
-          channel="$(resolve_build_tools_channel "$CHANNEL_REF")"
-          channel_image="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:${channel}"
+          case "$MATRIX_SERVICE" in
+            proxy) pinned_digest="$DIGEST_PROXY" ;;
+            dns) pinned_digest="$DIGEST_DNS" ;;
+            watchdog) pinned_digest="$DIGEST_WATCHDOG" ;;
+            dhcp) pinned_digest="$DIGEST_DHCP" ;;
+            dhcp-proxy) pinned_digest="$DIGEST_DHCP_PROXY" ;;
+            ntp) pinned_digest="$DIGEST_NTP" ;;
+            ui) pinned_digest="$DIGEST_UI" ;;
+            build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
+            *) pinned_digest="" ;;
+          esac
+          if [ -z "$pinned_digest" ]; then
+            echo "::error::determine-push-reuse-scope reported reuse=true for $MATRIX_SERVICE but did not export a pinned digest -- refusing to retag from an unverified reference."
+            exit 1
+          fi
+          pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
+
           short_sha="${COMMIT_SHA::7}"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-amd64"
 
-          manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$channel_image" --raw)"
+          manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
           amd64_digest="$(printf '%s' "$manifest_json" | jq -r '[.manifests[]? | select(.platform.architecture == "amd64" and .platform.os == "linux")][0].digest // empty')"
           if [ -z "$amd64_digest" ]; then
-            echo "::error::Could not find a linux/amd64 manifest for $channel_image ($channel channel); refusing to retag $MATRIX_SERVICE -- this would leave promote without a valid amd64 source image for this commit."
+            echo "::error::Could not find a linux/amd64 manifest for $pinned_ref; refusing to retag $MATRIX_SERVICE -- this would leave promote without a valid amd64 source image for this commit."
             exit 1
           fi
 
           source_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${amd64_digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from $channel_image) as $target instead of rebuilding."
+          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from the pinned digest $pinned_ref) as $target instead of rebuilding."
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --tag "$target" "$source_ref"
 
@@ -6356,45 +6521,67 @@ jobs:
 
       # Mirrors build's own "Retag unchanged service image" step exactly,
       # just for the linux/arm64 leg -- see that step's comment for the full
-      # Step 4/#1095 rationale. Both legs run independently in parallel
-      # jobs but resolve the same channel image and the same commit's short
-      # SHA, so they always agree on which digest to retag.
+      # Step 4/#1095 rationale, including the #1095 F-21 digest-pinning fix
+      # and the push-supersession-check guard's own reasoning. Both legs run
+      # independently in parallel jobs but resolve the SAME pinned digest
+      # determine-push-reuse-scope exported, so they always agree on which
+      # source content to retag.
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
-        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false'
+        if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
-          CHANNEL_REF: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
+          DIGEST_DNS: ${{ needs['determine-push-reuse-scope'].outputs.digest_dns }}
+          DIGEST_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_watchdog }}
+          DIGEST_DHCP: ${{ needs['determine-push-reuse-scope'].outputs.digest_dhcp }}
+          DIGEST_DHCP_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_dhcp_proxy }}
+          DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
+          DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
+          DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
         run: |
           set -euo pipefail
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          # shellcheck source=scripts/lib/build-tools-channel.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
             exit 1
           }
 
-          channel="$(resolve_build_tools_channel "$CHANNEL_REF")"
-          channel_image="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:${channel}"
+          case "$MATRIX_SERVICE" in
+            proxy) pinned_digest="$DIGEST_PROXY" ;;
+            dns) pinned_digest="$DIGEST_DNS" ;;
+            watchdog) pinned_digest="$DIGEST_WATCHDOG" ;;
+            dhcp) pinned_digest="$DIGEST_DHCP" ;;
+            dhcp-proxy) pinned_digest="$DIGEST_DHCP_PROXY" ;;
+            ntp) pinned_digest="$DIGEST_NTP" ;;
+            ui) pinned_digest="$DIGEST_UI" ;;
+            build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
+            *) pinned_digest="" ;;
+          esac
+          if [ -z "$pinned_digest" ]; then
+            echo "::error::determine-push-reuse-scope reported reuse=true for $MATRIX_SERVICE but did not export a pinned digest -- refusing to retag from an unverified reference."
+            exit 1
+          fi
+          pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
+
           short_sha="${COMMIT_SHA::7}"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-arm64"
 
-          manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$channel_image" --raw)"
+          manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
           arm64_digest="$(printf '%s' "$manifest_json" | jq -r '[.manifests[]? | select(.platform.architecture == "arm64" and .platform.os == "linux")][0].digest // empty')"
           if [ -z "$arm64_digest" ]; then
-            echo "::error::Could not find a linux/arm64 manifest for $channel_image ($channel channel); refusing to retag $MATRIX_SERVICE -- this would leave promote without a valid arm64 source image for this commit."
+            echo "::error::Could not find a linux/arm64 manifest for $pinned_ref; refusing to retag $MATRIX_SERVICE -- this would leave promote without a valid arm64 source image for this commit."
             exit 1
           fi
 
           source_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${arm64_digest}"
-          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from $channel_image) as $target instead of rebuilding."
+          echo "::notice::$MATRIX_SERVICE is unchanged on this push (Step 4, verified via scripts/lib/push-reuse.sh); retagging $source_ref (from the pinned digest $pinned_ref) as $target instead of rebuilding."
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create --tag "$target" "$source_ref"
 

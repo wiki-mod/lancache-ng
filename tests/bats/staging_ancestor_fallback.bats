@@ -1858,6 +1858,96 @@ STUB
     [[ "$output" == *"$broken_sha"* ]]
 }
 
+@test "saf_find_built_ancestor: #1095 F-22 -- an untouched candidate is skipped via a single probe, never the full poll budget" {
+    # The two tests above already prove the OUTCOME (untouched candidate
+    # walked past, touched candidate blocks) using a 0/0 freshness budget for
+    # the ancestor-candidate check -- which makes the pre-fix and post-fix
+    # code paths behave IDENTICALLY (both do at most one attempt when the
+    # budget is already zero), so neither test can distinguish "the pre-check
+    # short-circuited before the wait" from "the wait ran and immediately hit
+    # its own zero-second ceiling." This test uses a REAL, non-zero freshness
+    # budget (5s ceiling, 1s poll interval) specifically to make that
+    # distinction observable: the revision stub counts how many times it is
+    # invoked for the untouched candidate's own image. Pre-fix, the full poll
+    # loop would call it repeatedly until the 5s ceiling elapses (bounded by
+    # real wall-clock time via bash's $SECONDS, since this file's own
+    # setup() stubs `sleep` as a no-op -- see that comment -- so a poll loop
+    # here would spin as fast as possible, not literally sleep, but would
+    # still call the stub far more than once before $SECONDS crosses the
+    # ceiling). Post-fix (#1095 F-22), the pre-check confirms "untouched"
+    # before ever entering that loop and pays for exactly one non-polling
+    # (0/0 budget) probe instead, so the stub must be invoked exactly once
+    # for this candidate's own image regardless of the 5s budget passed in.
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    git init -q "$git_dir"
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+    mkdir -p "$git_dir/services/proxy" "$git_dir/services/ui"
+
+    echo "proxy built here" > "$git_dir/services/proxy/nginx.conf"
+    git -C "$git_dir" add services/proxy/nginx.conf
+    git -C "$git_dir" commit -q -m "proxy change"
+    built_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    echo "ui change" > "$git_dir/services/ui/main.rs"
+    git -C "$git_dir" add services/ui/main.rs
+    git -C "$git_dir" commit -q -m "ui-only change, proxy untouched"
+    untouched_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    git -C "$git_dir" commit -q --allow-empty -m base
+    base_sha="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_exists_stub="$BATS_TEST_TMPDIR/run_exists.sh"
+    cat > "$run_exists_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$run_exists_stub"
+    export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$run_exists_stub"
+
+    inactive_stub="$BATS_TEST_TMPDIR/inactive.sh"
+    cat > "$inactive_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 1
+STUB
+    chmod +x "$inactive_stub"
+    export STAGING_CANDIDATE_RUN_ACTIVE_CMD="$inactive_stub"
+
+    # Counts every invocation for the untouched candidate's own image
+    # (untouched_sha's tag suffix) into a separate file this test reads
+    # back afterward -- a real, observable side effect the assertion below
+    # verifies, rather than reasoning about call counts from memory.
+    probe_count_file="$BATS_TEST_TMPDIR/untouched_probe_count"
+    : > "$probe_count_file"
+    revision_stub="$BATS_TEST_TMPDIR/revision.sh"
+    cat > "$revision_stub" <<STUB
+#!/usr/bin/env bash
+image="\$1"
+suffix="\${image##*:sha-}"
+case "\$suffix" in
+    "${untouched_sha:0:7}")
+        echo "x" >> "$probe_count_file"
+        exit 1
+        ;;
+    "${built_sha:0:7}") echo "$built_sha" ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$revision_stub"
+    export STAGING_IMAGE_REVISION_CMD="$revision_stub"
+
+    # 5s ceiling / 1s poll interval for the ancestor-candidate check --
+    # deliberately non-zero, unlike every other test in this file exercising
+    # this fixture shape, specifically to make the pre-check-skips-the-wait
+    # behavior observable (see this test's own header comment).
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 5 5 1 0 0 "$git_dir"
+    [ "$status" -eq 0 ]
+    [ "${lines[-1]}" = "$built_sha" ]
+
+    probe_count="$(wc -l < "$probe_count_file" | tr -d ' ')"
+    [ "$probe_count" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # saf_resolve_untouched_backfill_source: end-to-end orchestration --
 # reordering (fast path), the paths-are-ignorable safety gate, and the

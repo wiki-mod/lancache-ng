@@ -117,7 +117,7 @@ computed on a 30s cycle and then never read by anything. This is a real,
 verified monitoring-visibility gap, not dead code in the strict sense and not
 a security defect by itself.
 
-### 3. Threat model's T9 mitigation ("Disk-usage warnings/alarms via the watchdog and Netdata") is not actually operator-visible today — PARTIALLY FIXED by PR #1165 (2026-07-24)
+### 3. Threat model's T9 mitigation ("Disk-usage warnings/alarms via the watchdog and Netdata") is not actually operator-visible today — FIXED by PR #1165 (2026-07-24) and the Netdata-alarm-forwarding follow-up (2026-08-06)
 
 > **Status update:** the watchdog half of this finding is fixed — the
 > dashboard's "Service health" card now renders the real cache-disk
@@ -126,6 +126,23 @@ a security defect by itself.
 > **not** fixed by this PR and remains exactly as described below: no
 > notification integration, no Admin UI surface, port 19999 still never
 > published. Do not read this finding as fully closed.
+>
+> **Status update (2026-08-06): the Netdata half is now also fixed.** The
+> `netdata` container's `custom_sender()` alarm-notify integration
+> (`deploy/*/docker-compose.yml`'s `netdata:` service command block, all
+> three real profiles) POSTs every health.d alarm event to the Admin UI's
+> new `POST /api/netdata-alarms` (`services/ui/src/routes/
+> netdata_alarms.rs`), gated by a shared `NETDATA_ALARM_TOKEN` (issue #858
+> pattern). The dashboard's new "Netdata alarms" card
+> (`services/ui/src/netdata_alarms.rs`) shows the recent history. Netdata's
+> native metrics dashboard (port 19999) is still never published — this
+> forwards alarm *events* only, not the full metrics browsing UI, so that
+> part of the original finding's wording ("no Admin UI surface") is fixed
+> specifically for alarms, not for Netdata's dashboard as a whole. Live
+> verification that a real fired alarm reaches the endpoint end-to-end
+> (via Netdata's own `alarm-notify.sh ... test` mode) is a follow-up, not
+> yet done as of this status update — see `docs/release-validation-plan.md`'s
+> Coverage Assessment entry for the same caveat.
 
 `docs/threat-model.md` line ~376 lists this as an existing mitigation for
 T9 (cache-exhaustion/request-flood DoS). Both halves are true in isolation
@@ -529,7 +546,7 @@ codebase.
 |---|---|---|---|
 | 1 | Docs vs. code: "traffic light bar" doesn't exist | Serious | Open |
 | 2 | watchdog status.json never rendered to an operator | Moderate | Open |
-| 3 | Threat-model T9 mitigation not operator-visible | Moderate | Open |
+| 3 | Threat-model T9 mitigation not operator-visible | Moderate | **FIXED** by PR #1165 (2026-07-24, watchdog half) and the Netdata-alarm-forwarding follow-up (2026-08-06, Netdata half) |
 | 4 | `SYSLOG_ENABLED` bool-parsing mismatch (UI vs watchdog) | Serious | **FIXED** by PR #877 (2026-07-16) |
 | 5 | `SYSLOG_MAX_GB` clamp mismatch (UI vs watchdog) | Minor | **FIXED** by PR #877 (2026-07-16) |
 | 6 | netdata web_log wiring inconsistent dev/quickstart/prod | Moderate | Open |
