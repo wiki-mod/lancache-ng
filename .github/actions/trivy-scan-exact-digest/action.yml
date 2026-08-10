@@ -15,6 +15,10 @@ inputs:
   cache-dir:
     description: Trivy vulnerability database cache directory owned by the caller.
     required: true
+  cleanup-cache:
+    description: Remove cache-dir after the scan when it is an ephemeral candidate cache.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -33,3 +37,10 @@ runs:
         cache-dir: ${{ inputs.cache-dir }}
         timeout: 10m
         exit-code: "1"
+
+    - name: Remove ephemeral exact-digest scan cache
+      if: always() && inputs.cleanup-cache == 'true'
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+      run: rm -rf -- "$CACHE_DIR"
