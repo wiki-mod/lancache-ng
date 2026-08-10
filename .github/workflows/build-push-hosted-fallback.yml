@@ -633,8 +633,8 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # Single-source GHCR owner/repo derivation instead of trusting
-          # github.repository's own casing directly (Rule-Ref: AG-KD-004's
-          # documented incident) -- this bash-reachable spot previously read
+          # github.repository's own casing directly (Rule-Ref: AG-CI-022's
+          # documented G1 incident) -- this bash-reachable spot previously read
           # the raw github context value directly via a step-level
           # REPOSITORY env entry, bypassing dmeta_ghcr_repo() entirely.
           # NOTE: never write the literal double-curly GHA expression

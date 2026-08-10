@@ -2885,8 +2885,8 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # Single-source GHCR owner/repo derivation instead of trusting
-          # github.repository's own casing directly (Rule-Ref: AG-KD-004's
-          # documented incident) -- this bash-reachable spot was previously
+          # github.repository's own casing directly (Rule-Ref: AG-CI-022's
+          # documented G1 incident) -- this bash-reachable spot was previously
           # bypassing dmeta_ghcr_repo() by constructing the full image
           # reference as a raw YAML expression.
           FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${CHANNEL_TAG}"
