@@ -27,14 +27,8 @@ jobs:
           from pathlib import Path
           path = Path('.github/workflows/build-push.yml')
           text = path.read_text()
-          old = """          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s
-' "$override_file" >> "$GITHUB_ENV"
-          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s
-' "$client_tools_ref" >> "$GITHUB_ENV"
-"""
-          new = """          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s\\n' "$override_file" >> "$GITHUB_ENV"
-          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s\\n' "$client_tools_ref" >> "$GITHUB_ENV"
-"""
+          old = "          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s\n' \"$override_file\" >> \"$GITHUB_ENV\"\n          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s\n' \"$client_tools_ref\" >> \"$GITHUB_ENV\"\n"
+          new = "          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s\\n' \"$override_file\" >> \"$GITHUB_ENV\"\n          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s\\n' \"$client_tools_ref\" >> \"$GITHUB_ENV\"\n"
           if text.count(old) != 1:
               raise SystemExit(f'escape repair expected exactly one source block, found {text.count(old)}')
           path.write_text(text.replace(old, new))
