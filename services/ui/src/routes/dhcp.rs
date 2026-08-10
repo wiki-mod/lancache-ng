@@ -4502,6 +4502,48 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
+    // Every Kea-mutation handler calling verify_csrf_token before
+    // require_kea_mode is a call-ORDER property with no shared wrapper
+    // function to unit-test directly -- exercising the real handlers
+    // end-to-end would need a full AppState (Docker client, NATS
+    // connection, SQLite handle), which this crate's existing tests
+    // deliberately avoid by extracting pure helper functions instead (see
+    // every other test in this module). Constructing that for 10 handlers
+    // just to prove a two-line ordering is disproportionate, so this scans
+    // this file's own real source for the property instead: any handler
+    // body that calls both must call verify_csrf_token first. A revert to
+    // the old require_kea_mode-first ordering in even one handler fails
+    // this test immediately.
+    #[test]
+    fn every_kea_mutation_handler_verifies_csrf_before_the_kea_mode_guard() {
+        let source = include_str!("dhcp.rs");
+        let mut checked = 0;
+        for chunk in source.split("\npub async fn ").skip(1) {
+            let body_end = chunk.find("\npub async fn ").unwrap_or(chunk.len());
+            let body = &chunk[..body_end];
+            let Some(kea_mode_pos) = body.find("require_kea_mode(&state)") else {
+                continue;
+            };
+            let csrf_pos = body
+                .find("verify_csrf_token(")
+                .expect("a handler calling require_kea_mode must also call verify_csrf_token");
+            assert!(
+                csrf_pos < kea_mode_pos,
+                "verify_csrf_token must be called before require_kea_mode in handler starting: {}",
+                &chunk[..chunk.find('\n').unwrap_or(chunk.len())]
+            );
+            checked += 1;
+        }
+        // Guards against this test silently checking zero handlers if the
+        // source-splitting heuristic above ever stops matching anything
+        // (e.g. a wholesale reformatting) -- ten handlers were confirmed by
+        // direct inspection when this ordering was fixed.
+        assert_eq!(
+            checked, 10,
+            "expected exactly 10 Kea-mutating handlers calling require_kea_mode"
+        );
+    }
+
     // Issue #1068 item 6: switching to a DHCP mode whose container was never
     // created (the docker-socket-proxy allowlist has no create capability --
     // see docker_client's own module comment) used to surface as a bare
@@ -5145,7 +5187,8 @@ mod tests {
         }
     }
 
-    // Every DHCP-mutating route calls require_kea_mode() first; if this
+    // Every Kea-mutating route calls this guard right after CSRF
+    // verification, before any validation or backend access; if this
     // guard ever accepted DnsmasqProxy/Disabled mode or an empty API URL, a
     // mutation route would try to POST to Kea's control agent with no
     // reachable target instead of failing with a clear "wrong mode" error.
