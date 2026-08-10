@@ -1,0 +1,29 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Temporary validation helper for PR #1523; removed before review-ready state.
+name: CI 1.1 actionlint
+
+on:
+  push:
+    branches:
+      - ci/1.1-single-artifact-consolidation
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Run repository-pinned actionlint toolchain
+        run: |
+          set -euo pipefail
+          image=ghcr.io/${{ github.repository }}/build-tools:nightly
+          docker pull "$image"
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/work:ro" \
+            -w /work \
+            "$image" \
+            actionlint -oneline
