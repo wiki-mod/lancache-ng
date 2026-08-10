@@ -3,9 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # One-shot transport for the maintainer-approved Rust header normalization.
-# The workflow merges the latest current_dev first, rewrites only header-contract
-# material, validates the complete repository header scan, and pushes one merge
-# commit. Its path-filter prevents the resulting bot push from running it again.
+# The workflow merges one connector-verified current_dev snapshot, rewrites only
+# header-contract material, validates the complete repository header scan, and
+# pushes one merge commit. Its path filter prevents that bot push from rerunning it.
 name: One-shot Rust header rollout
 
 on:
@@ -29,13 +29,14 @@ jobs:
           ref: agent/1517-spdx-header-backfill
           fetch-depth: 0
 
-      - name: Merge current_dev and apply the approved header contract
+      - name: Merge pinned current_dev and apply the approved header contract
         shell: bash
         run: |
           set -euo pipefail
 
           branch='agent/1517-spdx-header-backfill'
           old_integrated_base='cb2ceb1c1c1032591b2544eb0dabbdbe5ccc7506'
+          expected_base='5ffef2c5489d5ae5b68336ae43ee89ffc667e468'
           canonical='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
           legacy='lancache-ng (https://github.com/wiki-mod/lancache-ng)'
           spdx='SPDX-License-Identifier: AGPL-3.0-or-later'
@@ -43,40 +44,31 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin current_dev
-          pre_merge_head="$(git rev-parse HEAD)"
+          actual_base="$(git rev-parse origin/current_dev)"
+          if [ "$actual_base" != "$expected_base" ]; then
+            echo "::error::current_dev moved after connector verification: expected $expected_base, got $actual_base" >&2
+            exit 1
+          fi
 
-          # The maintainer is actively merging unrelated work into current_dev.
-          # If Git reports a conflict, only resolve it from current_dev when the
-          # branch's own version is byte-identical to the previously integrated
-          # base after physical line 20. That proves this PR's unique change to
-          # the conflicted file is confined to the already-validated header area;
-          # any deeper branch difference is a hard stop rather than being lost.
-          if ! git merge --no-commit --no-ff origin/current_dev; then
+          # Connector-side three-way inspection proved that this PR's unique
+          # changes in exactly these paths are header-only. Their substantive
+          # current_dev changes must therefore win a merge conflict; the
+          # canonical header is reapplied immediately below. Any additional
+          # conflict means the verified conflict set is stale and fails closed.
+          if ! git merge --no-commit --no-ff "$expected_base"; then
             mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
             for path in "${conflicts[@]}"; do
-              if ! git cat-file -e "$old_integrated_base:$path" 2>/dev/null || ! git cat-file -e "$pre_merge_head:$path" 2>/dev/null; then
-                echo "::error::Cannot prove header-only branch ownership for merge conflict: $path" >&2
-                exit 1
-              fi
-
-              old_file="$(mktemp)"
-              branch_file="$(mktemp)"
-              old_body="$(mktemp)"
-              branch_body="$(mktemp)"
-              git show "$old_integrated_base:$path" > "$old_file"
-              git show "$pre_merge_head:$path" > "$branch_file"
-              tail -n +21 -- "$old_file" > "$old_body"
-              tail -n +21 -- "$branch_file" > "$branch_body"
-              if ! cmp -s "$old_body" "$branch_body"; then
-                echo "::error::Merge conflict has branch-owned changes below line 20; refusing to take current_dev wholesale: $path" >&2
-                rm -f "$old_file" "$branch_file" "$old_body" "$branch_body"
-                exit 1
-              fi
-              rm -f "$old_file" "$branch_file" "$old_body" "$branch_body"
-
-              git checkout --theirs -- "$path"
-              git add -- "$path"
-              echo "Resolved header-only conflict from current_dev: $path"
+              case "$path" in
+                .github/actions/file-headers-check/action.yml|deploy/prod/docker-compose.yml|deploy/quickstart/docker-compose.yml)
+                  git checkout --theirs -- "$path"
+                  git add -- "$path"
+                  echo "Resolved connector-verified header-only conflict from current_dev: $path"
+                  ;;
+                *)
+                  echo "::error::Unexpected merge conflict after connector verification: $path" >&2
+                  exit 1
+                  ;;
+              esac
             done
 
             mapfile -t remaining < <(git diff --name-only --diff-filter=U)
@@ -167,10 +159,8 @@ jobs:
             rm -f "$tmp"
           }
 
-          # Bring files added/changed on current_dev since the branch's previous
-          # sync onto the new contract. Markdown stays excluded. Unknown syntax
-          # is intentionally left to the whole-repository guard below, which
-          # fails closed rather than guessing a parser/comment form.
+          # Bring files added/changed on current_dev since the previous branch
+          # sync onto the same canonical header. Markdown stays excluded.
           while IFS= read -r path; do
             [ -n "$path" ] || continue
             case "$path" in
@@ -194,7 +184,7 @@ jobs:
                 normalize_hash_header "$path"
                 ;;
             esac
-          done < <(git diff --name-only "$old_integrated_base"..origin/current_dev)
+          done < <(git diff --name-only "$old_integrated_base".."$expected_base")
 
           rust_total=0
           rust_rewritten=0
