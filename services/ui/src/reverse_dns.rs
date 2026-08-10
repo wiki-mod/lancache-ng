@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! IPv4 reverse-DNS (PTR) helpers for the Admin UI's manual PTR record
 //! management (#1077). Converts an operator-entered IPv4 address into the

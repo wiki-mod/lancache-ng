@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Validates a pull request TITLE against this repo's Conventional-Commit
 # taxonomy, enforced from AGENTS.md's AG-GH-018. This repo merges (not

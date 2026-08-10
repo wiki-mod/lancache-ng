@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Generates the LAN cache's root CA (ca.key/ca.crt) used to sign per-domain
 # wildcard certs for SSL interception (MITM) mode.
 #

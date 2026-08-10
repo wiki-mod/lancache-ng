@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # dnsmasq DHCP-relay-mode config template, rendered by entrypoint.sh via
 # envsubst when DHCP_MODE=dnsmasq-relay (issue #844). This is a DISTINCT mode
 # from the ProxyDHCP config in dnsmasq.conf.template: a relay does not answer

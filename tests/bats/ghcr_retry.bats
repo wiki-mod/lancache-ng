@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Fast, Docker-free unit coverage for scripts/lib/ghcr-retry.sh (issue #822,
 # "Pattern D": transient GHCR 401s guarded only in build-push.yml's

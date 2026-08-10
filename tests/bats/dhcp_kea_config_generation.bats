@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Tests for Kea DHCP config generation logic (services/dhcp/entrypoint.sh).
 # Covers JSON validity, config structure, TSIG setup, and NTP resolution.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Standing guard for issue #896: #820 ported the flock+retry collision-safe
 # reservation (issue #703) into every full-setup-validate.yml/full-setup-

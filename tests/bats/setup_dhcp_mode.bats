@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Regression tests for setup.sh DHCP-mode selection and mutual exclusion, plus
 # rendering of the dnsmasq-proxy and dnsmasq-relay (#844) config templates

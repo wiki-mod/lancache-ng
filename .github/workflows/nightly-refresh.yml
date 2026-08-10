@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Scheduled/manual refresh for the `nightly` channel (#1254/#1255, 2026-07-25
 # maintainer decision: nightly becomes a real once-daily build, like Firefox

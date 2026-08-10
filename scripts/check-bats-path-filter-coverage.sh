@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CI guard for issue #879: keeps
 # .github/workflows/build-tools-smoke.yml's `on.push.paths` /
 # `on.pull_request.paths` filter in sync with the real, non-fixture file

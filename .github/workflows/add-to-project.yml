@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Automatically adds newly opened issues and pull requests to the
 # KANBAN-Lancache-NG project board (AGENTS.md AG-GH-002/AG-GH-008). The

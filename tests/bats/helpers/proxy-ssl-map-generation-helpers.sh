@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads services/proxy/entrypoint.sh's REAL _render_ssl_map()
 # (and the _bounded_cert_name() it calls) via awk extraction, mirroring the

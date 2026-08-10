@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for #849 bug-hunt finding observability.md#19: dashboard.html's
 # "Recent requests (proxy)" tile always reads nginx's own direct access log

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads services/dns/entrypoint.sh's real
 # "_dns_generate_rpz_zone" and "_dns_ensure_zone_exists" functions without

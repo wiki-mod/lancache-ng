@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for issue #1296: watchdog.sh's new NTP_ENABLED-gated alert-only
 # monitoring of `ntp`, and get_health()/health_color()'s new "degraded"

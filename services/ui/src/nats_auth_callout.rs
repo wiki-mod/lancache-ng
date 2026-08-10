@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! NATS auth callout (issue #583, per #433's "finish the originally-intended
 //! design" decision): gives every registered secondary a genuinely unique,

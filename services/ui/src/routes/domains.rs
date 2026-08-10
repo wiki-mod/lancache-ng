@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Admin UI domain routes. Handles CDN domain lists, SSL wildcard scope, and
 //! LAN DNS records while preserving the on-disk domain-file semantics.
@@ -114,6 +116,27 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              configured, so no zone actually has TSIG-based update enforcement to relax yet \
              -- this toggle would have no effect. Configure DDNS_TSIG_KEY first (see \
              docs/threat-model.md), then try again.",
+        ),
+        // routes/dns_snapshots.rs::rollback_zone_snapshot uses this same
+        // mechanism for the specific case where the rollback request either
+        // never reached nats-subscriber, or was rejected outright (non-2xx)
+        // -- see that function's own doc comment for why a softer partial
+        // failure (rollback applied, post-rollback cache-flush degraded)
+        // still only logs server-side rather than using this banner too.
+        "zone_rollback_failed" => Some(
+            "The zone rollback did not complete: nats-subscriber rejected the request outright \
+             (a non-2xx response). No known-good snapshot was applied. Check the DNS service \
+             logs for the exact reason, then try again.",
+        ),
+        // Distinct from zone_rollback_failed above: a transport-level failure (timeout,
+        // connection reset) means the outcome is genuinely unknown, not a confirmed
+        // non-application -- nats-subscriber may have already applied the PATCH before the
+        // response was lost. Retrying blindly on this message risks a duplicate rollback.
+        "zone_rollback_unknown" => Some(
+            "The zone rollback request timed out or the connection was lost before a result \
+             could be confirmed. It may have already been applied on the DNS service side \
+             despite this uncertain result -- check the DNS service logs to confirm the actual \
+             outcome before retrying, to avoid an unnecessary duplicate rollback.",
         ),
         _ => None,
     }
@@ -2005,6 +2028,16 @@ mod tests {
                  wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\")."
             )
         );
+        // The codes rollback_zone_snapshot uses must resolve to real, fixed
+        // messages too, following the same allowlist contract as every
+        // other code -- and must be genuinely distinct from each other,
+        // since one claims a confirmed non-application and the other an
+        // unknown outcome.
+        let confirmed_failed = domains_page_error_message("zone_rollback_failed");
+        let unknown = domains_page_error_message("zone_rollback_unknown");
+        assert!(confirmed_failed.is_some());
+        assert!(unknown.is_some());
+        assert_ne!(confirmed_failed, unknown);
         assert_eq!(domains_page_error_message("unknown_code"), None);
         assert_eq!(domains_page_error_message(""), None);
         assert_eq!(

@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Step 4 (issue #1095): per-service build/scan reuse-on-push decision for
 # `build-push.yml`'s `build`/`build-arm64` jobs. On a push to a branch ref,

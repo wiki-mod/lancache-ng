@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Real TLS-handshake simulation for services/proxy/entrypoint.sh's deep
 # leading-dot wildcard cert path (_collect_domain_rows' _EXTRA_WILDCARD_BASES/

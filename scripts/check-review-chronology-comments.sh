@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Enforces AG-CODE-003 ("Do not reference the current task, PR number, or fix
 # in a comment... that belongs in the PR/commit description, not in code
