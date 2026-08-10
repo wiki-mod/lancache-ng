@@ -172,9 +172,7 @@
        passthrough, no CA cert needed) and SSL mode (HTTP + HTTPS with TLS
        interception) are both served by the single unified services/proxy
        container/nginx process (services/proxy-standard was retired and
-       merged into it in the v0.2.0 refactor -- corrected 2026-08-06,
-       bug-hunt #849's N3 finding; this comment previously still described
-       proxy-standard as a currently-existing, separately-running process).
+       merged into it in the v0.2.0 refactor).
        PROXY_STANDARD_URL/PROXY_SSL_URL (routes/dashboard.rs) default to the
        same stub_status endpoint on that one process and only diverge for an
        operator's own advanced multi-instance deployment -- see that file's

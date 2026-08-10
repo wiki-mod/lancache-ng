@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # LanCache-NG — Quickstart (no repo clone needed)
@@ -83,9 +84,9 @@ services:
       # volume so rollback survives container restarts/recreates.
       - proxy-config-snapshots:/var/lib/lancache-proxy
       # Per-domain SSL/MITM wildcard certs (entrypoint.sh's CERT_DIR) --
-      # see deploy/prod/docker-compose.yml's matching comment (bug-hunt
-      # #849, finding #3) for why this needs to be a real named volume
-      # rather than the Dockerfile's anonymous VOLUME fallback.
+      # see deploy/prod/docker-compose.yml's matching comment for why this
+      # needs to be a real named volume rather than the Dockerfile's
+      # anonymous VOLUME fallback.
       - proxy-certs:/etc/nginx/ssl/certs
     ports:
       - "${IP_STANDARD}:80:80"
@@ -1389,7 +1390,7 @@ volumes:
   shared-secrets:
   proxy-logs:
   # Generated per-domain wildcard certs (entrypoint.sh's CERT_DIR) -- see
-  # the proxy service's own volumes: comment (bug-hunt #849, finding #3).
+  # the proxy service's own volumes: comment.
   proxy-certs:
   # Known-good config snapshots (#415, #615), one persistent volume per
   # adapter. dns-standard and dns-ssl are separate containers with

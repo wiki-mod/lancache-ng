@@ -2,11 +2,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
-# Regression guard for bug-hunt #849 finding #3: CERT_DIR
-# (/etc/nginx/ssl/certs, entrypoint.sh's per-domain wildcard cert directory)
-# had no named volume in either deploy/prod or deploy/quickstart, only the
-# Dockerfile's own anonymous VOLUME fallback -- every `down && up`/recreate
-# silently lost every generated cert. This greps the real, checked-in
+# Regression guard: CERT_DIR (/etc/nginx/ssl/certs, entrypoint.sh's
+# per-domain wildcard cert directory) must have a named volume in both
+# deploy/prod and deploy/quickstart, not just the Dockerfile's own
+# anonymous VOLUME fallback -- without one, any flow that removes the
+# container (not `--force-recreate`, which reuses anonymous volumes)
+# silently loses every generated cert. This greps the real, checked-in
 # Compose files directly (not a copy) so a future edit that removes the
 # named volume fails this suite immediately. Docker Compose YAML validity
 # itself (`docker compose config`) is a separate, already-required check per
