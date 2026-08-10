@@ -47,6 +47,10 @@ inputs:
     description: Directory holding the full-setup docker-compose.yml.
     required: false
     default: deploy/full-setup
+  compose-override-file:
+    description: Optional compose override file, relative to working-directory, containing immutable digest-qualified image references.
+    required: false
+    default: ""
   max-attempts:
     description: Maximum subnet-slot reservation attempts before failing closed.
     required: false
@@ -83,6 +87,7 @@ runs:
         LANCACHE_IMAGE_TAG: ${{ inputs.image-tag }}
         RESERVE_MAX_ATTEMPTS: ${{ inputs.max-attempts }}
         RESERVE_LOCK_ROOT: ${{ inputs.lock-root }}
+        COMPOSE_OVERRIDE_FILE: ${{ inputs.compose-override-file }}
         GHCR_RETRY_USERNAME: ${{ inputs.ghcr-retry-username }}
         GHCR_RETRY_PASSWORD: ${{ inputs.ghcr-retry-password }}
       run: |
@@ -120,6 +125,12 @@ runs:
         # one step behind (a bare `startswith(own_prefix)` rather than the
         # delimited-child match the other copies already used).
 
+        compose_args=(-f docker-compose.yml)
+        if [[ -n "$COMPOSE_OVERRIDE_FILE" ]]; then
+          [[ -f "$COMPOSE_OVERRIDE_FILE" ]] || { echo "::error::Compose override '$COMPOSE_OVERRIDE_FILE' does not exist in $(pwd)."; exit 1; }
+          compose_args+=(-f "$COMPOSE_OVERRIDE_FILE")
+        fi
+
         # Pull the validation images before reserving a slot. build-push.yml's
         # own job runs on every push/PR and repeatedly hit GHCR 401/congestion
         # here, so it passes ghcr-retry credentials and this wraps the pull in
@@ -129,9 +140,9 @@ runs:
         if [[ -n "$GHCR_RETRY_USERNAME" && -n "$GHCR_RETRY_PASSWORD" ]]; then
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          ghcr_retry "$LANCACHE_IMAGE_REGISTRY" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose pull --quiet
+          ghcr_retry "$LANCACHE_IMAGE_REGISTRY" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose "${compose_args[@]}" pull --quiet
         else
-          docker compose pull --quiet
+          docker compose "${compose_args[@]}" pull --quiet
         fi
 
         reserved_slot=""
@@ -225,7 +236,7 @@ runs:
           fi
 
           echo "Attempting to start the validation stack on locked, pre-checked subnet $VALIDATION_SUBNET (attempt $attempt)."
-          if up_output="$(docker compose up -d 2>&1)"; then
+          if up_output="$(docker compose "${compose_args[@]}" up -d 2>&1)"; then
             echo "$up_output"
             reserved_slot="$slot"
             holder_pid="$candidate_pid"

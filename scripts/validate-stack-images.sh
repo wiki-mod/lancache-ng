@@ -70,7 +70,7 @@ tooling_names=$(collect_names tooling)
 metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
-runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui syslog)
+runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
   require_manifest_platform "$image" linux/amd64

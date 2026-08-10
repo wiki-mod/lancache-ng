@@ -12,13 +12,6 @@ on:
   workflow_dispatch:
   schedule:
     - cron: "23 3 * * 0"
-  push:
-    branches: [master, current_dev, v0.2.0]
-    paths:
-      - "tools/build-tools/**"
-      - ".github/workflows/build-tools.yml"
-      - ".github/actions/build-tools-candidate-smoke/**"
-      - ".github/actions/trivy-scan-exact-digest/**"
   pull_request:
     branches: [master, current_dev, v0.2.0]
     paths:
@@ -50,6 +43,10 @@ defaults:
 jobs:
   determine-publish-scope:
     name: determine build-tools publish scope
+    # Same-repo PRs are built by build-push.yml exactly once. This standalone
+    # PR path remains only for fork PRs, which cannot publish a candidate from
+    # the main workflow but still need a local build-tools validation.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.id != github.event.repository.id }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
