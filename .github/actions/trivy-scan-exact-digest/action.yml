@@ -1,0 +1,35 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Trivy scan exact image digest
+description: >-
+  Runs the blocking vulnerability and secret scan against one immutable,
+  digest-qualified image reference. Candidate build jobs share this action so
+  both architectures and event paths use one scan policy instead of maintaining
+  separate copies that can drift.
+
+inputs:
+  image-ref:
+    description: Immutable image reference in repository@sha256:digest form.
+    required: true
+  cache-dir:
+    description: Trivy vulnerability database cache directory owned by the caller.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Scan exact image digest with Trivy
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        scanners: vuln,secret
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        trivyignores: .trivyignore.yaml
+        skip-dirs: /usr/local/rustup/toolchains
+        hide-progress: true
+        cache: "false"
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: 10m
+        exit-code: "1"
