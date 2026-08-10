@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for services/watchdog/watchdog.sh's syslog-ng healthcheck (part
 # of the combined syslog+fluent-bit container's own dual-process

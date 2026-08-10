@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Drift guard: the `watchdog` and `ui` services' `depends_on` for
 # `docker-socket-proxy` used the plain list form, which only waits for that

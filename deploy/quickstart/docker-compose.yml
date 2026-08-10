@@ -1287,7 +1287,6 @@ services:
         jobs:
           - name: nginx_proxy
             path: /var/log/lancache/nginx-proxy.log
-            log_type: nginx
         CONF
         exec /usr/sbin/run.sh
     volumes:
