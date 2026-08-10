@@ -1176,6 +1176,47 @@ omitted):**
   does not also contain a matching config-unset/pattern-file-removal step) is
   plausible but not yet built — this is a real, currently-open gap, not a
   silently-assumed-covered case.
+- **Recorded exception (2026-08-07): no mechanical guard against a
+  config-file comment's factual claim going stale as the code it describes
+  changes.**
+  - **Scope**: any comment in a tracked config/workflow file that asserts a
+    factual claim about surrounding code (e.g. a base-image identity, a
+    dependency's version, a service's runtime behavior) which can drift out
+    of sync with a later, unrelated code change.
+  - **Reason**: judging whether a comment's factual claim is still true
+    resists cheap, reliable mechanical detection in general -- a check would
+    need to parse the comment's specific claim and cross-reference it
+    against the exact file(s) it describes, which differs per comment and
+    isn't a generic pattern worth building a linter for. This is the same
+    class AG-VAL-028 already carves out for the AG-CODE-* family.
+  - **Tracking**: issue #1095's F-18 audit found and fixed one real instance
+    (`.github/dependabot.yml`'s Docker-block comment asserted "every service
+    pins the same Debian base," accurate when written but stale since issue
+    #815 migrated every listed service to an identical Alpine base image).
+  - **Validation**: found and fixed only by a human/agent reading the
+    comment against the real `FROM` lines during an unrelated audit, not by
+    any CI check when first found. **Updated 2026-08-08**: this specific
+    recurring claim (that every Docker directory `.github/dependabot.yml`
+    groups into one PR shares an identical final-stage base image) is
+    concrete and mechanically checkable, unlike the general class this
+    exception covers -- `scripts/check-dependabot-docker-base-consistency.sh`
+    (wired into the `file-headers-check` composite action) now fails CI if
+    any listed Dockerfile's final `FROM` line ever diverges from the
+    others, with bats coverage
+    (`tests/bats/check_dependabot_docker_base_consistency.bats`, including a
+    real-repository self-check) proving both the passing and failing path --
+    see that file's own case count directly rather than a number restated
+    here, which has already drifted stale more than once as cases were
+    added.
+    The general exception below still stands for any *other* config-file
+    comment's factual claim, which remains genuinely hard to check
+    mechanically.
+  - **Non-Expansion**: this exception covers only the general
+    "comment-vs-code drift is hard to check mechanically" class. It does not
+    exempt any single already-known-stale comment from being fixed once
+    found (Rule-Ref: AG-DOC-001 still requires that), and does not cover a
+    comment whose claim is checkable by an existing, narrower guard (e.g.
+    AG-CODE-003's review-chronology phrasing already has one).
 - **Recorded exception (2026-08-08, Rule-Ref: AG-CC-004): third-party
   automated-reviewer output language cannot be checked by a durable, repeatable
   CI test.**

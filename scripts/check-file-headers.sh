@@ -4,9 +4,9 @@
 #
 # Scans git-tracked files for the canonical repository header contract from
 # AGENTS.md. Every non-excluded file must use the file format's native comment
-# syntax, keep a genuinely required interpreter/parser marker on physical line
-# 1 when one exists (otherwise line 1 is blank), put the LanCache-NG project
-# header on physical line 2, and put the SPDX identifier on physical line 3.
+# syntax. A genuinely required interpreter/parser marker occupies physical line 1;
+# Rust uses a bare `//!` formatter-stable placeholder on line 1; otherwise line 1 is blank.
+# The LanCache-NG project header stays on physical line 2 and SPDX stays on physical line 3.
 set -euo pipefail
 
 # Tracked separately from $# because the whole-repository branch below replaces
@@ -130,6 +130,10 @@ is_allowed_line1() {
     local first_line="$2"
     local lower_first_line
 
+    case "$path" in
+        *.rs) [ "$first_line" = "//!" ] && return 0 || return 1 ;;
+    esac
+
     [ -z "$first_line" ] && return 0
     [[ "$first_line" == '#!'* ]] && return 0
 
@@ -188,7 +192,7 @@ for path in "${files[@]}"; do
 
     first_line="${scanned_lines[0]-}"
     if ! is_allowed_line1 "$exclusion_key" "$first_line"; then
-        failures+=("$path: line 1 must be blank or a recognized required interpreter/parser marker")
+        failures+=("$path: line 1 does not match the canonical placeholder/interpreter/parser-marker contract")
     fi
 
     if [ "${scanned_lines[1]-}" != "$expected_project_line" ]; then

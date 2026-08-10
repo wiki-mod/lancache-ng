@@ -1,4 +1,4 @@
-
+//!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! Reader for the central syslog-ng log store (#633 PR4). Sibling to

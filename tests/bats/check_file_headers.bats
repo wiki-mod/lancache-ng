@@ -111,10 +111,10 @@ setup() {
     [[ "$output" == *"line 2 must be exactly"* ]]
 }
 
-@test "explicit-file mode accepts Rust inner-doc header syntax" {
+@test "explicit-file mode rejects a real blank line before the Rust inner-doc header" {
     printf '\n//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n//! SPDX-License-Identifier: AGPL-3.0-or-later\nfn main() {}\n' > "$fixture_dir/example.rs"
     run bash "$script" "$fixture_dir/example.rs"
-    [ "$status" -eq 0 ]
+    [ "$status" -eq 1 ]
 }
 
 @test "explicit-file mode accepts Lua header syntax" {
@@ -190,4 +190,10 @@ setup() {
     run bash "$script"
     [ "$status" -eq 0 ]
     [[ "$output" == *"All checked files carry the canonical repository header"* ]]
+}
+
+@test "explicit-file mode accepts the formatter-stable Rust line-1 placeholder" {
+    printf '//!\n//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n//! SPDX-License-Identifier: AGPL-3.0-or-later\nfn main() {}\n' > "$fixture_dir/example.rs"
+    run bash "$script" "$fixture_dir/example.rs"
+    [ "$status" -eq 0 ]
 }

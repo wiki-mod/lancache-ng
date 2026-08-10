@@ -1,4 +1,4 @@
-
+//!
 //! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //! First-run setup wizard displaying network configuration details, plus the

@@ -3,54 +3,18 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Dependabot configuration for automated dependency updates (GitHub Actions, Rust, Docker)
 #
-# `current_dev` is the only target-branch below. Dependabot's own
-# target-branch key accepts exactly one branch per update entry -- there is
-# no way to list multiple branches for a single block -- and defaults to the
-# repo's default branch (master) when omitted, so an explicit entry is still
-# required (found and fixed per #709's audit of hardcoded v0.2.0 branch-name
-# references: `v0.2.0` was the active branch when this file was first
-# written, but it is now frozen and `current_dev` took over that role --
-# relying on the implicit master default would silently leave the actual
-# active branch with zero automated dependency scanning).
+# Regular updates target current_dev so they follow the same promotion path
+# as application changes. Archived branches remain locked, while security
+# updates follow GitHub's default-branch behavior independently of these
+# regular-update entries.
 #
-# `master` deliberately has NO entries here anymore (removed 2026-07-31).
-# It used to keep its own parallel entries "rather than losing coverage
-# there", but that created two independent PR chains (one per branch) for
-# every dependency bump, each mergeable on its own -- and in practice they
-# drifted: PR #1232 (the v0.3.0 release promotion) hit 51 real merge
-# conflicts against master, the large majority of which turned out to be
-# master-only Dependabot PRs merged without ever porting the equivalent
-# current_dev-side PR. `master` only receives new content via the release
-# promotion from `current_dev` (see docs/release-versioning.md) -- scanning
-# it separately worked against that model instead of with it. Dependency
-# updates now flow the same way every other change does: land on
-# `current_dev`, then ship to `master` at the next release.
-#
-# `v0.2.0` deliberately has NO entries here either: its branch protection sets
-# `lock_branch: true` -- nothing can ever be merged into it regardless of
-# update type, so scanning it only produced PRs that had to be closed
-# unmerged. Re-adding a `target-branch: v0.2.0` block would not restore
-# coverage for Dependabot's *security* updates either way: GitHub applies
-# `target-branch` only to regular version-update PRs, not to
-# security-update PRs, which always target the repository's default branch
-# regardless of this file's contents. SECURITY.md also only supports the
-# latest stable release, not archived point releases -- if `v0.2.0` needs a
-# fix, that goes through a new release or a manual backport, not this file.
-#
-# BURST-FAN-OUT CONTROL (see issue #1065): each ecosystem is deliberately kept
-# to ONE grouped update per target-branch so a weekly run opens ~3 PRs per
-# branch, not one-per-directory. The Cargo and Docker blocks below use the
-# multi-`directories` form with a single `groups:` entry so every crate's
-# lockfile bump (Cargo) and every service Dockerfile's base-image bump (Docker)
-# collapse into a SINGLE cross-directory PR per branch instead of one PR per
-# directory. This matters because each merged PR is a push to a channel branch,
-# and every such push runs the full per-service build/scan matrix on the scarce
-# 5-runner `lancache-heavy` pool. The un-grouped, per-directory Docker layout
-# previously fanned a single weekly `library/debian` digest bump out into six
-# separate per-service PRs per branch; merging that backlog produced the
-# near-simultaneous merge burst that saturated the heavy pool for over an hour
-# (#1065). Grouping does not change WHAT gets updated -- only how many separate
-# PRs/merges/pushes it takes to land the same set of updates.
+# Each ecosystem uses one catch-all group to prevent directory-level update
+# fan-out. `schedule.day` is left unset (Dependabot's shared implicit
+# default, Monday) on all three blocks: staggering the *open* day was
+# considered but rejected -- it does not bound same-day *merges*, which is
+# the actual runner-pool-contention risk (AG-CI-016/AG-CI-017), so it would
+# have been a cheap-but-ineffective partial mitigation rather than a real
+# fix.
 version: 2
 updates:
   # GitHub Actions -- one grouped PR per target branch (single directory: /).
@@ -64,9 +28,8 @@ updates:
         patterns: ["*"]
 
   # Rust (Cargo) -- all three crates (Admin UI + DNS NATS subscriber +
-  # watchdog, added 2026-08 alongside services/watchdog/Cargo.toml, #1355)
-  # collapse into ONE grouped PR per target branch via the multi-`directories`
-  # form, instead of a separate PR per crate directory.
+  # watchdog) collapse into ONE grouped PR per target branch via the
+  # multi-`directories` form, instead of a separate PR per crate directory.
   - package-ecosystem: cargo
     directories:
       - /services/ui
@@ -80,9 +43,11 @@ updates:
         patterns: ["*"]
 
   # Docker base images -- all service Dockerfiles collapse into ONE grouped PR
-  # per target branch. Every service pins the same Debian base, so a single
-  # upstream digest bump previously opened six near-identical per-service PRs
-  # per branch; the multi-`directories` group makes it one cross-service PR.
+  # per target branch. Every listed service pins the identical Alpine base
+  # image (`alpine:3.24`), so a single upstream digest bump previously opened
+  # six near-identical
+  # per-service PRs per branch; the multi-`directories` group makes it one
+  # cross-service PR.
   - package-ecosystem: docker
     directories:
       - /services/proxy
