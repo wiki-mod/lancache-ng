@@ -60,9 +60,8 @@ jobs:
     name: detect changed paths (CodeQL rust relevance)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: a git diff plus one classify-image-impact.sh invocation,
-    # comparable to build-push.yml's own detect-changes job (6-17s there).
-    # Same generous 15-minute floor that job's comment explains.
+    # Real runs are one git diff plus the shared path classifier, comparable
+    # to build-push.yml's own detect-changes job. Keep the same generous floor.
     timeout-minutes: 15
     outputs:
       rust_relevant: ${{ steps.filter.outputs.rust_relevant }}
@@ -139,77 +138,32 @@ jobs:
           BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
-
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
-          # Same base/before resolution build-push.yml's detect-changes job
-          # uses (#536's merge-base fix so an unrelated already-merged base
-          # change isn't misattributed to this branch; #1095's push
-          # before-SHA fallback for an all-zeros/force-pushed/unreachable
-          # base) -- mirrored inline rather than imported, since GitHub
-          # Actions has no cross-workflow step/job reuse for plain
-          # (non-reusable) workflows.
-          changed_files="$(mktemp)"
-          force_all=false
+          # The shared classifier owns both merge-base handling and the
+          # fail-closed push fallback. CodeQL consumes its dedicated verdict
+          # instead of maintaining a second path list or diff algorithm here.
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
-            merge_base="$(git merge-base "$BASE_SHA" "$GITHUB_SHA")"
-            git diff --name-only "$merge_base" "$GITHUB_SHA" > "$changed_files"
+            classifier_output="$(bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA")"
+          elif [ -z "$BEFORE_SHA" ] \
+            || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
+            || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
+            echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); treating this push as rust-relevant."
+            classifier_output="$(bash scripts/classify-image-impact.sh --all-changed)"
           else
-            if [ -z "$BEFORE_SHA" ] \
-              || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
-              || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
-              echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); treating this push as rust-relevant."
-              force_all=true
-            else
-              git diff --name-only "$BEFORE_SHA" "$GITHUB_SHA" > "$changed_files"
-            fi
+            classifier_output="$(bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA")"
           fi
 
-          # Reuse the same per-path rules build-push.yml's detect-changes job
-          # depends on, instead of re-deriving a second, potentially-drifting
-          # copy of "does this touch Rust?": dns_rust is scoped to
-          # services/dns/nats-subscriber/ (the only Rust crate under
-          # services/dns -- the rest of that directory is PowerDNS
-          # config/entrypoint/lua, not analyzed by the rust matrix entry at
-          # all); ui is services/ui/ (a Rust crate at its root); watchdog is
-          # services/watchdog/ (added 2026-08 alongside
-          # services/watchdog/Cargo.toml, #1355 -- also a whole-directory
-          # filter like ui, not split into a Rust-only sub-filter like dns,
-          # since the shell runtime and the Rust crate share one directory);
-          # workflow covers build-push.yml/build-tools.yml/.github/actions/*,
-          # which includes the two composite actions this workflow's rust
-          # matrix entry consumes (cargo-with-sccache-fallback,
-          # configure-rust-sccache).
-          rust_via_shared_classifier=false
-          if [ "$force_all" = "true" ]; then
-            rust_via_shared_classifier=true
-          else
-            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/classify-image-impact.sh)"
-            if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|watchdog|workflow)=true$'; then
-              rust_via_shared_classifier=true
-            fi
-          fi
-
-          # Additive to the shared classifier: a change to this workflow file
-          # itself or its CodeQL config, since either can change how the rust
-          # matrix entry is built/analyzed even when no Rust source moved
-          # (e.g. a new crate added to the "Build ... Rust crate for CodeQL"
-          # steps, or a query-suite change in codeql-config.yml).
-          codeql_self=false
-          if [ "$force_all" = "true" ]; then
-            codeql_self=true
-          elif grep -qE '^\.github/(workflows/codeql\.yml|codeql/)' "$changed_files"; then
-            codeql_self=true
-          fi
-
-          rm -f "$changed_files"
-
-          if [ "$rust_via_shared_classifier" = "true" ] || [ "$codeql_self" = "true" ]; then
-            echo "rust_relevant=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "rust_relevant=false" >> "$GITHUB_OUTPUT"
-          fi
+          rust_relevant="$(sed -n 's/^codeql_rust=//p' <<< "$classifier_output")"
+          case "$rust_relevant" in
+            true | false) ;;
+            *)
+              echo "::error::Shared classifier did not emit a valid codeql_rust verdict."
+              exit 1
+              ;;
+          esac
+          echo "rust_relevant=$rust_relevant" >> "$GITHUB_OUTPUT"
 
   analyze:
     name: Analyze (${{ matrix.language }})
