@@ -265,27 +265,30 @@ fi
 require_grep 'channel_tags\+=\(latest\)' \
   .github/workflows/build-push.yml \
   'stable release promotion must publish latest'
-require_grep 'docker buildx imagetools inspect "\$source_image"' \
+require_grep 'source_tag_digest="\$\(digest_for_image "\$source_tag_image"\)"' \
   .github/workflows/build-push.yml \
-  'promotion must verify every sha-* source image before moving a public channel'
+  'promotion must verify the sha-* record still resolves to the exact producer digest before moving a public channel'
 require_grep 'imagetools inspect "\$image" --format' \
   scripts/require-image-platforms.sh \
   'the shared platform coverage guard must inspect single-platform image metadata before falling back to text Platform lines'
 if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/require-image-platforms.sh"; then
   fail 'the shared platform coverage guard must not require host jq'
 fi
-require_grep 'bash scripts/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
+require_grep 'bash scripts/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}@\$\{expected_digest\}" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
-  'promotion must verify every sha-* service image platform before moving public tags'
+  'promotion must verify every exact service digest platform before moving public tags'
 require_grep 'rollback_promotions\(\)' \
   .github/workflows/build-push.yml \
   'promotion must attempt rollback if a public channel move fails midway'
 require_grep 'previous_refs\["\$target_image"\]' \
   .github/workflows/build-push.yml \
   'promotion must remember previous channel digests before moving public tags'
-require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack:\$\{source_tag\}"' \
+require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack@\$\{STACK_DIGEST\}"' \
   .github/workflows/build-push.yml \
-  'promotion must create an immutable stack pointer image for the source commit'
+  'promotion must consume the immutable stack BOM digest created before validation'
+require_grep 'COPY stack-bom\.json /stack-bom\.json' \
+  .github/workflows/build-push.yml \
+  'the immutable stack artifact must record an explicit stack BOM alongside stack.env'
 require_grep 'LANCACHE_IMAGE_TAG=%s\\n' \
   .github/workflows/build-push.yml \
   'stack pointer image must contain the resolved immutable service image tag'
