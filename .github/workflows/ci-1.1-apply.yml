@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   apply:
-    if: github.ref == 'refs/heads/ci/1.1-single-artifact-consolidation'
+    if: github.ref == 'refs/heads/ci/1.1-single-artifact-consolidation' && github.actor != 'github-actions[bot]'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
@@ -21,18 +21,6 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
-
-      - name: Diagnose manifest merge source shape
-        run: |
-          python3 - <<'PY'
-          from pathlib import Path
-          lines = Path('.github/workflows/build-push.yml').read_text().splitlines(keepends=True)
-          matches = [i for i, line in enumerate(lines) if 'imagetools create -t "$target_image" "$amd64_image" "$arm64_image"' in line]
-          print('manifest merge source matches:', len(matches))
-          for i in matches:
-              for j in range(max(0, i - 1), min(len(lines), i + 2)):
-                  print(j + 1, repr(lines[j]))
-          PY
 
       - name: Harden one-shot patcher source match
         run: python3 scripts/ci-1.1-hotfix.py
@@ -48,17 +36,28 @@ jobs:
           git status --short
           test -n "$(git status --porcelain)" || { echo "::error::Guarded patch produced no changes."; exit 1; }
 
-      - name: Commit guarded refactor patch
+      - name: Stage transformed blobs for the GitHub connector
+        run: |
+          set -euo pipefail
+          root=.ci-1.1-output
+          rm -rf "$root"
+          mkdir -p "$root/github/workflows" \
+                   "$root/github/actions/reserve-validation-subnet-stack" \
+                   "$root/scripts"
+          cp .github/workflows/build-push.yml "$root/github/workflows/build-push.yml"
+          cp .github/workflows/build-tools.yml "$root/github/workflows/build-tools.yml"
+          cp .github/actions/reserve-validation-subnet-stack/action.yml "$root/github/actions/reserve-validation-subnet-stack/action.yml"
+          cp scripts/validate-stack-images.sh "$root/scripts/validate-stack-images.sh"
+          cp scripts/render-full-setup-digest-override.sh "$root/scripts/render-full-setup-digest-override.sh"
+          chmod +x "$root/scripts/render-full-setup-digest-override.sh"
+
+      - name: Publish transformed blobs without touching workflow paths
         env:
           BRANCH_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add .github/workflows/build-push.yml \
-                  .github/workflows/build-tools.yml \
-                  .github/actions/reserve-validation-subnet-stack/action.yml \
-                  scripts/validate-stack-images.sh \
-                  scripts/render-full-setup-digest-override.sh
-          git commit -m 'refactor(ci): carry exact candidate digests through promotion'
+          git add .ci-1.1-output
+          git commit -m 'chore(ci): stage guarded 1.1 refactor blobs'
           git push origin "HEAD:${BRANCH_NAME}"
