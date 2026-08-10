@@ -1,0 +1,578 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# CI workflow for the multi-arch build-tools image. A publish-capable run now
+# builds exactly one candidate per architecture, then smoke-tests, scans,
+# attests and merges those exact immutable digests. Pull requests remain
+# local-only because they must not write GHCR; each PR architecture still has
+# exactly one local candidate that all of its checks consume.
+name: Build Tools Image
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "23 3 * * 0"
+  pull_request:
+    branches: [master, current_dev, v0.2.0]
+    paths:
+      - "tools/build-tools/**"
+      - ".github/workflows/build-tools.yml"
+      - ".github/actions/build-tools-candidate-smoke/**"
+      - ".github/actions/trivy-scan-exact-digest/**"
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+  attestations: write
+  artifact-metadata: write
+
+concurrency:
+  group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish', github.workflow) }}
+  cancel-in-progress: false
+
+env:
+  BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
+  BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  determine-publish-scope:
+    name: determine build-tools publish scope
+    # Same-repo PRs are built by build-push.yml exactly once. This standalone
+    # PR path remains only for fork PRs, which cannot publish a candidate from
+    # the main workflow but still need a local build-tools validation.
+    if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.id != github.event.repository.id }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      should-publish: ${{ steps.should-publish.outputs.should-publish }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Determine whether build-tools inputs actually changed
+        id: should-publish
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before_sha="${{ github.event.before }}"
+          if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            git fetch --quiet --depth=1 origin "$before_sha" 2>/dev/null || true
+          fi
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            echo "::notice::Could not resolve base commit $before_sha; publishing to fail safe."
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          else
+            # A helper-action-only change still runs this workflow, but it
+            # validates one local candidate and does not republish identical bytes.
+            echo "should-publish=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  build-tools:
+    name: build amd64 build-tools image
+    needs: determine-publish-scope
+    runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    timeout-minutes: 150
+    concurrency:
+      group: build-tools-amd64-image-build
+      cancel-in-progress: false
+    outputs:
+      candidate-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Prepare local Buildx cache
+        id: buildx-cache
+        env:
+          BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_READ: ${{ runner.temp }}/lancache-ng-build-tools-cache/read
+          BUILDX_CACHE_DEST: ${{ runner.temp }}/lancache-ng-build-tools-cache/new
+        run: |
+          set -euo pipefail
+          command -v flock >/dev/null 2>&1 || { echo "::error::flock is required."; exit 1; }
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools-amd64"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools-amd64.lock"
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          rm -rf "$BUILDX_CACHE_READ" "$BUILDX_CACHE_DEST"
+          mkdir -p "$BUILDX_CACHE_READ" "$(dirname "$BUILDX_CACHE_DEST")"
+          (
+            flock -x 9
+            mkdir -p "$cache_dir"
+            cp -a "$cache_dir/." "$BUILDX_CACHE_READ/"
+          ) 9>"$lock_file"
+          {
+            echo "cache-from=$BUILDX_CACHE_READ"
+            echo "cache-to=$BUILDX_CACHE_DEST"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.BUILD_TOOLS_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short,suffix=-standalone-amd64
+
+      - name: Compute immutable pushed source tag
+        id: source-tag
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        run: printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build-tools base image digests
+        id: build-tools-base-digests
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        run: |
+          set -euo pipefail
+          digest_for_image() {
+            local image=$1 digest
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"; digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]] || { echo "::error::Could not read digest for $image."; exit 1; }
+            printf '%s\n' "$digest"
+          }
+          {
+            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Compute apt cache-bust value
+        id: apt-cache-bust
+        run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      # PRs and helper-only pushes cannot/should not publish. They still build
+      # exactly one local candidate and run the complete candidate test set.
+      - name: Build local amd64 scan image
+        id: local-build-amd64
+        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        timeout-minutes: 60
+        env:
+          APT_CACHE_BUST: ${{ steps.apt-cache-bust.outputs.value }}
+          BUILDX_BUILDER: ${{ steps.buildx.outputs.name }}
+          BUILDX_CACHE_FROM_DIR: ${{ steps.buildx-cache.outputs.cache-from }}
+          BUILDX_CACHE_TO_DIR: ${{ steps.buildx-cache.outputs.cache-to }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/build-retry.sh"
+          build_retry -- docker buildx build \
+            --builder "$BUILDX_BUILDER" \
+            --load \
+            --pull \
+            --tag "$BUILD_TOOLS_SCAN_IMAGE_AMD64" \
+            --platform linux/amd64 \
+            --provenance=false \
+            --build-arg "APT_CACHE_BUST=$APT_CACHE_BUST" \
+            --cache-from "type=local,src=$BUILDX_CACHE_FROM_DIR" \
+            --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
+            tools/build-tools
+
+      # A publish-capable run has no throwaway local precursor. This is the
+      # one real amd64 build and its output digest becomes the serial number
+      # consumed by smoke, Trivy, provenance and the later manifest merge.
+      - name: Build and push amd64 build-tools image
+        id: build
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 90
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          push: true
+          tags: ${{ steps.source-tag.outputs.image }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
+            org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+          outputs: type=image,oci-mediatypes=true
+          platforms: linux/amd64
+          provenance: false
+          pull: true
+          cache-from: type=local,src=${{ steps.buildx-cache.outputs.cache-from }}
+          cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
+
+      - name: Smoke-test local amd64 candidate
+        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
+          platform: linux/amd64
+          run-fixtures: "true"
+
+      - name: Smoke-test exact pushed amd64 candidate digest
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          platform: linux/amd64
+          run-fixtures: "true"
+
+      - name: Prepare candidate Trivy cache
+        id: trivy-cache
+        run: |
+          set -euo pipefail
+          sanitized_ref="$(printf '%s' "$GITHUB_REF" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          [[ -n "$sanitized_ref" ]] || { echo "::error::Could not derive safe cache key."; exit 1; }
+          cache_dir="/var/tmp/lancache-ng-trivy-cache/build-tools-${sanitized_ref}"
+          if [ "$GITHUB_EVENT_NAME" = "pull_request" ] || [ "$GITHUB_EVENT_NAME" = "workflow_dispatch" ] || [ "$GITHUB_RUN_ATTEMPT" != "1" ]; then
+            cache_dir="${cache_dir}-${GITHUB_RUN_ID}"
+            echo "ephemeral=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ephemeral=false" >> "$GITHUB_OUTPUT"
+          fi
+          mkdir -p "$cache_dir"
+          echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
+
+      - name: Scan local build-tools amd64 image with Trivy
+        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Scan pushed amd64 build-tools digest with Trivy
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 20
+        uses: ./.github/actions/trivy-scan-exact-digest
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          cache-dir: ${{ steps.trivy-cache.outputs.dir }}
+
+      - name: Remove ephemeral Trivy cache
+        if: ${{ always() && steps.trivy-cache.outputs.ephemeral == 'true' }}
+        env:
+          TRIVY_CACHE_DIR: ${{ steps.trivy-cache.outputs.dir }}
+        run: |
+          set -euo pipefail
+          case "$TRIVY_CACHE_DIR" in
+            /var/tmp/lancache-ng-trivy-cache/?*) rm -rf -- "$TRIVY_CACHE_DIR" ;;
+            *) echo "::error::Refusing unexpected cache path '$TRIVY_CACHE_DIR'."; exit 1 ;;
+          esac
+
+      - name: Attest amd64 build-tools image provenance
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Rotate local Buildx cache
+        if: >-
+          ${{
+            always() &&
+            (steps.local-build-amd64.outcome == 'success' || steps.build.outcome == 'success')
+          }}
+        env:
+          BUILDX_CACHE_ROOT: /var/tmp/lancache-ng-buildx-cache
+          BUILDX_CACHE_DEST: ${{ steps.buildx-cache.outputs.cache-to }}
+        run: |
+          set -euo pipefail
+          [ -d "$BUILDX_CACHE_DEST" ] || exit 0
+          cache_dir="$BUILDX_CACHE_ROOT/build-tools-amd64"
+          lock_file="$BUILDX_CACHE_ROOT/build-tools-amd64.lock"
+          mkdir -p "$BUILDX_CACHE_ROOT"
+          (
+            flock -x 9
+            rm -rf "$cache_dir"
+            mv "$BUILDX_CACHE_DEST" "$cache_dir"
+          ) 9>"$lock_file"
+
+      - name: Remove local scan image
+        if: always()
+        run: docker rmi "$BUILD_TOOLS_SCAN_IMAGE_AMD64" || true
+
+      - name: Remove buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+  build-tools-arm64:
+    name: build arm64 build-tools image (native)
+    needs: determine-publish-scope
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    outputs:
+      candidate-digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: ./.github/actions/buildx-setup-retry
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
+        with:
+          images: ${{ env.BUILD_TOOLS_IMAGE }}
+          tags: |
+            type=sha,prefix=sha-,format=short,suffix=-standalone-arm64
+
+      - name: Compute immutable pushed source tag
+        id: source-tag
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        run: printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Compute apt cache-bust value
+        id: apt-cache-bust
+        run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
+
+      - name: Build local arm64 scan image
+        id: local-build-arm64
+        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        timeout-minutes: 60
+        uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
+        with:
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          load: true
+          pull: true
+          tags: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          platforms: linux/arm64
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+          provenance: false
+          cache-from: type=gha,scope=build-tools-arm64
+          cache-to: type=gha,scope=build-tools-arm64,mode=max
+
+      - name: Build and push arm64 build-tools image
+        id: build
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 90
+        uses: ./.github/actions/ghcr-build-push-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          builder: ${{ steps.buildx.outputs.name }}
+          context: tools/build-tools
+          push: true
+          tags: ${{ steps.source-tag.outputs.image }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
+          outputs: type=image,oci-mediatypes=true
+          platforms: linux/arm64
+          provenance: false
+          pull: true
+          cache-from: type=gha,scope=build-tools-arm64
+          cache-to: type=gha,scope=build-tools-arm64,mode=max
+
+      - name: Smoke-test local arm64 candidate
+        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          platform: linux/arm64
+
+      - name: Smoke-test exact pushed arm64 candidate digest
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          platform: linux/arm64
+
+      - name: Scan local build-tools arm64 image with Trivy
+        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        timeout-minutes: 20
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
+          scanners: vuln,secret
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          trivyignores: .trivyignore.yaml
+          skip-dirs: /usr/local/rustup/toolchains
+          hide-progress: true
+          cache: "false"
+          timeout: 10m
+          exit-code: "1"
+
+      - name: Scan pushed arm64 build-tools digest with Trivy
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        timeout-minutes: 20
+        uses: ./.github/actions/trivy-scan-exact-digest
+        with:
+          image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
+          cache-dir: ${{ runner.temp }}/trivy-build-tools-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          cleanup-cache: "true"
+
+      - name: Attest arm64 build-tools image provenance
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Remove local scan image
+        if: always()
+        run: docker rmi "$BUILD_TOOLS_SCAN_IMAGE_ARM64" || true
+
+      - name: Remove buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
+
+  merge-build-tools-manifests:
+    name: merge build-tools multi-platform manifest
+    needs: [determine-publish-scope, build-tools, build-tools-arm64]
+    if: >-
+      ${{
+        !cancelled() &&
+        needs['build-tools'].result == 'success' &&
+        needs['build-tools-arm64'].result == 'success' &&
+        github.event_name != 'pull_request' &&
+        needs['determine-publish-scope'].outputs.should-publish == 'true'
+      }}
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 20
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Docker Buildx
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Log in to GHCR
+        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create multi-platform manifest from checked child digests
+        id: merge
+        env:
+          AMD64_DIGEST: ${{ needs.build-tools.outputs.candidate-digest }}
+          ARM64_DIGEST: ${{ needs.build-tools-arm64.outputs.candidate-digest }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
+          [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
+
+          source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA::7}"
+          amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
+          arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
+          build_tools_description="Prebuilt lancache-ng CI and developer validation toolchain image."
+
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create -t "$source_tag" "$amd64_ref" "$arm64_ref" \
+            --annotation "index:org.opencontainers.image.description=${build_tools_description}"
+          printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
+
+      - name: Verify merged manifest exposes both platforms
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: bash scripts/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
+
+      - name: Resolve merged manifest digest
+        id: merged-digest
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "${{ steps.merge.outputs.source-tag }}" --format '{{json .Manifest.Digest}}')"
+          digest="${digest%\"}"; digest="${digest#\"}"
+          [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid merged digest '$digest'."; exit 1; }
+          printf 'digest=%s\n' "$digest" >> "$GITHUB_OUTPUT"
+
+      - name: Attest merged build-tools manifest provenance
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ env.BUILD_TOOLS_IMAGE }}
+          subject-digest: ${{ steps.merged-digest.outputs.digest }}
+
+      - name: Promote mutable tags from the attested digest
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          REF_NAME: ${{ github.ref_name }}
+          MERGED_DIGEST: ${{ steps.merged-digest.outputs.digest }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          sanitized_ref="$(printf '%s' "$REF_NAME" | tr '/:@' '---' | tr -cd 'A-Za-z0-9_.-')"
+          [[ -n "$sanitized_ref" ]] || { echo "::error::Could not derive branch tag."; exit 1; }
+          branch_tag="${sanitized_ref}-tc"
+          source_ref="${BUILD_TOOLS_IMAGE}@${MERGED_DIGEST}"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
+          if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
+          fi
+
+      - name: Remove buildx builder
+        if: always()
+        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
