@@ -1,5 +1,6 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # nginx-based caching proxy image: unified standard (SNI passthrough) and
 # SSL/MITM (TLS-interception) mode, selected at runtime by entrypoint.sh.

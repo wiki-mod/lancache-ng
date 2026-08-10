@@ -1,5 +1,6 @@
 #!/bin/sh
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Docker socket proxy entrypoint: generates the HAProxy allowlist used by the
 # Admin UI/watchdog so Docker access stays limited to fixed project containers

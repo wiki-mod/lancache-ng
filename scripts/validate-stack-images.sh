@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Validates release/stack-images.yml (the release manifest) against the
 # actual repo: required schema/retention fields, that every first-party
 # runtime/tooling/metadata image and Dockerfile is declared with the right

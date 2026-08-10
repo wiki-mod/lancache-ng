@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for scripts/check-build-tools-smoke-coverage.sh (issues #790/#791
 # / #822 Pattern G): the guard that fails CI when tools/build-tools/

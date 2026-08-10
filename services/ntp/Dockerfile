@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # LanCache-NG-NTP image: chrony (chronyd) disciplining its own clock against
 # a curated set of public NTP servers and serving that time to LAN clients

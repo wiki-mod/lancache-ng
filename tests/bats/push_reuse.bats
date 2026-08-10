@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Docker-free coverage for scripts/lib/push-reuse.sh's push_reuse_decide
 # (Step 4, issue #1095): the per-service "is it safe to retag the channel

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Fixture tests for restore_clear_stale_env_local_if_unarchived(), the helper
 # cmd_restore calls right after rsync-ing the archived install tree back into

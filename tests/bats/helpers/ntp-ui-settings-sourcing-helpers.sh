@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads the ntp entrypoint's Admin-UI-settings sourcing
 # function (`_ntp_source_ui_settings`) directly from

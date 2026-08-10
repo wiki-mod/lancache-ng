@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Docker-free, git-free unit coverage for
 # scripts/lib/full-setup-domain-probe.sh's resolve_full_setup_probe_domain()

@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Path-based auto-labeling config for actions/labeler (see
 # .github/workflows/labeler.yml). Reduces, but does not replace, the

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/check-pipefail-scope-coverage.sh: verifies it
 # correctly derives check-pipefail-early-exit-grep.sh's own scan_files

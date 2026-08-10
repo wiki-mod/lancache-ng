@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Cross-language parity coverage for domain-entry validation (issue #822
 # pattern audit). services/proxy/entrypoint.sh's bash validator (mirrored

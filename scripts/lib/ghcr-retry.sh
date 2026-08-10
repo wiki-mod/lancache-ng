@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Shared retry + fresh-re-login wrapper for GHCR registry operations (docker
 # login/pull/push, `docker buildx imagetools create|inspect`, etc.).

@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 name: Trivy scan with digest-bound result cache
 description: >-
   Scans an image with Trivy, but skips the scan entirely if the exact same

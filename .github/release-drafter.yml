@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # release-drafter (https://github.com/release-drafter/release-drafter) config.
 # Drafts/updates a GitHub Release incrementally on every merge to master/v0.2.0
 # (see .github/workflows/release-drafter.yml), so release notes never need a

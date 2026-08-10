@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads the proxy entrypoint's known-good-snapshot library,
 # its `_migrate_legacy_proxy_snapshots_for_stream_acl` one-time backfill, and

@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for the issue #705 PXE boot-pointer rendering in
 # services/dhcp-proxy/entrypoint.sh (`_dhcp_proxy_render_pxe_service_directives`).

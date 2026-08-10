@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free unit coverage for scripts/lib/gc-pr-staging-images.sh -- the
 # manifest-graph classification functions scripts/gc-pr-staging-images.sh

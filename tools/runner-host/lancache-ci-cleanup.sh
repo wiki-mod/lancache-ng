@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # CI runner host maintenance: scheduled docker cleanup for self-hosted runner
 # hosts. Keeps every runner host from accumulating build cache, unused images,

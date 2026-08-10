@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback route
 # (`POST /dhcp/snapshot/rollback`, rollback_kea_snapshot in

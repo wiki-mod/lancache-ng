@@ -1,6 +1,6 @@
 #!/bin/bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # PowerDNS container entrypoint. Generates RPZ zones from cdn-domains.txt
 # (with monotonic serial handling), renders the recursor/authoritative config

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Automated companion to AGENTS.md's AG-GH-017 (issue #990): a branch must be
 # traceable in writing (a PR, or an issue comment/body naming it) at or near

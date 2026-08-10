@@ -1,6 +1,6 @@
 #!/bin/bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Sets default_poll_timeout_seconds/default_poll_hard_ceiling_seconds for the
 # given workflow_changed value, used by scripts/ensure-pr-staging-images.sh.

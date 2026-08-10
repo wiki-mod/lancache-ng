@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! cargo-fuzz target (issue #1252): exercises the real
 //! `serde_json::from_slice::<ZoneInfo>` deserialization `reconciler()` (see
 //! `../src/main.rs`) runs against PowerDNS's own `GET .../zones/{zone}`
