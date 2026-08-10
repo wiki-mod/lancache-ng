@@ -16,6 +16,13 @@
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     lib="$repo_root/scripts/lib/staging-image-freshness.sh"
+    # #1095 F-21: staging-image-freshness.sh's own _sif_inspect now routes
+    # its registry reads through ghcr_retry (scripts/lib/ghcr-retry.sh) --
+    # must be sourced first so the real (non-stubbed) docker branch below
+    # can find it, matching every other dual script/workflow-step caller's
+    # own sourcing convention in this project.
+    # shellcheck source=scripts/lib/ghcr-retry.sh
+    source "$repo_root/scripts/lib/ghcr-retry.sh"
     # shellcheck source=scripts/lib/staging-image-freshness.sh
     source "$lib"
 
@@ -342,16 +349,103 @@ STUB
 
 @test "sif_image_revision (real docker branch, no stub): a confirmed-absence registry error returns status 2" {
     fake_docker_returning_stderr "Error response from daemon: manifest unknown"
-    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
+    # Direct `$(... 2>/dev/null)` capture, not bats' `run` (which merges
+    # stdout+stderr into $output): #1095 F-21's ghcr_retry wrapping means a
+    # genuine failure path now legitimately logs its own ::warning::/::error::
+    # diagnostics to real stderr (this project's normal, desired CI-log
+    # visibility for every other ghcr_retry call site) -- `run` would fold
+    # that into $output and corrupt this exact stdout-must-be-empty check.
+    # Same reasoning tests/bats/push_reuse.bats' own stderr-diagnostics
+    # comment documents for the identical situation. `|| status=$?`, not a
+    # bare assignment statement: bats fails a test immediately on any
+    # non-zero exit inside its body unless the failure is absorbed by a
+    # conditional first -- sif_image_revision genuinely returns non-zero
+    # here (unlike push_reuse_decide, which always returns 0 by contract),
+    # so the bare form would abort the test before these assertions run.
+    status=0
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)" || status=$?
     [ "$status" -eq 2 ]
-    [ -z "$output" ]
+    [ -z "$result" ]
 }
 
 @test "sif_image_revision (real docker branch, no stub): an unrecognized/transient registry error returns status 1 (unchanged ambiguous case)" {
     fake_docker_returning_stderr "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
-    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee"
+    # #1095 F-21: sif_image_revision's registry reads now go through
+    # ghcr_retry, which defaults to 4 attempts/30s backoff -- a caller-less
+    # direct call like this one (unlike sif_wait_for_fresh_base_image, which
+    # scopes this down itself) would otherwise genuinely wait up to 90s here
+    # for a fake docker that fails identically every attempt. This test is
+    # about the final classification (still 1, ambiguous), not about
+    # exercising the real retry budget (covered separately by
+    # tests/bats/ghcr_retry.bats), so pin a single fast attempt --
+    # tests/bats/ghcr_retry.bats' own convention for the same reason.
+    # shellcheck disable=SC2034 # read by ghcr_retry() in scripts/lib/ghcr-retry.sh,
+    # a cross-file dynamic-scope read shellcheck cannot see.
+    GHCR_RETRY_MAX_ATTEMPTS=1
+    # Direct capture, not `run` -- see the confirmed-absence test above for
+    # both why (ghcr_retry's own real-stderr diagnostics would otherwise
+    # corrupt this stdout-must-be-empty check) and why `|| status=$?`
+    # specifically (a bare assignment would abort the test on the genuine
+    # non-zero exit before these assertions run).
+    status=0
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)" || status=$?
     [ "$status" -eq 1 ]
-    [ -z "$output" ]
+    [ -z "$result" ]
+}
+
+# #1095 F-21: a fake `docker` that SUCCEEDS with a real multi-platform index
+# on --raw, then echoes a fixed revision label on --format, logging every
+# invocation's own argv so the test can assert exactly which image
+# reference the second (--format) call targeted.
+fake_docker_multi_platform_success() {
+    local fake_bin_dir="$BATS_TEST_TMPDIR/fakebin_success"
+    mkdir -p "$fake_bin_dir"
+    call_log="$BATS_TEST_TMPDIR/docker_calls.log"
+    : > "$call_log"
+    cat > "$fake_bin_dir/docker" <<STUB
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >> "$call_log"
+if [[ "\$*" == *"--raw"* ]]; then
+  cat <<'JSON'
+{"manifests":[{"digest":"sha256:1111111111111111111111111111111111111111111111111111111111111111","platform":{"architecture":"amd64","os":"linux"}},{"digest":"sha256:2222222222222222222222222222222222222222222222222222222222222222","platform":{"architecture":"arm64","os":"linux"}}]}
+JSON
+  exit 0
+elif [[ "\$*" == *"--format"* ]]; then
+  printf 'deadbeefdeadbeefdeadbeefdeadbeefdeadbeef\n'
+  exit 0
+fi
+exit 1
+STUB
+    chmod +x "$fake_bin_dir/docker"
+    PATH="$fake_bin_dir:$PATH"
+}
+
+@test "sif_image_revision (real docker branch): a digest-ref input (repo@sha256:...) resolves its multi-platform child correctly, not truncated mid-digest" {
+    # #1095 F-21's digest-pinning fix passes sif_image_revision a caller-
+    # resolved repo@sha256:... reference (not only a mutable tag), so it can
+    # verify safety against, and export, the exact same immutable digest.
+    # The ORIGINAL "${image%:*}@digest" strip is only correct for a tag-ref
+    # input -- for a digest-ref input, the colon inside "sha256:..." itself
+    # would be misidentified as a tag separator, truncating the reference
+    # mid-digest ("repo@sha256@childdigest" instead of "repo@childdigest").
+    # This proves the fix by inspecting which reference the second
+    # (--format) call actually targeted, not just that SOME call succeeded.
+    fake_docker_multi_platform_success
+    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/ntp@sha256:pinnedpinnedpinnedpinnedpinnedpinnedpinnedpinnedpinnedpinnedpinn"
+    [ "$status" -eq 0 ]
+    [ "$output" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]
+    grep -qF 'ghcr.io/wiki-mod/lancache-ng/ntp@sha256:1111111111111111111111111111111111111111111111111111111111111111' "$call_log"
+    # Negative check: the truncated/malformed shape a regression would
+    # produce must NOT appear anywhere in the logged calls.
+    ! grep -qF '@sha256@sha256:' "$call_log"
+}
+
+@test "sif_image_revision (real docker branch): a plain tag-ref input still resolves its multi-platform child correctly (no regression)" {
+    fake_docker_multi_platform_success
+    run sif_image_revision "ghcr.io/wiki-mod/lancache-ng/ntp:nightly"
+    [ "$status" -eq 0 ]
+    [ "$output" = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef" ]
+    grep -qF 'ghcr.io/wiki-mod/lancache-ng/ntp@sha256:1111111111111111111111111111111111111111111111111111111111111111' "$call_log"
 }
 
 @test "sif_wait_for_fresh_base_image (real docker branch): a confirmed-absence failure is reported as confirmed absent, not the old ambiguous wording" {

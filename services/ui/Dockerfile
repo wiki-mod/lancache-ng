@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Multi-stage build for the Admin UI service. The builder stage compiles the
@@ -52,7 +53,21 @@ RUN set -eu; \
       arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
       *) echo "Unsupported architecture for musl cross-compilation target: $(dpkg --print-architecture)" >&2; exit 1; ;; \
     esac; \
-    rustup target list --installed | grep -qx "$(cat /tmp/musl-target)"; \
+    # Captured into a variable first, then grepped via a here-string
+    # (AG-VAL-032): a live `rustup target list --installed | grep -qx`
+    # pipe is the exact SIGPIPE-under-pipefail shape confirmed in a real CI
+    # failure for tools/build-tools/Dockerfile's identical check. This RUN
+    # block's own `set -eu` doesn't mention pipefail, but this stage is
+    # `FROM ${BUILD_TOOLS_IMAGE}` (see the top of this file), which sets
+    # `SHELL ["/bin/bash", "-o", "pipefail", "-c"]` -- Docker persists a
+    # base image's SHELL as that image's `Config.Shell`, and a child
+    # Dockerfile with no `SHELL` instruction of its own inherits that
+    # config as its default (confirmed empirically: a plain `FROM` with no
+    # override reports the parent's `Config.Shell`, not Docker's hardcoded
+    # `/bin/sh -c`). This RUN block was therefore already exploitable, not
+    # merely at risk of becoming exploitable later.
+    installed_musl_targets="$(rustup target list --installed)"; \
+    grep -qx "$(cat /tmp/musl-target)" <<<"${installed_musl_targets}"; \
     distcc_bin="$(command -v distcc)"; \
     distcc_real_bin="/usr/local/bin/distcc-real"; \
     cp "$distcc_bin" "$distcc_real_bin"; \

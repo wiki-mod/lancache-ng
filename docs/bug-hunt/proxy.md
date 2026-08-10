@@ -318,27 +318,22 @@ inside the cache path tree itself, so nothing ever writes to
 
 ## 9. Test-coverage gaps found by direct reading of the bats files
 
-- `tests/bats/proxy_known_good_snapshot.bats` only ever calls
-  `_proxy_validate_snapshot_or_rollback` with a **single** candidate file
-  (`$nginx_conf`). The real call site in `entrypoint.sh` always passes
-  **four**: `/etc/nginx/nginx.conf /etc/nginx/proxy-params.conf
-  "$SSL_MAP_FILE" "$STREAM_TARGET_FILE"`. The "incomplete snapshot" rejection
-  branch inside `kgs_snapshot_apply` (a snapshot missing one of several
-  requested basenames must be rejected wholesale, not partially applied) has
-  no test at all for the proxy adapter against a realistic multi-file
-  candidate set.
-- No test exercises `CA_DIR`/`ca.key`'s file permissions (see finding #1),
-  nor `CERT_DIR`'s `chmod 2750`/`0640` hardening itself — the correctly
-  implemented half of that same logic is also untested.
-- Confirmed (matches SoT-proxy.md's own note, re-verified by hand-tracing
-  the algorithm rather than trusting the claim): `_registrable_domain` has
-  no dedicated test for a compound-label public suffix (`co.uk`-style) or
-  for the PSL exception-rule interplay (`!city.kawasaki.jp`-style). Hand
-  trace of the algorithm for both cases looked logically correct, but that
-  is inference from reading, not from an executed test — a future edit
-  could regress either path silently with nothing to catch it.
-- `PROXY_SECURITY_MODE=strict` and `PROXY_ALLOWED_CLIENT_CIDRS` (the 403
-  code paths) still have no automated test anywhere (matches SoT).
+- `tests/bats/proxy_known_good_snapshot.bats` now covers incomplete
+  multi-file snapshots and the candidate-set migration. Its core fixtures
+  intentionally remain smaller than the production candidate set, and the
+  degraded-domain-row branch remains uncovered.
+- `tests/bats/proxy_cert_dir_permissions.bats` now drives the real CA and
+  certificate-directory hardening functions. It proves the explicit key-mode
+  correction with an insecure-key stub and records the requested group, so
+  the assertions depend on the production `chmod` and `chgrp` calls. The later
+  per-certificate `*.key` ownership and mode pass remains uncovered: this suite
+  does not exercise the `find "$CERT_DIR" ... -exec chmod 0640` command.
+- `tests/bats/proxy_registrable_domain.bats` now covers compound-label public
+  suffixes, bare-suffix rejection, and PSL wildcard/exception precedence.
+- `tests/bats/proxy_ssl_map_generation.bats` now isolates the strict/lazy host
+  map and client-CIDR map syntax. No automated request traverses either map's
+  HTTP/HTTPS denial path and asserts the resulting 403; the full-stack
+  simulation's denied client is rejected earlier by the stream ACL.
 
 **Severity assessment**: info (test-coverage gaps, collected per the
 methodology even though several are restatements of the SoT's own findings
@@ -370,7 +365,7 @@ range added too.
 
 ---
 
-## 11. `/healthz` has no access control at all (both `http.conf` and `https.conf`)
+## 11. ~~`/healthz` has no access control at all (both `http.conf` and `https.conf`)~~ FIXED by #1472
 
 ```nginx
 location = /healthz {
@@ -380,14 +375,22 @@ location = /healthz {
 }
 ```
 
-No `allow`/`deny`, unlike `/nginx_status`. Reachable by anyone who can route
+~~No `allow`/`deny`, unlike `/nginx_status`. Reachable by anyone who can route
 to the proxy at all, including the public internet if a port is ever
 forwarded. Low sensitivity (returns a static "ok"), but it is an
 unauthenticated fingerprint/probe surface for identifying a lancache-ng
 deployment from outside the LAN, and — unlike the `/ca.crt` endpoint
 proposal in `docs/install-ca-cert.md`, which explicitly discusses and
 accepts this exact trade-off — this one isn't discussed anywhere as an
-intentional decision.
+intentional decision.~~
+
+**Fix**: Both `conf.d/http.conf` and `conf.d/https.conf`'s `/healthz`
+locations now serve via `alias` (not a bare `return`, which runs in
+nginx's rewrite phase before `allow`/`deny` are evaluated) and carry an
+`allow 127.0.0.1/32; allow 172.16.0.0/12; deny all;` ACL, closing the
+unauthenticated fingerprint/probe surface for any client outside the
+container's own loopback and Docker bridge range. Regression test:
+`tests/bats/proxy_healthz_acl_and_hidden_headers.bats`.
 
 **Severity assessment**: info.
 
@@ -460,7 +463,7 @@ broken, flagged because no test covers it either way).
 
 ---
 
-## 15. Upstream `Cache-Control`/`Expires` are ignored for the proxy's own caching decision but not hidden from the client
+## 15. ~~Upstream `Cache-Control`/`Expires` are ignored for the proxy's own caching decision but not hidden from the client~~ FIXED by #1472
 
 ```nginx
 proxy_ignore_headers   Cache-Control Expires Vary Set-Cookie;
@@ -468,7 +471,7 @@ proxy_hide_header      Set-Cookie;
 proxy_hide_header      Vary;
 ```
 
-`Set-Cookie` and `Vary` are both ignored *and* hidden from the client
+~~`Set-Cookie` and `Vary` are both ignored *and* hidden from the client
 response. `Cache-Control`/`Expires` are ignored for nginx's own cache
 decision (so the proxy always caches per its own policy) but are **not**
 hidden — the client still receives the origin's original
@@ -478,7 +481,13 @@ means a client/game-launcher that itself honors a restrictive
 `Cache-Control` from the real origin could still choose not to reuse its
 own local disk cache, even though the LAN proxy is transparently serving
 the same bytes from its own cache underneath. Not confirmed to cause any
-concrete problem, just a design asymmetry worth having on record.
+concrete problem, just a design asymmetry worth having on record.~~
+
+**Fix**: `proxy-params.conf` now also hides `Cache-Control`/`Expires` from
+the client (`proxy_hide_header`), matching `Set-Cookie`/`Vary`, so
+"ignored for caching" and "hidden from the client" are consistent for all
+four headers. Regression test:
+`tests/bats/proxy_healthz_acl_and_hidden_headers.bats`.
 
 **Severity assessment**: info.
 
@@ -571,27 +580,25 @@ are appended after the verdicts.
    returns only `Dockerfile:35`; `proxy_cache_path ... use_temp_path=off`
    keeps temp files in the cache tree, so nothing writes there.
 
-9. **Test-coverage gaps** — CONFIRMED (info). `proxy_known_good_snapshot.bats`
-   only ever drives `_proxy_validate_snapshot_or_rollback` with a SINGLE
-   candidate file; the real call site passes four
-   (`nginx.conf proxy-params.conf $SSL_MAP_FILE $STREAM_TARGET_FILE`), so the
-   multi-file "incomplete snapshot" rejection branch (entrypoint 203-214) is
-   untested for the proxy adapter. No test asserts `CA_DIR`/`ca.key` or
-   `CERT_DIR` permissions. `_registrable_domain` has no `co.uk`/exception-rule
-   test — I hand-traced the algorithm for `foo.example.co.uk` (→ example.co.uk),
-   `city.kawasaki.jp` (exception → registrable), and plain `steamcontent.com`
-   and it is logically CORRECT; the gap is purely test coverage, not a bug.
-   `strict` mode and `PROXY_ALLOWED_CLIENT_CIDRS` 403 paths remain untested.
+9. **Test-coverage gaps** — PARTIALLY CLOSED (info). Dedicated Bats suites now
+   cover incomplete multi-file snapshots, CA-key and certificate-directory
+   hardening, PSL compound/exception behavior, and generated strict/lazy and
+   client-CIDR policy maps. The snapshot tests still use a reduced candidate
+   fixture and do not exercise the degraded-domain-row branch. The later
+   per-certificate `*.key` ownership/`0640` pass remains untested, as do the
+   HTTP/HTTPS request paths that consume either generated policy map and return
+   403; the full-stack simulation rejects its denied client at the stream ACL
+   before a request reaches those maps.
 
 10. **`/nginx_status` ACL IPv4-only** — CONFIRMED (info, latent). `http.conf:25`
     `allow 172.16.0.0/12`. No `enable_ipv6` on any deploy network (grep
     confirms), so container networking is IPv4-only today — not live. Also
     note `/nginx_status` exists only in `http.conf`, not `https.conf`.
 
-11. **`/healthz` has no access control** — CONFIRMED (info). Both
-    `http.conf:16` and `https.conf:25`; it's a `location =` block outside the
-    `$lancache_client_allowed` gate, reachable by anyone who can route to the
-    proxy. Static "ok", low sensitivity, undocumented as an intentional
+11. **`/healthz` has no access control** — CONFIRMED (info), **FIXED by #1472**.
+    Both `http.conf:16` and `https.conf:25`; it's a `location =` block outside
+    the `$lancache_client_allowed` gate, reachable by anyone who can route to
+    the proxy. Static "ok", low sensitivity, undocumented as an intentional
     decision (unlike the `/ca.crt` proposal).
 
 12. **install-ca-cert.md distribution is unimplemented** — CONFIRMED (info).
@@ -611,9 +618,10 @@ are appended after the verdicts.
     Asserted by config, exercised nowhere.
 
 15. **Upstream `Cache-Control`/`Expires` ignored but not hidden** — CONFIRMED
-    (info). `proxy-params.conf:16-18` ignores Cache-Control/Expires/Vary/
-    Set-Cookie for nginx's own cache decision and hides only Set-Cookie/Vary;
-    the origin's Cache-Control/Expires still reach the client verbatim. Design
+    (info), **FIXED by #1472**. `proxy-params.conf:16-18` ignores
+    Cache-Control/Expires/Vary/Set-Cookie for nginx's own cache decision and
+    hides only Set-Cookie/Vary; the origin's Cache-Control/Expires still
+    reach the client verbatim (fixed: now also hidden). Design
     asymmetry, no confirmed concrete failure.
 
 ## New findings (this sweep)

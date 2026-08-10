@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Standing guard (AG-VAL-029) for a confirmed real CI failure: a shell
@@ -25,8 +26,19 @@
 # independent of that governance rule.
 #
 # SCOPE: repo-wide, per issue #1377 -- every tracked shell script under
-# scripts/** and tools/**, plus setup.sh (the production installer). This
-# was originally scoped to only `tools/build-tools/Dockerfile` (the exact
+# scripts/**, tools/**, and services/**, every tools/*/Dockerfile* and
+# services/*/Dockerfile*, plus setup.sh (the production installer).
+# Dockerfiles are in scope for exactly the same reason shell scripts are: a
+# multi-stage service builder Dockerfile commonly runs under `set -o
+# pipefail` (`tools/build-tools/Dockerfile`'s confirmed real incident, see
+# above) and can pipe a producer into an early-exiting consumer inside a
+# single `RUN` instruction just as easily as a standalone script can.
+# `services/**` matters just as much as `scripts/**`/`tools/**`: a service
+# entrypoint commonly runs under its own `set -e`/`pipefail` and can pipe a
+# captured multi-line value (e.g. via `printf`) into an early-exiting
+# consumer such as `grep -qi`, the exact SIGPIPE-under-pipefail hazard this
+# guard exists to catch. This was originally scoped to only
+# `tools/build-tools/Dockerfile` (the exact
 # file the confirmed incident occurred in) because a first wide scan found
 # 41 preexisting instances of the same raw pattern across the codebase with
 # none individually reviewed yet, and fixing or reviewing all of them in
@@ -87,6 +99,8 @@ if ! tracked_scan_files="$(git ls-files -- \
   'scripts/*.sh' 'scripts/**/*.sh' \
   'tools/*.sh' 'tools/**/*.sh' \
   'tools/*/Dockerfile*' \
+  'services/*.sh' 'services/**/*.sh' \
+  'services/*/Dockerfile*' \
   'setup.sh')"; then
   printf '::error::check-pipefail-early-exit-grep: `git ls-files` itself failed -- is %s a real git work tree? Not treating this as a clean pass.\n' "$repo_root" >&2
   exit 1
@@ -115,11 +129,35 @@ fail() {
 for file in "${scan_files[@]}"; do
   [ -f "$file" ] || continue
 
-  # Scope to files that use pipefail at all -- an early-exiting consumer
-  # piped from a still-writing producer is harmless without it (the
-  # pipeline's exit status would just reflect the last command's own,
-  # SIGPIPE or not, and nothing downstream treats that as a failure).
-  if ! grep -qF 'pipefail' "$file"; then
+  # Scope to files that use pipefail directly or inherit the build-tools
+  # image's Bash/pipefail SHELL. Service builders commonly select that image
+  # through BUILD_TOOLS_IMAGE, so requiring the literal word "pipefail" in
+  # each child Dockerfile would miss the effective shell used by every RUN.
+  # A direct build-tools image reference is included for fixtures and for
+  # Dockerfiles that do not need the repository's overridable ARG pattern.
+  inherits_build_tools_pipefail=false
+  case "$file" in
+    services/*/Dockerfile*)
+      # `FROM` accepts optional `--flag`/`--flag=value` tokens (e.g.
+      # `--platform=$BUILDPLATFORM`) before the image reference -- without
+      # skipping over those, a multi-platform builder's own `FROM --platform=
+      # ... ${BUILD_TOOLS_IMAGE} AS builder` line would never match, silently
+      # exempting that stage from this guard despite genuinely inheriting
+      # build-tools' pipefail SHELL. Matched case-insensitively (`-i`):
+      # Dockerfile instruction names are themselves case-insensitive (Docker
+      # accepts `from`/`From`/`FROM` identically), so a case-sensitive-only
+      # match would miss a valid, differently-cased FROM line. Leading
+      # `[[:space:]]*` allows optional indentation before the instruction,
+      # which the Dockerfile format reference documents as ignored.
+      if grep -Eqi '^[[:space:]]*FROM[[:space:]]+(--[^[:space:]]+[[:space:]]+)*([^[:space:]]*build-tools([:@][^[:space:]]+)?|\$\{?BUILD_TOOLS_IMAGE\}?)($|[[:space:]])' "$file"; then
+        inherits_build_tools_pipefail=true
+      fi
+      ;;
+  esac
+
+  # An early-exiting consumer piped from a still-writing producer is harmless
+  # without pipefail: the pipeline status only reflects the consumer.
+  if ! grep -qF 'pipefail' "$file" && [ "$inherits_build_tools_pipefail" != true ]; then
     continue
   fi
 
@@ -142,7 +180,7 @@ for file in "${scan_files[@]}"; do
     case "$line_content" in
       *'# pipefail-safe:'*) continue ;;
     esac
-    fail "$file:$line_num: pipes a live command into an early-exiting consumer (grep -q/-m, head, or sed -n) in a file that uses pipefail -- this can fail with an unrelated-looking SIGPIPE (exit 141) if the producer is still writing when the consumer exits. Capture the producer's output into a variable first, then apply the consumer to the variable (e.g. via a here-string), or mark the line reviewed-safe with a trailing '# pipefail-safe: <reason>' comment if the producer is provably single-line/already-finished. Line: $trimmed"
+    fail "$file:$line_num: pipes a live command into an early-exiting consumer (grep -q/-m, head, or sed -n) in a file that uses or inherits pipefail -- this can fail with an unrelated-looking SIGPIPE (exit 141) if the producer is still writing when the consumer exits. Capture the producer's output into a variable first, then apply the consumer to the variable (e.g. via a here-string), or mark the line reviewed-safe with a trailing '# pipefail-safe: <reason>' comment if the producer is provably single-line/already-finished. Line: $trimmed"
   done < <(grep -nE "$pattern" "$file" || true)
 done
 

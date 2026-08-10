@@ -208,16 +208,42 @@ ip_ssl="127.0.${ip_octet}.3"
 # publishes ports bound to BOTH ${IP_STANDARD} and ${IP_SSL:-127.0.0.1} --
 # the latter unconditionally, even when this script's own fresh-install
 # reply sequence leaves SSL mode disabled (so setup.sh's wizard never asks
-# for or writes an SSL IP into .env at all). Exporting both here, rather
-# than relying solely on whatever the wizard happens to write, means every
-# `docker compose` invocation later in this script resolves both
-# consistently to this run's own unique addresses (shell-exported variables
-# take priority over `--env-file` for Compose's `${VAR}` interpolation) --
-# closing the same fixed-127.0.0.1 collision axis for IP_SSL that switching
-# IP_STANDARD off its own historical fixed value (see the retry loop's
-# comment further below) already closed for the standard address.
+# for or writes an SSL IP into .env at all).
+#
+# CORRECTED (issue #1415 follow-up, real CI failure confirmed 2026-08-07,
+# five identical `Bind for 127.0.0.1:80` failures across all five retry
+# attempts on PR #1463's run): exporting IP_SSL here does NOT, by itself,
+# close the IP_SSL collision axis the way the paragraph above used to claim.
+# setup.sh's own fresh-install wizard unconditionally does `IP_SSL=""` the
+# moment SSL mode is declined (setup.sh's own "Enable SSL mode?" handling),
+# and that reassignment keeps the shell's export attribute (verified: an
+# inherited-exported variable stays exported across a plain reassignment),
+# so the `docker compose up` setup.sh itself runs internally a few dozen
+# lines later inherits IP_SSL="" -- overwriting this export from inside the
+# very process tree docker-compose.yml's `${IP_SSL:-127.0.0.1}` fallback then
+# sees. Even if that overwrite did not happen, the .env file setup.sh writes
+# would carry the identical empty value for the same declined-SSL reason, so
+# Compose's `--env-file` fallback would resolve to the shared literal anyway
+# -- the collision is not a shell-export-priority bug, it is that "SSL
+# declined" has exactly one blank value today, and Compose's `:-` treats
+# blank and unset identically. IP_SSL_BIND_FALLBACK below is a SEPARATE
+# variable name setup.sh's wizard never assigns and never writes to .env, so
+# it survives untouched through the wizard's blanking of IP_SSL --
+# deploy/quickstart/docker-compose.yml's ports: entries now read
+# `${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}`, so a real install (which
+# never sets this variable) is completely unaffected, while this script's own
+# run gets its own already-derived, per-run-unique address instead of the
+# shared 127.0.0.1 every concurrent SSL-declined run on the host would
+# otherwise collide on. Confirmed on a real runner host via `docker compose
+# config` (not just static YAML reading, per AG-CI-015/AG-CI-017) that this
+# project's pinned Compose version resolves the nested `${A:-${B:-literal}}`
+# form correctly, including when $IP_SSL is set-but-empty rather than unset.
 export IP_STANDARD="$ip_standard"
 export IP_SSL="$ip_ssl"
+# See the long comment above -- this is the variable that actually survives
+# setup.sh's wizard blanking IP_SSL when SSL mode is declined, which is what
+# this script's fresh-install reply sequence always does.
+export IP_SSL_BIND_FALLBACK="$ip_ssl"
 
 cleanup() {
     local status=$?
@@ -472,6 +498,13 @@ while true; do
         ip_ssl="127.0.${ip_octet}.3"
         export IP_STANDARD="$ip_standard"
         export IP_SSL="$ip_ssl"
+        # Issue #1415 (follow-up): must move in lockstep with ip_ssl above --
+        # see the long comment on this variable's first export, further up
+        # this file, for why IP_SSL alone (re-exported just above) does not
+        # survive setup.sh's wizard blanking it once SSL mode is declined,
+        # and why this separate name is what actually reaches
+        # deploy/quickstart/docker-compose.yml's port-fallback expression.
+        export IP_SSL_BIND_FALLBACK="$ip_ssl"
         fresh_install_log="$repo_root/.setup-cli-simulation-tmp/fresh-install-attempt.log"
         attempt=$((attempt + 1))
         sleep 10

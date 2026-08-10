@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI domain routes. Handles CDN domain lists, SSL wildcard scope, and
@@ -6,7 +7,7 @@
 use crate::{AppState, docker_client};
 use axum::extract::{Form, Query, State};
 use axum::http::HeaderMap;
-use axum::response::{Html, Redirect};
+use axum::response::{IntoResponse, Redirect};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::fs;
@@ -115,6 +116,27 @@ fn domains_page_error_message(code: &str) -> Option<&'static str> {
              -- this toggle would have no effect. Configure DDNS_TSIG_KEY first (see \
              docs/threat-model.md), then try again.",
         ),
+        // routes/dns_snapshots.rs::rollback_zone_snapshot uses this same
+        // mechanism for the specific case where the rollback request either
+        // never reached nats-subscriber, or was rejected outright (non-2xx)
+        // -- see that function's own doc comment for why a softer partial
+        // failure (rollback applied, post-rollback cache-flush degraded)
+        // still only logs server-side rather than using this banner too.
+        "zone_rollback_failed" => Some(
+            "The zone rollback did not complete: nats-subscriber rejected the request outright \
+             (a non-2xx response). No known-good snapshot was applied. Check the DNS service \
+             logs for the exact reason, then try again.",
+        ),
+        // Distinct from zone_rollback_failed above: a transport-level failure (timeout,
+        // connection reset) means the outcome is genuinely unknown, not a confirmed
+        // non-application -- nats-subscriber may have already applied the PATCH before the
+        // response was lost. Retrying blindly on this message risks a duplicate rollback.
+        "zone_rollback_unknown" => Some(
+            "The zone rollback request timed out or the connection was lost before a result \
+             could be confirmed. It may have already been applied on the DNS service side \
+             despite this uncertain result -- check the DNS service logs to confirm the actual \
+             outcome before retrying, to avoid an unnecessary duplicate rollback.",
+        ),
         _ => None,
     }
 }
@@ -123,7 +145,7 @@ pub async fn domains_page(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
     Query(query): Query<DomainsPageQuery>,
-) -> Html<String> {
+) -> impl IntoResponse {
     let dns_domains = read_domain_entries(&state.config.cdn_domains_file);
 
     let lan_records = fetch_lan_records(&state).await;
@@ -662,7 +684,20 @@ fn ddns_tsig_key_file_is_real(path: &Path) -> bool {
 }
 
 const MIN_TTL: u32 = 1;
-const MAX_TTL: u32 = u32::MAX;
+// RFC 2181 SS8 specifies the resource-record TTL as "an unsigned number,
+// with a minimum value of 0, and a maximum value of 2147483647" (2^31-1) --
+// the field is transmitted in the less significant 31 bits of its 32-bit
+// wire slot, with the most significant (sign) bit fixed at zero; RFC 2181
+// SS8 directs a receiver to treat any value with that bit set as zero.
+// `u32::MAX` (4294967295) has that bit set, so accepting it here would let
+// an operator submit a TTL a compliant resolver is specified to reinterpret
+// as 0 (cache nothing) rather than the huge value the operator actually
+// typed -- silently wrong, not merely oversized. PowerDNS's own zone API
+// (doc.powerdns.com/authoritative/http-api/zone.html) documents `ttl` only
+// as a plain integer field with no additional upper bound of its own, so
+// RFC 2181's protocol-level ceiling is the correct, non-arbitrary bound to
+// enforce here, not an invented one.
+const MAX_TTL: u32 = 2_147_483_647;
 const LINUX_ERRNO_EBUSY: i32 = 16;
 
 fn normalize_record_type(record_type: &str) -> Option<&'static str> {
@@ -746,10 +781,62 @@ fn is_valid_lan_name_for_delete(name: &str) -> bool {
     is_valid_dns_fqdn_allow_underscore(name) && is_lan_zone_name(name)
 }
 
+// This must have an upper bound: without one, an operator could submit a
+// TXT value with no real ceiling at all. Confirmed against PowerDNS's own
+// documented TXT behavior (doc.powerdns.com/authoritative/appendices/types.html): "Text is
+// stored plainly, PowerDNS understands content not enclosed in quotes,"
+// and "When a TXT record is longer than 255 characters/bytes ... PowerDNS
+// will cut up the content into 255 character/byte chunks for transmission"
+// -- i.e. PowerDNS itself has no 255-byte content limit at the API layer
+// (that 255-byte figure is a wire-format <character-string> limit PowerDNS
+// already handles by auto-chunking, not a limit this validator needs to
+// enforce), and its own zone API docs state no separate content-length cap.
+//
+// The real, protocol-level ceiling is not RDLENGTH alone: it is the DNS
+// message itself, since RFC 1035 SS4.2.2 (TCP) carries each message behind
+// its own 16-bit length prefix, capping any single DNS message -- header,
+// question, and every answer's RDATA included -- at 65535 bytes total. A
+// TXT record's wire RDATA is one or more <character-string>s (RFC 1035
+// SS3.3/3.3.14), each a 1-byte length prefix followed by up to 255 content
+// bytes, so a C-byte content value costs C content bytes PLUS
+// ceil(C / 255) length-prefix bytes on the wire -- but that RDATA does not
+// travel alone. A response carrying this record also needs, at minimum:
+// a 12-byte header (RFC 1035 SS4.1.1); the question section that produced
+// this answer, whose QNAME can be as long as this validator's own
+// `is_valid_dns_fqdn`/`is_lan_zone_name` name-length ceiling allows
+// (253 presentation-form characters, i.e. up to 255 wire-format bytes per
+// RFC 1035 SS3.1/3.3.14 -- this file's own `is_valid_dns_fqdn_impl`'s
+// `name.len() > 253` check), plus 2-byte QTYPE and 2-byte QCLASS; and the
+// answer's own resource-record framing -- a compressed NAME pointer
+// (RFC 1035 SS4.1.4, 2 bytes, the normal case whenever the answer name
+// matches the question name), 2-byte TYPE, 2-byte CLASS, 4-byte TTL, and
+// the 2-byte RDLENGTH field itself; and the 11-byte, option-free OPT record
+// that RFC 6891 requires an EDNS responder to include when the request
+// contains one. Conservatively for the longest name
+// this validator allows (not per-request name-dependent, so this stays a
+// compile-time constant): 12 (header) + (255 + 2 + 2) (question) +
+// (2 + 2 + 2 + 4 + 2) (answer frame) + 11 (OPT) = 294 bytes of non-RDATA
+// overhead, leaving 65535 - 294 = 65241 bytes for RDATA. Solving
+// C + ceil(C / 255) <= 65241 for the largest integer C gives 64986
+// (64986 + ceil(64986 / 255) = 64986 + 255 = 65241, and one byte more,
+// 64987, needs the same 255 prefixes for 65242 -- one over). 64986 is
+// therefore the real maximum content length this validator can accept for
+// any allowed record name, rather than the 65279-byte content bound that
+// accounts only for RDLENGTH and its TXT chunk prefixes while omitting the
+// surrounding message that must also carry this record home. Deliberately
+// not the 255-byte figure some callers might expect: this module's own
+// existing test
+// (validates_supported_lan_record_edge_cases) already asserts a 512-byte
+// TXT content is valid, which is correct given PowerDNS's own documented
+// auto-chunking behavior above.
+const MAX_TXT_CONTENT_BYTES: usize = 64_986;
+
 fn is_valid_txt_content(content: &str) -> bool {
     let content = content.trim();
 
-    !content.is_empty() && !content.chars().any(char::is_control)
+    !content.is_empty()
+        && content.len() <= MAX_TXT_CONTENT_BYTES
+        && !content.chars().any(char::is_control)
 }
 
 fn is_valid_mx_content(content: &str) -> bool {
@@ -1245,6 +1332,50 @@ fn write_domain_file_in_place(path: &Path, content: &str) -> anyhow::Result<()> 
     Ok(())
 }
 
+// Response-interpretation decision logic, pulled out of fetch_lan_records
+// below so it has a unit test independent of a live PowerDNS connection.
+// The HTTP status must be checked before trusting the body: a non-2xx
+// response (e.g. the "lan" zone not existing yet, an auth failure, or
+// PowerDNS being briefly unavailable) commonly still carries a JSON error
+// body (`{"error": "..."}`) that would parse successfully as `Value` but
+// has no "rrsets" key -- silently falling through to the same empty
+// `vec![]` this function already returns for a genuinely empty, healthy
+// zone. An operator would see the LAN records table simply empty, with no
+// way to tell "there really are no records" apart from "PowerDNS is
+// unreachable/misconfigured and every one of your manual records failed to
+// load." Checking the status first (mirroring `patch_reverse_zone`'s own
+// status check above) restores that distinction via a log line, matching
+// every other PowerDNS response this module already logs on failure.
+fn parse_lan_records_response(
+    status: reqwest::StatusCode,
+    body: Result<serde_json::Value, String>,
+) -> Vec<RRset> {
+    if !status.is_success() {
+        tracing::error!(
+            %status,
+            "failed to fetch LAN records: PowerDNS zone GET for \"lan\" returned a non-success status"
+        );
+        return vec![];
+    }
+
+    match body {
+        Ok(data) => {
+            if let Some(rrsets) = data.get("rrsets").and_then(|v| v.as_array()) {
+                rrsets
+                    .iter()
+                    .filter_map(|r| serde_json::from_value(r.clone()).ok())
+                    .collect()
+            } else {
+                vec![]
+            }
+        }
+        Err(e) => {
+            tracing::error!("failed to parse LAN records response body: {e}");
+            vec![]
+        }
+    }
+}
+
 async fn fetch_lan_records(state: &AppState) -> Vec<RRset> {
     let url = format!(
         "{}/api/v1/servers/localhost/zones/lan",
@@ -1258,28 +1389,42 @@ async fn fetch_lan_records(state: &AppState) -> Vec<RRset> {
         .send()
         .await
     {
-        Ok(resp) => match resp.json::<serde_json::Value>().await {
-            Ok(data) => {
-                if let Some(rrsets) = data.get("rrsets").and_then(|v| v.as_array()) {
-                    rrsets
-                        .iter()
-                        .filter_map(|r| serde_json::from_value(r.clone()).ok())
-                        .collect()
-                } else {
-                    vec![]
-                }
+        Ok(resp) => {
+            let status = resp.status();
+            // Check the status before awaiting the body: parse_lan_records_response
+            // already discards the body entirely for a non-success status, so
+            // awaiting resp.json() first would mean a slow or non-terminating
+            // error response (e.g. a hung upstream on a 5xx) blocks this request
+            // until the HTTP client's own timeout, even though the outcome is
+            // already fully determined by the status alone.
+            if !status.is_success() {
+                return parse_lan_records_response(status, Err(String::new()));
             }
-            Err(_) => vec![],
-        },
-        Err(_) => vec![],
+            let body = resp
+                .json::<serde_json::Value>()
+                .await
+                .map_err(|e| e.to_string());
+            parse_lan_records_response(status, body)
+        }
+        Err(e) => {
+            tracing::error!("failed to fetch LAN records from PowerDNS: {e}");
+            vec![]
+        }
     }
 }
 
+// The bare zone-root name "lan" needs its own explicit case: it doesn't end
+// with '.' and doesn't end with the four-character suffix ".lan" (it is
+// only three characters), so without the `trimmed == "lan"` check below it
+// falls through to the generic label branch and becomes "lan.lan." instead
+// of the correct zone-root FQDN "lan.". The `trimmed == "lan"` case must be
+// checked explicitly alongside the ".lan"-suffix case; every other bare
+// label (e.g. "www") is unaffected and still correctly becomes "www.lan.".
 fn normalize_lan_name(name: &str) -> String {
     let trimmed = name.trim().to_lowercase();
     if trimmed.ends_with('.') {
         trimmed
-    } else if trimmed.ends_with(".lan") {
+    } else if trimmed == "lan" || trimmed.ends_with(".lan") {
         format!("{}.", trimmed)
     } else {
         format!("{}.lan.", trimmed)
@@ -1688,6 +1833,104 @@ mod tests {
         assert!(validate_lan_record("api.lan.", "SRV", "0 0 443 api.lan.", 300).is_none());
     }
 
+    // RFC 2181 SS8 caps a real, RFC-compliant TTL at 2^31-1 (2147483647),
+    // not u32::MAX -- a value with the sign bit set is specified to be
+    // reinterpreted as 0 by a compliant resolver. Locks the exact boundary
+    // rather than just "some large value is rejected."
+    #[test]
+    fn ttl_upper_bound_matches_rfc_2181_not_u32_max() {
+        assert_eq!(MAX_TTL, 2_147_483_647);
+        assert!(validate_lan_record("api.lan.", "A", "192.0.2.10", MAX_TTL).is_some());
+        assert!(validate_lan_record("api.lan.", "A", "192.0.2.10", MAX_TTL + 1).is_none());
+        assert!(validate_lan_record("api.lan.", "A", "192.0.2.10", u32::MAX).is_none());
+    }
+
+    // Locks MAX_TXT_CONTENT_BYTES (64986, the chunking-overhead-, EDNS-OPT-,
+    // and surrounding-DNS-message-framing-adjusted RFC 1035 SS4.2.2
+    // 65535-byte message ceiling -- see that constant's own header comment
+    // for the exact arithmetic) as is_valid_txt_content's real boundary, while
+    // confirming the pre-existing 512-byte case (validated above via
+    // PowerDNS's own documented TXT auto-chunking) still passes.
+    #[test]
+    fn txt_content_upper_bound_matches_message_ceiling() {
+        assert!(is_valid_txt_content(&"x".repeat(MAX_TXT_CONTENT_BYTES)));
+        assert!(!is_valid_txt_content(
+            &"x".repeat(MAX_TXT_CONTENT_BYTES + 1)
+        ));
+        // Still rejects the pre-existing empty/control-character cases.
+        assert!(!is_valid_txt_content(""));
+        assert!(!is_valid_txt_content("has\ncontrol\tchars"));
+    }
+
+    // The bare zone-root name "lan" must normalize to "lan.", not
+    // "lan.lan." -- see normalize_lan_name's own header comment for why
+    // this specific label needs an explicit case. Every other shape stays
+    // unaffected.
+    #[test]
+    fn normalize_lan_name_handles_the_bare_zone_root() {
+        assert_eq!(normalize_lan_name("lan"), "lan.");
+        assert_eq!(normalize_lan_name("LAN"), "lan.");
+        assert_eq!(normalize_lan_name("  lan  "), "lan.");
+        // Unaffected shapes: already-FQDN, already-.lan-suffixed, and a
+        // bare label needing the full ".lan." suffix appended.
+        assert_eq!(normalize_lan_name("lan."), "lan.");
+        assert_eq!(normalize_lan_name("printer.lan"), "printer.lan.");
+        assert_eq!(normalize_lan_name("printer"), "printer.lan.");
+    }
+
+    // A non-success HTTP status must short-circuit to an empty result
+    // without ever looking at the body, even when that body happens to
+    // parse as valid JSON with no "rrsets" key -- otherwise a real PowerDNS
+    // error is indistinguishable from a genuinely empty zone.
+    #[test]
+    fn parse_lan_records_response_rejects_non_success_status_regardless_of_body() {
+        let error_body: serde_json::Value = serde_json::json!({"error": "Not Found"});
+        assert!(
+            parse_lan_records_response(reqwest::StatusCode::NOT_FOUND, Ok(error_body)).is_empty()
+        );
+    }
+
+    // A success status with a genuinely empty zone (no "rrsets" key, or an
+    // empty array) must still correctly return no records, not be
+    // mistaken for a fetch failure.
+    #[test]
+    fn parse_lan_records_response_returns_empty_for_a_real_empty_zone() {
+        let empty_zone: serde_json::Value = serde_json::json!({"rrsets": []});
+        assert!(parse_lan_records_response(reqwest::StatusCode::OK, Ok(empty_zone)).is_empty());
+    }
+
+    // A success status with real rrsets data must still parse and return
+    // the records -- the status check must not swallow the success path
+    // it needs to let through unchanged.
+    #[test]
+    fn parse_lan_records_response_parses_real_rrsets_on_success() {
+        let body: serde_json::Value = serde_json::json!({
+            "rrsets": [
+                {
+                    "name": "printer.lan.",
+                    "type": "A",
+                    "ttl": 300,
+                    "records": [{"content": "192.0.2.50", "disabled": false}]
+                }
+            ]
+        });
+        let records = parse_lan_records_response(reqwest::StatusCode::OK, Ok(body));
+        assert_eq!(records.len(), 1);
+        assert_eq!(records[0].name, "printer.lan.");
+        assert_eq!(records[0].records[0].content, "192.0.2.50");
+    }
+
+    // A success status whose body failed to parse as JSON at all (a
+    // malformed/truncated response) must also return empty rather than
+    // panicking.
+    #[test]
+    fn parse_lan_records_response_returns_empty_on_body_parse_error() {
+        assert!(
+            parse_lan_records_response(reqwest::StatusCode::OK, Err("truncated body".to_string()))
+                .is_empty()
+        );
+    }
+
     #[test]
     fn allows_deleting_existing_lan_rrsets_outside_add_whitelist() {
         assert_eq!(normalize_delete_record_type("srv"), Some("SRV".to_string()));
@@ -1784,6 +2027,16 @@ mod tests {
                  wildcard/subdomain-only scope is fine (e.g. \".steamcontent.com\")."
             )
         );
+        // The codes rollback_zone_snapshot uses must resolve to real, fixed
+        // messages too, following the same allowlist contract as every
+        // other code -- and must be genuinely distinct from each other,
+        // since one claims a confirmed non-application and the other an
+        // unknown outcome.
+        let confirmed_failed = domains_page_error_message("zone_rollback_failed");
+        let unknown = domains_page_error_message("zone_rollback_unknown");
+        assert!(confirmed_failed.is_some());
+        assert!(unknown.is_some());
+        assert_ne!(confirmed_failed, unknown);
         assert_eq!(domains_page_error_message("unknown_code"), None);
         assert_eq!(domains_page_error_message(""), None);
         assert_eq!(

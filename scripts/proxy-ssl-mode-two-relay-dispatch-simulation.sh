@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end simulation for services/proxy's SSL-mode stream-level SNI
@@ -165,6 +166,23 @@ docker run -d --name "$proxy_container" --network "$network_name" \
     "$proxy_image" >/dev/null
 wait_for_tcp "$proxy_container" 443
 
+# Started here, ahead of the depth-1/depth-2 TLS probes below: PROXY_ALLOWED_
+# CLIENT_CIDRS is scoped to allow_ip/32 from the proxy container's own
+# startup above, and entrypoint.sh's "2b." stream-level ACL gates ALL
+# external connections to this container's :443 dispatcher, including these
+# probes -- an ephemeral, arbitrary-IP throwaway container is not a usable
+# TLS client against this fixture; only a client whose source address is
+# actually inside PROXY_ALLOWED_CLIENT_CIDRS can reach ssl_preread at all.
+# client_deny_container is also started here, alongside
+# client_allow_container, for the same fixed-topology reason even though its
+# own first use is still later below.
+echo "== Starting two fixed-IP clients to prove real client-IP preservation through the two-relay chain =="
+docker run -d --name "$client_allow_container" --network "$network_name" --ip "$allow_ip" \
+    "$build_tools_image" sleep 120 >/dev/null
+docker run -d --name "$client_deny_container" --network "$network_name" --ip "$deny_ip" \
+    "$build_tools_image" sleep 120 >/dev/null
+sleep 1
+
 echo "== Verifying the generated dispatch map routes depth-1 to the MITM relay and depth-2 to the passthrough relay (regex-anchored, not nginx 'hostnames' mode) =="
 dispatch_map="$(docker exec "$proxy_container" cat /etc/nginx/stream.d/01-ssl-dispatch.conf)"
 if ! grep -qE '"~\^\[\^\.\]\+\\\.example\\\.net\$"\s+127\.0\.0\.1:9445;' <<<"$dispatch_map"; then
@@ -182,7 +200,13 @@ echo "OK: dispatch map correctly separates depth-1 (MITM relay) from depth>=2 (p
 echo "== Real TLS handshake: depth-1 SNI (one.example.net) must terminate at the internal MITM listener with OUR generated cert =="
 ca_crt="$(docker exec "$proxy_container" cat /etc/nginx/ssl/ca/ca.crt)"
 printf '%s' "$ca_crt" > "$work_dir/ca.crt"
-depth1_out="$(docker run --rm --network "$network_name" -v "$work_dir/ca.crt:/ca.crt:ro" "$build_tools_image" bash -c \
+docker cp "$work_dir/ca.crt" "$client_allow_container:/ca.crt" >/dev/null
+# Run via `docker exec` against the fixed-IP allow-listed client, not an
+# ephemeral `docker run --rm` container: the latter would get an arbitrary
+# IP the outer dispatcher's stream-level ACL (scoped to allow_ip/32 only)
+# rejects before ssl_preread ever runs, failing this handshake for a reason
+# unrelated to what this probe is actually proving.
+depth1_out="$(docker exec "$client_allow_container" bash -c \
     "timeout 10 openssl s_client -connect ${proxy_container}:443 -servername one.example.net -CAfile /ca.crt -verify_hostname one.example.net -verify_return_error < /dev/null 2>&1" || true)"
 if ! grep -q '^Verify return code: 0 (ok)' <<<"$depth1_out"; then
     echo "::error::Expected depth-1 SNI 'one.example.net' to handshake and verify cleanly against our own CA (MITM path). Full openssl output:" >&2
@@ -192,7 +216,7 @@ fi
 echo "OK: depth-1 SNI terminates at the MITM relay with our own CA-signed cert, hostname-verified."
 
 echo "== Real TLS handshake: depth-2 SNI (two.levels.example.net) must be blind-forwarded to the REAL distinct backend, not our cert =="
-depth2_subject="$(docker run --rm --network "$network_name" "$build_tools_image" bash -c \
+depth2_subject="$(docker exec "$client_allow_container" bash -c \
     "echo | timeout 10 openssl s_client -connect ${proxy_container}:443 -servername two.levels.example.net 2>/dev/null | openssl x509 -noout -subject 2>/dev/null" || true)"
 if [[ -z "$depth2_subject" ]]; then
     echo "::error::Handshake for depth-2 SNI 'two.levels.example.net' produced no certificate at all (dead backend or passthrough relay failure) -- test-infrastructure failure, not evidence either way." >&2
@@ -205,13 +229,6 @@ if [[ "$depth2_subject" != "subject=CN=backend-two-real" ]]; then
 fi
 echo "OK: depth-2 SNI is blind-forwarded to the real distinct backend ($depth2_subject), not a mismatched local cert -- this is exactly the connectivity gap #1276/#1322 closes."
 
-echo "== Starting two fixed-IP clients to prove real client-IP preservation through the two-relay chain =="
-docker run -d --name "$client_allow_container" --network "$network_name" --ip "$allow_ip" \
-    "$build_tools_image" sleep 120 >/dev/null
-docker run -d --name "$client_deny_container" --network "$network_name" --ip "$deny_ip" \
-    "$build_tools_image" sleep 120 >/dev/null
-sleep 1
-
 proxy_ip="$(docker inspect -f "{{(index .NetworkSettings.Networks \"${network_name}\").IPAddress}}" "$proxy_container")"
 
 echo "== Allowed client (${allow_ip}, inside PROXY_ALLOWED_CLIENT_CIDRS) requesting the MITM-covered host must NOT be blocked by \$lancache_client_allowed =="
@@ -222,22 +239,43 @@ if [[ "$allow_status" == "403" ]]; then
 fi
 echo "OK: allowed client (${allow_ip}) was not blocked by the geo allowlist (HTTP $allow_status -- any non-403 proves \$remote_addr correctly matched PROXY_ALLOWED_CLIENT_CIDRS; the exact non-403 code depends on this script's own throwaway backend's upstream TLS trust, not the fix under test)."
 
-echo "== Denied client (${deny_ip}, outside PROXY_ALLOWED_CLIENT_CIDRS) requesting the same MITM-covered host MUST be blocked with HTTP 403 =="
+echo "== Denied client (${deny_ip}, outside PROXY_ALLOWED_CLIENT_CIDRS) requesting the same MITM-covered host MUST be rejected at the stream level, before any TLS handshake or HTTP response =="
+# entrypoint.sh's "2b." enforces PROXY_ALLOWED_CLIENT_CIDRS via
+# ngx_stream_access_module's plain allow/deny at the outer :443 dispatcher,
+# checked before ssl_preread even runs -- not the http-context
+# $lancache_client_allowed geo variable, which cannot cross the http{}/
+# stream{} boundary and would require a completed TLS handshake first
+# regardless. A denied connection is therefore refused/reset at the TCP
+# level and never produces any HTTP response at all: curl's own documented
+# behavior for "-w '%{http_code}'" is to print the literal string "000"
+# when no HTTP response was received, which is what this assertion checks
+# for -- not "403" (that status code implies a completed handshake that
+# never happens for a denied client at this dispatch point).
 deny_status="$(docker exec "$client_deny_container" curl -s -o /dev/null -w '%{http_code}' -k --resolve "one.example.net:443:${proxy_ip}" "https://one.example.net/" --max-time 10 || true)"
-if [[ "$deny_status" != "403" ]]; then
-    echo "::error::Expected the denied client (${deny_ip}) to receive HTTP 403 from \$lancache_client_allowed, got: $deny_status -- either the geo check isn't running, or \$remote_addr does not reflect the real client IP through the two-relay chain." >&2
+if [[ "$deny_status" != "000" ]]; then
+    echo "::error::Expected the denied client (${deny_ip}) to be rejected at the TCP/stream level (curl status '000', no HTTP response received at all), got HTTP status: $deny_status -- either the stream-level ACL isn't running, or \$remote_addr does not reflect the real client IP through the two-relay chain." >&2
     exit 1
 fi
-echo "OK: denied client (${deny_ip}) correctly received HTTP 403 -- \$remote_addr through the two-relay chain reflects the REAL client IP, not the relay's own loopback address (confirms the entire point of the symmetric two-relay design)."
+echo "OK: denied client (${deny_ip}) was rejected at the stream level before any TLS handshake or HTTP response -- proves \$remote_addr through the two-relay chain reflects the REAL client IP (confirms the entire point of the symmetric two-relay design), and that the stream-level ACL takes effect ahead of ssl_preread."
 
-echo "== Confirming the access log itself shows the real client IPs, not 127.0.0.1 (the relay's own loopback) =="
+echo "== Confirming the access log itself shows the allowed client's real IP, not 127.0.0.1 (the relay's own loopback) =="
+# The denied client is deliberately NOT expected here: its connection is
+# rejected at the outer stream dispatcher before ever reaching the MITM
+# relay's own HTTP-layer vhost that writes this log, so it never gets an
+# access-log entry at all -- a TCP-level rejection point, not an HTTP-layer
+# 403, and therefore no log line to find.
 access_log="$(docker exec "$proxy_container" cat /var/log/nginx/access.log)"
-if ! grep -q "^${allow_ip} " <<<"$access_log" || ! grep -q "^${deny_ip} " <<<"$access_log"; then
-    echo "::error::Expected the proxy's own access log to show both real client IPs (${allow_ip}, ${deny_ip}), not the relay's loopback address. Access log:" >&2
+if ! grep -q "^${allow_ip} " <<<"$access_log"; then
+    echo "::error::Expected the proxy's own access log to show the allowed client's real IP (${allow_ip}), not the relay's loopback address. Access log:" >&2
     echo "$access_log" >&2
     exit 1
 fi
-echo "OK: access log shows the real client IPs directly."
+if grep -q "^${deny_ip} " <<<"$access_log"; then
+    echo "::error::Denied client (${deny_ip}) unexpectedly reached the HTTP-layer access log -- it should have been rejected earlier, at the stream-level ACL, before ever reaching the MITM relay's vhost. Access log:" >&2
+    echo "$access_log" >&2
+    exit 1
+fi
+echo "OK: access log shows the allowed client's real IP directly, and correctly has no entry at all for the denied client (rejected before the HTTP layer)."
 
 echo "== Healthcheck: dedicated non-PROXY-protocol port (8445) must work; the PROXY-protocol-only internal MITM port (8444) must NOT accept a plain connection =="
 if ! docker exec "$proxy_container" curl -ksf https://127.0.0.1:8445/healthz >/dev/null; then

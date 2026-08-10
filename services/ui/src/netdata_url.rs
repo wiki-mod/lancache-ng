@@ -19,6 +19,41 @@ use std::collections::HashMap;
 
 const ALLOWED_NETDATA_ENDPOINTS: &[&str] = &["data", "charts"];
 
+/// Fallback Content-Type used only when the upstream Netdata response did
+/// not send one at all. #849 bug-hunt finding observability.md#11:
+/// `routes/netdata_proxy.rs::proxy` used to hardcode this on every response
+/// regardless of the real `format=` query parameter (`json`/`csv`/`html`/
+/// etc., both allowlisted endpoints support it) -- harmless while the only
+/// real caller (`stats.html`'s `fetchChart`) always requests `format=json`,
+/// but a manual `?format=csv` request (allowed by the allowlist, since only
+/// the endpoint *name* is restricted) would receive CSV bytes mislabeled as
+/// `application/json`. `resolve_proxy_content_type` below is the pure
+/// decision function extracted so it can be unit-tested here (this module
+/// already has a `#[cfg(test)] mod tests`) without spinning up an axum
+/// handler -- the handler itself only needs to call it once.
+pub const DEFAULT_NETDATA_CONTENT_TYPE: &str = "application/json";
+
+/// Decides what Content-Type header the Admin UI's own proxy response
+/// should carry, given the upstream Netdata response's own Content-Type (if
+/// any). Forwarding the upstream's real header is the correct general
+/// behavior -- Netdata itself already sets the right value for whatever
+/// `format=` the caller requested, so the proxy does not need to duplicate
+/// its own format-to-mime-type table and keep it in sync. Only falls back to
+/// the fixed JSON default when Netdata's response is missing the header
+/// entirely, or sends it present-but-blank (defensive; neither currently
+/// observed in practice). This function does not itself validate that the
+/// header value is well-formed header-value text -- the caller
+/// (`routes/netdata_proxy.rs::proxy`) already discards a non-UTF8/invalid
+/// upstream Content-Type via `HeaderValue::to_str().ok()` before this
+/// function ever sees it, so by the time a `Some(value)` reaches here it is
+/// already known-valid ASCII.
+pub fn resolve_proxy_content_type(upstream_content_type: Option<&str>) -> String {
+    match upstream_content_type {
+        Some(value) if !value.trim().is_empty() => value.to_string(),
+        _ => DEFAULT_NETDATA_CONTENT_TYPE.to_string(),
+    }
+}
+
 /// Builds the upstream Netdata request URL for one Admin UI `/netdata/{path}`
 /// proxy request. `base_url` is server configuration (`state.config
 /// .netdata_url`), never client-controlled; `path` and `params` come
@@ -52,7 +87,21 @@ pub fn build_netdata_url(
     }
 
     if !params.is_empty() {
-        url.query_pairs_mut().extend_pairs(params.iter());
+        // Finding #8 (docs/bug-hunt/ui-routes.md, issue #849): `params` is a
+        // `HashMap`, whose iteration order is randomized per-process (a
+        // different random hash seed each run, by design, to resist
+        // hash-flooding attacks) -- a bare `.iter()` here produced a
+        // nondeterministic query-parameter order in the upstream Netdata
+        // URL across otherwise-identical requests. Netdata itself doesn't
+        // care about parameter order, but nondeterministic output makes
+        // this function's own behavior harder to reason about and test
+        // (e.g. asserting an exact query string, or comparing two "same
+        // request" URLs byte-for-byte) for no benefit. Sorting by key
+        // first makes the output reproducible without changing which
+        // parameters are sent or their values.
+        let mut sorted_params: Vec<(&String, &String)> = params.iter().collect();
+        sorted_params.sort_by_key(|(key, _)| key.as_str());
+        url.query_pairs_mut().extend_pairs(sorted_params);
     }
 
     Ok(url)
@@ -95,6 +144,37 @@ mod tests {
         assert_eq!(pairs.get("format"), Some(&"json".to_string()));
     }
 
+    // Finding #8 (docs/bug-hunt/ui-routes.md, issue #849): the actual bug
+    // this test locks in. Building the same URL from the same input twice
+    // must produce byte-identical query-string ordering -- a `HashMap`'s
+    // own iteration order is randomized per-process, so this would fail
+    // intermittently before the fix (sorting by key) whenever the process's
+    // random hash seed happened to order these four keys differently across
+    // the two calls in the same test run.
+    #[test]
+    fn query_param_order_is_deterministic_across_repeated_calls() {
+        let p = params(&[
+            ("chart", "system.cpu"),
+            ("points", "60"),
+            ("group", "average"),
+            ("format", "json"),
+        ]);
+
+        let first = build_netdata_url("http://netdata:19999", "data", &p)
+            .expect("data endpoint should be allowed");
+        let second = build_netdata_url("http://netdata:19999", "data", &p)
+            .expect("data endpoint should be allowed");
+
+        assert_eq!(first.as_str(), second.as_str());
+        // Also locks the exact expected order (alphabetical by key), not
+        // just "the same as itself" -- a real regression test, not a
+        // tautology.
+        assert_eq!(
+            first.query(),
+            Some("chart=system.cpu&format=json&group=average&points=60")
+        );
+    }
+
     // URL builder must properly percent-encode special characters in query parameter names and values to prevent injection attacks.
     #[test]
     fn encodes_query_params_with_url_builder() {
@@ -135,5 +215,42 @@ mod tests {
                 "{path} should be rejected"
             );
         }
+    }
+
+    // #849 observability.md#11: a real upstream Content-Type (e.g. Netdata
+    // honoring a `format=csv` request) must be forwarded verbatim, not
+    // silently overwritten with the hardcoded JSON default.
+    #[test]
+    fn forwards_a_real_upstream_content_type() {
+        assert_eq!(
+            resolve_proxy_content_type(Some("text/csv; charset=utf-8")),
+            "text/csv; charset=utf-8"
+        );
+        assert_eq!(resolve_proxy_content_type(Some("text/html")), "text/html");
+    }
+
+    // Missing header (no Content-Type at all) falls back to the fixed
+    // default rather than propagating an absent header downstream.
+    #[test]
+    fn falls_back_to_json_default_when_upstream_omits_content_type() {
+        assert_eq!(
+            resolve_proxy_content_type(None),
+            DEFAULT_NETDATA_CONTENT_TYPE
+        );
+    }
+
+    // Defensive case: an upstream that sends a Content-Type header present
+    // but empty/whitespace-only must not produce an empty header value on
+    // the proxy's own response.
+    #[test]
+    fn falls_back_to_json_default_when_upstream_content_type_is_blank() {
+        assert_eq!(
+            resolve_proxy_content_type(Some("   ")),
+            DEFAULT_NETDATA_CONTENT_TYPE
+        );
+        assert_eq!(
+            resolve_proxy_content_type(Some("")),
+            DEFAULT_NETDATA_CONTENT_TYPE
+        );
     }
 }
