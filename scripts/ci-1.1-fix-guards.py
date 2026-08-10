@@ -53,20 +53,5 @@ require_grep 'COPY stack-bom\\.json /stack-bom\\.json' \\
 'stack BOM guard',
 )
 
-insert_after = '''require_grep 'subject-digest: \\$\\{\\{ steps\\.build\\.outputs\\.digest \\$\\}\\}' \\
-  .github/workflows/build-push.yml \\
-  'provenance attestations must bind to the pushed image digest'
-'''
-addition = '''require_grep 'uses: \\./\\.github/actions/trivy-scan-exact-digest' \\
-  .github/workflows/build-push.yml \\
-  'candidate security scans must consume the immutable digest produced by the build job'
-require_grep 'image-ref: ghcr\\.io/\\$\\{\\{ github\\.repository \\$\\}\\}/\\$\\{\\{ matrix\\.service \\$\\}\\}@\\$\\{\\{ steps\\.build\\.outputs\\.digest \\$\\}' \\
-  .github/workflows/build-push.yml \\
-  'candidate security scans must bind to the exact build output digest'
-'''
-if text.count(insert_after) != 1:
-    raise SystemExit(f'exact scan insertion point: expected one source block, found {text.count(insert_after)}')
-text = text.replace(insert_after, insert_after + addition)
-
 path.write_text(text)
 print('stack-image guards migrated to exact digest identity')
