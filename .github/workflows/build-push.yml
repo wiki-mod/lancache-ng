@@ -3152,10 +3152,8 @@ jobs:
           set -euo pipefail
           override_file=".ci-exact-digests.yml"
           client_tools_ref="$(bash scripts/render-full-setup-digest-override.sh "deploy/full-setup/${override_file}")"
-          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s
-' "$override_file" >> "$GITHUB_ENV"
-          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s
-' "$client_tools_ref" >> "$GITHUB_ENV"
+          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s\n' "$override_file" >> "$GITHUB_ENV"
+          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s\n' "$client_tools_ref" >> "$GITHUB_ENV"
       - name: Remove buildx builder
         if: ${{ always() && steps.channel.outputs.pr-staging-available == 'true' }}
         run: |
