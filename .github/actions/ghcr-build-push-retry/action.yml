@@ -251,3 +251,50 @@ runs:
           exit 1
         fi
         echo "digest=$digest" >> "$GITHUB_OUTPUT"
+
+    # Same-repository pull requests already push their PR-scoped staging
+    # image through this action. Scan that exact returned digest here before
+    # this producer step can report success. A fork/Dependabot PR reaches the
+    # caller with push=false, so it never enters this registry-backed path.
+    - name: Resolve exact pushed PR image reference
+      id: pr-image
+      if: github.event_name == 'pull_request' && inputs.push == 'true' && steps.resolve.outcome == 'success'
+      shell: bash
+      env:
+        IMAGE_TAGS: ${{ inputs.tags }}
+        IMAGE_DIGEST: ${{ steps.resolve.outputs.digest }}
+      run: |
+        set -euo pipefail
+
+        image_tag="$(printf '%s\n' "$IMAGE_TAGS" | sed -n '/[^[:space:]]/{s/^[[:space:]]*//;s/[[:space:]]*$//;p;q;}')"
+        if [[ -z "$image_tag" || -z "$IMAGE_DIGEST" ]]; then
+          echo "::error::A pushed PR candidate requires both a concrete image tag and Buildx digest." >&2
+          exit 1
+        fi
+
+        case "$image_tag" in
+          "$REGISTRY"/*:*) ;;
+          *)
+            echo "::error::Refusing to derive a PR scan reference from unexpected tag '$image_tag'." >&2
+            exit 1
+            ;;
+        esac
+
+        image_repo="${image_tag%:*}"
+        printf 'image-ref=%s@%s\n' "$image_repo" "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
+      env:
+        IMAGE_TAGS: ${{ inputs.tags }}
+        IMAGE_DIGEST: ${{ steps.resolve.outputs.digest }}
+        REGISTRY: ${{ inputs.registry }}
+
+    - name: Scan exact pushed PR digest
+      if: github.event_name == 'pull_request' && inputs.push == 'true' && steps.pr-image.outcome == 'success'
+      uses: ./.github/actions/trivy-scan-exact-digest
+      with:
+        image-ref: ${{ steps.pr-image.outputs.image-ref }}
+        cache-dir: ${{ runner.temp }}/lancache-ng-trivy-pr-candidate
+
+    - name: Remove PR candidate Trivy cache
+      if: always() && github.event_name == 'pull_request' && inputs.push == 'true'
+      shell: bash
+      run: rm -rf -- "${{ runner.temp }}/lancache-ng-trivy-pr-candidate"
