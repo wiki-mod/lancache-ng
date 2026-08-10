@@ -168,13 +168,17 @@
       </button>
     </form>
   </div>
-  <!-- Per-mode connection metrics: standard mode (services/proxy-standard,
-       HTTP caching + HTTPS SNI passthrough, no CA cert needed) and SSL mode
-       (services/proxy, HTTP + HTTPS with TLS interception) are two separate
-       running nginx processes with independent stub_status endpoints, even
-       though they now share the one cache directory above. The `id`
-       attributes on the numbers below are updated live by the auto-refresh
-       script at the bottom of this template, which polls GET /api/metrics
+  <!-- Per-mode connection metrics: standard mode (HTTP caching + HTTPS SNI
+       passthrough, no CA cert needed) and SSL mode (HTTP + HTTPS with TLS
+       interception) are both served by the single unified services/proxy
+       container/nginx process (services/proxy-standard was retired and
+       merged into it in the v0.2.0 refactor).
+       PROXY_STANDARD_URL/PROXY_SSL_URL (routes/dashboard.rs) default to the
+       same stub_status endpoint on that one process and only diverge for an
+       operator's own advanced multi-instance deployment -- see that file's
+       own comment for the full explanation. The `id` attributes on the
+       numbers below are updated live by the auto-refresh script at the
+       bottom of this template, which polls GET /api/metrics
        (routes/dashboard.rs::metrics_api) every few seconds. -->
   <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
     <div class="card">
