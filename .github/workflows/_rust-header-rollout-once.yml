@@ -43,26 +43,42 @@ jobs:
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git fetch origin current_dev
+          pre_merge_head="$(git rev-parse HEAD)"
 
-          # Header-only edits overlap the first lines of many files, while the
-          # maintainer is actively merging unrelated work into current_dev. A
-          # merge conflict is therefore resolved from current_dev only for the
-          # four files already proven by the connector-side base delta to have
-          # new functional CI content; their canonical header is reapplied below.
+          # The maintainer is actively merging unrelated work into current_dev.
+          # If Git reports a conflict, only resolve it from current_dev when the
+          # branch's own version is byte-identical to the previously integrated
+          # base after physical line 20. That proves this PR's unique change to
+          # the conflicted file is confined to the already-validated header area;
+          # any deeper branch difference is a hard stop rather than being lost.
           if ! git merge --no-commit --no-ff origin/current_dev; then
             mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
             for path in "${conflicts[@]}"; do
-              case "$path" in
-                .github/actions/file-headers-check/action.yml|.github/dependabot.yml|.github/workflows/build-push.yml|.github/workflows/build-tools-smoke.yml)
-                  git checkout --theirs -- "$path"
-                  git add -- "$path"
-                  ;;
-                *)
-                  echo "::error::Unexpected merge conflict while syncing current_dev: $path" >&2
-                  exit 1
-                  ;;
-              esac
+              if ! git cat-file -e "$old_integrated_base:$path" 2>/dev/null || ! git cat-file -e "$pre_merge_head:$path" 2>/dev/null; then
+                echo "::error::Cannot prove header-only branch ownership for merge conflict: $path" >&2
+                exit 1
+              fi
+
+              old_file="$(mktemp)"
+              branch_file="$(mktemp)"
+              old_body="$(mktemp)"
+              branch_body="$(mktemp)"
+              git show "$old_integrated_base:$path" > "$old_file"
+              git show "$pre_merge_head:$path" > "$branch_file"
+              tail -n +21 -- "$old_file" > "$old_body"
+              tail -n +21 -- "$branch_file" > "$branch_body"
+              if ! cmp -s "$old_body" "$branch_body"; then
+                echo "::error::Merge conflict has branch-owned changes below line 20; refusing to take current_dev wholesale: $path" >&2
+                rm -f "$old_file" "$branch_file" "$old_body" "$branch_body"
+                exit 1
+              fi
+              rm -f "$old_file" "$branch_file" "$old_body" "$branch_body"
+
+              git checkout --theirs -- "$path"
+              git add -- "$path"
+              echo "Resolved header-only conflict from current_dev: $path"
             done
+
             mapfile -t remaining < <(git diff --name-only --diff-filter=U)
             if [ "${#remaining[@]}" -ne 0 ]; then
               printf '::error::Unresolved merge conflict: %s\n' "${remaining[@]}" >&2
@@ -123,12 +139,57 @@ jobs:
             rm -f "$tmp"
           }
 
-          # Bring any files added/changed on current_dev since the branch's last
-          # sync onto the same canonical header before the whole-repo guard runs.
+          normalize_plain_header() {
+            local path="$1" project_line="$2" spdx_line="$3" legacy_line="$4" l1 l2 tmp
+            [ -f "$path" ] || return 0
+            l1="$(sed -n '1p' -- "$path")"
+            l2="$(sed -n '2p' -- "$path")"
+            if [ -z "$l1" ] && [ "$l2" = "$project_line" ] && [ "$(sed -n '3p' -- "$path")" = "$spdx_line" ]; then
+              return 0
+            fi
+            tmp="$(mktemp)"
+            if [ "$l1" = "$spdx_line" ] && { [ "$l2" = "$legacy_line" ] || [ "$l2" = "$project_line" ]; }; then
+              {
+                printf '\n%s\n%s\n' "$project_line" "$spdx_line"
+                tail -n +3 -- "$path"
+              } > "$tmp"
+            elif { [ "$l1" = "$legacy_line" ] || [ "$l1" = "$project_line" ]; } && [ "$l2" = "$spdx_line" ]; then
+              {
+                printf '\n%s\n%s\n' "$project_line" "$spdx_line"
+                tail -n +3 -- "$path"
+              } > "$tmp"
+            else
+              echo "::error::Unexpected native-comment header shape in $path" >&2
+              rm -f "$tmp"
+              exit 1
+            fi
+            cat "$tmp" > "$path"
+            rm -f "$tmp"
+          }
+
+          # Bring files added/changed on current_dev since the branch's previous
+          # sync onto the new contract. Markdown stays excluded. Unknown syntax
+          # is intentionally left to the whole-repository guard below, which
+          # fails closed rather than guessing a parser/comment form.
           while IFS= read -r path; do
             [ -n "$path" ] || continue
             case "$path" in
               *.md) ;;
+              services/ui/src/templates/*.html)
+                normalize_plain_header "$path" "{# $canonical #}" "{# $spdx #}" "{# $legacy #}"
+                ;;
+              *.html)
+                normalize_plain_header "$path" "<!-- $canonical -->" "<!-- $spdx -->" "<!-- $legacy -->"
+                ;;
+              *.lua)
+                normalize_plain_header "$path" "-- $canonical" "-- $spdx" "-- $legacy"
+                ;;
+              *.js)
+                normalize_plain_header "$path" "// $canonical" "// $spdx" "// $legacy"
+                ;;
+              *.css)
+                normalize_plain_header "$path" "/* $canonical */" "/* $spdx */" "/* $legacy */"
+                ;;
               *.sh|*.bats|*.yml|*.yaml|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|.shellspec|*/.shellspec|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*)
                 normalize_hash_header "$path"
                 ;;
@@ -271,9 +332,6 @@ jobs:
           ' "$agents" > "$agents.tmp"
           mv "$agents.tmp" "$agents"
 
-          # Fail closed before creating the merge commit. The whole-repository
-          # scan proves both the 47-file Rust rollout and any files arriving
-          # from the freshly merged current_dev satisfy the executable guard.
           bash -n "$guard"
           bash "$guard"
           git diff --check
