@@ -792,13 +792,17 @@ NATS_CALLOUT_PASSWORD=<generate-a-secret>
 NATS_SYS_PASSWORD=<generate-a-secret>
 ```
 
-`SECONDARY_REGISTRATION_TOKEN` is different from the values above: it is
-always required, even on a single-node install that never registers a
-secondary DNS node. The Admin UI's boot-time check refuses to start on an
-empty value or on the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
+`SECONDARY_REGISTRATION_TOKEN` is different from the values above: on an
+empty value or the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
 placeholder (an empty token previously allowed unauthenticated secondary
-registration — see issue #659), so replace it with a real secret regardless
-of whether you plan to use secondary DNS:
+registration — see issue #659), the Admin UI does not refuse to start — it
+generates a persistent random token on first boot and writes it to a file
+under its `/data` volume, logging the file path so you can retrieve it
+later if you decide to register a secondary DNS node. Startup only refuses
+to continue if that persisted token file itself already exists but is
+unusable (empty, still a placeholder, or unreadable/unwritable). To set the
+token explicitly instead of relying on auto-generation, replace the
+placeholder with a real secret:
 
 ```env
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>
@@ -811,11 +815,11 @@ Secrets in `.env` follow a simple rule: they are generated once on first install
 - If the value is a placeholder (empty or the literal string `<generate-a-secret>`), a new secret is generated.
 - If a real value is already present, it is preserved unchanged — even across multiple updates.
 
-Secret formats vary by key:
+Secret formats vary by key, not by naming suffix — despite the `*_KEY`/`*_PASSWORD` names, generation kind is assigned per key in `setup.sh`, and the two families are not generated the same way as each other:
 
-- `*_KEY` secrets (e.g. `DDNS_TSIG_KEY`): 32 hex characters
-- `*_PASSWORD` secrets (e.g. `NATS_UI_PASSWORD`): 32 base64 characters
-- `SECONDARY_REGISTRATION_TOKEN`: 20 alphanumeric characters
+- 64 hex characters (`openssl rand -hex 32`): `KEA_CTRL_TOKEN`, `PDNS_API_KEY`, `NATS_UI_PASSWORD`, `NATS_DNS_WRITER_PASSWORD`, `NATS_DNS_REPLICA_PASSWORD`, `NATS_CALLOUT_PASSWORD`, `NATS_SYS_PASSWORD`, `SECONDARY_REGISTRATION_TOKEN`
+- 44 base64 characters (`openssl rand -base64 32`): `DDNS_TSIG_KEY`
+- 20 alphanumeric characters: `UI_AUTH_PASSWORD`
 
 Store your actual secret values securely if you need to rotate them manually. The setup script will not regenerate them unless you explicitly delete or clear the `.env` entry.
 

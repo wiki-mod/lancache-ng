@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
@@ -110,6 +111,27 @@ impl std::fmt::Display for DhcpError {
 }
 
 impl std::error::Error for DhcpError {}
+
+// kea_config_modify's closures throughout this file share two literal
+// not-found error strings for client-input problems (the operator's own
+// request named something that isn't there), not server-side
+// config-mutation failures, which should surface as 404 Not Found rather
+// than the generic 500 Internal Server Error every other closure failure
+// maps to: "subnet not found" (from find_subnet_mut, used directly or via
+// dhcp4_subnets_mut+find) and "custom option not found" (from
+// remove_custom_subnet_option/remove_pxe_subnet_field, e.g. a
+// double-submitted or stale-page option-removal form). This one shared
+// helper is used at every kea_config_modify call site, so the mapping
+// only needs to be correct once here, and any closure failure that is not
+// one of these two specific cases keeps the generic 500 behavior.
+fn kea_config_modify_error(e: Box<dyn std::error::Error + Send + Sync>) -> DhcpError {
+    let message = e.to_string();
+    if message == "subnet not found" || message == "custom option not found" {
+        DhcpError::new(StatusCode::NOT_FOUND, message)
+    } else {
+        DhcpError::config_error(message)
+    }
+}
 
 // Every DHCP route in this file renders full HTML pages (this is the Admin
 // UI, not a JSON API), so an error result is rendered the same way as a
@@ -750,7 +772,7 @@ async fn set_ntp_option_on_all_subnets(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))
+    .map_err(kea_config_modify_error)
 }
 
 // Best-effort pre-flight check that update_dhcp_mode runs BEFORE
@@ -1904,7 +1926,7 @@ pub async fn add_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -1977,7 +1999,7 @@ pub async fn update_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2007,7 +2029,7 @@ pub async fn remove_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2049,7 +2071,7 @@ pub async fn add_subnet_option(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2090,7 +2112,7 @@ pub async fn remove_subnet_option(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2162,7 +2184,7 @@ pub async fn add_reservation(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -2198,7 +2220,7 @@ pub async fn remove_reservation(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -2239,7 +2261,7 @@ pub async fn release_lease(
         }),
     )
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     match kea_lease_del_result(&resp) {
         LeaseDelOutcome::Released => {
@@ -2291,7 +2313,7 @@ pub async fn update_dhcp_ddns(
         set_config_ddns_enabled(config, enabled)
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -4457,6 +4479,44 @@ mod tests {
             "expected the exact fix command, got: {}",
             dhcp_err.message
         );
+    }
+
+    // A caller-supplied subnet_id that doesn't exist must map to 404 Not
+    // Found, not the blanket 500 every other kea_config_modify closure
+    // failure correctly gets. Exercises kea_config_modify_error directly
+    // against the exact literal string find_subnet_mut produces
+    // (`.ok_or("subnet not found")`), since that string is the
+    // load-bearing contract between the two functions.
+    #[test]
+    fn kea_config_modify_error_maps_subnet_not_found_to_404() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "subnet not found".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(dhcp_err.message, "subnet not found");
+    }
+
+    // A double-submitted or stale-page option-removal form (both
+    // remove_custom_subnet_option and remove_pxe_subnet_field's
+    // `.ok_or("custom option not found")`) must map to 404 Not Found too,
+    // not the blanket 500 the missing-string case previously fell through
+    // to.
+    #[test]
+    fn kea_config_modify_error_maps_custom_option_not_found_to_404() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "custom option not found".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(dhcp_err.message, "custom option not found");
+    }
+
+    // Every other kea_config_modify closure failure (a genuine
+    // config-mutation/backend problem, not a bad client-supplied id) must
+    // keep exactly its previous 500 behavior -- proving the added 404 case
+    // is additive, not a behavior change for every other failure shape.
+    #[test]
+    fn kea_config_modify_error_keeps_other_failures_as_500() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "subnet4 not an array".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     // A real operational failure (not a missing container) must still
