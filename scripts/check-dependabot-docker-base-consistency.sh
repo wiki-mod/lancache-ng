@@ -7,6 +7,8 @@
 # each block independent and compare effective images, including global ARG
 # defaults and aliases, so harmless Dockerfile syntax differences do not
 # obscure either equality or real drift.
+# Syntax contracts: https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference
+# and https://docs.docker.com/reference/dockerfile/.
 #
 # Accepts an optional repo_root argument (defaults to this script's own
 # repo) so a bats test can point it at a throwaway fixture tree instead of
@@ -41,7 +43,27 @@ function scalar(line, value) {
 /^  - package-ecosystem:/ {
     ecosystem=tolower(scalar($0))
     in_docker=(ecosystem == "docker")
-    if (in_docker) block++
+    if (in_docker) {
+        block++
+        print block "\t@BLOCK@"
+    }
+    next
+}
+in_docker && /^    directory:/ {
+    path=scalar($0)
+    if (path ~ /^\//) print block "\t" path
+    next
+}
+in_docker && /^    directories:[[:space:]]*\[/ {
+    paths=$0
+    sub(/^    directories:[[:space:]]*\[/, "", paths)
+    sub(/\][[:space:]]*(#.*)?$/, "", paths)
+    count=split(paths, entries, /,[[:space:]]*/)
+    for (i=1; i<=count; i++) {
+        path=entries[i]
+        gsub(/^[[:space:]"'\047]+|[[:space:]"'\047]+$/, "", path)
+        if (path ~ /^\//) print block "\t" path
+    }
     next
 }
 in_docker && /^      - / {
@@ -63,6 +85,7 @@ fi
 declare -A base_image_of=()
 missing_dockerfiles=()
 blocks_seen=()
+declared_blocks=()
 
 resolve_final_image() {
     local dockerfile="$1" line instruction remainder image alias name value token
@@ -70,8 +93,8 @@ resolve_final_image() {
     local -A global_args=() stage_images=()
 
     # Dockerfile heredoc bodies are data rather than instructions, while a
-    # backslash-continued instruction is one logical line. Normalize those
-    # two forms before looking for ARG and FROM instructions.
+    # parser-directive-selected continuation joins one logical instruction.
+    # Normalize those forms before looking for ARG and FROM instructions.
     while IFS= read -r line || [ -n "$line" ]; do
         line="${line#"${line%%[![:space:]]*}"}"
         instruction="${line%%[[:space:]]*}"
@@ -121,13 +144,15 @@ resolve_final_image() {
         fi
         final_image="$image"
     done < <(awk '
-        function emit_logical(    marker, candidate) {
+        function emit_logical(    marker, candidate, owner) {
             print logical
             candidate=logical
             sub(/^[[:space:]]*/, "", candidate)
             # A comment can describe heredoc syntax without starting a
-            # heredoc; only Dockerfile instructions can own payload lines.
-            if (candidate !~ /^#/ && candidate ~ /^[A-Za-z]+[[:space:]]/ &&
+            # heredoc; only RUN and COPY can own Dockerfile payload lines.
+            owner=candidate
+            sub(/[[:space:]].*$/, "", owner)
+            if ((tolower(owner) == "run" || tolower(owner) == "copy") &&
                 match(candidate, /<<-?[[:space:]]*["'"'"']?[A-Za-z_][A-Za-z0-9_]*["'"'"']?/)) {
                 marker=substr(candidate, RSTART, RLENGTH)
                 sub(/^<<-?[[:space:]]*/, "", marker)
@@ -146,6 +171,14 @@ resolve_final_image() {
             physical=$0
             candidate=physical
             sub(/^[[:space:]]*/, "", candidate)
+            if (!content_seen && candidate ~ /^#[[:space:]]*escape[[:space:]]*=/) {
+                directive=candidate
+                sub(/^#[[:space:]]*escape[[:space:]]*=[[:space:]]*/, "", directive)
+                sub(/[[:space:]]*$/, "", directive)
+                if (directive == "`" || directive == "\\") escape=directive
+                print physical
+                next
+            }
             # Standalone comments are complete physical lines even when
             # their text ends in a backslash; Docker does not continue them.
             if (logical == "" && candidate ~ /^#/) {
@@ -153,8 +186,12 @@ resolve_final_image() {
                 emit_logical()
                 next
             }
-            if (physical ~ /\\[[:space:]]*$/) {
-                sub(/\\[[:space:]]*$/, "", physical)
+            if (candidate != "") content_seen=1
+            if (escape == "") escape="\\"
+            escaped=(escape == "\\" ? physical ~ /\\[[:space:]]*$/ : physical ~ /`[[:space:]]*$/)
+            if (escaped) {
+                if (escape == "\\") sub(/\\[[:space:]]*$/, "", physical)
+                else sub(/`[[:space:]]*$/, "", physical)
                 logical=logical physical " "
                 next
             }
@@ -174,6 +211,10 @@ resolve_final_image() {
 for entry in "${tagged_directories[@]}"; do
     block="${entry%%$'\t'*}"
     dir="${entry#*$'\t'}"
+    if [ "$dir" = "@BLOCK@" ]; then
+        declared_blocks+=("$block")
+        continue
+    fi
     dockerfile="${dir#/}/Dockerfile"
     if [ ! -f "$dockerfile" ]; then
         missing_dockerfiles+=("$dockerfile")
@@ -183,6 +224,13 @@ for entry in "${tagged_directories[@]}"; do
 
     base_image_of["${block}"$'\t'"${dockerfile}"]="$normalized_image"
     blocks_seen+=("$block")
+done
+
+for block in "${declared_blocks[@]}"; do
+    if [[ ! " ${blocks_seen[*]} " =~ [[:space:]]${block}[[:space:]] ]]; then
+        printf '::error::check-dependabot-docker-base-consistency: docker-ecosystem block #%s has no parseable directory or directories entries\n' "$block" >&2
+        exit 1
+    fi
 done
 
 if [ "${#missing_dockerfiles[@]}" -gt 0 ]; then

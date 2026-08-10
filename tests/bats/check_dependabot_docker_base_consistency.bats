@@ -601,3 +601,61 @@ EOF
     [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
         fail "let a comment continuation marker hide divergent final images: $output"
 }
+
+@test "does not enter heredoc mode for heredoc-looking LABEL text" {
+    # Only RUN and COPY instructions accept Dockerfile heredocs; prose in a
+    # different instruction must not hide later stages.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    cat > "$fixture_root/services/a/Dockerfile" <<'EOF'
+FROM busybox:1.37 AS builder
+LABEL usage="Use <<EOF in docs"
+FROM alpine:3.24
+EOF
+    cat > "$fixture_root/services/b/Dockerfile" <<'EOF'
+FROM busybox:1.37 AS builder
+LABEL usage="Use <<EOF in docs"
+FROM debian:12-slim
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "let LABEL text hide divergent final images: $output"
+}
+
+@test "honors a backtick Dockerfile escape parser directive" {
+    # The escape parser directive changes the continuation character, so a
+    # logical FROM instruction must follow that declared syntax.
+    write_dependabot_docker_block
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b"
+    printf '# escape=`\nFROM `\n  alpine:3.24\n' > "$fixture_root/services/a/Dockerfile"
+    printf '# escape=`\nFROM `\n  debian:12-slim\n' > "$fixture_root/services/b/Dockerfile"
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "did not honor the configured backtick escape: $output"
+}
+
+@test "parses flow-style directories in every Docker update block" {
+    # YAML flow sequences are equivalent to block sequences and must not
+    # let a later Docker block escape validation.
+    cat > "$fixture_root/.github/dependabot.yml" <<'EOF'
+version: 2
+updates:
+  - package-ecosystem: docker
+    directory: /services/a
+  - package-ecosystem: docker
+    directories: [/services/b, "/services/c"]
+EOF
+    mkdir -p "$fixture_root/services/a" "$fixture_root/services/b" "$fixture_root/services/c"
+    printf 'FROM busybox:1.37\n' > "$fixture_root/services/a/Dockerfile"
+    printf 'FROM alpine:3.24\n' > "$fixture_root/services/b/Dockerfile"
+    printf 'FROM debian:12-slim\n' > "$fixture_root/services/c/Dockerfile"
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"alpine:3.24"* && "$output" == *"debian:12-slim"* ]] || \
+        fail "did not validate the flow-style Docker block: $output"
+}
