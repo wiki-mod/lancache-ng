@@ -1,0 +1,304 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# One-shot transport for the maintainer-approved Rust header normalization.
+# The workflow merges the latest current_dev first, rewrites only header-contract
+# material, validates the complete repository header scan, and pushes one merge
+# commit. Its path-filter prevents the resulting bot push from running it again.
+name: One-shot Rust header rollout
+
+on:
+  push:
+    branches:
+      - agent/1517-spdx-header-backfill
+    paths:
+      - .github/workflows/_rust-header-rollout-once.yml
+
+permissions:
+  contents: write
+
+jobs:
+  rollout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Check out the draft branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: agent/1517-spdx-header-backfill
+          fetch-depth: 0
+
+      - name: Merge current_dev and apply the approved header contract
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          branch='agent/1517-spdx-header-backfill'
+          old_integrated_base='cb2ceb1c1c1032591b2544eb0dabbdbe5ccc7506'
+          canonical='LanCache-NG (https://github.com/wiki-mod/lancache-ng)'
+          legacy='lancache-ng (https://github.com/wiki-mod/lancache-ng)'
+          spdx='SPDX-License-Identifier: AGPL-3.0-or-later'
+
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git fetch origin current_dev
+
+          # Header-only edits overlap the first lines of many files, while the
+          # maintainer is actively merging unrelated work into current_dev. A
+          # merge conflict is therefore resolved from current_dev only for the
+          # four files already proven by the connector-side base delta to have
+          # new functional CI content; their canonical header is reapplied below.
+          if ! git merge --no-commit --no-ff origin/current_dev; then
+            mapfile -t conflicts < <(git diff --name-only --diff-filter=U)
+            for path in "${conflicts[@]}"; do
+              case "$path" in
+                .github/actions/file-headers-check/action.yml|.github/dependabot.yml|.github/workflows/build-push.yml|.github/workflows/build-tools-smoke.yml)
+                  git checkout --theirs -- "$path"
+                  git add -- "$path"
+                  ;;
+                *)
+                  echo "::error::Unexpected merge conflict while syncing current_dev: $path" >&2
+                  exit 1
+                  ;;
+              esac
+            done
+            mapfile -t remaining < <(git diff --name-only --diff-filter=U)
+            if [ "${#remaining[@]}" -ne 0 ]; then
+              printf '::error::Unresolved merge conflict: %s\n' "${remaining[@]}" >&2
+              exit 1
+            fi
+          fi
+
+          normalize_hash_header() {
+            local path="$1" l1 l2 l3 tmp
+            [ -f "$path" ] || return 0
+            l1="$(sed -n '1p' -- "$path")"
+            l2="$(sed -n '2p' -- "$path")"
+            l3="$(sed -n '3p' -- "$path")"
+            tmp="$(mktemp)"
+
+            if [[ "$l1" == '#!'* ]]; then
+              if [ "$l2" = "# $canonical" ] && [ "$l3" = "# $spdx" ]; then
+                rm -f "$tmp"
+                return 0
+              fi
+              if [ "$l2" = "# $spdx" ] && { [ "$l3" = "# $legacy" ] || [ "$l3" = "# $canonical" ]; }; then
+                {
+                  printf '%s\n' "$l1" "# $canonical" "# $spdx"
+                  tail -n +4 -- "$path"
+                } > "$tmp"
+              elif { [ "$l2" = "# $legacy" ] || [ "$l2" = "# $canonical" ]; } && [ "$l3" = "# $spdx" ]; then
+                {
+                  printf '%s\n' "$l1" "# $canonical" "# $spdx"
+                  tail -n +4 -- "$path"
+                } > "$tmp"
+              else
+                echo "::error::Unexpected shebang header shape in $path" >&2
+                rm -f "$tmp"
+                exit 1
+              fi
+            else
+              if [ -z "$l1" ] && [ "$l2" = "# $canonical" ] && [ "$l3" = "# $spdx" ]; then
+                rm -f "$tmp"
+                return 0
+              fi
+              if [ "$l1" = "# $spdx" ] && { [ "$l2" = "# $legacy" ] || [ "$l2" = "# $canonical" ]; }; then
+                {
+                  printf '\n%s\n%s\n' "# $canonical" "# $spdx"
+                  tail -n +3 -- "$path"
+                } > "$tmp"
+              elif { [ "$l1" = "# $legacy" ] || [ "$l1" = "# $canonical" ]; } && [ "$l2" = "# $spdx" ]; then
+                {
+                  printf '\n%s\n%s\n' "# $canonical" "# $spdx"
+                  tail -n +3 -- "$path"
+                } > "$tmp"
+              else
+                echo "::error::Unexpected hash-comment header shape in $path" >&2
+                rm -f "$tmp"
+                exit 1
+              fi
+            fi
+            cat "$tmp" > "$path"
+            rm -f "$tmp"
+          }
+
+          # Bring any files added/changed on current_dev since the branch's last
+          # sync onto the same canonical header before the whole-repo guard runs.
+          while IFS= read -r path; do
+            [ -n "$path" ] || continue
+            case "$path" in
+              *.md) ;;
+              *.sh|*.bats|*.yml|*.yaml|*.toml|*.conf|*.template|*.txt|*.env|*.service|*.timer|*.ps1|*.dockerignore|Dockerfile|*/Dockerfile|.gitattributes|.gitignore|*/.gitignore|.shellspec|*/.shellspec|CODEOWNERS|*/CODEOWNERS|.githooks/*|*/.githooks/*)
+                normalize_hash_header "$path"
+                ;;
+            esac
+          done < <(git diff --name-only "$old_integrated_base"..origin/current_dev)
+
+          rust_total=0
+          rust_rewritten=0
+          while IFS= read -r -d '' path; do
+            rust_total=$((rust_total + 1))
+            l1="$(sed -n '1p' -- "$path")"
+            l2="$(sed -n '2p' -- "$path")"
+            l3="$(sed -n '3p' -- "$path")"
+
+            if [ "$l1" = '//!' ] && [ "$l2" = "//! $canonical" ] && [ "$l3" = "//! $spdx" ]; then
+              continue
+            fi
+
+            tmp="$(mktemp)"
+            if [ -z "$l1" ] && [ "$l2" = "//! $canonical" ] && [ "$l3" = "//! $spdx" ]; then
+              {
+                printf '%s\n' '//!'
+                tail -n +2 -- "$path"
+              } > "$tmp"
+            elif [ "$l1" = "//! $spdx" ] && { [ "$l2" = "//! $legacy" ] || [ "$l2" = "//! $canonical" ]; }; then
+              {
+                printf '%s\n' '//!' "//! $canonical" "//! $spdx"
+                tail -n +3 -- "$path"
+              } > "$tmp"
+            elif { [ "$l1" = "//! $legacy" ] || [ "$l1" = "//! $canonical" ]; } && [ "$l2" = "//! $spdx" ]; then
+              {
+                printf '%s\n' '//!' "//! $canonical" "//! $spdx"
+                tail -n +3 -- "$path"
+              } > "$tmp"
+            else
+              echo "::error::Unexpected Rust header shape in $path" >&2
+              rm -f "$tmp"
+              exit 1
+            fi
+            cat "$tmp" > "$path"
+            rm -f "$tmp"
+            rust_rewritten=$((rust_rewritten + 1))
+          done < <(git ls-files -z '*.rs')
+
+          if [ "$rust_total" -lt 47 ]; then
+            echo "::error::Expected at least the previously inventoried 47 Rust files, found $rust_total" >&2
+            exit 1
+          fi
+
+          guard='scripts/check-file-headers.sh'
+          [ "$(grep -Fxc '# syntax, keep a genuinely required interpreter/parser marker on physical line' "$guard")" -eq 1 ]
+          [ "$(grep -Fxc '# 1 when one exists (otherwise line 1 is blank), put the LanCache-NG project' "$guard")" -eq 1 ]
+          [ "$(grep -Fxc '# header on physical line 2, and put the SPDX identifier on physical line 3.' "$guard")" -eq 1 ]
+          sed -i 's|# syntax, keep a genuinely required interpreter/parser marker on physical line|# syntax. A genuinely required interpreter/parser marker occupies physical line 1;|' "$guard"
+          sed -i 's|# 1 when one exists (otherwise line 1 is blank), put the LanCache-NG project|# Rust uses a bare `//!` formatter-stable placeholder on line 1; otherwise line 1 is blank.|' "$guard"
+          sed -i 's|# header on physical line 2, and put the SPDX identifier on physical line 3.|# The LanCache-NG project header stays on physical line 2 and SPDX stays on physical line 3.|' "$guard"
+
+          rust_anchor='    [ -z "$first_line" ] && return 0'
+          [ "$(grep -Fxc "$rust_anchor" "$guard")" -eq 1 ]
+          awk '
+            $0 == "    [ -z \"$first_line\" ] && return 0" {
+              print "    case \"$path\" in"
+              print "        *.rs) [ \"$first_line\" = \"//!\" ] && return 0 || return 1 ;;"
+              print "    esac"
+              print ""
+            }
+            { print }
+          ' "$guard" > "$guard.tmp"
+          mv "$guard.tmp" "$guard"
+
+          old_error='        failures+=("$path: line 1 must be blank or a recognized required interpreter/parser marker")'
+          [ "$(grep -Fxc "$old_error" "$guard")" -eq 1 ]
+          awk -v old="$old_error" '
+            $0 == old {
+              print "        failures+=(\"$path: line 1 does not match the canonical placeholder/interpreter/parser-marker contract\")"
+              next
+            }
+            { print }
+          ' "$guard" > "$guard.tmp"
+          mv "$guard.tmp" "$guard"
+
+          bats='tests/bats/check_file_headers.bats'
+          old_test='@test "explicit-file mode accepts Rust inner-doc header syntax" {'
+          [ "$(grep -Fxc "$old_test" "$bats")" -eq 1 ]
+          awk '
+            BEGIN { in_rust_blank = 0; changed_status = 0 }
+            $0 == "@test \"explicit-file mode accepts Rust inner-doc header syntax\" {" {
+              print "@test \"explicit-file mode rejects a real blank line before the Rust inner-doc header\" {"
+              in_rust_blank = 1
+              next
+            }
+            in_rust_blank && $0 == "    [ \"$status\" -eq 0 ]" {
+              print "    [ \"$status\" -eq 1 ]"
+              changed_status++
+              next
+            }
+            in_rust_blank && $0 == "}" {
+              print
+              in_rust_blank = 0
+              next
+            }
+            { print }
+            END { if (changed_status != 1) exit 42 }
+          ' "$bats" > "$bats.tmp"
+          mv "$bats.tmp" "$bats"
+
+          if grep -Fq 'explicit-file mode accepts the formatter-stable Rust line-1 placeholder' "$bats"; then
+            echo '::error::Rust placeholder regression test already exists unexpectedly' >&2
+            exit 1
+          fi
+          cat >> "$bats" <<'BATS'
+
+          @test "explicit-file mode accepts the formatter-stable Rust line-1 placeholder" {
+              printf '//!\n//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)\n//! SPDX-License-Identifier: AGPL-3.0-or-later\nfn main() {}\n' > "$fixture_dir/example.rs"
+              run bash "$script" "$fixture_dir/example.rs"
+              [ "$status" -eq 0 ]
+          }
+          BATS
+
+          agents='AGENTS.md'
+          awk '
+            BEGIN { matrix = 0; rule = 0; rust = 0 }
+            index($0, "| AG-HDR-001 |") == 1 {
+              print "| AG-HDR-001 | Every in-scope source/config file uses the canonical physical three-line `LanCache-NG` + SPDX prefix; line 1 is a required interpreter/parser marker, the formatter-stable bare `//!` Rust placeholder, or blank as defined by the file format | CI (`file-headers` job runs `scripts/check-file-headers.sh` in build-push.yml) |"
+              matrix++
+              next
+            }
+            index($0, "- **[AG-HDR-001]**") == 1 {
+              print "- **[AG-HDR-001]** Every source/config file (Rust, shell, YAML, Dockerfiles, `.conf`/template files, HTML/CSS/JS) in scope for repository headers uses one canonical physical three-line prefix. Physical line 1 is either a genuinely required interpreter/parser marker, for Rust exactly the bare `//!` inner-doc placeholder required to keep the three-line contract formatter-stable, or otherwise intentionally blank. Physical line 2 contains the literal project form `LanCache-NG (https://github.com/wiki-mod/lancache-ng)` in the native comment syntax valid for that file. Physical line 3 contains `SPDX-License-Identifier: AGPL-3.0-or-later` using the same native comment syntax. Existing file-purpose documentation follows this fixed prefix and is not displaced or removed merely to satisfy the three-line contract. `scripts/check-file-headers.sh` enforces the exact capitalization, physical positions, native syntax, and uniqueness of the project/SPDX lines."
+              rule++
+              next
+            }
+            index($0, "  - Rust:") == 1 {
+              print "  - Rust: physical line 1 is exactly bare `//!`; lines 2 and 3 are `//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)` and `//! SPDX-License-Identifier: AGPL-3.0-or-later`. The bare inner-doc line is the formatter-stable placeholder for the otherwise empty first line; a physical blank line is not canonical because `rustfmt` removes it."
+              rust++
+              next
+            }
+            { print }
+            END { if (matrix != 1 || rule != 1 || rust != 1) exit 43 }
+          ' "$agents" > "$agents.tmp"
+          mv "$agents.tmp" "$agents"
+
+          # Fail closed before creating the merge commit. The whole-repository
+          # scan proves both the 47-file Rust rollout and any files arriving
+          # from the freshly merged current_dev satisfy the executable guard.
+          bash -n "$guard"
+          bash "$guard"
+          git diff --check
+
+          while IFS= read -r -d '' path; do
+            [ "$(sed -n '1p' -- "$path")" = '//!' ] || {
+              echo "::error::Rust line 1 is not //! after normalization: $path" >&2
+              exit 1
+            }
+            [ "$(sed -n '2p' -- "$path")" = "//! $canonical" ] || {
+              echo "::error::Rust line 2 is not canonical after normalization: $path" >&2
+              exit 1
+            }
+            [ "$(sed -n '3p' -- "$path")" = "//! $spdx" ] || {
+              echo "::error::Rust line 3 is not SPDX after normalization: $path" >&2
+              exit 1
+            }
+          done < <(git ls-files -z '*.rs')
+
+          git add -A
+          git diff --cached --check
+          marker="GPT-$(date +%s)"
+          git commit -m "$marker" -m 'chore(governance): enforce formatter-stable Rust file headers'
+          git push origin "HEAD:$branch"
+
+          echo "Rust files inspected: $rust_total"
+          echo "Rust files rewritten: $rust_rewritten"
+          echo "Pushed head: $(git rev-parse HEAD)"
