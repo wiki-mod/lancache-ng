@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CI image pinning helper: scans .github/workflows and Dockerfiles for mutable
 # image references (floating tags like :latest, @v4-style action references
 # without SHA pins, untagged base images) and reports them. Intended as a

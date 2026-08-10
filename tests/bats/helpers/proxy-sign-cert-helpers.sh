@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper exposing hand-extracted copies of services/proxy/entrypoint.sh's
 # _sign_cert() and _bounded_cert_name(), the two functions the deep leading-dot

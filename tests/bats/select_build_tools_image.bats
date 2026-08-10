@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Docker-free unit coverage for scripts/select-build-tools-image.sh's
 # select_build_tools_trusted_fallback_allowed() -- the trust-boundary

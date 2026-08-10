@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Regression tests for services/ntp/entrypoint.sh's sourcing of the
 # Admin-UI-persisted settings file (`_ntp_source_ui_settings`), which had

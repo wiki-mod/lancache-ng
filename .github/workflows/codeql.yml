@@ -1,5 +1,6 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # CI workflow that runs CodeQL static analysis (GitHub Actions and Rust languages)
 # on pushes, pull requests, and a daily schedule, uploading SARIF results as security alerts.
 name: CodeQL

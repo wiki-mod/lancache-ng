@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Coverage for scripts/lib/git-fetch-retry.sh's git_fetch_retry(): a fake
 # `git` function stands in for the real binary so each case can script an

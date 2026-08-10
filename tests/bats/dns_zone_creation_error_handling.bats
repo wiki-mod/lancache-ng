@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for _dns_ensure_zone_exists (services/dns/entrypoint.sh),
 # fixing bug-hunt finding #6 (docs/bug-hunt/dns.md, re-verified 2026-08-06):

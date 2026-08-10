@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for #762's `setup.sh create-logs-for-issue` diagnostic bundle,
 # driving the real setup.sh functions (logbundle_key_looks_like_secret,

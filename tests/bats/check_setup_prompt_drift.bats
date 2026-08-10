@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for scripts/check-setup-prompt-drift.sh (#1176): the CI guard that
 # fails when setup.sh's interactive install wizard and its expect-driven

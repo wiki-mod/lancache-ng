@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Reaps the per-PR GHCR staging tags that build-push.yml now pushes on
 # pull_request events (see #626) so "validate full-setup image" can test a

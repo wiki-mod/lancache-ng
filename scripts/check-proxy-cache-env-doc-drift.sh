@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # CI guard for bug-hunt #849/#1068 item 11: docs/architecture-ng.md's nginx
 # cache-configuration table hand-duplicates each CACHE_* variable's default
