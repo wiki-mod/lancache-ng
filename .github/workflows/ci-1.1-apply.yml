@@ -22,6 +22,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      - name: Diagnose manifest merge source shape
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          lines = Path('.github/workflows/build-push.yml').read_text().splitlines(keepends=True)
+          matches = [i for i, line in enumerate(lines) if 'imagetools create -t "$target_image" "$amd64_image" "$arm64_image"' in line]
+          print('manifest merge source matches:', len(matches))
+          for i in matches:
+              for j in range(max(0, i - 1), min(len(lines), i + 2)):
+                  print(j + 1, repr(lines[j]))
+          PY
+
       - name: Harden one-shot patcher source match
         run: python3 scripts/ci-1.1-hotfix.py
 
