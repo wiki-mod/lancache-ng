@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: AGPL-3.0-or-later
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI service entry point. Wires up the axum HTTP server, shared
