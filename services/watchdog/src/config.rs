@@ -1,5 +1,6 @@
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 //! SPDX-License-Identifier: AGPL-3.0-or-later
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Environment parsing and validation, mirroring watchdog.sh's own startup
 //! section (env var reads, `is_truthy`, the `CHECK_INTERVAL` digit-only

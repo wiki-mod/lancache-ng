@@ -1,4 +1,6 @@
--- lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+-- LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+-- SPDX-License-Identifier: AGPL-3.0-or-later
 --
 -- PowerDNS Recursor Lua script (preresolve hook): AAAA filter that suppresses
 -- IPv6 DNS responses for all domains. Enabled by the presence of

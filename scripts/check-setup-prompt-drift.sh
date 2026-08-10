@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # CI guard for issue #1176: setup.sh's interactive install wizard and the
 # expect-driven simulation scripts that drive it (scripts/setup-cli-

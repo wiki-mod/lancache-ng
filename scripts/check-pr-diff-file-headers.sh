@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Runs the diff-scoped half of the file-headers/file-headers-hosted jobs'
 # SPDX check (AG-HDR-008): fetches the PR's base branch and exact base SHA,

@@ -1,6 +1,6 @@
 #!/bin/bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Dedicated entrypoint for the standalone `retention` sidecar container
 # (#842 Teil 2, 2026-08-01). Was previously a generic wrapper that launched
 # retention.sh as a background process inside the SAME container as

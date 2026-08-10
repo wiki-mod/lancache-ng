@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CI workflow that builds, smoke-tests, and scans the multi-arch build-tools container
 # image (providing rustc, sccache, distcc) locally, then publishes it to GHCR on a
 # weekly schedule, on relevant pushes to master, and on manual dispatch. This

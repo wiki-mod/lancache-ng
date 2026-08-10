@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Fixture tests for nats_secondary_override_active_for_install_dir() and
 # compose_file_args_for_install_dir(), the two helpers `setup.sh update` uses

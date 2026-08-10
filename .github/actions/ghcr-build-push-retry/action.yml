@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 name: Docker build and push to GHCR with retry
 description: >-
   Wraps docker/build-push-action with the issue #822 GHCR retry policy:

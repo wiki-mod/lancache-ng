@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Sync-guard test to ensure the CA subject string (CN/O) stays consistent
 # between certs/generate-ca.sh and services/proxy/entrypoint.sh.

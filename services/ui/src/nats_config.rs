@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! NATS configuration validation helpers.
 //!
 //! Runtime NATS config generation interpolates credentials into double-quoted

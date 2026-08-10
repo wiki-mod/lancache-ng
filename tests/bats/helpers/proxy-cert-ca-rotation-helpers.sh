@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that extracts services/proxy/entrypoint.sh's real
 # _purge_stale_leaf_certs_on_ca_change() so its CA-fingerprint-tracked leaf

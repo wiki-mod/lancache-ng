@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CDN domain list for DNS spoofing. One domain per line, three explicit match modes (#1072):
 #   domain.com      -> matches ONLY domain.com (no subdomains)
 #   .domain.com     -> matches ONLY *.domain.com (every subdomain, not the bare root)

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for #849 bug-hunt finding watchdog.md#12: tests/bats/helpers/
 # watchdog-helpers.sh's load_watchdog_functions() extracts watchdog.sh's

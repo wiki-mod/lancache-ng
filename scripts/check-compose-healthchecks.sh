@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # CI guard against the exact regression issue #1169 was filed for: a service
 # defined in deploy/*/docker-compose.yml with no `healthcheck:` block at all,

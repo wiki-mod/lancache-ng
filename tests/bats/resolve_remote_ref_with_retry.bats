@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # Proves the remote-ref resolver's success, retry, and exhausted-budget paths offline.
 
 setup() {

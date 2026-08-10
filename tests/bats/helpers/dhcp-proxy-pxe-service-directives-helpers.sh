@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads the dhcp-proxy entrypoint's issue #705 PXE
 # boot-pointer rendering function (`_dhcp_proxy_render_pxe_service_directives`)

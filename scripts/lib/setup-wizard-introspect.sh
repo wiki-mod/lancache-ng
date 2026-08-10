@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Issue #1176 (Angle 1): shared helper sourced by scripts/setup-cli-
 # simulation.sh and scripts/syslog-forwarding-simulation.sh so both derive

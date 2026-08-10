@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for scripts/check-validation-subnet-wrapper-coverage.sh (#896):
 # the standing CI guard that fails a build if a job in full-setup-validate.yml

@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads services/dns/entrypoint.sh's real
 # "secret_is_placeholder" and "configure_ddns_tsig" functions without

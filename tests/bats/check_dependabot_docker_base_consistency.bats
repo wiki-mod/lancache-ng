@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Exercises scripts/check-dependabot-docker-base-consistency.sh against
 # small, throwaway fixture trees rather than only this repo's own real

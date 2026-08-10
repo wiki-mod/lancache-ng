@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads setup.sh's lancache_auto_update_should_proceed()
 # in isolation. It has zero dependency on docker, systemd, or any other

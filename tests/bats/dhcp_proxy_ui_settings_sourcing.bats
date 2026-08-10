@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Regression tests for services/dhcp-proxy/entrypoint.sh's sourcing of the
 # Admin-UI-persisted settings file (`_dhcp_proxy_source_ui_settings`), which
