@@ -792,13 +792,17 @@ NATS_CALLOUT_PASSWORD=<generate-a-secret>
 NATS_SYS_PASSWORD=<generate-a-secret>
 ```
 
-`SECONDARY_REGISTRATION_TOKEN` is different from the values above: it is
-always required, even on a single-node install that never registers a
-secondary DNS node. The Admin UI's boot-time check refuses to start on an
-empty value or on the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
+`SECONDARY_REGISTRATION_TOKEN` is different from the values above: on an
+empty value or the checked-in `CHANGE_ME_SECONDARY_REGISTRATION_TOKEN`
 placeholder (an empty token previously allowed unauthenticated secondary
-registration — see issue #659), so replace it with a real secret regardless
-of whether you plan to use secondary DNS:
+registration — see issue #659), the Admin UI does not refuse to start — it
+generates a persistent random token on first boot and writes it to a file
+under its `/data` volume, logging the file path so you can retrieve it
+later if you decide to register a secondary DNS node. Startup only refuses
+to continue if that persisted token file itself already exists but is
+unusable (empty, still a placeholder, or unreadable/unwritable). To set the
+token explicitly instead of relying on auto-generation, replace the
+placeholder with a real secret:
 
 ```env
 SECONDARY_REGISTRATION_TOKEN=<generate-a-secret>

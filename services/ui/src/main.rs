@@ -926,15 +926,15 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let nats = connect_nats_with_retry(&cfg).await;
-    let ui_session_secret = load_or_create_session_secret()?;
-
-    // Resolve the effective secondary-registration token alongside the other
-    // durable /data secrets: a real operator value is preserved, otherwise a
-    // persistent random one is generated so the documented manual compose path
-    // starts securely instead of crash-looping (see
-    // load_or_create_secondary_registration_token). validate_* then asserts the
-    // resolved value is real as defense in depth.
+    // Resolved and validated before the NATS retry loop below (which retries
+    // forever), matching this function's own stated ordering principle
+    // above: a bad token configuration must fail closed immediately, not
+    // wait behind an indefinite NATS connection retry when NATS also
+    // happens to be unavailable. Alongside the other durable /data secrets:
+    // a real operator value is preserved, otherwise a persistent random one
+    // is generated so the documented manual compose path starts securely
+    // instead of crash-looping (see load_or_create_secondary_registration_token).
+    // validate_* then asserts the resolved value is real as defense in depth.
     let secondary_registration_token = match load_or_create_secondary_registration_token(
         &cfg.secondary_registration_token,
         SECONDARY_REGISTRATION_TOKEN_FILE,
@@ -950,6 +950,9 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     cfg.secondary_registration_token = secondary_registration_token;
+
+    let nats = connect_nats_with_retry(&cfg).await;
+    let ui_session_secret = load_or_create_session_secret()?;
 
     // Loaded before the DB/state so its public key can be baked into the
     // initial nats.conf write below, and its private seed handed to the

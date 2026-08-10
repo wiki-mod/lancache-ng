@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
@@ -111,19 +112,21 @@ impl std::fmt::Display for DhcpError {
 
 impl std::error::Error for DhcpError {}
 
-// kea_config_modify's closures throughout this file share the literal
-// "subnet not found" error string (from find_subnet_mut, used directly or
-// via dhcp4_subnets_mut+find) whenever a caller-supplied subnet_id doesn't
-// exist -- a client-input problem (the operator's own request named a
-// subnet that isn't there), not a server-side config-mutation failure, and
-// should surface as 404 Not Found rather than the generic 500 Internal
-// Server Error every other closure failure maps to. This one shared
+// kea_config_modify's closures throughout this file share two literal
+// not-found error strings for client-input problems (the operator's own
+// request named something that isn't there), not server-side
+// config-mutation failures, which should surface as 404 Not Found rather
+// than the generic 500 Internal Server Error every other closure failure
+// maps to: "subnet not found" (from find_subnet_mut, used directly or via
+// dhcp4_subnets_mut+find) and "custom option not found" (from
+// remove_custom_subnet_option/remove_pxe_subnet_field, e.g. a
+// double-submitted or stale-page option-removal form). This one shared
 // helper is used at every kea_config_modify call site, so the mapping
 // only needs to be correct once here, and any closure failure that is not
-// this specific "subnet not found" case keeps the generic 500 behavior.
+// one of these two specific cases keeps the generic 500 behavior.
 fn kea_config_modify_error(e: Box<dyn std::error::Error + Send + Sync>) -> DhcpError {
     let message = e.to_string();
-    if message == "subnet not found" {
+    if message == "subnet not found" || message == "custom option not found" {
         DhcpError::new(StatusCode::NOT_FOUND, message)
     } else {
         DhcpError::config_error(message)
@@ -4490,6 +4493,19 @@ mod tests {
         let dhcp_err = kea_config_modify_error(boxed);
         assert_eq!(dhcp_err.status, StatusCode::NOT_FOUND);
         assert_eq!(dhcp_err.message, "subnet not found");
+    }
+
+    // A double-submitted or stale-page option-removal form (both
+    // remove_custom_subnet_option and remove_pxe_subnet_field's
+    // `.ok_or("custom option not found")`) must map to 404 Not Found too,
+    // not the blanket 500 the missing-string case previously fell through
+    // to.
+    #[test]
+    fn kea_config_modify_error_maps_custom_option_not_found_to_404() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "custom option not found".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(dhcp_err.message, "custom option not found");
     }
 
     // Every other kea_config_modify closure failure (a genuine
