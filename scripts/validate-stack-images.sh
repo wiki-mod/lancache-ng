@@ -99,6 +99,7 @@ for dockerfile in \
   services/watchdog/Dockerfile \
   services/dhcp/Dockerfile \
   services/dhcp-proxy/Dockerfile \
+  services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
   tools/build-tools/Dockerfile
@@ -175,6 +176,7 @@ for dockerfile in \
   services/watchdog/Dockerfile \
   services/dhcp/Dockerfile \
   services/dhcp-proxy/Dockerfile \
+  services/ntp/Dockerfile \
   services/ui/Dockerfile \
   tools/build-tools/Dockerfile
 do
@@ -195,11 +197,11 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
   .github/workflows/build-push.yml \
   'per-platform service builds must force OCI mediatypes so downstream imagetools create can actually attach index annotations'
 # build-tools.yml is a second, independent publisher of the build-tools
-# image (weekly cron/push/dispatch, moving build-tools:latest and mutable
-# branch tags) -- most CI/dev paths actually consume its tags, not
-# build-push.yml's own build-tools matrix row's sha-<commit>-only output.
-# It needs the identical OCI-mediatype/annotation fix, not just
-# build-push.yml (issue #620).
+# image on weekly cron/manual dispatch, moving build-tools:latest and mutable
+# branch tags. Same-repository push candidates are built by build-push.yml,
+# so this standalone workflow no longer owns a second push-triggered build.
+# Its own publisher still needs the identical OCI-mediatype/annotation
+# contract because most CI/dev paths consume these standalone mutable tags.
 require_grep 'outputs: type=image,oci-mediatypes=true' \
   .github/workflows/build-tools.yml \
   'build-tools.yml per-platform builds must force OCI mediatypes so its own merge step can actually attach index annotations'
