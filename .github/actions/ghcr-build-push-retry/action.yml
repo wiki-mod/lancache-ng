@@ -263,6 +263,7 @@ runs:
       env:
         IMAGE_TAGS: ${{ inputs.tags }}
         IMAGE_DIGEST: ${{ steps.resolve.outputs.digest }}
+        REGISTRY: ${{ inputs.registry }}
       run: |
         set -euo pipefail
 
@@ -282,10 +283,6 @@ runs:
 
         image_repo="${image_tag%:*}"
         printf 'image-ref=%s@%s\n' "$image_repo" "$IMAGE_DIGEST" >> "$GITHUB_OUTPUT"
-      env:
-        IMAGE_TAGS: ${{ inputs.tags }}
-        IMAGE_DIGEST: ${{ steps.resolve.outputs.digest }}
-        REGISTRY: ${{ inputs.registry }}
 
     - name: Scan exact pushed PR digest
       if: github.event_name == 'pull_request' && inputs.push == 'true' && steps.pr-image.outcome == 'success'
