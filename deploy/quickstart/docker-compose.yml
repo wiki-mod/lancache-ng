@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # LanCache-NG — Quickstart (no repo clone needed)
@@ -82,11 +83,41 @@ services:
       # Known-good nginx config snapshots (#415): persistent, service-owned
       # volume so rollback survives container restarts/recreates.
       - proxy-config-snapshots:/var/lib/lancache-proxy
+      # Per-domain SSL/MITM wildcard certs (entrypoint.sh's CERT_DIR) --
+      # see deploy/prod/docker-compose.yml's matching comment for why this
+      # needs to be a real named volume rather than the Dockerfile's
+      # anonymous VOLUME fallback.
+      - proxy-certs:/etc/nginx/ssl/certs
     ports:
       - "${IP_STANDARD}:80:80"
       - "${IP_STANDARD}:443:8443"
-      - "${IP_SSL:-127.0.0.1}:80:80"
-      - "${IP_SSL:-127.0.0.1}:443:443"
+      # Issue #1415 (follow-up, real-world signature confirmed on PR #1463's
+      # CI run 2026-08-07): this row publishes unconditionally even when SSL
+      # mode is declined -- setup.sh's fresh-install wizard then leaves .env's
+      # IP_SSL genuinely EMPTY (not unset), and Compose's `:-` operator treats
+      # empty exactly like unset, so the bare `${IP_SSL:-127.0.0.1}` this used
+      # to read fell back to the one shared literal every SSL-declined install
+      # on a host defaults to -- including two concurrent CI simulation runs,
+      # which is why scripts/setup-cli-simulation.sh's own dynamic
+      # IP_STANDARD/IP_SSL derivation (already fixed for the IP_STANDARD row
+      # above by PR #1456) never actually closed this second row's collision:
+      # exporting IP_SSL from the wrapper is moot once setup.sh's wizard
+      # itself blanks it before ever calling `docker compose up`, and the
+      # written .env is just as empty either way. IP_SSL_BIND_FALLBACK is a
+      # SEPARATE knob setup.sh's wizard never assigns and never writes to
+      # .env, so it survives untouched through that blanking -- confirmed with
+      # a real `docker compose config` run on a runner host (not just static
+      # YAML reading, per AG-CI-015/017) that nested `${A:-${B:-literal}}`
+      # interpolation resolves correctly on this project's pinned Compose
+      # version, including when $IP_SSL is set-but-empty rather than unset.
+      # Left unset (the default, and the only supported value for a real
+      # install), both rows below still resolve to the identical historical
+      # 127.0.0.1 literal -- unchanged for every real deployment. Only
+      # scripts/setup-cli-simulation.sh sets it, to this run's own
+      # sim_ip_octet()-derived address, mirroring LANCACHE_CONTAINER_SUFFIX's
+      # existing CI-only-knob pattern documented at the top of this file.
+      - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:80:80"
+      - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:443:443"
     healthcheck:
       # Since #1276/#1322: see deploy/prod/docker-compose.yml's matching
       # comment -- container port 443 is now the stream-level SNI dispatch
@@ -717,13 +748,17 @@ services:
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # DHCP_MODE/SYSLOG_ENABLED (issue #842/#849): matches
-      # deploy/prod/docker-compose.yml's identical addition -- currently
-      # unused by watchdog.sh (the bash entrypoint this ENTRYPOINT still
-      # runs), read only by the Rust crate's resolve_alert_only_targets()
-      # once that becomes this service's actual ENTRYPOINT.
+      # DHCP_MODE/SYSLOG_ENABLED/NTP_ENABLED (issue #842/#849/#1296):
+      # matches deploy/prod/docker-compose.yml's identical addition and its
+      # own comment there for the full rationale -- DHCP_MODE/SYSLOG_ENABLED
+      # are still unused by watchdog.sh (the bash entrypoint this
+      # ENTRYPOINT actually runs), read only by the Rust crate's
+      # resolve_alert_only_targets() once that becomes this service's
+      # actual ENTRYPOINT; NTP_ENABLED is different -- watchdog.sh itself
+      # now reads it directly to decide whether to alert-only-monitor `ntp`.
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P` for the dashboard's disk-usage card) -- see
@@ -781,6 +816,13 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      # #849 bug-hunt finding observability.md#21: without this entry,
+      # retention.sh's own "${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}" default
+      # would be the only value the container ever sees -- Compose does not
+      # pass an arbitrary host/`.env` variable into a container unless it is
+      # named here, so an operator setting this in their `.env` would
+      # silently have no effect without this line.
+      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
@@ -988,7 +1030,17 @@ services:
       # flap this healthcheck unhealthy for that reason alone. Verified live:
       # a freshly started, not-yet-synchronised chronyd still returns a
       # "Reference ID" line immediately.
-      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1"]
+      #
+      # Second statement (issue #1296, maintainer decision): see
+      # deploy/prod/docker-compose.yml's matching comment on this exact
+      # line for the full rationale -- kept identical across both compose
+      # files. In short: surfaces a real CAP_SYS_TIME-denied degraded mode
+      # into Docker's own `.State.Health.Log` every healthcheck cycle, so
+      # `services/watchdog` can report a genuinely distinct amber
+      # "Degraded" state instead of a plain healthy dot, without ever
+      # making this container Docker-"unhealthy" for a real, deliberate
+      # reduced-guarantee mode.
+      test: ["CMD-SHELL", "chronyc tracking | grep -q 'Reference ID' || exit 1; if [ -f /run/ntp-cap-sys-time-degraded ]; then printf 'DEGRADED: %s\n' \"$(cat /run/ntp-cap-sys-time-degraded)\"; fi"]
       interval: 30s
       timeout: 5s
       retries: 3
@@ -1074,6 +1126,12 @@ services:
       - SSL_LOG=/var/log/nginx/access.log
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
+      # Shared-secret bootstrap (#858): the ui entrypoint resolves this from
+      # /var/lib/lancache-secrets/netdata-alarm-token to match the netdata
+      # service's own resolution below -- see routes/netdata_alarms.rs for
+      # what this token gates (POST /api/netdata-alarms, the forward channel
+      # for Netdata's health.d alarms, bug hunt #849 finding #3).
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN:-}
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
@@ -1201,16 +1259,96 @@ services:
         # services/ directory to bind-mount services/syslog/netdata-web_log.conf
         # from (same constraint as netdata.conf itself, above), so the job
         # config is generated inline instead. Keep this content byte-identical
-        # to services/syslog/netdata-web_log.conf if that file ever changes.
+        # to services/syslog/netdata-web_log.conf if that file ever changes
+        # -- mechanically enforced by scripts/check-logging-matrix.sh
+        # (#849 bug-hunt finding observability.md#16), because this inline
+        # copy is independent of the real file (not a bind-mount), so a
+        # change applied only there never propagates here on its own:
+        # services/syslog/netdata-web_log.conf's own header records that its
+        # `log_type: nginx` field was removed 2026-07-31 after causing a real
+        # "check failed: failed to create parser" job failure, a change that
+        # prod (which bind-mounts the real file directly) picked up
+        # automatically while this standalone copy did not. The
+        # byte-identical check exists precisely to catch that class of
+        # silent divergence for every quickstart install going forward.
         mkdir -p /etc/netdata/go.d
         cat > /etc/netdata/go.d/web_log.conf <<'CONF'
         jobs:
           - name: nginx_proxy
             path: /var/log/lancache/nginx-proxy.log
-            log_type: nginx
         CONF
+        # Netdata alarm -> Admin UI forwarding (bug hunt #849, observability.md
+        # finding #3). Same shared-secret-bootstrap (#858) resolution and
+        # health_alarm_notify.conf override as deploy/prod/docker-compose.yml's
+        # netdata service -- see that file's matching comment for the verified
+        # alarm-notify.sh sourcing order and why only the custom_sender()
+        # integration point needs defining here. Keep this block byte-identical
+        # to prod's if it ever changes.
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        if secret_is_placeholder "$$NETDATA_ALARM_TOKEN"; then NETDATA_ALARM_TOKEN=""; fi
+        if ! NETDATA_ALARM_TOKEN="$$(resolve_shared_secret netdata-alarm-token "$$NETDATA_ALARM_TOKEN" lancache_gen_hex32)"; then
+          echo "[lancache-netdata] FATAL: NETDATA_ALARM_TOKEN is unset/placeholder and the shared-secrets volume is not writable, so no shared token could be generated." >&2
+          echo "[lancache-netdata] Mount the shared-secrets volume, or set NETDATA_ALARM_TOKEN to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        umask 077
+        printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
+        chmod 0600 /etc/netdata/.netdata-alarm-token
+        # Live-verified 2026-08-06 (PR #1444 real-alarm check, keep this
+        # block byte-identical to deploy/prod/docker-compose.yml's matching
+        # fragment): netdata's own daemon -- and therefore alarm-notify.sh
+        # and this file's custom_sender() -- runs as the image's
+        # unprivileged `netdata` user (uid 201), never as root, once past
+        # this root-context setup script. Without this chown, the token
+        # file stays root:root/0600 from the printf above, so the real
+        # health-engine-triggered alarm-notify.sh process gets "Permission
+        # denied" reading it, `cat ... 2>/dev/null` silently swallows that
+        # into an empty string, and every real (non-manually-triggered)
+        # alarm silently fails Admin UI auth with 401 -- confirmed by
+        # instrumenting this exact custom_sender() body and observing
+        # token_len=0 on a real health.d-fired alarm, versus a correct
+        # non-empty token when the same file is read via a root shell
+        # (e.g. `docker exec`), which is why naive manual testing as root
+        # does not catch this.
+        chown netdata:netdata /etc/netdata/.netdata-alarm-token
+        cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
+        # shellcheck disable=SC2154
+        # name/chart/host/status/old_status/value_string/units/info/
+        # unique_id/alarm_id/event_id/when/duration below are populated by
+        # Netdata's own alarm-notify.sh before it sources this file's
+        # custom_sender() -- never assigned in this fragment itself. See
+        # deploy/prod/docker-compose.yml's matching heredoc for the full
+        # explanation (keep this block byte-identical to that one).
+        # shellcheck disable=SC2034
+        # SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM are read by Netdata's own
+        # alarm-notify.sh AFTER sourcing this file, not used within it.
+        SEND_CUSTOM="YES"
+        DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
+        _lancache_json_escape() {
+          printf '%s' "$$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+        custom_sender() {
+          local token
+          token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
+          docurl -s --max-time 15 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Netdata-Alarm-Token: $${token}" \
+            -d "{\"unique_id\":$${unique_id},\"alarm_id\":$${alarm_id},\"event_id\":$${event_id},\"when\":$${when},\"name\":\"$$(_lancache_json_escape "$${name}")\",\"chart\":\"$$(_lancache_json_escape "$${chart}")\",\"host\":\"$$(_lancache_json_escape "$${host}")\",\"status\":\"$$(_lancache_json_escape "$${status}")\",\"old_status\":\"$$(_lancache_json_escape "$${old_status}")\",\"value_string\":\"$$(_lancache_json_escape "$${value_string}")\",\"units\":\"$$(_lancache_json_escape "$${units}")\",\"info\":\"$$(_lancache_json_escape "$${info}")\",\"duration\":$${duration}}" \
+            "http://ui:8080/api/netdata-alarms" >/dev/null 2>&1
+        }
+        ALARMCONF
         exec /usr/sbin/run.sh
     volumes:
+      # Shared-secret bootstrap (#858): same two mounts as the nats service
+      # above, needed here for the identical reason -- this service runs the
+      # pinned upstream `netdata/netdata` image (see the `image:` line
+      # below), which has no entrypoint.sh of its own to embed a byte-
+      # identical copy into. `services/netdata/entrypoint.sh` is a separate,
+      # evaluated-but-not-adopted first-party build (issue #1304/#815, PR
+      # #1352) -- no deploy profile actually runs that image today.
+      - shared-secrets:/var/lib/lancache-secrets
+      - ./scripts/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata
       - netdatacache:/var/cache/netdata
@@ -1219,6 +1357,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
+    environment:
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN:-}
     healthcheck:
       # Real HTTP probe against netdata's own REST API (#1169), matching the
       # check deploy/full-setup/docker-compose.yml's validation stack already
@@ -1249,6 +1389,9 @@ volumes:
   # so the generated value never rotates across restarts.
   shared-secrets:
   proxy-logs:
+  # Generated per-domain wildcard certs (entrypoint.sh's CERT_DIR) -- see
+  # the proxy service's own volumes: comment.
+  proxy-certs:
   # Known-good config snapshots (#415, #615), one persistent volume per
   # adapter. dns-standard and dns-ssl are separate containers with
   # independently-generated config, so each gets its own snapshot history.

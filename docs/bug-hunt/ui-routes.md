@@ -63,25 +63,15 @@ findings that overlap with it are still listed (for completeness) with a note.
 
 ## dashboard.rs -- `GET /`, `GET /api/metrics`
 
-2. **The dashboard's "recent logs" preview silently drops all standard-mode traffic when
-   `STANDARD_LOG` and `SSL_LOG` are configured as two different files.** (`routes/dashboard.rs:46-53`)
-   ```rust
-   let path = if cfg.standard_log == cfg.ssl_log {
-       cfg.standard_log.clone()
-   } else {
-       cfg.ssl_log.clone()
-   };
-   move || nginx_client::parse_log_tail(&path, 10)
-   ```
-   When the logs differ (a supported, documented configuration -- see `AGENTS.md`'s "Two-Mode /
-   Two-IP Architecture" section, each mode gets its own proxy service -- corrected 2026-08-05,
-   issue #1391 doc-sweep audit: this used to cite `CLAUDE.md`, which moved this section to
-   `AGENTS.md` on 2026-07-31), this always reads only
-   `ssl_log` and never reads `standard_log` at all. Any standard-mode (HTTP passthrough / no-CA)
-   client traffic is completely invisible in the dashboard's "recent activity" section in that
-   configuration, even though `get_log_stats`/`logs.rs`'s own `/logs` page correctly read and
-   merge both files. This is an actual behavioral inconsistency between `dashboard.rs` and
-   `logs.rs` for the exact same "recent log lines" concept, not just a coverage gap.
+2. ~~**The dashboard's "recent logs" preview silently drops all standard-mode traffic when
+   `STANDARD_LOG` and `SSL_LOG` are configured as two different files.** (`routes/dashboard.rs:46-53`)~~
+   **FIXED by #1476.** `dashboard.rs` now has a `merge_recent_logs` helper: when the two log
+   paths differ, both `standard_log` and `ssl_log` are read up to the same limit and merged
+   chronologically by parsed timestamp (`nginx_client::merge_log_entries_chronologically`, the
+   same helper `logs.rs`'s own merge uses), keeping only the most recent entries overall instead
+   of reading only one source. Covered by
+   `dashboard.rs`'s own `merge_recent_logs_includes_both_sources_when_they_interleave` and
+   `merge_recent_logs_keeps_the_most_recent_entries_when_over_limit` unit tests.
 
 3. ~~**`metrics_api` (`GET /api/metrics`) is confirmed dead code from the frontend's perspective**~~
    **CORRECTED (2026-07-18 currency check): this finding was wrong, not merely stale.**
@@ -109,24 +99,17 @@ findings that overlap with it are still listed (for completeness) with a note.
 
 ## logs.rs -- `GET /logs`
 
-5. **Cross-source log merge in the non-syslog branch is not chronologically interleaved --
-   it's two blocks concatenated and reversed, not a real merge by time.** (`routes/logs.rs:64-90`)
-   `nginx_client::parse_log_tail` returns each source's own tail window oldest-first (confirmed
-   in `nginx_client.rs`'s own doc comment: "oldest-first within the tail window ... routes/
-   logs.rs reverses the result itself to show newest-first"). When `standard_log != ssl_log`,
-   `logs_page` does:
-   ```rust
-   standard_logs.into_iter().chain(ssl_logs).collect()
-   ```
-   i.e. `[standard(oldest..newest), ssl(oldest..newest)]`, and only afterward does
-   `all_logs.reverse()` on the *whole combined list*. The result is
-   `[ssl(newest..oldest), standard(newest..oldest)]` -- every SSL-log entry (regardless of its
-   actual timestamp) is placed before every standard-log entry in the rendered "most recent
-   first" list. If the standard proxy's most recent request is more recent than the SSL proxy's
-   most recent request, it will still render *below* the SSL block instead of at the top. This
-   is a real correctness bug in the split-log branch, not merely a display nuance -- an operator
-   split-log setup gets a `/logs` page whose ordering does not reflect actual chronological
-   order across the two sources.
+5. ~~**Cross-source log merge in the non-syslog branch is not chronologically interleaved --
+   it's two blocks concatenated and reversed, not a real merge by time.** (`routes/logs.rs:64-90`)~~
+   **FIXED by #1476.** `logs_page`'s split-log branch now calls
+   `nginx_client::merge_log_entries_chronologically(standard_logs, ssl_logs)` instead of
+   `.chain()`, so the two sources are interleaved by actual parsed timestamp rather than
+   concatenated as two separate blocks. The same PR also fixed a related sizing bug this merge
+   introduced: each source was initially read only up to `max_entries / 2` before merging, which
+   could still silently drop entries whenever one source supplied more than half of the globally
+   newest requests -- each source is now read up to the full `max_entries` budget, with the
+   global cap applied only after the merge (matching `routes/dashboard.rs`'s
+   `merge_recent_logs`, see finding 2 above).
 
 6. **PARTIALLY ADDRESSED, re-verified against current code.** The `?filter=<cache_status>` query
    param is still only applied in the nginx branch (`routes/logs.rs:94-96` at original writing);
@@ -257,9 +240,10 @@ findings that overlap with it are still listed (for completeness) with a note.
     request's own mutation") -- so this is a known, accepted gap rather than an oversight, but it
     remains unfixed and operator-visible.
 
-13. **`normalize_lan_name` cannot produce the exact zone-apex name `"lan."` from the bare input
-    `"lan"` (no trailing dot) -- it mangles it into `"lan.lan."` instead.**
-    (`routes/domains.rs:771-780`)
+13. **~~`normalize_lan_name` cannot produce the exact zone-apex name `"lan."` from the bare input
+    `"lan"` (no trailing dot) -- it mangles it into `"lan.lan."` instead.~~ FIXED by #1470
+    (commit `b84d6ccb`).**
+    (`routes/domains.rs:771-780`, original code before the fix)
     ```rust
     fn normalize_lan_name(name: &str) -> String {
         let trimmed = name.trim().to_lowercase();
@@ -279,31 +263,62 @@ findings that overlap with it are still listed (for completeness) with a note.
     dot themselves (`"lan."`) to get the intended name; every existing unit test that exercises
     the apex (`validate_lan_record("lan.", ...)`) already passes the trailing dot in directly,
     so this normalization edge case has no test coverage either way.
+    **Fix**: `normalize_lan_name` now checks `trimmed == "lan"` explicitly alongside the
+    `.lan`-suffix case, so the bare zone-root label correctly normalizes to `"lan."`. Regression
+    test: `normalize_lan_name_handles_the_bare_zone_root`.
 
-14. **`MAX_TTL` is `u32::MAX` (4294967295), which exceeds PowerDNS/RFC 2181's signed-32-bit TTL
-    range (0..=2147483647).** (`routes/domains.rs:357-358`, used by `validate_lan_record` at
-    line 469) A TTL value between `2147483648` and `4294967295` passes this route's own
-    validation and gets published to NATS/`nats-subscriber`, which then presumably forwards it
-    to PowerDNS's API -- whether PowerDNS accepts, silently truncates/wraps, or rejects such a
-    value was not traced further in this file (out of this file's own code), but the UI-level
-    validation itself allows a value the DNS protocol/PowerDNS doesn't support, pushing a
-    possible failure downstream into the same fire-and-log NATS publish path already flagged as
-    silent (`add_lan_record`, line ~188-197) -- i.e. this could compound into a record silently
-    never actually being written with the TTL the operator entered.
+14. **~~`MAX_TTL` is `u32::MAX` (4294967295), which exceeds PowerDNS/RFC 2181's signed-32-bit TTL
+    range (0..=2147483647).~~ FIXED by #1470 (commit `b84d6ccb`).** (`routes/domains.rs:357-358`,
+    original code before the fix, used by `validate_lan_record` at line 469) A TTL value between
+    `2147483648` and `4294967295` passes this route's own validation and gets published to
+    NATS/`nats-subscriber`, which then presumably forwards it to PowerDNS's API -- whether
+    PowerDNS accepts, silently truncates/wraps, or rejects such a value was not traced further in
+    this file (out of this file's own code), but the UI-level validation itself allows a value the
+    DNS protocol/PowerDNS doesn't support, pushing a possible failure downstream into the same
+    fire-and-log NATS publish path already flagged as silent (`add_lan_record`, line ~188-197) --
+    i.e. this could compound into a record silently never actually being written with the TTL the
+    operator entered.
+    **Fix**: `MAX_TTL` corrected to `2_147_483_647`, matching RFC 2181 SS8's actual ceiling (a
+    value with the sign bit set is specified to be reinterpreted as 0 by a compliant resolver, not
+    accepted as a real TTL). Regression test: `ttl_upper_bound_matches_rfc_2181_not_u32_max`.
+    Follow-up: `templates/domains.html`'s TTL field had no matching `max` attribute, so the browser
+    still accepted a value above the new server-side ceiling and `add_lan_record` silently redirected
+    back to `/domains` with no visible error once the server rejected it. Fixed: added
+    `max="2147483647"` plus a visible client-side validation message.
 
-15. `is_valid_txt_content` (`routes/domains.rs:442-446`) has no upper length bound on TXT record
-    content -- only rejects empty and control characters. Combined with `LanRecordForm` having
-    no visible request body size cap traced in this file, an operator (or, since this route
-    requires authentication+CSRF, at least an authenticated session) could submit an arbitrarily
-    large TXT value that this route accepts and forwards via NATS before any PowerDNS-side limit
-    is hit. Low severity given the route requires an authenticated admin session already.
+15. **~~`is_valid_txt_content` (`routes/domains.rs:442-446`) has no upper length bound on TXT
+    record content -- only rejects empty and control characters.~~ FIXED by #1470 (commit
+    `b84d6ccb`).** Combined with `LanRecordForm` having no visible request body size cap traced in
+    this file, an operator (or, since this route requires authentication+CSRF, at least an
+    authenticated session) could submit an arbitrarily large TXT value that this route accepts and
+    forwards via NATS before any PowerDNS-side limit is hit. Low severity given the route requires
+    an authenticated admin session already.
+    **Fix**: added `MAX_TXT_CONTENT_BYTES = 64_986` (RFC 1035 SS4.2.2's 65535-byte DNS message
+    ceiling -- not RDLENGTH alone -- adjusted for both the per-255-byte-chunk length-prefix
+    overhead PowerDNS's own documented TXT auto-chunking adds on the wire, and the surrounding DNS
+    header/question/answer-frame bytes and the mandatory option-free EDNS response OPT record that
+    must also fit in the same message; see that constant's own header comment for the exact
+    arithmetic). The form applies the same UTF-8 byte-aware ceiling through browser custom validity;
+    HTML `maxlength` is unsuitable because it counts UTF-16 code units instead. Regression test:
+    `txt_content_upper_bound_matches_message_ceiling`.
 
-16. `fetch_lan_records` (`routes/domains.rs:741-769`) doesn't check `resp.status().is_success()`
-    before calling `.json()`, unlike `flush_recursor_cache` in the same file which does check
-    success. A non-2xx response from PowerDNS Authoritative still gets parsed as JSON; if it
-    happens to be a JSON error body without an `rrsets` key the function correctly falls back to
-    `vec![]`, so this is not currently a crash/panic risk, just an inconsistency with the
-    success-checking pattern used elsewhere in the same file.
+16. **~~`fetch_lan_records` (`routes/domains.rs:741-769`) doesn't check
+    `resp.status().is_success()` before calling `.json()`, unlike `flush_recursor_cache` in the
+    same file which does check success.~~ FIXED by #1470 (commit `b84d6ccb`).** A non-2xx response
+    from PowerDNS Authoritative still gets parsed as JSON; if it happens to be a JSON error body
+    without an `rrsets` key the function correctly falls back to `vec![]`, so this is not
+    currently a crash/panic risk, just an inconsistency with the success-checking pattern used
+    elsewhere in the same file.
+    **Fix**: the response-interpretation logic was extracted into a pure `parse_lan_records_response`
+    helper that checks `status.is_success()` before ever looking at the body, and logs on both a
+    non-success status and a body-parse failure so a real PowerDNS failure is now distinguishable
+    from a genuinely empty zone. `fetch_lan_records` itself also checks the status before awaiting
+    `resp.json()` (not just inside the helper), so a slow/non-terminating non-2xx response no
+    longer blocks on reading a body the outcome never depended on. Regression tests:
+    `parse_lan_records_response_rejects_non_success_status_regardless_of_body`,
+    `parse_lan_records_response_returns_empty_for_a_real_empty_zone`,
+    `parse_lan_records_response_parses_real_rrsets_on_success`,
+    `parse_lan_records_response_returns_empty_on_body_parse_error`.
 
 ---
 
@@ -476,4 +491,3 @@ This document is the raw, unfiltered output of the collection phase for issue #8
 no self-verification during collection, per the maintainer-agreed methodology for this sweep).
 Severity judgments in the accompanying tool-call findings are the collecting agent's own
 first-pass estimate, not a verified ranking -- verification is a separate, later phase.
-

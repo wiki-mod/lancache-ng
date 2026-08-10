@@ -20,7 +20,10 @@ use serde::Deserialize;
 use std::sync::Arc;
 use tera::Context;
 
-pub async fn setup_page(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Html<String> {
+pub async fn setup_page(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> impl IntoResponse {
     let mut ctx = Context::new();
     ctx.insert("standard_ip", &state.config.standard_ip);
     ctx.insert("ssl_ip", &state.config.ssl_ip);

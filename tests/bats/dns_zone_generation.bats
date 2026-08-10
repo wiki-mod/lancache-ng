@@ -21,9 +21,14 @@ setup() {
     # shellcheck source=scripts/lib/domain-validation.sh
     source "$repo_root/scripts/lib/domain-validation.sh"
 
-    # Source the helper that provides generate_rpz_zone()
+    # Load generate_rpz_zone() -- a thin wrapper around the real
+    # _dns_generate_rpz_zone extracted live from services/dns/entrypoint.sh
+    # (bug-hunt finding #8, docs/bug-hunt/dns.md: this used to be an
+    # independently hand-maintained copy with no guard against drifting from
+    # the real entrypoint logic; now it's the same code, sourced).
     # shellcheck source=tests/bats/helpers/dns-zone-helpers.sh
     source "$BATS_TEST_DIRNAME/helpers/dns-zone-helpers.sh"
+    load_dns_zone_helpers "$repo_root" "$BATS_TEST_TMPDIR/dns-zone-helpers-extracted.sh"
 }
 
 # Helper to extract serial from a zone file

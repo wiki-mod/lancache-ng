@@ -172,11 +172,21 @@ svc_list=(proxy dns-standard ui netdata watchdog)
 [[ "${ssl_enabled:-1}" = "1" ]] && svc_list=(proxy dns-standard dns-ssl ui netdata watchdog)
 ```
 ```bash
-# verify_stack_functional_health:3487,3494
+# verify_stack_functional_health (current line numbers have since shifted)
 ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE")
 ...
-if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]] && ! curl -sf "http://$ip_ssl/healthz" >/dev/null; then
+if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]]; then
+    _verify_healthz_endpoint "$ip_ssl" || return 1
+fi
 ```
+
+**STATUS: as of 2026-08-08, `_verify_healthz_endpoint` is no longer a bare
+curl call** — it's TCP reachability, a `docker port` binding-ownership
+check, then a `docker exec` loopback curl for content (issue: replacing an
+HTTP-level identity heuristic with Docker's own binding table). The
+`${ssl_enabled:-0}` default-mismatch finding below is unaffected by that
+change: it's about which default `ssl_enabled` falls back to when unset, not
+about what the guarded call does once it runs.
 
 Both read the same logical value (`SSL_ENABLED` from `.env`) into a locally
 named `ssl_enabled` variable, and both use bash's `${var:-default}` to guard
@@ -188,7 +198,7 @@ for what is meant to be the same "value missing" case. Neither is clearly
 "the" correct fail-safe default, and the inconsistency suggests this wasn't a
 deliberate per-context choice. Impact is low in both cases today (`cmd_debug`
 just tries to tail one extra/one fewer log stream; the health check just
-includes/skips one extra curl probe), but it's a real inconsistency in a
+includes/skips one extra probe), but it's a real inconsistency in a
 "what do we assume when config is incomplete" policy that appears twice in
 the same file with different answers.
 

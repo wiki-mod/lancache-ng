@@ -262,6 +262,37 @@ found errors from DDNS or the Admin UI.
 
 **Evidence:** `services/dns/entrypoint.sh:676-684`.
 
+**STATUS: `_dns_ensure_zone_exists()` fixed, through two independently-found
+follow-up bugs in the same fix.** The blanket `|| true` was replaced with a
+function that inspects `create-zone`'s own stderr to distinguish "already
+exists" (non-fatal) from a real failure (fatal, with a FATAL line). That
+first fix had two further bugs, both found live (2026-08-09) and both now
+corrected in the merged code:
+1. **`set -e` defeated the tolerance check itself.** An early version wrote
+   `create_output=$(pdnsutil ... 2>&1)` then read `create_status=$?` on the
+   next line, but under this file's own top-level `set -euo pipefail`, that
+   assignment IS the command `-e` checks -- a nonzero create-zone exit (the
+   everyday already-exists case on every restart against a persistent
+   volume) aborted the whole entrypoint on that line, before `create_status`
+   was ever read, crash-looping the container on every restart of an install
+   whose zones already exist. The merged fix tests the command substitution
+   directly as the `if` condition (`if create_output=$(pdnsutil ...); then`),
+   exempting it from `errexit` without needing a separate status variable.
+2. **The tolerance check's own grep pattern never matched.** It searched for
+   `"already exists"`, but pdnsutil's real message is `"Zone '<name>' exists
+   already"` -- the reversed word order never matched, so even with (1)
+   fixed, every restart against an existing zone still fell through to the
+   fatal branch. Fixed by matching `"exists already"` instead, confirmed
+   against the real binary.
+The match itself is done via a here-string (`grep -qi "exists already" <<<
+"$create_output"`), not a live `printf | grep -q` pipe, per AG-VAL-032: an
+early-exiting consumer piped from a still-writing producer can SIGPIPE under
+this file's `pipefail`, reporting the pipeline as failed even when the match
+itself succeeded. A dedicated regression test
+(`tests/bats/dns_zone_creation_error_handling.bats`) proves the
+already-exists tolerance survives under a real `set -e`-active subprocess,
+not just under bats' own default options.
+
 ---
 
 ## 7. [Correctness, latent] `dns_record_to_zone_update` allows a `replace` action with `ttl: None`, which is silently unrecoverable if it ever reaches PowerDNS

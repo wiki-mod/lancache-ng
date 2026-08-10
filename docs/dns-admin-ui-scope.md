@@ -105,8 +105,10 @@ customs).
 `31.172.` octet, and the two ULA IPv6 reverse zones `c.f.ip6.arpa.` /
 `d.f.ip6.arpa.` — see `services/dns/entrypoint.sh`'s `LAN_ZONES` /
 `PRIVATE_REVERSE_ZONES` arrays and `docs/architecture-ng.md`'s zone table),
-all created idempotently by `services/dns/entrypoint.sh` on every start
-(`create-zone ... || true`). The Admin UI cannot create, delete, or list
+all created idempotently by `services/dns/entrypoint.sh` on every start via
+`_dns_ensure_zone_exists()` (tolerates an "exists already" `create-zone`
+failure, but is fatal on any other failure -- not a blanket `|| true`). The
+Admin UI cannot create, delete, or list
 arbitrary zones — it only manages *records inside* the fixed `lan.` zone
 (see 1b) and the CDN domain list that drives RPZ. `local.lan.` and the
 reverse zones exist and are created, but have no Admin UI record-management
