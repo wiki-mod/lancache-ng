@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! First-run setup wizard displaying network configuration details, plus the
 //! ongoing release-channel / scheduled-update settings control (#819).

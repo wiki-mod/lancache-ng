@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI routes for the PowerDNS zone/record known-good snapshot rollback
@@ -160,11 +161,20 @@ pub async fn rollback_zone_snapshot(
         .send()
         .await;
 
-    // Tracks whether the rollback request itself reached nats-subscriber
-    // and was accepted (2xx) -- the redirect target below depends on this,
-    // separate from the softer flush_ok/zone_check_passed nuance handled
-    // entirely within the success arm's own logging.
-    let rollback_request_succeeded = matches!(&result, Ok(resp) if resp.status().is_success());
+    // Tracks whether the rollback request itself reached nats-subscriber and
+    // was accepted (2xx), was rejected outright (a confirmed non-application),
+    // or hit a transport-level failure (timeout, connection reset) -- the
+    // latter is genuinely ambiguous, not a confirmed failure: nats-subscriber
+    // may have already applied the PATCH before the response was lost, so it
+    // must not be reported to the operator as "no snapshot was applied"
+    // (which risks an unnecessary duplicate rollback on retry). Separate from
+    // the softer flush_ok/zone_check_passed nuance handled entirely within
+    // the success arm's own logging below.
+    let rollback_outcome = match &result {
+        Ok(resp) if resp.status().is_success() => RollbackOutcome::Applied,
+        Ok(_) => RollbackOutcome::ConfirmedNotApplied,
+        Err(_) => RollbackOutcome::Unknown,
+    };
 
     match result {
         Ok(resp) if resp.status().is_success() => {
@@ -236,19 +246,32 @@ pub async fn rollback_zone_snapshot(
     }
 
     Ok(Redirect::to(zone_rollback_redirect_location(
-        rollback_request_succeeded,
+        rollback_outcome,
     )))
 }
 
-// The success/failure redirect decision, pulled out as a pure function so
-// it has a unit test independent of a live nats-subscriber connection
-// (which the surrounding handler cannot practically be tested against
-// without a mock HTTP server this codebase does not otherwise use).
-fn zone_rollback_redirect_location(succeeded: bool) -> &'static str {
-    if succeeded {
-        "/domains"
-    } else {
-        "/domains?error=zone_rollback_failed"
+// Distinguishes a confirmed non-application (nats-subscriber reachable and
+// responded, but rejected the request) from a genuinely unknown outcome (a
+// transport-level failure before any response arrived) -- see
+// rollback_zone_snapshot's own comment on why collapsing these into a single
+// bool risks telling an operator to retry a rollback that was already
+// applied.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum RollbackOutcome {
+    Applied,
+    ConfirmedNotApplied,
+    Unknown,
+}
+
+// The redirect decision, pulled out as a pure function so it has a unit
+// test independent of a live nats-subscriber connection (which the
+// surrounding handler cannot practically be tested against without a mock
+// HTTP server this codebase does not otherwise use).
+fn zone_rollback_redirect_location(outcome: RollbackOutcome) -> &'static str {
+    match outcome {
+        RollbackOutcome::Applied => "/domains",
+        RollbackOutcome::ConfirmedNotApplied => "/domains?error=zone_rollback_failed",
+        RollbackOutcome::Unknown => "/domains?error=zone_rollback_unknown",
     }
 }
 
@@ -256,17 +279,33 @@ fn zone_rollback_redirect_location(succeeded: bool) -> &'static str {
 mod tests {
     use super::*;
 
-    // A failed rollback must redirect with the error-banner query
-    // parameter, not the plain success URL, so the operator gets a
-    // visible signal instead of a silent, misleadingly "successful"-looking
-    // redirect.
+    // A confirmed (non-2xx) rollback rejection must redirect with the
+    // error-banner query parameter, not the plain success URL, so the
+    // operator gets a visible signal instead of a silent, misleadingly
+    // "successful"-looking redirect.
     #[test]
-    fn zone_rollback_redirect_location_signals_failure_via_query_param() {
-        assert_eq!(zone_rollback_redirect_location(true), "/domains");
+    fn zone_rollback_redirect_location_signals_confirmed_failure_via_query_param() {
         assert_eq!(
-            zone_rollback_redirect_location(false),
+            zone_rollback_redirect_location(RollbackOutcome::Applied),
+            "/domains"
+        );
+        assert_eq!(
+            zone_rollback_redirect_location(RollbackOutcome::ConfirmedNotApplied),
             "/domains?error=zone_rollback_failed"
         );
+    }
+
+    // A transport-level failure (timeout, connection reset) must use a
+    // distinct query parameter from a confirmed rejection: nats-subscriber
+    // may have already applied the PATCH before the response was lost, so
+    // telling the operator "no snapshot was applied" here would be wrong
+    // and could cause an unnecessary duplicate rollback on retry.
+    #[test]
+    fn zone_rollback_redirect_location_distinguishes_unknown_from_confirmed_failure() {
+        let unknown = zone_rollback_redirect_location(RollbackOutcome::Unknown);
+        let confirmed = zone_rollback_redirect_location(RollbackOutcome::ConfirmedNotApplied);
+        assert_ne!(unknown, confirmed);
+        assert_eq!(unknown, "/domains?error=zone_rollback_unknown");
     }
 
     // Snapshots missing the "id" field must be silently skipped so a partially-malformed response degrades gracefully instead of losing all snapshots.
