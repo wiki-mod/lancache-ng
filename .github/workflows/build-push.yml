@@ -342,21 +342,13 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: ./.github/actions/file-headers-check
-      - name: Select build-tools image
-        if: github.event_name == 'pull_request'
-        # No `needs: validate-compose` here on purpose, mirroring
-        # compose-healthchecks/pr-template-check's own deliberate choice to
-        # stay independent of validate-compose's image selection (see this
-        # job's own header comment: "runs before expensive Rust/image work")
-        # -- resolving locally instead keeps that property intact rather
-        # than coupling this cheap, fast-feedback job to a heavier pipeline
-        # stage.
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+      - name: Select immutable build-tools image
         run: |
           set -euo pipefail
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - uses: ./.github/actions/file-headers-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
         # Diff-scoped, not repo-wide: the whole-repo call above stays soft on
         # AG-HDR-008 (the backfill isn't complete), but a file this PR is
@@ -748,27 +740,19 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - name: GitHub-hosted fallback notice
-        run: |
-          echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Coverage fix (issue #1095): this used to only run "Check repository header on all
-      # tracked files", silently never running the workflow line-count ceiling or
-      # review-chronology checks at all when self-hosted runners were down. Now runs the
-      # same three checks as the self-hosted file-headers job above.
-      - uses: ./.github/actions/file-headers-check
-      - name: Select build-tools image
-        if: github.event_name == 'pull_request'
-        # This fallback job must resolve its own image rather than depending
-        # on validate-compose's output (like the self-hosted job above does)
-        # -- it exists specifically for when self-hosted runners (and
-        # anything that depends on them) are unavailable, so a needs:
-        # dependency on that job would defeat the fallback's purpose.
-        # Matches pr-tracking-metadata-check-hosted's own resolution step.
-        env:
-          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+      - name: Select immutable build-tools image
         run: |
           set -euo pipefail
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+      - name: GitHub-hosted fallback notice
+        run: |
+          echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
+      # Use the same composite action as the self-hosted job so runner fallback cannot
+      # silently weaken repository-hygiene coverage. The action metadata is the single
+      # source of truth for its current checks, avoiding a count that can drift here.
+      - uses: ./.github/actions/file-headers-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
         # Mirrors the self-hosted file-headers job's own step above exactly,
         # for parity between the two -- see that step's comment for the
