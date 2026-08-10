@@ -818,6 +818,25 @@ if [ "${SSL_ENABLED}" = "1" ]; then
     }
     _harden_cert_dir "$worker_user"
 
+    # CERT_DIR is now a named, persistent volume, so a leaf cert signed by a
+    # since-replaced CA is no longer flushed by the anonymous-volume reset
+    # that a container-removing recreate used to cause incidentally. Without
+    # this check, the per-domain loops below (which skip any cert/key pair
+    # that already exists) would keep serving certs signed by a CA the
+    # operator already told clients to stop trusting, per the CA-rotation
+    # procedure docs/backup-restore.md documents. Track which CA signed the
+    # certs currently in CERT_DIR and purge every leaf on a mismatch so
+    # those loops regenerate them all against the current CA.
+    _purge_stale_leaf_certs_on_ca_change() {
+        local fingerprint_file="$CERT_DIR/.ca-fingerprint" current_fingerprint
+        current_fingerprint="$(openssl x509 -noout -fingerprint -sha256 -in "$CA_DIR/ca.crt" 2>/dev/null)"
+        if [ "$(cat "$fingerprint_file" 2>/dev/null)" != "$current_fingerprint" ]; then
+            find "$CERT_DIR" -maxdepth 1 -type f \( -name '*.crt' -o -name '*.key' \) -delete
+            printf '%s\n' "$current_fingerprint" > "$fingerprint_file"
+        fi
+    }
+    _purge_stale_leaf_certs_on_ca_change
+
     # Persist the serial counter in the CA volume so it survives container restarts (#71).
     # Initialized with a nanosecond timestamp on first use to avoid colliding with any
     # serials that were issued under the old "echo 01" scheme.
