@@ -1,0 +1,49 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Temporary one-shot helper used only on ci/1.1-single-artifact-consolidation.
+name: CI 1.1 guarded patch application
+
+on:
+  push:
+    branches:
+      - ci/1.1-single-artifact-consolidation
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.ref == 'refs/heads/ci/1.1-single-artifact-consolidation'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout working branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Apply guarded refactor patch
+        run: python3 scripts/ci-1.1-apply.py
+
+      - name: Verify patch shape
+        run: |
+          set -euo pipefail
+          git diff --check
+          git diff --stat
+          git status --short
+          test -n "$(git status --porcelain)" || { echo "::error::Guarded patch produced no changes."; exit 1; }
+
+      - name: Commit guarded refactor patch
+        env:
+          BRANCH_NAME: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/build-push.yml \
+                  .github/workflows/build-tools.yml \
+                  .github/actions/reserve-validation-subnet-stack/action.yml \
+                  scripts/validate-stack-images.sh \
+                  scripts/render-full-setup-digest-override.sh
+          git commit -m 'refactor(ci): carry exact candidate digests through promotion'
+          git push origin "HEAD:${BRANCH_NAME}"
