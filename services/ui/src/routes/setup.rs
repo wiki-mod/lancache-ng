@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! First-run setup wizard displaying network configuration details, plus the
 //! ongoing release-channel / scheduled-update settings control (#819).
@@ -76,10 +77,22 @@ impl IntoResponse for SettingsError {
             "<!DOCTYPE html>\n<html>\n<head><title>Settings Error</title></head>\n\
              <body><h1>Settings Error</h1>\n<p>{}</p>\n\
              <p><a href=\"/setup\">Return to setup</a></p>\n</body>\n</html>",
-            // No user input is ever interpolated into this body (both error
-            // paths below use fixed messages), so this never needs to escape
-            // untrusted content -- unlike routes/dhcp.rs's DhcpError, which
-            // does define its own html_escape for exactly that reason.
+            // There are three SettingsError::new(...) construction sites in
+            // update_stack_settings below (a CSRF failure, an
+            // invalid-channel rejection, and a settings-persist failure),
+            // and the third one is not a fixed string at all -- it
+            // formats `err.to_string()` from persist_stack_settings'
+            // Result::Err. That value is still safe to leave unescaped today
+            // (it's an io::Error-derived message describing a local file-write
+            // failure, never anything built from this form's own
+            // attacker-controlled fields), but "no user input is ever
+            // interpolated" overstated the actual guarantee -- the real
+            // invariant this body relies on is "every message reaching here is
+            // either a fixed literal or a value with no attacker-controlled
+            // content," not "always a fixed literal." A future fourth error
+            // path that ever does interpolate request-derived text into this
+            // struct's `message` field would need routes/dhcp.rs's DhcpError
+            // html_escape treatment, not this file's current bare interpolation.
             self.message
         );
         (self.status, Html(body)).into_response()

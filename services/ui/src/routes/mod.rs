@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //!
 //! Admin UI route modules, plus shared helpers used across them: Tera
@@ -57,7 +58,38 @@ pub fn render(templates: &Tera, name: &str, ctx: &Context, dev_mode: bool) -> Re
 }
 
 pub fn insert_csrf_token(ctx: &mut Context, headers: &HeaderMap) {
-    let token = crate::session::csrf_header_value(headers).unwrap_or("");
+    // csrf_header_value returns Some("") for a header that is present but
+    // empty, not just None for an absent header -- filter that out too, so
+    // the invariant-break diagnostic below fires for both shapes of the
+    // same underlying problem instead of only the "header missing entirely"
+    // case.
+    let token = crate::session::csrf_header_value(headers)
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| {
+            // Every real page handler this is called from sits behind the
+            // `basic_auth` middleware, which always sets the internal CSRF
+            // header for a valid session before routing to any handler --
+            // reaching this function with no header present, or with one
+            // present but empty, means that invariant broke somewhere
+            // upstream, not a normal "no session yet" state this function
+            // should quietly tolerate. A real session's own csrf_token is
+            // always 32 random bytes (session::issue_session_at), never
+            // empty, so silently embedding "" here with zero diagnostic
+            // could only ever become exploitable if some other bug also
+            // let a session's csrf_token become empty -- and with no
+            // diagnostic, that combination would go unnoticed until
+            // actually exploited. Logging loudly turns a theoretical
+            // defense-in-depth gap into an observable failure instead.
+            tracing::error!(
+                "insert_csrf_token: no session CSRF header present on this request, or \
+                 it was present but empty; the basic_auth middleware should have set a \
+                 real one before reaching this handler. Embedding an empty CSRF token, \
+                 which only passes verify_csrf_token/verify_csrf_header if the session's \
+                 own token is also empty (never true for a real, correctly-issued \
+                 session)."
+            );
+            ""
+        });
     ctx.insert("csrf_token", token);
 }
 
@@ -216,5 +248,115 @@ mod tests {
         );
         assert!(verify_csrf_token(&headers, "session-token-b").is_err());
         assert!(verify_csrf_header(&headers).is_err());
+    }
+
+    // Reaching insert_csrf_token with no session CSRF header present (an
+    // invariant violation this function cannot itself repair) must still
+    // insert an empty context value rather than panicking or leaving the
+    // template variable undefined -- Tera errors on an undefined variable,
+    // so degrading gracefully here still matters even for a logged, loud
+    // failure. Locks the fallback value's own behavior only; the
+    // diagnostic itself is asserted separately below, via a real
+    // subscriber, since deleting the tracing::error! call would otherwise
+    // leave this test green.
+    #[test]
+    fn insert_csrf_token_degrades_to_empty_value_without_a_session_header() {
+        let empty_headers = HeaderMap::new();
+        let mut ctx = Context::new();
+        insert_csrf_token(&mut ctx, &empty_headers);
+        assert_eq!(
+            ctx.get("csrf_token").and_then(|value| value.as_str()),
+            Some("")
+        );
+    }
+
+    // Minimal tracing::Subscriber that captures each event's "message"
+    // field, so the invariant-break diagnostic itself (not just its
+    // side-effecting fallback value) can be asserted on directly --
+    // deleting the tracing::error! call in insert_csrf_token must fail
+    // this test, unlike the fallback-value test above.
+    struct CapturingSubscriber {
+        messages: std::sync::Arc<std::sync::Mutex<Vec<String>>>,
+    }
+
+    struct MessageVisitor(Option<String>);
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.0 = Some(format!("{value:?}"));
+            }
+        }
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = MessageVisitor(None);
+            event.record(&mut visitor);
+            if let Some(message) = visitor.0 {
+                self.messages.lock().unwrap().push(message);
+            }
+        }
+        fn enter(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    fn captured_diagnostics(run: impl FnOnce()) -> Vec<String> {
+        let messages = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            messages: messages.clone(),
+        };
+        tracing::subscriber::with_default(subscriber, run);
+        messages.lock().unwrap().clone()
+    }
+
+    #[test]
+    fn insert_csrf_token_logs_the_invariant_diagnostic_without_a_session_header() {
+        let empty_headers = HeaderMap::new();
+        let mut ctx = Context::new();
+        let messages = captured_diagnostics(|| {
+            insert_csrf_token(&mut ctx, &empty_headers);
+        });
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no session CSRF header present")),
+            "expected the invariant-break diagnostic to be logged, got: {messages:?}"
+        );
+    }
+
+    // The invariant break this hardening targets can also show up as a
+    // present-but-empty header (csrf_header_value returns Some("")), not
+    // just a fully absent one -- must hit the exact same fallback+diagnostic
+    // path, not silently pass the empty value through untouched.
+    #[test]
+    fn insert_csrf_token_logs_the_invariant_diagnostic_for_a_present_but_empty_header() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            crate::session::INTERNAL_CSRF_HEADER_NAME,
+            "".parse().unwrap(),
+        );
+        let mut ctx = Context::new();
+        let messages = captured_diagnostics(|| {
+            insert_csrf_token(&mut ctx, &headers);
+        });
+        assert_eq!(
+            ctx.get("csrf_token").and_then(|value| value.as_str()),
+            Some("")
+        );
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("no session CSRF header present")),
+            "expected the invariant-break diagnostic to be logged, got: {messages:?}"
+        );
     }
 }
