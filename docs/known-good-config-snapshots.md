@@ -747,8 +747,10 @@ does on every start narrows the problem a lot:
   as a follow-up rather than solved here since it is about TSIG metadata
   hygiene, not zone/record rollback.
 - `lan.` / `local.lan.` and the private reverse zones (`PRIVATE_REVERSE_ZONES`
-  in the entrypoint) are created idempotently (`create-zone ... || true`)
-  but never repopulated — their *record* contents come entirely from
+  in the entrypoint) are created idempotently via `_dns_ensure_zone_exists()`
+  (a selective check: an "exists already" `create-zone` failure is tolerated,
+  any other failure is fatal -- not a blanket `|| true` that would also
+  swallow a genuine backend error) but never repopulated — their *record* contents come entirely from
   DDNS updates (Kea leases, hostname registrations) applied directly to the
   primary's PowerDNS instance. **Correction on NATS coverage:** only the
   `lan.` zone has any NATS-driven path today — the Admin UI's record

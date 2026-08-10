@@ -4266,14 +4266,111 @@ require_functional_check_tool() {
     return 0
 }
 
+# Probes one published proxy IP in three separate steps rather than a single
+# `curl http://$ip/healthz`, because that single combined call conflates
+# three different properties and a fix for one host-networking mode broke it
+# for another:
+#
+#   1. A bare TCP connect to port 80 proves Docker's port-publishing actually
+#      forwards SOMEWHERE at all -- this is what a removed port mapping
+#      fails on. It does not prove that "somewhere" is this project's own
+#      proxy: any listener that accepts the connection satisfies it,
+#      including one of this stack's OTHER services if a broken compose
+#      update remapped port 80 onto it instead.
+#   2. Docker's own port-binding table for the 'proxy' container is checked
+#      directly (`docker port`), not an HTTP-level identity probe: an HTTP
+#      response can only ever prove "an nginx answered", never "the intended
+#      container specifically" -- any other nginx reachable on the same
+#      address (this stack's own services are not nginx-based, but nothing
+#      stops an operator from running an unrelated one on the same host)
+#      would satisfy an HTTP-level check just as well as a broken mapping
+#      would fail to. Docker's binding table has no such ambiguity: it is
+#      the authoritative record of which container a published host
+#      address/port actually forwards to, checked without any network round
+#      trip and independent of the /healthz ACL entirely.
+#   3. The /healthz content itself is fetched via `docker exec` against the
+#      proxy container's OWN loopback (127.0.0.1) instead of the externally
+#      published address. This is exactly the caller /healthz's ACL already
+#      allows (127.0.0.1/32), and it no longer depends on Docker's
+#      userland-proxy setting: with userland-proxy disabled, a host-
+#      originated connection to a published port is NAT'd straight through
+#      with the real host IP preserved rather than rewritten to the docker0
+#      gateway address the ACL's 172.16.0.0/12 allowance assumes. On such a
+#      host, a single external curl call that also required a 2xx status
+#      would fail this gate (and roll back an otherwise-healthy update)
+#      purely because the ACL rejected that specific caller, not because the
+#      proxy was unhealthy.
+#
+# Together the three steps still prove what a single 2xx-or-fail call used
+# to assume (Docker forwards the port to THIS proxy specifically, AND the
+# service behind it actually answers /healthz) without depending on a
+# specific userland-proxy setting, ACL-source-IP outcome, or an HTTP-level
+# identity heuristic for either.
+
+# Bare TCP connect (no HTTP request sent), split into its own function purely
+# so tests can replace it with a canned success/failure instead of depending
+# on real network reachability for a made-up test IP -- same seam pattern
+# this project's health-baseline tests already use for dc_update/docker
+# (see tests/bats/setup_update_health_baseline.bats).
+_tcp_port_reachable() {
+    local ip="$1" port="$2"
+    timeout 5 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "$ip" "$port" 2>/dev/null
+}
+
+# Confirms Docker itself considers this specific container the owner of the
+# published address/port, split into its own function for the same
+# testability reason as _tcp_port_reachable above. `docker port` lists every
+# host binding for the given container port, one per line (e.g. dual-stack
+# IPv4+IPv6, or this project's own IP_STANDARD/IP_SSL each separately
+# publishing container port 80 -- see deploy/prod/docker-compose.yml); any
+# one of them matching is sufficient.
+_proxy_container_publishes_port() {
+    local container_id="$1" ip="$2" port="$3" binding
+    while IFS= read -r binding; do
+        case "$binding" in
+            "0.0.0.0:${port}"|"${ip}:${port}"|"[::]:${port}") return 0 ;;
+        esac
+    done < <(docker port "$container_id" "${port}/tcp" 2>/dev/null)
+    return 1
+}
+
+_verify_healthz_endpoint() {
+    local ip="$1" proxy_container_id
+
+    if ! _tcp_port_reachable "$ip" 80; then
+        print_error "Functional check failed: TCP connect to ${ip}:80"
+        return 1
+    fi
+
+    proxy_container_id=$(service_container_id proxy)
+    if [[ -z "$proxy_container_id" ]]; then
+        print_error "Functional check failed: no running 'proxy' container to probe /healthz through"
+        return 1
+    fi
+
+    if ! _proxy_container_publishes_port "$proxy_container_id" "$ip" 80; then
+        print_error "Functional check failed: the 'proxy' container's own Docker port binding does not include ${ip}:80 -- the published port may be mapped to a different service"
+        return 1
+    fi
+
+    require_functional_check_tool curl "the proxy-container-loopback /healthz probe" || return 1
+    if ! docker exec "$proxy_container_id" curl -sf "http://127.0.0.1/healthz" >/dev/null; then
+        print_error "Functional check failed: http://127.0.0.1/healthz inside the proxy container"
+        return 1
+    fi
+    return 0
+}
+
 # Functional confirmation on top of per-container health: a container
 # reporting "healthy" only proves ITS OWN internal check passed, not that it
 # actually serves what a real client needs. Reuses this project's own
 # established real-probe idioms rather than inventing new ones: the proxy
-# /healthz check already used by cmd_debug's "Health checks" step, and a real
-# dig-based DNS query in the same style scripts/dns-zone-rollback-simulation.sh
-# already uses. `ping`/`ss` are deliberately not used here -- neither proves
-# the service actually answers a real request.
+# /healthz check already used by cmd_debug's "Health checks" step (now split
+# into a reachability + Docker-binding-identity + loopback-content trio, see
+# _verify_healthz_endpoint above), and a real dig-based DNS query in the same style
+# scripts/dns-zone-rollback-simulation.sh already uses. `ping`/`ss` are
+# deliberately not used here -- neither proves the service actually answers a
+# real request.
 #
 # Every probe below fails closed (require_functional_check_tool) when curl or
 # dig is missing rather than silently skipping that half of the check: a
@@ -4290,18 +4387,10 @@ verify_stack_functional_health() {
     ssl_enabled=$(get_env_var SSL_ENABLED "$_UPDATE_ENV_FILE")
 
     if [[ -n "$ip_standard" ]]; then
-        require_functional_check_tool curl "the http://$ip_standard/healthz probe" || return 1
-        if ! curl -sf "http://$ip_standard/healthz" >/dev/null; then
-            print_error "Functional check failed: http://$ip_standard/healthz"
-            return 1
-        fi
+        _verify_healthz_endpoint "$ip_standard" || return 1
     fi
     if [[ "${ssl_enabled:-0}" = "1" && -n "$ip_ssl" ]]; then
-        require_functional_check_tool curl "the http://$ip_ssl/healthz probe" || return 1
-        if ! curl -sf "http://$ip_ssl/healthz" >/dev/null; then
-            print_error "Functional check failed: http://$ip_ssl/healthz"
-            return 1
-        fi
+        _verify_healthz_endpoint "$ip_ssl" || return 1
     fi
 
     # A fixed, always-in-cdn-domains.txt hostname: this only proves the DNS
@@ -4391,6 +4480,51 @@ capture_stack_health_baseline() {
     done
 }
 
+# docker logs is a known, documented blind spot for a small set of services:
+# dhcp-proxy (dnsmasq) and nats (nats-server) each support only one log
+# destination at a time, and once LOGGING_ENABLED (default "1") activates the
+# `logging` profile, that one destination is a file, not stdout -- so
+# `docker logs` on those containers, and on `syslog`'s own fluent-bit process
+# specifically, goes quiet (see docs/architecture-ng.md's logging matrix for
+# the full per-service breakdown). Unlike the per-service source volumes
+# (Docker-managed, not directly host-readable), syslog-ng's own aggregated
+# output tree IS a host bind mount
+# (${SYSLOG_NG_LOG_DIR:-$LANCACHE_STATE_DIR/syslog-ng}, see setup.sh's own
+# pre-creation step for that same path), organized as
+# "<root>/<syslog-ng $HOST>/<YYYYMMDD>.log" per services/syslog/syslog-ng.conf's
+# destination template -- so it can be read directly here, without starting
+# any extra container. Keyed by service name (as wait_for_stack_health's
+# caller names it), value is the exact "host" field
+# services/syslog/fluent-bit.conf's record_modifier filter stamps onto that
+# service's forwarded lines.
+declare -A _REGRESSED_SERVICE_SYSLOG_HOST=(
+    [dhcp-proxy]="lancache-dhcp-proxy"
+    [nats]="lancache-nats"
+    [syslog]="lancache-syslog"
+)
+
+# Tails today's forwarded syslog-ng log file for one of the three services
+# above, as a supplement to (never a replacement for) the plain `docker logs`
+# dump in wait_for_stack_health below -- called only when that service is one
+# of _REGRESSED_SERVICE_SYSLOG_HOST's known-quiet keys AND central logging is
+# actually active, since neither the bind mount nor any forwarded content
+# exists otherwise.
+dump_service_syslog_ng_tail() {
+    local svc="$1" syslog_host="$2"
+    local syslog_ng_log_dir today_file
+
+    syslog_ng_log_dir="$(get_env_var SYSLOG_NG_LOG_DIR "$_UPDATE_ENV_FILE")"
+    syslog_ng_log_dir="${syslog_ng_log_dir:-$(production_state_root_default "$INSTALL_DIR")/syslog-ng}"
+    today_file="$syslog_ng_log_dir/$syslog_host/$(date -u +%Y%m%d).log"
+
+    if [[ -r "$today_file" ]]; then
+        print_warn "Last 50 forwarded log lines for '$svc' (docker logs is empty for this service while central logging is active -- see $today_file):"
+        tail -n 50 "$today_file" 2>&1 | sed 's/^/    /' || print_warn "Could not read $today_file (may have rotated mid-read)."
+    else
+        print_warn "No forwarded syslog-ng log file found for '$svc' yet at $today_file."
+    fi
+}
+
 # Polls every named service until each is container-healthy (see
 # service_container_is_healthy) AND the whole set passes the functional probe,
 # or the timeout elapses. This is the real decision point the removed
@@ -4446,6 +4580,39 @@ wait_for_stack_health() {
 
     if (( ${#regressed_services[@]} > 0 )); then
         print_error "Service(s) regressed from healthy to unhealthy during this update: ${regressed_services[*]}"
+        # Diagnosing this gate's own failure previously required a live SSH
+        # session against a still-running (or already-recreated-and-gone)
+        # container, since neither this script nor CI's use of it captured
+        # any container output on this exact path -- a real incident traced
+        # a silent entrypoint crash back to this gap. Dump each regressed
+        # service's own recent log output here, once, right where the
+        # failure is detected, so both a real operator and CI's own captured
+        # output have the actual cause without needing separate live access.
+        for svc in "${regressed_services[@]}"; do
+            local container_id
+            # Guarded as an `if` condition, not a bare assignment (Rule-Ref:
+            # AG-VAL-030 -- a `$(...)` whose failure the caller relies on;
+            # this is a command-substitution-under-set--e concern, not
+            # AG-VAL-032's pipefail/early-exiting-consumer one, since there
+            # is no pipeline here at all): service_container_id's own
+            # `docker compose ps` call can exit non-zero, and this script
+            # runs under set -e -- a bare `container_id=$(...)` here would
+            # abort the whole update instead of just skipping the log dump
+            # for this one service.
+            if container_id=$(service_container_id "$svc") && [[ -n "$container_id" ]]; then
+                print_warn "Last 50 log lines for regressed service '$svc' (container $container_id):"
+                docker logs --tail 50 "$container_id" 2>&1 | sed 's/^/    /' || print_warn "Could not retrieve logs for '$svc' (container may already be gone)."
+            else
+                print_warn "No container found for regressed service '$svc'; cannot dump its logs."
+            fi
+            if [[ -n "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]-}" ]]; then
+                local logging_enabled
+                logging_enabled="$(get_env_var LOGGING_ENABLED "$_UPDATE_ENV_FILE")"
+                if [[ "${logging_enabled:-1}" = "1" ]]; then
+                    dump_service_syslog_ng_tail "$svc" "${_REGRESSED_SERVICE_SYSLOG_HOST[$svc]}"
+                fi
+            fi
+        done
     fi
     return 1
 }

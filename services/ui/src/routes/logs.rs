@@ -1,3 +1,4 @@
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! lancache-ng (https://github.com/wiki-mod/lancache-ng)
 //! Route for viewing and filtering logs: the nginx access-log tail by
 //! default, or -- once an install opts into `docker compose --profile
@@ -94,17 +95,24 @@ pub async fn logs_page(
 
         shared_logs
     } else {
-        // Split the budget across both sources so the combined, reversed,
-        // truncated result below still tops out at max_entries overall.
-        let per_source = max_entries / 2;
+        // Each source is read up to the FULL max_entries budget, not a
+        // pre-split half of it -- the combined, reversed, truncated result
+        // below is what actually enforces the max_entries cap. Splitting the
+        // budget up front (e.g. max_entries / 2 per source) would silently
+        // drop entries whenever one source supplies more than half of the
+        // globally newest requests: with a limit of 200 and the newest 200
+        // requests all in one source, a half-each cap would only load 100 of
+        // them and show up to 100 older entries from the other source
+        // instead. Matches the same shape routes/dashboard.rs's
+        // merge_recent_logs already uses for the same reason.
         let (standard_logs, ssl_logs) = tokio::join!(
             tokio::task::spawn_blocking({
                 let p = state.config.standard_log.clone();
-                move || nginx_client::parse_log_tail(&p, per_source)
+                move || nginx_client::parse_log_tail(&p, max_entries)
             }),
             tokio::task::spawn_blocking({
                 let p = state.config.ssl_log.clone();
-                move || nginx_client::parse_log_tail(&p, per_source)
+                move || nginx_client::parse_log_tail(&p, max_entries)
             }),
         );
 
@@ -118,7 +126,15 @@ pub async fn logs_page(
             entry.source = "SSL".to_string();
         }
 
-        standard_logs.into_iter().chain(ssl_logs).collect()
+        // A plain `.chain()` would put every Standard entry before every
+        // SSL entry (or vice versa, depending on iteration order) regardless of their
+        // real timestamps -- after the `.reverse()` below, that means one
+        // source's entire block always displayed before the other's,
+        // rather than the two interleaving by actual recency. Both inputs
+        // are already individually chronological (parse_log_tail's own
+        // contract); merging by parsed timestamp preserves each source's
+        // internal order while interleaving the two sources by recency.
+        nginx_client::merge_log_entries_chronologically(standard_logs, ssl_logs)
     };
 
     // Show most recent first

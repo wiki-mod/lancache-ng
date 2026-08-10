@@ -342,7 +342,44 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select immutable build-tools image
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - uses: ./.github/actions/file-headers-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
+        # Diff-scoped, not repo-wide: the whole-repo call above stays soft on
+        # AG-HDR-008 (the backfill isn't complete), but a file this PR is
+        # actively touching has no such exception -- see
+        # scripts/check-file-headers.sh's own header for why explicit file
+        # arguments hard-fail. Runs inside the pinned build-tools image
+        # (scripts/check-pr-diff-file-headers.sh, which does the same
+        # shallow-safe fetch-by-exact-SHA idiom the line-endings job's "Run
+        # governance guardrails" step already uses: base.sha is a
+        # webhook-payload snapshot that can be behind the base branch's
+        # current tip on a long-lived PR, so the base commit is fetched
+        # directly by SHA rather than relying on the branch-tip fetch alone)
+        # rather than runner-local git/Bash/head/grep, so a self-hosted
+        # runner with missing or stale host tooling cannot fail this check
+        # or produce a result diverging from the project's own toolchain.
+        if: github.event_name == 'pull_request'
+        env:
+          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/source:ro" \
+            -w /tmp \
+            -e SPDX_BASE_SHA \
+            -e SPDX_BASE_REF \
+            -e GITHUB_SHA \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 bash -c \
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks:
     # Cheap repository hygiene gate (issue #1169), mirroring file-headers'
@@ -703,14 +740,39 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Select immutable build-tools image
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Coverage fix (issue #1095): this used to only run "Check repository header on all
-      # tracked files", silently never running the workflow line-count ceiling or
-      # review-chronology checks at all when self-hosted runners were down. Now runs the
-      # same three checks as the self-hosted file-headers job above.
+      # Use the same composite action as the self-hosted job so runner fallback cannot
+      # silently weaken repository-hygiene coverage. The action metadata is the single
+      # source of truth for its current checks, avoiding a count that can drift here.
       - uses: ./.github/actions/file-headers-check
+        with:
+          build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
+      - name: Check SPDX header on this PR's changed files (AG-HDR-008)
+        # Mirrors the self-hosted file-headers job's own step above exactly,
+        # for parity between the two -- see that step's comment for the
+        # full rationale.
+        if: github.event_name == 'pull_request'
+        env:
+          SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          SPDX_BASE_REF: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/source:ro" \
+            -w /tmp \
+            -e SPDX_BASE_SHA \
+            -e SPDX_BASE_REF \
+            -e GITHUB_SHA \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 bash -c \
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
@@ -1058,7 +1120,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Step content (ShellCheck/ActionLint plus 5 standing text/YAML guards) extracted
+      # Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted
       # into a composite action (issue #1095 duplication finding): this job and
       # shellcheck-hosted below used to carry the identical steps twice. Job-level
       # scheduling (needs/if/concurrency/permissions, and the docs-only skip in this
