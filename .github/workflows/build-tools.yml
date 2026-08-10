@@ -1,11 +1,11 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI workflow for the multi-arch build-tools image. A publish-capable run now
-# builds exactly one candidate per architecture, then smoke-tests, scans,
-# attests and merges those exact immutable digests. Pull requests remain
-# local-only because they must not write GHCR; each PR architecture still has
-# exactly one local candidate that all of its checks consume.
+# CI workflow for the multi-arch build-tools image. Manual and scheduled runs
+# build exactly one publishable candidate per architecture, then smoke-test,
+# scan, attest, and merge those exact immutable digests. Fork pull requests
+# build one local candidate per architecture; same-repository pull requests are
+# handled by build-push.yml so this workflow does not build the same candidate twice.
 name: Build Tools Image
 
 on:
@@ -42,53 +42,20 @@ defaults:
 
 jobs:
   determine-publish-scope:
-    name: determine build-tools publish scope
-    # Same-repo PRs are built by build-push.yml exactly once. This standalone
-    # PR path remains only for fork PRs, which cannot publish a candidate from
-    # the main workflow but still need a local build-tools validation.
+    name: admit standalone build-tools route
+    # Same-repository PRs are built by build-push.yml exactly once. This job is
+    # a shared admission gate for both architecture jobs so the fork-only PR
+    # exception is expressed once rather than copied into every downstream job.
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.id != github.event.repository.id }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:
       contents: read
-    outputs:
-      should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Determine whether build-tools inputs actually changed
-        id: should-publish
+      - name: Confirm standalone route
         run: |
           set -euo pipefail
-
-          if [ "${{ github.event_name }}" != "push" ]; then
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          before_sha="${{ github.event.before }}"
-          if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
-            git fetch --quiet --depth=1 origin "$before_sha" 2>/dev/null || true
-          fi
-          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
-            echo "::notice::Could not resolve base commit $before_sha; publishing to fail safe."
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-
-          if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
-            echo "should-publish=true" >> "$GITHUB_OUTPUT"
-          else
-            # A helper-action-only change still runs this workflow, but it
-            # validates one local candidate and does not republish identical bytes.
-            echo "should-publish=false" >> "$GITHUB_OUTPUT"
-          fi
+          echo "Standalone build-tools route admitted for event '$GITHUB_EVENT_NAME'."
 
   build-tools:
     name: build amd64 build-tools image
@@ -133,7 +100,7 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -150,12 +117,12 @@ jobs:
 
       - name: Compute immutable pushed source tag
         id: source-tag
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         run: printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         run: |
           set -euo pipefail
           digest_for_image() {
@@ -174,11 +141,11 @@ jobs:
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      # PRs and helper-only pushes cannot/should not publish. They still build
-      # exactly one local candidate and run the complete candidate test set.
+      # Fork PRs cannot publish repository packages, but still need one local
+      # candidate so the same build-tools smoke and vulnerability policy runs.
       - name: Build local amd64 scan image
         id: local-build-amd64
-        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        if: github.event_name == 'pull_request'
         timeout-minutes: 60
         env:
           APT_CACHE_BUST: ${{ steps.apt-cache-bust.outputs.value }}
@@ -200,12 +167,12 @@ jobs:
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
 
-      # A publish-capable run has no throwaway local precursor. This is the
-      # one real amd64 build and its output digest becomes the serial number
-      # consumed by smoke, Trivy, provenance and the later manifest merge.
+      # A publish-capable run has no throwaway local precursor. This is the one
+      # real amd64 build and its digest is consumed by smoke, Trivy, provenance,
+      # and the later manifest merge.
       - name: Build and push amd64 build-tools image
         id: build
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         timeout-minutes: 90
         uses: ./.github/actions/ghcr-build-push-retry
         with:
@@ -229,7 +196,7 @@ jobs:
           cache-to: type=local,dest=${{ steps.buildx-cache.outputs.cache-to }},mode=max
 
       - name: Smoke-test local amd64 candidate
-        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        if: github.event_name == 'pull_request'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
@@ -237,7 +204,7 @@ jobs:
           run-fixtures: "true"
 
       - name: Smoke-test exact pushed amd64 candidate digest
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
@@ -261,7 +228,7 @@ jobs:
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
       - name: Scan local build-tools amd64 image with Trivy
-        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        if: github.event_name == 'pull_request'
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -278,7 +245,7 @@ jobs:
           exit-code: "1"
 
       - name: Scan pushed amd64 build-tools digest with Trivy
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         timeout-minutes: 20
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -297,7 +264,7 @@ jobs:
           esac
 
       - name: Attest amd64 build-tools image provenance
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         uses: ./.github/actions/ghcr-attest-retry
         with:
           username: ${{ github.actor }}
@@ -350,7 +317,7 @@ jobs:
         uses: ./.github/actions/buildx-setup-retry
 
       - name: Log in to GHCR
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
@@ -367,16 +334,18 @@ jobs:
 
       - name: Compute immutable pushed source tag
         id: source-tag
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         run: printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Compute apt cache-bust value
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
+      # Fork PRs use one local arm64 candidate; manual and scheduled runs take
+      # the pushed exact-digest path below instead of building a second image.
       - name: Build local arm64 scan image
         id: local-build-arm64
-        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        if: github.event_name == 'pull_request'
         timeout-minutes: 60
         uses: docker/build-push-action@53b7df96c91f9c12dcc8a07bcb9ccacbed38856a # v7.3.0
         with:
@@ -394,7 +363,7 @@ jobs:
 
       - name: Build and push arm64 build-tools image
         id: build
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         timeout-minutes: 90
         uses: ./.github/actions/ghcr-build-push-retry
         with:
@@ -415,21 +384,21 @@ jobs:
           cache-to: type=gha,scope=build-tools-arm64,mode=max
 
       - name: Smoke-test local arm64 candidate
-        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        if: github.event_name == 'pull_request'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           platform: linux/arm64
 
       - name: Smoke-test exact pushed arm64 candidate digest
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/arm64
 
       - name: Scan local build-tools arm64 image with Trivy
-        if: github.event_name == 'pull_request' || needs['determine-publish-scope'].outputs.should-publish != 'true'
+        if: github.event_name == 'pull_request'
         timeout-minutes: 20
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
@@ -445,7 +414,7 @@ jobs:
           exit-code: "1"
 
       - name: Scan pushed arm64 build-tools digest with Trivy
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         timeout-minutes: 20
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -454,7 +423,7 @@ jobs:
           cleanup-cache: "true"
 
       - name: Attest arm64 build-tools image provenance
-        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        if: github.event_name != 'pull_request'
         uses: ./.github/actions/ghcr-attest-retry
         with:
           username: ${{ github.actor }}
@@ -478,8 +447,7 @@ jobs:
         !cancelled() &&
         needs['build-tools'].result == 'success' &&
         needs['build-tools-arm64'].result == 'success' &&
-        github.event_name != 'pull_request' &&
-        needs['determine-publish-scope'].outputs.should-publish == 'true'
+        github.event_name != 'pull_request'
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 20
