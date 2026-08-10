@@ -1,0 +1,83 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Smoke-test build-tools candidate
+description: >-
+  Runs the build-tools executable checks and, when requested, the Bats and
+  ShellSpec fixtures against the exact candidate image supplied by the caller.
+
+inputs:
+  image-ref:
+    description: Candidate image reference. May be a local PR-only image or an immutable repository@sha256 digest.
+    required: true
+  platform:
+    description: Docker platform used to execute the candidate.
+    required: true
+  run-fixtures:
+    description: Run the repository Bats and ShellSpec suites inside the candidate.
+    required: false
+    default: "false"
+
+runs:
+  using: composite
+  steps:
+    - name: Smoke-test acceleration-infrastructure tools
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        PLATFORM: ${{ inputs.platform }}
+      run: |
+        set -euo pipefail
+        : "${IMAGE_REF:?image-ref is required}"
+        : "${PLATFORM:?platform is required}"
+        timeout 15m docker run --rm --platform "$PLATFORM" "$IMAGE_REF" bash -c '
+        set -euo pipefail
+        required_tools=(
+          actionlint bash bats cargo cargo-audit cargo-tarpaulin clippy-driver
+          dig distcc distcc-pump docker envsubst jq rustc rustfmt sccache
+          shellspec shellcheck
+        )
+        for tool in "${required_tools[@]}"; do command -v "$tool" >/dev/null; done
+        cargo --version
+        cargo audit --version
+        cargo-audit --version
+        cargo tarpaulin --version
+        cargo-tarpaulin --version
+        sccache --version
+        actionlint --version
+        bats --version
+        shellspec --version
+        shellcheck --version
+        distcc --version
+        distcc-pump --help >/dev/null
+        docker --version
+        docker compose version
+        '
+
+    - name: Run Bats setup fixtures
+      if: inputs.run-fixtures == 'true'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        set -euo pipefail
+        timeout 20m docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$GITHUB_WORKSPACE:/work:ro" \
+          -w /work \
+          "$IMAGE_REF" \
+          bash -lc 'set -euo pipefail; bats tests/bats'
+
+    - name: Run ShellSpec setup fixtures
+      if: inputs.run-fixtures == 'true'
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+      run: |
+        set -euo pipefail
+        timeout 20m docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$GITHUB_WORKSPACE:/work:ro" \
+          -w /work \
+          "$IMAGE_REF" \
+          bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'
