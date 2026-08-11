@@ -163,7 +163,7 @@ to the operator anywhere in this project:**
   found) — confirmed intentionally absent, consistent with this being a
   fully self-hosted, LAN-only project (cloud claiming would phone home to
   Netdata Cloud, which would need an explicit operator opt-in this project
-doesn't offer).
+  doesn't offer).
 - **`allmetrics` (Prometheus-compatible metrics export)** — not proxied,
   not referenced. No path exists today to scrape netdata into an external
   Prometheus/Grafana stack without bypassing this project's own Admin UI
