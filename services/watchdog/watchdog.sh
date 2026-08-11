@@ -258,30 +258,6 @@ if [ "$C_NATS" != "$EXPECTED_NATS" ]; then
     exit 1
 fi
 
-# Canonical truthy-parsing contract shared with the Admin UI's env_bool()
-# (services/ui/src/config.rs). Recognizes 1/true/yes/on as truthy,
-# case-insensitively and after trimming surrounding whitespace,
-# exactly like env_bool()'s `value.trim().to_ascii_lowercase()` match.
-# Anything else (including 0/false/no/off, empty, or unrecognized garbage)
-# is treated as not-truthy; callers combine this with their own
-# `${VAR:-default}` fallback for the "unset" case, same as env_bool()'s
-# `unwrap_or(default)`. Used for this file's boolean-style env vars
-# (SSL_ENABLED, LOGGING_ENABLED); introduced as a single shared function
-# specifically so each new flag reuses it instead of re-implementing its own
-# truthy check that could drift from this one the way SYSLOG_ENABLED's
-# Admin-UI/watchdog truthy-parsing mismatch once did (issue #877).
-is_truthy() {
-    local v="$1"
-    # Trim leading/trailing whitespace (mirrors Rust's `.trim()`).
-    v="${v#"${v%%[![:space:]]*}"}"
-    v="${v%"${v##*[![:space:]]}"}"
-    v="${v,,}" # lowercase (mirrors Rust's `.to_ascii_lowercase()`)
-    case "$v" in
-        1|true|yes|on) return 0 ;;
-        *) return 1 ;;
-    esac
-}
-
 # Keep the watchdog on one cache path only. If an old install still carries
 # split cache vars, they must agree or the helper refuses to guess.
 resolve_cache_dir() {
