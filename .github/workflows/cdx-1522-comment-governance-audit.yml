@@ -169,6 +169,9 @@ jobs:
             raise SystemExit(f'Expected 25+1 timeout insertions, got {a}+{b}')
           PY
 
+          # Validate the exact target tree, not this temporary executor's own source text.
+          git rm -- .github/workflows/cdx-1522-comment-governance-audit.yml
+
       - name: Validate in immutable build-tools
         shell: bash
         run: |
@@ -212,7 +215,6 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          git rm -- .github/workflows/cdx-1522-comment-governance-audit.yml
           git add -A
           git diff --cached --check
           marker="CDX-$(date +%s)"
