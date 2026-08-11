@@ -1,0 +1,162 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Read-only GHCR audit for the ordinary sha-* retention policy. The job uses
+# a dedicated checkout directory and only read permissions so PR code cannot
+# inherit the destructive credentials used by the operational PR/orphan reaper.
+name: SHA Retention Audit
+
+on:
+  pull_request:
+    branches:
+      - current_dev
+    types: [opened, synchronize, reopened]
+    paths:
+      - .github/workflows/gc-sha-retention-audit.yml
+      - release/stack-images.yml
+      - docs/release-versioning.md
+      - scripts/select-build-tools-image.sh
+      - scripts/untracked/gc-sha-retention-audit.sh
+      - scripts/lib/github-api-retry.sh
+      - scripts/lib/sha-retention-audit.sh
+      - scripts/validate-stack-images.sh
+      - tests/bats/sha_retention_audit.bats
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: sha-retention-audit-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  audit:
+    # Fork PRs cannot prove the real package inventory with repository package
+    # permissions, so they are excluded instead of silently running a weaker
+    # mode that looks equivalent in the check list.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 35
+    permissions:
+      contents: read
+      packages: read
+    env:
+      AUDIT_CHECKOUT: ${{ github.workspace }}/f17-sha-retention-audit
+
+    steps:
+      - name: Prepare dedicated audit checkout directory
+        run: |
+          set -euo pipefail
+          expected="${GITHUB_WORKSPACE}/f17-sha-retention-audit"
+          if [[ "$AUDIT_CHECKOUT" != "$expected" ]]; then
+            echo "::error::Refusing to clean unexpected audit checkout path: $AUDIT_CHECKOUT"
+            exit 1
+          fi
+          rm -rf -- "$AUDIT_CHECKOUT"
+
+      - name: Checkout full repository history for read-only audit
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          path: f17-sha-retention-audit
+
+      - name: Verify isolated checkout identity and completeness
+        working-directory: f17-sha-retention-audit
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          actual_sha="$(git rev-parse HEAD)"
+          if [[ "$actual_sha" != "$EXPECTED_SHA" ]]; then
+            echo "::error::Audit checkout mismatch: expected $EXPECTED_SHA, got $actual_sha"
+            exit 1
+          fi
+          git rev-parse --verify --quiet 'origin/current_dev^{commit}' >/dev/null
+          for required in \
+            release/stack-images.yml \
+            scripts/select-build-tools-image.sh \
+            scripts/untracked/gc-sha-retention-audit.sh \
+            scripts/lib/github-api-retry.sh \
+            scripts/lib/sha-retention-audit.sh \
+            tests/bats/sha_retention_audit.bats; do
+            if [[ ! -f "$required" ]]; then
+              echo "::error::Required audit file is missing after checkout: $required"
+              exit 1
+            fi
+          done
+          index_state="$(git ls-files -v)"
+          if grep -q '^S ' <<<"$index_state"; then
+            echo "::error::Dedicated audit checkout unexpectedly contains skip-worktree entries."
+            exit 1
+          fi
+
+      - name: Select immutable build-tools image
+        id: build_tools
+        working-directory: f17-sha-retention-audit
+        env:
+          GITHUB_BASE_REF: ${{ github.base_ref }}
+          GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          image="$(bash scripts/select-build-tools-image.sh)"
+          if [[ -z "$image" ]]; then
+            echo "::error::Build-tools selector returned an empty image reference."
+            exit 1
+          fi
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+
+      - name: Validate audit implementation in build-tools
+        working-directory: f17-sha-retention-audit
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build_tools.outputs.image }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30s 15m bash -lc '
+              set -euo pipefail
+              bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/validate-stack-images.sh
+              shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/validate-stack-images.sh tests/bats/sha_retention_audit.bats
+              actionlint .github/workflows/gc-sha-retention-audit.yml
+              bats tests/bats/sha_retention_audit.bats
+              bash scripts/validate-stack-images.sh
+              bash scripts/check-workflow-line-limit.sh
+            '
+
+      - name: Run live protect-only GHCR audit
+        working-directory: f17-sha-retention-audit
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build_tools.outputs.image }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          docker run --rm \
+            -u "$(id -u):$(id -g)" \
+            -e GH_TOKEN \
+            -e GITHUB_REPOSITORY \
+            -e SRA_HISTORY_REF=origin/current_dev \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30s 25m bash scripts/untracked/gc-sha-retention-audit.sh
+
+      - name: Remove dedicated audit checkout directory
+        if: always()
+        run: |
+          set -euo pipefail
+          expected="${GITHUB_WORKSPACE}/f17-sha-retention-audit"
+          if [[ "$AUDIT_CHECKOUT" != "$expected" ]]; then
+            echo "::error::Refusing to clean unexpected audit checkout path: $AUDIT_CHECKOUT"
+            exit 1
+          fi
+          rm -rf -- "$AUDIT_CHECKOUT"
+          if [[ -e "$AUDIT_CHECKOUT" ]]; then
+            echo "::error::Dedicated audit checkout directory still exists after cleanup."
+            exit 1
+          fi
