@@ -1,0 +1,57 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Temporary same-repository transformer for the active CI 1.1 Draft.
+
+name: CDX CI 1.1 matrix transformer
+
+on:
+  pull_request:
+    branches: [current_dev]
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  transform:
+    if: github.event.pull_request.number == 1523 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the PR head branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ci/1.1-single-artifact-consolidation
+          fetch-depth: 0
+
+      - name: Transform and validate the shared build matrix
+        run: |
+          set -euo pipefail
+
+          python3 .github/cdx-1522-point2.py
+          git rm -- .github/cdx-1522-point2.py .github/workflows/cdx-1522-maintenance.yml
+
+          bash scripts/check-workflow-service-lists.sh
+          grep -Fq 'include: &normal-build-services' .github/workflows/build-push.yml
+          grep -Fq 'include: *normal-build-services' .github/workflows/build-push.yml
+          [ "$(grep -Fc 'include: &normal-build-services' .github/workflows/build-push.yml)" -eq 1 ]
+          [ "$(grep -Fc 'include: *normal-build-services' .github/workflows/build-push.yml)" -eq 1 ]
+
+          git add -A
+          git diff --cached --check
+          wc -l -c .github/workflows/build-push.yml
+
+          marker="CDX-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "$marker ci: share normal build service metadata"
+
+          printf 'CDX_COMMIT_SHA=%s\n' "$(git rev-parse HEAD)"
+          printf 'CDX_TREE_SHA=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+          printf 'CDX_BUILD_PUSH_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/build-push.yml')"
+          printf 'CDX_PARENT_SHA=%s\n' "$(git rev-parse 'HEAD^')"
+
+          # The workflow token uploads the Git objects but GitHub rejects the ref update
+          # for a commit that changes workflow files. The connected GitHub App advances
+          # the branch to the emitted commit after independently reading this run.
+          git push origin HEAD:refs/heads/ci/1.1-single-artifact-consolidation
