@@ -64,7 +64,7 @@ extract_service_block() {
         }
         # Read the dependency's immediately following line so an unrelated
         # condition elsewhere in the service block cannot produce a false pass.
-        after_dep="$(printf '%s\n' "$block" | awk '/docker-socket-proxy:$/{getline; print; exit}')"
+        after_dep="$(awk '/docker-socket-proxy:$/{getline; print; exit}' <<< "$block")"
         [[ "$after_dep" == *"condition: service_healthy"* ]] || {
             echo "watchdog's docker-socket-proxy dependency in $f is not condition: service_healthy (got: '$after_dep')" >&2
             return 1
@@ -82,7 +82,7 @@ extract_service_block() {
             echo "ui service block in $f has no map-form docker-socket-proxy dependency entry" >&2
             return 1
         }
-        after_dep="$(printf '%s\n' "$block" | awk '/docker-socket-proxy:$/{getline; print; exit}')"
+        after_dep="$(awk '/docker-socket-proxy:$/{getline; print; exit}' <<< "$block")"
         [[ "$after_dep" == *"condition: service_started"* ]] || {
             echo "ui's docker-socket-proxy dependency in $f is not condition: service_started (got: '$after_dep')" >&2
             return 1
