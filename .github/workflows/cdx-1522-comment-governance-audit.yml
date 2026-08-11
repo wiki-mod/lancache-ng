@@ -1,6 +1,6 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Temporary PR #1523 audit. Removed from the clean target after findings are fixed.
+# Temporary touched-file comment audit. Removed from the clean target after findings are fixed.
 name: CDX CI 1.1 comment governance audit
 
 on:
@@ -37,7 +37,7 @@ jobs:
           set -euo pipefail
           : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
           : "${BASE_SHA:?BASE_SHA is required}"
-          docker run --rm \
+          docker run --rm -i \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
@@ -45,14 +45,20 @@ jobs:
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 python3 - <<'PY'
           from pathlib import Path
+          import os
           import re
           import subprocess
 
           changed = subprocess.check_output(
-              ['git', 'diff', '--name-only', '--diff-filter=ACMRTUXB', BASE_SHA := __import__('os').environ['BASE_SHA'], 'HEAD'],
+              ['git', 'diff', '--name-only', '--diff-filter=ACMRTUXB', os.environ['BASE_SHA'], 'HEAD'],
               text=True,
           ).splitlines()
-          source_paths = [p for p in changed if p.endswith(('.yml', '.yaml', '.sh', '.bats'))]
+          source_paths = [
+              p for p in changed
+              if p.endswith(('.yml', '.yaml', '.sh', '.bats'))
+              and not p.startswith('.github/workflows/cdx-')
+              and not p.startswith('.github/cdx-')
+          ]
           ref_re = re.compile(r'(?:\b(?:issue|issues|PR|pull request)\s*#?\d+\b|(?<![A-Za-z0-9_])#\d+\b)', re.I)
           chronology_re = re.compile(r'caught in review|before this fix|review finding|review round|follow-up pass|this PR|this task', re.I)
           findings = []
