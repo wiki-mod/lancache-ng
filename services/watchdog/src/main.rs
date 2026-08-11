@@ -18,49 +18,28 @@ use lancache_watchdog::docker_client::DockerProxyClient;
 use lancache_watchdog::health::{Action, AlertAction, AlertCounter, FailureCounter, HealthReading};
 use lancache_watchdog::status::{self, DiskInfo, ServiceHealth, WatchdogStatus};
 
-/// Issue #842's five alert-only monitored services (never restarted -- see
-/// `lib.rs`'s module doc comment and [`HealthReading::is_alert_ok`]'s own
-/// doc comment for why). Built once at startup from [`Settings`] rather
-/// than re-derived every loop iteration, since `DHCP_MODE`/`LOGGING_ENABLED`
-/// never change for the lifetime of this process.
+/// Alert-only services are never restarted. Their container list is built once
+/// at startup because deployment gates and the coordinated container suffix do
+/// not change during the lifetime of this process.
 ///
-/// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
-/// with issue #842/#849 introducing this function): `syslog` (fluent-bit)
-/// and `syslog-ng` used to be two separate containers, both alert-only
-/// monitored under their own fixed names (`CONTAINER_SYSLOG`,
-/// `CONTAINER_SYSLOG_NG`). They are now ONE combined container
-/// (`services/syslog/`) under the single container name `CONTAINER_SYSLOG`
-/// -- `CONTAINER_SYSLOG_NG` ("lancache-syslog-ng") no longer names any real
-/// container this stack ever starts, so pushing it here would make every
-/// health check against it fail closed permanently (container not found),
-/// a false alert for a container that was never supposed to exist by
-/// design, not a real outage. Only `CONTAINER_SYSLOG` is pushed now; the
-/// combined container's own dual-process healthcheck
-/// (`services/syslog/healthcheck.sh`) is what actually proves fluent-bit
-/// AND syslog-ng are both alive inside it, one level below what this
-/// per-container Docker-API check can see.
+/// Central logging runs fluent-bit and syslog-ng in one `services/syslog/`
+/// container named by `CONTAINER_SYSLOG`. Its own dual-process healthcheck
+/// proves both processes are alive, while this layer consumes the resulting
+/// per-container Docker health state.
 fn resolve_alert_only_targets(
     dhcp_mode: &str,
-    syslog_enabled: bool,
+    logging_enabled: bool,
     ntp_enabled: bool,
     container_suffix: &str,
 ) -> Vec<String> {
     // ui/netdata are never profile-gated in any deploy/*/docker-compose.yml
-    // profile (unlike dhcp/dhcp-proxy/syslog below), so both are
-    // always monitored, matching how proxy/dns-standard/nats are always
-    // monitored among the four restart-capable services above.
+    // profile, unlike dhcp/dhcp-proxy/syslog/ntp, so both are always
+    // monitored.
     //
-    // container_suffix (see load_settings()'s own LANCACHE_CONTAINER_SUFFIX
-    // read, threaded through here) must be appended to every one of these
-    // names, the same way it already is for ContainerNames's four
-    // restart-capable fields: every deploy/*/docker-compose.yml
-    // `container_name:` entry -- including `lancache-ui`, `lancache-netdata`,
-    // `lancache-dhcp`, `lancache-dhcp-proxy`, and `lancache-syslog` -- carries
-    // this same suffix in the coordinated-suffix CI shape. Without it, this
-    // function would keep returning the bare, unsuffixed name once that
-    // shape is active, so get_health() would query a container that was
-    // never started under that exact name and report a permanent false
-    // "unreachable" for a service that is actually healthy.
+    // Every deployment container_name uses the same coordinated suffix in
+    // isolated CI stacks. Alert-only names must therefore apply that suffix
+    // too; otherwise get_health() would query a container name that was never
+    // started and report a permanent false "unreachable" state.
     let mut targets = vec![
         format!("{}{container_suffix}", config::CONTAINER_UI),
         format!("{}{container_suffix}", config::CONTAINER_NETDATA),
@@ -68,9 +47,11 @@ fn resolve_alert_only_targets(
     if let Some(dhcp_container) = config::dhcp_alert_container(dhcp_mode) {
         targets.push(format!("{dhcp_container}{container_suffix}"));
     }
-    if syslog_enabled {
+    if logging_enabled {
         targets.push(format!("{}{container_suffix}", config::CONTAINER_SYSLOG));
     }
+    // NTP is profile-gated. Monitoring it when disabled would create a
+    // permanent false alert for a container that intentionally does not exist.
     if ntp_enabled {
         targets.push(format!("{}{container_suffix}", config::CONTAINER_NTP));
     }
@@ -118,20 +99,15 @@ struct Settings {
     status_file: PathBuf,
     cache_dir: PathBuf,
     container_names: ContainerNames,
-    // Threaded through separately from `container_names` into
-    // resolve_alert_only_targets(), which builds its own container names
-    // from the plain config::CONTAINER_* constants rather than from
-    // ContainerNames -- see that function's own comment for why it needs
-    // this suffix applied too.
+    // resolve_alert_only_targets() builds names from the plain
+    // config::CONTAINER_* constants rather than ContainerNames, so it needs
+    // the same coordinated suffix separately.
     container_suffix: String,
-    // Issue #842: gates which of the five alert-only services (see
-    // resolve_alert_only_targets()) are actually deployed. Read once here
-    // (not re-read per loop iteration) since neither knob can change for
-    // the lifetime of this process -- an operator changing DHCP_MODE or
-    // LOGGING_ENABLED requires a `setup.sh update` + container recreate,
-    // which restarts this process anyway.
+    // These gates describe whether optional alert-only containers are part of
+    // the running stack. A deployment change recreates this container, so the
+    // values are intentionally resolved once at startup.
     dhcp_mode: String,
-    syslog_enabled: bool,
+    logging_enabled: bool,
     ntp_enabled: bool,
 }
 
@@ -192,10 +168,8 @@ fn load_settings() -> Settings {
     // "${SSL_ENABLED:-1}"`.
     let ssl_enabled = config::resolve_bool(env("SSL_ENABLED").as_deref(), true);
 
-    // Read once and kept as its own Settings field (not just consumed
-    // inline below): resolve_alert_only_targets() also needs this exact
-    // value, independently of container_names, to build its own suffixed
-    // names from the plain config::CONTAINER_* constants.
+    // Keep the suffix as its own setting because both ContainerNames and the
+    // independently-built alert-only target list must use the same value.
     let container_suffix = env("LANCACHE_CONTAINER_SUFFIX").unwrap_or_default();
 
     let container_names = match config::resolve_container_names(
@@ -204,9 +178,8 @@ fn load_settings() -> Settings {
         env("CONTAINER_DNS_SSL").as_deref(),
         env("CONTAINER_NATS").as_deref(),
         ssl_enabled,
-        // Issue #1415: see resolve_container_names()'s own doc comment --
-        // empty/unset for every real install, only ever non-empty for a
-        // CI-coordinated quickstart-compose run.
+        // Empty or unset is the normal deployment shape. A non-empty suffix
+        // is used only by coordinated isolated validation stacks.
         Some(container_suffix.as_str()),
     ) {
         Ok(names) => names,
@@ -240,32 +213,20 @@ fn load_settings() -> Settings {
         }
     };
 
-    // DHCP_MODE (issue #842): defaults to "disabled", matching setup.sh's
-    // own `append_env_key_if_missing DHCP_MODE "disabled"` -- an install
-    // that never set this at all (or a value setup.sh itself would already
-    // have rejected) must not accidentally start alert-only-monitoring a
-    // DHCP container that was never provisioned. See
-    // config::dhcp_alert_container()'s own doc comment for why an
-    // unrecognized value also falls back to "monitor neither", not a guess.
+    // An absent or invalid DHCP mode must not create an alert for a DHCP
+    // container that was never provisioned. The classifier itself owns the
+    // accepted mode mapping and falls back to monitoring neither service.
     let dhcp_mode = env("DHCP_MODE").unwrap_or_else(|| "disabled".to_string());
 
-    // LOGGING_ENABLED, NOT SYSLOG_ENABLED: mirrors watchdog.sh's own
-    // C_SYSLOG gate fix. SYSLOG_ENABLED is a deliberately separate,
-    // narrower "double opt-in" that only gates the storage-budget
-    // retention/pruning engine (see deploy/prod/.env's own comment on it),
-    // not "is the syslog container part of this stack." An earlier version
-    // of this function read SYSLOG_ENABLED here (reasoning that reusing
-    // retention.sh's existing toggle would avoid a second knob that could
-    // drift) -- but a normal install with central logging on
-    // (LOGGING_ENABLED=1/`--profile logging` active) and retention/pruning
-    // never separately opted into legitimately runs the syslog container
-    // while SYSLOG_ENABLED stays at its default "false", so gating
-    // alert-only monitoring on SYSLOG_ENABLED alone left that common case
-    // unmonitored -- the exact bug #877 already fixed once for a different
-    // pair of drifted toggles. LOGGING_ENABLED is passed into this
-    // service's environment from every deploy/*/docker-compose.yml
-    // `watchdog:` block, the same way DHCP_MODE/SYSLOG_ENABLED already are.
-    let syslog_enabled = config::resolve_bool(env("LOGGING_ENABLED").as_deref(), false);
+    // LOGGING_ENABLED represents whether the combined syslog container is
+    // part of the stack. SYSLOG_ENABLED is deliberately narrower and controls
+    // only the storage-budget retention/pruning engine, so using it here would
+    // leave the normal logging-enabled, retention-disabled deployment
+    // unmonitored.
+    let logging_enabled = config::resolve_bool(env("LOGGING_ENABLED").as_deref(), false);
+
+    // NTP monitoring follows the same gate that controls whether the optional
+    // NTP container exists, avoiding a false alert when the profile is off.
     let ntp_enabled = config::resolve_bool(env("NTP_ENABLED").as_deref(), false);
 
     Settings {
@@ -281,7 +242,7 @@ fn load_settings() -> Settings {
         container_names,
         container_suffix,
         dhcp_mode,
-        syslog_enabled,
+        logging_enabled,
         ntp_enabled,
     }
 }
@@ -292,13 +253,9 @@ async fn main() {
     let client = DockerProxyClient::new(settings.docker_proxy_url.clone())
         .expect("building the reqwest client must not fail (no invalid static config)");
 
-    // The data-driven service table the maintainer's own rewrite brief
-    // asked for, replacing watchdog.sh's four individually-named
-    // C_PROXY/C_DNS_STD/C_DNS_SSL/C_NATS variables. Built fresh from
-    // ContainerNames rather than stored on Settings: this is the shape the
-    // main loop iterates, while ContainerNames is the validated
-    // env-resolution result the rest of the program (status.json's
-    // dns-ssl-key omission) also needs directly.
+    // The data-driven service table replaces individually-named loop state.
+    // ContainerNames remains separate because status generation also needs
+    // the validated SSL-mode omission directly.
     let mut monitored: Vec<MonitoredService> = vec![
         MonitoredService {
             container_name: settings.container_names.proxy.clone(),
@@ -330,19 +287,11 @@ async fn main() {
         .collect();
     let mut docker_proxy_alert_counter = AlertCounter::default();
 
-    // Issue #842: ui/dhcp/dhcp-proxy/netdata/syslog (the last one combining
-    // fluent-bit+syslog-ng since the consolidation PR, 2026-08), alert-only
-    // (never restarted -- see resolve_alert_only_targets()'s own doc
-    // comment and lib.rs's module doc comment for why). A separate
-    // AlertCounter per container, keyed the same way failure_counters is
-    // above, so a persistently-down alert-only service keeps climbing
-    // (never resets on some arbitrary threshold the way a restart-capable
-    // FailureCounter would) -- see HealthReading::is_alert_ok's own doc
-    // comment for the reasoning behind reusing AlertCounter's semantics
-    // here instead of FailureCounter's.
+    // Alert-only services use independent counters because an outage must
+    // remain visible without ever crossing into restart behavior.
     let alert_only_targets = resolve_alert_only_targets(
         &settings.dhcp_mode,
-        settings.syslog_enabled,
+        settings.logging_enabled,
         settings.ntp_enabled,
         &settings.container_suffix,
     );
@@ -417,31 +366,21 @@ async fn main() {
             );
         }
 
-        // Alert-only docker-socket-proxy probe: deliberately never
-        // restarted -- see docker_client::ping's and health::AlertCounter's
-        // own doc comments for why.
+        // The Docker proxy is alert-only because watchdog cannot safely
+        // restart its own management channel.
         let reachable = client.ping(settings.curl_max_time).await;
         let docker_proxy_name = settings.container_names.docker_socket_proxy;
         match docker_proxy_alert_counter.record(reachable) {
             AlertAction::None => {}
             AlertAction::Recovered => log(&format!("RECOVERED {docker_proxy_name}")),
             AlertAction::Unreachable { count } => log(&format!(
-                "UNHEALTHY {docker_proxy_name} ({count} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel (see issue #1170)"
+                "UNHEALTHY {docker_proxy_name} ({count} consecutive failures) -- alert only, watchdog cannot restart its own Docker API channel"
             )),
         }
         // watchdog.sh's probe_docker_socket_proxy() stores the literal
-        // string "healthy"/"unhealthy" into H_DOCKER_PROXY (never
-        // "unreachable" -- that string is reserved for get_health()'s
-        // per-container Docker-API failures). Using HealthReading::Unhealthy
-        // here (not ::Unreachable) matches that exactly: health_color()
-        // renders it red, the correct alarm-level color for "the management
-        // plane's own Docker API gateway is down," not the yellow
-        // indeterminate-warning color ::Unreachable maps to. This is purely
-        // a status.json/dashboard representation choice -- it does not run
-        // through FailureCounter/restart logic at all, so it carries none of
-        // ::Unhealthy's restart-triggering meaning for the four monitored
-        // containers above; only AlertCounter (which never restarts
-        // anything) drives this probe's actual behavior.
+        // string "healthy"/"unhealthy" into H_DOCKER_PROXY. Using
+        // HealthReading::Unhealthy here renders a red management-plane alarm
+        // without passing through restart-capable FailureCounter logic.
         let docker_proxy_reading = if reachable {
             HealthReading::Healthy
         } else {
@@ -452,13 +391,9 @@ async fn main() {
             ServiceHealth::from_reading(&docker_proxy_reading, docker_proxy_alert_counter.0),
         );
 
-        // Issue #842: the five alert-only services resolved at startup (see
-        // resolve_alert_only_targets()). Same per-container Docker-API
-        // inspect as the restart-capable services above (get_health()), but
-        // driven through AlertCounter/is_alert_ok() instead of
-        // FailureCounter/Action -- never restarted, matching the
-        // docker-socket-proxy probe's own alert-only shape immediately
-        // above, generalized from one hardcoded container to a list.
+        // Alert-only targets use the same Docker health read as restart-capable
+        // services but route the result through AlertCounter, so they can
+        // recover and accumulate failures without ever issuing a restart.
         for name in &alert_only_targets {
             let reading = client.get_health(name, settings.curl_max_time).await;
             let counter = alert_only_counters
@@ -468,7 +403,7 @@ async fn main() {
                 AlertAction::None => {}
                 AlertAction::Recovered => log(&format!("RECOVERED {name}")),
                 AlertAction::Unreachable { count } => log(&format!(
-                    "UNHEALTHY {name} ({count} consecutive failures) -- alert only, watchdog does not restart this service (issue #842)"
+                    "UNHEALTHY {name} ({count} consecutive failures) -- alert only, watchdog does not restart this service"
                 )),
             }
             services_status.insert(
@@ -494,14 +429,9 @@ async fn main() {
         // Compose `watchdog` service (deploy/*/docker-compose.yml) sets
         // `restart: always`, so an exited process actually gets the
         // orchestrator to restart it. `healthcheck.sh`'s own mtime-freshness
-        // check (see this loop's own comment further below) would correctly
-        // start reporting the container `unhealthy` once status.json goes
-        // stale even without this exit -- but `restart: always` alone only
-        // restarts a container whose process actually exits, not one that is
-        // merely reported unhealthy while still running; without this exit,
-        // the process would keep running, correctly flagged unhealthy, with
-        // no automatic recovery path unless something else (external to this
-        // Compose file) acts on that health status.
+        // check would correctly start reporting the container `unhealthy`
+        // once status.json goes stale even without this exit, but Docker does
+        // not restart a still-running process merely because health is red.
         if let Err(e) = status::write_status(&settings.status_file, &watchdog_status) {
             log_err(&format!(
                 "ERROR: failed to write {}: {e}",
@@ -510,12 +440,8 @@ async fn main() {
             std::process::exit(1);
         }
 
-        // maybe_purge()/maybe_prune_syslog()/maybe_rotate_fluent_bit_selflog()
-        // are intentionally never called here: those filesystem-retention
-        // passes run as their own dedicated `retention` Compose service (see
-        // lib.rs's module doc comment) -- not a scope question still open
-        // for this daemon to eventually absorb.
-
+        // Filesystem-retention passes run as their own dedicated `retention`
+        // Compose service, so this daemon intentionally never invokes them.
         tokio::time::sleep(settings.check_interval).await;
     }
 }
@@ -525,13 +451,46 @@ mod tests {
     use super::*;
 
     #[test]
-    // A coordinated LANCACHE_CONTAINER_SUFFIX (the CI-only shape every
-    // deploy/*/docker-compose.yml `container_name:` entry already carries)
-    // must reach every alert-only target's name, not just ContainerNames's
-    // four restart-capable fields -- otherwise get_health() queries the
-    // bare, unsuffixed container name, which never exists under that
-    // shape, and reports a permanent false "unreachable" for a service
-    // that is actually healthy.
+    // With every optional profile disabled, only the two always-on services
+    // belong in the alert-only set.
+    fn no_optional_services_enabled_monitors_only_ui_and_netdata() {
+        let targets = resolve_alert_only_targets("disabled", false, false, "");
+        assert_eq!(
+            targets,
+            vec!["lancache-ui".to_string(), "lancache-netdata".to_string()]
+        );
+    }
+
+    #[test]
+    // NTP_ENABLED must add the real NTP container independently of the DHCP
+    // and central-logging gates so degraded NTP health can become observable.
+    fn ntp_enabled_adds_the_ntp_container() {
+        let targets = resolve_alert_only_targets("disabled", false, true, "");
+        assert!(targets.contains(&"lancache-ntp".to_string()));
+    }
+
+    #[test]
+    // A disabled NTP profile has no NTP container, even when the other
+    // optional services are active, so monitoring it would be a false alert.
+    fn ntp_disabled_never_adds_the_ntp_container_even_with_others_enabled() {
+        let targets = resolve_alert_only_targets("kea", true, false, "");
+        assert!(!targets.contains(&"lancache-ntp".to_string()));
+    }
+
+    #[test]
+    // Independent optional gates must compose without suppressing one another.
+    fn all_optional_services_enabled_together() {
+        let targets = resolve_alert_only_targets("kea", true, true, "");
+        assert!(targets.contains(&"lancache-ui".to_string()));
+        assert!(targets.contains(&"lancache-netdata".to_string()));
+        assert!(targets.contains(&"lancache-dhcp".to_string()));
+        assert!(targets.contains(&"lancache-syslog".to_string()));
+        assert!(targets.contains(&"lancache-ntp".to_string()));
+    }
+
+    #[test]
+    // A coordinated container suffix must reach every alert-only target, not
+    // only the restart-capable ContainerNames fields.
     fn resolve_alert_only_targets_applies_the_coordinated_suffix() {
         let targets = resolve_alert_only_targets("kea", true, true, "-ci1");
         assert_eq!(
@@ -547,9 +506,7 @@ mod tests {
     }
 
     #[test]
-    // No suffix (every real, non-CI install) must reproduce the exact bare
-    // names this function always returned before container_suffix existed
-    // -- an empty suffix must be a no-op, not merely "not crash."
+    // An empty coordinated suffix is deliberately a no-op for every target.
     fn resolve_alert_only_targets_is_unchanged_with_no_suffix() {
         let targets = resolve_alert_only_targets("disabled", false, false, "");
         assert_eq!(
