@@ -115,11 +115,15 @@ jobs:
           sims.write_text(text, encoding='utf-8')
 
           validator = Path('scripts/validate-stack-images.sh')
-          text = validator.read_text(encoding='utf-8')
-          stale = "require_grep 'COPY stack-bom\\\\.json /stack-bom\\\\.json' \\\\\n  .github/workflows/build-push.yml \\\\\n  'the immutable stack artifact must record an explicit stack BOM alongside stack.env'\n"
-          if text.count(stale) != 1:
-            raise SystemExit(f'stale stack-bom guard: expected one match, got {text.count(stale)}')
-          text = text.replace(stale, '', 1).replace(
+          lines = validator.read_text(encoding='utf-8').splitlines(keepends=True)
+          hits = [i for i, line in enumerate(lines) if 'COPY stack-bom' in line]
+          if len(hits) != 1:
+            raise SystemExit(f'stale stack-bom guard: expected one marker line, got {len(hits)}')
+          idx = hits[0]
+          if idx + 2 >= len(lines) or '.github/workflows/build-push.yml' not in lines[idx + 1] or 'explicit stack BOM alongside stack.env' not in lines[idx + 2]:
+            raise SystemExit('stale stack-bom guard: unexpected three-line shape')
+          del lines[idx:idx + 3]
+          text = ''.join(lines).replace(
             'promotion must consume the immutable stack BOM digest created before validation',
             'promotion must consume the immutable stack pointer digest created before validation')
           validator.write_text(text, encoding='utf-8')
