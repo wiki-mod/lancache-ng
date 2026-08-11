@@ -226,20 +226,11 @@ services:
         jetstream {
           store_dir: /data
         }
-        # Monitor endpoint: nats-server shipped with no HTTP monitor
-        # listening (no http_port set), so the Docker healthcheck below saw
-        # a hard connection refused against :8222 on every attempt -- not a
-        # timing issue, the port simply never opened. Verified live against
-        # this pinned image (nats-server 2.14.3): once set, /healthz and
-        # /varz answer immediately after "Server is ready". Only reachable
-        # from other containers on this compose network -- not published to
-        # the host -- and carries no secrets of its own (nats-server's
-        # monitor endpoint has no built-in auth). (Corrected: this comment
-        # previously also credited this port to "Netdata's go.d NATS
-        # collector" -- checked against the real pinned netdata image and
-        # found false, see the nats service's own `networks:` comment below
-        # for the full correction; this endpoint's only real consumer is the
-        # Docker healthcheck.)
+        # Monitor endpoint: nats-server ships with no HTTP monitor listening
+        # unless http_port is configured. The Docker healthcheck therefore
+        # needs this internal-only port so /healthz can prove the server is
+        # answering. No active Netdata NATS collector consumes this endpoint
+        # in this stack.
         http_port: 8222
         # Central logging pipeline (#633): nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
@@ -447,15 +438,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Corrected: see deploy/prod/docker-compose.yml's identical nats
-    # `networks:` comment for the full correction -- a prior revision put
-    # nats on netdata-net too, on the unverified premise that netdata's
-    # go.d NATS collector needs this endpoint. Checked against the real
-    # pinned netdata image: that collector ships with no active job by
-    # default and would only ever target 127.0.0.1 (not the `nats` Compose
-    # DNS name) even if manually enabled, so nats does not need netdata-net
-    # membership -- keeping it off that network is the correct, narrower
-    # isolation this stack's netdata-network-scoping change intends.
+    # NATS stays on the shared application network only. The pinned Netdata
+    # image has no active NATS go.d job, and its shipped default targets
+    # 127.0.0.1:8222 rather than the `nats` Compose name. This stack does not
+    # install a NATS collector override, so joining netdata-net would add no
+    # collector path and would unnecessarily expose Netdata's unauthenticated
+    # API to the NATS container.
     networks:
       - default
     restart: always
@@ -518,13 +506,11 @@ services:
       - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
       - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
       - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
-      # Mandatory silent-data-loss hardening (this PR's task requirement,
-      # not optional): entrypoint.sh's detector loop compares syslog-ng's own
-      # "processed" stats counter against real bytes landing under
-      # SYSLOG_NG_LOG_DIR every this-many seconds -- see
-      # services/syslog/data-loss-detector.sh's header for the real,
-      # reproduced bug this guards against and the live verification that it
-      # both fires on the broken case and stays silent on the healthy one.
+      # Mandatory silent-data-loss hardening: entrypoint.sh's detector loop
+      # compares syslog-ng's own "processed" stats counter against real bytes
+      # landing under SYSLOG_NG_LOG_DIR every this-many seconds. The detector
+      # must remain active because forwarding can otherwise fail silently while
+      # both processes continue reporting healthy.
       - DATA_LOSS_CHECK_INTERVAL_SECONDS=${DATA_LOSS_CHECK_INTERVAL_SECONDS:-60}
     volumes:
       - proxy-logs:/var/log/nginx:ro
@@ -764,15 +750,12 @@ services:
       - CONTAINER_NATS=lancache-nats${LANCACHE_CONTAINER_SUFFIX:-}
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - SSL_ENABLED=${SSL_ENABLED:-0}
-      # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED: matches
-      # deploy/prod/docker-compose.yml's identical addition -- see that
-      # file's own comment on this same environment block for the full
-      # reasoning, including why LOGGING_ENABLED (not SYSLOG_ENABLED) is the
-      # correct gate for whether watchdog.sh considers the syslog container
-      # part of this stack at all. DHCP_MODE is still unused by watchdog.sh
-      # (the bash entrypoint this ENTRYPOINT still runs) -- only the Rust
-      # crate's resolve_alert_only_targets() reads it, once that becomes
-      # this service's actual ENTRYPOINT.
+      # Quickstart has no static watchdog.env interpolation layer for these
+      # per-install gates, so pass them directly. LOGGING_ENABLED controls
+      # whether the syslog container exists for alert-only monitoring;
+      # SYSLOG_ENABLED is only the retention/pruning opt-in. DHCP_MODE is
+      # consumed by the prepared Rust alert-only target resolver, while
+      # NTP_ENABLED gates the live Bash NTP alert-only target.
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
@@ -796,9 +779,9 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
-    # See deploy/prod/docker-compose.yml's identical `depends_on:` for this
-    # service for the full reasoning (waits for docker-socket-proxy's real
-    # HTTP healthcheck instead of a bare "container exists" signal).
+    # Every Docker health read and restart call goes through this proxy.
+    # Require its /_ping healthcheck before watchdog starts so the first
+    # monitoring cycle has a working Docker API channel.
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -1226,8 +1209,9 @@ services:
     networks:
       - default
       - docker-api
-      # Needed to reach netdata (NETDATA_URL below) now that netdata no
-      # longer sits on `default`.
+      # NETDATA_URL points at the isolated Netdata service, so the UI must join
+      # the dedicated metrics network in addition to its existing application
+      # and Docker API networks.
       - netdata-net
     restart: always
     logging:
@@ -1283,11 +1267,10 @@ services:
         # plain-text access-log copy (fluent-bit's `file=nginx-proxy.log`
         # output into the `logs` volume, already mounted read-only below)
         # to expose live per-request nginx analytics (per-status-code
-        # counters, response time, etc.). quickstart's install_dir has no
-        # services/ directory to bind-mount services/syslog/netdata-web_log.conf
-        # from (same constraint as netdata.conf itself, above), so the job
-        # config is generated inline instead. Keep this content byte-identical
-        # to services/syslog/netdata-web_log.conf if that file ever changes.
+        # counters, response time, etc.). Quickstart has no services/
+        # checkout to bind-mount from, so this is an independent inline copy.
+        # Keep it byte-identical to the source config; the logging-matrix guard
+        # enforces that parity.
         mkdir -p /etc/netdata/go.d
         cat > /etc/netdata/go.d/web_log.conf <<'CONF'
         jobs:
@@ -1357,13 +1340,9 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    # See deploy/prod/docker-compose.yml's identical `networks:` for this
-    # service for the full reasoning -- netdata never publishes a host
-    # port, but with no explicit `networks:` it implicitly joined the same
-    # shared `default`
-    # network as every other real service, so any of them could reach its
-    # full, unauthenticated HTTP API directly. Only the Admin UI (below,
-    # NETDATA_URL) actually needs to reach it.
+    # Netdata's unauthenticated API must not share the default application
+    # bridge. Only the UI needs NETDATA_URL, so Netdata joins netdata-net only.
+    # Keep this network non-internal for upstream Netdata outbound access.
     networks:
       - netdata-net
     logging:
@@ -1373,8 +1352,8 @@ services:
 networks:
   docker-api:
     internal: true
-  # Dedicated to netdata + the Admin UI -- see the netdata service's own
-  # comment above.
+  # Dedicated to Netdata and the Admin UI, the only bridge-networked caller
+  # of NETDATA_URL.
   netdata-net: {}
 
 volumes:
