@@ -90,9 +90,12 @@ on:
       # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
       # dependency scan against the real repo tree.
       - "scripts/gc-pr-staging-images.sh"
+      - "scripts/untracked/gc-sha-retention-audit.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
+      - ".github/workflows/gc-sha-retention-audit.yml"
       - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
+      - "release/stack-images.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
       - ".github/workflows/full-setup-sims.yml"
@@ -309,9 +312,12 @@ on:
       # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
       # dependency scan against the real repo tree.
       - "scripts/gc-pr-staging-images.sh"
+      - "scripts/untracked/gc-sha-retention-audit.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
+      - ".github/workflows/gc-sha-retention-audit.yml"
       - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
+      - "release/stack-images.yml"
       - ".github/workflows/full-setup-validate.yml"
       - ".github/workflows/full-setup-deep-validate.yml"
       - ".github/workflows/full-setup-sims.yml"
