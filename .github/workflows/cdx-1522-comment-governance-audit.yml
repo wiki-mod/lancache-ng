@@ -4,20 +4,15 @@
 name: CDX CI 1.1 governance cleanup
 
 on:
-  pull_request:
-    branches: [current_dev]
-    types: [synchronize]
+  push:
+    branches: [ci/1.1-single-artifact-consolidation]
 
 permissions:
   contents: write
 
-defaults:
-  run:
-    shell: bash
-
 jobs:
   transform:
-    if: github.event.pull_request.number == 1523 && github.event.pull_request.head.repo.full_name == github.repository
+    if: github.ref == 'refs/heads/ci/1.1-single-artifact-consolidation'
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -27,11 +22,13 @@ jobs:
           fetch-depth: 0
 
       - name: Resolve immutable build-tools image
+        shell: bash
         run: |
           set -euo pipefail
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
 
-      - name: Apply governance cleanup
+      - name: Apply touched-file governance fixes
+        shell: bash
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -39,180 +36,145 @@ jobs:
           import re
 
           comment_paths = [
-              '.github/actions/build-tools-candidate-smoke/action.yml',
-              '.github/actions/reserve-validation-subnet-stack/action.yml',
-              '.github/actions/trivy-scan-exact-digest/action.yml',
-              '.github/workflows/build-push-hosted-fallback.yml',
-              '.github/workflows/build-push.yml',
-              '.github/workflows/build-tools.yml',
-              '.github/workflows/channel-install-smoke.yml',
-              '.github/workflows/codeql.yml',
-              '.github/workflows/full-setup-sims.yml',
-              'scripts/check-workflow-service-lists.sh',
-              'scripts/classify-image-impact.sh',
-              'scripts/detect-full-setup-changes.sh',
-              'scripts/render-full-setup-digest-override.sh',
-              'scripts/validate-stack-images.sh',
-              'tests/bats/check_workflow_service_lists.bats',
-              'tests/bats/classify_codeql_rust_relevance.bats',
-              'tests/bats/detect_full_setup_classifier_parity.bats',
+            '.github/actions/build-tools-candidate-smoke/action.yml',
+            '.github/actions/reserve-validation-subnet-stack/action.yml',
+            '.github/actions/trivy-scan-exact-digest/action.yml',
+            '.github/workflows/build-push-hosted-fallback.yml',
+            '.github/workflows/build-push.yml', '.github/workflows/build-tools.yml',
+            '.github/workflows/channel-install-smoke.yml', '.github/workflows/codeql.yml',
+            '.github/workflows/full-setup-sims.yml', 'scripts/check-workflow-service-lists.sh',
+            'scripts/classify-image-impact.sh', 'scripts/detect-full-setup-changes.sh',
+            'scripts/render-full-setup-digest-override.sh', 'scripts/validate-stack-images.sh',
+            'tests/bats/check_workflow_service_lists.bats',
+            'tests/bats/classify_codeql_rust_relevance.bats',
+            'tests/bats/detect_full_setup_classifier_parity.bats',
           ]
 
-          def clean_comment(line: str) -> str:
-              leading = line[:len(line) - len(line.lstrip())]
-              stripped = line.lstrip()
-              if not stripped.startswith('#') or stripped.startswith('#!'):
-                  return line
-              newline = '\n' if line.endswith('\n') else ''
-              body = stripped[1:].rstrip('\n')
-              replacements = {
-                  "THIS PR's": "the triggering pull request's",
-                  "This PR's": "the triggering pull request's",
-                  "this PR's": "the triggering pull request's",
-                  "THIS PR": "the triggering pull request",
-                  "This PR": "the triggering pull request",
-                  "this PR": "the triggering pull request",
-                  'caught in review': 'required by the current invariant',
-                  'Caught in review': 'Required by the current invariant',
-                  'before this fix': 'without this guard',
-                  'Before this fix': 'Without this guard',
-                  'review finding': 'validation finding',
-                  'review round': 'validation pass',
-                  'follow-up pass': 'validation pass',
-                  'fixed alongside this': 'kept aligned here',
-                  "Codex review finding on #764": 'staged-image isolation requirement',
-              }
-              for old, new in replacements.items():
-                  body = body.replace(old, new)
-              body = re.sub(r'\bPR\s+#\d+\b', 'a prior change', body)
-              body = re.sub(r'\bpull request\s+#\d+\b', 'a prior change', body, flags=re.I)
-              body = body.replace('tracked separately, not audited or fixed in the triggering pull request.',
-                                  'Those removed checks are outside the active container-scan path.')
-              body = body.replace("the triggering pull request's fix addresses",
-                                  'The regression guard covers')
-              return f'{leading}#{body}{newline}'
+          def clean_comment(line):
+            stripped = line.lstrip()
+            if not stripped.startswith('#') or stripped.startswith('#!'):
+              return line
+            leading = line[:len(line)-len(stripped)]
+            newline = '\n' if line.endswith('\n') else ''
+            body = stripped[1:].rstrip('\n')
+            for old, new in (
+              ("THIS PR's", "the triggering pull request's"),
+              ("This PR's", "the triggering pull request's"),
+              ("this PR's", "the triggering pull request's"),
+              ("THIS PR", "the triggering pull request"),
+              ("This PR", "the triggering pull request"),
+              ("this PR", "the triggering pull request"),
+              ('caught in review', 'required by the current invariant'),
+              ('Caught in review', 'Required by the current invariant'),
+              ('before this fix', 'without this guard'),
+              ('Before this fix', 'Without this guard'),
+              ('review finding', 'validation finding'),
+              ('review round', 'validation pass'),
+              ('follow-up pass', 'validation pass'),
+              ('fixed alongside this', 'kept aligned here'),
+              ('Codex validation finding on #764', 'staged-image isolation requirement'),
+              ('Codex review finding on #764', 'staged-image isolation requirement'),
+            ):
+              body = body.replace(old, new)
+            body = re.sub(r'\bPR\s+#\d+\b', 'a prior change', body)
+            body = re.sub(r'\bpull request\s+#\d+\b', 'a prior change', body, flags=re.I)
+            body = body.replace(
+              'tracked separately, not audited or fixed in the triggering pull request.',
+              'Those removed checks are outside the active container-scan path.')
+            body = body.replace("the triggering pull request's fix addresses", 'The regression guard covers')
+            return f'{leading}#{body}{newline}'
 
           for name in comment_paths:
-              path = Path(name)
-              text = path.read_text(encoding='utf-8')
-              path.write_text(''.join(clean_comment(line) for line in text.splitlines(keepends=True)), encoding='utf-8')
+            path = Path(name)
+            path.write_text(''.join(clean_comment(x) for x in path.read_text(encoding='utf-8').splitlines(keepends=True)), encoding='utf-8')
 
-          # CodeQL's extraction caveat is durable, but historical PR/run chronology is not.
           codeql = Path('.github/workflows/codeql.yml')
           text = codeql.read_text(encoding='utf-8')
-          start_marker = '          # CodeQL Rust extraction can silently degrade while the job still reports success.\n'
-          end_marker = '          - language: rust\n'
-          start = text.find(start_marker)
-          end = text.find(end_marker, start)
+          start = text.find('          # CodeQL Rust extraction can silently degrade while the job still reports success.\n')
+          end = text.find('          - language: rust\n', start)
           if start < 0 or end < 0:
-              raise SystemExit('CodeQL Rust extraction comment block markers not found')
-          replacement = (
-              '          # Rust macro expansion can degrade extraction while CodeQL still reports success.\n'
-              '          # The upstream limitation is tracked in issue #394; CodeQL\'s own database-quality diagnostic remains authoritative.\n'
-              '          # A green Rust analysis must therefore not be read as proof of complete extraction coverage.\n'
-          )
-          text = text[:start] + replacement + text[end:]
+            raise SystemExit('CodeQL extraction comment markers not found')
+          text = text[:start] + (
+            '          # Rust macro expansion can degrade extraction while CodeQL still reports success.\n'
+            '          # The upstream limitation is tracked in issue #394; CodeQL\'s database-quality diagnostic remains authoritative.\n'
+            '          # A green Rust analysis must therefore not be read as proof of complete extraction coverage.\n'
+          ) + text[end:]
           codeql.write_text(text, encoding='utf-8')
 
-          # The reusable Full-Setup header should describe its current contract, not the migration history that created it.
           sims = Path('.github/workflows/full-setup-sims.yml')
           text = sims.read_text(encoding='utf-8')
-          start_marker = '# Reusable workflow: the ten shared full-setup validation/simulation jobs that\n'
-          end_marker = 'name: Full-Setup Simulations (reusable)\n'
-          start = text.find(start_marker)
-          end = text.find(end_marker, start)
+          start = text.find('# Reusable workflow: the ten shared full-setup validation/simulation jobs that\n')
+          end = text.find('name: Full-Setup Simulations (reusable)\n', start)
           if start < 0 or end < 0:
-              raise SystemExit('Full-Setup reusable header markers not found')
-          replacement = (
-              '# Reusable Full-Setup validation/simulation suite shared by the manual and PR callers.\n'
-              '# Callers supply the image tag, run gate, PR-staging availability, and build-tools change state.\n'
-              '# The caller owns staging-image ordering; subnet reservation writes through GITHUB_ENV and must not be overridden at job scope.\n'
-          )
-          text = text[:start] + replacement + text[end:]
+            raise SystemExit('Full-Setup reusable header markers not found')
+          text = text[:start] + (
+            '# Reusable Full-Setup validation/simulation suite shared by the manual and PR callers.\n'
+            '# Callers supply the image tag, run gate, PR-staging availability, and build-tools change state.\n'
+            '# The caller owns staging-image ordering; subnet reservation writes through GITHUB_ENV and must not be overridden at job scope.\n'
+          ) + text[end:]
           sims.write_text(text, encoding='utf-8')
 
-          # Remove the stale CI 1.1 BOM requirement. The retained stack artifact is the existing stack.env pointer.
           validator = Path('scripts/validate-stack-images.sh')
           text = validator.read_text(encoding='utf-8')
-          stale = '''require_grep 'COPY stack-bom\\.json /stack-bom\\.json' \\
-  .github/workflows/build-push.yml \\
-  'the immutable stack artifact must record an explicit stack BOM alongside stack.env'\n'''
+          stale = "require_grep 'COPY stack-bom\\\\.json /stack-bom\\\\.json' \\\\\n  .github/workflows/build-push.yml \\\\\n  'the immutable stack artifact must record an explicit stack BOM alongside stack.env'\n"
           if text.count(stale) != 1:
-              raise SystemExit(f'stale stack-bom guard: expected one match, got {text.count(stale)}')
-          text = text.replace(stale, '', 1)
-          text = text.replace('promotion must consume the immutable stack BOM digest created before validation',
-                              'promotion must consume the immutable stack pointer digest created before validation')
+            raise SystemExit(f'stale stack-bom guard: expected one match, got {text.count(stale)}')
+          text = text.replace(stale, '', 1).replace(
+            'promotion must consume the immutable stack BOM digest created before validation',
+            'promotion must consume the immutable stack pointer digest created before validation')
           validator.write_text(text, encoding='utf-8')
 
-          # Every real docker-run command in the touched CI files needs an in-container hard kill boundary.
-          def add_timeouts(name: str) -> int:
-              path = Path(name)
-              lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
-              inserted = 0
-              step_name = ''
-              i = 0
-              while i < len(lines):
-                  stripped = lines[i].strip()
-                  if stripped.startswith('- name: '):
-                      step_name = stripped[len('- name: '):]
-                  if not lines[i].lstrip().startswith('docker run '):
-                      i += 1
-                      continue
-                  j = i
-                  command_lines = []
-                  while j < len(lines):
-                      command_lines.append(lines[j])
-                      if not lines[j].rstrip('\n').rstrip().endswith('\\'):
-                          break
-                      j += 1
-                  if any('timeout --kill-after=' in line for line in command_lines):
-                      i = j + 1
-                      continue
-                  image_index = None
-                  for k in range(i, j + 1):
-                      if ('BUILD_TOOLS_IMAGE' in lines[k] or 'build_tools_image' in lines[k]) and lines[k].rstrip('\n').rstrip().endswith('\\'):
-                          image_index = k
-                  if image_index is None:
-                      raise SystemExit(f'{name}:{i+1}: docker run has no recognizable build-tools image boundary')
-                  if name.endswith('full-setup-sims.yml') and step_name == 'Run setup CLI simulation':
-                      seconds = 2400
-                  elif step_name.startswith('Run coverage') or step_name == 'Merge coverage reports and check threshold':
-                      seconds = 2700
-                  elif step_name.startswith('Audit Rust dependencies'):
-                      seconds = 900
-                  elif step_name == 'Attach SBOM to the release':
-                      seconds = 1800
-                  else:
-                      seconds = 1200
-                  indent = lines[image_index][:len(lines[image_index]) - len(lines[image_index].lstrip())]
-                  lines.insert(image_index + 1, f'{indent}timeout --kill-after=30 --signal=KILL {seconds} \\\n')
-                  inserted += 1
-                  i = j + 2
-              path.write_text(''.join(lines), encoding='utf-8')
-              return inserted
+          def add_timeouts(name):
+            path = Path(name)
+            lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+            count = 0
+            step = ''
+            i = 0
+            while i < len(lines):
+              s = lines[i].strip()
+              if s.startswith('- name: '): step = s[8:]
+              if not lines[i].lstrip().startswith('docker run '):
+                i += 1; continue
+              j = i; parts = []
+              while j < len(lines):
+                parts.append(lines[j])
+                if not lines[j].rstrip().endswith('\\'): break
+                j += 1
+              if any('timeout --kill-after=' in x for x in parts):
+                i = j + 1; continue
+              image = next((k for k in range(i, j+1)
+                            if ('BUILD_TOOLS_IMAGE' in lines[k] or 'build_tools_image' in lines[k])
+                            and lines[k].rstrip().endswith('\\')), None)
+              if image is None:
+                raise SystemExit(f'{name}:{i+1}: no build-tools image boundary')
+              if name.endswith('full-setup-sims.yml') and step == 'Run setup CLI simulation': sec = 2400
+              elif step.startswith('Run coverage') or step == 'Merge coverage reports and check threshold': sec = 2700
+              elif step.startswith('Audit Rust dependencies'): sec = 900
+              elif step == 'Attach SBOM to the release': sec = 1800
+              else: sec = 1200
+              indent = lines[image][:len(lines[image])-len(lines[image].lstrip())]
+              lines.insert(image+1, f'{indent}timeout --kill-after=30 --signal=KILL {sec} \\\n')
+              count += 1; i = j + 2
+            path.write_text(''.join(lines), encoding='utf-8')
+            return count
 
-          build_count = add_timeouts('.github/workflows/build-push.yml')
-          sims_count = add_timeouts('.github/workflows/full-setup-sims.yml')
-          print(f'Inserted container kill boundaries: build-push={build_count}, full-setup-sims={sims_count}')
-          if build_count != 25 or sims_count != 1:
-              raise SystemExit(f'Expected 25+1 timeout insertions, got {build_count}+{sims_count}')
+          a = add_timeouts('.github/workflows/build-push.yml')
+          b = add_timeouts('.github/workflows/full-setup-sims.yml')
+          print(f'Inserted kill boundaries: build-push={a}, full-setup-sims={b}')
+          if (a, b) != (25, 1):
+            raise SystemExit(f'Expected 25+1 timeout insertions, got {a}+{b}')
           PY
 
-      - name: Validate transformed files in immutable build-tools
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      - name: Validate in immutable build-tools
+        shell: bash
         run: |
           set -euo pipefail
-          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
           docker run --rm -i \
             --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work" \
-            -w /work \
-            -e BASE_SHA \
+            -v "$PWD:/work" -w /work \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 900 bash -s <<'VALIDATE'
           set -euo pipefail
-
           bash -n scripts/check-workflow-service-lists.sh scripts/validate-stack-images.sh
           shellcheck --severity=warning scripts/check-workflow-service-lists.sh scripts/validate-stack-images.sh
           actionlint .github/workflows/build-push.yml .github/workflows/codeql.yml .github/workflows/full-setup-sims.yml
@@ -220,84 +182,43 @@ jobs:
           bash scripts/check-workflow-service-lists.sh
           bash scripts/validate-stack-images.sh
           bash scripts/check-workflow-line-limit.sh
-          bats tests/bats/check_workflow_service_lists.bats \
-               tests/bats/classify_codeql_rust_relevance.bats \
-               tests/bats/detect_full_setup_classifier_parity.bats
-
+          bats tests/bats/check_workflow_service_lists.bats tests/bats/classify_codeql_rust_relevance.bats tests/bats/detect_full_setup_classifier_parity.bats
           python3 - <<'PY'
           from pathlib import Path
           import re
-
-          paths = [Path('.github/workflows/build-push.yml'), Path('.github/workflows/full-setup-sims.yml')]
-          findings = []
-          for path in paths:
-              lines = path.read_text(encoding='utf-8').splitlines()
-              i = 0
-              while i < len(lines):
-                  if not lines[i].lstrip().startswith('docker run '):
-                      i += 1
-                      continue
-                  start = i
-                  parts = [lines[i]]
-                  while parts[-1].rstrip().endswith('\\') and i + 1 < len(lines):
-                      i += 1
-                      parts.append(lines[i])
-                  command = ' '.join(parts)
-                  if 'timeout --kill-after=' not in command:
-                      findings.append(f'{path}:{start+1}')
-                  i += 1
-          if findings:
-              raise SystemExit('docker run without in-container timeout: ' + ', '.join(findings))
-          print('All real docker-run commands in touched Full-Setup/build-push workflows have in-container kill boundaries.')
+          for path in map(Path, ['.github/workflows/build-push.yml','.github/workflows/full-setup-sims.yml']):
+            lines=path.read_text().splitlines(); i=0
+            while i<len(lines):
+              if not lines[i].lstrip().startswith('docker run '): i+=1; continue
+              n=i+1; parts=[lines[i]]
+              while parts[-1].rstrip().endswith('\\') and i+1<len(lines): i+=1; parts.append(lines[i])
+              if 'timeout --kill-after=' not in ' '.join(parts): raise SystemExit(f'{path}:{n}: missing in-container timeout')
+              i+=1
+          pat=re.compile(r'\b(?:PR|pull request)\s*#\d+\b|caught in review|before this fix|review finding|review round|follow-up pass|\bthis PR\b',re.I)
+          for path in map(Path, ['.github/workflows/build-push.yml','.github/workflows/codeql.yml','.github/workflows/full-setup-sims.yml','.github/actions/reserve-validation-subnet-stack/action.yml','scripts/validate-stack-images.sh','tests/bats/check_workflow_service_lists.bats']):
+            for n,line in enumerate(path.read_text().splitlines(),1):
+              if line.lstrip().startswith('#') and pat.search(line): raise SystemExit(f'{path}:{n}: {line.strip()}')
           PY
-
-          python3 - <<'PY'
-          from pathlib import Path
-          import re
-          paths = [
-              Path('.github/workflows/build-push.yml'), Path('.github/workflows/codeql.yml'),
-              Path('.github/workflows/full-setup-sims.yml'), Path('.github/actions/reserve-validation-subnet-stack/action.yml'),
-              Path('scripts/validate-stack-images.sh'), Path('tests/bats/check_workflow_service_lists.bats'),
-          ]
-          bad = []
-          pattern = re.compile(r'\b(?:PR|pull request)\s*#\d+\b|caught in review|before this fix|review finding|review round|follow-up pass|\bthis PR\b', re.I)
-          for path in paths:
-              for n, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
-                  if line.lstrip().startswith('#') and pattern.search(line):
-                      bad.append(f'{path}:{n}:{line.strip()}')
-          if bad:
-              raise SystemExit('Task/review chronology remains:\n' + '\n'.join(bad[:40]))
-          print('Touched-file task/review chronology audit: 0 findings.')
-          PY
-
-          if grep -RInF 'stack-bom.json' scripts/validate-stack-images.sh .github/workflows/build-push.yml; then
-            echo '::error::CI 1.1 stack-bom scope drift remains.'
-            exit 1
-          fi
+          if grep -RInF 'stack-bom.json' scripts/validate-stack-images.sh .github/workflows/build-push.yml; then exit 1; fi
           VALIDATE
-
           git diff --check
           wc -l -c .github/workflows/build-push.yml .github/workflows/full-setup-sims.yml
 
       - name: Create clean target commit
+        shell: bash
         run: |
           set -euo pipefail
           git rm -- .github/workflows/cdx-1522-comment-governance-audit.yml
           git add -A
           git diff --cached --check
-
           marker="CDX-$(date +%s)"
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git commit -m "$marker ci: satisfy touched-file governance invariants"
-
           printf 'CDX_COMMIT_SHA=%s\n' "$(git rev-parse HEAD)"
-          printf 'CDX_TREE_SHA=%s\n' "$(git rev-parse 'HEAD^{tree}')"
           printf 'CDX_BUILD_PUSH_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/build-push.yml')"
           printf 'CDX_FULL_SETUP_SIMS_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/full-setup-sims.yml')"
           printf 'CDX_CODEQL_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/codeql.yml')"
           printf 'CDX_RESERVE_ACTION_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/actions/reserve-validation-subnet-stack/action.yml')"
           printf 'CDX_VALIDATE_STACK_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:scripts/validate-stack-images.sh')"
-
-          # Upload git objects. The connector advances the workflow-editing branch ref.
           git push origin HEAD:refs/heads/ci/1.1-single-artifact-consolidation
