@@ -1,8 +1,8 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Temporary read-only audit for PR #1523 comment-size cleanup.
+# Temporary same-repository executor for PR #1523 comment-size cleanup.
 
-name: CDX CI 1.1 build-push comment audit
+name: CDX CI 1.1 build-push comment cleanup
 
 on:
   pull_request:
@@ -10,10 +10,10 @@ on:
     types: [synchronize]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
-  audit:
+  transform:
     if: github.event.pull_request.number == 1523 && github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -21,76 +21,95 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ci/1.1-single-artifact-consolidation
+          fetch-depth: 0
 
-      - name: Measure YAML comment blocks outside block scalars
+      - name: Compress historical YAML comments and validate semantic identity
         run: |
           set -euo pipefail
+
+          before_lines="$(wc -l < .github/workflows/build-push.yml)"
+          before_bytes="$(wc -c < .github/workflows/build-push.yml)"
+
+          python3 .github/cdx-1522-comment-cleanup.py
+          git rm -- .github/cdx-1522-comment-cleanup.py .github/workflows/cdx-1522-comment-audit.yml
+
+          ruby -e 'require "yaml"; YAML.load_file(ARGV[0], aliases: true)' .github/workflows/build-push.yml
+
+          # Product diff must be comment-only. Reject any added/deleted non-comment content.
+          python3 - <<'PY'
+          import subprocess
+
+          diff = subprocess.check_output(
+              ['git', 'diff', '--unified=0', '--', '.github/workflows/build-push.yml'],
+              text=True,
+          )
+          bad = []
+          for line in diff.splitlines():
+              if line.startswith(('+++', '---', '@@', 'diff ', 'index ')):
+                  continue
+              if not line.startswith(('+', '-')):
+                  continue
+              payload = line[1:]
+              if payload.strip() and not payload.lstrip().startswith('#'):
+                  bad.append(line)
+          if bad:
+              raise SystemExit('Non-comment product diff detected:\n' + '\n'.join(bad[:20]))
+          PY
+
+          git add -A
+          git diff --cached --check
+
+          changed="$(git diff --cached --name-only | sort)"
+          expected="$(printf '%s\n' \
+            .github/cdx-1522-comment-cleanup.py \
+            .github/workflows/build-push.yml \
+            .github/workflows/cdx-1522-comment-audit.yml | sort)"
+          if [ "$changed" != "$expected" ]; then
+            echo '::error::Unexpected target file set.'
+            printf 'Expected:\n%s\nActual:\n%s\n' "$expected" "$changed"
+            exit 1
+          fi
+
+          after_lines="$(wc -l < .github/workflows/build-push.yml)"
+          after_bytes="$(wc -c < .github/workflows/build-push.yml)"
+          printf 'BEFORE_LINES=%s\nAFTER_LINES=%s\nSAVED_LINES=%s\n' "$before_lines" "$after_lines" "$((before_lines-after_lines))"
+          printf 'BEFORE_BYTES=%s\nAFTER_BYTES=%s\nSAVED_BYTES=%s\n' "$before_bytes" "$after_bytes" "$((before_bytes-after_bytes))"
+
           python3 - <<'PY'
           from pathlib import Path
           import re
 
           path = Path('.github/workflows/build-push.yml')
           lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
-
-          # Track YAML literal/folded block scalars so shell/awk/heredoc comments inside
-          # run: | / run: >- are never classified as removable YAML commentary.
           scalar_indent = None
-          yaml_comment_lines = []
-          yaml_comment_bytes = 0
-          blocks = []
-          current = None
-
-          for n, raw in enumerate(lines, 1):
+          count = 0
+          size = 0
+          for raw in lines:
               text = raw.rstrip('\n')
               stripped = text.lstrip(' ')
               indent = len(text) - len(stripped)
-
               if scalar_indent is not None:
                   if stripped and indent <= scalar_indent:
                       scalar_indent = None
                   else:
-                      if current:
-                          blocks.append(current)
-                          current = None
                       continue
-
               if re.search(r':\s*[|>]([+-]?\d*)?\s*(?:#.*)?$', text):
                   scalar_indent = indent
-
               if stripped.startswith('#'):
-                  yaml_comment_lines.append(n)
-                  yaml_comment_bytes += len(raw.encode('utf-8'))
-                  if current and n == current['end'] + 1:
-                      current['end'] = n
-                      current['lines'] += 1
-                      current['bytes'] += len(raw.encode('utf-8'))
-                      current['text'].append(stripped[1:].strip())
-                  else:
-                      if current:
-                          blocks.append(current)
-                      current = {
-                          'start': n, 'end': n, 'lines': 1,
-                          'bytes': len(raw.encode('utf-8')),
-                          'text': [stripped[1:].strip()],
-                      }
-              else:
-                  if current:
-                      blocks.append(current)
-                      current = None
-
-          if current:
-              blocks.append(current)
-
-          total_bytes = path.stat().st_size
-          print(f'TOTAL_LINES={len(lines)}')
-          print(f'TOTAL_BYTES={total_bytes}')
-          print(f'YAML_COMMENT_LINES_OUTSIDE_SCALARS={len(yaml_comment_lines)}')
-          print(f'YAML_COMMENT_BYTES_OUTSIDE_SCALARS={yaml_comment_bytes}')
-          print(f'YAML_COMMENT_LINE_PERCENT={len(yaml_comment_lines) * 100 / len(lines):.2f}')
-          print(f'YAML_COMMENT_BYTE_PERCENT={yaml_comment_bytes * 100 / total_bytes:.2f}')
-          print(f'CONTIGUOUS_YAML_COMMENT_BLOCKS={len(blocks)}')
-          print('=== TOP 40 YAML COMMENT BLOCKS BY BYTES ===')
-          for block in sorted(blocks, key=lambda b: (-b['bytes'], b['start']))[:40]:
-              preview = ' '.join(x for x in block['text'] if x)[:220]
-              print(f"L{block['start']}-L{block['end']} lines={block['lines']} bytes={block['bytes']} :: {preview}")
+                  count += 1
+                  size += len(raw.encode('utf-8'))
+          print(f'YAML_COMMENT_LINES_OUTSIDE_SCALARS={count}')
+          print(f'YAML_COMMENT_BYTES_OUTSIDE_SCALARS={size}')
           PY
+
+          marker="CDX-$(date +%s)"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m "$marker ci: compress historical build-push commentary"
+
+          printf 'CDX_COMMIT_SHA=%s\n' "$(git rev-parse HEAD)"
+          printf 'CDX_TREE_SHA=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+          printf 'CDX_BUILD_PUSH_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/build-push.yml')"
+
+          # Upload objects; the connected GitHub App advances the workflow-editing ref.
+          git push origin HEAD:refs/heads/ci/1.1-single-artifact-consolidation
