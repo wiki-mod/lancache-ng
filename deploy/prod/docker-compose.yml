@@ -485,6 +485,10 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      # Compose only passes explicitly listed host/.env variables into this
+      # container. Keep the retry cooldown listed here so an operator override
+      # reaches retention.sh instead of silently falling back to its 3600s default.
+      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
@@ -681,25 +685,25 @@ services:
       # interfaces, matching how `dhcp`'s port 67/udp is published above.
       - "123:123/udp"
     # Least-privilege hardening (issue #1358): before this, `ntp` had only
-    # `cap_add: [SYS_TIME]` layered on top of Docker's full default
-    # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
-    # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
-    # proven necessary (same pattern as PR #1360's `retention` service, see
-    # its own comment in this file), removes every one of those unused
-    # defaults instead of relying on chronyd's own good behavior to not
-    # misuse them. This set was NOT guessed -- determined empirically on a
-    # real runner via `strace` against the real chronyd binary, starting
-    # from `cap_drop: ALL` and adding capabilities one at a time until each
-    # specific "Operation not permitted" error (each one tied to a specific
-    # syscall in the strace output) went away, INCLUDING a negative check
-    # (re-removing a capability that was added and confirming its specific
-    # failure comes back, not just adding until things looked fine) -- see
-    # the PR implementing this issue for the full session. Real end-to-end
-    # clock-stepping under this exact capability set is additionally
-    # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
-    # GitHub-hosted CI job, the only environment in this project's CI that
-    # runs on a real, non-LXC-nested kernel (see that script's own header) --
-    # kept in sync with this cap_add list; update both together.
+      # `cap_add: [SYS_TIME]` layered on top of Docker's full default
+      # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
+      # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
+      # proven necessary (same pattern as PR #1360's `retention` service, see
+      # its own comment in this file), removes every one of those unused
+      # defaults instead of relying on chronyd's own good behavior to not
+      # misuse them. This set was NOT guessed -- determined empirically on a
+      # real runner via `strace` against the real chronyd binary, starting
+      # from `cap_drop: ALL` and adding capabilities one at a time until each
+      # specific "Operation not permitted" error (each one tied to a specific
+      # syscall in the strace output) went away, INCLUDING a negative check
+      # (re-removing a capability that was added and confirming its specific
+      # failure comes back, not just adding until things looked fine) -- see
+      # the PR implementing this issue for the full session. Real end-to-end
+      # clock-stepping under this exact capability set is additionally
+      # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
+      # GitHub-hosted CI job, the only environment in this project's CI that
+      # runs on a real, non-LXC-nested kernel (see that script's own header) --
+      # kept in sync with this cap_add list; update both together.
     cap_drop:
       - ALL
     cap_add:
@@ -791,17 +795,17 @@ services:
 
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
-  # DHCP servers" feature. Reuses the UI image, running the same lancache-ui
-  # binary in an alternate CLI mode (`--dhcp-probe`, see
-  # services/ui/src/dhcp_probe_native.rs) instead of the former separate
-  # dhcp-probe.sh script -- issue #1288 replaced that script's nmap/dhclient
-  # dependency (both EOL, dropped from current Alpine) with a native DHCPv4
-  # client speaking the wire protocol directly, so this image no longer
-  # installs either tool. The Admin UI stops then starts this container on
-  # demand and reads its output — it never creates or removes it — so the
-  # narrowed docker-socket-proxy only needs to permit start/restart, the same
-  # capability class already used for the NATS and proxy-ssl reload flows,
-  # not generic container creation.
+      # DHCP servers" feature. Reuses the UI image, running the same lancache-ui
+      # binary in an alternate CLI mode (`--dhcp-probe`, see
+      # services/ui/src/dhcp_probe_native.rs) instead of the former separate
+      # dhcp-probe.sh script -- issue #1288 replaced that script's nmap/dhclient
+      # dependency (both EOL, dropped from current Alpine) with a native DHCPv4
+      # client speaking the wire protocol directly, so this image no longer
+      # installs either tool. The Admin UI stops then starts this container on
+      # demand and reads its output — it never creates or removes it — so the
+      # narrowed docker-socket-proxy only needs to permit start/restart, the same
+      # capability class already used for the NATS and proxy-ssl reload flows,
+      # not generic container creation.
   dhcp-probe:
     container_name: lancache-dhcp-probe
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
@@ -1217,13 +1221,11 @@ services:
       - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
       - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
       - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
-      # Mandatory silent-data-loss hardening (this PR's task requirement,
-      # not optional): entrypoint.sh's detector loop compares syslog-ng's own
-      # "processed" stats counter against real bytes landing under
-      # SYSLOG_NG_LOG_DIR every this-many seconds -- see
-      # services/syslog/data-loss-detector.sh's header for the real,
-      # reproduced bug this guards against and the live verification that it
-      # both fires on the broken case and stays silent on the healthy one.
+      # Mandatory silent-data-loss hardening: entrypoint.sh's detector loop
+      # compares syslog-ng's own "processed" stats counter against real bytes
+      # landing under SYSLOG_NG_LOG_DIR every this-many seconds. The detector
+      # must remain active because forwarding can otherwise fail silently while
+      # both processes continue reporting healthy.
       - DATA_LOSS_CHECK_INTERVAL_SECONDS=${DATA_LOSS_CHECK_INTERVAL_SECONDS:-60}
     volumes:
       - proxy-logs:/var/log/nginx:ro
@@ -1252,13 +1254,13 @@ services:
       # has its permissions changed later.
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
     # Real dual-process check (services/syslog/healthcheck.sh): verifies
-    # fluent-bit AND syslog-ng independently and only reports healthy when
-    # both are, writing a structured per-process status file (including
-    # data_loss_alert_active) for a future Admin UI/watchdog integration --
-    # the granularity fix for the POC's own documented "one Docker
-    # HEALTHCHECK slot for two processes" gap. Already declared as this
-    # image's own Dockerfile HEALTHCHECK; redeclared here explicitly to
-    # match this compose file's existing per-service convention.
+      # fluent-bit AND syslog-ng independently and only reports healthy when
+      # both are, writing a structured per-process status file (including
+      # data_loss_alert_active) for a future Admin UI/watchdog integration --
+      # the granularity fix for the POC's own documented "one Docker
+      # HEALTHCHECK slot for two processes" gap. Already declared as this
+      # image's own Dockerfile HEALTHCHECK; redeclared here explicitly to
+      # match this compose file's existing per-service convention.
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 30s
@@ -1325,6 +1327,10 @@ services:
       - SSL_LOG=/var/log/nginx/access.log
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
+      # Netdata and the UI independently resolve the same shared token. Passing
+      # the variable here preserves an operator-provided value while the shared
+      # secret volume keeps generated values convergent between both services.
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
@@ -1414,19 +1420,13 @@ services:
       # longer sits on `default` -- see the netdata service's own comment
       # for why.
       - netdata-net
-    # See the watchdog service's own `depends_on:` above for the same
-    # reasoning -- docker-socket-proxy has carried a real HTTP
-    # healthcheck since #1169, so the Admin UI (whose own Docker API calls,
-    # e.g. restart-service buttons, also go through it) waits for genuine
-    # readiness instead of a bare "container exists" signal. proxy/netdata/
-    # nats keep `service_started` -- the exact behavior the plain list form
-    # already had -- since none of the three has a startup-ordering
-    # dependency on the UI beyond "the container object exists," and
-    # Compose's map form requires every entry in one `depends_on:` block to
-    # use the same syntax (list and map entries cannot be mixed).
+    # The dashboard and recovery surface must remain startable even if the
+    # Docker API proxy is unhealthy. Only container creation is required for
+    # UI startup; Docker-backed actions can surface their own degraded state.
+    # The other dependencies retain the same ordering-only behavior.
     depends_on:
       docker-socket-proxy:
-        condition: service_healthy
+        condition: service_started
       proxy:
         condition: service_started
       netdata:
@@ -1469,9 +1469,9 @@ services:
     # repo checkout), netdata still needs its config generated inline here
     # rather than bind-mounted, since its image is third-party and has no
     # equivalent baked-in config of its own. This entrypoint override writes
-    # a netdata.conf that
-    # redirects daemon/health to real files under
-    # /var/log/netdata/*.file.log, then execs the image's own entrypoint.
+    # a netdata.conf that redirects daemon/health to real files under
+    # /var/log/netdata/*.file.log, then writes the alarm notification override
+    # before execing the image's own entrypoint.
     # netdata-logs shares that path with fluent-bit, which tails those real
     # files read-only. collector/access/debug stay on their stdout defaults
     # and are NOT collected: collector is extremely high-rate internal
@@ -1489,8 +1489,60 @@ services:
         daemon = /var/log/netdata/daemon.file.log
         health = /var/log/netdata/health.file.log
         CONF
+        # Netdata sources the user notification override after its stock
+        # health_alarm_notify.conf. Defining only the custom integration point
+        # here keeps the stock notification logic intact while forwarding health
+        # alarms to the Admin UI. The shared token bootstrap keeps both services
+        # on the same credential without hardcoding it.
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        if secret_is_placeholder "$$NETDATA_ALARM_TOKEN"; then NETDATA_ALARM_TOKEN=""; fi
+        if ! NETDATA_ALARM_TOKEN="$$(resolve_shared_secret netdata-alarm-token "$$NETDATA_ALARM_TOKEN" lancache_gen_hex32)"; then
+          echo "[lancache-netdata] FATAL: NETDATA_ALARM_TOKEN is unset/placeholder and the shared-secrets volume is not writable, so no shared token could be generated." >&2
+          echo "[lancache-netdata] Mount the shared-secrets volume, or set NETDATA_ALARM_TOKEN to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        # Keep the resolved secret out of the command recorded by docker inspect.
+        # The runtime sender reads it from a mode-0600 file instead.
+        umask 077
+        printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
+        chmod 0600 /etc/netdata/.netdata-alarm-token
+        # alarm-notify.sh executes as the unprivileged netdata user after setup,
+        # so ownership must follow the daemon or real health-triggered alarms
+        # cannot read the otherwise correctly protected token file.
+        chown netdata:netdata /etc/netdata/.netdata-alarm-token
+        cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
+        # Minimal override sourced after Netdata's stock notification config.
+        # shellcheck disable=SC2154
+        # Netdata populates these alarm fields before custom_sender() is called.
+        # shellcheck disable=SC2034
+        # Netdata reads these activation variables after sourcing the override.
+        SEND_CUSTOM="YES"
+        DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
+        # Escape collector/operator supplied strings before embedding them in JSON.
+        _lancache_json_escape() {
+          printf '%s' "$$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+        custom_sender() {
+          local token
+          token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
+          # Forwarding is best effort: an unavailable UI must not interfere with
+          # Netdata's own health engine or notification processing.
+          docurl -s --max-time 15 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Netdata-Alarm-Token: $${token}" \
+            -d "{\"unique_id\":$${unique_id},\"alarm_id\":$${alarm_id},\"event_id\":$${event_id},\"when\":$${when},\"name\":\"$$(_lancache_json_escape "$${name}")\",\"chart\":\"$$(_lancache_json_escape "$${chart}")\",\"host\":\"$$(_lancache_json_escape "$${host}")\",\"status\":\"$$(_lancache_json_escape "$${status}")\",\"old_status\":\"$$(_lancache_json_escape "$${old_status}")\",\"value_string\":\"$$(_lancache_json_escape "$${value_string}")\",\"units\":\"$$(_lancache_json_escape "$${units}")\",\"info\":\"$$(_lancache_json_escape "$${info}")\",\"duration\":$${duration}}" \
+            "http://ui:8080/api/netdata-alarms" >/dev/null 2>&1
+        }
+        ALARMCONF
         exec /usr/sbin/run.sh
+    environment:
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
     volumes:
+      # This upstream image has no first-party entrypoint in which to embed the
+      # shared-secret helper, so mount and source the repository's canonical copy.
+      - shared-secrets:/var/lib/lancache-secrets
+      - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata
       - netdatacache:/var/cache/netdata
