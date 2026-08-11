@@ -4,26 +4,15 @@
 # Health monitor and auto-restart-on-failure daemon.
 #
 # File-retention responsibilities (cache-age purge, syslog-ng storage-budget
-# pruning, fluent-bit self-log rotation) moved out of this file into the
-# standalone services/watchdog/retention.sh (#842, 2026-08-01), run as a
-# genuinely separate OS process by the compose `command:` override -- see
-# that file's header for the full blast-radius-separation rationale. This
-# file no longer reads CACHE_VALID_DAYS/SYSLOG_*/FLUENT_BIT_SELFLOG_* at all;
-# CACHE_DIR is one exception, still read here for disk_info()'s unrelated
-# disk-usage-percentage reporting into status.json, resolved independently of
-# retention.sh's own copy (see that file's resolve_cache_dir() comment for
-# why this is deliberate duplication, not shared state). LOGGING_ENABLED is
-# the other exception: this file DOES now read it, gating alert-only health
-# monitoring of the
-# combined syslog+fluent-bit container -- see check_alert_only()'s own
-# comment below for why that container is alert-only rather than
-# restart-capable, and C_SYSLOG's own assignment further below for why
-# LOGGING_ENABLED (not the similarly-named but semantically distinct
-# SYSLOG_ENABLED) is the correct gate. DHCP_MODE/SYSLOG_ENABLED were already
-# present in every deploy/*/docker-compose.yml's `watchdog:` environment
-# block (added ahead of this change for the not-yet-wired-up Rust rewrite --
-# see services/watchdog/src/lib.rs's module doc comment); LOGGING_ENABLED is
-# newly added here.
+# pruning, fluent-bit self-log rotation) live in the standalone
+# services/watchdog/retention.sh process. This file retains CACHE_DIR only for
+# disk_info()'s independent status.json disk-usage reporting. LOGGING_ENABLED
+# remains here because it is a runtime-presence gate, not a retention setting:
+# it decides whether the combined syslog+fluent-bit container exists and should
+# be monitored alert-only. SYSLOG_ENABLED is intentionally narrower and belongs
+# to the retention/pruning engine. DHCP_MODE is carried through Compose for the
+# Rust implementation's alert-only target resolution, while the live Bash path
+# uses LOGGING_ENABLED for syslog presence.
 
 set -euo pipefail
 
@@ -188,34 +177,15 @@ fi
 # stable status.json/dashboard key and log label for this probe.
 C_DOCKER_PROXY="lancache-docker-socket-proxy"
 
-# syslog: no ${CONTAINER_*:-...}-style override exists for it in the Rust
-# rewrite this
-# mirrors (services/watchdog/src/config.rs's CONTAINER_SYSLOG is a plain
-# `const`, never read from an env var), so there is nothing for
-# scripts/check-naming-consistency.sh's watchdog_names extraction to
-# validate here either -- unlike C_PROXY/C_DNS_STD/etc. above, there is no
-# separate FATAL-guarded CONTAINER_SYSLOG env var to compare against. It
-# DOES still need LANCACHE_CONTAINER_SUFFIX appended, though: this
-# container's own real name (see deploy/*/docker-compose.yml's
-# `container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}`) and
-# scripts/docker-socket-proxy.sh's own generated HAProxy allowlist (which
-# rewrites its `lancache-syslog` ACL entry with this exact suffix at
-# startup) both carry it -- referenced directly from the raw environment
-# variable here since LANCACHE_CONTAINER_SUFFIX itself is not normalized
-# until further below, and this assignment runs first. Gated on
-# LOGGING_ENABLED, NOT SYSLOG_ENABLED: an install that never opted into
-# `docker compose --profile logging` never starts this container at all, so
-# monitoring it unconditionally would report a permanent false "unhealthy"
-# for a container that was never supposed to exist -- LOGGING_ENABLED is
-# the flag that actually governs whether the `logging` profile (and
-# therefore this container) is active. SYSLOG_ENABLED is a deliberately
-# separate, narrower "double opt-in" that only gates the storage-budget
-# retention/pruning engine (maybe_prune_syslog(), see deploy/prod/.env's
-# own comment on it) -- a normal install with central logging on but
-# retention/pruning never separately opted into legitimately runs this
-# container with SYSLOG_ENABLED still at its default "false", and gating
-# health monitoring on SYSLOG_ENABLED alone would leave that common case
-# silently unmonitored.
+# syslog uses the same fixed-name contract as the Rust implementation:
+# services/watchdog/src/config.rs exposes CONTAINER_SYSLOG as a plain constant,
+# not an environment override, so there is no separate CONTAINER_SYSLOG value
+# for scripts/check-naming-consistency.sh to validate. The coordinated suffix
+# still applies because the real Compose container name and Docker-proxy
+# allowlist both use it. LOGGING_ENABLED, not SYSLOG_ENABLED, gates presence:
+# an install without the logging profile has no syslog container to monitor,
+# while SYSLOG_ENABLED controls only the separate storage-budget retention
+# engine and can legitimately remain false while central logging is active.
 if is_truthy "${LOGGING_ENABLED:-0}"; then
     C_SYSLOG="lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}"
 else
@@ -553,12 +523,9 @@ write_status() {
     \"$C_DNS_SSL\":   {\"status\": \"$(health_color "$H_DNS_SSL")\",   \"health\": \"$H_DNS_SSL\",   \"failures\": $F_DNS_SSL}"
     fi
 
-    # Same conditional-inclusion shape as ssl_services above -- omitted
-    # entirely (not just "unknown")
-    # when C_SYSLOG is empty (LOGGING_ENABLED falsy, see that assignment's
-    # own comment above), so an install that never opted into central
-    # logging doesn't show a permanently "unhealthy"/never-existed container
-    # in the dashboard's service list.
+    # Same conditional-inclusion shape as ssl_services above. Omitting the key
+    # entirely when C_SYSLOG is empty prevents a deployment without central
+    # logging from showing a permanently unhealthy service that never existed.
     local syslog_service=""
     if [ -n "$C_SYSLOG" ]; then
         syslog_service=",
@@ -603,13 +570,9 @@ while true; do
     # see probe_docker_socket_proxy()'s own comment for why this daemon must
     # never attempt to restart its own Docker API gateway.
     probe_docker_socket_proxy F_DOCKER_PROXY H_DOCKER_PROXY
-    # Alert-only: deliberately check_alert_only, not check_and_maybe_restart
-    # -- see that function's
-    # own comment for why restart-capable monitoring is not implementable
-    # for this container without a separate allowlist-widening decision.
-    # Skipped entirely (not called with an empty name) when C_SYSLOG is
-    # empty (LOGGING_ENABLED falsy), matching every other SSL_ENABLED-style
-    # conditional monitor above.
+    # Syslog is alert-only because making it restart-capable would require a
+    # separate Docker-proxy allowlist widening. Skip the check entirely when
+    # LOGGING_ENABLED says the container is not part of this deployment.
     if [ -n "$C_SYSLOG" ]; then
         check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
     fi
