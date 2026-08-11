@@ -1,0 +1,86 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Temporary PR #1523 audit. Removed from the clean target after findings are fixed.
+name: CDX CI 1.1 comment governance audit
+
+on:
+  pull_request:
+    branches: [current_dev]
+    types: [synchronize]
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  audit:
+    if: github.event.pull_request.number == 1523 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Resolve immutable build-tools image
+        run: |
+          set -euo pipefail
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+
+      - name: Audit touched-file comments for task and review chronology
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+          : "${BASE_SHA:?BASE_SHA is required}"
+          docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e BASE_SHA \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 python3 - <<'PY'
+          from pathlib import Path
+          import re
+          import subprocess
+
+          changed = subprocess.check_output(
+              ['git', 'diff', '--name-only', '--diff-filter=ACMRTUXB', BASE_SHA := __import__('os').environ['BASE_SHA'], 'HEAD'],
+              text=True,
+          ).splitlines()
+          source_paths = [p for p in changed if p.endswith(('.yml', '.yaml', '.sh', '.bats'))]
+          ref_re = re.compile(r'(?:\b(?:issue|issues|PR|pull request)\s*#?\d+\b|(?<![A-Za-z0-9_])#\d+\b)', re.I)
+          chronology_re = re.compile(r'caught in review|before this fix|review finding|review round|follow-up pass|this PR|this task', re.I)
+          findings = []
+          todos = []
+
+          for name in source_paths:
+              path = Path(name)
+              if not path.is_file():
+                  continue
+              for lineno, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
+                  stripped = line.lstrip()
+                  # The touched files use shell/YAML/Bats line comments. Ignore shebangs.
+                  if not stripped.startswith('#') or stripped.startswith('#!'):
+                      continue
+                  body = stripped[1:].strip()
+                  if ref_re.search(body) or chronology_re.search(body):
+                      findings.append((name, lineno, body))
+                  if re.search(r'\b(?:TODO|FIXME)\b', body):
+                      todos.append((name, lineno, body))
+
+          print('=== AG-CODE-003 candidate comment findings ===')
+          for name, lineno, body in findings:
+              print(f'{name}:{lineno}: {body}')
+          print(f'COMMENT_FINDING_COUNT={len(findings)}')
+          print('=== TODO/FIXME comments in touched files ===')
+          for name, lineno, body in todos:
+              print(f'{name}:{lineno}: {body}')
+          print(f'TODO_FIXME_COUNT={len(todos)}')
+          if findings:
+              raise SystemExit(2)
+          PY
