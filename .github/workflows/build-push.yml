@@ -3134,11 +3134,6 @@ jobs:
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$resolved_source"
           done
 
-      # This is the last step in the job that uses the builder set up above --
-      # "Build full-setup validation image" below is a plain `docker build`,
-      # not buildx. Same `pr-staging-available` gate as the setup step itself,
-      # since there is nothing to remove when that step never ran.
-
       - name: Pin full-setup service identities to immutable digests
         id: pin-full-setup-digests
         env:
@@ -3161,19 +3156,6 @@ jobs:
         if: ${{ always() && steps.channel.outputs.pr-staging-available == 'true' }}
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
-      - name: Build full-setup validation image
-        env:
-          IMAGE_TAG: ${{ steps.channel.outputs.tag }}
-        run: |
-          set -euo pipefail
-
-          docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
-            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
-            --build-arg LANCACHE_IMAGE_TAG="$IMAGE_TAG" \
-            -t lancache-ng-full-setup:validation \
-            deploy/full-setup
 
       - name: Validate compose configuration
         env:
@@ -3280,11 +3262,9 @@ jobs:
             kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
           fi
 
-      - name: Clean up image
+      - name: Clean up exact-digest override
         if: always()
-        run: |
-          docker rmi lancache-ng-full-setup:validation || true
-          rm -f deploy/full-setup/.ci-exact-digests.yml
+        run: rm -f deploy/full-setup/.ci-exact-digests.yml
 
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow changes

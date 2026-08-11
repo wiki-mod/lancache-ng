@@ -129,16 +129,6 @@ jobs:
           esac
           printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
-      - name: Build full-setup validation image
-        run: |
-          set -euo pipefail
-          docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
-            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
-            --build-arg LANCACHE_IMAGE_TAG="$LANCACHE_IMAGE_TAG" \
-            -t lancache-ng-full-setup:validation \
-            deploy/full-setup
-
       - name: Validate compose configuration
         env:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
@@ -207,10 +197,6 @@ jobs:
           if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
             kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
           fi
-
-      - name: Clean up image
-        if: always()
-        run: docker rmi lancache-ng-full-setup:validation || true
 
   ssl-mitm-cache-simulation:
     # Real DNS/HTTP/HTTPS caching test (deb.debian.org). Chained after the
