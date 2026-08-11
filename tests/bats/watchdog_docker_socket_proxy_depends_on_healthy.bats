@@ -2,20 +2,19 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Drift guard: the `watchdog` and `ui` services' `depends_on` for
-# `docker-socket-proxy` used the plain list form, which only waits for that
-# container to *start*, not for HAProxy inside it to actually be accepting
-# connections on :2375 -- even though docker-socket-proxy carries a real
-# HTTP healthcheck (see its own service block in each compose file). Covers
-# all three real
-# compose files that define a `watchdog` service (prod, quickstart, and
-# full-setup's CI validation harness): full-setup's docker-socket-proxy
-# carries the identical healthcheck, so leaving it on the old
-# ordering-only form would leave the same gap in a third file.
-# This is a structural text scan of the real compose files, same extraction
-# approach as tests/bats/netdata_network_isolation.bats and
-# scripts/check-compose-healthchecks.sh (docker compose config needs a
-# populated .env/Docker to run at all).
+# Drift guard for the Docker API proxy startup contract. The watchdog cannot
+# perform health reads or restart calls until HAProxy is genuinely forwarding
+# Docker API requests, so it waits for docker-socket-proxy's real healthcheck.
+# The Admin UI has a different availability requirement: its HTTP server and
+# recovery/dashboard surface must remain startable while Docker API access is
+# degraded, so it waits only for the proxy container to be started. Covers all
+# three compose files that define both services: prod, quickstart, and the
+# full-setup validation harness.
+#
+# This is a structural text scan of the real compose files, using the same
+# service-boundary extraction approach as the other compose drift guards.
+# `docker compose config` remains a separate validation layer because these
+# deployment files require populated environment values to resolve fully.
 
 bats_require_minimum_version 1.5.0
 
@@ -28,10 +27,8 @@ setup() {
     )
 }
 
-# extract_service_block <compose-file> <service-name>
-# See tests/bats/netdata_network_isolation.bats's identical helper for the
-# boundary-rule rationale (matches scripts/check-compose-healthchecks.sh's
-# own service-block scanning approach).
+# The helper stops at the next top-level service so a condition from another
+# service cannot accidentally satisfy an assertion for the target service.
 extract_service_block() {
     local file="$1" service="$2"
     awk -v svc="  ${service}:" '
@@ -42,24 +39,22 @@ extract_service_block() {
     ' "$file"
 }
 
-# docker-socket-proxy itself must actually carry a healthcheck in every file
-# -- this is the precondition that makes `condition: service_healthy`
-# meaningful at all rather than a dependency that can never start; verified
-# explicitly rather than assumed, since the other tests in this file only
-# check that watchdog/ui reference `condition: service_healthy` and would
-# stay green even if that condition could never actually be satisfied.
-@test "docker-socket-proxy's own service block defines a healthcheck in every compose file" {
+# A health-gated watchdog dependency is useful only if the dependency itself
+# exposes a real healthcheck, so verify that precondition explicitly.
+@test "docker-socket-proxy defines a healthcheck in every compose file" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" docker-socket-proxy)"
         [ -n "$block" ]
         [[ "$block" == *"healthcheck:"* ]] || {
-            echo "docker-socket-proxy service block in $f has no healthcheck: -- condition: service_healthy would never be satisfiable" >&2
+            echo "docker-socket-proxy service block in $f has no healthcheck" >&2
             return 1
         }
     done
 }
 
-@test "watchdog waits for docker-socket-proxy to be healthy, not merely started" {
+# The watchdog's Docker API operations are its core job, so startup must wait
+# until the proxy is genuinely healthy instead of merely having been created.
+@test "watchdog waits for docker-socket-proxy to be healthy" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" watchdog)"
         [ -n "$block" ]
@@ -67,10 +62,8 @@ extract_service_block() {
             echo "watchdog service block in $f has no map-form docker-socket-proxy dependency entry" >&2
             return 1
         }
-        # Assert the condition sits on the line immediately after the
-        # docker-socket-proxy dependency key, not merely present somewhere
-        # in the block -- proves it is that dependency's own condition, not
-        # an unrelated healthcheck's condition line coincidentally present.
+        # Read the dependency's immediately following line so an unrelated
+        # condition elsewhere in the service block cannot produce a false pass.
         after_dep="$(printf '%s\n' "$block" | awk '/docker-socket-proxy:$/{getline; print; exit}')"
         [[ "$after_dep" == *"condition: service_healthy"* ]] || {
             echo "watchdog's docker-socket-proxy dependency in $f is not condition: service_healthy (got: '$after_dep')" >&2
@@ -79,7 +72,9 @@ extract_service_block() {
     done
 }
 
-@test "the Admin UI waits for docker-socket-proxy to be healthy, not merely started" {
+# The UI must still come up when Docker API access is broken so operators retain
+# its dashboard and recovery surface; only container creation is a prerequisite.
+@test "Admin UI waits only for docker-socket-proxy to be started" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" ui)"
         [ -n "$block" ]
@@ -88,8 +83,8 @@ extract_service_block() {
             return 1
         }
         after_dep="$(printf '%s\n' "$block" | awk '/docker-socket-proxy:$/{getline; print; exit}')"
-        [[ "$after_dep" == *"condition: service_healthy"* ]] || {
-            echo "ui's docker-socket-proxy dependency in $f is not condition: service_healthy (got: '$after_dep')" >&2
+        [[ "$after_dep" == *"condition: service_started"* ]] || {
+            echo "ui's docker-socket-proxy dependency in $f is not condition: service_started (got: '$after_dep')" >&2
             return 1
         }
     done
