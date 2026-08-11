@@ -550,17 +550,13 @@ services:
       validation:
         ipv4_address: ${VALIDATION_UI_IP:-172.30.99.9}
       validation-api:
-    # This validation harness's Admin UI also makes its own Docker API calls
-    # (restart-service buttons) through docker-socket-proxy, so it waits for
-    # genuine readiness instead of a bare "container exists" signal -- see
-    # deploy/prod/docker-compose.yml's identical `depends_on:` for its own
-    # `ui` service for the full reasoning. proxy/nats keep `service_started`
-    # -- the exact behavior the plain list form already had -- since
-    # Compose's map form requires every entry in one `depends_on:` block to
-    # use the same syntax.
+    # The dashboard and recovery surface must still start when the Docker API
+    # proxy is unhealthy. Only container creation is required here; individual
+    # Docker-backed actions can report their own degraded state after startup.
+    # proxy and nats likewise retain their previous ordering-only dependency.
     depends_on:
       docker-socket-proxy:
-        condition: service_healthy
+        condition: service_started
       proxy:
         condition: service_started
       nats:
