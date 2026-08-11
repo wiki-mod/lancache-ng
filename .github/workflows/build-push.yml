@@ -7010,13 +7010,13 @@ jobs:
           done
 
 
-          # Build the immutable stack BOM before any public channel is moved.
-          # Every recorded service digest is the exact merged manifest digest
-          # produced above from the already-checked platform children.
+          # Build the immutable stack pointer before any public channel is moved.
+          # All service digests must already be present so the pointer can only
+          # represent one complete, validated candidate set.
           for service in "${services[@]}"; do
             digest="${merged_digests[$service]:-}"
             [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
-              echo "::error::Cannot create stack BOM: missing exact digest for $service."
+              echo "::error::Cannot create stack pointer: missing exact digest for $service."
               exit 1
             }
           done
@@ -7029,38 +7029,14 @@ jobs:
             printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
             printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
             printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
-            for service in "${services[@]}"; do
-              env_key="$(printf '%s' "$service" | tr '[:lower:]-' '[:upper:]_')"
-              printf 'LANCACHE_IMAGE_DIGEST_%s=%s\n' "$env_key" "${merged_digests[$service]}"
-            done
           } > "$pointer_context/stack.env"
 
-          cat > "$pointer_context/stack-bom.json" <<BOM
-          {
-            "schema": 1,
-            "commit": "${COMMIT_SHA}",
-            "source_tag": "${source_tag}",
-            "services": {
-              "proxy": "${merged_digests[proxy]}",
-              "dns": "${merged_digests[dns]}",
-              "watchdog": "${merged_digests[watchdog]}",
-              "dhcp": "${merged_digests[dhcp]}",
-              "dhcp-proxy": "${merged_digests[dhcp-proxy]}",
-              "ntp": "${merged_digests[ntp]}",
-              "syslog": "${merged_digests[syslog]}",
-              "ui": "${merged_digests[ui]}",
-              "build-tools": "${merged_digests[build-tools]}"
-            }
-          }
-          BOM
-
-          stack_pointer_description="Resolves a lancache-ng stack channel to one immutable, digest-recorded service image set."
+          stack_pointer_description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
           cat > "$pointer_context/Dockerfile" <<DOCKERFILE
           FROM busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
-          LABEL org.opencontainers.image.title="lancache-ng stack bill of materials"
+          LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
           LABEL org.opencontainers.image.description="${stack_pointer_description}"
           COPY stack.env /stack.env
-          COPY stack-bom.json /stack-bom.json
           CMD ["true"]
           DOCKERFILE
 
@@ -7075,7 +7051,7 @@ jobs:
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
             bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
           stack_digest="$(digest_for_image "$stack_pointer_image")"
-          [[ "$stack_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid stack BOM digest: $stack_digest"; exit 1; }
+          [[ "$stack_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid stack pointer digest: $stack_digest"; exit 1; }
           printf 'stack_digest=%s\n' "$stack_digest" >> "$GITHUB_OUTPUT"
           cleanup_pointer_context
           trap - EXIT
@@ -7169,7 +7145,7 @@ jobs:
       # teardown is unconditional too -- exactly one of those two steps ever
       # uses the builder per run, but it was created either way.
 
-      - name: Attest immutable stack BOM provenance
+      - name: Attest immutable stack pointer provenance
         if: steps.create-trusted-manifests.outputs.stack_digest != ''
         uses: ./.github/actions/ghcr-attest-with-cache
         with:
@@ -7697,10 +7673,10 @@ jobs:
               bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${expected_digest}" "$REQUIRED_PLATFORMS"
           done
 
-          [[ "$STACK_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Missing or malformed stack BOM digest '$STACK_DIGEST'."; exit 1; }
+          [[ "$STACK_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Missing or malformed stack pointer digest '$STACK_DIGEST'."; exit 1; }
           stack_tag_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
           [[ "$(digest_for_image "$stack_tag_image")" = "$STACK_DIGEST" ]] || {
-            echo "::error::$stack_tag_image moved away from the merge-manifests stack BOM digest; refusing promotion."
+            echo "::error::$stack_tag_image moved away from the merge-manifests stack pointer digest; refusing promotion."
             exit 1
           }
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
