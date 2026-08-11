@@ -30,19 +30,6 @@
 #      only so a reader of this file's history knows both defects were fixed
 #      together, not this one alone.
 #
-# A THIRD gap, F-17 in issue #1095, was fixed by a later PR: every
-# sha-<commit> tag (and its -amd64/-arm64 legs) was unconditionally
-# protected forever, regardless of age or count, growing without bound as
-# current_dev accumulates commits. gcps_commit_branch_relation() below is
-# that fix's classification primitive: it answers, via GitHub's compare API,
-# whether a given commit is an ancestor of a given ref (current_dev, master,
-# or a release tag), which scripts/gc-pr-staging-images.sh's own sha-tag
-# retention pass uses to prune sha-<commit> tags beyond the newest N per
-# service among commits that are current_dev-exclusive (never promoted to
-# master or a release) -- see that pass's own header comment for the full
-# policy and this function's own comment for why it returns a three-state
-# ANCESTOR/NOT_ANCESTOR/LOOKUP_FAILED answer rather than a plain boolean.
-#
 # Deliberately NOT `set -euo pipefail` at the top level, matching every other
 # file under scripts/lib/: this file only defines functions for a caller to
 # invoke under the caller's own shell options (see scripts/lib/ghcr-retry.sh's
@@ -278,100 +265,6 @@ gcps_pr_lookup_state() {
   fi
 
   printf '%s\n' "${cache_ref[$pr_number]}"
-}
-
-# gcps_commit_branch_relation <repository> <commit> <ref> <cache-array-name>
-#
-# Prints exactly one of ANCESTOR / NOT_ANCESTOR / LOOKUP_FAILED for whether
-# <commit> is an ancestor of (or equal to) <ref>, using GitHub's own compare
-# API (`GET /repos/<repository>/compare/<commit>...<ref>`) rather than a
-# local git ancestry walk -- this reaper deliberately does a narrow,
-# script-only checkout (see the calling workflow's own comment on why a full
-# clone is avoided here), so it has no local commit graph to walk. Mirrors
-# gcps_pr_lookup_state's own OPEN/CLOSED/LOOKUP_FAILED three-state pattern
-# and its per-run caching (keyed here on "<commit>|<ref>", since the same
-# commit can legitimately be checked against several different refs --
-# current_dev, master, and any number of release tags -- within one run,
-# and the same ref pair can recur across services since sha-<commit> tags
-# are commit-scoped, not service-scoped).
-#
-# Added for issue #1095's F-17 (sha-* image tag retention): the maintainer's
-# 2026-08-07 decision (keep at most 10 previous sha-<commit> versions per
-# service, for current_dev specifically) requires knowing whether a given
-# sha-<commit> tag's commit is (a) actually part of current_dev's own history
-# at all, and (b) NOT also part of master's or a release tag's history --
-# the latter needing to stay protected regardless of the retention count,
-# since those commits carry release/rollback provenance this reaper's
-# existing sha-* handling was never meant to touch (see this file's caller,
-# the "any non pr-* tag" branch's own extensive comment on why sha-<commit>
-# tags were unconditionally protected before this PR).
-#
-# GitHub's compare API's `status` field for `base...head`, per GitHub's own
-# REST API documentation: "identical" (same commit), "ahead" (head has every
-# commit base has, plus more -- i.e. base IS an ancestor of head),
-# "behind" (head is an ancestor of base instead), or "diverged" (neither).
-# So <commit> (used as `base`) is an ancestor-or-equal of <ref> (used as
-# `head`) exactly when status is "identical" or "ahead" -- ANCESTOR below.
-# Any other status, OR a fetch/parse failure of any kind (including a 404,
-# e.g. a rewritten/force-pushed-away commit GitHub can no longer resolve),
-# is treated as LOOKUP_FAILED, not NOT_ANCESTOR: this function alone cannot
-# tell "confirmed not an ancestor" apart from "GitHub couldn't answer" from
-# its own single compare call for the "behind"/"diverged" cases either, and
-# collapsing an ambiguous result into a confident NOT_ANCESTOR would risk
-# the caller treating an unprovable case as provably safe to prune -- the
-# exact same collapsing bug gcps_pr_lookup_state's own header already
-# documents fixing once for the PR-state case. The caller is responsible
-# for applying the correct fail-closed direction for whichever question it
-# is asking (see scripts/gc-pr-staging-images.sh's own sha-tag-retention
-# pass: LOOKUP_FAILED must resolve to "not eligible for pruning" when
-# checking current_dev membership, but to "still protected" when checking
-# master/release-tag membership -- both directions mean "when in doubt,
-# don't touch it," they just require different boolean outcomes from this
-# one three-state answer).
-gcps_commit_branch_relation() {
-  local repository="$1" commit="$2" ref="$3" cache_array_name="$4"
-  local -n relation_cache_ref="$cache_array_name"
-  local cache_key="${commit}|${ref}"
-  local api_output status
-
-  if [[ -n "${relation_cache_ref[$cache_key]:-}" ]]; then
-    printf '%s\n' "${relation_cache_ref[$cache_key]}"
-    return
-  fi
-
-  # Same "bare assignment inside the if condition" reasoning as
-  # gcps_pr_lookup_state above: a bare `api_output="$(gh api ...)"` failing
-  # under `set -e` would abort this whole script, not just this function.
-  if api_output="$(gh api "repos/${repository}/compare/${commit}...${ref}" 2>&1)"; then
-    if status="$(printf '%s' "$api_output" | jq -r '.status // empty' 2>&1)"; then
-      case "$status" in
-        identical | ahead)
-          relation_cache_ref["$cache_key"]="ANCESTOR"
-          ;;
-        behind | diverged)
-          relation_cache_ref["$cache_key"]="NOT_ANCESTOR"
-          ;;
-        *)
-          echo "::warning::Unrecognized compare status '$status' for $repository commit $commit vs $ref -- treating as LOOKUP_FAILED (fail closed)." >&2
-          relation_cache_ref["$cache_key"]="LOOKUP_FAILED"
-          ;;
-      esac
-    else
-      echo "::warning::Could not parse compare status for $repository commit $commit vs $ref from a successful API response via jq: $status" >&2
-      relation_cache_ref["$cache_key"]="LOOKUP_FAILED"
-    fi
-  else
-    # Deliberately not special-cased on "HTTP 404" the way
-    # gcps_pr_lookup_state treats a 404 as a confirmed CLOSED answer: a
-    # missing PR number is a real, permanent fact, but a compare-API 404 can
-    # mean the commit was genuinely never on this repository OR that it was
-    # rewritten away (force-push, filter-branch) -- neither of which this
-    # reaper can safely treat as "therefore not an ancestor of anything."
-    echo "::warning::Could not compare $repository commit $commit against $ref (not necessarily a 404): $api_output" >&2
-    relation_cache_ref["$cache_key"]="LOOKUP_FAILED"
-  fi
-
-  printf '%s\n' "${relation_cache_ref[$cache_key]}"
 }
 
 # gcps_registry_anon_token <service> <repository>

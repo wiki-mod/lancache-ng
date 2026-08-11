@@ -32,17 +32,6 @@
 # orphaned versions" step below for why the actual logic now lives in
 # scripts/gc-pr-staging-images.sh rather than inline here.
 #
-# ALSO (F-17, issue #1095) prunes sha-<commit> tags (and their -amd64/-arm64
-# legs) beyond a per-service retention count of GC_SHA_RETENTION_KEEP
-# (default 10, the maintainer's own 2026-08-07 decision), but only for a
-# commit confirmed current_dev-exclusive (never promoted to master or a
-# release tag) -- every other sha-<commit> tag stays exactly as protected as
-# before. Real deletion under this policy needs GC_SHA_RETENTION_ENABLED=true
-# as a separate, explicit opt-in (default off: classification/dry-run only,
-# logged via ::notice::) -- see scripts/gc-pr-staging-images.sh's
-# process_service_sha_retention() for the full policy and its fail-closed
-# reasoning.
-#
 # Two triggers cover both the common case and the safety-net case:
 #   - pull_request (closed): reaps promptly right after the PR that owns a
 #     given staging tag closes (merged or not).
@@ -84,29 +73,7 @@ on:
     # Weekly, offset from build-tools.yml's Sunday 03:23 refresh so the two
     # scheduled jobs don't contend for the same runner at the same minute.
     - cron: "17 4 * * 0"
-  # `enable_deletion` (F-17, issue #1095, maintainer requirement): lets a
-  # maintainer manually dispatching this workflow from GitHub's own Actions
-  # tab flip the sha-<commit> retention pass (process_service_sha_retention(),
-  # see scripts/gc-pr-staging-images.sh) from dry-run into real deletion for
-  # THAT ONE run, without needing to edit this file or set a repository
-  # variable first. Defaults to `false` (dry-run) -- the safe default stays
-  # the default even for a manual dispatch that forgets to touch this input.
-  # `github.event.inputs` (and the newer `inputs` context) exist ONLY for a
-  # `workflow_dispatch`-triggered run; the `pull_request: closed` and
-  # `schedule` triggers above have no such context at all, so the step below
-  # that resolves this into GC_SHA_RETENTION_ENABLED must not assume
-  # `inputs.enable_deletion` is ever set -- see that step's own comment for
-  # how it falls back to the existing off-by-default behavior for every
-  # other trigger type.
-  workflow_dispatch:
-    inputs:
-      enable_deletion:
-        description: >-
-          Actually delete sha-<commit> tags beyond the per-service retention
-          count (F-17), instead of only logging what would be deleted. Leave
-          unchecked for a dry run (the safe default).
-        type: boolean
-        default: false
+  workflow_dispatch: {}
 
 # Package version deletion is intentionally NOT done with the default
 # GITHUB_TOKEN: GitHub's REST API for deleting a container package version
@@ -160,20 +127,6 @@ jobs:
     # headroom for the new per-version registry calls under normal GHCR
     # response times, without reintroducing a multi-hour silent-hang window
     # the way 150 minutes did.
-    #
-    # F-17 (issue #1095) adds further bounded work on top of the above: up
-    # to 3 `gh api compare` calls (current_dev, master, one per release tag
-    # until a match) per sha-<commit> RETENTION CANDIDATE (a commit ranked
-    # beyond GC_SHA_RETENTION_KEEP for its service), capped at
-    # GC_SHA_RETENTION_MAX_DELETIONS_PER_SERVICE (default 20) candidates per
-    # service per run -- at most 20 x 3 x 8 = 480 extra GitHub REST calls in
-    # the worst case, cheap individually (no registry manifest fetch
-    # involved, unlike the orphan pass) and independent of GHCR's own
-    # rate-limit budget (these hit the GitHub API, not the registry). Not
-    # expected to meaningfully change the 60-minute budget above, but not
-    # re-measured against a real run with a large sha-retention backlog
-    # either -- flagged as an open verification item in this PR rather than
-    # asserted as proven headroom.
     timeout-minutes: 60
     steps:
       # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
@@ -238,23 +191,6 @@ jobs:
         if: steps.creds.outputs.have-pat == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-          # F-17 (issue #1095, maintainer requirement): lets a manual
-          # workflow_dispatch run flip real deletion on for the sha-<commit>
-          # retention pass via the `enable_deletion` input declared above,
-          # instead of only via a repository variable a maintainer would
-          # otherwise have to set separately before dispatching. The
-          # `github.event_name == 'workflow_dispatch' &&` guard is not
-          # cosmetic: `inputs.enable_deletion` (and the older
-          # `github.event.inputs.enable_deletion`) simply does not exist for
-          # the `pull_request: closed` and `schedule` triggers above, and
-          # this expression must still resolve to the literal string
-          # `'false'` for those -- not an empty string -- so
-          # scripts/gc-pr-staging-images.sh's own
-          # `sha_retention_enabled="${GC_SHA_RETENTION_ENABLED:-false}"`
-          # default never has to distinguish "explicitly false" from
-          # "unset" here; this expression always sets one or the other
-          # explicitly, for every trigger type.
-          GC_SHA_RETENTION_ENABLED: ${{ (github.event_name == 'workflow_dispatch' && inputs.enable_deletion) && 'true' || 'false' }}
         run: bash scripts/gc-pr-staging-images.sh
 
       # actions/checkout@v7.0.1's sparseCheckoutNonConeMode() (the code path
