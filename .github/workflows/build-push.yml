@@ -2819,7 +2819,7 @@ jobs:
     # #626's exact bug. On push events, this job still waits for `promote` so it validates
     # the freshly-promoted channel state instead of racing ahead of it or checking a stale
     # channel tag.
-    needs: [detect-changes, merge-manifests, compute-validation-network]
+    needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose]
     if: >-
       ${{
         always() &&
@@ -3177,20 +3177,24 @@ jobs:
 
       - name: Validate compose configuration
         env:
+          BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
           LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
           FULL_SETUP_COMPOSE_OVERRIDE: ${{ env.FULL_SETUP_COMPOSE_OVERRIDE }}
         run: |
           set -euo pipefail
+          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
+          # Reuse validate-compose's already smoke-tested, digest-qualified CI toolchain.
           docker run --rm \
             -v "$PWD/deploy/full-setup:/validation:ro" \
             -w /validation \
             --env LANCACHE_IMAGE_REGISTRY \
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
-            docker:latest \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
             docker compose -f docker-compose.yml -f "${FULL_SETUP_COMPOSE_OVERRIDE:?FULL_SETUP_COMPOSE_OVERRIDE is required}" config >/dev/null
 
       # VALIDATION_SUBNET (and the matching VALIDATION_*_IP/VALIDATION_GATEWAY vars) starts

@@ -115,6 +115,20 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Resolve immutable build-tools image
+        id: build-tools
+        run: |
+          set -euo pipefail
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          case "$build_tools_image" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::Expected digest-qualified build-tools image, got '$build_tools_image'."
+              exit 1
+              ;;
+          esac
+          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
+
       - name: Build full-setup validation image
         run: |
           set -euo pipefail
@@ -127,17 +141,21 @@ jobs:
 
       - name: Validate compose configuration
         env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
         run: |
           set -euo pipefail
+          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+
           docker run --rm \
             -v "$PWD/deploy/full-setup:/validation:ro" \
             -w /validation \
             --env LANCACHE_IMAGE_REGISTRY \
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
-            docker:latest \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
             docker compose -f docker-compose.yml config >/dev/null
 
       - name: Reserve a validation subnet and start the stack (locked, retries on collision)
