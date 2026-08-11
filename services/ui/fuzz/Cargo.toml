@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # cargo-fuzz harness crate for lancache-ui (issue #1252): fuzzes the Kea
 # config-get reservation-entry parsing path and the Netdata proxy's
 # allowlisted-path/query-parameter URL builder, both against the real

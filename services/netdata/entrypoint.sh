@@ -1,5 +1,6 @@
 #!/bin/sh
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Entrypoint for the first-party netdata image (services/netdata/Dockerfile).
 # Plain POSIX sh, not bash: this script only needs `cat`/a heredoc and

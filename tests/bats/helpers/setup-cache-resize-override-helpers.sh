@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads setup.sh's lancache_ui_cache_max_gb_override_is_valid()
 # in isolation. Same reasoning as setup-ui-channel-override-helpers.sh: this is

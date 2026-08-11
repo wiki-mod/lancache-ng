@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Retry wrapper for a *local* `docker buildx build` invocation, specifically
 # for the transient BuildKit/containerd content-store race confirmed live at

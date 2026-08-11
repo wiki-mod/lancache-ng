@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Local HTTP listener (#628) the Admin UI calls to list PowerDNS zone/
 //! record known-good snapshots and trigger an operator-selected rollback.

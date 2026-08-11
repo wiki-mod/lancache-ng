@@ -1,5 +1,6 @@
 #!/bin/sh
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Admin UI container entrypoint: fixes up ownership on shared/bind-mounted
 # data paths when started as root, then drops privileges to the unprivileged

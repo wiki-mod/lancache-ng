@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # LanCache-NG-NTP entrypoint. Renders /etc/chrony/chrony.conf from the base
 # template plus the operator-configured upstream server list and LAN-scoped

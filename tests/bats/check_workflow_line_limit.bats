@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Exercises scripts/check-workflow-line-limit.sh (issue #1095, 2026-08-01)
 # against small, throwaway .github/workflows fixture trees rather than this

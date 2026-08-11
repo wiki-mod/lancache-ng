@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Fast, Docker-free unit coverage for scripts/lib/docker-buildx-retry.sh
 # (issue #1223, AG-CI-013), mirroring tests/bats/build_retry.bats's approach

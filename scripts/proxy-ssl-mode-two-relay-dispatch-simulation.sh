@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Real end-to-end simulation for services/proxy's SSL-mode stream-level SNI
 # depth-dispatch and symmetric two-relay client-IP fix (issues #1276/#1322).

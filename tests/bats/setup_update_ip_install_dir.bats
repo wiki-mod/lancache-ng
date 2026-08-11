@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Regression coverage for #666: cmd_update_ip() used to be hardwired to
 # $SCRIPT_DIR/deploy/prod and $SCRIPT_DIR/config/prod/dns-*.env -- the repo

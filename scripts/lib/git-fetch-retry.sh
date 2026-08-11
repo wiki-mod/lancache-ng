@@ -1,6 +1,6 @@
 #!/bin/bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Retry wrapper for a `git fetch` invocation, following this project's
 # established AG-CI-013 pattern (scripts/lib/ghcr-retry.sh for registry

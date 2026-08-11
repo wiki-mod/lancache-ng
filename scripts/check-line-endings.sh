@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Scans git-tracked files for CRLF line endings (issue #601). .gitattributes
 # already declares `* text=auto eol=lf`, which normalizes line endings for

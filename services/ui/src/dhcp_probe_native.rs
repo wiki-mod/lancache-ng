@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Native DHCPv4 probe (issue #1288): replaces the former `dhcp-probe.sh`
 //! script's dependence on two now-EOL/no-longer-packaged external tools --

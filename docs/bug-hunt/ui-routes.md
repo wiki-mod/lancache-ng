@@ -432,7 +432,7 @@ lines 1-3317, read in full; test module, lines 3318-5568, scanned by test-name c
     backend failure in any monitoring that treats a 500 status as an incident, when the intended
     end state (the option is gone) is already true.
 
-23. **CSRF verification happens after the (side-effect-free) `require_kea_mode` state check in
+23. ~~**CSRF verification happens after the (side-effect-free) `require_kea_mode` state check in
     every Kea mutation handler, rather than first.** (`routes/dhcp.rs:1196-1198` and every
     following mutation handler in this file follow the identical
     `require_kea_mode(&state)?;` then `crate::routes::verify_csrf_token(...)` order) Not
@@ -440,7 +440,10 @@ lines 1-3317, read in full; test module, lines 3318-5568, scanned by test-name c
     config state and has no side effect, but it is a minor inversion of the usual "verify the
     request is legitimate before doing anything else with it" ordering used elsewhere in this
     project (e.g. `routes/domains.rs`'s handlers all call `verify_csrf_token` as their very
-    first statement). Flagging as an info-level consistency note, not a vulnerability.
+    first statement). Flagging as an info-level consistency note, not a vulnerability.**~~
+    **FIXED by #1479.** All ten Kea mutation handlers now call
+    `crate::routes::verify_csrf_token` first and `require_kea_mode(&state)` immediately after,
+    matching the ordering `routes/domains.rs`'s handlers already used.
 
 24. **The Admin UI's own user-facing template text is inconsistently in German across at least
     seven template files rendered by these very routes, contradicting `AGENTS.md`'s explicit

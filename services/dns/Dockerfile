@@ -1,5 +1,6 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 # DNS service: PowerDNS (recursor + authoritative), nats-subscriber binary, Lua RPZ scripts.
 
 # Intentional ARG default (overridable at build time via --build-arg).

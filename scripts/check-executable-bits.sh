@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Standing guard for issue #1019 (#822 Pattern B): a repo script committed
 # with git mode 100644 but invoked as a *bare path* (e.g. `scripts/foo.sh`,

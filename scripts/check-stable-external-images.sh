@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Stable-release gate: every external (third-party) image referenced by the
 # prod/quickstart deploy profiles must be declared in release/stack-images.yml
 # and pinned by an immutable sha256 digest before a stable release can move

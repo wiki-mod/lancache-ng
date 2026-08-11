@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Pure (Docker-free, registry-free) helpers for deciding WHICH image tag the
 # full-setup deep validation suite should test, and whether a PR is eligible
