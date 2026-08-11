@@ -23,6 +23,17 @@ subprocess.run(['python3', fixed_transformer], check=True)
 Path(fixed_transformer).unlink()
 body.unlink()
 
+# The unordered-set Bats fixture predates syslog and lists the same services in
+# reverse order, so the body transform's forward-order "ntp ui" insertion does
+# not touch it. Keep that fixture at the same nine-service canonical set too.
+test_path = Path('tests/bats/check_workflow_service_lists.bats')
+tests = test_path.read_text(encoding='utf-8')
+old_unordered = 'services=(build-tools ui ntp dhcp-proxy dhcp watchdog dns proxy)'
+new_unordered = 'services=(build-tools ui syslog ntp dhcp-proxy dhcp watchdog dns proxy)'
+if tests.count(old_unordered) != 1:
+    raise SystemExit(f'unordered service fixture: expected exactly one match, got {tests.count(old_unordered)}')
+test_path.write_text(tests.replace(old_unordered, new_unordered, 1), encoding='utf-8')
+
 guard_path = Path('scripts/check-workflow-service-lists.sh')
 guard = guard_path.read_text(encoding='utf-8')
 replacements = {
