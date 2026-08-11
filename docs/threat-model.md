@@ -313,19 +313,16 @@ record changes, or subscribes to read cache/DNS metadata.
 (forged DNS records reprogram what the appliance spoofs)
 
 **Mitigations** (verified in `deploy/quickstart/docker-compose.yml`):
-- NATS is **not published on the host** in the default deployment — it is only
-  reachable on the internal Docker network. This also covers nats-server's own
-  HTTP monitor endpoint (`http_port: 8222`, added for the Docker healthcheck --
-  corrected 2026-08-08: this previously also credited this port to "Netdata's
-  NATS collector", checked against the real pinned netdata image and found
-  false, see `docs/capability-inventory/SoT-observability.md`'s network
-  section for the full correction; `nats` is not on netdata's own isolated
-  network and does not need to be): it carries no credentials of its own
-  (nats-server's monitor has no built-in auth), so any container reachable on
-  the same internal Docker network can read `/varz`/`/healthz` without a NATS
-  role credential — but it is read-only server metadata (version, connection
-  counts), not the DNS-record data path itself, and stays unreachable from
-  outside the Docker network exactly like the client port.
+- NATS is **not published on the host** in the default deployment; it is only
+  reachable on the internal Docker network. The internal HTTP monitor endpoint
+  (`http_port: 8222`) exists for the Docker healthcheck and is not consumed by
+  Netdata in this stack. It carries no credentials of its own (nats-server's
+  monitor has no built-in auth), so any container reachable on the same internal
+  Docker network can read `/varz`/`/healthz` without a NATS role credential. The
+  endpoint exposes read-only server metadata such as version and connection
+  counts, not the DNS-record data path, and remains unreachable from outside the
+  Docker network exactly like the client port. NATS does not join Netdata's
+  dedicated isolated network because no active collector path requires it.
 - Access is **credentialled and role-scoped**, not a single shared account.
   Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.
