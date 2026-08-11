@@ -44,7 +44,7 @@ jobs:
           PY
 
           python3 .github/cdx-1522-comment-cleanup.py
-          git rm -- .github/cdx-1522-comment-cleanup.py .github/workflows/cdx-1522-comment-audit.yml
+          git rm -f -- .github/cdx-1522-comment-cleanup.py .github/workflows/cdx-1522-comment-audit.yml
 
           ruby -e 'require "yaml"; YAML.load_file(ARGV[0], aliases: true)' .github/workflows/build-push.yml
 
