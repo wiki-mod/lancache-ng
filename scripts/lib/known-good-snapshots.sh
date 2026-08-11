@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Known-good configuration snapshot contract (see
 # docs/known-good-config-snapshots.md and issue #415).

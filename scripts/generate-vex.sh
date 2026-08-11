@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Generates an OpenVEX (https://openvex.dev) JSON document from the accepted-
 # vulnerability records in .trivyignore.yaml, so that downstream consumers get
 # a standard, portable VEX statement for every vulnerability this project has

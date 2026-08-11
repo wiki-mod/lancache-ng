@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Repeat-run idempotence fixture tests for migrate_env_for_update(), the real
 # function `setup.sh update` calls to converge an install's .env before
@@ -38,7 +39,8 @@ setup() {
 # `docker pull` a channel pointer image. Includes DHCP_PROXY_INTERFACE/
 # DHCP_PROXY_ROUTER/DHCP_NTP_SERVERS/DHCP_PROXY_DOMAIN/
 # DHCP_PROXY_BOOT_FILENAME/DHCP_PROXY_BOOT_SERVER/DHCP_PROXY_CUSTOM_OPTIONS
-# (#450), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
+# (#450), DHCP_PROXY_PXE_BOOT_SERVER/DHCP_PROXY_PXE_BOOT_FILENAME_BIOS/
+# DHCP_PROXY_PXE_BOOT_FILENAME_UEFI (#705), NATS_DNS_REPLICA_USER/NATS_DNS_REPLICA_PASSWORD/
 # NATS_CALLOUT_USER/NATS_CALLOUT_PASSWORD (#583),
 # NATS_SYS_USER/NATS_SYS_PASSWORD (#681), AUTO_UPDATE_ENABLED (#819),
 # NTP_ENABLED (#1082, LanCache-NG-NTP), DHCP_RELAY_LOCAL_ADDR (#844,
@@ -125,6 +127,9 @@ write_converged_env_fixture() {
         'DHCP_PROXY_BOOT_FILENAME=' \
         'DHCP_PROXY_BOOT_SERVER=' \
         'DHCP_PROXY_CUSTOM_OPTIONS=' \
+        'DHCP_PROXY_PXE_BOOT_SERVER=' \
+        'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=' \
+        'DHCP_PROXY_PXE_BOOT_FILENAME_UEFI=' \
         'KEA_CTRL_TOKEN=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' \
         'DDNS_TSIG_KEY=YWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYWFhYQ==' \
         'PDNS_API_KEY=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' \
@@ -265,6 +270,26 @@ write_legacy_env_fixture() {
     [ "$first_run_hash" = "$second_run_hash" ]
 }
 
+@test "migrate_env_for_update on a quickstart (non-deploy/prod) install runs cleanly under set -u" {
+    # setup.sh's own top-level `set -euo pipefail` (line 16) is not captured
+    # by load_setup_update_helpers (its extraction starts at is_valid_ipv4(),
+    # well after that line), so every other test in this file runs the real
+    # migrate_env_for_update() under whatever options bats itself happens to
+    # use -- not necessarily nounset. The prodsync_default_* locals this
+    # function declares are only ever assigned inside an
+    # is_deploy_prod_install_dir branch; on this quickstart fixture that
+    # branch never runs, so an unset (not merely empty) local expanded
+    # unconditionally in the append_env_key_if_missing calls below it would
+    # abort here specifically, and only under the exact option set setup.sh's
+    # real callers use (AG-VAL-030) -- silently passing under bats' own
+    # default options is not equivalent proof.
+    set -u
+    write_converged_env_fixture
+
+    run migrate_env_for_update "$(dirname "$env_file")"
+    [ "$status" -eq 0 ]
+}
+
 @test "migrate_env_for_update on a legacy .env converges once and is stable on the second run" {
     write_legacy_env_fixture
 
@@ -327,4 +352,152 @@ write_legacy_env_fixture() {
 
     duplicate_keys=$(awk -F= '{print $1}' "$env_file" | sort | uniq -d)
     [ -z "$duplicate_keys" ]
+}
+
+@test "migrate_env_for_update on a deploy/prod install with no PXE keys in .env yet preserves an existing config/prod/dhcp-proxy.env PXE value across two runs (the confirmed real bug)" {
+    # A pre-#705 (or even pre-#450) deploy/prod install: .env has never heard
+    # of these keys at all, but the operator already configured PXE
+    # boot-pointer support the only way that existed before setup.sh gained
+    # this wizard/migration -- hand-editing config/prod/dhcp-proxy.env
+    # directly. A fix that only seeds the backfill from $env_file's OWN
+    # prior state (e.g. a snapshot taken before the appends) merely defers
+    # this bug by one run: the second `setup.sh update` starts with .env
+    # already carrying the first run's backfilled placeholder, which looks
+    # identical to a genuine explicit clear either way. Running this twice is
+    # the actual discriminating check -- seeding the backfill from
+    # config/prod/dhcp-proxy.env's own real value (not from $env_file's own
+    # history) is what converges both files to agree from the first run
+    # onward, exactly like every other key in this function.
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    # The backfill actually happened, and converged to config/prod's real
+    # value rather than an empty placeholder -- proves this test exercises
+    # the real seeding path rather than accidentally skipping it.
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' "$env_file"
+    grep -qx 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' "$env_file"
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.9.9.9" ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$config_prod_env"
+    [ "$output" = "real-pxelinux.0" ]
+
+    # The discriminating second run: .env now already carries these keys
+    # from run one, exactly the state that would fool a fix relying on
+    # $env_file's own prior existence instead of config/prod's real value.
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.9.9.9" ]
+    run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$config_prod_env"
+    [ "$output" = "real-pxelinux.0" ]
+}
+
+@test "migrate_env_for_update preserves a direct config/prod edit made after the first migration" {
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1
+DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=pxelinux.0
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+    grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' "$env_file"
+
+    # Operators edit the runtime file directly for deploy/prod. The duplicate
+    # .env value is now stale and must never overwrite this later valid edit.
+    set_env_key DHCP_PROXY_PXE_BOOT_SERVER "10.0.0.2" "$config_prod_env"
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.0.0.2" ]
+}
+
+@test "migrate_env_for_update in dnsmasq-proxy mode does not die on an incomplete hand-edited PXE pair in config/prod/dhcp-proxy.env" {
+    # config/prod/dhcp-proxy.env is hand-edited and has never passed through
+    # this function's own dnsmasq-proxy validation block -- entrypoint.sh
+    # tolerates a PXE boot server with no filename yet (renders no
+    # pxe-service directive, logs a startup warning, not fatal), but this
+    # function's own pxe_boot_pointer_answers_are_complete() guard requires
+    # the pair together and would die on exactly this state if seeded
+    # unvalidated. Confirms the seeding path added to fix the preservation
+    # bug above cannot itself turn a working install into a failing update.
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+    printf '%s\n' \
+        'DHCP_MODE=dnsmasq-proxy' \
+        'DHCP_SUBNET_START=192.0.2.0' \
+        'DHCP_DNS_PRIMARY=192.0.2.20' \
+        'UPSTREAM_DHCP_IP=192.0.2.1' \
+        >> "$env_file"
+
+    # Incomplete on purpose: a server with no filename, exactly the state
+    # entrypoint.sh's own design tolerates but this function's completeness
+    # guard does not.
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    # The authoritative runtime file is not rewritten; entrypoint.sh retains
+    # its existing warning/no-directive behavior for this hand-edited state.
+    run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
+    [ "$output" = "10.9.9.9" ]
+}
+
+@test "migrate_env_for_update in dnsmasq-proxy mode does not die on an invalid hand-edited value in config/prod/dhcp-proxy.env" {
+    # A hand-edited config/prod/dhcp-proxy.env is never guaranteed to satisfy
+    # $env_file's own stricter validation contract. A malformed IPv4 here
+    # must not abort an update that previously worked.
+    prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
+    config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
+    mkdir -p "$prod_install_dir" "$config_prod_dir"
+    config_prod_env="$config_prod_dir/dhcp-proxy.env"
+
+    env_file="$prod_install_dir/.env"
+    write_legacy_env_fixture
+    printf '%s\n' \
+        'DHCP_MODE=dnsmasq-proxy' \
+        'DHCP_SUBNET_START=192.0.2.0' \
+        'DHCP_DNS_PRIMARY=192.0.2.20' \
+        'UPSTREAM_DHCP_IP=192.0.2.1' \
+        >> "$env_file"
+
+    cat > "$config_prod_env" <<'EOF'
+DHCP_PROXY_ROUTER=not-an-ip-address
+EOF
+
+    run migrate_env_for_update "$prod_install_dir"
+    [ "$status" -eq 0 ]
+
+    run get_env_var DHCP_PROXY_ROUTER "$config_prod_env"
+    [ "$output" = "not-an-ip-address" ]
 }

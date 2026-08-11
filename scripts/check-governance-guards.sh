@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # Checks changed files and PR bodies for stale TODO/FIXME markers, partial
 # Fixes/Closes claims, and malformed PR-body uploads.
 set -euo pipefail

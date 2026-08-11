@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Admin UI service entry point. Wires up the axum HTTP server, shared
 //! `AppState` (Docker client, NATS connection, SQLite handle, Tera templates),
@@ -745,6 +747,30 @@ fn validate_ui_session_ttl_seconds(seconds: u64) -> Result<(), String> {
 // (a resolution bug that ever yielded an empty/placeholder token must still fail
 // closed rather than start in a silently insecure state, issue #659), not as
 // the primary boot gate it once was.
+// This token gates `POST /api/secondary/register` (the only route that
+// lets a new secondary join this primary) with a plain equality check
+// (routes/secondaries.rs's constant-time comparison), which by itself
+// rejects only an empty or known-placeholder value. Without a length
+// floor, a short, easily-guessable value that is neither of those (e.g.
+// an operator hand-typing "changeme123" or "secret" instead of running
+// the generator this rule's own error message recommends) would still be
+// accepted. setup.sh's real default is a 64-character hex string (32
+// CSPRNG bytes via `ensure_secret_env_key ... hex32`); this floor is
+// deliberately much lower than that (32 characters, half the real
+// default) so a genuinely hand-chosen operator secret with reasonable
+// entropy is not rejected, while a trivially short/guessable value is.
+// This is a length floor only -- rate-limiting the registration endpoint
+// itself against online brute-forcing is a separate, larger undertaking
+// (shared per-route state, a rate-limiting strategy decision) requiring
+// its own maintainer decision.
+//
+// The minimum is a character count, not a byte count: token.chars().count()
+// below, not token.len(). A byte-length check would let a short string of
+// multi-byte UTF-8 characters (e.g. 8 four-byte emoji, 32 bytes total) pass
+// this floor despite being only 8 characters -- far below the intended
+// entropy floor for a value that gates remote secondary registration.
+const MIN_SECONDARY_REGISTRATION_TOKEN_LEN: usize = 32;
+
 fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
     if token.is_empty() {
         return Err(
@@ -758,6 +784,15 @@ fn validate_secondary_registration_token(token: &str) -> Result<(), String> {
             "SECONDARY_REGISTRATION_TOKEN is still set to a default placeholder \
              ('{token}') — refusing to start. Generate a real secret with: \
              openssl rand -hex 32"
+        ));
+    }
+    let token_char_len = token.chars().count();
+    if token_char_len < MIN_SECONDARY_REGISTRATION_TOKEN_LEN {
+        return Err(format!(
+            "SECONDARY_REGISTRATION_TOKEN is only {token_char_len} character(s), below the \
+             required minimum of {MIN_SECONDARY_REGISTRATION_TOKEN_LEN} — refusing to start. \
+             This token is the only thing gating remote secondary registration; a short value \
+             is practical to brute-force. Generate a real secret with: openssl rand -hex 32"
         ));
     }
     Ok(())
@@ -892,15 +927,15 @@ async fn main() -> Result<()> {
         .timeout(std::time::Duration::from_secs(10))
         .build()?;
 
-    let nats = connect_nats_with_retry(&cfg).await;
-    let ui_session_secret = load_or_create_session_secret()?;
-
-    // Resolve the effective secondary-registration token alongside the other
-    // durable /data secrets: a real operator value is preserved, otherwise a
-    // persistent random one is generated so the documented manual compose path
-    // starts securely instead of crash-looping (see
-    // load_or_create_secondary_registration_token). validate_* then asserts the
-    // resolved value is real as defense in depth.
+    // Resolved and validated before the NATS retry loop below (which retries
+    // forever), matching this function's own stated ordering principle
+    // above: a bad token configuration must fail closed immediately, not
+    // wait behind an indefinite NATS connection retry when NATS also
+    // happens to be unavailable. Alongside the other durable /data secrets:
+    // a real operator value is preserved, otherwise a persistent random one
+    // is generated so the documented manual compose path starts securely
+    // instead of crash-looping (see load_or_create_secondary_registration_token).
+    // validate_* then asserts the resolved value is real as defense in depth.
     let secondary_registration_token = match load_or_create_secondary_registration_token(
         &cfg.secondary_registration_token,
         SECONDARY_REGISTRATION_TOKEN_FILE,
@@ -916,6 +951,9 @@ async fn main() -> Result<()> {
         std::process::exit(1);
     }
     cfg.secondary_registration_token = secondary_registration_token;
+
+    let nats = connect_nats_with_retry(&cfg).await;
+    let ui_session_secret = load_or_create_session_secret()?;
 
     // Loaded before the DB/state so its public key can be baked into the
     // initial nats.conf write below, and its private seed handed to the
@@ -1565,6 +1603,45 @@ mod tests {
             )
             .is_ok()
         );
+    }
+
+    // A token that is neither empty nor a known placeholder, but too short
+    // to meaningfully resist brute-forcing, must still be rejected.
+    // `MIN_SECONDARY_REGISTRATION_TOKEN_LEN` is the exact boundary this
+    // locks -- one character under it must fail, exactly at it must pass.
+    #[test]
+    fn secondary_registration_token_rejects_short_non_placeholder_values() {
+        let too_short = "a".repeat(MIN_SECONDARY_REGISTRATION_TOKEN_LEN - 1);
+        let err = validate_secondary_registration_token(&too_short).unwrap_err();
+        assert!(err.contains("below the required minimum"));
+
+        let exactly_min = "b".repeat(MIN_SECONDARY_REGISTRATION_TOKEN_LEN);
+        assert!(validate_secondary_registration_token(&exactly_min).is_ok());
+    }
+
+    // The length floor must count characters, not bytes: a multi-byte UTF-8
+    // string can have far more bytes than characters (8 four-byte emoji is
+    // 32 bytes but only 8 characters). A byte-count check would silently
+    // accept this short, low-entropy value; a character-count check
+    // correctly rejects it.
+    #[test]
+    fn secondary_registration_token_length_floor_counts_characters_not_bytes() {
+        let eight_emoji = "\u{1F600}".repeat(8);
+        assert_eq!(
+            eight_emoji.len(),
+            32,
+            "test fixture assumption: 8 four-byte emoji = 32 bytes"
+        );
+        assert_eq!(eight_emoji.chars().count(), 8);
+        let err = validate_secondary_registration_token(&eight_emoji).unwrap_err();
+        assert!(err.contains("below the required minimum"));
+
+        // Exactly MIN_SECONDARY_REGISTRATION_TOKEN_LEN multi-byte characters
+        // (4x the byte length of the ASCII equivalent) must still pass,
+        // proving the floor is a real character-count boundary rather than
+        // accidentally stricter for multi-byte input.
+        let min_chars_emoji = "\u{1F600}".repeat(MIN_SECONDARY_REGISTRATION_TOKEN_LEN);
+        assert!(validate_secondary_registration_token(&min_chars_emoji).is_ok());
     }
 
     // Cross-language parity coverage for secret/token placeholder detection

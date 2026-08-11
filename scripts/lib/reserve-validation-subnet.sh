@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Host-local, per-slot locking for the full-setup-validate validation
 # Docker subnet (issue #703; slot/`/27` redesign issue #832). Pure functions

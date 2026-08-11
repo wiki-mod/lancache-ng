@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
 # (NATS, docker-socket-proxy) wired up with production-sized defaults
@@ -42,6 +44,18 @@ services:
       # Both standard and SSL proxy paths write into this same cache tree.
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
+      # Per-domain SSL/MITM wildcard certs (entrypoint.sh's CERT_DIR),
+      # distinct from the CA bind-mount above (../../certs, the persistent
+      # CA key/cert itself). The Dockerfile's own VOLUME declaration for
+      # this path (/etc/nginx/ssl/certs) is anonymous, so without this named
+      # volume, any flow that removes the container (e.g. `docker compose
+      # down && up`, as opposed to `--force-recreate`, which reuses
+      # anonymous volumes) silently loses every generated wildcard cert and
+      # re-signs the full domain list from scratch on next boot --
+      # self-healing (all certs are deterministically re-derived from the
+      # same persisted CA) but a real, avoidable regeneration cost for a
+      # deployment with a large cdn-domains.txt.
+      - proxy-certs:/etc/nginx/ssl/certs
       # Known-good nginx config snapshots (#415): must be a persistent,
       # service-owned volume, not the ephemeral container layer, so
       # rollback survives container restarts/recreates.
@@ -1590,6 +1604,11 @@ volumes:
       # normal production path is derived from the shared state root.
       device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
+  # Generated per-domain wildcard certs (entrypoint.sh's CERT_DIR), separate
+  # from the ../../certs CA bind-mount -- see the proxy service's own
+  # volumes: comment for why this needs to be a real named volume rather
+  # than the Dockerfile's anonymous VOLUME fallback.
+  proxy-certs:
   # Known-good config snapshots (#415, #615), one persistent volume per
   # adapter. Deliberately plain Docker-managed volumes (not part of the
   # LANCACHE_STATE_DIR bind-mount contract used by cache/kea/pdns/nats): see

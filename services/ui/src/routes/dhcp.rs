@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! Admin UI DHCP routes. Renders Kea DHCP subnets, leases, reservations, and
 //! dual DHCP probe checks, and applies guarded DHCP config mutations through
@@ -110,6 +112,27 @@ impl std::fmt::Display for DhcpError {
 }
 
 impl std::error::Error for DhcpError {}
+
+// kea_config_modify's closures throughout this file share two literal
+// not-found error strings for client-input problems (the operator's own
+// request named something that isn't there), not server-side
+// config-mutation failures, which should surface as 404 Not Found rather
+// than the generic 500 Internal Server Error every other closure failure
+// maps to: "subnet not found" (from find_subnet_mut, used directly or via
+// dhcp4_subnets_mut+find) and "custom option not found" (from
+// remove_custom_subnet_option/remove_pxe_subnet_field, e.g. a
+// double-submitted or stale-page option-removal form). This one shared
+// helper is used at every kea_config_modify call site, so the mapping
+// only needs to be correct once here, and any closure failure that is not
+// one of these two specific cases keeps the generic 500 behavior.
+fn kea_config_modify_error(e: Box<dyn std::error::Error + Send + Sync>) -> DhcpError {
+    let message = e.to_string();
+    if message == "subnet not found" || message == "custom option not found" {
+        DhcpError::new(StatusCode::NOT_FOUND, message)
+    } else {
+        DhcpError::config_error(message)
+    }
+}
 
 // Every DHCP route in this file renders full HTML pages (this is the Admin
 // UI, not a JSON API), so an error result is rendered the same way as a
@@ -750,7 +773,7 @@ async fn set_ntp_option_on_all_subnets(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))
+    .map_err(kea_config_modify_error)
 }
 
 // Best-effort pre-flight check that update_dhcp_mode runs BEFORE
@@ -1844,8 +1867,13 @@ pub async fn add_subnet(
     headers: HeaderMap,
     Form(form): Form<AddSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let lease_time = validate_dhcp_form(DhcpFormValidation {
         subnet: &form.subnet,
         pool_start: &form.pool_start,
@@ -1904,7 +1932,7 @@ pub async fn add_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -1921,8 +1949,13 @@ pub async fn update_subnet(
     headers: HeaderMap,
     Form(form): Form<UpdateSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let lease_time = validate_dhcp_form(DhcpFormValidation {
         subnet: &form.subnet,
         pool_start: &form.pool_start,
@@ -1977,7 +2010,7 @@ pub async fn update_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -1992,8 +2025,13 @@ pub async fn remove_subnet(
     headers: HeaderMap,
     Form(form): Form<RemoveSubnetForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let subnet_id = form.id;
     kea_config_modify(&state, move |config| {
         let dhcp4 = config.get_mut("Dhcp4").ok_or("Dhcp4 missing")?;
@@ -2007,7 +2045,7 @@ pub async fn remove_subnet(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2024,8 +2062,13 @@ pub async fn add_subnet_option(
     headers: HeaderMap,
     Form(form): Form<AddSubnetOptionForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let key = parse_custom_option_key(&form.code).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
@@ -2049,7 +2092,7 @@ pub async fn add_subnet_option(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2065,8 +2108,13 @@ pub async fn remove_subnet_option(
     headers: HeaderMap,
     Form(form): Form<RemoveSubnetOptionForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let key = parse_custom_option_key(&form.code).map_err(|message| {
         DhcpError::new(
             StatusCode::BAD_REQUEST,
@@ -2090,7 +2138,7 @@ pub async fn remove_subnet_option(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2100,8 +2148,13 @@ pub async fn add_reservation(
     headers: HeaderMap,
     Form(form): Form<AddReservationForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     if !is_valid_mac(&form.mac) || !is_valid_ip(&form.ip) {
         return Err(DhcpError::from(StatusCode::BAD_REQUEST));
     }
@@ -2162,7 +2215,7 @@ pub async fn add_reservation(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -2175,8 +2228,13 @@ pub async fn remove_reservation(
     headers: HeaderMap,
     Form(form): Form<RemoveReservationForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     // Issue #947: mirrors add_reservation/release_lease, which both validate
     // their own identifier field before use. Harmless as a no-op today (a
     // malformed MAC simply matches nothing in remove_reservation_entry's
@@ -2198,7 +2256,7 @@ pub async fn remove_reservation(
         Ok(())
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
     Ok(Redirect::to("/dhcp"))
 }
 
@@ -2212,8 +2270,13 @@ pub async fn release_lease(
     headers: HeaderMap,
     Form(form): Form<ReleaseLeaseForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     if !is_valid_ip(&form.ip) {
         return Err(DhcpError::new(
             StatusCode::BAD_REQUEST,
@@ -2239,7 +2302,7 @@ pub async fn release_lease(
         }),
     )
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     match kea_lease_del_result(&resp) {
         LeaseDelOutcome::Released => {
@@ -2283,15 +2346,20 @@ pub async fn update_dhcp_ddns(
     headers: HeaderMap,
     Form(form): Form<DdnsToggleForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
     let enabled = parse_bool_flag(&form.enabled);
 
     kea_config_modify(&state, move |config| {
         set_config_ddns_enabled(config, enabled)
     })
     .await
-    .map_err(|e| DhcpError::config_error(e.to_string()))?;
+    .map_err(kea_config_modify_error)?;
 
     Ok(Redirect::to("/dhcp"))
 }
@@ -2499,8 +2567,13 @@ pub async fn rollback_kea_snapshot(
     headers: HeaderMap,
     Form(form): Form<RollbackKeaSnapshotForm>,
 ) -> Result<Redirect, DhcpError> {
-    require_kea_mode(&state)?;
+    // Request-integrity checks (CSRF) must run before any state-dependent
+    // business logic, including a state check that itself reveals whether
+    // Kea mode is currently active -- checking CSRF first is the more
+    // defensive ordering, since it means an invalid-CSRF request never
+    // learns anything about the server's current configuration state.
     crate::routes::verify_csrf_token(&headers, &form.csrf_token).map_err(DhcpError::from)?;
+    require_kea_mode(&state)?;
 
     let snapshot_root = PathBuf::from(&state.config.kea_config_snapshot_dir);
     let known_ids = kea_snapshots::list_snapshot_ids(&snapshot_root).map_err(|e| {
@@ -4429,6 +4502,48 @@ mod tests {
     use std::error::Error;
     use std::sync::Arc;
 
+    // Every Kea-mutation handler calling verify_csrf_token before
+    // require_kea_mode is a call-ORDER property with no shared wrapper
+    // function to unit-test directly -- exercising the real handlers
+    // end-to-end would need a full AppState (Docker client, NATS
+    // connection, SQLite handle), which this crate's existing tests
+    // deliberately avoid by extracting pure helper functions instead (see
+    // every other test in this module). Constructing that for 10 handlers
+    // just to prove a two-line ordering is disproportionate, so this scans
+    // this file's own real source for the property instead: any handler
+    // body that calls both must call verify_csrf_token first. A revert to
+    // the old require_kea_mode-first ordering in even one handler fails
+    // this test immediately.
+    #[test]
+    fn every_kea_mutation_handler_verifies_csrf_before_the_kea_mode_guard() {
+        let source = include_str!("dhcp.rs");
+        let mut checked = 0;
+        for chunk in source.split("\npub async fn ").skip(1) {
+            let body_end = chunk.find("\npub async fn ").unwrap_or(chunk.len());
+            let body = &chunk[..body_end];
+            let Some(kea_mode_pos) = body.find("require_kea_mode(&state)") else {
+                continue;
+            };
+            let csrf_pos = body
+                .find("verify_csrf_token(")
+                .expect("a handler calling require_kea_mode must also call verify_csrf_token");
+            assert!(
+                csrf_pos < kea_mode_pos,
+                "verify_csrf_token must be called before require_kea_mode in handler starting: {}",
+                &chunk[..chunk.find('\n').unwrap_or(chunk.len())]
+            );
+            checked += 1;
+        }
+        // Guards against this test silently checking zero handlers if the
+        // source-splitting heuristic above ever stops matching anything
+        // (e.g. a wholesale reformatting) -- ten handlers were confirmed by
+        // direct inspection when this ordering was fixed.
+        assert_eq!(
+            checked, 10,
+            "expected exactly 10 Kea-mutating handlers calling require_kea_mode"
+        );
+    }
+
     // Issue #1068 item 6: switching to a DHCP mode whose container was never
     // created (the docker-socket-proxy allowlist has no create capability --
     // see docker_client's own module comment) used to surface as a bare
@@ -4457,6 +4572,44 @@ mod tests {
             "expected the exact fix command, got: {}",
             dhcp_err.message
         );
+    }
+
+    // A caller-supplied subnet_id that doesn't exist must map to 404 Not
+    // Found, not the blanket 500 every other kea_config_modify closure
+    // failure correctly gets. Exercises kea_config_modify_error directly
+    // against the exact literal string find_subnet_mut produces
+    // (`.ok_or("subnet not found")`), since that string is the
+    // load-bearing contract between the two functions.
+    #[test]
+    fn kea_config_modify_error_maps_subnet_not_found_to_404() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "subnet not found".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(dhcp_err.message, "subnet not found");
+    }
+
+    // A double-submitted or stale-page option-removal form (both
+    // remove_custom_subnet_option and remove_pxe_subnet_field's
+    // `.ok_or("custom option not found")`) must map to 404 Not Found too,
+    // not the blanket 500 the missing-string case previously fell through
+    // to.
+    #[test]
+    fn kea_config_modify_error_maps_custom_option_not_found_to_404() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "custom option not found".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::NOT_FOUND);
+        assert_eq!(dhcp_err.message, "custom option not found");
+    }
+
+    // Every other kea_config_modify closure failure (a genuine
+    // config-mutation/backend problem, not a bad client-supplied id) must
+    // keep exactly its previous 500 behavior -- proving the added 404 case
+    // is additive, not a behavior change for every other failure shape.
+    #[test]
+    fn kea_config_modify_error_keeps_other_failures_as_500() {
+        let boxed: Box<dyn std::error::Error + Send + Sync> = "subnet4 not an array".into();
+        let dhcp_err = kea_config_modify_error(boxed);
+        assert_eq!(dhcp_err.status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
     // A real operational failure (not a missing container) must still
@@ -5034,7 +5187,8 @@ mod tests {
         }
     }
 
-    // Every DHCP-mutating route calls require_kea_mode() first; if this
+    // Every Kea-mutating route calls this guard right after CSRF
+    // verification, before any validation or backend access; if this
     // guard ever accepted DnsmasqProxy/Disabled mode or an empty API URL, a
     // mutation route would try to POST to Kea's control agent with no
     // reachable target instead of failing with a clear "wrong mode" error.

@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Cross-implementation parity coverage for secret/token placeholder detection
 # (issue #967). scripts/lib/shared-secret-bootstrap.sh's secret_is_placeholder

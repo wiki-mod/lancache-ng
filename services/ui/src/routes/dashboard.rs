@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //! Main dashboard route displaying cache statistics and connection metrics.
 
 use crate::{
@@ -41,6 +43,33 @@ fn watchdog_status_json(result: watchdog_status::WatchdogStatusReadResult) -> se
     }
 }
 
+// The decision logic behind the dashboard's recent-activity widget, pulled
+// out of the `tokio::task::spawn_blocking` closure below so it has a unit
+// test independent of real log files. When standard_log and ssl_log
+// differ (the normal case for a real dual-mode deployment, not an edge
+// case), both sources must be fetched and merged -- reading only one
+// source's tail would leave every entry from the other mode silently
+// absent from this widget, with no indication anything was being dropped.
+// Merges both sources chronologically
+// (nginx_client::merge_log_entries_chronologically, the same helper
+// routes/logs.rs's own log-source merge uses) and keeps only the most
+// recent `limit` entries overall, rather than one source's entire block
+// plus a truncated fragment of the other's.
+fn merge_recent_logs(
+    standard_entries: Vec<nginx_client::LogEntry>,
+    ssl_entries: Vec<nginx_client::LogEntry>,
+    limit: usize,
+) -> Vec<nginx_client::LogEntry> {
+    let mut merged = nginx_client::merge_log_entries_chronologically(standard_entries, ssl_entries);
+    // merge_log_entries_chronologically returns oldest-first; drop from the
+    // front (the oldest entries), not the back, to keep the most recent
+    // `limit` entries overall.
+    if merged.len() > limit {
+        merged.drain(0..merged.len() - limit);
+    }
+    merged
+}
+
 pub async fn dashboard(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -81,13 +110,20 @@ pub async fn dashboard(
         move || nginx_client::get_log_stats(&sl, &xl)
     });
 
+    const RECENT_LOGS_LIMIT: usize = 10;
     let recent_logs_task = tokio::task::spawn_blocking({
-        let path = if cfg.standard_log == cfg.ssl_log {
-            cfg.standard_log.clone()
-        } else {
-            cfg.ssl_log.clone()
-        };
-        move || nginx_client::parse_log_tail(&path, 10)
+        let standard_log = cfg.standard_log.clone();
+        let ssl_log = cfg.ssl_log.clone();
+        move || {
+            if standard_log == ssl_log {
+                nginx_client::parse_log_tail(&standard_log, RECENT_LOGS_LIMIT)
+            } else {
+                let standard_entries =
+                    nginx_client::parse_log_tail(&standard_log, RECENT_LOGS_LIMIT);
+                let ssl_entries = nginx_client::parse_log_tail(&ssl_log, RECENT_LOGS_LIMIT);
+                merge_recent_logs(standard_entries, ssl_entries, RECENT_LOGS_LIMIT)
+            }
+        }
     });
 
     // Syslog store size/stats (#633 PR4): same spawn_blocking-wrapped shape
@@ -295,6 +331,58 @@ mod tests {
     use super::*;
     use std::collections::HashMap;
     use std::time::Duration;
+
+    fn log_entry(time: &str, host: &str) -> nginx_client::LogEntry {
+        nginx_client::LogEntry {
+            ip: "192.0.2.1".to_string(),
+            time: time.to_string(),
+            method: "GET".to_string(),
+            path: "/".to_string(),
+            host: host.to_string(),
+            status: 200,
+            bytes_human: "1.0 KiB".to_string(),
+            cache_status: "HIT".to_string(),
+            source: String::new(),
+        }
+    }
+
+    // When Standard and SSL entries interleave by real timestamp, the
+    // merged, limit-truncated result must contain entries from BOTH
+    // sources, not just SSL's -- a widget that reads only one source's
+    // tail whenever standard_log != ssl_log (the normal case) would only
+    // ever return ssl-tagged hosts here.
+    #[test]
+    fn merge_recent_logs_includes_both_sources_when_they_interleave() {
+        let standard = vec![
+            log_entry("10/Aug/2026:12:00:00 +0000", "standard-a"),
+            log_entry("10/Aug/2026:12:02:00 +0000", "standard-b"),
+        ];
+        let ssl = vec![
+            log_entry("10/Aug/2026:12:01:00 +0000", "ssl-a"),
+            log_entry("10/Aug/2026:12:03:00 +0000", "ssl-b"),
+        ];
+
+        let merged = merge_recent_logs(standard, ssl, 10);
+        let hosts: Vec<&str> = merged.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, vec!["standard-a", "ssl-a", "standard-b", "ssl-b"]);
+    }
+
+    // When the combined entry count exceeds `limit`, the oldest entries
+    // must be dropped (from the front of the oldest-first merged list), not
+    // the newest -- a truncation bug here would silently show stale
+    // activity instead of the actual most-recent requests.
+    #[test]
+    fn merge_recent_logs_keeps_the_most_recent_entries_when_over_limit() {
+        let standard = vec![
+            log_entry("10/Aug/2026:12:00:00 +0000", "oldest"),
+            log_entry("10/Aug/2026:12:02:00 +0000", "middle"),
+        ];
+        let ssl = vec![log_entry("10/Aug/2026:12:04:00 +0000", "newest")];
+
+        let merged = merge_recent_logs(standard, ssl, 2);
+        let hosts: Vec<&str> = merged.iter().map(|e| e.host.as_str()).collect();
+        assert_eq!(hosts, vec!["middle", "newest"]);
+    }
 
     fn sample_status() -> watchdog_status::WatchdogStatus {
         let mut services = HashMap::new();

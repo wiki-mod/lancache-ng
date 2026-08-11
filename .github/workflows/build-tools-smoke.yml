@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
 # tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
 # image, pulled via scripts/select-build-tools-image.sh -- it never builds or
@@ -48,7 +50,12 @@ on:
       - "scripts/check-bats-path-filter-coverage.sh"
       - "scripts/check-build-tools-smoke-coverage.sh"
       - "scripts/check-pipefail-early-exit-grep.sh"
+      - "scripts/check-file-headers.sh"
+      - "scripts/check-pipefail-scope-coverage.sh"
+      - "scripts/check-pr-diff-file-headers.sh"
+      - "services/dhcp/**"
       - "scripts/select-build-tools-image.sh"
+      - "scripts/resolve-remote-ref-with-retry.sh"
       - "scripts/lib/**"
       - "scripts/classify-image-impact.sh"
       - "scripts/compute-next-release-tag.sh"
@@ -68,6 +75,7 @@ on:
       - "scripts/check-netdata-curl-pin.sh"
       - "scripts/check-workflow-line-limit.sh"
       - "scripts/check-review-chronology-comments.sh"
+      - "scripts/check-dependabot-docker-base-consistency.sh"
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
@@ -200,6 +208,16 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
+      # tests/bats/proxy_healthz_acl_and_hidden_headers.bats reads these
+      # three real config files directly via $repo_root (per
+      # scripts/check-bats-path-filter-coverage.sh's own extraction
+      # convention) -- without these entries, a PR touching only conf.d/
+      # http.conf, conf.d/https.conf, or proxy-params.conf (none of which
+      # entrypoint.sh's own path entry above covers) would never run that
+      # suite.
+      - "services/proxy/conf.d/http.conf"
+      - "services/proxy/conf.d/https.conf"
+      - "services/proxy/proxy-params.conf"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
       # services/watchdog/retention.sh (#842, 2026-08-01): the three
@@ -214,6 +232,14 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
+      # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
+      # points PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # _registrable_domain's PSL-driven derivation runs against the exact
+      # rule shapes upstream ships (compound-label suffixes like co.uk,
+      # exception rules like !city.kawasaki.jp), not a hand-written
+      # fixture. Without this entry, a vendored PSL update would not trigger
+      # the Bats suite that validates the dependent derivation behavior.
+      - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       # services/syslog/netdata-web_log.conf (#879 gap found by
@@ -243,7 +269,12 @@ on:
       - "scripts/check-bats-path-filter-coverage.sh"
       - "scripts/check-build-tools-smoke-coverage.sh"
       - "scripts/check-pipefail-early-exit-grep.sh"
+      - "scripts/check-file-headers.sh"
+      - "scripts/check-pipefail-scope-coverage.sh"
+      - "scripts/check-pr-diff-file-headers.sh"
+      - "services/dhcp/**"
       - "scripts/select-build-tools-image.sh"
+      - "scripts/resolve-remote-ref-with-retry.sh"
       - "scripts/lib/**"
       - "scripts/classify-image-impact.sh"
       - "scripts/compute-next-release-tag.sh"
@@ -263,6 +294,7 @@ on:
       - "scripts/check-netdata-curl-pin.sh"
       - "scripts/check-workflow-line-limit.sh"
       - "scripts/check-review-chronology-comments.sh"
+      - "scripts/check-dependabot-docker-base-consistency.sh"
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
@@ -304,6 +336,16 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
+      # tests/bats/proxy_healthz_acl_and_hidden_headers.bats reads these
+      # three real config files directly via $repo_root (per
+      # scripts/check-bats-path-filter-coverage.sh's own extraction
+      # convention) -- without these entries, a PR touching only conf.d/
+      # http.conf, conf.d/https.conf, or proxy-params.conf (none of which
+      # entrypoint.sh's own path entry above covers) would never run that
+      # suite.
+      - "services/proxy/conf.d/http.conf"
+      - "services/proxy/conf.d/https.conf"
+      - "services/proxy/proxy-params.conf"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
       # services/watchdog/retention.sh (#842, 2026-08-01): the three
@@ -318,6 +360,14 @@ on:
       # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
+      # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
+      # points PUBLIC_SUFFIX_LIST_FILE at this real vendored data file so
+      # _registrable_domain's PSL-driven derivation runs against the exact
+      # rule shapes upstream ships (compound-label suffixes like co.uk,
+      # exception rules like !city.kawasaki.jp), not a hand-written
+      # fixture. Without this entry, a vendored PSL update would not trigger
+      # the Bats suite that validates the dependent derivation behavior.
+      - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       # services/syslog/netdata-web_log.conf (#879 gap found by

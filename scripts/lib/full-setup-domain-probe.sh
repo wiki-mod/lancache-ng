@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Shared helper: turns a services/dns/cdn-domains.txt entry into a DNS-legal
 # probe name for scripts/full-setup-client-simulation.sh's live `dig` checks

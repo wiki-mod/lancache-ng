@@ -1,5 +1,6 @@
 #!/bin/bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Reserve a collision-free full-setup validation subnet, export its complete
 # VALIDATION_* environment, then run a single command (a *-simulation.sh

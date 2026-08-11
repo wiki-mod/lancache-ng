@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Regression coverage for verify_stack_functional_health()'s fail-closed
 # behavior: a functional probe whose required tool (curl, dig) is missing
@@ -13,6 +14,17 @@
 # (the mechanism that keeps curl/dig actually installed on a real run, so
 # the fail-closed branch above stays the rare exception) closes out the
 # same failure class.
+#
+# Also covers the healthz probe's own split into a TCP-reachability step, a
+# Docker-binding-identity step, and a container-loopback content step (see
+# _verify_healthz_endpoint, _tcp_port_reachable, and
+# _proxy_container_publishes_port in setup.sh): each must independently fail
+# closed (unreachable port; a container whose own Docker port binding does
+# not include the published address, e.g. a broken compose update remapping
+# port 80 elsewhere; a healthy port with no proxy container to exec into),
+# and the content probe never depends on the externally published address's
+# own source-IP ACL, since it only ever runs against the container's own
+# loopback.
 #
 # PATH is fully replaced per test with a minimal sandbox containing only the
 # one external command this function chain actually shells out to (awk, via
@@ -38,6 +50,40 @@ setup() {
     ln -s "$(command -v awk)" "$sandbox/awk"
 
     env_file="$BATS_TEST_TMPDIR/lancache.env"
+
+    # Default fakes for the split TCP-reachability / container-loopback
+    # probe _verify_healthz_endpoint now performs in addition to curl/dig:
+    # "port reachable, proxy container present, its loopback /healthz call
+    # succeeds" -- so every existing test that only cares about the curl/dig
+    # fail-closed behavior doesn't have to know these exist at all. Only the
+    # tests that specifically target the new split (TCP unreachable, no
+    # container running) override them.
+    #
+    # _tcp_port_reachable is a real function this project's setup.sh defines
+    # (see setup.sh); overriding it here instead of exercising a real network
+    # connection keeps this test hermetic against a made-up test IP like
+    # "10.0.0.10", the same reason dc_update/docker are overridden as fake
+    # functions rather than real binaries in
+    # tests/bats/setup_update_health_baseline.bats.
+    _tcp_port_reachable() { return 0; }
+    # Same reasoning as _tcp_port_reachable above: a real function this
+    # project's setup.sh defines (see _proxy_container_publishes_port),
+    # overridden here so every existing test that doesn't specifically
+    # target the Docker-binding-identity step doesn't have to know it exists.
+    _proxy_container_publishes_port() { return 0; }
+    service_container_id() { printf '%s' "fake-proxy-container-id"; }
+    # Delegates "docker exec <id> <cmd...>" to the real command on PATH
+    # (curl, in this file's case) so the existing curl-success/failure stubs
+    # below drive the container-loopback probe's outcome too, exactly like
+    # they drove the old single external curl call.
+    docker() {
+        if [[ "$1" = "exec" ]]; then
+            shift 2
+            "$@"
+            return $?
+        fi
+        return 0
+    }
 }
 
 # Tests below replace PATH with the sandbox for the `run` call and never
@@ -124,6 +170,79 @@ EOF
     hash -r
     run verify_stack_functional_health
     [ "$status" -eq 0 ]
+}
+
+@test "fails when the published port's TCP connect fails, independent of the container's own health" {
+    write_env "10.0.0.10" "" "0"
+    stub_tool dig 0 "1.2.3.4"
+    _tcp_port_reachable() { return 1; }
+    PATH="$sandbox"
+    hash -r
+    run verify_stack_functional_health
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"TCP connect"* ]]
+}
+
+@test "fails when the proxy container's own Docker port binding does not include the published address" {
+    write_env "10.0.0.10" "" "0"
+    stub_tool curl 0 ""
+    stub_tool dig 0 "1.2.3.4"
+    _proxy_container_publishes_port() { return 1; }
+    PATH="$sandbox"
+    hash -r
+    run verify_stack_functional_health
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"does not include"* ]]
+}
+
+# The four cases below call _proxy_container_publishes_port directly rather
+# than through verify_stack_functional_health, so they need the REAL
+# function, not setup()'s own blanket `_proxy_container_publishes_port() {
+# return 0; }` fake (installed so every OTHER test doesn't have to know this
+# function exists) that shadows it in this same shell. Re-sourcing the whole
+# helper file would fail on its `readonly` globals the second time; redefine
+# just this one function by re-extracting it from the real setup.sh instead.
+# `docker` is overridden as a bash function directly (bash resolves a
+# function before ever searching PATH), so these need no PATH sandbox.
+
+@test "_proxy_container_publishes_port accepts a binding to the exact published host IP" {
+    docker() { [ "$1" = "port" ] && printf '%s\n' "10.0.0.10:80"; }
+    eval "$(awk '/^_proxy_container_publishes_port\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _proxy_container_publishes_port "fake-proxy-container-id" "10.0.0.10" 80
+    [ "$status" -eq 0 ]
+}
+
+@test "_proxy_container_publishes_port accepts a 0.0.0.0 bind-all binding" {
+    docker() { [ "$1" = "port" ] && printf '%s\n' "0.0.0.0:80"; }
+    eval "$(awk '/^_proxy_container_publishes_port\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _proxy_container_publishes_port "fake-proxy-container-id" "10.0.0.10" 80
+    [ "$status" -eq 0 ]
+}
+
+@test "_proxy_container_publishes_port rejects a binding to a different host IP" {
+    docker() { [ "$1" = "port" ] && printf '%s\n' "10.0.0.99:80"; }
+    eval "$(awk '/^_proxy_container_publishes_port\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _proxy_container_publishes_port "fake-proxy-container-id" "10.0.0.10" 80
+    [ "$status" -eq 1 ]
+}
+
+@test "_proxy_container_publishes_port fails when docker port reports no binding at all" {
+    docker() { [ "$1" = "port" ] && return 1; }
+    eval "$(awk '/^_proxy_container_publishes_port\(\) \{/{p=1} p{print} p&&/^\}$/{exit}' "$repo_root/setup.sh")"
+    run _proxy_container_publishes_port "fake-proxy-container-id" "10.0.0.10" 80
+    [ "$status" -eq 1 ]
+}
+
+@test "fails when no proxy container is running to probe healthz through" {
+    write_env "10.0.0.10" "" "0"
+    stub_tool curl 0 ""
+    stub_tool dig 0 "1.2.3.4"
+    service_container_id() { printf ''; }
+    PATH="$sandbox"
+    hash -r
+    run verify_stack_functional_health
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"no running 'proxy' container"* ]]
 }
 
 @test "does not require curl or dig when no IP is configured" {

@@ -1,4 +1,6 @@
-//! lancache-ng (https://github.com/wiki-mod/lancache-ng)
+//!
+//! LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+//! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! `POST /api/netdata-alarms`: ingest endpoint for the `netdata` container's
 //! `custom_sender()` alarm-notify integration (bug hunt #849,

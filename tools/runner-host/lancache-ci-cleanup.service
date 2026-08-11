@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 # systemd oneshot service that runs the versioned runner-host docker cleanup
 # script (lancache-ci-cleanup.sh); see README.md in this directory.
 [Unit]

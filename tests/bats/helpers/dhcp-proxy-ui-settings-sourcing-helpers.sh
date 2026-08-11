@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Bats helper that loads the dhcp-proxy entrypoint's Admin-UI-settings
 # sourcing function (`_dhcp_proxy_source_ui_settings`) directly from

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Bats helper that loads the real setup.sh post-update functional health
-# gate -- require_functional_check_tool, verify_stack_functional_health,
+# gate -- require_functional_check_tool, _tcp_port_reachable,
+# _verify_healthz_endpoint, verify_stack_functional_health,
 # service_container_is_healthy, wait_for_stack_health, rollback_stack_update,
 # install_missing_tools, and package_name_for_tool -- without executing
 # setup.sh's interactive install/update entrypoint or its top-level CLI
@@ -49,4 +51,23 @@ load_setup_functional_health_helpers() {
 
     # shellcheck source=/dev/null
     source "$helper_file"
+
+    # The captured range's own `declare -A _REGRESSED_SERVICE_SYSLOG_HOST=(...)`
+    # (setup.sh's dhcp-proxy/nats/syslog -> syslog-ng-host mapping) just ran
+    # as part of the `source` above -- but that happens inside THIS function,
+    # so a plain `declare` without `-g` scopes it local to
+    # load_setup_functional_health_helpers, and it evaporates the instant
+    # this function returns, before any caller (e.g. a bats setup()) even
+    # gets a chance to see it -- a caller-side `declare -p`/promote trick
+    # would be too late by then; it has to happen here, one level in, while
+    # the local value is still alive. Unlike _UPDATE_HEALTH_BASELINE (which
+    # callers re-declare fresh+empty themselves, since tests populate it
+    # per-test), this array must keep setup.sh's own real content, so it is
+    # promoted via `declare -p` + re-eval with `-gA` substituted in, not
+    # re-declared empty. Guarded on the array actually existing, since not
+    # every captured range this helper might load in the future necessarily
+    # defines it.
+    if declare -p _REGRESSED_SERVICE_SYSLOG_HOST &>/dev/null; then
+        eval "$(declare -p _REGRESSED_SERVICE_SYSLOG_HOST | sed 's/^declare -A/declare -gA/')"
+    fi
 }

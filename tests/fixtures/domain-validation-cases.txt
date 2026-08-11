@@ -1,4 +1,6 @@
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Shared parity fixture for domain-entry validation (issue #822 pattern
 # audit). Read by BOTH the bash validator (_is_valid_domain in

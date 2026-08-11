@@ -1,5 +1,6 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Regression tests for lancache_auto_update_should_proceed() (#819) -- the
 # pure decision that gates cmd_auto_update's scheduled systemd-timer entry

@@ -1,6 +1,6 @@
 #!/bin/bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Shared classification/lookup functions for scripts/gc-pr-staging-images.sh
 # (the standalone reaper .github/workflows/gc-pr-staging-images.yml now
