@@ -18,129 +18,34 @@ on:
         options: [none, nightly]
         default: none
   schedule:
-    # Daily stable-channel refresh (issues #1035, #1056; #825/#1141 branch model: master
-    # = `latest`, archived vY.X.Z branches publish no live channel). `promote` only moves
-    # `latest` on a push to master, so between master pushes the channel can silently go
-    # stale (#1035's failure mode). A `schedule` event always runs from the default branch
-    # (currently master) and rebuilds/re-promotes the full stack, so `latest` never drifts
-    # more than ~24h behind master even with no push.
-    #
-    # `nightly` (current_dev's channel) is DELIBERATELY NOT covered by this cron since
-    # #1254/#1255 (2026-07-25): current_dev no longer auto-publishes nightly on every push,
-    # so it has its OWN schedule instead -- see nightly-refresh.yml, which dispatches this
-    # workflow against current_dev's tip once a day (same UTC time, same DST reasoning)
-    # plus on-demand. That file's cron is itself inert until merged to master (GitHub
-    # `schedule:` only ever fires from the workflow file on the default branch).
-    #
-    # 01:00 UTC == 02:00 CET; during CEST (UTC+2) this lands at 03:00 local instead. That
-    # one-hour seasonal drift is accepted deliberately -- no correctness impact.
+    # Daily default-branch refresh keeps the stable `latest` channel from going stale.
+    # `nightly` is refreshed separately by nightly-refresh.yml; 01:00 UTC is intentional across DST.
     - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
-    # Issue #1095 Part 1: mirrors the pull_request trigger's own paths-ignore below
-    # (added for #1203) onto push, so a doc-only merge commit landing via `push` (the only
-    # way it can land -- AG-WF-004 forbids direct pushes) no longer unconditionally re-runs
-    # the full 8-service build/scan/build-arm64/merge-manifests/promote pipeline on the
-    # scarce self-hosted lancache-heavy pool. Confirmed live (2026-07-24, run 30084334029):
-    # before this, a push touching only two unrelated shell scripts still ran all 18
-    # self-hosted-heavy jobs end to end.
-    #
-    # Same semantics as the pull_request block: GitHub only skips a push run when EVERY
-    # changed file matches an ignore pattern, so a mixed docs+code push still runs the full
-    # pipeline. Force-push/no-common-ancestor pushes fail open (GitHub can't compute a
-    # definitive diff, so it runs the workflow), and tags never hit paths-ignore at all
-    # (GitHub does not evaluate path filters for `tags:`), so a release tag always runs.
-    #
-    # `!CHANGELOG.md` stays un-ignored, same reason as the pull_request block:
-    # check-changelog-direct-edit.sh (`shellcheck` job) still needs to see and warn on a
-    # CHANGELOG-only push that bypassed the automated release flow.
+    # Skip a push only when every changed path is documentation-only; mixed changes still run.
+    # Release tags are unaffected, and CHANGELOG.md remains included for the direct-edit guard.
     paths-ignore:
       - "**/*.md"
       - "docs/**"
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # Issue #1203 added a trigger-level `paths-ignore` (docs-only) here to spare light
-    # jobs from queuing behind heavy work. Issue #1245's audit (2026-07-30) found its
-    # safety claim false: current_dev DOES enforce required status checks by job name, and
-    # a `paths-ignore` match means the whole run never exists -- not even a synthetic
-    # `skipped` -- so every required check shows "Expected -- Waiting" forever and the PR
-    # can never merge (confirmed live: PR #1242 sat permanently BLOCKED this way). It also
-    # cannot scope per target branch, so this was broken for every branch in the list above.
-    #
-    # Fix (#1245): removed `paths-ignore` entirely; runner conservation moved to the job
-    # level, where a job with nothing to do posts a real `skipped` conclusion instead of
-    # never existing. `shellcheck` matters most: `build`/`build-arm64` hard-require
-    # `needs.shellcheck.result == 'success'` with no path tolerance of their own, so its
-    # clean skip is what stops the whole heavy pipeline from scheduling for a docs-only PR
-    # (see that job's `if:`). `validate-compose` deliberately did NOT get the same
-    # treatment -- see `container-scan`'s comment for the invariant that it stays root.
-    #
-    # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
-    # pr-tracking-metadata-check reads labels/milestone/draft state from the webhook
-    # snapshot, so with only the defaults a label/milestone change or ready-for-review
-    # would never re-trigger this workflow. Added labeled/unlabeled/milestoned/
-    # demilestoned/ready_for_review to fix that; `edited` stays excluded (unrelated to
-    # metadata, would add high-frequency reruns for no benefit).
-    #
-    # `labeled`/`unlabeled`/`milestoned`/`demilestoned` carry no new commit -- the
-    # content under test is byte-identical to whatever the PR's last `synchronize`
-    # (or `opened`/`reopened`) already validated, so re-running the Rust
-    # build/test/lint/audit jobs and the multi-arch image builds for them buys
-    # nothing: a prior run already produced the authoritative result for this exact
-    # commit. Each of build/build-arm64/dns_rust_quality/ui_rust_quality/
-    # watchdog_rust_quality/dns_test/ui_test/watchdog_test/dns_cargo_audit/
-    # ui_cargo_audit/watchdog_cargo_audit/rust_coverage's own `if:` therefore
-    # additionally requires the pull_request event's `action` to be one of
-    # opened/synchronize/reopened/ready_for_review before it will run at all (see
-    # each job's own comment) -- this list and that inline per-job condition must be
-    # kept in sync if either ever changes. AG-GH-008's metadata check itself
-    # (pr-tracking-metadata-check/-hosted) is deliberately NOT scoped this way: it
-    # only reads the webhook snapshot and depends solely on validate-compose (which
-    # has no such gate), so it still re-evaluates on every type below, keeping its
-    # own freshness guarantee intact. ci_scope_policy's per-path required-success
-    # logic is taught the same event-action distinction so a metadata-only event
-    # skipping these jobs is never mistaken for a real, unexplained failure.
+    # Do not use PR-level paths-ignore: required checks must exist even for docs-only PRs.
+    # Job-level gates post real skipped conclusions; metadata events rerun metadata policy without rebuilding unchanged content.
+    # Keep this event set aligned with the content-event gates below.
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
-  # Workflow-level floor for pull-requests: a job's own `permissions:` block
-  # can only NARROW this, never widen it (#903 follow-up -- pr-template-check
-  # and pr-template-check-hosted added `pull-requests: read` at the job level
-  # to fetch the PR body live via `gh pr view`, but without it granted here
-  # too, that job-level grant was silently capped back down to nothing,
-  # exactly the same class of permissions-widening mistake already documented
-  # for id-token/attestations/artifact-metadata in build-tools.yml).
+  # Job-level permissions can only narrow this workflow-level grant; PR-reading jobs need this floor.
   pull-requests: read
 
 concurrency:
-  # Push/tag events use a run_id-suffixed key instead of the old `{workflow}-publish` one
-  # (which never included the ref, so master and v0.2.0 pushes contended for the same
-  # pending slot): this never collides with itself, so it no longer serializes whole runs
-  # one at a time. That whole-run serialization used to be the only thing stopping a rapid
-  # burst of pushes from tearing `promote` down mid-write; #897 replaced the mechanism that
-  # protected it with scripts/lib/promote-lock.sh's git-ref lock instead (see the `promote`
-  # job's own comments) -- independent of this group, which still matters because
-  # workflow-level `cancel-in-progress: true` cancels the entire previous run including
-  # every in-progress job, not just queued ones (confirmed against GitHub's own docs).
-  # Per-job cancellation for the real runner-hogging jobs (`build`, `container-scan`) is
-  # scoped directly on those jobs below instead, keyed by service+ref, so a superseded
-  # commit's heavy work gets reclaimed promptly while merge-manifests/promote/release
-  # simply never start for it via their existing `needs.<job>.result == 'success'` gates.
-  #
-  # `cancel-in-progress` stays false for BOTH branches of the group key: for push/tag it no
-  # longer matters (run-id-scoped, never collides); for pull_request it matters a lot.
-  # Live-tested flipping it to true (#888) and it backfired immediately: opening a PR with
-  # labels/milestone already set (AG-GH-008) fires `opened` plus a `labeled`/`milestoned`
-  # event within the same second, each spawning a competing run for the same per-PR-ref
-  # group -- with cancel-in-progress:true, the first run's `detect-changes` job was killed
-  # mid-execution by the very next event, producing a spurious "got 'cancelled'" failure on
-  # a healthy PR. `promote`/`release` never run on `pull_request` at all, so there was never
-  # a registry-correctness reason to flip this branch, only a scheduling one not worth the
-  # reintroduced noise. `build`/`container-scan` still get real per-commit cancellation on
-  # PR branches via their own job-level groups below, independent of this setting.
+  # Push/tag runs use unique groups so publication runs cannot cancel each other mid-promotion.
+  # PR runs share a ref group but do not cancel: metadata events may race for the same commit.
+  # Heavy per-job groups below reclaim superseded PR work without cancelling the whole run.
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
@@ -158,35 +63,9 @@ defaults:
     shell: bash
 
 jobs:
-  # Change classification for PR path-scoping and (as of #1095, extended to
-  # watchdog's own Rust crate by the 2026-08 watchdog Rust CI wiring update)
-  # push-event scoping of the six redundant Rust jobs. On a pull_request it diffs the PR's
-  # merge-base..head; on a push it diffs github.event.before..github.sha (the
-  # commits that push actually introduced), degrading to --all-changed when that
-  # base is absent/unreachable (all-zeros first push, force-push, GC'd base) so
-  # an undeterminable diff fails safe to the full pipeline. Service-image
-  # decisions are based on each Dockerfile's COPY graph, while docs/governance/
-  # setup/deploy/release classes stay visible for policy checks. Build-affecting
-  # workflow or composite-action changes are treated as touching runtime
-  # services, since the CI logic itself changed. Dedicated release helper
-  # workflows remain release contract changes, and build-tools rebuilds stay
-  # tied to build-tools inputs.
-  #
-  # SCOPE (#1095, extended 2026-08 to watchdog): the push-event outputs
-  # currently gate dns_test/ui_test/watchdog_test/dns_cargo_audit/
-  # ui_cargo_audit/watchdog_cargo_audit -- work that already ran and passed on
-  # the PR that produced the push (Rule-Ref: AG-WF-004 forbids direct master pushes), so
-  # skipping it on a push that did not touch the relevant crate reuses that
-  # known-good result. build/build-arm64/container-scan do NOT get their
-  # should-build/should-scan gates from this job's own before..sha diff --
-  # the determine-push-reuse-scope job provides the cross-run-ordering-safe
-  # per-service reuse decision those three jobs actually key off (channel
-  # image revision label + real git ancestry + a real content diff via
-  # scripts/classify-image-impact.sh, see scripts/lib/push-reuse.sh), for
-  # all 8 first-party product/tooling services. workflow_dispatch is left
-  # unscoped (detect-changes does not run for it); the six jobs' own if: fail
-  # safe to running whenever this job did not produce a successful
-  # classification.
+  # Classify PR and push diffs once; uncertain push ancestry fails safe to all-changed.
+  # Build-affecting workflow/action changes count as runtime changes; build-tools stays tied to its own inputs.
+  # Per-service push reuse is decided separately by determine-push-reuse-scope using image revision, ancestry, and content diff.
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -354,20 +233,8 @@ jobs:
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # Diff-scoped, not repo-wide: the whole-repo call above stays soft on
-        # AG-HDR-008 (the backfill isn't complete), but a file this PR is
-        # actively touching has no such exception -- see
-        # scripts/check-file-headers.sh's own header for why explicit file
-        # arguments hard-fail. Runs inside the pinned build-tools image
-        # (scripts/check-pr-diff-file-headers.sh, which does the same
-        # shallow-safe fetch-by-exact-SHA idiom the line-endings job's "Run
-        # governance guardrails" step already uses: base.sha is a
-        # webhook-payload snapshot that can be behind the base branch's
-        # current tip on a long-lived PR, so the base commit is fetched
-        # directly by SHA rather than relying on the branch-tip fetch alone)
-        # rather than runner-local git/Bash/head/grep, so a self-hosted
-        # runner with missing or stale host tooling cannot fail this check
-        # or produce a result diverging from the project's own toolchain.
+        # AG-HDR-008 is hard-failed only for files changed by this PR; the repository-wide backfill remains soft.
+        # Run inside the pinned build-tools image and fetch the exact base SHA so long-lived PRs remain deterministic.
         if: github.event_name == 'pull_request'
         env:
           SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -517,35 +384,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
-        # AG-GH-008 requires every PR to carry a milestone. Dependabot cannot set its own
-        # milestone or add itself to a project board -- this used to be handled by exempting
-        # dependabot[bot] from this whole check (#1061-#1064), but the maintainer decided
-        # (#1278) that auto-tagging real metadata is the right fix instead of skipping the
-        # requirement. Labels and project-board placement are already handled for Dependabot
-        # PRs without this step (GitHub's own dependency labels, labeler.yml,
-        # add-to-project.yml's unconditional trigger) -- milestone was the one real gap,
-        # confirmed via the GitHub API (#1270, #1163: labeled and on the board, milestone
-        # null).
-        #
-        # Runs before "Fetch current labels/milestone live" below so that step's re-fetch
-        # already sees the milestone this step just set, in the same job run.
-        #
-        # Uses PROJECT_AUTOMATION_PAT, not the default GITHUB_TOKEN: this project already
-        # standardized on that PAT for every other Dependabot-adjacent write since GITHUB_TOKEN
-        # cannot write Projects v2 data. Confirmed live (PR #1270, 2026-07-29) that this PAT
-        # does reach build-push.yml on a Dependabot-authored run -- Dependabot PRs are
-        # same-repo branches, not forks, so the fork-secret-withholding restriction documented
-        # below does not apply here.
-        #
-        # Idempotent per AG-OP-006/AG-OP-009: only PATCHes when the PR's live milestone is
-        # genuinely empty, so a re-run (e.g. a synchronize retrigger) never overwrites a
-        # milestone a maintainer set by hand in between.
-        #
-        # Known, accepted cost: successfully setting a milestone fires a real `milestoned`
-        # event, re-triggering this entire workflow once more (already accepted as a bounded,
-        # infrequent cost -- see the trigger's own `types:` comment). This is a ONE-TIME cost
-        # per newly-opened Dependabot PR: the idempotence check means later runs never PATCH
-        # again.
+        # Dependabot cannot set its own milestone, so assign the catch-all milestone before the authoritative metadata check.
+        # The write is idempotent and uses PROJECT_AUTOMATION_PAT; missing credentials leave the later gate to fail clearly.
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
@@ -793,32 +633,9 @@ jobs:
       - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
-    # Cheap repository hygiene gate (issue #601). .gitattributes already normalizes line
-    # endings for files git touches going forward, but does not catch files where that
-    # normalization was bypassed.
-    #
-    # Runs inside the same build-tools image selected by validate-compose, same as
-    # shellcheck -- per AGENTS.md's Build-tools Verification Contract, verification must
-    # run in that container, not against whatever bash/grep happen to be on the host.
-    #
-    # Issue #1245: this job also now carries the "Run governance guardrails" (stale
-    # TODO/FIXME scan, malformed PR-body-upload/Fixes-Closes check) and "Warn on direct
-    # CHANGELOG.md edits" steps, relocated here from `shellcheck`. Those two checks must
-    # run on every pull_request event regardless of whether the diff is docs-only -- a
-    # stale TODO or malformed `Fixes #N` claim can appear in a plain docs-only PR just as
-    # easily as in a code PR, and the CHANGELOG.md warn exists specifically for a
-    # CHANGELOG-only diff. `shellcheck` gained a docs-only self-skip (its own `if:`) that
-    # deliberately does NOT apply here, since `line-endings` has no skip condition of its
-    # own and only depends on `validate-compose` (a root job), so it is a stable place for
-    # content-agnostic per-PR checks that must never be silently skipped.
-    #
-    # DO NOT RENAME `name: line endings` below -- it IS the required-status-check context
-    # string in current_dev's classic branch protection (confirmed via the GitHub API).
-    # Renaming it to reflect this job's broader scope would silently create a new,
-    # never-satisfied required check while the old name stays expected forever --
-    # issue #1245's exact bug class from a different cause. Same caution applies if issue
-    # #1014 Step 4 ever decomposes `full-setup-validate`: preserve its existing `if:` and
-    # exact required-check name.
+    # Required `line endings` check also hosts content-agnostic governance and CHANGELOG guards.
+    # Do not rename this required-check context; docs-only PRs must still execute these guards.
+    # Verification runs in the selected build-tools image rather than host-local tooling.
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -1032,28 +849,8 @@ jobs:
       - name: Check for banned-language source files (AG-REL-001)
         run: bash scripts/check-language-policy.sh
 
-  # GitHub-hosted fallback is deliberately limited to cheap lint/policy jobs with no LAN
-  # dependency of their own: file-headers-hosted, compose-healthchecks-hosted (#1169),
-  # line-endings-hosted, shellcheck-hosted, pr-template-check-hosted, language-policy-
-  # hosted, and watchdog_test-hosted. Rust builds, image scans, and publish paths stay on
-  # self-hosted runners because they still depend on the shared build-tools image,
-  # sccache/distcc acceleration, or registry credentials with no safe hosted equivalent
-  # yet -- see docs/ci-github-hosted-fallback-decision.md for the full reasoning per job
-  # class.
-  #
-  # Explicit decision on ci_scope_policy's own hosted fallback (issue #509's
-  # second acceptance criterion): NOT feasible as a real fallback today, and
-  # deliberately not attempted here. ci_scope_policy's whole job is to check
-  # the *results* of dns_rust_quality/ui_rust_quality/watchdog_rust_quality/
-  # dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/
-  # watchdog_cargo_audit -- all self-hosted-only Rust jobs with no hosted
-  # equivalent of their own yet. A "ci_scope_policy-hosted"
-  # job would have to depend on those same self-hosted jobs, so if self-hosted
-  # runners are genuinely unavailable (the scenario this fallback exists for),
-  # it would sit queued waiting on its own needs: forever, same as the jobs
-  # it's meant to be a fallback for. There is no real fallback for this check
-  # until the Rust build/test jobs themselves get a hosted path -- tracked
-  # separately, not solved by this workflow file alone.
+  # Hosted fallback covers only checks that do not depend on LAN/self-hosted build infrastructure.
+  # ci_scope_policy cannot have a meaningful hosted fallback until its Rust dependencies do.
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected by
     # validate-compose, keeping linting independent from whatever happens to be installed
@@ -1065,20 +862,8 @@ jobs:
     # a brand-new, never-satisfied required check with the old name still expected,
     # reproducing issue #1245's exact bug class.
     needs: [validate-compose, detect-changes]
-    # Issue #1245: this is the load-bearing self-skip in this workflow. On a pull_request
-    # event whose ENTIRE diff is docs-only (detect-changes' `docs_only` output), none of
-    # this job's remaining steps (ShellCheck/ActionLint plus setup-migration-semantics/
-    # action-node-version/validation-subnet-wrapper/executable-bits/
-    # build-tools-smoke-coverage) have anything new to check. Skipping cleanly is what
-    # matters: build/build-arm64 hard-require `needs.shellcheck.result == 'success'` with
-    # no path tolerance of their own, so this is the ONE place that stops the entire heavy
-    # pipeline from scheduling for a trivial doc-only PR. Two steps that DO need to run
-    # regardless of docs-only-ness (governance guardrails, the CHANGELOG direct-edit warn)
-    # were moved out into `line-endings` specifically so this skip does not drop them.
-    # `validate-compose` deliberately does NOT get the same self-skip -- see
-    # `container-scan`'s comment for why it must stay a root job. `github.event_name !=
-    # 'pull_request' ||` keeps this unconditional on push, so a docs-only merge commit
-    # still publishes its sha-<commit> images instead of starving the channel.
+    # Docs-only PRs skip this heavy lint bundle at job level so required checks still exist.
+    # Governance and CHANGELOG checks live in line-endings because they must run for every PR.
     if: >-
       ${{
         always() &&
@@ -1190,26 +975,8 @@ jobs:
     # real work this job's own comment below explicitly calls out -- and
     # that fallback build is not represented in the fast-path samples above.
     timeout-minutes: 30
-    # Job-level concurrency (#891 follow-up): cancel-in-progress is pull_request-only --
-    # see `build`'s group comment for the full #979 rationale. validate-compose is the
-    # shared `needs:` root that exports the smoke-tested build-tools image for the whole
-    # workflow, and it is an unconditional success gate for build/build-arm64. So on push
-    # it is the sharpest gate on the channel publish path: cancelling it in a merge cascade
-    # makes the entire build path skip and starves the channel -- it must survive to
-    # completion there. On a PR every consumer cleanly skips a cancelled result, so
-    # reclaiming a superseded run is pure benefit.
-    #
-    # NOTE: because validate-compose no longer cancels on push, its downstream
-    # `skipped` cascade onto dns_test/ui_test/watchdog_test/dns_cargo_audit/
-    # ui_cargo_audit/watchdog_cargo_audit can no longer fire on push. dns_test/
-    # ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/watchdog_cargo_audit
-    # (watchdog_test/watchdog_cargo_audit added by the 2026-08 watchdog Rust CI
-    # wiring update, now that they compile the watchdog crate the same way
-    # dns/ui already did) still keep their own cancel-on-push groups
-    # (deliberately unchanged -- they are NOT on the publish path, so
-    # cancelling a superseded push's copy saves scarce runners at no
-    # freshness cost), so ci_scope_policy still needs its direct-cancellation
-    # tolerance for them; see ci_scope_policy's comment.
+    # validate-compose is a hard publish-path gate, so only superseded PR copies may be cancelled.
+    # Push copies must finish because downstream publication requires its successful build-tools output.
     concurrency:
       group: >-
         ${{
@@ -2768,19 +2535,8 @@ jobs:
               ;;
           esac
 
-  # A fixed validation subnet collided repeatedly across different, concurrent workflow
-  # runs sharing one of the 3 physical self-hosted runner hosts (#623) -- `needs:` only
-  # serializes jobs within one run. Deriving the subnet from this run's own id/attempt
-  # gives every run its own subnet, so two runs on the same host (almost) never collide.
-  #
-  # Deliberately unconditional (no `needs`/`if` gating on detect-changes): detect-changes
-  # itself only runs on pull_request, so on push it is skipped -- and a job that `needs`
-  # a skipped job is itself skipped by default. full-setup-validate below uses
-  # `always()` to tolerate its own skipped/failed `needs`, so gating this job the same
-  # way would make it skip on every push while full-setup-validate still ran, silently
-  # falling back to the old fixed subnet on every master merge -- exactly the bug this
-  # fixes. Running unconditionally costs a few seconds on the rare PR that doesn't touch
-  # deploy/ or the CI contract, far cheaper than that.
+  # Derive a per-run validation subnet candidate; actual collision-safe reservation still happens in the stack-start helper.
+  # This job stays unconditional because full-setup validation also runs on push.
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -2807,18 +2563,8 @@ jobs:
 
   full-setup-validate:
     name: validate full-setup image
-    # On a pull_request event, `promote` never runs at all -- there is no channel image
-    # for THIS PR to wait for. Instead this job waits directly for `merge-manifests`,
-    # because (see #626) that job is where a same-repo PR's per-arch staging legs get
-    # combined into the real pr-<N>-sha-<short> multi-platform tag this job actually
-    # pulls. This job MUST NOT start before merge-manifests finishes: build/build-arm64
-    # wait on several lighter jobs and then compile Rust, so they (and merge-manifests
-    # after them) are much slower than the lightweight `detect-changes` job this used to
-    # depend on alone -- depending on only detect-changes let this job race ahead, find no
-    # staging tags yet, and silently fall back to stale base-channel content, reproducing
-    # #626's exact bug. On push events, this job still waits for `promote` so it validates
-    # the freshly-promoted channel state instead of racing ahead of it or checking a stale
-    # channel tag.
+    # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
+    # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
     needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose]
     if: >-
       ${{
@@ -2851,26 +2597,8 @@ jobs:
       # `GH_TOKEN`, never the `gh` CLI (AG-CI-001: `gh` must not be assumed present on a
       # bare `lancache-light` runner), but the REST endpoint requires this scope either way.
       actions: read
-    # None of VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, or VALIDATION_UI_PORT
-    # are set here from compute-validation-network's outputs (unlike
-    # LANCACHE_IMAGE_REGISTRY/PREFIX/TAG below, which stay per-step since they don't
-    # participate in this at all). This job used to set all of them as fixed job-level
-    # env, then run the same check-then-create pattern
-    # full-setup-validate.yml itself had before issue #703's linked run confirmed for real:
-    # two genuinely concurrent runs on the same self-hosted host can derive the identical
-    # slot from compute-validation-network's hash-only derivation, both pass the old
-    # `docker network ls`-based pre-flight check (which only catches a leftover network
-    # from a PREVIOUS run, not another run mid-check), and then race the kernel to create
-    # the bridge, with only one winning. This job hits this race under real concurrency
-    # more often than full-setup-validate.yml (workflow_dispatch-only) does.
-    #
-    # This job now uses the exact same host-local flock reservation
-    # (scripts/lib/reserve-validation-subnet.sh) and retry-on-collision loop
-    # full-setup-validate.yml's own step uses -- see that step's comment for the full
-    # mechanism. A job-level `env:` entry is re-applied on top of every step's
-    # accumulated $GITHUB_ENV state, so a fixed entry here would always win in every later
-    # step, silently overriding whatever a retry inside that step writes -- exactly why
-    # none of these are set here.
+    # Do not set validation network/project values at job scope: reservation retries must be able to overwrite them via GITHUB_ENV.
+    # The locked reservation helper owns the collision-safe values used by later steps.
     steps:
       # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so the
       # "Ensure PR staging tags exist for full-setup services" step below can
@@ -2882,22 +2610,8 @@ jobs:
         with:
           fetch-depth: 0
 
-      # `latest` is contractually a stable-release-only channel (see
-      # docs/release-versioning.md) -- it is never moved by a v0.2.0 (or any other
-      # pre-release integration branch) push, so it always reflects the last real release,
-      # not this branch's current code. Validating a pre-release branch against `latest`
-      # therefore checks the wrong image for the wrong reason. Mirror the same ref-to-channel
-      # mapping the `promote` job uses so this job validates the channel this branch
-      # actually publishes to.
-      #
-      # On a pull_request event this now resolves to the PR's OWN staging tag (see #626)
-      # instead of the base-ref channel, so this job actually tests the PR's own commits --
-      # UNLESS this is a Dependabot PR or a fork PR: those get a read-only GITHUB_TOKEN, so
-      # build/build-arm64 never push anything for them and there is no PR staging tag to
-      # validate against. pr-staging-available captures that so every later step can gate
-      # off one flag instead of re-deriving it. base_channel_tag is always computed: it is
-      # the resolved tag itself when staging isn't available, and the fallback source for any
-      # full-setup service an eligible PR did not touch either way.
+      # Resolve validation tags using the same branch/channel contract as promotion.
+      # Same-repo PRs use their own staging tag; fork/Dependabot PRs fall back to a readable base channel.
       - name: Determine validation image channel
         id: channel
         env:
@@ -2964,21 +2678,8 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      # deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for every service,
-      # and the "Run client simulation" step below pulls build-tools at that same tag --
-      # but build/build-arm64 only push the PR staging tag for services detect-changes says
-      # this PR actually touched (deliberate additional push cost -- see #626 -- not
-      # "rebuild everything per PR for free"). Any untouched service has no image at the
-      # staging tag yet, so back-fill it with a cheap registry-side copy from the base-ref
-      # channel image (the correct thing to validate for an untouched service anyway). This
-      # mirrors the `promote`/`merge-manifests` jobs' own `docker buildx imagetools create`
-      # pattern for moving/combining tags without re-pulling image layers.
-      #
-      # Gated on pr-staging-available, not a bare `github.event_name == 'pull_request'`: a
-      # Dependabot/fork PR has no PR staging tag for ANY service, so
-      # steps.channel.outputs.tag already equals base_channel_tag above -- there is nothing
-      # to back-fill, and attempting to log in/push here with that PR's read-only
-      # GITHUB_TOKEN would just fail instead of skipping cleanly.
+      # Full-Setup uses one tag for the suite; untouched PR services are registry-side backfilled from a verified base commit image.
+      # Touched services must already have their PR staging image and fail closed if it is missing.
 
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
@@ -2993,17 +2694,8 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # A service detect-changes says THIS PR touched (or any service other than
-      # build-tools, if the PR changed a workflow/CI-contract file -- mirrors build/
-      # build-arm64's own should-build override) must already have a staging image by the
-      # time this runs: full-setup-validate now waits for merge-manifests specifically so
-      # that's true. If it's missing anyway -- build/build-arm64 actually failed to push it,
-      # or imagetools inspect hit a transient registry error -- silently copying the PR base
-      # commit's own per-commit image into that service's PR tag would make this job green
-      # while testing exactly the stale image #626 exists to stop testing, just now hidden
-      # behind a tag name that LOOKS PR-specific. Fail loudly instead; only a genuinely
-      # untouched service gets the base-commit back-fill (#1254/#1255: sourced from the PR
-      # base commit's own durable sha-<short> tag, not a mutable channel).
+      # Touched services must have a PR staging image after merge-manifests; never hide a missing candidate with base-content fallback.
+      # Only genuinely untouched services may use the verified base-commit backfill path.
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
@@ -4369,131 +4061,10 @@ jobs:
               fi'
 
   ci_scope_policy:
-    # Central policy reconciliation for PR path filtering. Individual jobs may skip for
-    # speed, but this job verifies that every required check really ran for the files
-    # touched by the PR. It has its own job-level cancel-in-progress group (below), same as
-    # build/container-scan/build-arm64 (#891) -- nothing else hard-asserts its result via
-    # `needs:`, only build/build-arm64's soft `if:` gate, which cleanly skips on cancelled.
-    #
-    # The hazard the push-event tolerance below addresses is PUSH-event parallelism, not
-    # the PR-metadata storm: the top-level group fully serializes pull_request runs for the
-    # same ref (cancel-in-progress: false, confirmed live on #915), so the PR-event branch
-    # of the script stays strict and untouched. push/tag events use a run_id-suffixed
-    # top-level key that never collides, so rapid pushes run fully in parallel with no
-    # top-level throttle -- THAT is where #915/#891 gave rust_coverage/shellcheck/
-    # file-headers/line-endings/ci_scope_policy/validate-compose/dns_test/ui_test/
-    # dns_cargo_audit/ui_cargo_audit their own per-job cancel-in-progress groups, letting a
-    # newer push cancel an older one's copy mid-flight. Those jobs are deliberately NOT on
-    # the channel publish path, so #979 left their cancel-on-push groups in place
-    # (reclaiming runners at no freshness cost) and this job tolerates the resulting
-    # `cancelled`/`skipped` outcomes on push instead of hard-failing on them -- see the
-    # per-job comments on each of those jobs for the concurrency-group side of this.
-    #
-    # (#979) validate-compose is now pull_request-only for cancellation (a hard
-    # publish-path gate), so its old `skipped`-cascade onto dns_test/ui_test/
-    # watchdog_test/dns_cargo_audit/ui_cargo_audit can no longer fire on push.
-    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit still use
-    # require_success_or_intentional_cancellation() (a direct `cancelled` from their own
-    # groups is still possible); watchdog_test has no group of its own, so on push it now
-    # only shows `success` -- its require_success_or_intentional_skip() helper stays as
-    # pull_request-path tolerance only.
-    #
-    # The hazard this addresses is PUSH-event parallelism, not the PR-metadata
-    # storm. This workflow's top-level concurrency group (top of file)
-    # already fully serializes pull_request-triggered runs for the same ref
-    # (`{workflow}-{ref}`, cancel-in-progress: false): a burst of opened +
-    # labeled + milestoned events for one PR queues each run behind the
-    # previous one rather than running them concurrently, so two PR runs for
-    # the same ref can never have an in-progress job for the same job-level
-    # group at the same time -- confirmed live on #915, and re-confirmed live
-    # for this revision's five newly-scoped jobs the same way. That
-    # serialization is why the PR-event branch of the script below is left
-    # untouched and stays strict (see below).
-    #
-    # push/tag events are different: the top-level group's key for those is
-    # `{workflow}-publish-{run_id}` (unique per run, deliberately never
-    # collides -- see that group's own comment), so rapid pushes to
-    # master/v0.2.0 genuinely run fully in parallel with no top-level
-    # throttle at all. THAT is where a job-level cancel-in-progress group on
-    # dns_test/ui_test/dns_cargo_audit/ui_cargo_audit lets a newer push cancel
-    # an older, still in-progress push's copy of that job mid-flight. Those
-    # four jobs are deliberately NOT on the channel publish path (nothing
-    # in `build`'s `if:` needs them), so #979 left their cancel-on-push groups
-    # in place: reclaiming a superseded push's copy saves scarce runners at no
-    # freshness cost, and this job just has to tolerate the resulting
-    # `cancelled` result.
-    #
-    # (#979 update) validate-compose used to be the sharpest case here --
-    # cancelling IT forced dns_test/ui_test/watchdog_test/dns_cargo_audit/
-    # ui_cargo_audit to `skipped` via their `needs['validate-compose'].result
-    # == 'success'` guard. It is now pull_request-only for cancellation (it is
-    # a hard publish-path gate; see its own comment), so on push it always
-    # completes and that `skipped` cascade can no longer fire on push.
-    #
-    # Fix: on the push-event branch below, dns_test/ui_test/dns_cargo_audit/
-    # ui_cargo_audit still use require_success_or_intentional_cancellation()
-    # (success|skipped|cancelled) because they can still show a direct
-    # `cancelled` from their own cancel-on-push groups. watchdog_test used to
-    # not get its own group, tolerating only `success`/`skipped` on push via
-    # require_success_or_intentional_skip() -- see the 2026-08 watchdog Rust
-    # CI wiring update below for why that changed.
-    #
-    # (#1095 update) dns_test/ui_test/dns_cargo_audit/ui_cargo_audit now have a
-    # SECOND legitimate `skipped` source on push, independent of the
-    # concurrency-cancellation one above: detect-changes runs on push events too
-    # (not just pull_request), and these four jobs' own `if:` gates skip on a
-    # push that did not touch the relevant crate (nor the workflow) -- the PR
-    # that produced that push already ran and passed them (AG-WF-004), so the
-    # skip reuses that known-good result. require_success_or_intentional_cancellation()
-    # already tolerates `skipped`, so it covers this new source with no change;
-    # this note just records that on push a `skipped` here can now mean
-    # "path-scoped out by detect-changes" as well as "superseded mid-flight".
-    # rust_coverage stays unconditional for the badge (still runs the crates'
-    # tests under tarpaulin regardless), so this change does not touch its
-    # tolerance. watchdog_test WAS also NOT path-scoped on push at this point
-    # in the file's history -- see the 2026-08 watchdog Rust CI wiring update
-    # below for why that is no longer true.
-    #
-    # dns_rust_quality/ui_rust_quality were, at this point in the file's
-    # history, deliberately left on strict require_success(): they were not in
-    # #891's enumerated candidate list (PR #915 explicitly flagged them, and
-    # watchdog_test, as out of scope so they would not be silently mistaken
-    # for "already considered and rejected"), and neither depends on
-    # validate-compose -- only on detect-changes, which never runs on push --
-    # so nothing at that point gave them a legitimate way to show anything but
-    # `success` on a push event. That reasoning about dns_rust_quality/
-    # ui_rust_quality themselves is still accurate today; only the "clean,
-    # separate, mechanically identical follow-up if ever wanted" framing is
-    # superseded, since watchdog_rust_quality (added below) IS now exactly
-    # that follow-up, applied to the new watchdog crate rather than to dns/ui.
-    #
-    # (2026-08 watchdog Rust CI wiring update) services/watchdog/Cargo.toml
-    # was added (#1355), so watchdog gained the same three-job Rust shape
-    # dns/ui already had: watchdog_rust_quality (fmt/check/clippy, strict
-    # require_success() on push, exactly like dns_rust_quality/ui_rust_quality
-    # above -- no group, does not depend on validate-compose), watchdog_test
-    # (now ALSO compiles and runs `cargo test`, so it gained its own
-    # cancel-on-push concurrency group and moved to
-    # require_success_or_intentional_cancellation() on push, matching dns_test/
-    # ui_test exactly instead of the require_success_or_intentional_skip()
-    # tolerance described above, which was correct only for its old
-    # shell-check-only shape), and watchdog_cargo_audit (prebuilt cargo-audit
-    # binary, no compilation, same cancel-on-push group shape and
-    # require_success_or_intentional_cancellation() tolerance as
-    # dns_cargo_audit/ui_cargo_audit). watchdog_test is also now path-scoped on
-    # push the same way dns_test/ui_test are (detect-changes' `watchdog`/
-    # `workflow` outputs), which it was NOT before this update -- a plain push
-    # that does not touch services/watchdog/ or the workflow contract now
-    # reuses the PR's already-passing result instead of recompiling.
-    #
-    # detect-changes stays excluded from concurrency scoping for the same
-    # reason #915 already found: it only runs
-    # `if: github.event_name == 'pull_request'` (never on push, so the push
-    # hazard above does not apply to it), and on pull_request it is already
-    # serialization-protected by the top-level group. A group would be a
-    # pure no-op there, so it is left out because it gains nothing, not
-    # because it is unsafe. Its own require_success() check below (PR-branch
-    # only) is therefore also left strict, unchanged.
+    # Reconcile path-scoped Rust job results so PR-required work stays strict while intentional skips remain valid.
+    # Push runs may also see skipped/cancelled results from path reuse or per-job supersession cancellation.
+    # Rust quality jobs remain strict on push because they have no legitimate cancellation path.
+    # build/build-arm64 require this policy job to succeed; this job itself is never cancelled on push.
     name: CI scope policy
     needs:
       - detect-changes
@@ -4768,42 +4339,9 @@ jobs:
           fi
 
   container-scan:
-    # Never runs on `pull_request` (see `if:` below) -- PRs exercise Dockerfiles via
-    # `build` below with no vulnerability scan; that gap is separate and untouched here.
-    #
-    # UPDATED (issue #1095, closes finding G8 / originally #1348): used to unconditionally
-    # `docker buildx build --load` its own throwaway, never-pushed image per changed
-    # service, then scan THAT -- a second, independent build of the same commit that
-    # `build`/`build-arm64` also build and push moments later. A fresh `docker buildx
-    # build` stamps a new `created` timestamp every time, so the two never share a digest
-    # even for byte-identical inputs: "kit 678/345/675 goes in, kit 654 comes out" --
-    # this job's scan verdict was never about the artifact actually shipped. `build`/
-    # `build-arm64`'s own "Scan pushed service digest with Trivy" step (Step 3, all 8
-    # services) already scans the EXACT pushed digest, so the throwaway rebuild bought no
-    # provenance, only redundant compute. That branch ("should-scan == true" below) is
-    # removed: a changed service now only pays for the cheap reuse-eligibility check
-    # above, and the pushed-digest scan in build/build-arm64 is the sole real gate.
-    #
-    # The OTHER branch ("should-scan == false", Step 4 / #1331 / #1339, G11 via #1467)
-    # is untouched: when a service is proven unchanged there is no new build to scan, so
-    # this job Trivy-scans the already-published channel image by digest instead.
-    #
-    # UPDATED (issue #1290): this used to be a bare `if:` relying on GitHub's implicit
-    # `&& success()`, which was safe only while `validate-compose` and (since #1095 Part
-    # 1) `push-supersession-check` stayed root jobs with no `if:`/`needs:` of their own.
-    # Adding `determine-push-reuse-scope` to `needs:` below breaks that invariant: its own
-    # `if:` only fires on `push` to a branch ref, so it legitimately shows `skipped` on
-    # pull_request/schedule/workflow_dispatch/tag-push -- and implicit success() treats a
-    # skipped need exactly like a failed one, which would have silently skipped
-    # container-scan (and weakened the build gate) on every one of those events. Hardened
-    # below to explicitly tolerate `determine-push-reuse-scope` showing either `success`
-    # or `skipped`, matching the same fail-safe idiom used for the four Rust jobs'
-    # detect-changes dependency elsewhere. `validate-compose` and
-    # `push-supersession-check` both remain plain root jobs with no `if:`/`needs:`, so
-    # neither can ever legitimately show `skipped` -- checked for plain `success` below,
-    # not the success-or-skipped tolerance `determine-push-reuse-scope` needs. INVARIANT:
-    # the plain `== 'success'` checks hold ONLY while both stay root jobs. If either ever
-    # gains an `if:`/`needs:` that can skip, widen its own check here to match.
+    # Changed candidates are scanned by build/build-arm64 using their exact pushed digests; this job must not rebuild them.
+    # For a proven-unchanged push, scan the immutable reused channel digest instead.
+    # determine-push-reuse-scope may legitimately skip outside branch pushes; validate-compose and push-supersession-check remain hard root gates.
     if: >-
       ${{
         always() &&
@@ -4813,17 +4351,8 @@ jobs:
         (needs['determine-push-reuse-scope'].result == 'success' || needs['determine-push-reuse-scope'].result == 'skipped')
       }}
     needs: [validate-compose, push-supersession-check, determine-push-reuse-scope]
-    # Job-level concurrency (#888): keyed per matrix row (service + platform) and per
-    # ref. cancel-in-progress is pull_request-only -- see `build`'s group comment for the
-    # full #979 rationale. On push, `build`'s `if:` requires
-    # `needs['container-scan'].result == 'success'`, so this scan is a hard gate on the
-    # channel publish path: cancelling it in a merge cascade starves the channel. On a PR
-    # it is safe to cancel a superseded scan -- it never builds locally (G8 fix) and at
-    # most reads a remote image (never pushes), so `build` cleanly skips it via `needs`.
-    #
-    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) keep their own
-    # run_id-suffixed key so a manual retrigger or rerun cannot be confused with a
-    # genuinely superseded push; on push/tag the flag is false anyway.
+    # Cancel superseded PR scan rows only; push scans are publication gates and must survive.
+    # Dispatch/rerun keys include run_id so manual attempts cannot cancel each other.
     concurrency:
       group: >-
         ${{
@@ -4832,18 +4361,10 @@ jobs:
           format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # Runner selector kept aligned with build/build-arm64's own per-arch split even
-    # though this job no longer builds anything (G8 fix): the surviving "should-scan ==
-    # false" branch's registry pull + Trivy scan still benefits from the same split, and
-    # one shared convention beats a second, independently-tuned selector.
+    # Keep scan runner tiers aligned with the corresponding real build architecture.
     runs-on: ${{ fromJSON(matrix.runner) }}
-    # Post-G8-fix timing: a changed service ("should-scan == true") only runs the cheap
-    # reuse-eligibility check and finishes in seconds; an unchanged service ("should-scan
-    # == false") pulls the channel image and Trivy-scans it, same cost as always. 60
-    # minutes gives headroom for a cold layer cache or vuln-DB refresh on that branch,
-    # neither of which
-    # shows up in the warm-cache samples above; still far under build's own
-    # 150-minute bound for the same class of work at full multi-arch scale.
+    # Changed rows only decide reuse here; unchanged rows may pull and Trivy-scan a channel digest.
+    # The 60-minute bound covers cold image/DB fetches without inheriting full build time.
     timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -4851,15 +4372,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # G8 fix (issue #1095): this job no longer builds anything, so `context`,
-          # `build_contexts`, `description`, and `platform` (only ever consumed by the
-          # now-removed throwaway-build step) are dropped from this matrix entirely --
-          # only `service`/`platform_tag`/`runner` are still read below. Runner tiers are
-          # kept in sync manually with `build`'s own matrix (see that job's comment for
-          # the full light/heavy measured-cost rationale, AG-CI-002): the surviving
-          # "should-scan == false" branch's registry pull + Trivy scan still benefits
-          # from the same split as the real build, even though this job itself no longer
-          # builds anything to measure a compile cost for.
+          # This matrix carries only scan-time service/platform/runner data; build metadata belongs to the canonical build matrix.
           - service: proxy
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -4918,25 +4431,8 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
-        # Step 3 (issue #1095): generalizes what used to be build-tools-only
-        # ("Enable build-tools publish scan", issue #1290) to every matrix.service. No
-        # service unconditionally builds a local throwaway image just to scan it on every
-        # trusted-ref push when determine-push-reuse-scope has already proven it is safe to
-        # reuse the published channel image instead. This reads determine-push-reuse-scope's
-        # `reuse_<service>` output -- the SAME already-verified three-part decision (channel
-        # image revision label + real git ancestry + a real content diff via
-        # scripts/classify-image-impact.sh) that build/build-arm64's own retag-vs-rebuild
-        # decision trusts -- rather than a second, weaker, independently-computed check.
-        # Consuming the SAME decision matters concretely: a narrower check could say
-        # "unchanged" while the wider one correctly falls back to a real rebuild (channel
-        # image stale/unverifiable, the #808 failure shape), and if that happened with two
-        # independently-computed checks, a freshly rebuilt-and-published image could go
-        # completely unscanned this run. Sharing one decision makes that disagreement
-        # structurally impossible -- this is what closes the scan-coverage hole named in
-        # issue #1095's own "Correction 1": since should-scan and should-build are both
-        # derived from the identical output per service, neither can go to false while the
-        # other stays true. Fails safe to a full scan whenever determine-push-reuse-scope did
-        # not run or did not succeed, matching this job's own hardened `if:`.
+        # Use the same determine-push-reuse-scope decision as build/build-arm64 so scan and build cannot disagree.
+        # A failed/unavailable reuse decision fails safe to the real candidate scan path.
         id: push-scan-changes
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
@@ -5087,24 +4583,9 @@ jobs:
           # ownership" above already keeps writable.
 
   determine-push-reuse-scope:
-    # Step 4 (issue #1095): decides, once per push (not once per build/build-arm64/
-    # per-arch matrix row), whether each allowlisted product service can safely retag its
-    # already-published channel image instead of paying for a real rebuild+rescan this
-    # run. This job exists as a SEPARATE job -- not inline in build/build-arm64's own
-    # "Determine whether this service needs building" step -- for one load-bearing
-    # reason: the verification this decision requires (sif_is_ancestor_or_equal, and a
-    # real content diff via scripts/classify-image-impact.sh from the channel image's own
-    # build commit) needs full git history, and build/build-arm64's own checkouts use the
-    # default shallow clone. Running the decision here once, with the one job in this
-    # push path that already has full history, means build and build-arm64 both just read
-    # a plain true/false output -- provably agreeing with each other without either
-    # needing its own deep checkout or duplicating the verification logic per arch.
-    #
-    # See scripts/lib/push-reuse.sh's own header comment for the full rationale of WHY a
-    # channel image (not the immediately-preceding push's own predecessor commit) is the
-    # reuse source, and why ancestry alone (without the content diff) is not sufficient
-    # evidence of "safe to reuse" -- issue #1095's own "C-7" finding and issue #1290's
-    # corrected implementation converge on this same three-part verification.
+    # Decide push reuse once with full git history, then share the result with both architecture builds and container-scan.
+    # Reuse requires a pinned channel digest plus matching image revision, real git ancestry, and a clean service-content diff.
+    # Release tags never reuse branch-channel artifacts.
     name: determine push reuse scope (Step 4)
     needs: detect-changes
     # Branches only -- a release tag push has no meaningful "channel" to
@@ -5139,20 +4620,7 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # #1095 F-21: the exact immutable manifest-list digest this job pinned
-      # AND verified reuse safety against, for every service that came back
-      # reuse=true -- empty for a service that stayed reuse=false. Every
-      # downstream consumer (container-scan, build, build-arm64) reads this
-      # instead of independently re-resolving the mutable channel tag a
-      # second (or third, fourth) time, which is the digest TOCTOU race two
-      # Codex review threads on PR #1378 found: a channel refresh between
-      # this job's own verification and a much-later downstream job's
-      # independent re-resolution could scan/retag a different image than
-      # the one just proven safe. Because the verification (sif_image_revision
-      # + ancestry + content diff, all in scripts/lib/push-reuse.sh) now runs
-      # against this exact pinned digest reference rather than the mutable
-      # tag, the verified bytes and the exported bytes are provably
-      # identical -- there is no gap for the channel to move in between.
+      # Export the exact digest verified for every reuse=true service so downstream jobs never re-resolve a mutable channel tag.
       digest_proxy: ${{ steps.decide.outputs.digest_proxy }}
       digest_dns: ${{ steps.decide.outputs.digest_dns }}
       digest_ui: ${{ steps.decide.outputs.digest_ui }}
@@ -5592,37 +5060,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 4 (issue #1095): generalized to whichever service this matrix row is
-      # currently building, including build-tools (issue #1290) -- determine-push-
-      # reuse-scope already did the real verification, so this step only needs to resolve
-      # the pinned digest's own linux/amd64 child digest and retag it. No rebuild, no
-      # recompilation needed here. No separate Trivy scan needed here either: container-
-      # scan's "Determine per-service publish scan reuse" step reads this exact same
-      # determine-push-reuse-scope decision for every service, so whenever this step's own
-      # should-build is false for a service, container-scan's "Scan channel image with
-      # Trivy (no rebuild)" step already scanned that exact digest directly this run.
-      # Because both steps read the identical output, the two decisions cannot disagree,
-      # so no service is ever left without a real scan on this path.
-      #
-      # #1095 F-21: resolves the linux/amd64 child digest from determine-push-reuse-scope's
-      # own already-pinned, already-verified manifest-list digest (DIGEST_*) instead of
-      # independently re-resolving the mutable channel tag here -- the digest TOCTOU race
-      # two Codex review threads on PR #1378 found. This registry read is now against an
-      # IMMUTABLE digest reference, so no matter when it runs, it cannot observe different
-      # content than what was verified -- unlike the old mutable-tag read, this closes the
-      # race rather than merely shrinking its window.
-      #
-      # push-supersession-check gate (issue #1095 Part 1, added here by #1095 F-21):
-      # "Determine whether this service needs building" above forces should-build to
-      # 'false' for EVERY service on a superseded push, regardless of whether
-      # determine-push-reuse-scope ever verified (and pinned a digest for) this specific
-      # service -- unlike a genuine reuse=true case, a superseded push's DIGEST_* output
-      # for this service can legitimately be empty. Without this guard, this step would
-      # still run, find no pinned digest, and hard-fail via the empty-digest check below,
-      # where the pre-#1095-F-21 code merely (silently, and separately not-quite-safely)
-      # retagged from the mutable tag directly. Matches container-scan's own "Resolve
-      # channel image for unchanged-scan retag" step, which already carries this same
-      # condition for the identical reason.
+      # For reuse=true, retag this architecture from determine-push-reuse-scope's already-verified immutable digest.
+      # container-scan consumes the same decision/digest, so the retag-only path cannot bypass scanning.
+      # Superseded pushes skip this step because they may intentionally have no pinned reuse digest.
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
@@ -5696,20 +5136,8 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-amd64
 
-      # Uses github.sha (the actual checked-out/built commit), NOT docker/metadata-action's
-      # `type=sha` output above and NOT the PR branch's own head commit. For a
-      # pull_request event, github.sha is the synthetic merge commit -- head merged into
-      # the base branch's tip AT THE TIME OF THIS EVENT -- and that is exactly the property
-      # needed here: it changes whenever the actual built content changes, even if the PR's
-      # own head commit doesn't, and it stays the same across a re-run of the identical
-      # event. Tagging by the PR head SHA alone let two different events for the same head,
-      # merged against two different base states, collide on one tag -- and since this
-      # workflow's concurrency group does not cancel in-progress PR runs, a slower/older run
-      # could overwrite a newer run's tag with different image content after the fact. The
-      # `pr-<N>-` prefix lets the GC workflow (gc-pr-staging-images.yml) find and reap this
-      # once the PR closes. The `-amd64` suffix matches this job's own per-arch tag
-      # convention; merge-manifests combines it with build-arm64's `-arm64` PR staging tag
-      # into the real pr-<N>-sha-<short> multi-platform tag full-setup-validate consumes.
+      # Key PR staging tags by github.sha, the actual synthetic merge commit that was built.
+      # This prevents two events for the same PR head but different base states from overwriting one staging tag.
       - name: Compute PR staging tag
         id: pr-tag
         if: >-
@@ -7039,22 +6467,8 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      # actions/attest is a standalone action step, so it cannot run inside the bash loops
-      # above -- one explicit step per service is required, same as promote's single
-      # "Attest stack pointer provenance" step just repeated for each merged multi-platform
-      # manifest. Each step is gated only on its own digest output being non-empty: the
-      # "Create ..." step above already skips (via `continue`, not a step failure) any
-      # service with no per-arch inputs for this event, which leaves that service's
-      # *_digest output unset here -- nothing else needs checking.
-      #
-      # Routed through ghcr-attest-with-cache (issue #1095, attestation-caching finding),
-      # not ghcr-attest-retry directly: "Create multi-platform manifests" above runs
-      # unconditionally every push for every service with valid per-arch inputs, and
-      # `docker buildx imagetools create` is deterministic for identical inputs, so an
-      # unchanged service gets the exact same merged digest recreated and re-attested on
-      # every single push -- the same waste shape as G11, but for provenance attestations,
-      # firing far more often. Also fixes a real, separate gap found in the same pass:
-      # `syslog` (wired in by issue #1428/#1433) had no attest step here at all until now.
+      # Attestation actions cannot run inside the manifest loop, so each emitted merged digest has an explicit gated step.
+      # Digest-bound attestation caching avoids re-attesting unchanged merged identities.
       - name: Attest proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.proxy_digest != ''
         uses: ./.github/actions/ghcr-attest-with-cache
@@ -7223,87 +6637,20 @@ jobs:
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.syslog_digest }}
 
   promote:
-    # Promotion is intentionally separate from image build. It moves coherent channel
-    # tags only after all sha-* source images for the same commit exist.
-    #
-    # The `if:` below must stay in an explicit `<status-fn>() && needs.X.result ==
-    # 'success'` form, not a bare `github.event_name != 'pull_request'`. A bare condition
-    # gets an implicit `&& success()` appended by GitHub Actions, and `success()` walks
-    # the WHOLE transitive needs graph (promote -> merge-manifests -> build, build-arm64
-    # -> detect-changes, file-headers, pr-template-check, ...), not just this job's own
-    # direct `needs: merge-manifests`. detect-changes/file-headers/pr-template-check are
-    # intentionally `if: github.event_name == 'pull_request'` (they skip on every push),
-    # but `success()` treats a skipped job the same as a failed one -- so on every real
-    # push to master or a vX.Y.Z branch, the implicit success() check silently evaluated
-    # false and this job never ran, even though `build` itself completed successfully
-    # (confirmed directly: run 28958519247 on v0.2.0, all 7 build matrix legs succeeded,
-    # promote still skipped). This is why dev/nightly were never actually promoted
-    # despite the channel-resolution logic in this job being correct (see issue #532).
-    #
-    # Use `!cancelled()`, not `always()`, as the status function: `always()` would also
-    # make this job proceed to move public tags even if a maintainer cancels the run
-    # after build succeeds -- `!cancelled()` suppresses the same implicit-success()-
-    # over-skipped-deps problem while still correctly stopping the job on a real
-    # cancellation.
+    # Promote only after merged candidates and pre-promotion Full-Setup validation succeed.
+    # Use an explicit status function because GitHub implicit success() also considers transitively skipped dependencies.
+    # `!cancelled()` additionally prevents publication after an operator cancels the run.
     name: promote stack image channels
     needs: [merge-manifests, full-setup-validate]
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && needs['full-setup-validate'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Real runs: 17s-3.6min for this job's own promotion work, but
-    # scripts/lib/promote-lock.sh's promote_lock_acquire_with_retry is called with
-    # (max_attempts=40, backoff_seconds=15), a legitimate non-hang wait of up to ~10
-    # minutes for the shared cross-run lock under real contention (concurrent promotions
-    # from a merge cascade), before this job's own work even starts. 45 minutes covers
-    # that real lock-wait ceiling plus this job's own work with headroom, so normal lock
-    # contention can never be mistaken for a hang.
+    # 45 minutes covers the cross-workflow promote-lock retry budget plus normal registry work.
     timeout-minutes: 45
-    # Promote only repoints already-built, already-pushed sha-* images at mutable
-    # channel tags -- it is idempotent and fast, unlike the rest of this workflow, where
-    # cancelling stale in-flight work for a superseded commit is desirable. Originally
-    # added (#793) because promote used to share the top-level publish concurrency group
-    # with the slow build/test/scan pipeline: a rapid burst of pushes could drop
-    # promote's entire run while it was still queued, before it ever started (#777).
-    # Giving promote its own group here stopped it from competing for that same single
-    # pending slot.
-    #
-    # CORRECTION (#888): this job-level group does NOT, by itself, protect promote from
-    # being killed mid-execution if the top-level group's own cancel-in-progress were
-    # ever true and cancelled the whole run out from under it -- a job-level group only
-    # serializes THIS job against OTHER users of this exact same group name (currently
-    # just backfill-stack-latest.yml); it is not a shield against the enclosing run's own
-    # cancellation. Confirmed against GitHub's docs: workflow-level
-    # cancel-in-progress:true tears down the entire previous run, including jobs already
-    # in progress, regardless of any job-level group they belong to. This is why the
-    # top-level group (see top of file) uses a run_id-suffixed key for push/tag events
-    # instead of being flipped to cancel-in-progress:true -- that keeps promote safe by
-    # construction, not by this group's own cancel-in-progress setting (which stays false
-    # here purely for the backfill-serialization reason above).
-    #
-    # REMOVED (#897): this job-level `concurrency:` group is exactly what let a newer
-    # pending `promote` run silently CANCEL an older one that was still queued, before
-    # the older run's very first step had executed -- GitHub's concurrency-group
-    # primitive holds at most one PENDING request per group, and a merely-queued job is
-    # not protected by anything its own steps could do. #892 (narrowing cancellation to
-    # build/container-scan instead of the whole run) made this practically reachable:
-    # multiple tag pushes/dispatches can now build in parallel and reach this point at
-    # nearly the same time. Real mutual exclusion (still GLOBAL, not per-ref --
-    # re-scoping per-ref would reintroduce #777, a promotion racing
-    # backfill-stack-latest.yml's own tag move for a different ref) now comes from
-    # scripts/lib/promote-lock.sh's "Acquire the cross-workflow promote lock" step
-    # below instead: every promote/backfill-latest run is now admitted immediately and
-    # self-serializes via a git-ref-backed lock that is atomic on GitHub's remote
-    # regardless of which self-hosted host picks up the job (checked for real: lancache-
-    # heavy spans several distinct physical hosts, so a host-local flock would not have
-    # provided real exclusion here). backfill-stack-latest.yml was updated to use the
-    # exact same lock so the #777 property still holds.
+    # Do not use GitHub concurrency as the promotion mutex: it can discard queued jobs.
+    # scripts/lib/promote-lock.sh provides the cross-host, cross-workflow git-ref lock shared with latest backfill.
+    # Top-level push groups remain unique so an in-progress promotion is never cancelled by a newer run.
     permissions:
-      # Widened from `contents: read` (#897): the promote-lock mechanism
-      # above needs to push/delete a dedicated, non-branch/non-tag ref
-      # (refs/promote-lock/global) on this repo to implement its
-      # compare-and-swap acquire/release. This does not grant any ability to
-      # write to master/v0.2.0/tags -- branch protection rulesets only match
-      # refs/heads/* ref-name conditions, and this lock ref lives outside
-      # both refs/heads/* and refs/tags/* entirely.
+      # contents:write is required only for the dedicated refs/promote-lock/global compare-and-swap lock.
       contents: write
       packages: write
       id-token: write
@@ -7319,12 +6666,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # Real, cross-host mutual exclusion for the tag-moving work below (issue #897 -- see
-      # this job's own `permissions:`/removed `concurrency:` comments for the full
-      # reasoning). Runs immediately after checkout, before any image work starts, so a run
-      # that cannot get the lock never touches GHCR at all. Fails closed: if every attempt
-      # is exhausted, promote_lock_acquire_with_retry prints ::error:: and returns 1, which
-      # -- under `set -euo pipefail` -- stops this step (and the job) before any tag moves.
+      # Acquire the shared remote promote lock before any GHCR tag move; exhaustion fails closed.
       - name: Acquire the cross-workflow promote lock
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
