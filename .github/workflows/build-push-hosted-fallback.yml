@@ -163,7 +163,7 @@ jobs:
   build-hosted-fallback:
     needs: preflight
     runs-on: ubuntu-latest
-    timeout-minutes: 120
+    timeout-minutes: 150
     permissions:
       contents: read
       packages: write
@@ -175,14 +175,8 @@ jobs:
       matrix: ${{ fromJSON(needs.preflight.outputs.matrix) }}
     env:
       BUILD_TOOLS_IMAGE: ${{ needs.preflight.outputs.build_tools_image }}
-    outputs:
-      short_sha: ${{ steps.short-sha.outputs.value }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Resolve short commit SHA
-        id: short-sha
-        run: printf 'value=%s\n' "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         id: buildx
@@ -267,6 +261,14 @@ jobs:
           cache-from: type=gha,scope=${{ matrix.service }}-amd64-hosted-fallback
           cache-to: type=gha,scope=${{ matrix.service }}-amd64-hosted-fallback,mode=max
 
+      - name: Smoke-test exact build-tools candidate digest
+        if: matrix.service == 'build-tools'
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
+          platform: linux/amd64
+          run-fixtures: "true"
+
       - name: Scan the exact pushed candidate digest
         timeout-minutes: 20
         uses: ./.github/actions/trivy-scan-exact-digest
@@ -283,69 +285,86 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
-      - name: Remove buildx builder
-        if: always()
-        run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
-
-  merge-manifest-hosted-fallback:
-    needs: [preflight, build-hosted-fallback]
-    if: ${{ inputs.merge_manifest }}
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    permissions:
-      contents: read
-      packages: write
-      id-token: write
-      attestations: write
-      artifact-metadata: write
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up Docker Buildx
-        id: buildx
-        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
-
-      - name: Log in to GHCR
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Create multi-platform manifests from the already-built legs
+      - name: Merge exact candidate with existing arm64 leg
+        id: merge
+        if: ${{ inputs.merge_manifest }}
         env:
           REPOSITORY: ${{ github.repository }}
-          SHORT_SHA: ${{ needs['build-hosted-fallback'].outputs.short_sha }}
-          MATRIX_JSON: ${{ needs.preflight.outputs.matrix }}
+          SERVICE: ${{ matrix.service }}
+          DESCRIPTION: ${{ matrix.description }}
+          AMD64_DIGEST: ${{ steps.build.outputs.digest }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          source_tag="sha-${SHORT_SHA}"
-          mapfile -t services < <(printf '%s' "$MATRIX_JSON" | jq -r '.include[].service')
 
-          for service in "${services[@]}"; do
-            amd64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-amd64"
-            arm64_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}-arm64"
-            target_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+          [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
+            echo "::error::Build step did not export a valid amd64 digest for $SERVICE: '$AMD64_DIGEST'."
+            exit 1
+          }
 
-            if ! docker buildx imagetools inspect "$amd64_image" >/dev/null 2>&1; then
-              echo "::error::Missing $amd64_image; the build job should have just pushed it."
-              exit 1
-            fi
-            if ! docker buildx imagetools inspect "$arm64_image" >/dev/null 2>&1; then
-              echo "::notice::Skipping $service: no arm64 tag ($arm64_image) exists for this commit."
-              continue
-            fi
+          short_sha="${GITHUB_SHA::7}"
+          arm64_tag="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${short_sha}-arm64"
+          lookup_log="$(mktemp)"
+          cleanup_lookup_log() { rm -f "$lookup_log"; }
+          trap cleanup_lookup_log EXIT
+          if ! arm64_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools inspect "$arm64_tag" --format '{{json .Manifest.Digest}}' 2>"$lookup_log")"; then
+            echo "::notice::Skipping multi-platform merge for $SERVICE because no usable arm64 leg exists at $arm64_tag after the registry retry budget."
+            exit 0
+          fi
+          if [[ -s "$lookup_log" ]]; then
+            echo "::notice::Arm64 manifest lookup for $SERVICE succeeded after at least one registry retry."
+          fi
+          cleanup_lookup_log
+          trap - EXIT
 
-            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
-          done
+          arm64_digest="${arm64_digest%\"}"
+          arm64_digest="${arm64_digest#\"}"
+          [[ "$arm64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
+            echo "::error::Resolved malformed arm64 digest for $arm64_tag: '$arm64_digest'."
+            exit 1
+          }
+
+          amd64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${AMD64_DIGEST}"
+          arm64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${arm64_digest}"
+          target_image="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${short_sha}"
+
+          # Resolve the mutable arm64 staging tag exactly once above, then keep
+          # the complete merge on immutable references so the tested amd64
+          # candidate cannot be replaced between verification and assembly.
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref" \
+            --annotation "index:org.opencontainers.image.description=${DESCRIPTION}"
+          GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+            bash scripts/require-image-platforms.sh "$target_image" linux/amd64,linux/arm64
+
+          merged_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx imagetools inspect "$target_image" --format '{{json .Manifest.Digest}}')"
+          merged_digest="${merged_digest%\"}"
+          merged_digest="${merged_digest#\"}"
+          [[ "$merged_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
+            echo "::error::Could not resolve merged manifest digest for $target_image: '$merged_digest'."
+            exit 1
+          }
+          {
+            printf 'subject-name=ghcr.io/%s/%s\n' "$REPOSITORY" "$SERVICE"
+            printf 'digest=%s\n' "$merged_digest"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Attest merged multi-platform manifest
+        if: ${{ inputs.merge_manifest && steps.merge.outputs.digest != '' }}
+        uses: ./.github/actions/ghcr-attest-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ${{ steps.merge.outputs.subject-name }}
+          subject-digest: ${{ steps.merge.outputs.digest }}
 
       - name: Remove buildx builder
         if: always()
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Summary
-        run: echo "::notice::Hosted overflow fallback complete. It built each selected amd64 candidate once; channel promotion remains owned by build-push.yml."
+        run: echo "::notice::Hosted overflow fallback completed ${{ matrix.service }} from one amd64 candidate; channel promotion remains owned by build-push.yml."

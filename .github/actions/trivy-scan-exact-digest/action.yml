@@ -23,10 +23,12 @@ runs:
   using: composite
   steps:
     - name: Require immutable digest identity
+      id: require
       shell: bash
       env:
         IMAGE_REF: ${{ inputs.image-ref }}
         CACHE_DIR: ${{ inputs.cache-dir }}
+        CLEANUP_CACHE: ${{ inputs.cleanup-cache }}
       run: |
         set -euo pipefail
         case "$IMAGE_REF" in
@@ -41,7 +43,43 @@ runs:
           exit 1
         fi
         : "${CACHE_DIR:?cache-dir is required}"
+
+        cleanup_safe=false
+        if [[ "$CLEANUP_CACHE" == "true" ]]; then
+          # Cleanup is intentionally limited to the two cache roots this
+          # action's callers own. A typo must never turn a reusable action's
+          # caller-controlled input into an arbitrary recursive deletion.
+          [[ "$CACHE_DIR" == /* ]] || {
+            echo "::error::Refusing to clean non-absolute Trivy cache path '$CACHE_DIR'."
+            exit 1
+          }
+          case "/${CACHE_DIR#/}/" in
+            */../* | */./*)
+              echo "::error::Refusing Trivy cache cleanup path containing dot traversal: '$CACHE_DIR'."
+              exit 1
+              ;;
+          esac
+
+          runner_temp="${RUNNER_TEMP:-}"
+          runner_temp="${runner_temp%/}"
+          if [[ -n "$runner_temp" && "$CACHE_DIR" == "$runner_temp/"* ]]; then
+            cleanup_safe=true
+          elif [[ "$CACHE_DIR" == /var/tmp/lancache-ng-trivy-cache/* ]]; then
+            cleanup_safe=true
+          fi
+
+          if [[ "$cleanup_safe" != "true" ]]; then
+            echo "::error::Refusing to clean unexpected Trivy cache path '$CACHE_DIR'."
+            exit 1
+          fi
+        fi
+
         mkdir -p "$CACHE_DIR"
+        if [[ "$CLEANUP_CACHE" == "true" && -L "$CACHE_DIR" ]]; then
+          echo "::error::Refusing to clean symlinked Trivy cache path '$CACHE_DIR'."
+          exit 1
+        fi
+        printf 'cleanup-safe=%s\n' "$cleanup_safe" >> "$GITHUB_OUTPUT"
 
     - name: Scan exact image digest with Trivy
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
@@ -59,7 +97,7 @@ runs:
         exit-code: "1"
 
     - name: Remove ephemeral exact-digest scan cache
-      if: always() && inputs.cleanup-cache == 'true'
+      if: always() && inputs.cleanup-cache == 'true' && steps.require.outputs.cleanup-safe == 'true'
       shell: bash
       env:
         CACHE_DIR: ${{ inputs.cache-dir }}

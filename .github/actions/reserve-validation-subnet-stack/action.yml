@@ -61,16 +61,13 @@ inputs:
     default: /tmp/lancache-validation-locks
   ghcr-retry-username:
     description: >-
-      Optional. When set together with ghcr-retry-password, the validation-image
-      `docker compose pull` is wrapped in scripts/lib/ghcr-retry.sh's ghcr_retry
-      (GHCR 401/transient resilience -- build-push.yml's own job needs this
-      because it runs on every push/PR and hits registry congestion; the
-      dispatch-only / channel-tag callers leave it empty and pull plainly, which
-      keeps their behavior byte-for-byte what it was before this extraction).
+      Optional registry username. Pulls always use the shared retry/backoff
+      wrapper; when username and password are both set, retries also perform a
+      fresh registry login between attempts.
     required: false
     default: ""
   ghcr-retry-password:
-    description: Optional GHCR password/token paired with ghcr-retry-username.
+    description: Optional registry password/token paired with ghcr-retry-username for retry re-login.
     required: false
     default: ""
 
@@ -131,19 +128,14 @@ runs:
           compose_args+=(-f "$COMPOSE_OVERRIDE_FILE")
         fi
 
-        # Pull the validation images before reserving a slot. build-push.yml's
-        # own job runs on every push/PR and repeatedly hit GHCR 401/congestion
-        # here, so it passes ghcr-retry credentials and this wraps the pull in
-        # scripts/lib/ghcr-retry.sh. The dispatch-only / channel-tag callers
-        # leave the credentials empty and pull plainly, preserving their exact
-        # prior behavior.
-        if [[ -n "$GHCR_RETRY_USERNAME" && -n "$GHCR_RETRY_PASSWORD" ]]; then
-          # shellcheck source=scripts/lib/ghcr-retry.sh
-          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
-          ghcr_retry "$LANCACHE_IMAGE_REGISTRY" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker compose "${compose_args[@]}" pull --quiet
-        else
+        # Pull before reserving a scarce subnet slot. Registry reads are
+        # transient external operations, so every caller gets the same retry
+        # policy. Credentials only add re-login between attempts; anonymous
+        # callers still retain backoff and retry instead of a single shot.
+        # shellcheck source=scripts/lib/ghcr-retry.sh
+        source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+        ghcr_retry "$LANCACHE_IMAGE_REGISTRY" "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
           docker compose "${compose_args[@]}" pull --quiet
-        fi
 
         reserved_slot=""
         holder_pid=""

@@ -30,12 +30,16 @@ runs:
         set -euo pipefail
         : "${IMAGE_REF:?image-ref is required}"
         : "${PLATFORM:?platform is required}"
-        timeout 15m docker run --rm --platform "$PLATFORM" "$IMAGE_REF" bash -c '
+
+        # The timeout runs inside the candidate container so a signal-deaf
+        # tool cannot outlive the docker client and keep a runner slot wedged.
+        docker run --rm --platform "$PLATFORM" "$IMAGE_REF" \
+          timeout --kill-after=30s --signal=TERM 14m bash -c '
         set -euo pipefail
         required_tools=(
           actionlint bash bats cargo cargo-audit cargo-tarpaulin clippy-driver
           dig distcc distcc-pump docker envsubst jq rustc rustfmt sccache
-          shellspec shellcheck
+          shellspec shellcheck timeout
         )
         for tool in "${required_tools[@]}"; do command -v "$tool" >/dev/null; done
         cargo --version
@@ -61,11 +65,15 @@ runs:
         IMAGE_REF: ${{ inputs.image-ref }}
       run: |
         set -euo pipefail
-        timeout 20m docker run --rm \
+
+        # Keep the kill boundary inside the candidate for the same runner-leak
+        # reason as the executable smoke step above.
+        docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$GITHUB_WORKSPACE:/work:ro" \
           -w /work \
           "$IMAGE_REF" \
+          timeout --kill-after=30s --signal=TERM 19m \
           bash -lc 'set -euo pipefail; bats tests/bats'
 
     - name: Run ShellSpec setup fixtures
@@ -75,9 +83,13 @@ runs:
         IMAGE_REF: ${{ inputs.image-ref }}
       run: |
         set -euo pipefail
-        timeout 20m docker run --rm \
+
+        # ShellSpec gets the identical in-container hard-stop contract so all
+        # candidate fixture runners have the same resource-lifecycle behavior.
+        docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$GITHUB_WORKSPACE:/work:ro" \
           -w /work \
           "$IMAGE_REF" \
+          timeout --kill-after=30s --signal=TERM 19m \
           bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'

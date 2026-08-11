@@ -2,12 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Scheduled published-channel installation smoke check (issue #785). This is
-# deliberately separate from per-PR validation: a broken mutable channel is a
-# channel problem, not a reason to blame an unrelated PR. The workflow runs
-# setup.sh's real channel -> stack pointer -> immutable sha-* resolution, then
-# brings up the full stack and checks health. Heavy client simulations remain
-# in the full-setup validation workflows.
+# Scheduled published-channel installation smoke check. This is deliberately
+# separate from per-PR validation: a broken mutable channel is a channel
+# problem, not a reason to blame an unrelated PR. The workflow runs setup.sh's
+# real channel -> stack pointer -> immutable sha-* resolution, then brings up
+# the full stack and checks health. Heavy client simulations remain in the
+# full-setup validation workflows.
 name: Channel Install Smoke
 
 on:
@@ -35,27 +35,38 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build full-setup validation image (against published channel)
+      - name: Resolve immutable build-tools image
+        id: build-tools
         run: |
           set -euo pipefail
-          echo "Smoke-testing published channel/tag: ${LANCACHE_IMAGE_TAG}"
-          docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY="${LANCACHE_IMAGE_REGISTRY}" \
-            --build-arg LANCACHE_IMAGE_PREFIX="${LANCACHE_IMAGE_PREFIX}" \
-            --build-arg LANCACHE_IMAGE_TAG="${LANCACHE_IMAGE_TAG}" \
-            -t lancache-ng-full-setup:channel-smoke \
-            deploy/full-setup
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          case "$build_tools_image" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::Expected digest-qualified build-tools image, got '$build_tools_image'."
+              exit 1
+              ;;
+          esac
+          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
       - name: Validate compose configuration
+        env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
         run: |
           set -euo pipefail
+          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+
+          # Use the same immutable validation toolchain as the rest of CI. The
+          # timeout is inside the container so a signal-deaf compose process
+          # cannot survive cancellation and keep the runner occupied.
           docker run --rm \
             -v "$PWD/deploy/full-setup:/validation:ro" \
             -w /validation \
             --env LANCACHE_IMAGE_REGISTRY \
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
-            docker:latest \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
             docker compose -f docker-compose.yml config >/dev/null
 
       # Single source shared with the regular/deep/full pipeline validation
@@ -92,7 +103,3 @@ jobs:
           if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
             kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
           fi
-
-      - name: Clean up image
-        if: always()
-        run: docker rmi lancache-ng-full-setup:channel-smoke || true
