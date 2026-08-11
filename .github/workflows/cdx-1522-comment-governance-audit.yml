@@ -1,7 +1,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Temporary touched-file comment audit. Removed from the clean target after findings are fixed.
-name: CDX CI 1.1 comment governance audit
+# Temporary touched-file governance audit. Removed from the clean target after findings are fixed.
+name: CDX CI 1.1 touched-file governance audit
 
 on:
   pull_request:
@@ -30,7 +30,60 @@ jobs:
           set -euo pipefail
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
 
+      - name: Audit touched workflow container kill boundaries
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            -e BASE_SHA \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import subprocess
+
+          changed = subprocess.check_output(
+              ['git', 'diff', '--name-only', '--diff-filter=ACMRTUXB', os.environ['BASE_SHA'], 'HEAD'],
+              text=True,
+          ).splitlines()
+          paths = [
+              p for p in changed
+              if (p.startswith('.github/workflows/') or p.startswith('.github/actions/'))
+              and p.endswith(('.yml', '.yaml'))
+              and '/cdx-' not in p
+          ]
+          findings = []
+          for name in paths:
+              lines = Path(name).read_text(encoding='utf-8').splitlines()
+              i = 0
+              while i < len(lines):
+                  line = lines[i]
+                  if 'docker run ' not in line or line.lstrip().startswith('#'):
+                      i += 1
+                      continue
+                  start = i
+                  parts = [line.strip()]
+                  while parts[-1].endswith('\\') and i + 1 < len(lines):
+                      i += 1
+                      parts.append(lines[i].strip())
+                  command = ' '.join(parts)
+                  if ' timeout ' not in f' {command} ':
+                      findings.append((name, start + 1, command[:500]))
+                  i += 1
+          print('=== AG-CI-016 docker-run commands without in-container timeout ===')
+          for name, lineno, command in findings:
+              print(f'{name}:{lineno}: {command}')
+          print(f'DOCKER_RUN_TIMEOUT_FINDING_COUNT={len(findings)}')
+          if findings:
+              raise SystemExit(3)
+          PY
+
       - name: Audit touched-file comments for task and review chronology
+        if: always()
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -59,8 +112,10 @@ jobs:
               and not p.startswith('.github/workflows/cdx-')
               and not p.startswith('.github/cdx-')
           ]
-          ref_re = re.compile(r'(?:\b(?:issue|issues|PR|pull request)\s*#?\d+\b|(?<![A-Za-z0-9_])#\d+\b)', re.I)
-          chronology_re = re.compile(r'caught in review|before this fix|review finding|review round|follow-up pass|this PR|this task', re.I)
+          # Issue numbers may be durable WHY-grounding. This audit is intentionally
+          # narrower than the earlier candidate scan and targets task/PR/review chronology.
+          ref_re = re.compile(r'\b(?:PR|pull request)\s*#\d+\b', re.I)
+          chronology_re = re.compile(r'caught in review|before this fix|review finding|review round|follow-up pass|this PR|this task|fixed alongside this|this PR.s fix', re.I)
           findings = []
           todos = []
 
@@ -70,7 +125,6 @@ jobs:
                   continue
               for lineno, line in enumerate(path.read_text(encoding='utf-8').splitlines(), 1):
                   stripped = line.lstrip()
-                  # The touched files use shell/YAML/Bats line comments. Ignore shebangs.
                   if not stripped.startswith('#') or stripped.startswith('#!'):
                       continue
                   body = stripped[1:].strip()
@@ -79,7 +133,7 @@ jobs:
                   if re.search(r'\b(?:TODO|FIXME)\b', body):
                       todos.append((name, lineno, body))
 
-          print('=== AG-CODE-003 candidate comment findings ===')
+          print('=== AG-CODE-003 task/review comment findings ===')
           for name, lineno, body in findings:
               print(f'{name}:{lineno}: {body}')
           print(f'COMMENT_FINDING_COUNT={len(findings)}')
