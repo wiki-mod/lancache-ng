@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# This temporary workflow calculates the real current-base F-16 integration
+# This temporary workflow calculates a fresh-base scripts-layout integration
 # on a clean hosted runner without publishing the result. The job deliberately
 # removes this file from its prospective tree before inspecting the result.
 name: Scripts Layout Fresh-Base Diagnostic
@@ -26,7 +26,7 @@ concurrency:
 
 jobs:
   resolve-fresh-base:
-    name: trial current-first F-16 integration
+    name: trial current-first scripts-layout integration
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     env:
@@ -103,8 +103,8 @@ jobs:
           done
 
           # These conflicts are rename destinations. Recreate them from the
-          # current source blobs, not from the historical PR copies, so newer
-          # fixes survive before applying the directory-depth adjustments.
+          # current source blobs, not from older branch copies, so newer fixes
+          # survive before applying the directory-depth adjustments.
           git show "${CURRENT_DEV_SHA}:scripts/check-file-headers.sh" > scripts/tracked/check-file-headers.sh
           git show "${CURRENT_DEV_SHA}:scripts/test-governance-guards.sh" > scripts/tracked/test-governance-guards.sh
           git show "${CURRENT_DEV_SHA}:scripts/syslog-forwarding-simulation.sh" > scripts/untracked/simulations/syslog-forwarding-simulation.sh
@@ -117,9 +117,8 @@ jobs:
             scripts/test-governance-guards.sh \
             scripts/syslog-forwarding-simulation.sh
 
-          # Four guards arrived on current_dev after the historical F-16
-          # contribution. They were independently classified as CI-only and
-          # therefore join tracked/ rather than falling into untracked/.
+          # These guards are absent from the older branch contribution. Each
+          # was independently classified as CI-only, so they join tracked/.
           for name in \
             check-dependabot-docker-base-consistency.sh \
             check-pipefail-scope-coverage.sh \
@@ -146,11 +145,15 @@ jobs:
           OLD='source "$script_dir/lib/git-fetch-retry.sh"' NEW='source "$script_dir/../lib/git-fetch-retry.sh"' \
             perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' scripts/tracked/check-pr-diff-file-headers.sh
 
-          # Only current-first conflict files and the four newly moved guards
-          # missed some or all of the historical rename edits. Auto-merged
-          # files are intentionally left untouched here.
+          # Conflict-restored files, newly moved guards, and current-tree
+          # callers may miss some rename edits. Files with intentional flat
+          # fixture paths are handled separately below.
           reference_fix_files=(
             "${current_first_paths[@]}"
+            .github/workflows/build-push.yml
+            .github/workflows/codeql.yml
+            deploy/quickstart/docker-compose.yml
+            services/proxy/entrypoint.sh
             scripts/tracked/check-file-headers.sh
             scripts/tracked/test-governance-guards.sh
             scripts/untracked/simulations/syslog-forwarding-simulation.sh
@@ -158,9 +161,14 @@ jobs:
             scripts/tracked/check-pipefail-scope-coverage.sh
             scripts/tracked/check-pr-diff-file-headers.sh
             scripts/tracked/resolve-remote-ref-with-retry.sh
+            tests/bats/check_dependabot_docker_base_consistency.bats
+            tests/bats/check_file_headers.bats
+            tests/bats/check_logging_matrix_weblog_parity.bats
+            tests/bats/resolve_remote_ref_with_retry.bats
+            tests/bats/setup_dhcp_proxy_pxe_wizard.bats
           )
 
-          replace_in_current_first_files() {
+          replace_in_reference_files() {
             local old="$1" new="$2" path
             for path in "${reference_fix_files[@]}"; do
               [[ -f "$path" ]] || continue
@@ -168,6 +176,15 @@ jobs:
                 OLD="$old" NEW="$new" perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$path"
               fi
             done
+          }
+
+          replace_exact_in_file() {
+            local path="$1" old="$2" new="$3"
+            if ! grep -Fq -- "$old" "$path"; then
+              printf '::error::Expected semantic reference not found in %s: %s\n' "$path" "$old"
+              exit 1
+            fi
+            OLD="$old" NEW="$new" perl -0pi -e 's/\Q$ENV{OLD}\E/$ENV{NEW}/g' "$path"
           }
 
           while read -r class name; do
@@ -183,7 +200,7 @@ jobs:
               echo "::error::Expected moved script is missing: $new"
               exit 1
             fi
-            replace_in_current_first_files "$old" "$new"
+            replace_in_reference_files "$old" "$new"
           done <<'LAYOUT'
           tracked check-action-node-versions.sh
           tracked check-bats-path-filter-coverage.sh
@@ -254,6 +271,26 @@ jobs:
           untracked validate-stack-images.sh
           LAYOUT
 
+          # These two tests intentionally copy real scripts into a flat throwaway
+          # fixture tree. Update only the references that locate the real files;
+          # fixture destinations and fixture invocations must remain flat.
+          replace_exact_in_file tests/bats/check_pr_diff_file_headers.bats \
+            '# Coverage for scripts/check-pr-diff-file-headers.sh: exercises the real' \
+            '# Coverage for scripts/tracked/check-pr-diff-file-headers.sh: exercises the real'
+          replace_exact_in_file tests/bats/check_pr_diff_file_headers.bats \
+            'script="$BATS_TEST_DIRNAME/../../scripts/check-pr-diff-file-headers.sh"' \
+            'script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-pr-diff-file-headers.sh"'
+          replace_exact_in_file tests/bats/check_pr_diff_file_headers.bats \
+            'check_file_headers_script="$BATS_TEST_DIRNAME/../../scripts/check-file-headers.sh"' \
+            'check_file_headers_script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-file-headers.sh"'
+          replace_exact_in_file tests/bats/check_pipefail_scope_coverage.bats \
+            '# Coverage for scripts/check-pipefail-scope-coverage.sh: verifies it' \
+            '# Coverage for scripts/tracked/check-pipefail-scope-coverage.sh: verifies it'
+          replace_exact_in_file tests/bats/check_pipefail_scope_coverage.bats \
+            'script="$BATS_TEST_DIRNAME/../../scripts/check-pipefail-scope-coverage.sh"' \
+            'script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-pipefail-scope-coverage.sh"'
+          git add -- tests/bats/check_pr_diff_file_headers.bats tests/bats/check_pipefail_scope_coverage.bats
+
           cat > scripts/tracked/README.md <<'README'
           # scripts/tracked/
 
@@ -295,6 +332,49 @@ jobs:
           [[ "$direct_untracked_count" == 20 ]]
           [[ "$top_level_count" == 0 ]]
 
+          intentional_pre_layout_reference() {
+            local old="$1" match="$2"
+            case "$old" in
+              scripts/check-pr-title-convention.sh)
+                if [[ "$match" == scripts/untracked/detect-full-setup-changes.sh:* && \
+                      "$match" == *"then-flat scripts/check-pr-title-convention.sh"* ]]; then
+                  return 0
+                fi
+                if [[ "$match" == tests/bats/detect_full_setup_changes.bats:* && \
+                      "$match" == *"then-flat scripts/check-pr-title-convention.sh"* ]]; then
+                  return 0
+                fi
+                ;;
+              scripts/check-file-headers.sh)
+                if [[ "$match" == tests/bats/check_pr_diff_file_headers.bats:* && \
+                      "$match" == *"work_dir/scripts/check-file-headers.sh"* ]]; then
+                  return 0
+                fi
+                ;;
+              scripts/check-pr-diff-file-headers.sh)
+                if [[ "$match" == tests/bats/check_pr_diff_file_headers.bats:* && \
+                      "$match" == *"work_dir/scripts/check-pr-diff-file-headers.sh"* ]]; then
+                  return 0
+                fi
+                if [[ "$match" == tests/bats/check_pr_diff_file_headers.bats:* && \
+                      "$match" == *"bash scripts/check-pr-diff-file-headers.sh"* ]]; then
+                  return 0
+                fi
+                ;;
+              scripts/check-pipefail-early-exit-grep.sh)
+                if [[ "$match" == tests/bats/check_pipefail_scope_coverage.bats:* && \
+                      "$match" == *"fixture-root)/scripts/check-pipefail-early-exit-grep.sh"* ]]; then
+                  return 0
+                fi
+                if [[ "$match" == tests/bats/check_pipefail_scope_coverage.bats:* && \
+                      "$match" == *"fixture/scripts/check-pipefail-early-exit-grep.sh"* ]]; then
+                  return 0
+                fi
+                ;;
+            esac
+            return 1
+          }
+
           stale_found=0
           while read -r class name; do
             [[ -n "$class" && -n "$name" ]] || continue
@@ -302,8 +382,19 @@ jobs:
             grep_status=0
             matches="$(git grep -n -F -- "$old" -- .)" || grep_status=$?
             if ((grep_status == 0)); then
-              printf '::error::Stale pre-layout reference remains for %s:\n%s\n' "$old" "$matches"
-              stale_found=1
+              unexpected_matches=()
+              while IFS= read -r match; do
+                if intentional_pre_layout_reference "$old" "$match"; then
+                  printf 'intentional pre-layout reference: %s\n' "$match"
+                else
+                  unexpected_matches+=("$match")
+                fi
+              done <<< "$matches"
+              if ((${#unexpected_matches[@]} > 0)); then
+                printf '::error::Stale pre-layout reference remains for %s:\n' "$old"
+                printf '%s\n' "${unexpected_matches[@]}"
+                stale_found=1
+              fi
             elif ((grep_status != 1)); then
               printf '::error::git grep failed while checking %s (exit %s).\n' "$old" "$grep_status"
               exit 1
