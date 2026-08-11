@@ -62,6 +62,21 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+# Tag text is emitted into line-oriented audit output, so control characters must fail schema validation.
+@test "package-version page schema rejects control characters in tags" {
+  cat >"$tmp_dir/page.json" <<'EOF'
+[
+  {
+    "id": 42,
+    "name": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "metadata": {"container": {"tags": ["bad\tseparator"]}}
+  }
+]
+EOF
+  run sra_validate_version_page "$tmp_dir/page.json"
+  [ "$status" -ne 0 ]
+}
+
 # Missing tag metadata must never collapse into an apparently untagged version.
 @test "package-version page schema rejects missing tag metadata" {
   cat >"$tmp_dir/page.json" <<'EOF'

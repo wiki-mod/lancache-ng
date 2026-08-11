@@ -65,7 +65,7 @@ sra_validate_version_page() {
       all(.metadata.container.tags[];
         type == "string" and
         length > 0 and
-        (test("[\\u0000-\\u001f\\u007f]") | not)
+        (explode | all(.[]; . >= 32 and . != 127))
       )
     )
   ' "$page_file" >/dev/null
@@ -113,8 +113,9 @@ sra_version_tag_facts() {
     type == "object" and
     (.metadata.container.tags | type == "array") and
     all(.metadata.container.tags[];
-      type == "string" and length > 0 and
-      (test("[\\u0000-\\u001f\\u007f]") | not)
+      type == "string" and
+      length > 0 and
+      (explode | all(.[]; . >= 32 and . != 127))
     )
   ' <<<"$version_json" >/dev/null || return 1
 
