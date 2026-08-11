@@ -16,7 +16,9 @@ The first-party runtime package set is:
 - `watchdog`
 - `dhcp`
 - `dhcp-proxy`
+- `ntp`
 - `ui`
+- `syslog`
 
 The first-party tooling package is:
 
@@ -327,17 +329,51 @@ bad pull without guessing which image was running.
 
 ## Retention
 
-`release/stack-images.yml` defines the retention contract. The project must keep
-at least the current stable release and two previous stable releases for the
-full first-party image set. Release digests, rollback digests, and `sha-*` tags
-referenced by supported releases must not be deleted.
+`release/stack-images.yml` defines the retention contract. The normal history
+budget is `accepted_ordinary_roots_per_package: 10`: for each first-party
+runtime or tooling package, keep the ten newest **accepted ordinary root
+identities**. The current accepted identity counts as one of those ten, so the
+rolling window is one current plus nine previous accepted roots.
 
-Mutable channels such as `latest` and `nightly` may move, but the digests they
-pointed to remain protected when they are also referenced by a supported
-release, rollback path, or published deployment document.
+The budget counts stored root identity, not tag names. Multiple immutable
+`sha-<commit>` aliases that resolve to the same root digest consume one ordinary
+history slot. Platform child manifests and provenance/SBOM/referrer artifacts
+also do not consume ordinary-history slots; they remain part of the required
+artifact closure while a retained or otherwise protected root references them.
 
-Automated cleanup must be opt-in and must read the manifest retention section.
-It must not delete release or rollback digests by pattern alone.
+A legacy `sha-*` tag proves that an immutable build identity exists, but it does
+not by itself prove that the artifact passed the acceptance gates. Rejected,
+abandoned, failed, or acceptance-unknown candidates do not become accepted
+ordinary history merely because they are new or carry a SHA-shaped tag. Until
+canonical accepted-artifact evidence can prove acceptance for the exact root,
+a retention audit must report that state conservatively and must not use it as
+destructive deletion authority.
+
+Protected references are exceptions to the rolling ordinary-history budget.
+The exact digest/root identities required by `nightly`, `latest`, a supported
+stable release, an accepted stack identity, or an explicitly recorded rollback
+anchor remain protected together with their required artifact closure even when
+they fall outside the ten ordinary accepted roots. Git ancestry can help classify
+where a legacy SHA came from, but being an ancestor of a protected branch or tag
+is not by itself a permanent storage exemption.
+
+The project must additionally keep at least the current stable release and two
+previous stable releases for the full first-party image set. Release digests,
+rollback digests, and SHA identities referenced by those protected releases must
+not be deleted.
+
+Mutable channels such as `latest` and `nightly` may move, but the exact digests
+they still reference are protected. Historical channel targets are not retained
+merely because a mutable channel once pointed at them unless another retention
+rule still protects that identity.
+
+Automated cleanup must be explicitly approved and must consume the manifest
+retention contract plus canonical accepted/protected identity evidence. A
+read-only audit may classify and report candidates, but must not expose a switch
+that turns the audit itself into a package-version deletion path. Destructive
+activation is a separate approval and validation boundary and must fail closed
+when acceptance, package-version schema, protected references, or artifact-graph
+closure cannot be proven.
 
 ## CI Guardrails
 

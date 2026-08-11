@@ -27,6 +27,7 @@ registry: ghcr.io
 image_prefix: wiki-mod/lancache-ng
 retention:
   minimum_stable_releases: 3
+  accepted_ordinary_roots_per_package: 10
   keep_mutable_channels:
     - latest
     - nightly

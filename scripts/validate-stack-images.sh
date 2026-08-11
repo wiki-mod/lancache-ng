@@ -61,6 +61,7 @@ require_grep '^registry: ghcr\.io$' "${manifest#$repo_root/}" 'manifest registry
 require_grep '^image_prefix: wiki-mod/lancache-ng$' "${manifest#$repo_root/}" 'manifest image_prefix must be wiki-mod/lancache-ng'
 require_grep '^retention:$' "${manifest#$repo_root/}" 'manifest must define retention rules'
 require_grep '^  minimum_stable_releases: 3$' "${manifest#$repo_root/}" 'retention must keep at least current plus two previous stable releases'
+require_grep '^  accepted_ordinary_roots_per_package: 10$' "${manifest#$repo_root/}" 'retention must keep exactly ten accepted ordinary root identities per first-party package'
 require_grep '^  protect_release_and_rollback_digests: true$' "${manifest#$repo_root/}" 'retention must protect release and rollback digests'
 require_grep '^  deletion_policy: manual-or-approved-automation-only$' "${manifest#$repo_root/}" 'retention deletion policy must be explicit'
 require_grep '^concurrency:$' .github/workflows/build-push.yml 'build workflow must serialize write-capable package publishing'
@@ -70,7 +71,7 @@ tooling_names=$(collect_names tooling)
 metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
-runtime_images=(proxy dns watchdog dhcp dhcp-proxy ui syslog)
+runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog)
 for image in "${runtime_images[@]}"; do
   require_name "$runtime_names" "$image" runtime
   require_manifest_platform "$image" linux/amd64
@@ -99,6 +100,7 @@ for dockerfile in \
   services/watchdog/Dockerfile \
   services/dhcp/Dockerfile \
   services/dhcp-proxy/Dockerfile \
+  services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
   tools/build-tools/Dockerfile
@@ -175,6 +177,7 @@ for dockerfile in \
   services/watchdog/Dockerfile \
   services/dhcp/Dockerfile \
   services/dhcp-proxy/Dockerfile \
+  services/ntp/Dockerfile \
   services/ui/Dockerfile \
   tools/build-tools/Dockerfile
 do
