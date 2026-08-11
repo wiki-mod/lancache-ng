@@ -1,0 +1,82 @@
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Temporary same-repository executor for the active CI 1.1 Draft.
+
+name: CDX CI 1.1 service metadata transformer
+
+on:
+  pull_request:
+    branches: [current_dev]
+    types: [synchronize]
+
+permissions:
+  contents: write
+
+jobs:
+  transform:
+    if: github.event.pull_request.number == 1523 && github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out the PR head branch
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ci/1.1-single-artifact-consolidation
+          fetch-depth: 0
+
+      - name: Transform and validate service metadata
+        run: |
+          set -euo pipefail
+
+          python3 .github/cdx-1522-service-metadata.py
+          git rm -- .github/cdx-1522-service-metadata.py .github/workflows/cdx-1522-service-metadata.yml
+
+          bash -n scripts/check-workflow-service-lists.sh
+          bash scripts/check-workflow-service-lists.sh
+
+          tmpdir="$(mktemp -d)"
+          trap 'rm -rf "$tmpdir"' EXIT
+
+          cp .github/workflows/build-push-hosted-fallback.yml "$tmpdir/build-push-hosted-fallback.yml"
+          sed -i 's/chrony-based NTP server for lancache-ng/DRIFTED NTP description for lancache-ng/' "$tmpdir/build-push-hosted-fallback.yml"
+          if bash scripts/check-workflow-service-lists.sh .github/workflows/build-push.yml "$tmpdir/build-push-hosted-fallback.yml"; then
+            echo "::error::Hosted Fallback metadata drift was not rejected."
+            exit 1
+          fi
+
+          cp .github/workflows/build-push.yml "$tmpdir/build-push.yml"
+          sed -i 's/ ntp syslog ui build-tools/ ntp ui build-tools/' "$tmpdir/build-push.yml"
+          if bash scripts/check-workflow-service-lists.sh "$tmpdir/build-push.yml"; then
+            echo "::error::CI_BUILD_SERVICES drift was not rejected."
+            exit 1
+          fi
+
+          ruby -e 'require "yaml"; YAML.load_file(ARGV[0], aliases: true)' .github/workflows/build-push.yml
+          ruby -e 'require "yaml"; YAML.load_file(ARGV[0], aliases: true)' .github/workflows/build-push-hosted-fallback.yml
+
+          if command -v bats >/dev/null 2>&1; then
+            bats tests/bats/check_workflow_service_lists.bats
+          else
+            echo "::notice::bats is not installed on the hosted executor; the repository CI will run the Bats suite."
+          fi
+
+          git add -A
+          git diff --cached --check
+          wc -l -c .github/workflows/build-push.yml
+
+          marker="CDX-$(date +%s)"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "$marker ci: consolidate service metadata"
+
+          printf 'CDX_COMMIT_SHA=%s\n' "$(git rev-parse HEAD)"
+          printf 'CDX_TREE_SHA=%s\n' "$(git rev-parse 'HEAD^{tree}')"
+          printf 'CDX_BUILD_PUSH_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/build-push.yml')"
+          printf 'CDX_FALLBACK_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/build-push-hosted-fallback.yml')"
+          printf 'CDX_GUARD_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:scripts/check-workflow-service-lists.sh')"
+          printf 'CDX_TEST_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:tests/bats/check_workflow_service_lists.bats')"
+
+          # Upload the new Git objects. The workflow token cannot advance a ref to a
+          # commit that edits workflow files; the connected GitHub App does that after
+          # reading and validating the emitted commit/tree identifiers.
+          git push origin HEAD:refs/heads/ci/1.1-single-artifact-consolidation
