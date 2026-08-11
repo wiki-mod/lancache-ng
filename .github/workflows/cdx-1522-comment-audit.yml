@@ -30,6 +30,19 @@ jobs:
           before_lines="$(wc -l < .github/workflows/build-push.yml)"
           before_bytes="$(wc -c < .github/workflows/build-push.yml)"
 
+          # One audit marker spans two physical comment lines; keep the transformer strict
+          # by shortening that marker to its unique first-line prefix before execution.
+          python3 - <<'PY'
+          from pathlib import Path
+          path = Path('.github/cdx-1522-comment-cleanup.py')
+          text = path.read_text(encoding='utf-8')
+          old = 'Diff-scoped, not repo-wide: the whole-repo call above stays soft on AG-HDR-008'
+          new = 'Diff-scoped, not repo-wide: the whole-repo call above stays soft on'
+          if text.count(old) != 1:
+              raise SystemExit(f'marker fix: expected one match, got {text.count(old)}')
+          path.write_text(text.replace(old, new, 1), encoding='utf-8')
+          PY
+
           python3 .github/cdx-1522-comment-cleanup.py
           git rm -- .github/cdx-1522-comment-cleanup.py .github/workflows/cdx-1522-comment-audit.yml
 
