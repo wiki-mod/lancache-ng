@@ -1,0 +1,100 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# This workflow uses a clean GitHub-hosted checkout to calculate a real
+# three-way merge when the authoring environment cannot provide a trustworthy
+# local Git worktree. It is intentionally read-only: credentials are not
+# persisted, repository permissions are read-only, and the job never commits
+# or pushes the calculated merge result.
+name: Scripts Layout Fresh-Base Diagnostic
+
+on:
+  push:
+    branches:
+      - ci/1095-f16-scripts-restructure
+    # Restrict the diagnostic to explicit edits of this temporary workflow so
+    # unrelated branch pushes cannot repeatedly consume hosted runner time.
+    paths:
+      - ".github/workflows/scripts-layout-fresh-base-diagnostic.yml"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+concurrency:
+  group: ${{ format('{0}-{1}', github.workflow, github.ref) }}
+  cancel-in-progress: true
+
+jobs:
+  three-way-merge:
+    name: calculate current-base three-way merge
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      LEGACY_HEAD: 046043af092b7daa65eaf7d6a36e4b4ca2d70db0
+      CURRENT_DEV_SHA: e5c803cbccf926dc5db23f97d12b6dc428b344b4
+    steps:
+      - name: Checkout the frozen current development base with full history
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: e5c803cbccf926dc5db23f97d12b6dc428b344b4
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Calculate merge and report conflicts
+        run: |
+          set -euo pipefail
+
+          git --version
+
+          actual_head="$(git rev-parse HEAD)"
+          if [[ "$actual_head" != "$CURRENT_DEV_SHA" ]]; then
+            echo "::error::Checkout resolved to $actual_head instead of frozen current_dev $CURRENT_DEV_SHA."
+            exit 1
+          fi
+
+          for required_commit in "$CURRENT_DEV_SHA" "$LEGACY_HEAD"; do
+            if ! git cat-file -e "${required_commit}^{commit}"; then
+              echo "::error::Full-history checkout does not contain required commit $required_commit."
+              exit 1
+            fi
+          done
+
+          merge_base="$(git merge-base "$CURRENT_DEV_SHA" "$LEGACY_HEAD")"
+          printf 'current_dev=%s\nlegacy_head=%s\nmerge_base=%s\n' \
+            "$CURRENT_DEV_SHA" "$LEGACY_HEAD" "$merge_base"
+
+          if git merge --no-commit --no-ff "$LEGACY_HEAD"; then
+            merge_status=0
+          else
+            merge_status=$?
+          fi
+
+          printf 'merge_status=%s\n' "$merge_status"
+          printf '%s\n' '--- git status --short ---'
+          git status --short
+
+          unmerged_paths="$(git diff --name-only --diff-filter=U)"
+          if [[ -n "$unmerged_paths" ]]; then
+            printf '%s\n%s\n' '--- unmerged paths ---' "$unmerged_paths"
+          else
+            printf '%s\n' '--- unmerged paths: none ---'
+          fi
+
+          if (( merge_status != 0 )); then
+            if [[ -z "$unmerged_paths" ]]; then
+              echo "::error::Merge failed without leaving an inspectable conflict set."
+            fi
+            exit "$merge_status"
+          fi
+
+          printf '%s\n' '--- structural snapshot after clean merge ---'
+          printf 'tracked_scripts=%s\n' "$(find scripts/tracked -maxdepth 1 -type f -name '*.sh' | wc -l)"
+          printf 'simulation_scripts=%s\n' "$(find scripts/untracked/simulations -maxdepth 1 -type f -name '*-simulation.sh' | wc -l)"
+          printf 'direct_untracked_scripts=%s\n' "$(find scripts/untracked -maxdepth 1 -type f \( -name '*.sh' -o -name '*.ps1' \) | wc -l)"
+          printf 'top_level_scripts=%s\n' "$(find scripts -maxdepth 1 -type f \( -name '*.sh' -o -name '*.ps1' \) | wc -l)"
+
+          git diff --check
