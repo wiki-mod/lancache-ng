@@ -1,7 +1,7 @@
 diff --git a/.github/workflows/build-push.yml b/.github/workflows/build-push.yml
 --- a/.github/workflows/build-push.yml
 +++ b/.github/workflows/build-push.yml
-@@ -7008,16 +7008,16 @@ jobs:
+@@ -7008,10 +7008,10 @@ jobs:
 -          # Build the immutable stack BOM before any public channel is moved.
 -          # Every recorded service digest is the exact merged manifest digest
 -          # produced above from the already-checked platform children.
@@ -16,7 +16,7 @@ diff --git a/.github/workflows/build-push.yml b/.github/workflows/build-push.yml
                exit 1
              }
            done
-@@ -7027,38 +7027,13 @@ jobs:
+@@ -7027,37 +7027,13 @@ jobs:
              printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
              printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
              printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
@@ -56,7 +56,7 @@ diff --git a/.github/workflows/build-push.yml b/.github/workflows/build-push.yml
 -          COPY stack-bom.json /stack-bom.json
            CMD ["true"]
            DOCKERFILE
-@@ -7078,7 +7053,7 @@ jobs:
+@@ -7078,6 +7053,6 @@ jobs:
              bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
            stack_digest="$(digest_for_image "$stack_pointer_image")"
 -          [[ "$stack_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid stack BOM digest: $stack_digest"; exit 1; }
@@ -64,13 +64,13 @@ diff --git a/.github/workflows/build-push.yml b/.github/workflows/build-push.yml
            printf 'stack_digest=%s\n' "$stack_digest" >> "$GITHUB_OUTPUT"
            cleanup_pointer_context
            trap - EXIT
-@@ -7171,7 +7146,7 @@ jobs:
+@@ -7171,4 +7146,4 @@ jobs:
 -      - name: Attest immutable stack BOM provenance
 +      - name: Attest immutable stack pointer provenance
          if: steps.create-trusted-manifests.outputs.stack_digest != ''
          uses: ./.github/actions/ghcr-attest-with-cache
          with:
-@@ -7702,11 +7677,11 @@ jobs:
+@@ -7702,6 +7677,6 @@ jobs:
 -          [[ "$STACK_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Missing or malformed stack BOM digest '$STACK_DIGEST'."; exit 1; }
 +          [[ "$STACK_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Missing or malformed stack pointer digest '$STACK_DIGEST'."; exit 1; }
            stack_tag_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
