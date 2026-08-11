@@ -202,8 +202,6 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # Full-file review found one mechanically malformed comment after the
-          # chronology cleanup. Replace it with the durable self-match invariant.
           path = Path('.github/workflows/build-push.yml')
           lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
           hits = [i for i, line in enumerate(lines) if 'That defect class is broader than these two removed checks and is' in line]
@@ -219,8 +217,6 @@ jobs:
           ]
           path.write_text(''.join(lines), encoding='utf-8')
 
-          # Remove the remaining wrapped review-history phrase and replace the
-          # stale setup-simulation channel history with its current immutable-input contract.
           path = Path('.github/workflows/full-setup-sims.yml')
           lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
           hits = [i for i, line in enumerate(lines[:-1]) if 'Codex review' in line and 'finding on #764' in lines[i + 1]]
@@ -249,9 +245,6 @@ jobs:
           text = text[:start] + replacement + text[end:]
           path.write_text(text, encoding='utf-8')
 
-          # setup-reset-dns-config was the lone sibling still interpolating workflow
-          # expressions directly into shell. Bring it onto the env-plus-quoted-variable
-          # contract used by every other build-tools resolver in this reusable workflow.
           lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
           job_start = next((i for i, line in enumerate(lines) if line == '  setup-reset-dns-config-simulation:\n'), None)
           if job_start is None:
@@ -273,7 +266,6 @@ jobs:
             '          REPOSITORY: $' + '{{ github.repository }}\n',
           ]
           lines[run_line:run_line] = env_lines
-          run_line += len(env_lines)
           direct_if = '          if [[ "$' + '{{ inputs.pr_staging_available }}" == "true" && "$' + '{{ inputs.build_tools_touched }}" == "true" ]]; then\n'
           direct_image = '            image="ghcr.io/$' + '{{ github.repository }}/build-tools:$' + '{{ inputs.image_tag }}"\n'
           if direct_if not in lines or direct_image not in lines:
@@ -282,7 +274,6 @@ jobs:
           lines[lines.index(direct_image)] = '            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"\n'
           path.write_text(''.join(lines), encoding='utf-8')
 
-          # Remove validator commentary that became false after service-metadata dedup.
           path = Path('scripts/validate-stack-images.sh')
           lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
           hits = [i for i, line in enumerate(lines[:-1]) if '# #1428: syslog joined this SERVICES scalar too' in line]
@@ -303,28 +294,26 @@ jobs:
           python3 - <<'PY'
           from pathlib import Path
 
-          # The chronology guard previously documented and implemented an intentional
-          # per-line blind spot. The observed wrapped "review finding" comment proves
-          # that blind spot is no longer acceptable, so scan adjacent physical comment
-          # lines too and add the noun form to the narrow chronology vocabulary.
           path = Path('scripts/check-review-chronology-comments.sh')
           text = path.read_text(encoding='utf-8')
-          old_header = '''# Detection is deliberately per-line, not a full-file/multiline scan: every
-# real instance found in this repository's own audit had the offending
-# phrase entirely on one line, and a per-line grep keeps the false-positive
-# surface small and the match easy to point at with a file:line reference.
-# The known, accepted tradeoff is that a phrase awkwardly split across a
-# line wrap would not be caught -- the same simplicity tradeoff this
-# project's other line-oriented guards (e.g. check-file-headers.sh,
-# check-workflow-line-limit.sh) already make.
-'''
-          new_header = '''# Detection checks each physical line and also joins adjacent hand-written
-# comment lines before applying the same narrow chronology regex. The joined
-# scan covers ordinary line-comment prefixes used by this repository plus the
-# common first/continuation markers for block comments; it deliberately does
-# not join arbitrary code lines, which keeps the false-positive surface small
-# while preventing formatting/line-wrapping from hiding one logical comment.
-'''
+          old_header = (
+            '# Detection is deliberately per-line, not a full-file/multiline scan: every\n'
+            '# real instance found in this repository\'s own audit had the offending\n'
+            '# phrase entirely on one line, and a per-line grep keeps the false-positive\n'
+            '# surface small and the match easy to point at with a file:line reference.\n'
+            '# The known, accepted tradeoff is that a phrase awkwardly split across a\n'
+            '# line wrap would not be caught -- the same simplicity tradeoff this\n'
+            '# project\'s other line-oriented guards (e.g. check-file-headers.sh,\n'
+            '# check-workflow-line-limit.sh) already make.\n'
+          )
+          new_header = (
+            '# Detection checks each physical line and also joins adjacent hand-written\n'
+            '# comment lines before applying the same narrow chronology regex. The joined\n'
+            '# scan covers ordinary line-comment prefixes used by this repository plus the\n'
+            '# common first/continuation markers for block comments; it deliberately does\n'
+            '# not join arbitrary code lines, which keeps the false-positive surface small\n'
+            '# while preventing formatting/line-wrapping from hiding one logical comment.\n'
+          )
           if text.count(old_header) != 1:
             raise SystemExit(f'chronology guard header marker: expected one match, got {text.count(old_header)}')
           text = text.replace(old_header, new_header, 1)
@@ -340,41 +329,42 @@ jobs:
           line_scan = '    done < <(grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$path" || true)\n'
           if text.count(line_scan) != 1:
             raise SystemExit(f'chronology line-scan marker: expected one match, got {text.count(line_scan)}')
-          adjacent_scan = r'''
-
-    # Treat adjacent physical comment lines as one logical comment too. This
-    # catches review chronology split by formatting without joining arbitrary
-    # executable/source lines. The individual-line negatives avoid duplicate
-    # reports for a phrase already caught by the primary line scan above.
-    while IFS=$'\t' read -r first_line first_text second_text; do
-        [ -n "$first_line" ] || continue
-        joined="$first_text $second_text"
-        if grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$joined" \
-            && ! grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$first_text" \
-            && ! grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$second_text"; then
-            violations+=("$path:$first_line:$joined")
-        fi
-    done < <(
-        awk '
-            function is_comment(line) {
-                return line ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/
-            }
-            function payload(line) {
-                sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", line)
-                return line
-            }
-            {
-                current_is_comment = is_comment($0)
-                current = current_is_comment ? payload($0) : ""
-                if (previous_is_comment && current_is_comment) {
-                    printf "%d\t%s\t%s\n", NR - 1, previous, current
-                }
-                previous_is_comment = current_is_comment
-                previous = current
-            }
-        ' "$path"
-    )
-'''
+          adjacent_scan_lines = [
+            '',
+            '    # Treat adjacent physical comment lines as one logical comment too. This',
+            '    # catches review chronology split by formatting without joining arbitrary',
+            '    # executable/source lines. The individual-line negatives avoid duplicate',
+            '    # reports for a phrase already caught by the primary line scan above.',
+            '    while IFS=$\'\\t\' read -r first_line first_text second_text; do',
+            '        [ -n "$first_line" ] || continue',
+            '        joined="$first_text $second_text"',
+            '        if grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$joined" \\',
+            '            && ! grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$first_text" \\',
+            '            && ! grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$second_text"; then',
+            '            violations+=("$path:$first_line:$joined")',
+            '        fi',
+            '    done < <(',
+            '        awk \'',
+            '            function is_comment(line) {',
+            '                return line ~ /^[[:space:]]*(#|\\/\\/|--|\\/\\*|\\*|<!--|\\{#)/',
+            '            }',
+            '            function payload(line) {',
+            '                sub(/^[[:space:]]*(#|\\/\\/|--|\\/\\*|\\*|<!--|\\{#)[[:space:]]*/, "", line)',
+            '                return line',
+            '            }',
+            '            {',
+            '                current_is_comment = is_comment($0)',
+            '                current = current_is_comment ? payload($0) : ""',
+            '                if (previous_is_comment && current_is_comment) {',
+            '                    printf "%d\\t%s\\t%s\\n", NR - 1, previous, current',
+            '                }',
+            '                previous_is_comment = current_is_comment',
+            '                previous = current',
+            '            }',
+            '        \' "$path"',
+            '    )',
+          ]
+          adjacent_scan = '\n'.join(adjacent_scan_lines) + '\n'
           text = text.replace(line_scan, line_scan + adjacent_scan, 1)
           path.write_text(text, encoding='utf-8')
 
@@ -383,38 +373,39 @@ jobs:
           marker = '@test "passes on a plain \'manual review\' mention with no adjacent discovery verb" {\n'
           if text.count(marker) != 1:
             raise SystemExit(f'chronology bats insertion marker: expected one match, got {text.count(marker)}')
-          tests = '''@test "fails on the noun form 'review finding'" {
-    cat > "$fixture_root/example.yml" <<'EOF'
-on:
-  push:
-    # The isolation gap was a review finding on PR #764.
-    branches: [master]
-EOF
-
-    run bash "$script" "$fixture_root"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the review-finding line: $output"
-}
-
-@test "fails when 'review finding' is wrapped across adjacent comment lines" {
-    cat > "$fixture_root/example.yml" <<'EOF'
-on:
-  push:
-    # The isolation gap was a review
-    # finding on PR #764 and must not survive line wrapping.
-    branches: [master]
-EOF
-
-    run bash "$script" "$fixture_root"
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the first wrapped comment line: $output"
-}
-
-'''
+          test_lines = [
+            '@test "fails on the noun form \'review finding\'" {',
+            '    cat > "$fixture_root/example.yml" <<\'EOF\'',
+            'on:',
+            '  push:',
+            '    # The isolation gap was a review finding on PR #764.',
+            '    branches: [master]',
+            'EOF',
+            '',
+            '    run bash "$script" "$fixture_root"',
+            '    [ "$status" -eq 1 ]',
+            '    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the review-finding line: $output"',
+            '}',
+            '',
+            '@test "fails when \'review finding\' is wrapped across adjacent comment lines" {',
+            '    cat > "$fixture_root/example.yml" <<\'EOF\'',
+            'on:',
+            '  push:',
+            '    # The isolation gap was a review',
+            '    # finding on PR #764 and must not survive line wrapping.',
+            '    branches: [master]',
+            'EOF',
+            '',
+            '    run bash "$script" "$fixture_root"',
+            '    [ "$status" -eq 1 ]',
+            '    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the first wrapped comment line: $output"',
+            '}',
+            '',
+          ]
+          tests = '\n'.join(test_lines) + '\n'
           path.write_text(text.replace(marker, tests + marker, 1), encoding='utf-8')
           PY
 
-          # Validate the exact target tree, not this temporary executor's own source text.
           git rm -- .github/workflows/cdx-1522-comment-governance-audit.yml
 
       - name: Validate in immutable build-tools
