@@ -299,30 +299,14 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # DHCP_MODE/SYSLOG_ENABLED/LOGGING_ENABLED: watchdog.env
-    # is a static, non-templated file (see its own header), so these
-    # top-level .env values -- which do vary per install -- are passed the
-    # same way the `retention` service below already passes SYSLOG_ENABLED
-    # for its own syslog-ng retention gate. This container's own `command:`
-    # above execs watchdog.sh (bash), not the Rust crate, so in this LIVE
-    # container only watchdog.sh's own reads of these vars are actually
-    # exercised today; the Rust crate (services/watchdog/src/main.rs) reads
-    # DHCP_MODE and LOGGING_ENABLED too, but only its own `cargo test`
-    # suite exercises that until it becomes this service's real ENTRYPOINT
-    # (see services/watchdog/src/lib.rs's module doc comment) -- passing
-    # both here now means no further compose change is needed on that day.
-    # LOGGING_ENABLED gates whether the syslog container is considered part
-    # of this stack at all for alert-only monitoring, in both watchdog.sh
-    # and the Rust crate -- it must NOT be SYSLOG_ENABLED for that, since
-    # SYSLOG_ENABLED is a deliberately separate, narrower "double opt-in"
-    # for the storage-budget retention/pruning engine only (see
-    # deploy/prod/.env's own comment on it): a normal install with central
-    # logging on (LOGGING_ENABLED=1/`--profile logging` active) but
-    # retention/pruning never separately opted into (SYSLOG_ENABLED left at
-    # its default "false") legitimately runs the syslog container without
-    # ever setting SYSLOG_ENABLED, so gating health monitoring on
-    # SYSLOG_ENABLED alone left that container unmonitored by default on
-    # the common path.
+    # watchdog.env is static and cannot interpolate per-install top-level
+    # values. Pass the runtime presence gates here so watchdog.sh and the
+    # prepared Rust implementation see the same deployment state.
+    # LOGGING_ENABLED controls whether the combined syslog container exists
+    # for alert-only monitoring; SYSLOG_ENABLED remains the narrower
+    # retention/pruning opt-in. DHCP_MODE is consumed by the prepared Rust
+    # alert-only target resolver, while NTP_ENABLED gates the live Bash NTP
+    # alert-only target.
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
@@ -349,16 +333,10 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
-    # docker-socket-proxy is the one dependency every
-    # get_health()/restart_container() call in watchdog.sh
-    # goes through -- the plain list form only waited for that container to
-    # *start*, not for HAProxy inside it to actually be accepting connections
-    # on :2375. Narrow/self-healing in practice (HAProxy binds well within a
-    # second, and a missed first cycle self-corrects via get_health()'s own
-    # "unreachable" fallback), but docker-socket-proxy has carried a real
-    # HTTP healthcheck since #1169 (see its own service block above), so
-    # there is no longer a reason not to wait for genuine readiness instead
-    # of a bare "container exists" signal.
+    # Every Docker health read and restart call goes through this proxy.
+    # Require its /_ping healthcheck before watchdog starts so the first
+    # monitoring cycle has a working Docker API channel, not merely a created
+    # proxy container.
     depends_on:
       docker-socket-proxy:
         condition: service_healthy
@@ -685,25 +663,25 @@ services:
       # interfaces, matching how `dhcp`'s port 67/udp is published above.
       - "123:123/udp"
     # Least-privilege hardening (issue #1358): before this, `ntp` had only
-      # `cap_add: [SYS_TIME]` layered on top of Docker's full default
-      # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
-      # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
-      # proven necessary (same pattern as PR #1360's `retention` service, see
-      # its own comment in this file), removes every one of those unused
-      # defaults instead of relying on chronyd's own good behavior to not
-      # misuse them. This set was NOT guessed -- determined empirically on a
-      # real runner via `strace` against the real chronyd binary, starting
-      # from `cap_drop: ALL` and adding capabilities one at a time until each
-      # specific "Operation not permitted" error (each one tied to a specific
-      # syscall in the strace output) went away, INCLUDING a negative check
-      # (re-removing a capability that was added and confirming its specific
-      # failure comes back, not just adding until things looked fine) -- see
-      # the PR implementing this issue for the full session. Real end-to-end
-      # clock-stepping under this exact capability set is additionally
-      # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
-      # GitHub-hosted CI job, the only environment in this project's CI that
-      # runs on a real, non-LXC-nested kernel (see that script's own header) --
-      # kept in sync with this cap_add list; update both together.
+    # `cap_add: [SYS_TIME]` layered on top of Docker's full default
+    # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
+    # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
+    # proven necessary (same pattern as PR #1360's `retention` service, see
+    # its own comment in this file), removes every one of those unused
+    # defaults instead of relying on chronyd's own good behavior to not
+    # misuse them. This set was NOT guessed -- determined empirically on a
+    # real runner via `strace` against the real chronyd binary, starting
+    # from `cap_drop: ALL` and adding capabilities one at a time until each
+    # specific "Operation not permitted" error (each one tied to a specific
+    # syscall in the strace output) went away, INCLUDING a negative check
+    # (re-removing a capability that was added and confirming its specific
+    # failure comes back, not just adding until things looked fine) -- see
+    # the PR implementing this issue for the full session. Real end-to-end
+    # clock-stepping under this exact capability set is additionally
+    # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
+    # GitHub-hosted CI job, the only environment in this project's CI that
+    # runs on a real, non-LXC-nested kernel (see that script's own header) --
+    # kept in sync with this cap_add list; update both together.
     cap_drop:
       - ALL
     cap_add:
@@ -795,17 +773,17 @@ services:
 
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # Predeclared start/stop/wait helper for the Admin UI's "check for other
-      # DHCP servers" feature. Reuses the UI image, running the same lancache-ui
-      # binary in an alternate CLI mode (`--dhcp-probe`, see
-      # services/ui/src/dhcp_probe_native.rs) instead of the former separate
-      # dhcp-probe.sh script -- issue #1288 replaced that script's nmap/dhclient
-      # dependency (both EOL, dropped from current Alpine) with a native DHCPv4
-      # client speaking the wire protocol directly, so this image no longer
-      # installs either tool. The Admin UI stops then starts this container on
-      # demand and reads its output — it never creates or removes it — so the
-      # narrowed docker-socket-proxy only needs to permit start/restart, the same
-      # capability class already used for the NATS and proxy-ssl reload flows,
-      # not generic container creation.
+  # DHCP servers" feature. Reuses the UI image, running the same lancache-ui
+  # binary in an alternate CLI mode (`--dhcp-probe`, see
+  # services/ui/src/dhcp_probe_native.rs) instead of the former separate
+  # dhcp-probe.sh script -- issue #1288 replaced that script's nmap/dhclient
+  # dependency (both EOL, dropped from current Alpine) with a native DHCPv4
+  # client speaking the wire protocol directly, so this image no longer
+  # installs either tool. The Admin UI stops then starts this container on
+  # demand and reads its output — it never creates or removes it — so the
+  # narrowed docker-socket-proxy only needs to permit start/restart, the same
+  # capability class already used for the NATS and proxy-ssl reload flows,
+  # not generic container creation.
   dhcp-probe:
     container_name: lancache-dhcp-probe
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
@@ -908,20 +886,11 @@ services:
         jetstream {
           store_dir: /data
         }
-        # Monitor endpoint: nats-server shipped with no HTTP monitor
-        # listening (no http_port set), so the Docker healthcheck below saw
-        # a hard connection refused against :8222 on every attempt -- not a
-        # timing issue, the port simply never opened. Verified live against
-        # this pinned image (nats-server 2.14.3): once set, /healthz and
-        # /varz answer immediately after "Server is ready". Only reachable
-        # from other containers on this compose network -- not published to
-        # the host -- and carries no secrets of its own (nats-server's
-        # monitor endpoint has no built-in auth). (Corrected: this comment
-        # previously also credited this port to "Netdata's go.d NATS
-        # collector" -- checked against the real pinned netdata image and
-        # found false, see the nats service's own `networks:` comment below
-        # for the full correction; this endpoint's only real consumer is the
-        # Docker healthcheck.)
+        # Monitor endpoint: nats-server ships with no HTTP monitor listening
+        # unless http_port is configured. The Docker healthcheck therefore
+        # needs this internal-only port so /healthz can prove the server is
+        # answering. No active Netdata NATS collector consumes this endpoint
+        # in this stack.
         http_port: 8222
         # Central logging pipeline (#633): nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
@@ -1134,28 +1103,12 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # Corrected: a prior revision of this compose file put nats on BOTH
-    # `default` and `netdata-net`, on the premise that netdata's go.d.plugin
-    # runs an active NATS collector against this container's monitor
-    # endpoint (nats:8222) and would lose its route once netdata was scoped
-    # to netdata-net alone. That premise was never actually verified and
-    # does not hold: the real image this deployment pins
-    # (netdata/netdata@sha256:a130dbbf...) ships go.d's NATS collector with
-    # every job commented out by default (/usr/lib/netdata/conf.d/go.d/
-    # nats.conf has no active `jobs:` entry at all), so it makes zero
-    # connection attempts to anything; and even an operator-uncommented
-    # default job targets `http://127.0.0.1:8222` (localhost), never the
-    # Compose DNS name `nats`, so it could not reach this container over
-    # any network regardless. No go.d job config for nats is bind-mounted or
-    # baked into this stack anywhere (only `web_log.conf` is, for a
-    # different collector). nats therefore does not need netdata-net
-    # membership, and keeping it off that network is the correct, narrower
-    # isolation the netdata-network-scoping design intends -- putting nats
-    # on netdata-net would have been a real, if accidental, widening of
-    # exactly the access surface that scoping is meant to close (a
-    # compromised nats container could otherwise resolve and reach
-    # netdata:19999, since Compose bridge-network membership is
-    # bidirectional).
+    # NATS stays on the shared application network only. The pinned Netdata
+    # image has no active NATS go.d job, and its shipped default targets
+    # 127.0.0.1:8222 rather than the `nats` Compose name. This stack does not
+    # install a NATS collector override, so joining netdata-net would add no
+    # collector path and would unnecessarily expose Netdata's unauthenticated
+    # API to the NATS container.
     networks:
       - default
     restart: always
@@ -1254,13 +1207,13 @@ services:
       # has its permissions changed later.
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
     # Real dual-process check (services/syslog/healthcheck.sh): verifies
-      # fluent-bit AND syslog-ng independently and only reports healthy when
-      # both are, writing a structured per-process status file (including
-      # data_loss_alert_active) for a future Admin UI/watchdog integration --
-      # the granularity fix for the POC's own documented "one Docker
-      # HEALTHCHECK slot for two processes" gap. Already declared as this
-      # image's own Dockerfile HEALTHCHECK; redeclared here explicitly to
-      # match this compose file's existing per-service convention.
+    # fluent-bit AND syslog-ng independently and only reports healthy when
+    # both are, writing a structured per-process status file (including
+    # data_loss_alert_active) for a future Admin UI/watchdog integration --
+    # the granularity fix for the POC's own documented "one Docker
+    # HEALTHCHECK slot for two processes" gap. Already declared as this
+    # image's own Dockerfile HEALTHCHECK; redeclared here explicitly to
+    # match this compose file's existing per-service convention.
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 30s
@@ -1416,9 +1369,9 @@ services:
     networks:
       - default
       - docker-api
-      # Needed to reach netdata (NETDATA_URL below) now that netdata no
-      # longer sits on `default` -- see the netdata service's own comment
-      # for why.
+      # NETDATA_URL points at the isolated Netdata service, so the UI must
+      # join the dedicated metrics network in addition to its existing
+      # application and Docker API networks.
       - netdata-net
     # The dashboard and recovery surface must remain startable even if the
     # Docker API proxy is unhealthy. Only container creation is required for
@@ -1574,21 +1527,11 @@ services:
       retries: 3
       start_period: 20s
     restart: always
-    # netdata never publishes a host port (grepped every
-    # deploy/*/docker-compose.yml for "19999" --
-    # only ever the internal NETDATA_URL env var or a container-local
-    # healthcheck). An explicit `networks:` entry below is required for
-    # netdata: leaving it unset would put netdata on the same implicit
-    # shared `default` network as every other real service (dns, proxy,
-    # dhcp, nats, ...), letting any one of them reach netdata's full,
-    # unauthenticated HTTP API (`/api/v1/alarms`, `/api/v1/allmetrics`,
-    # etc., not just the two endpoints the Admin UI's own proxy allowlist
-    # restricts its own outbound calls to) directly at
-    # http://netdata:19999. Only the Admin UI actually needs to reach
-    # netdata (NETDATA_URL below); scoping netdata to its own dedicated
-    # network -- not `internal: true`, since netdata's own image may still
-    # need outbound internet access for its own operation -- keeps every
-    # other lancache-ng container unable to resolve or reach it at all.
+    # Netdata exposes an unauthenticated HTTP API internally and publishes no
+    # host port. Keep it off the shared default bridge so arbitrary sibling
+    # containers cannot reach that API directly; only the UI joins netdata-net.
+    # The network is not internal because the upstream Netdata image may need
+    # outbound access for its own operation.
     networks:
       - netdata-net
     logging:
@@ -1600,10 +1543,8 @@ services:
 networks:
   docker-api:
     internal: true
-  # Dedicated to netdata + the Admin UI (the only real caller, via
-  # NETDATA_URL) -- see the netdata
-  # service's own comment above for why this exists as a separate network
-  # rather than netdata staying on `default`.
+  # Dedicated to Netdata and the Admin UI, the only bridge-networked caller
+  # of NETDATA_URL.
   netdata-net: {}
 
 volumes:
