@@ -17,6 +17,15 @@ def remove_named_step(text: str, name: str, expected: int = 1) -> str:
 build_path = Path('.github/workflows/build-push.yml')
 build = build_path.read_text(encoding='utf-8')
 build = remove_named_step(build, 'Build full-setup validation image')
+stale_buildx_comment = '''      # This is the last step in the job that uses the builder set up above --
+      # "Build full-setup validation image" below is a plain `docker build`,
+      # not buildx. Same `pr-staging-available` gate as the setup step itself,
+      # since there is nothing to remove when that step never ran.
+
+'''
+if build.count(stale_buildx_comment) != 1:
+    raise SystemExit(f'stale buildx comment: expected exactly one match, got {build.count(stale_buildx_comment)}')
+build = build.replace(stale_buildx_comment, '', 1)
 cleanup_pattern = re.compile(
     r"(?ms)^      - name: Clean up image\n"
     r"        if: always\(\)\n"
