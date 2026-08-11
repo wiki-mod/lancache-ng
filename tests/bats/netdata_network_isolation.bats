@@ -2,21 +2,18 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Drift guard: netdata's own HTTP API (port 19999) is never published to
-# the host in any real
-# deployment, but leaving it without an explicit `networks:` entry would
-# put it on the same implicit shared `default` Compose network as every
-# other real service (dns, proxy, dhcp, nats, ...) -- any one of them could
-# then reach netdata's full, unauthenticated API directly, not just the two
-# endpoints the Admin UI's own outbound proxy allowlist restricts itself to.
-# Scoping netdata to a dedicated `netdata-net` network shared only with the
-# Admin UI (the sole real caller, via NETDATA_URL) closes that exposure.
+# Drift guard for Netdata network isolation in the real deployment profiles.
+# Netdata's unauthenticated HTTP API is scoped to a dedicated `netdata-net`
+# bridge shared only with the Admin UI among bridge-networked services.
+# Host-networked DHCP services are a deliberate boundary of that mechanism:
+# `network_mode: host` bypasses Compose bridge membership entirely, so their
+# route to Docker bridge addresses cannot be removed by omitting netdata-net.
+# These checks keep both the isolation and that explicit limitation visible.
+#
 # This is a structural text scan of the real
-# deploy/{prod,quickstart}/docker-compose.yml files (not a fixture) --
-# `docker compose config` needs a populated `.env` and Docker to run at all
-# (see scripts/check-compose-healthchecks.sh's identical reasoning for why
-# it also avoids that path), so this mirrors that script's own
-# service-block-extraction approach instead.
+# deploy/{prod,quickstart}/docker-compose.yml files (not a fixture).
+# `docker compose config` remains a separate validation layer because these
+# deployment files need populated environment values to resolve fully.
 
 bats_require_minimum_version 1.5.0
 
@@ -28,12 +25,8 @@ setup() {
     )
 }
 
-# extract_service_block <compose-file> <service-name>
-# Prints the exact lines of one top-level service's block (from its own
-# "  <name>:" line up to, but excluding, the next 2-space-indented service
-# key or top-level key) -- same boundary rule
-# scripts/check-compose-healthchecks.sh's check_file() already established
-# and relies on for this repo's real compose file indentation shape.
+# The helper stops at the next top-level service so network declarations from
+# neighboring services cannot accidentally satisfy the target assertion.
 extract_service_block() {
     local file="$1" service="$2"
     awk -v svc="  ${service}:" '
@@ -44,6 +37,8 @@ extract_service_block() {
     ' "$file"
 }
 
+# Isolation requires an explicit dedicated network in each real deployment;
+# an undeclared name would make the service-level membership invalid.
 @test "both deploy files declare a dedicated netdata-net top-level network" {
     for f in "${compose_files[@]}"; do
         grep -qE '^  netdata-net:' "$f" || {
@@ -53,6 +48,9 @@ extract_service_block() {
     done
 }
 
+# Netdata must not regain implicit or explicit membership in the application
+# bridge, because that would expose its unauthenticated API to every sibling
+# container on that bridge.
 @test "netdata's own service block is scoped to netdata-net, not the shared default network" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" netdata)"
@@ -65,11 +63,8 @@ extract_service_block() {
             echo "netdata service block in $f does not list netdata-net" >&2
             return 1
         }
-        # Docker Compose accepts network membership in either list form
-        # (`- default`) or map form (`default: {}`/`default:` with nested
-        # keys) -- both must be rejected, or a map-form rewrite could
-        # silently reconnect netdata to the shared network while this test
-        # still passed.
+        # Docker Compose accepts network membership in either list form or
+        # map form, so both representations must be rejected here.
         if grep -qE '^      (- default$|default:)' <<< "$block"; then
             echo "netdata service block in $f still lists the shared 'default' network (list or map form) -- isolation regressed" >&2
             return 1
@@ -77,7 +72,9 @@ extract_service_block() {
     done
 }
 
-@test "the Admin UI's service block joins netdata-net (the only real caller of NETDATA_URL)" {
+# The UI is the bridge-networked consumer of NETDATA_URL, so removing this
+# membership would turn isolation into an availability regression.
+@test "the Admin UI's service block joins netdata-net (the only bridge-networked caller of NETDATA_URL)" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" ui)"
         [ -n "$block" ]
@@ -88,45 +85,49 @@ extract_service_block() {
     done
 }
 
-@test "nats does not join netdata-net (no real collector needs it, checked against the pinned image)" {
-    # Regression guard for a real incident: a prior revision of this stack
-    # put `nats` on both `default` and `netdata-net`, on the premise that
-    # netdata's go.d.plugin runs an active NATS collector against
-    # `nats:8222` that would otherwise lose its route once netdata was
-    # scoped off the shared network. That premise was checked directly
-    # against the real pinned netdata image (netdata/netdata@sha256:
-    # a130dbbf...) and found false: /usr/lib/netdata/conf.d/go.d/nats.conf
-    # ships with every job commented out by default (no active job at all),
-    # and even an operator-enabled default job targets `127.0.0.1`, never
-    # the `nats` Compose DNS name, so it could never reach this container
-    # over any network regardless. Putting `nats` on `netdata-net` would
-    # only widen the access surface this file's other tests exist to close
-    # (bridge-network membership is bidirectional), so it must stay off
-    # that network.
+# The pinned Netdata image has no active NATS go.d job in this stack, and its
+# stock NATS job targets loopback rather than the Compose DNS name. Giving NATS
+# netdata-net membership would therefore only widen access to Netdata's API.
+@test "nats does not join netdata-net because no active collector route requires it" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" nats)"
         [ -n "$block" ]
-        # Matches the real YAML membership shapes only (list-item or
-        # map-key), not a bare substring -- this service's own block
-        # carries an explanatory comment that mentions "netdata-net" in
-        # prose several times (documenting exactly why it must NOT be a
-        # member), which a naive substring check would misread as the
-        # network entry itself.
+        # Match YAML membership shapes rather than a bare substring because
+        # explanatory comments may legitimately contain the network name.
         if grep -qE '^      (- netdata-net$|netdata-net:)' <<< "$block"; then
-            echo "nats service block in $f lists netdata-net -- this is an unnecessary widening of netdata's isolated network, not a required route (checked against the real pinned netdata image, see this test's own comment)" >&2
+            echo "nats service block in $f lists netdata-net -- this unnecessarily widens Netdata API reachability" >&2
             return 1
         fi
     done
 }
 
+# Host networking shares the host routing table and is not constrained by
+# Compose bridge membership. Keep this topology explicit so a future change
+# cannot silently turn a documented isolation limitation into a false claim.
+@test "host-network DHCP services remain an explicit boundary of Compose Netdata isolation" {
+    local service
+    for f in "${compose_files[@]}"; do
+        for service in dhcp dhcp-proxy dhcp-probe; do
+            block="$(extract_service_block "$f" "$service")"
+            [ -n "$block" ] || {
+                echo "$service service block is missing from $f" >&2
+                return 1
+            }
+            [[ "$block" == *"network_mode: host"* ]] || {
+                echo "$service in $f no longer uses network_mode: host; update the Netdata isolation boundary and its documentation together" >&2
+                return 1
+            }
+            if grep -qE '^      (- netdata-net$|netdata-net:)' <<< "$block"; then
+                echo "$service in $f declares netdata-net despite using host networking; Compose network membership cannot provide isolation in this mode" >&2
+                return 1
+            fi
+        done
+    done
+}
+
+# Compose accepts both list and map syntax, so the guard itself needs a
+# negative fixture proving map-form default membership cannot bypass it.
 @test "the default-network rejection catches map-form membership, not only list form" {
-    # Regression case: Docker Compose accepts networks: as either a list
-    # (- default) or a map (default: {}). A guard that only greps for the
-    # list-item spelling would pass a map-form rewrite that silently
-    # reconnects netdata to the shared network -- reproduced here against a
-    # small throwaway fixture, not this repo's real compose files, since
-    # neither real file currently uses map form and this test exists to
-    # prove the guard's own regex, not the real files' current content.
     local fixture; fixture="$(mktemp)"
     cat > "$fixture" <<'EOF'
   netdata:
