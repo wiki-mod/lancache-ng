@@ -67,7 +67,13 @@ jobs:
           printf 'current_dev=%s\nlegacy_head=%s\nmerge_base=%s\n' \
             "$CURRENT_DEV_SHA" "$LEGACY_HEAD" "$merge_base"
 
-          if git merge --no-commit --no-ff "$LEGACY_HEAD"; then
+          # Git requires a committer identity before this merge form even with
+          # --no-commit. Scope the synthetic identity to this command so no
+          # persistent runner or repository configuration is changed.
+          if git \
+            -c user.name='LanCache-NG CI Diagnostic' \
+            -c user.email='ci-diagnostic@users.noreply.github.com' \
+            merge --no-commit --no-ff "$LEGACY_HEAD"; then
             merge_status=0
           else
             merge_status=$?
