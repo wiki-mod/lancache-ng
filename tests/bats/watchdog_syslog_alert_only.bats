@@ -2,24 +2,15 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for services/watchdog/watchdog.sh's syslog-ng healthcheck (part
-# of the combined syslog+fluent-bit container's own dual-process
-# HEALTHCHECK): real but orphaned -- nothing in the stack consumed it (no
-# autoheal, and watchdog.sh's own
-# check_and_maybe_restart() loop only ever monitored three hardcoded
-# containers). This adds alert-only monitoring (never restart-capable --
-# scripts/docker-socket-proxy.sh's safe_service_restart ACL does not permit
-# a restart POST for this container, see check_alert_only()'s own comment),
-# gated on LOGGING_ENABLED the same way SSL_ENABLED gates C_DNS_SSL
-# monitoring -- NOT on SYSLOG_ENABLED, a deliberately separate, narrower
-# flag that only gates the storage-budget retention/pruning engine (see
-# deploy/prod/.env's own comment on it and watchdog.sh's C_SYSLOG
-# assignment for the full reasoning this file's own tests below prove).
+# Coverage for alert-only monitoring of the combined syslog and fluent-bit
+# container. Its own dual-process Docker HEALTHCHECK proves both processes,
+# while watchdog consumes that health state without ever making the service
+# restart-capable. LOGGING_ENABLED controls whether this optional container
+# exists; SYSLOG_ENABLED is deliberately narrower and only gates the storage
+# retention/pruning engine, so it must not control health monitoring.
 #
-# Mirrors watchdog_docker_socket_proxy_probe.bats's structure closely, since
-# check_alert_only() is the generalized form of that file's
-# probe_docker_socket_proxy() for a per-container Docker-API health check
-# rather than a bare /_ping reachability probe.
+# The helper-level tests mirror the Docker proxy alert probe's structure while
+# exercising the generalized per-container health path used by syslog.
 
 bats_require_minimum_version 1.5.0
 
@@ -31,9 +22,8 @@ setup() {
     export SSL_ENABLED=0
     export CACHE_DIR="$BATS_TEST_TMPDIR"
     export STATUS_FILE="$status_file"
-    # C_SYSLOG is resolved once at source time from LOGGING_ENABLED (mirrors
-    # C_DNS_SSL's own SSL_ENABLED-gated resolution) -- must be exported
-    # before load_watchdog_functions sources the extracted range below.
+    # C_SYSLOG is resolved once at source time from LOGGING_ENABLED, so the
+    # gate must be exported before the helper range is sourced below.
     export LOGGING_ENABLED=1
 
     # shellcheck source=tests/bats/helpers/watchdog-helpers.sh
@@ -80,13 +70,9 @@ setup() {
 }
 
 @test "C_SYSLOG stays non-empty when LOGGING_ENABLED is truthy but SYSLOG_ENABLED is falsy" {
-    # Real bug this test guards against: LOGGING_ENABLED and SYSLOG_ENABLED
-    # are deliberately separate flags (see this file's header and
-    # watchdog.sh's own C_SYSLOG comment) -- a normal install with central
-    # logging on but retention/pruning never separately opted into runs the
-    # syslog container with SYSLOG_ENABLED left at its default "false".
-    # C_SYSLOG must resolve purely from LOGGING_ENABLED and must not be
-    # affected by SYSLOG_ENABLED's own value either way.
+    # A normal deployment may enable central logging while leaving the
+    # independent retention/pruning opt-in disabled. Health monitoring must
+    # therefore derive solely from LOGGING_ENABLED.
     LOGGING_ENABLED=1 SYSLOG_ENABLED=false \
         load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-logging-only.sh"
     [ "$C_SYSLOG" = "lancache-syslog" ] || {
@@ -96,20 +82,11 @@ setup() {
 }
 
 @test "C_SYSLOG carries LANCACHE_CONTAINER_SUFFIX when one is set (issue #1415 coordinated-suffix shape)" {
-    # Real bug this test guards against: deploy/quickstart/docker-compose.yml
-    # and the syslog-forwarding simulation both name this container
-    # lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}, and
-    # scripts/docker-socket-proxy.sh's own generated HAProxy allowlist
-    # rewrites its lancache-syslog ACL entry with the identical suffix at
-    # startup -- C_SYSLOG must match, or every watchdog inspect request in
-    # a suffixed deployment targets a container that does not exist.
-    # The FATAL guards further down this file's own sourced range require a
-    # COORDINATED suffix -- every CONTAINER_* override must carry the same
-    # suffix as LANCACHE_CONTAINER_SUFFIX itself, or this correctly refuses
-    # to start (see EXPECTED_PROXY/etc. and their own FATAL checks). Setting
-    # only LANCACHE_CONTAINER_SUFFIX without the matching CONTAINER_*
-    # overrides is the mismatched-suffix case those guards exist to reject,
-    # not the scenario this test is exercising.
+    # Isolated validation stacks suffix every coordinated container name and
+    # the Docker proxy allowlist with the same value. C_SYSLOG must match that
+    # contract or watchdog would inspect a container name that does not exist.
+    # The FATAL guards in watchdog.sh require every explicit CONTAINER_* name
+    # to carry the same suffix, so this fixture supplies the coordinated set.
     LANCACHE_CONTAINER_SUFFIX="ci7x9q" \
     CONTAINER_PROXY="lancache-proxyci7x9q" \
     CONTAINER_DNS_STANDARD="lancache-dns-standardci7x9q" \
@@ -144,13 +121,10 @@ setup() {
 }
 
 @test "check_alert_only treats 'unreachable' as a failure, the same as 'unhealthy'" {
-    # Real bug this test guards against: get_health() returns "unreachable"
-    # (not "unhealthy") when the container is absent, unresponsive, or the
-    # docker-socket-proxy call itself fails -- exactly the "enabled but not
-    # actually running" outage this alert-only monitoring exists to
-    # surface. An earlier version of check_alert_only() only matched the
-    # literal string "unhealthy", silently ignoring this case entirely: no
-    # failure-counter increment, no UNHEALTHY log line, ever.
+    # get_health() reports "unreachable" when the container is absent,
+    # unresponsive, or the Docker proxy request fails. That is a real outage
+    # for an enabled alert-only service and must increment the same counter as
+    # Docker's explicit "unhealthy" state.
     get_health() { printf 'unreachable\n'; }
 
     check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
@@ -162,10 +136,8 @@ setup() {
 }
 
 @test "check_alert_only still treats 'starting' and 'none' as non-failures, not just 'healthy'" {
-    # 'starting' (Docker's own healthcheck grace period) and 'none' (no
-    # healthcheck configured/reported yet) are normal transient states, not
-    # outages -- the 'unreachable' fix above must not overreach into
-    # flagging these too.
+    # Docker's starting grace period and a service without a reported health
+    # state are not failures. Treating them as outages would create false alerts.
     for state in starting none; do
         F_SYSLOG=0
         get_health() { printf '%s\n' "$state"; }
@@ -178,14 +150,10 @@ setup() {
 }
 
 @test "check_alert_only resets the failure counter on an intervening 'starting'/'none' reading, not only 'healthy'" {
-    # Resetting the counter only in the "healthy" branch would let a
-    # failure streak survive untouched through an
-    # intervening "starting"/"none" reading -- unhealthy -> starting ->
-    # unhealthy reported the second event as "2 consecutive failures" even
-    # though the container was never actually observed failing twice in a
-    # row without an intervening non-failure reading. Matches the Rust
-    # rewrite's AlertCounter::record(), which resets on every
-    # is_alert_ok() reading (Healthy/Starting/None all count equally).
+    # A consecutive-failure counter must reset on every non-failure reading.
+    # Otherwise unhealthy -> starting -> unhealthy would be counted as two
+    # consecutive failures even though the observations are not consecutive.
+    # This matches the Rust AlertCounter::record() is_alert_ok() semantics.
     for intervening in starting none; do
         F_SYSLOG=0
         get_health() { printf 'unhealthy\n'; }
@@ -230,21 +198,17 @@ setup() {
     [ "$output" = "true" ]
 }
 
-# The dashboard must never show a permanently "unhealthy"/never-existed
-# container for an install that never opted into the logging profile in the
-# first place -- omitted entirely, not merely zeroed out, mirrors how
-# ssl_services is omitted (not emitted with dummy values) when SSL_ENABLED
-# is falsy.
+# An install that never enabled central logging has no syslog container to
+# report. Omitting the service entirely avoids a permanent false dashboard
+# alarm and mirrors the optional SSL service behavior.
 @test "write_status omits the syslog block entirely when LOGGING_ENABLED is falsy" {
     unset LOGGING_ENABLED
     load_watchdog_functions "$repo_root" "$BATS_TEST_TMPDIR/reload-omit.sh"
     [ -z "$C_SYSLOG" ]
 
     write_status
-    # `jq -e` exits 1 (not 0) whenever the filter's own output is `false` or
-    # `null` -- that is the entire point of `-e`, so a genuinely-absent key
-    # (has() itself evaluating to false, asserted via $output below) must be
-    # paired with status 1 here, not 0.
+    # `jq -e` exits 1 when the filter evaluates to false or null. A genuinely
+    # absent key therefore has status 1 while the captured output is `false`.
     run jq -e '.services | has("lancache-syslog")' "$status_file"
     [ "$status" -eq 1 ]
     [ "$output" = "false" ]
