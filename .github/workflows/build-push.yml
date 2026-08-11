@@ -5338,21 +5338,8 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build:
-    # This job is the only place that publishes service sha-* images. It stays on
-    # self-hosted runners because the heavy Rust/image path depends on the shared
-    # build-tools image, sccache/distcc acceleration, and registry credentials. It still
-    # waits for lightweight validation, policy checks, and trusted-ref vulnerability
-    # scans before publishing. UPDATED (Step 3, issue #1095): for every service
-    # (originally build-tools only), it also scans the exact pushed digest before
-    # attestation/promotion can proceed -- see "Scan pushed service digest with Trivy"
-    # below.
-    #
-    # Also skipped on a metadata-only pull_request event -- see the trigger's own
-    # `types:` comment at the top of this file. Those events never carry a new commit, so
-    # there is no new image content for this job to build or push -- a prior run already
-    # published the sha-* (and, on a same-repo PR, pr-<N>-sha-<short>) tags for this exact
-    # commit. merge-manifests/full-setup-validate downstream already tolerate a skipped
-    # build/build-arm64 cleanly via their own `needs.build.result == 'success'` gates.
+    # Same-repository candidates keep their pushed digest through scan and downstream assembly.
+    # Metadata-only PR events reuse the prior commit because they carry no new image content.
     needs:
       - shellcheck
       - validate-compose
@@ -5385,41 +5372,11 @@ jobs:
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
-    # Per-service runner selection (issue #1095, AG-CI-002 measured exception): mirrors
-    # container-scan's own `${{ fromJSON(matrix.runner) }}` pattern -- see this job's
-    # matrix comment above for which services route to light vs heavy and why.
+    # Compile-heavy services use heavy capacity; lighter image assembly stays on light runners.
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 150
-    # Job-level concurrency (#888, keyed per matrix service and per ref). CANONICAL
-    # RATIONALE for this whole workflow's channel publish path -- container-scan/
-    # build-arm64 and the shellcheck/validate-compose/line-endings/ci_scope_policy gates
-    # all point here for the full story.
-    #
-    # cancel-in-progress is scoped to pull_request events ONLY (issue #979). On a PR, a
-    # newer push to the same branch supersedes the older commit, so cancelling the older
-    # service build reclaims a scarce self-hosted slot (heavy or light, per matrix.runner
-    # above -- otherwise pinned for the full ~150-minute timeout) with no downside: a PR's own commits are never promoted to a
-    # channel, GHCR tag writes are atomic (a cancelled build leaves no corrupt or
-    # partially-visible sha-* tag), and merge-manifests already requires
-    # `needs.build.result == 'success'`, so a cancelled build cleanly stops the pipeline.
-    #
-    # On push/tag it must NOT cancel. This branch build is what publishes the commit's
-    # sha-* images that promote turns into the latest/nightly channel (#825/#1141: master
-    # -> latest, current_dev -> nightly). The top-level group uses a run_id-scoped key for
-    # push (never collides), so a rapid merge cascade runs every push's build fully in
-    # parallel with no throttle. With cancel-in-progress:true each new push tore down the
-    # previous push's in-progress build before it finished; in a fast enough cascade NO
-    # build completed for 90+ minutes, starving the channel and failing #808's freshness
-    # gate on unrelated PRs (issue #979, a recurrence of #777's starvation one layer
-    # below the promote job). With cancel false the in-progress build always survives to
-    # completion; the channel still advances toward HEAD because GitHub keeps only the
-    # newest pending run per group regardless of this flag (see promote's #897 comment),
-    # and #808 needs the base channel built at-or-after a PR's base commit, not exactly at
-    # it. Release (tag) builds are unaffected: a tag ref never collides.
-    #
-    # The group key still isolates workflow_dispatch and reruns with a run_id suffix so a
-    # PR rerun cannot cancel the original PR run's build; on push/tag the flag is false
-    # anyway.
+    # Obsolete PR builds may be cancelled to reclaim runners; push/tag candidates must survive for publication.
+    # Dispatches and reruns include the run id so separate attempts cannot cancel each other.
     concurrency:
       group: >-
         ${{
@@ -5439,24 +5396,12 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
-          # decision 2026-08-06) are this rule's canonical copy: proxy/dhcp-proxy/
-          # watchdog/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles
-          # (precompiled package install or a COPY --from an upstream image only,
-          # confirmed by direct inspection, not assumed from the service name) and
-          # measured well below dns/ui/build-tools in a real full-rebuild run -- see issue
-          # #1095's comment thread for the numbers. dns/ui (Rust via ${BUILD_TOOLS_IMAGE})
-          # and build-tools (Go+Rust) stay heavy. watchdog is scoped to its CURRENT
-          # Dockerfile only: issue #842's planned Rust rewrite must trigger a fresh
-          # re-evaluation, not a grandfathered stay on light. container-scan's own matrix
-          # mirrors this split (kept in sync manually) even though it no longer builds
-          # anything itself (G8 fix) -- see that job's own comment for why it still cares.
+        include: &normal-build-services
+          # Package/COPY-only images use light runners; compile-heavy services stay on heavy capacity.
+          # Re-evaluate a service tier if its Dockerfile gains real compile or link work.
           - service: proxy
             context: services/proxy
-            # cdn-domains.txt lives in services/dns/, outside this image's own
-            # build context — see services/proxy/Dockerfile's COPY --from
-            # comment for why a named additional context is needed here.
+            # Proxy needs DNS domain data that lives outside its own build context.
             build_contexts: dns-domains=services/dns
             description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -6303,17 +6248,8 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
 
   build-arm64:
-    # Native linux/arm64 leg of the same publish contract as build above. Runs on a
-    # GitHub-hosted arm64 runner (free for this public repo, GA since 2026-08-07) instead
-    # of QEMU on the self-hosted amd64 pool, so ui/dns compile Rust natively rather than
-    # emulated. This runner is outside the self-hosted LAN and cannot reach Redis-backed
-    # sccache, sccache-dist, or distcc -- see docs/self-hosted-actions-runner.md.
-    # merge-manifests below combines this job's per-service linux/arm64 tag with build's
-    # linux/amd64 tag into the real sha-<commit> multi-platform tag; this job never writes
-    # that tag directly.
-    #
-    # Also skipped on a metadata-only pull_request event -- see `build`'s identical
-    # comment above.
+    # Native arm64 candidates mirror the amd64 artifact contract before manifest assembly.
+    # Metadata-only PR events reuse the prior commit because they carry no new image content.
     needs:
       - shellcheck
       - validate-compose
@@ -6348,14 +6284,8 @@ jobs:
       }}
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
-    # Job-level concurrency, mirroring `build` (the amd64 leg) exactly, and for the same
-    # reasons -- see `build`'s group comment for the full #979 rationale.
-    # cancel-in-progress is pull_request-only: merge-manifests needs this native arm64
-    # leg's success, so on push it is on the channel publish path and must survive to
-    # completion (cancelling it in a merge cascade starves the channel exactly like
-    # cancelling `build`). On a PR, a superseded commit's arm64 leg is wasted work
-    # merge-manifests can never use, so cancelling it there reclaims arm64 runner
-    # capacity. Same workflow_dispatch/rerun run_id isolation as `build`'s group.
+    # Obsolete PR arm64 work may be cancelled; push/tag candidates must survive for manifest assembly.
+    # Dispatches and reruns use isolated concurrency keys.
     concurrency:
       group: >-
         ${{
@@ -6375,45 +6305,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - service: proxy
-            context: services/proxy
-            build_contexts: dns-domains=services/dns
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
-          - service: dns
-            context: services/dns
-            build_contexts: ""
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
-            rust: true
-          - service: watchdog
-            context: services/watchdog
-            build_contexts: ""
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
-          - service: dhcp
-            context: services/dhcp
-            build_contexts: ""
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
-          - service: dhcp-proxy
-            context: services/dhcp-proxy
-            build_contexts: ""
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
-          - service: ntp
-            context: services/ntp
-            build_contexts: ""
-            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
-          - service: syslog
-            context: services/syslog
-            build_contexts: ""
-            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
-          - service: ui
-            context: services/ui
-            build_contexts: ""
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
-            rust: true
-          - service: build-tools
-            context: tools/build-tools
-            build_contexts: ""
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
+        include: *normal-build-services
 
     steps:
       - name: Checkout
