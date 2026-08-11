@@ -838,6 +838,10 @@ services:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
+      # Compose only passes explicitly listed host/.env variables into this
+      # container. Keep the retry cooldown listed here so an operator override
+      # reaches retention.sh instead of silently falling back to its 3600s default.
+      - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
@@ -1141,6 +1145,9 @@ services:
       - SSL_LOG=/var/log/nginx/access.log
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
+      # Netdata and the UI resolve the same shared token so forwarded alarms
+      # authenticate without hardcoding a credential into either container.
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN:-}
       - STANDARD_IP=${IP_STANDARD}
       - SSL_IP=${IP_SSL}
       - LANCACHE_IMAGE_REGISTRY=${LANCACHE_IMAGE_REGISTRY:-ghcr.io}
@@ -1203,15 +1210,13 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
-    # See deploy/prod/docker-compose.yml's identical `depends_on:` for this
-    # service for the full reasoning (waits for docker-socket-proxy's real
-    # HTTP healthcheck instead of a bare "container exists" signal).
-    # proxy/netdata/nats keep `service_started` (the exact behavior the
-    # plain list form already had); Compose's map form requires every entry
-    # in one `depends_on:` block to use the same syntax.
+    # The dashboard and recovery surface must remain startable even if the
+    # Docker API proxy is unhealthy. Only container creation is required for
+    # UI startup; Docker-backed actions can surface their own degraded state.
+    # The other dependencies retain the same ordering-only behavior.
     depends_on:
       docker-socket-proxy:
-        condition: service_healthy
+        condition: service_started
       proxy:
         condition: service_started
       netdata:
@@ -1255,7 +1260,8 @@ services:
     # no services/ directory -- see setup.sh's install_quickstart_compose_
     # assets()), so this entrypoint override writes a netdata.conf that
     # redirects daemon/health to real files under
-    # /var/log/netdata/*.file.log, then execs the image's own entrypoint.
+    # /var/log/netdata/*.file.log, then writes the web_log job and alarm
+    # notification override before execing the image's own entrypoint.
     # netdata-logs shares that path with fluent-bit, which tails those real
     # files read-only. collector/access/debug stay on their stdout defaults
     # and are NOT collected: collector is extremely high-rate internal
@@ -1288,8 +1294,48 @@ services:
           - name: nginx_proxy
             path: /var/log/lancache/nginx-proxy.log
         CONF
+        # Resolve a shared alarm token before installing the custom notification
+        # sender. Quickstart ships the same helper used by the NATS bootstrap.
+        . /usr/local/lib/shared-secret-bootstrap.sh
+        if secret_is_placeholder "$$NETDATA_ALARM_TOKEN"; then NETDATA_ALARM_TOKEN=""; fi
+        if ! NETDATA_ALARM_TOKEN="$$(resolve_shared_secret netdata-alarm-token "$$NETDATA_ALARM_TOKEN" lancache_gen_hex32)"; then
+          echo "[lancache-netdata] FATAL: NETDATA_ALARM_TOKEN is unset/placeholder and the shared-secrets volume is not writable, so no shared token could be generated." >&2
+          echo "[lancache-netdata] Mount the shared-secrets volume, or set NETDATA_ALARM_TOKEN to a real value (openssl rand -hex 32)." >&2
+          exit 1
+        fi
+        umask 077
+        printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
+        chmod 0600 /etc/netdata/.netdata-alarm-token
+        # The notification process runs as the unprivileged netdata user after
+        # setup, so it must own the protected token file it reads at alarm time.
+        chown netdata:netdata /etc/netdata/.netdata-alarm-token
+        cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
+        # shellcheck disable=SC2154
+        # Netdata populates these alarm fields before invoking custom_sender().
+        # shellcheck disable=SC2034
+        # Netdata reads these activation variables after sourcing this override.
+        SEND_CUSTOM="YES"
+        DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
+        _lancache_json_escape() {
+          printf '%s' "$$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
+        }
+        custom_sender() {
+          local token
+          token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
+          docurl -s --max-time 15 \
+            -X POST \
+            -H "Content-Type: application/json" \
+            -H "X-Netdata-Alarm-Token: $${token}" \
+            -d "{\"unique_id\":$${unique_id},\"alarm_id\":$${alarm_id},\"event_id\":$${event_id},\"when\":$${when},\"name\":\"$$(_lancache_json_escape "$${name}")\",\"chart\":\"$$(_lancache_json_escape "$${chart}")\",\"host\":\"$$(_lancache_json_escape "$${host}")\",\"status\":\"$$(_lancache_json_escape "$${status}")\",\"old_status\":\"$$(_lancache_json_escape "$${old_status}")\",\"value_string\":\"$$(_lancache_json_escape "$${value_string}")\",\"units\":\"$$(_lancache_json_escape "$${units}")\",\"info\":\"$$(_lancache_json_escape "$${info}")\",\"duration\":$${duration}}" \
+            "http://ui:8080/api/netdata-alarms" >/dev/null 2>&1
+        }
+        ALARMCONF
         exec /usr/sbin/run.sh
     volumes:
+      # This upstream image has no project entrypoint in which to embed the
+      # helper, so mount quickstart's installed canonical copy explicitly.
+      - shared-secrets:/var/lib/lancache-secrets
+      - ./scripts/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata
       - netdatalib:/var/lib/netdata
       - netdatacache:/var/cache/netdata
@@ -1298,6 +1344,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - netdata-logs:/var/log/netdata
       - logs:/var/log/lancache:ro
+    environment:
+      - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN:-}
     healthcheck:
       # Real HTTP probe against netdata's own REST API (#1169), matching the
       # check deploy/full-setup/docker-compose.yml's validation stack already
