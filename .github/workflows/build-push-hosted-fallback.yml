@@ -92,10 +92,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # This overflow workflow carries build-specific metadata in addition
-          # to the canonical service names from release/stack-images.yml. Keep
-          # this table aligned with build-push.yml; scripts/check-workflow-
-          # service-lists.sh verifies the service-set side of that contract.
+          # This separate workflow mirrors build-specific metadata from build-push.yml.
+          # The service-list guard compares the service set and metadata against that matrix.
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
           declare -A contexts=(
             [proxy]=services/proxy
             [dns]=services/dns
@@ -124,14 +123,14 @@ jobs:
             [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
             [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
-            [ntp]="NTP service for lancache-ng managed networks."
-            [syslog]="Syslog collection and forwarding service for lancache-ng deployments."
+            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
+            [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+            selected=("${services[@]}")
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
@@ -141,7 +140,7 @@ jobs:
             svc="$(printf '%s' "$raw" | xargs)"
             [ -z "$svc" ] && continue
             if [ -z "${contexts[$svc]+set}" ]; then
-              echo "::error::Unknown service '$svc'. Valid services: ${!contexts[*]}."
+              echo "::error::Unknown service '$svc'. Valid services: ${services[*]}."
               exit 1
             fi
             row="$(jq -n \

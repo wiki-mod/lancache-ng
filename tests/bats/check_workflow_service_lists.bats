@@ -2,45 +2,19 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-workflow-service-lists.sh (#822): the CI guard
-# that fails a build if build-push.yml's several independent `services=(...)`
-# arrays (which drive manifest merge, channel promotion, and release) ever
-# diverge from the build matrix's canonical service set, or if
-# `full_setup_services=(...)` gains a service that is not a real build-matrix
-# service.
-#
-# The first 8 tests below (single-file invocation) write a small fixture
-# workflow (only the lines this guard reads: a `- service:` matrix plus the
-# array assignments) and point the script at it via its file argument, so
-# the suite runs fully offline and does not depend on the real
-# build-push.yml's current contents.
-#
-# The remaining tests cover the guard's extension (#822 pattern audit, beyond
-# issue #935's original build-push.yml-only scope) to 3 more real files that
-# duplicate the same service-list class: scripts/gc-pr-staging-images.sh,
-# backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh. These
-# invoke the script with a matrix-source fixture PLUS additional fixture
-# files, mirroring the script's own `[primary] [extra]...` argument shape.
-#
-# gc_fixture is named gc-pr-staging-images.sh, not .yml (#1095, 2026-08-06):
-# it used to model the array as it looked embedded in
-# .github/workflows/gc-pr-staging-images.yml's own `run:` block, before that
-# logic moved into scripts/gc-pr-staging-images.sh as a real, standalone
-# script. check_services_arrays() in the script under test keys
-# REQUIRES_SERVICES_ARRAY/SUBSET_SERVICES_FILES by `basename "$file"` -- a
-# fixture still named *.yml here would silently stop being treated as
-# "required" the moment the real script's own map keys moved to *.sh,
-# letting every "no services=(...) array found"/"diverges" test below pass
-# for the wrong reason (or not fail at all) without anyone noticing.
+# Coverage for scripts/check-workflow-service-lists.sh: canonical matrix, runtime
+# service lists, deliberate subsets, and Hosted Fallback metadata drift. Synthetic
+# fixtures keep failure modes isolated; the final test also checks the real tree.
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-workflow-service-lists.sh"
     fixture="$BATS_TEST_TMPDIR/build-push.yml"
     gc_fixture="$BATS_TEST_TMPDIR/gc-pr-staging-images.sh"
     backfill_fixture="$BATS_TEST_TMPDIR/backfill-stack-latest.yml"
     ensure_fixture="$BATS_TEST_TMPDIR/ensure-pr-staging-images.sh"
+    hosted_fixture="$BATS_TEST_TMPDIR/build-push-hosted-fallback.yml"
 }
 
-# Emits a matrix declaring all eight real services (#1296: ntp joined
+# Emits a matrix declaring all nine real services (#1296: ntp joined
 # proxy/dns/watchdog/dhcp/dhcp-proxy/ui/build-tools, matching the real
 # build-push.yml matrix's own service list). The leading indentation matches
 # the anchored `^\s+- service:` pattern the guard extracts from.
@@ -57,6 +31,7 @@ jobs:
           - service: dhcp
           - service: dhcp-proxy
           - service: ntp
+          - service: syslog
           - service: ui
           - service: build-tools
 EOF
@@ -69,10 +44,10 @@ EOF
     {
         write_canonical_matrix
         echo '          full_setup_services=(proxy dns watchdog ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
     } > "$fixture"
 
     run bash "$script" "$fixture"
@@ -87,11 +62,11 @@ EOF
 @test "fails when one services=() copy is missing a service the matrix declares" {
     {
         write_canonical_matrix
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
         # One copy forgot the newly-added build-tools service.
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui)'
     } > "$fixture"
 
     run bash "$script" "$fixture"
@@ -104,10 +79,10 @@ EOF
 @test "fails when a services=() copy lists a service the matrix does not build" {
     {
         write_canonical_matrix
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools phantom)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools phantom)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
     } > "$fixture"
 
     run bash "$script" "$fixture"
@@ -122,10 +97,10 @@ EOF
     {
         write_canonical_matrix
         echo '          full_setup_services=(proxy dns watchdog)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
     } > "$fixture"
 
     run bash "$script" "$fixture"
@@ -139,10 +114,10 @@ EOF
     {
         write_canonical_matrix
         echo '          full_setup_services=(proxy dns watchdog ui build-tools typo)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
     } > "$fixture"
 
     run bash "$script" "$fixture"
@@ -182,10 +157,10 @@ EOF
 @test "treats service arrays as unordered sets" {
     {
         write_canonical_matrix
-        echo '          services=(build-tools ui ntp dhcp-proxy dhcp watchdog dns proxy)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
-        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+        echo '          services=(build-tools ui syslog ntp dhcp-proxy dhcp watchdog dns proxy)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
     } > "$fixture"
 
     run bash "$script" "$fixture"
@@ -205,14 +180,14 @@ EOF
 # ensure-pr-staging-images.sh declares full_setup_services=(...) at column 0
 # (a plain shell script, not indented inside a YAML `run:` block).
 write_good_extra_fixtures() {
-    echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)' > "$gc_fixture"
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)' > "$backfill_fixture"
+    echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)' > "$gc_fixture"
+    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui)' > "$backfill_fixture"
     # #1296 (2026-07-30): dhcp/dhcp-proxy moved from excluded to required
     # first (ensure-pr-staging-images.sh started ensuring both -- see that
     # script's own full_setup_services=(...) comment); ntp completes the set
     # (the file's own FULL_SETUP_EXACT_EXCLUSIONS entry is now empty, so
-    # "canonical minus that exclusion set" is the full 8-service set below).
-    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)' > "$ensure_fixture"
+    # "canonical minus that exclusion set" is the full 9-service set below).
+    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)' > "$ensure_fixture"
 }
 
 # The matrix-source file itself always requires at least one of its own
@@ -222,7 +197,7 @@ write_good_extra_fixtures() {
 # distracting from what each test actually exercises.
 write_matrix_source_with_services() {
     write_canonical_matrix
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools)'
+    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
 }
 
 # The happy path for the extended multi-file invocation: matrix-source fixture
@@ -242,7 +217,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when gc-pr-staging-images.sh's services=() diverges from canonical" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp ui)' > "$gc_fixture"
+    echo 'services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui)' > "$gc_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -272,7 +247,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when backfill-stack-latest.yml's services=() contains a non-canonical service" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp ui phantom)' > "$backfill_fixture"
+    echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui phantom)' > "$backfill_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -289,7 +264,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when backfill-stack-latest.yml's services=() silently drops a real service" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo '          services=(proxy dns dhcp dhcp-proxy ntp ui)' > "$backfill_fixture"
+    echo '          services=(proxy dns dhcp dhcp-proxy ntp syslog ui)' > "$backfill_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -306,7 +281,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when ensure-pr-staging-images.sh's column-0 full_setup_services=() contains a typo" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ntp ui build-tools typo)' > "$ensure_fixture"
+    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools typo)' > "$ensure_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -417,4 +392,63 @@ write_matrix_source_with_services() {
     run bash -c "cd '$repo_root' && bash '$script'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"consistent"* ]]
+}
+
+
+write_metadata_matrix_source() {
+    cat <<'EOF'
+jobs:
+  build:
+    strategy:
+      matrix:
+        include: &normal-build-services
+          - service: proxy
+            context: services/proxy
+            build_contexts: dns-domains=services/dns
+            description: &ci-description-proxy "Proxy description."
+          - service: ntp
+            context: services/ntp
+            build_contexts: ""
+            description: &ci-description-ntp "NTP description."
+    steps: []
+          services=(proxy ntp)
+EOF
+}
+
+write_good_hosted_metadata() {
+    cat > "$hosted_fixture" <<'EOF'
+services=(proxy ntp)
+declare -A contexts=(
+  [proxy]=services/proxy
+  [ntp]=services/ntp
+)
+declare -A build_contexts=(
+  [proxy]="dns-domains=services/dns"
+  [ntp]=""
+)
+declare -A descriptions=(
+  [proxy]="Proxy description."
+  [ntp]="NTP description."
+)
+EOF
+}
+
+@test "hosted fallback metadata passes when it matches the anchored build matrix" {
+    write_metadata_matrix_source > "$fixture"
+    write_good_hosted_metadata
+
+    run bash "$script" "$fixture" "$hosted_fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"consistent"* ]]
+}
+
+@test "hosted fallback metadata fails when a description drifts from the build matrix" {
+    write_metadata_matrix_source > "$fixture"
+    write_good_hosted_metadata
+    sed -i 's/NTP description\./Drifted NTP description./' "$hosted_fixture"
+
+    run bash "$script" "$fixture" "$hosted_fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"descriptions metadata"* ]]
+    [[ "$output" == *"diverges"* ]]
 }

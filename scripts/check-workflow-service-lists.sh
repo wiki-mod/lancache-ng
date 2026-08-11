@@ -1,69 +1,11 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI guard against a specific #822 recurrence shape: the service list that
-# drives multi-platform manifest merge, channel promotion, and release is
-# hardcoded as several independent `services=(...)` bash arrays inside
-# separate embedded `run:` blocks of .github/workflows/build-push.yml, with
-# no mechanism keeping them in sync. If a new service is added to the
-# build/build-arm64 matrix but one of those copies is missed, that service is
-# SILENTLY dropped from merge/promotion/release -- the loop just never
-# iterates over it, with no error. This script fails CI the moment any copy
-# diverges from the canonical set of built services.
-#
-# The canonical set is DERIVED from the build matrix (`- service:` entries),
-# not hardcoded here: that is the one place a service must be added to be
-# built at all, so deriving from it means adding a service automatically
-# updates the canonical set and forces every `services=(...)` copy to follow
-# or fail this check. A hardcoded canonical set would go stale in exactly the
-# same silent way it is meant to prevent.
-#
-# `full_setup_services=(...)` is deliberately a SUBSET, so it is checked as a
-# subset of the canonical set, not for equality -- a naive "all lists
-# identical" check would be wrong here. The two `full_setup_services=(...)`
-# copies below no longer share one exclusion set as of #1296 (2026-07-30):
-# build-push.yml's own copy (the compose-only, product-stack membership list)
-# still intentionally omits dhcp/dhcp-proxy/ntp, but scripts/ensure-pr-staging-
-# images.sh's copy (the deep-validation staging-image list) now includes all
-# three -- see FULL_SETUP_EXACT_EXCLUSIONS below, whose exclusion set for that
-# file is now empty (ntp was the last member, added #1296). Do not assume the
-# two arrays mirror each other's exclusions; check each file's own comment.
-#
-# This same #822 recurrence shape was found again, beyond build-push.yml's 4
-# internal copies (issue #935's original scope), in 3 more real files that
-# duplicate the same service list with no sync mechanism:
-#   - scripts/gc-pr-staging-images.sh: a `services=(...)` copy that must
-#     equal the full canonical set (its own comment: "Every service
-#     build-push.yml's build/build-arm64 jobs can push a PR staging tag
-#     for"). Until #1095 (2026-08-06) this array lived inline in
-#     .github/workflows/gc-pr-staging-images.yml's own `run:` block, which is
-#     why this guard originally pointed at the workflow file; the reap/
-#     orphan-classification logic (array included) moved into this
-#     standalone, bats-testable script, and this guard's target moved with
-#     it. gc-pr-staging-images.yml itself no longer declares any
-#     services=(...) array at all -- it only checks out and runs the script.
-#   - .github/workflows/backfill-stack-latest.yml: a `services=(...)` copy
-#     that is a deliberate, documented SUBSET excluding build-tools (its own
-#     comment: "Product stack latest backfill intentionally excludes
-#     build-tools"). Named `services=`, not `full_setup_services=`, but
-#     semantically the same subset relationship -- see
-#     SUBSET_SERVICES_FILES below.
-#   - scripts/ensure-pr-staging-images.sh: a `full_setup_services=(...)`
-#     copy -- see FULL_SETUP_EXACT_EXCLUSIONS below.
-# All three are checked against the SAME canonical set derived from
-# build-push.yml's build matrix below, since none of them has a build matrix
-# of their own -- build-push.yml is the one place a service is actually built.
-#
-# For these two new subset-checked arrays specifically, "subset" means EXACT
-# equality to canonical-minus-a-known-exclusion-set, not just "no phantom
-# members": a membership-only check would silently accept a real service
-# being DROPPED from the array (a shorter list is still a valid subset by
-# that weaker definition), which is exactly the #822 failure mode this whole
-# guard exists to catch. build-push.yml's own pre-existing
-# `full_setup_services=(...)` check (used by the original 8 bats fixtures)
-# intentionally keeps its original, looser membership-only semantics --
-# tightening that one too is a separate, pre-existing-design decision outside
-# this 3-file extension's scope.
+# CI guard for service-set and build-metadata drift.
+# The normal build matrix is canonical. Runtime service loops, Hosted Fallback,
+# GC/backfill helpers, and Full-Setup subsets must stay consistent with it.
+# Deliberate subsets are checked against explicit exclusion sets so dropping a
+# real service cannot pass merely because the shorter list is still a subset.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -73,7 +15,7 @@ repo_root=$(cd "$script_dir/.." && pwd)
 # set is derived from (its `- service:` build matrix), plus any further
 # arguments naming additional files whose service-list arrays get checked
 # against that same canonical set. Defaults (zero args) to this repo's
-# build-push.yml plus the 3 additional real files above, so CI can call this
+# build-push.yml plus the additional real files below, so CI can call this
 # with no arguments while the bats suite points it at a single self-contained
 # fixture file (matrix + arrays together, exactly like the original
 # single-file invocation this script started as) with no further arguments.
@@ -85,6 +27,7 @@ else
     cd "$repo_root"
     workflow=".github/workflows/build-push.yml"
     extra_files=(
+        ".github/workflows/build-push-hosted-fallback.yml"
         "scripts/gc-pr-staging-images.sh"
         ".github/workflows/backfill-stack-latest.yml"
         "scripts/ensure-pr-staging-images.sh"
@@ -133,6 +76,29 @@ if [[ -z "$canonical" ]]; then
     exit 1
 fi
 canonical_oneline=$(printf '%s' "$canonical" | tr '\n' ' ')
+
+# build-push.yml uses one workflow-level runtime list for its shell loops.
+# Older/synthetic fixtures may still use services=(...) directly, so the guard
+# supports both shapes and fails closed if the runtime list diverges.
+workflow_services_requirement="required"
+mapfile -t workflow_service_entries < <(grep -nE '^  CI_BUILD_SERVICES:[[:space:]]*' "$workflow" || true)
+if [[ ${#workflow_service_entries[@]} -gt 1 ]]; then
+    fail "multiple CI_BUILD_SERVICES declarations found in $workflow; expected one maintained runtime list."
+elif [[ ${#workflow_service_entries[@]} -eq 1 ]]; then
+    entry=${workflow_service_entries[0]}
+    content=${entry#*:}
+    value=${content#*:}
+    value="$(xargs <<<"$value")"
+    value=${value#\"}
+    value=${value%\"}
+    runtime_services=$(printf '%s\n' "$value" | tr ' ' '\n' | sed '/^$/d' | sort -u)
+    if [[ "$runtime_services" != "$canonical" ]]; then
+        fail "CI_BUILD_SERVICES in $workflow diverges from the build matrix."
+        printf "    expected: %s\n" "$canonical_oneline" >&2
+        printf "    found:    %s\n" "$(printf '%s' "$runtime_services" | tr '\n' ' ')" >&2
+    fi
+    workflow_services_requirement="optional"
+fi
 
 # Normalize a `name=(a b c)` bash array line to a sorted, newline-separated
 # element list so set comparison is order-independent.
@@ -210,6 +176,79 @@ check_services_arrays() {
             fail "services=(...) at $file:$lineno diverges from the expected set."
             printf "    expected: %s\n" "$expected_oneline" >&2
             printf "    found:    %s\n" "$(printf '%s' "$elements" | tr '\n' ' ')" >&2
+        fi
+    done
+}
+
+
+# Extract one field from the anchored normal-build matrix. The matrix values in
+# this workflow are scalar strings; description anchors are stripped before
+# comparison because the alias name is YAML structure, not metadata content.
+extract_matrix_metadata() {
+    local field="$1"
+    awk -v field="$field" '
+        /^[[:space:]]+include: &normal-build-services[[:space:]]*$/ { inside=1; next }
+        inside && /^    steps:[[:space:]]*$/ { exit }
+        inside && /^[[:space:]]+- service:[[:space:]]*/ {
+            line=$0
+            sub(/^[[:space:]]+- service:[[:space:]]*/, "", line)
+            service=line
+            next
+        }
+        inside && service != "" {
+            prefix="^[[:space:]]+" field ":[[:space:]]*"
+            if ($0 ~ prefix) {
+                line=$0
+                sub(prefix, "", line)
+                sub(/^&[^[:space:]]+[[:space:]]+/, "", line)
+                if (line ~ /^".*"$/) {
+                    sub(/^"/, "", line)
+                    sub(/"$/, "", line)
+                }
+                print service "\t" line
+            }
+        }
+    ' "$workflow" | sort
+}
+
+# Extract service-keyed values from one associative array in Hosted Fallback.
+extract_fallback_metadata() {
+    local file="$1" array_name="$2"
+    awk -v array_name="$array_name" '
+        $0 ~ "^[[:space:]]*declare -A " array_name "=\\($" { inside=1; next }
+        inside && /^[[:space:]]*\)[[:space:]]*$/ { exit }
+        inside && /^[[:space:]]*\[[a-z0-9-]+\]=/ {
+            line=$0
+            sub(/^[[:space:]]*\[/, "", line)
+            split_at=index(line, "]=")
+            service=substr(line, 1, split_at - 1)
+            value=substr(line, split_at + 2)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            print service "\t" value
+        }
+    ' "$file" | sort
+}
+
+check_hosted_fallback_metadata() {
+    local file="$1" field array_name expected found
+    local -a pairs=(
+        "context:contexts"
+        "build_contexts:build_contexts"
+        "description:descriptions"
+    )
+
+    for pair in "${pairs[@]}"; do
+        field=${pair%%:*}
+        array_name=${pair#*:}
+        expected="$(extract_matrix_metadata "$field")"
+        found="$(extract_fallback_metadata "$file" "$array_name")"
+        if [[ -z "$expected" ]]; then
+            fail "could not extract '$field' metadata from the anchored build matrix in $workflow."
+            continue
+        fi
+        if [[ "$found" != "$expected" ]]; then
+            fail "$array_name metadata in $file diverges from build-push.yml's normal-build matrix."
         fi
     done
 }
@@ -320,6 +359,7 @@ check_full_setup_arrays() {
 # under-requiring (silently accepting the array vanishing from a file that
 # should always have it).
 declare -A REQUIRES_SERVICES_ARRAY=(
+    ["build-push-hosted-fallback.yml"]=1
     ["gc-pr-staging-images.sh"]=1
     ["backfill-stack-latest.yml"]=1
 )
@@ -327,12 +367,9 @@ declare -A REQUIRES_FULL_SETUP_ARRAY=(
     ["ensure-pr-staging-images.sh"]=1
 )
 
-# The matrix-source file itself always requires at least one services=(...)
-# copy (this is build-push.yml's own long-standing invariant, preserved
-# exactly for the single-file bats-fixture invocation too). It is not itself
-# required to declare full_setup_services=(...) -- a bats fixture testing
-# only the services=(...) equality case has no reason to include one.
-check_services_arrays "$workflow" "required"
+# The production workflow uses CI_BUILD_SERVICES; legacy synthetic fixtures may
+# still use services=(...). full_setup_services=(...) remains optional here.
+check_services_arrays "$workflow" "$workflow_services_requirement"
 check_full_setup_arrays "$workflow" "optional"
 
 for file in "${extra_files[@]}"; do
@@ -349,12 +386,16 @@ for file in "${extra_files[@]}"; do
     full_setup_requirement="optional"
     [[ -n "${REQUIRES_FULL_SETUP_ARRAY[$file_basename]:-}" ]] && full_setup_requirement="required"
     check_full_setup_arrays "$file" "$full_setup_requirement"
+
+    if [[ "$file_basename" == "build-push-hosted-fallback.yml" ]]; then
+        check_hosted_fallback_metadata "$file"
+    fi
 done
 
 if [[ $violations -gt 0 ]]; then
-    printf "%b✗ %d service-list divergence(s) found.%b Keep every services=(...)/full_setup_services=(...) copy in sync with the build matrix; see issue #822.\n" "$RED" "$violations" "$NC" >&2
+    printf "%b✗ %d service-list/metadata divergence(s) found.%b Keep runtime service metadata in sync with the build matrix.\n" "$RED" "$violations" "$NC" >&2
     exit 1
 fi
 
-printf "%b✓ All checked service lists are consistent with the build matrix (%s).%b\n" "$GREEN" "$canonical_oneline" "$NC"
+printf "%b✓ All checked service lists and metadata are consistent with the build matrix (%s).%b\n" "$GREEN" "$canonical_oneline" "$NC"
 exit 0

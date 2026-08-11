@@ -146,6 +146,9 @@ concurrency:
 
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  # One runtime list for manifest assembly, promotion, and release loops.
+  # scripts/check-workflow-service-lists.sh keeps it equal to the build matrix.
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
@@ -5403,49 +5406,49 @@ jobs:
             context: services/proxy
             # Proxy needs DNS domain data that lives outside its own build context.
             build_contexts: dns-domains=services/dns
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+            description: &ci-description-proxy "nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
             context: services/dns
             build_contexts: ""
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
+            description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
             context: services/watchdog
             build_contexts: ""
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+            description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp
             context: services/dhcp
             build_contexts: ""
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+            description: &ci-description-dhcp "Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
             build_contexts: ""
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            description: &ci-description-dhcp-proxy "dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
             build_contexts: ""
-            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+            description: &ci-description-ntp "chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: syslog
             context: services/syslog
             build_contexts: ""
-            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
+            description: &ci-description-syslog "Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
             context: services/ui
             build_contexts: ""
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
+            description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: build-tools
             context: tools/build-tools
             build_contexts: ""
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
+            description: &ci-description-build-tools "Prebuilt lancache-ng CI and developer validation toolchain image."
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
@@ -6801,36 +6804,37 @@ jobs:
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          DESCRIPTION_PROXY: *ci-description-proxy
+          DESCRIPTION_DNS: *ci-description-dns
+          DESCRIPTION_WATCHDOG: *ci-description-watchdog
+          DESCRIPTION_DHCP: *ci-description-dhcp
+          DESCRIPTION_DHCP_PROXY: *ci-description-dhcp-proxy
+          DESCRIPTION_NTP: *ci-description-ntp
+          DESCRIPTION_SYSLOG: *ci-description-syslog
+          DESCRIPTION_UI: *ci-description-ui
+          DESCRIPTION_BUILD_TOOLS: *ci-description-build-tools
         run: |
           set -euo pipefail
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          read -ra services <<< "$CI_BUILD_SERVICES"
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           declare -A merged_digests=()
 
-          # Same wording as this same file's build/build-arm64 matrix.description entries --
-          # kept in sync manually, not sourced from one shared place, because merge-manifests
-          # has no matrix of its own to read matrix.description from directly. This is where
-          # the OCI org.opencontainers.image.description annotation is actually set (issue
-          # #620): per-platform images upstream stay unannotated on purpose (see build's
-          # "Build and push" step comment), and every `imagetools create` downstream of this
-          # one (promote's channel and stack-pointer moves) carbon-copies this index annotation
-          # forward untouched rather than re-declaring it, confirmed live to preserve both the
-          # annotation and the exact source digest unchanged.
+          # These aliases come from the canonical build-matrix description scalars above.
           declare -A service_descriptions=(
-            [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
-            [dns]="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
-            [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
-            [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
-            [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
-            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
-            [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
-            [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
-            [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
+            [proxy]="$DESCRIPTION_PROXY"
+            [dns]="$DESCRIPTION_DNS"
+            [watchdog]="$DESCRIPTION_WATCHDOG"
+            [dhcp]="$DESCRIPTION_DHCP"
+            [dhcp-proxy]="$DESCRIPTION_DHCP_PROXY"
+            [ntp]="$DESCRIPTION_NTP"
+            [syslog]="$DESCRIPTION_SYSLOG"
+            [ui]="$DESCRIPTION_UI"
+            [build-tools]="$DESCRIPTION_BUILD_TOOLS"
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
@@ -6974,7 +6978,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          read -ra services <<< "$CI_BUILD_SERVICES"
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -7396,7 +7400,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          read -ra services <<< "$CI_BUILD_SERVICES"
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack@${STACK_DIGEST}"
@@ -7921,7 +7925,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          read -ra services <<< "$CI_BUILD_SERVICES"
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
