@@ -199,6 +199,221 @@ jobs:
           path.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
           PY
 
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # Full-file review found one mechanically malformed comment after the
+          # chronology cleanup. Replace it with the durable self-match invariant.
+          path = Path('.github/workflows/build-push.yml')
+          lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+          hits = [i for i, line in enumerate(lines) if 'That defect class is broader than these two removed checks and is' in line]
+          if len(hits) != 1:
+            raise SystemExit(f'build-push malformed-comment marker: expected one match, got {len(hits)}')
+          idx = hits[0]
+          if idx + 1 >= len(lines) or 'Those removed checks are outside the active container-scan path.' not in lines[idx + 1]:
+            raise SystemExit('build-push malformed-comment marker has unexpected shape')
+          indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+          lines[idx:idx + 2] = [
+            f'{indent}# These removed checks are outside the active container-scan path; any future\n',
+            f'{indent}# absence guard must be anchored so it cannot match its own source text.\n',
+          ]
+          path.write_text(''.join(lines), encoding='utf-8')
+
+          # Remove the remaining wrapped review-history phrase and replace the
+          # stale setup-simulation channel history with its current immutable-input contract.
+          path = Path('.github/workflows/full-setup-sims.yml')
+          lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+          hits = [i for i, line in enumerate(lines[:-1]) if 'Codex review' in line and 'finding on #764' in lines[i + 1]]
+          if len(hits) != 1:
+            raise SystemExit(f'wrapped review-history marker: expected one match, got {len(hits)}')
+          idx = hits[0]
+          indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+          lines[idx:idx + 2] = [
+            f'{indent}# A unique project name alone does not isolate concurrently-created bridge networks;\n',
+            f'{indent}# the sibling simulation jobs therefore need the complete per-run subnet/IP set too.\n',
+          ]
+          text = ''.join(lines)
+          job_marker = '  setup-cli-simulation:\n'
+          name_marker = '    name: setup.sh CLI simulation\n'
+          start = text.find(job_marker)
+          end = text.find(name_marker, start)
+          if start < 0 or end < 0:
+            raise SystemExit('setup-cli-simulation header markers not found')
+          replacement = (
+            job_marker
+            + '    # Drive the real setup.sh install/update/migration/rollback path against the exact\n'
+            + '    # images selected by the caller. Same-repository PRs use immutable staging images;\n'
+            + '    # other callers use the already-resolved channel so this gate never hardcodes a\n'
+            + '    # mutable channel independently of the caller.\n'
+          )
+          text = text[:start] + replacement + text[end:]
+          path.write_text(text, encoding='utf-8')
+
+          # setup-reset-dns-config was the lone sibling still interpolating workflow
+          # expressions directly into shell. Bring it onto the env-plus-quoted-variable
+          # contract used by every other build-tools resolver in this reusable workflow.
+          lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+          job_start = next((i for i, line in enumerate(lines) if line == '  setup-reset-dns-config-simulation:\n'), None)
+          if job_start is None:
+            raise SystemExit('setup-reset-dns-config job not found')
+          step_start = next((i for i in range(job_start, len(lines)) if lines[i].strip() == '- name: Resolve build-tools image'), None)
+          if step_start is None:
+            raise SystemExit('setup-reset-dns build-tools resolver not found')
+          id_line = next((i for i in range(step_start, len(lines)) if lines[i].strip() == 'id: build-tools-image'), None)
+          run_line = next((i for i in range(step_start, len(lines)) if lines[i].strip() == 'run: |'), None)
+          if id_line is None or run_line is None or run_line <= id_line:
+            raise SystemExit('setup-reset-dns resolver id/run shape changed')
+          if any(line.strip() == 'env:' for line in lines[id_line + 1:run_line]):
+            raise SystemExit('setup-reset-dns resolver unexpectedly already has env block')
+          env_lines = [
+            '        env:\n',
+            '          PR_STAGING_AVAILABLE: $' + '{{ inputs.pr_staging_available }}\n',
+            '          BUILD_TOOLS_TOUCHED: $' + '{{ inputs.build_tools_touched }}\n',
+            '          IMAGE_TAG: $' + '{{ inputs.image_tag }}\n',
+            '          REPOSITORY: $' + '{{ github.repository }}\n',
+          ]
+          lines[run_line:run_line] = env_lines
+          run_line += len(env_lines)
+          direct_if = '          if [[ "$' + '{{ inputs.pr_staging_available }}" == "true" && "$' + '{{ inputs.build_tools_touched }}" == "true" ]]; then\n'
+          direct_image = '            image="ghcr.io/$' + '{{ github.repository }}/build-tools:$' + '{{ inputs.image_tag }}"\n'
+          if direct_if not in lines or direct_image not in lines:
+            raise SystemExit('setup-reset-dns direct-expression lines not found')
+          lines[lines.index(direct_if)] = '          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then\n'
+          lines[lines.index(direct_image)] = '            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"\n'
+          path.write_text(''.join(lines), encoding='utf-8')
+
+          # Remove validator commentary that became false after service-metadata dedup.
+          path = Path('scripts/validate-stack-images.sh')
+          lines = path.read_text(encoding='utf-8').splitlines(keepends=True)
+          hits = [i for i, line in enumerate(lines[:-1]) if '# #1428: syslog joined this SERVICES scalar too' in line]
+          if len(hits) != 1:
+            raise SystemExit(f'stale SERVICES comment marker: expected one match, got {len(hits)}')
+          idx = hits[0]
+          if 'services=(...) pattern above.' not in lines[idx + 1]:
+            raise SystemExit('stale SERVICES comment has unexpected shape')
+          indent = lines[idx][:len(lines[idx]) - len(lines[idx].lstrip())]
+          lines[idx:idx + 2] = [
+            f'{indent}# Keep release verification aligned with the canonical first-party service set plus\n',
+            f'{indent}# the immutable stack pointer.\n',
+          ]
+          text = ''.join(lines).replace('the syslog+\n# fluent-bit consolidation PR replaced', 'the syslog+\n# fluent-bit consolidation replaced')
+          path.write_text(text, encoding='utf-8')
+          PY
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          # The chronology guard previously documented and implemented an intentional
+          # per-line blind spot. The observed wrapped "review finding" comment proves
+          # that blind spot is no longer acceptable, so scan adjacent physical comment
+          # lines too and add the noun form to the narrow chronology vocabulary.
+          path = Path('scripts/check-review-chronology-comments.sh')
+          text = path.read_text(encoding='utf-8')
+          old_header = '''# Detection is deliberately per-line, not a full-file/multiline scan: every
+# real instance found in this repository's own audit had the offending
+# phrase entirely on one line, and a per-line grep keeps the false-positive
+# surface small and the match easy to point at with a file:line reference.
+# The known, accepted tradeoff is that a phrase awkwardly split across a
+# line wrap would not be caught -- the same simplicity tradeoff this
+# project's other line-oriented guards (e.g. check-file-headers.sh,
+# check-workflow-line-limit.sh) already make.
+'''
+          new_header = '''# Detection checks each physical line and also joins adjacent hand-written
+# comment lines before applying the same narrow chronology regex. The joined
+# scan covers ordinary line-comment prefixes used by this repository plus the
+# common first/continuation markers for block comments; it deliberately does
+# not join arbitrary code lines, which keeps the false-positive surface small
+# while preventing formatting/line-wrapping from hiding one logical comment.
+'''
+          if text.count(old_header) != 1:
+            raise SystemExit(f'chronology guard header marker: expected one match, got {text.count(old_header)}')
+          text = text.replace(old_header, new_header, 1)
+          pattern_marker = 'REVIEW_CHRONOLOGY_PATTERN+="|(\\\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\\\b)"\n'
+          if text.count(pattern_marker) != 1:
+            raise SystemExit(f'chronology pattern marker: expected one match, got {text.count(pattern_marker)}')
+          text = text.replace(
+            pattern_marker,
+            pattern_marker + '# "review finding" is the noun-form chronology label used by automated review output.\n'
+            + 'REVIEW_CHRONOLOGY_PATTERN+="|(\\\\breview[[:space:]]+finding\\\\b)"\n',
+            1,
+          )
+          line_scan = '    done < <(grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$path" || true)\n'
+          if text.count(line_scan) != 1:
+            raise SystemExit(f'chronology line-scan marker: expected one match, got {text.count(line_scan)}')
+          adjacent_scan = r'''
+
+    # Treat adjacent physical comment lines as one logical comment too. This
+    # catches review chronology split by formatting without joining arbitrary
+    # executable/source lines. The individual-line negatives avoid duplicate
+    # reports for a phrase already caught by the primary line scan above.
+    while IFS=$'\t' read -r first_line first_text second_text; do
+        [ -n "$first_line" ] || continue
+        joined="$first_text $second_text"
+        if grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$joined" \
+            && ! grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$first_text" \
+            && ! grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$second_text"; then
+            violations+=("$path:$first_line:$joined")
+        fi
+    done < <(
+        awk '
+            function is_comment(line) {
+                return line ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/
+            }
+            function payload(line) {
+                sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", line)
+                return line
+            }
+            {
+                current_is_comment = is_comment($0)
+                current = current_is_comment ? payload($0) : ""
+                if (previous_is_comment && current_is_comment) {
+                    printf "%d\t%s\t%s\n", NR - 1, previous, current
+                }
+                previous_is_comment = current_is_comment
+                previous = current
+            }
+        ' "$path"
+    )
+'''
+          text = text.replace(line_scan, line_scan + adjacent_scan, 1)
+          path.write_text(text, encoding='utf-8')
+
+          path = Path('tests/bats/check_review_chronology_comments.bats')
+          text = path.read_text(encoding='utf-8')
+          marker = '@test "passes on a plain \'manual review\' mention with no adjacent discovery verb" {\n'
+          if text.count(marker) != 1:
+            raise SystemExit(f'chronology bats insertion marker: expected one match, got {text.count(marker)}')
+          tests = '''@test "fails on the noun form 'review finding'" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+on:
+  push:
+    # The isolation gap was a review finding on PR #764.
+    branches: [master]
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the review-finding line: $output"
+}
+
+@test "fails when 'review finding' is wrapped across adjacent comment lines" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+on:
+  push:
+    # The isolation gap was a review
+    # finding on PR #764 and must not survive line wrapping.
+    branches: [master]
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the first wrapped comment line: $output"
+}
+
+'''
+          path.write_text(text.replace(marker, tests + marker, 1), encoding='utf-8')
+          PY
+
           # Validate the exact target tree, not this temporary executor's own source text.
           git rm -- .github/workflows/cdx-1522-comment-governance-audit.yml
 
@@ -212,14 +427,14 @@ jobs:
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 900 bash -s <<'VALIDATE'
           set -euo pipefail
-          bash -n scripts/check-workflow-service-lists.sh scripts/validate-stack-images.sh
-          shellcheck --severity=warning scripts/check-workflow-service-lists.sh scripts/validate-stack-images.sh
+          bash -n scripts/check-workflow-service-lists.sh scripts/validate-stack-images.sh scripts/check-review-chronology-comments.sh
+          shellcheck --severity=warning scripts/check-workflow-service-lists.sh scripts/validate-stack-images.sh scripts/check-review-chronology-comments.sh
           actionlint .github/workflows/build-push.yml .github/workflows/codeql.yml .github/workflows/full-setup-sims.yml
           bash scripts/check-review-chronology-comments.sh
           bash scripts/check-workflow-service-lists.sh
           bash scripts/validate-stack-images.sh
           bash scripts/check-workflow-line-limit.sh
-          bats tests/bats/check_workflow_service_lists.bats tests/bats/classify_codeql_rust_relevance.bats tests/bats/detect_full_setup_classifier_parity.bats
+          bats tests/bats/check_review_chronology_comments.bats tests/bats/check_workflow_service_lists.bats tests/bats/classify_codeql_rust_relevance.bats tests/bats/detect_full_setup_classifier_parity.bats
           python3 - <<'PY'
           from pathlib import Path
           import re
@@ -237,6 +452,8 @@ jobs:
               if line.lstrip().startswith('#') and pat.search(line): raise SystemExit(f'{path}:{n}: {line.strip()}')
           PY
           if grep -RInF 'stack-bom.json' scripts/validate-stack-images.sh .github/workflows/build-push.yml; then exit 1; fi
+          if grep -RInF 'Codex review' .github/workflows/full-setup-sims.yml; then exit 1; fi
+          if grep -RInF 'services=(...) pattern above' scripts/validate-stack-images.sh; then exit 1; fi
           VALIDATE
           git diff --check
           wc -l -c .github/workflows/build-push.yml .github/workflows/full-setup-sims.yml
@@ -257,4 +474,6 @@ jobs:
           printf 'CDX_CODEQL_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/codeql.yml')"
           printf 'CDX_RESERVE_ACTION_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/actions/reserve-validation-subnet-stack/action.yml')"
           printf 'CDX_VALIDATE_STACK_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:scripts/validate-stack-images.sh')"
+          printf 'CDX_REVIEW_GUARD_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:scripts/check-review-chronology-comments.sh')"
+          printf 'CDX_REVIEW_GUARD_TEST_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:tests/bats/check_review_chronology_comments.bats')"
           git push origin HEAD:refs/heads/ci/1.1-single-artifact-consolidation
