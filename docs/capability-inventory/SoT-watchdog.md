@@ -27,20 +27,26 @@ syslog-ng retention engine, and Admin-UI status-file writer.
 
 ## 1. Monitored containers (tracked in #842, not re-litigated here)
 
-`check_and_maybe_restart()` (restart-capable) is called for exactly three
-containers in the main loop, plus `nats` (always): `C_PROXY`
-(`lancache-proxy`), `C_DNS_STD` (`lancache-dns-standard`), and conditionally
-`C_DNS_SSL` (`lancache-dns-ssl`, only when `SSL_ENABLED=1`).
-`docker-socket-proxy` gets its own dedicated `probe_docker_socket_proxy()`
-alert-only check (never restart-capable -- this daemon must never attempt
-to restart its own Docker API gateway). The combined syslog+fluent-bit
-container (`syslog-ng`) is also monitored, but via `check_alert_only()`
-(alert-only, never restart-capable -- `scripts/docker-socket-proxy.sh`'s
-allowlist does not permit a restart POST for this container), and only
-when `LOGGING_ENABLED` is truthy (see `C_SYSLOG`'s own assignment).
-`nats`/`ui`/`dhcp`/`dhcp-proxy`/`netdata` beyond the above are not
-monitored or restarted by this script. See #842 for the design discussion;
-this inventory only adds the exhaustive rest of the file's behavior below.
+`check_and_maybe_restart()` is the restart-capable path. It monitors
+`C_PROXY` (`lancache-proxy`), `C_DNS_STD` (`lancache-dns-standard`),
+conditionally `C_DNS_SSL` (`lancache-dns-ssl` when `SSL_ENABLED=1`), and
+`C_NATS` (`lancache-nats`, always present).
+
+Three targets use alert-only monitoring and are never passed to
+`restart_container()`:
+
+- `docker-socket-proxy` via `probe_docker_socket_proxy()`, because watchdog
+  cannot safely restart its own Docker API gateway through that same gateway.
+- the combined syslog/fluent-bit container via `check_alert_only()` when
+  `LOGGING_ENABLED` is truthy; the Docker-proxy allowlist does not grant a
+  restart POST for this container.
+- `ntp` via `check_alert_only()` when `NTP_ENABLED` is truthy; an install with
+  NTP disabled has no NTP container and must not receive a false unreachable
+  alert.
+
+`ui`, `dhcp`, `dhcp-proxy`, and `netdata` are not monitored or restarted by
+the live Bash watchdog. See #842 for the broader design discussion; this
+inventory documents the implemented behavior.
 
 ## 2. Every function, in detail
 
