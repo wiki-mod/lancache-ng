@@ -2,9 +2,6 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Temporary same-repository patch executor for the active CI 1.1 Draft.
-# The runner applies one staged patch and exposes the resulting Git objects;
-# the connected GitHub App advances the branch because the workflow token
-# cannot update workflow files itself.
 
 name: CDX CI 1.1 patch executor
 
@@ -14,7 +11,7 @@ on:
     types: [synchronize]
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   apply-patch:
@@ -25,16 +22,20 @@ jobs:
       - name: Check out the PR head branch
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.pull_request.head.sha }}
+          ref: ci/1.1-single-artifact-consolidation
           fetch-depth: 0
 
-      - name: Apply the staged patch and emit Git object IDs
+      - name: Apply and push the staged patch
         run: |
           set -euo pipefail
 
           mapfile -t patch_files < <(find .github -maxdepth 1 -type f -name 'cdx-1522-point*.patch' -print | sort)
+          if [[ "${#patch_files[@]}" -eq 0 ]]; then
+            echo "::notice::No staged CI 1.1 patch remains; nothing to apply."
+            exit 0
+          fi
           if [[ "${#patch_files[@]}" -ne 1 ]]; then
-            echo "::error::Expected exactly one staged CI 1.1 patch, found ${#patch_files[@]}."
+            echo "::error::Expected at most one staged CI 1.1 patch, found ${#patch_files[@]}."
             exit 1
           fi
 
@@ -49,8 +50,4 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git commit -m "$marker ci: apply CI 1.1 implementation step"
-
-          printf 'CDX_COMMIT_SHA=%s\n' "$(git rev-parse HEAD)"
-          printf 'CDX_TREE_SHA=%s\n' "$(git rev-parse 'HEAD^{tree}')"
-          printf 'CDX_BUILD_PUSH_BLOB_SHA=%s\n' "$(git rev-parse 'HEAD:.github/workflows/build-push.yml')"
-          printf 'CDX_PARENT_SHA=%s\n' "$(git rev-parse 'HEAD^')"
+          git push origin HEAD:refs/heads/ci/1.1-single-artifact-consolidation
