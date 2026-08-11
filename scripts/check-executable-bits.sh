@@ -14,14 +14,27 @@
 # protection: only a single hardcoded `test -x services/watchdog/watchdog.sh`
 # existed in build-push.yml.
 #
-# This script parses every workflow and composite-action file for script
-# invocations, flags the ones that execute a repo script by a *bare path*
-# (no `bash`/`sh`/`.`/`source` interpreter prefix -- those read the file and
-# do not need the executable bit), and asserts each such file's *committed*
-# git mode is 100755. The committed mode (`git ls-tree HEAD`) is what matters,
-# not the checkout's filesystem mode: CI checks the repo out from git, so the
-# mode stored in the tree is exactly what a bare invocation will get, and it
-# is the only mode that is meaningful on a core.filemode=false author host.
+# This script parses every workflow and composite-action file for shell
+# content in `run:` values, flags commands that execute a repo script by a
+# *bare path* (no `bash`/`sh`/`.`/`source` interpreter prefix -- those read the
+# file and do not need the executable bit), and asserts each such file's
+# *committed* git mode is 100755. Other YAML values such as `paths:` are data,
+# not shell, and must never be interpreted as commands merely because their
+# scalar text looks like a repository path.
+#
+# GitHub Actions workflow syntax makes `run` the shell-command field, while
+# YAML 1.2 permits that scalar either inline or as a literal/folded block
+# (`|`/`>`) with optional chomping and indentation indicators. The scanner
+# therefore recognizes plain/single-quoted/double-quoted `run` mapping keys,
+# both block-scalar indicator orders, and the shell text indented beneath a
+# block scalar. Backslash-continued physical shell lines are joined before
+# command-word classification so data words in a multiline construct such as
+# `for x in \\ ...; do` are not mistaken for independently executed commands.
+#
+# The committed mode (`git ls-tree HEAD`) is what matters, not the checkout's
+# filesystem mode: CI checks the repo out from git, so the mode stored in the
+# tree is exactly what a bare invocation will get, and it is the only mode
+# that is meaningful on a core.filemode=false author host.
 #
 # It additionally requires every tracked file under `.githooks/` to be
 # executable, because git runs a hook by bare path unconditionally (a
@@ -38,11 +51,11 @@
 # converting a recurring whack-a-mole into an impossible-to-reintroduce class.
 #
 # Deliberately implemented in plain bash string/glob/`case` matching rather
-# than a YAML parser (this project depends on neither a YAML library nor a
-# non-shell runtime for its guards -- Rule-Ref: AG-REL-001) and rather than a
-# PCRE grep (check-idempotence-test-coverage.sh's own header documents that
-# both PCRE grep and a POSIX-awk rewrite misbehaved on this project's actual
-# self-hosted runners).
+# than adding a YAML library or another committed runtime dependency
+# (Rule-Ref: AG-REL-001), and rather than a PCRE grep
+# (check-idempotence-test-coverage.sh's own header documents that both PCRE
+# grep and a POSIX-awk rewrite misbehaved on this project's actual self-hosted
+# runners).
 #
 # Known, deliberate scope limits (a safety net for the common shape, not a
 # proof of universal coverage -- Rule-Ref: AG-VAL-024 still governs how new
@@ -170,13 +183,10 @@ command_word_script() {
 }
 
 # split_into_segments <line>
-# Splits a shell line into command segments at command separators
-# (&& || ; |) using pure bash parameter expansion, emitting one segment per
-# line. Kept subprocess-free (no per-line `sed`) so scanning every line of a
-# multi-thousand-line workflow file stays fast on every host, including
-# Windows Git Bash where each subprocess spawn is expensive. `||` and `&&`
-# are collapsed before the single `|` so a `||` is not mis-split as two
-# empty pipes.
+# Splits a shell line into command segments at the separators this guard
+# needs to recognize (&&, ||, ;, |). This intentionally stays a lightweight
+# command-word scanner rather than pretending to be a full Bash parser; the
+# workflow's real shell syntax is validated separately by shellcheck/bash.
 split_into_segments() {
   local s="$1" nl=$'\n'
   s="${s//&&/$nl}"
@@ -191,41 +201,145 @@ split_into_segments() {
   printf '%s\n' "$s"
 }
 
+# inspect_shell_line <logical-shell-line> <context>
+# Classifies only shell text that came from a GitHub Actions `run:` scalar.
+# Keeping this separate from YAML extraction prevents configuration data that
+# happens to contain script-looking paths from reaching the command scanner.
+inspect_shell_line() {
+  local shell_line="$1" context="$2" segment found
+  shell_line="${shell_line#"${shell_line%%[![:space:]]*}"}"
+  [ -n "$shell_line" ] || return 0
+  case "$shell_line" in \#*) return 0 ;; esac
+
+  while IFS= read -r segment; do
+    [ -n "$segment" ] || continue
+    found="$(command_word_script "$segment")"
+    if [ -n "$found" ]; then
+      require_executable "$found" "$context"
+    fi
+  done < <(split_into_segments "$shell_line")
+}
+
+# is_block_scalar_header <run-value>
+# YAML block scalars use `|` (literal) or `>` (folded), optionally followed
+# by one chomping indicator (+/-), one indentation indicator (1-9), in either
+# order, plus an optional YAML comment. Recognizing the complete indicator
+# shape prevents a legitimate `run: >-`/`run: |2-` form from being mistaken
+# for an inline shell command.
+is_block_scalar_header() {
+  local value="$1"
+  [[ "$value" =~ ^[\|\>](\+|-)?[1-9]?[[:space:]]*(#.*)?$ ]] ||
+    [[ "$value" =~ ^[\|\>][1-9](\+|-)?[[:space:]]*(#.*)?$ ]]
+}
+
+# yaml_run_value <yaml-line>
+# Prints "<key-indent><TAB><value>" only when the line defines a `run`
+# mapping key. A leading sequence marker (`- run:`) and quoted YAML mapping
+# keys are accepted; unrelated YAML values are intentionally ignored.
+yaml_run_value() {
+  local line="$1" leading body key_indent value
+  leading="${line%%[! ]*}"
+  body="${line#"$leading"}"
+  key_indent=${#leading}
+  if [[ "$body" == '- '* ]]; then
+    body="${body#- }"
+    key_indent=$((key_indent + 2))
+  fi
+
+  case "$body" in
+    run:*) value="${body#run:}" ;;
+    "'run':"*) value="${body#\'run\':}" ;;
+    '"run":'*) value="${body#\"run\":}" ;;
+    *) return 1 ;;
+  esac
+
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s\t%s\n' "$key_indent" "$value"
+}
+
+# inspect_run_physical_line <line> <context>
+# Joins shell physical lines ending in a backslash before classification.
+# This mirrors the shell's logical-line behavior for the common workflow
+# continuation shape and, critically, keeps a multiline `for ... in` word
+# list as one statement whose command word is `for`, not one fake command per
+# data item.
+pending_shell_line=""
+inspect_run_physical_line() {
+  local line="$1" context="$2" right_trimmed
+  line="${line#"${line%%[![:space:]]*}"}"
+  right_trimmed="${line%"${line##*[![:space:]]}"}"
+
+  if [[ -n "$pending_shell_line" ]]; then
+    pending_shell_line+=" $right_trimmed"
+  else
+    pending_shell_line="$right_trimmed"
+  fi
+
+  if [[ "$right_trimmed" == *\\ ]]; then
+    pending_shell_line="${pending_shell_line%\\}"
+    return 0
+  fi
+
+  inspect_shell_line "$pending_shell_line" "$context"
+  pending_shell_line=""
+}
+
 for file in "${scan_files[@]}"; do
-  # Pre-filter to only the handful of lines that even mention a candidate
-  # script directory, so the per-segment parsing below never runs on the
-  # thousands of unrelated lines in a large workflow file. `|| true` keeps a
-  # file with zero candidate lines from tripping `set -e` on grep's exit 1.
-  while IFS= read -r line; do
-    # Left-trim; skip whole-line shell comments -- this is how a workflow
-    # comment that merely *mentions* a script path (e.g. full-setup-
-    # validate.yml's prose reference to full-setup-client-simulation.sh) is
-    # prevented from being read as an invocation.
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    [ -n "$trimmed" ] || continue
-    case "$trimmed" in \#*) continue ;; esac
+  in_run_block=0
+  run_key_indent=0
+  pending_shell_line=""
 
-    # Drop a leading YAML list marker and a leading `run:` key so an inline
-    # `run: scripts/foo.sh` is analyzed as shell; block-scalar `run: |`
-    # bodies arrive here already as bare indented shell lines and need no
-    # such stripping.
-    trimmed="${trimmed#- }"
-    case "$trimmed" in
-      run:*)
-        trimmed="${trimmed#run:}"
-        trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-        ;;
-    esac
-    [ -n "$trimmed" ] || continue
-
-    while IFS= read -r segment; do
-      [ -n "$segment" ] || continue
-      found="$(command_word_script "$segment")"
-      if [ -n "$found" ]; then
-        require_executable "$found" "in $file"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$in_run_block" -eq 1 ]; then
+      # Blank lines are part of a block scalar and do not terminate its YAML
+      # indentation scope.
+      if [ -z "${line//[[:space:]]/}" ]; then
+        continue
       fi
-    done < <(split_into_segments "$trimmed")
-  done < <(grep -E '(scripts|services|tests|\.githooks)/' "$file" || true)
+
+      leading="${line%%[! ]*}"
+      line_indent=${#leading}
+      if [ "$line_indent" -gt "$run_key_indent" ]; then
+        inspect_run_physical_line "$line" "in $file"
+        continue
+      fi
+
+      # Reaching the key's indentation ends the block. A dangling continued
+      # logical line is still inspected rather than silently discarded; the
+      # repository's separate shell syntax checks will reject malformed Bash.
+      if [ -n "$pending_shell_line" ]; then
+        inspect_shell_line "$pending_shell_line" "in $file"
+        pending_shell_line=""
+      fi
+      in_run_block=0
+      # The current physical line belongs to YAML again, so intentionally
+      # fall through and test whether it begins another `run:` scalar.
+    fi
+
+    if run_record="$(yaml_run_value "$line")"; then
+      run_key_indent="${run_record%%$'\t'*}"
+      run_value="${run_record#*$'\t'}"
+      if is_block_scalar_header "$run_value"; then
+        in_run_block=1
+        pending_shell_line=""
+      elif [ -n "$run_value" ]; then
+        # Inline `run:` values are shell text. Strip one simple outer quote
+        # pair because YAML permits quoted scalars and a quoted scalar still
+        # becomes the same command string when Actions invokes the shell.
+        if [[ "$run_value" == \'*\' && "$run_value" == *\' ]]; then
+          run_value="${run_value:1:${#run_value}-2}"
+          run_value="${run_value//\'\'/\'}"
+        elif [[ "$run_value" == \"*\" && "$run_value" == *\" ]]; then
+          run_value="${run_value:1:${#run_value}-2}"
+        fi
+        inspect_shell_line "$run_value" "in $file"
+      fi
+    fi
+  done < "$file"
+
+  if [ "$in_run_block" -eq 1 ] && [ -n "$pending_shell_line" ]; then
+    inspect_shell_line "$pending_shell_line" "in $file"
+  fi
 done
 
 # .githooks/*: git execs a hook by bare path unconditionally, so every

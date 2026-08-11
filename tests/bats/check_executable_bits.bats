@@ -246,3 +246,97 @@ EOF
     [ "$status" -ne 0 ]
     [[ "$output" == *"ui-nats-dns-integration-simulation.sh"* ]]
 }
+
+@test "does not treat a workflow paths filter entry as a script invocation" {
+    # `on.*.paths` is YAML configuration data, not shell content. A path that
+    # happens to name a non-executable script must not be classified as a
+    # command merely because YAML represents the filter as a sequence item.
+    add_script tests/bats/filter-only.bats no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on:
+  pull_request:
+    paths:
+      - tests/bats/filter-only.bats
+jobs:
+  build:
+    steps:
+      - run: echo ok
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "does not treat a backslash-continued for word list as separate commands" {
+    # Words between `for ... in` and `; do` are iteration data. Joining the
+    # physical continuation lines before command-word classification keeps a
+    # script-looking data item attached to the `for` statement instead of
+    # inventing a bare-path command that Bash would never execute there.
+    add_script tests/bats/required-file.bats no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: |
+          set -euo pipefail
+          for required in \
+            tests/bats/required-file.bats; do
+            test -f "$required"
+          done
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "still detects a bare script in an inline run scalar" {
+    # Restricting the scanner to `run:` values must not narrow the original
+    # protection to block scalars only; a direct inline command is equally an
+    # exec-bit dependency.
+    add_script scripts/inline.sh no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: scripts/inline.sh
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scripts/inline.sh"* ]]
+}
+
+@test "still detects a bare script in a folded run block" {
+    # YAML permits folded (`>`) as well as literal (`|`) block scalars for a
+    # `run` value. A simple one-command folded block must retain the same
+    # direct-exec protection as the established literal-block fixtures.
+    add_script scripts/folded.sh no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: >-
+          scripts/folded.sh
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scripts/folded.sh"* ]]
+}
