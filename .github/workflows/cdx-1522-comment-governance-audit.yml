@@ -169,6 +169,34 @@ jobs:
             raise SystemExit(f'Expected 25+1 timeout insertions, got {a}+{b}')
           PY
 
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('scripts/validate-stack-images.sh')
+          text = path.read_text(encoding='utf-8')
+          start_marker = '# #1428: syslog joined build-push.yml\'s own promotion/release\n'
+          end_marker = "  'promotion and release jobs must share the full first-party service set'\n"
+          start = text.find(start_marker)
+          end = text.find(end_marker, start)
+          if start < 0 or end < 0:
+            raise SystemExit('stale promotion/release literal service guard markers not found')
+          end += len(end_marker)
+          replacement = '''# Promotion and release must consume the same canonical service set rather than
+# maintaining independent literals that can drift from the build matrix.
+for service_job in promote release; do
+  if ! awk -v job="$service_job" '\''
+    $0 == "  " job ":" { in_job=1; next }
+    in_job && /^  [[:alnum:]_-]+:$/ { exit found ? 0 : 1 }
+    in_job && /read -ra services <<< "\\$CI_BUILD_SERVICES"/ { found=1 }
+    END { exit found ? 0 : 1 }
+  '\'' "$repo_root/.github/workflows/build-push.yml"; then
+    fail "$service_job job must consume the canonical CI_BUILD_SERVICES service set"
+  fi
+done
+'''
+          path.write_text(text[:start] + replacement + text[end:], encoding='utf-8')
+          PY
+
           # Validate the exact target tree, not this temporary executor's own source text.
           git rm -- .github/workflows/cdx-1522-comment-governance-audit.yml
 
