@@ -67,9 +67,16 @@ runs:
         set -euo pipefail
 
         # Keep the kill boundary inside the candidate for the same runner-leak
-        # reason as the executable smoke step above.
+        # reason as the executable smoke step above. The full aggregate Bats
+        # suite now runs well over a thousand cases in one process; Docker's
+        # default 1024-file open-file ulimit is tight enough that the run can
+        # fail right at the tail end (the final planned test never gets a
+        # result line, no matching "not ok" either) even though every
+        # individual test before it passed -- confirmed by reproducing the
+        # failure with the default ulimit and clearing it with a higher one.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
+          --ulimit nofile=8192:8192 \
           -v "$GITHUB_WORKSPACE:/work:ro" \
           -w /work \
           "$IMAGE_REF" \
@@ -85,9 +92,12 @@ runs:
         set -euo pipefail
 
         # ShellSpec gets the identical in-container hard-stop contract so all
-        # candidate fixture runners have the same resource-lifecycle behavior.
+        # candidate fixture runners have the same resource-lifecycle behavior,
+        # including the same raised open-file ceiling as the Bats step above
+        # for the same large-aggregate-suite reason.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
+          --ulimit nofile=8192:8192 \
           -v "$GITHUB_WORKSPACE:/work:ro" \
           -w /work \
           "$IMAGE_REF" \
