@@ -81,8 +81,13 @@ runs:
         fi
         printf 'cleanup-safe=%s\n' "$cleanup_safe" >> "$GITHUB_OUTPUT"
 
+    # AG-CI-013: trivy-action's own internal Trivy-binary install step has
+    # intermittently failed under concurrent build-matrix load with an
+    # unauthenticated request to github.com's web releases endpoint (see
+    # .github/actions/trivy-scan-with-retry's own header comment for the
+    # confirmed root cause and why a token cannot fix this specific path).
     - name: Scan exact image digest with Trivy
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: ./.github/actions/trivy-scan-with-retry
       with:
         image-ref: ${{ inputs.image-ref }}
         scanners: vuln,secret

@@ -1,0 +1,174 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Trivy scan with retry
+description: >-
+  Wraps aquasecurity/trivy-action with a retry policy (AG-CI-013), matching
+  the project's existing GHCR retry pattern for uses:-step operations
+  (.github/actions/ghcr-build-push-retry, .github/actions/ghcr-attest-retry):
+  scan once, and on failure wait and retry the identical scan -- up to 4
+  total attempts (1 initial + 3 retries). No re-authentication step between
+  attempts (unlike those two actions): the failure class this wraps is
+  trivy-action's own internal Trivy-binary install step making an
+  unauthenticated request to github.com's web releases endpoint
+  (aquasecurity/trivy's contrib/install.sh -> github_release(), confirmed by
+  reading that script directly -- it has no code path that attaches an
+  Authorization header at all, so no token this repository could supply
+  would change that request), intermittently failing under concurrent load
+  from this project's build matrix. The exact HTTP-level cause (throttling
+  vs. a transient blip) is not visible in trivy-action's own log output;
+  retrying is the same fail-safe response this project already uses for
+  every other flaky-external-operation class (AG-CI-013) rather than
+  guessing at a fix for a mechanism that cannot be directly observed.
+  scripts/lib/ghcr-retry.sh's ghcr_retry() was considered and not reused
+  here: its function signature requires a registry/username/password triple
+  and calls a GHCR-specific re-login between attempts, neither of which
+  applies to a bare Trivy scan with no registry credentials of its own --
+  forcing empty-string registry/user/pass arguments through that interface
+  would be more confusing to a reader than this dedicated, smaller wrapper.
+  This action does not thread through trivy-action's rarely-used remaining
+  inputs (template/output/list-all-pkgs/ignore-policy/etc.); add them here
+  if a real caller needs them rather than widening this action's already
+  passed-through-input surface speculatively.
+
+inputs:
+  image-ref:
+    description: Image reference to scan (may be digest-qualified or not; the caller decides).
+    required: true
+  scanners:
+    required: false
+    default: ""
+  severity:
+    required: false
+    default: ""
+  ignore-unfixed:
+    required: false
+    default: "false"
+  trivyignores:
+    required: false
+    default: ""
+  skip-dirs:
+    required: false
+    default: ""
+  hide-progress:
+    required: false
+    default: "false"
+  cache:
+    required: false
+    default: "true"
+  cache-dir:
+    required: false
+    default: ""
+  timeout:
+    required: false
+    default: ""
+  exit-code:
+    required: false
+    default: ""
+  backoff-seconds:
+    description: Seconds to wait before each retry.
+    required: false
+    default: "30"
+
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+
+    - name: Wait before retry 1
+      if: steps.attempt1.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+
+    - name: Wait before retry 2
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - id: attempt3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+
+    - name: Wait before retry 3
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - id: attempt4
+      if: steps.attempt1.outcome == 'failure' && steps.attempt2.outcome == 'failure' && steps.attempt3.outcome == 'failure'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        image-ref: ${{ inputs.image-ref }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+
+    # continue-on-error on every attempt above means none of their failures
+    # fail this composite action by itself -- this step is what actually
+    # surfaces success/failure to the calling job, mirroring
+    # .github/actions/ghcr-build-push-retry's own "Resolve outcome across
+    # all attempts" step shape.
+    - name: Resolve outcome across all attempts
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        for outcome in "${{ steps.attempt1.outcome }}" "${{ steps.attempt2.outcome }}" "${{ steps.attempt3.outcome }}" "${{ steps.attempt4.outcome }}"; do
+          if [[ "$outcome" == "success" ]]; then
+            exit 0
+          fi
+        done
+        echo "::error::All Trivy scan attempts for ${{ inputs.image-ref }} failed." >&2
+        exit 1

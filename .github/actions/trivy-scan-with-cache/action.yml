@@ -51,9 +51,14 @@ runs:
         path: ${{ runner.temp }}/trivy-scan-clean
         key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
 
+    # AG-CI-013: trivy-action's own internal Trivy-binary install step has
+    # intermittently failed under concurrent build-matrix load with an
+    # unauthenticated request to github.com's web releases endpoint (see
+    # .github/actions/trivy-scan-with-retry's own header comment for the
+    # confirmed root cause and why a token cannot fix this specific path).
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: ./.github/actions/trivy-scan-with-retry
       with:
         image-ref: ${{ inputs.image-ref }}
         scanners: vuln,secret
