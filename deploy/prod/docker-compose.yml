@@ -345,7 +345,7 @@ services:
     # a `service_started` startup race can produce instead (get_health() and
     # probe_docker_socket_proxy() both already treat an unreachable proxy as
     # a normal, non-fatal failure state that clears itself once the proxy
-    # becomes reachable -- confirmed live, PR #1489, 2026-08-12: with
+    # becomes reachable -- confirmed live, 2026-08-12: with
     # `service_healthy`, watchdog only started ~5s after docker-socket-proxy
     # itself reached Healthy; RESTART_AFTER=3 consecutive
     # ~CHECK_INTERVAL-second cycles means one transient unreachable reading

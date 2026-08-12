@@ -1070,15 +1070,18 @@ async fn main() -> Result<()> {
     // ready to serve a restart request -- and this process starts issuing
     // reload attempts as soon as it itself boots, with no dependency on that
     // readiness (the Admin UI deliberately keeps `depends_on: docker-socket-
-    // proxy: condition: service_started`, not `service_healthy`, so its own
-    // dashboard and recovery surface stay reachable even when Docker access
-    // is degraded -- see "Docker socket proxy startup contract" in this PR's
-    // own description). A flat 3-attempt/2s-interval budget (~6s total) was
-    // provably too short for this: a real PR #1489 CI run (2026-08-12)
-    // showed the UI container starting at 11:13:06.10, its first reload
-    // attempt firing at 11:13:06.17, its third and final attempt exhausting
-    // at 11:13:10.18, and docker-socket-proxy only reaching Healthy at
-    // 11:13:11.27 -- missing by 1.1s. Growing the backoff (shared
+    // proxy: condition: service_started`, not `service_healthy`, in every
+    // real deploy/*/docker-compose.yml, so its own dashboard and recovery
+    // surface stay reachable even when Docker access is degraded -- watchdog
+    // uses the identical dependency and reasoning, see
+    // deploy/prod/docker-compose.yml's own watchdog `depends_on:` comment).
+    // A flat
+    // 3-attempt/2s-interval budget (~6s total) was provably too short for
+    // this: a real CI run (2026-08-12) showed the UI container starting at
+    // 11:13:06.10, its first reload attempt firing at 11:13:06.17, its third
+    // and final attempt exhausting at 11:13:10.18, and docker-socket-proxy
+    // only reaching Healthy at 11:13:11.27 -- missing by 1.1s. Growing the
+    // backoff (shared
     // `grow_backoff` helper, Rule-Ref: AG-CODE-011) instead of a flat
     // interval, over more attempts, gives a total budget on the order of the
     // real startup delay actually observed plus a real margin for CI-load

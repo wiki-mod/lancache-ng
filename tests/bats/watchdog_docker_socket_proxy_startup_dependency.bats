@@ -9,8 +9,8 @@
 # docker-socket-proxy is briefly slow to become healthy at startup.
 #
 # This was originally `service_healthy` for watchdog specifically (a real
-# design mistake corrected 2026-08-12, PR #1489, after being live-verified
-# against a real CI run): `service_healthy` means Compose refuses to CREATE
+# design mistake corrected 2026-08-12, after being live-verified against a
+# real CI run): `service_healthy` means Compose refuses to CREATE
 # the watchdog container at all if docker-socket-proxy fails its own
 # startup healthcheck -- total monitoring silence for exactly the failure
 # mode watchdog exists to surface. watchdog.sh's own get_health() and

@@ -100,7 +100,7 @@ RUN apk add --no-cache \
 # non-root `lancache` uid 10001 only carries CAP_DAC_READ_SEARCH (a read-only
 # bypass, see the capability posture comment below), never a write bypass, so
 # every file-output write into it fails closed with EACCES/"error opening"
-# (live-reproduced: PR #1489's syslog-forwarding-simulation CI job).
+# (live-reproduced in the syslog-forwarding-simulation CI job).
 
 # Copy the pinned fluent-bit binary and its full shared-library closure into
 # a private prefix -- never mixed into Alpine's own musl /usr/lib, so this
