@@ -54,6 +54,14 @@ jobs:
   backfill-latest:
     name: backfill latest from existing stack pointer
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
+    # AG-CI-016: every job needs an explicit bound, never GitHub's 360-minute
+    # default -- this job does real GHCR registry work (pull, multiple
+    # `docker buildx imagetools` calls per service) on a scarce self-hosted
+    # heavy runner, and holds the cross-workflow promote-lock ref for as
+    # long as it runs. 60 minutes matches gc-pr-staging-images.yml's own
+    # tuned budget for a comparably GHCR-heavy job (see that workflow's own
+    # comment on why 150 minutes was too permissive in practice).
+    timeout-minutes: 60
     steps:
       - name: Require default branch dispatch
         env:

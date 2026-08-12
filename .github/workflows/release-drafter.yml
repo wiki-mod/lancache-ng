@@ -34,6 +34,12 @@ jobs:
   update_release_draft:
     name: draft/update release notes
     runs-on: ubuntu-latest
+    # AG-CI-016: every job needs an explicit bound, never GitHub's 360-minute
+    # default. GitHub-hosted, so a hang here does not consume the self-hosted
+    # runner pool, but the rule is unconditional; 15 minutes is generous for
+    # a single third-party-action API call (matches orphaned-branches.yml's
+    # own budget for a comparably small single-step job).
+    timeout-minutes: 15
     permissions:
       # release-drafter needs to create/update a draft release and resolve
       # merged-PR labels; contents:write is release-drafter's own documented
