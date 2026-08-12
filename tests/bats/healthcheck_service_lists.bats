@@ -30,8 +30,9 @@
 #    archived vY.X.Z branch still predate #1112 and keep the original
 #    byte-for-byte-across-three-files shape, so this rewrite is not
 #    cherry-picked there.
-# 2. scripts/untracked/simulations/setup-cli-simulation.sh and scripts/syslog-forwarding-
-#    simulation.sh wait on a DIFFERENT compose target
+# 2. scripts/untracked/simulations/setup-cli-simulation.sh and
+#    scripts/untracked/simulations/syslog-forwarding-simulation.sh wait on a
+#    DIFFERENT compose target
 #    (deploy/quickstart/docker-compose.yml) with different profiles enabled
 #    (minimal vs. ssl+logging), so they legitimately track a different,
 #    smaller/larger subset of services that declare a real healthcheck in

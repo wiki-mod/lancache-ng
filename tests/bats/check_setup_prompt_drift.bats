@@ -4,8 +4,9 @@
 #
 # Coverage for scripts/tracked/check-setup-prompt-drift.sh (#1176): the CI guard that
 # fails when setup.sh's interactive install wizard and its expect-driven
-# simulation scripts (scripts/untracked/simulations/setup-cli-simulation.sh, scripts/syslog-
-# forwarding-simulation.sh) drift apart on the wizard's hand-duplicated
+# simulation scripts (scripts/untracked/simulations/setup-cli-simulation.sh,
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh) drift apart
+# on the wizard's hand-duplicated
 # prompt text -- the exact failure class that let PR #1082 hang both
 # simulation scripts (issue #1175) when a new unconditional prompt was added
 # without updating either script's expect_prompt sequence.
