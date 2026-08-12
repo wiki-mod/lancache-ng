@@ -479,6 +479,27 @@ services:
   # prod does. The data-loss detector below still applies regardless (e.g.
   # a volume created by an older image version, or reused across an
   # upgrade Docker does not re-populate).
+  # Named volumes keep their existing ownership across image upgrades, so the
+  # image-layer chown alone cannot migrate an already-populated `logs` volume.
+  # This short-lived least-privilege initializer repairs both the directory and
+  # any old proxy-log copies before the non-root syslog service opens them.
+  syslog-logs-permissions:
+    container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
+    profiles: [logging]
+    user: "0:0"
+    entrypoint: ["/bin/chown"]
+    command: ["-R", "10001:10001", "/var/log/lancache"]
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    read_only: true
+    volumes:
+      - logs:/var/log/lancache
+    restart: "no"
+
   syslog:
     container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
@@ -502,6 +523,9 @@ services:
       - ALL
     cap_add:
       - DAC_READ_SEARCH
+    depends_on:
+      syslog-logs-permissions:
+        condition: service_completed_successfully
     environment:
       - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
       - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
