@@ -208,13 +208,14 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
 require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-tools.yml \
   'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
-# #1428: syslog joined build-push.yml's own promotion/release
-# services=(...) arrays alongside ntp -- this pattern must stay byte-for-byte
-# in sync with those arrays (see check-workflow-service-lists.sh for the
-# broader, build-matrix-derived guard that keeps every OTHER services=(...)
-# copy in this repo in sync; this one specific literal is a narrower,
-# release/promotion-scoped check that guard does not reach).
-require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools\)' \
+# Promotion and release jobs now all read the shared CI_BUILD_SERVICES env
+# scalar (read -ra services <<< "$CI_BUILD_SERVICES") rather than each
+# carrying its own hand-duplicated services=(...) literal -- this check was
+# updated in lockstep with that consolidation so it keeps verifying a real,
+# still-present pattern instead of a literal array shape build-push.yml no
+# longer contains. #1428 (syslog joining the first-party service set) is
+# covered here because CI_BUILD_SERVICES already carries syslog.
+require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 
@@ -287,10 +288,12 @@ require_grep 'previous_refs\["\$target_image"\]' \
   'promotion must remember previous channel digests before moving public tags'
 require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack@\$\{STACK_DIGEST\}"' \
   .github/workflows/build-push.yml \
-  'promotion must consume the immutable stack BOM digest created before validation'
-require_grep 'COPY stack-bom\.json /stack-bom\.json' \
-  .github/workflows/build-push.yml \
-  'the immutable stack artifact must record an explicit stack BOM alongside stack.env'
+  'promotion must consume the immutable stack pointer digest created before validation'
+# CI 1.1 deliberately keeps the existing immutable stack pointer/stack.env
+# contract rather than introducing a separate stack-bom.json artifact (that
+# BOM/Stack-Lock design is out of scope here, tracked under the broader V2
+# work in #1095) -- so this validator only asserts stack.env's own presence
+# below, not a stack-bom.json file build-push.yml no longer builds.
 require_grep 'LANCACHE_IMAGE_TAG=%s\\n' \
   .github/workflows/build-push.yml \
   'stack pointer image must contain the resolved immutable service image tag'
@@ -405,8 +408,9 @@ require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-p
 require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
   .github/workflows/build-push.yml \
   'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
-# #1428: syslog joined this SERVICES scalar too, same reason as line 180's
-# services=(...) pattern above.
+# Keep release verification aligned with the canonical first-party service
+# set plus the immutable stack pointer (#1428 added syslog here for the same
+# reason the runtime_images/Dockerfile loops above cover it).
 require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'

@@ -144,7 +144,7 @@ echo "proxy, dns-standard, dns-ssl, and ui are healthy."
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
-        "$build_tools_image" bash -c "$1"
+        "$build_tools_image" timeout --kill-after=30 --signal=KILL 120 bash -c "$1"
 }
 
 echo "== UI: establishing a session and extracting its CSRF token =="
@@ -216,7 +216,7 @@ attempt_nats_connect() {
         -e "NATS_CONSUMER=$consumer" \
         -e "PDNS_API_KEY=validation-pdns-key" \
         "$dns_image" \
-        -c 'timeout 5 nats-subscriber || true' \
+        -c 'timeout --kill-after=2 --signal=KILL 5 nats-subscriber || true' \
         > "$log_file" 2>&1 || true
     if grep -q "Connected to NATS" "$log_file"; then
         echo "1"

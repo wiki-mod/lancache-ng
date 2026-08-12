@@ -671,6 +671,7 @@ jobs:
             -e GITHUB_RUN_ID \
             -e GITHUB_RUN_ATTEMPT \
             "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 2400 \
             bash scripts/syslog-forwarding-simulation.sh
 
   # THE REQUIRED CHECK. Always runs (even when the suite was skipped for a

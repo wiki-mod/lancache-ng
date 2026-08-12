@@ -667,6 +667,7 @@ jobs:
             -e SETUP_SIM_IMAGE_CHANNEL \
             -e SETUP_SIM_IMAGE_TAG \
             "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 1800 \
             bash scripts/setup-cli-simulation.sh
 
   dhcp-kea-lease-flow-simulation:
@@ -982,12 +983,25 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
-        # preference, matching every other job in this suite.
+        # preference, matching every other job in this suite. Read via env: +
+        # quoted shell variables rather than interpolating ${{ }} expressions
+        # directly into the run: script (OSPS-BR-01.04 hardening, refs #1130):
+        # matches this file's own LANCACHE_IMAGE_TAG/env-var convention
+        # elsewhere and avoids the documented GitHub Actions script-injection
+        # anti-pattern, even though image_tag only ever holds a raw
+        # workflow_dispatch value when pr_staging_available is false (see
+        # scripts/lib/validation-image-tag.sh's
+        # vit_pr_staging_available/vit_resolve_tag).
         id: build-tools-image
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
             image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"

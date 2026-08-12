@@ -181,7 +181,7 @@ run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/ca.crt:/ca.crt:ro" \
         -v "$work_dir/shared:/shared" \
-        "$build_tools_image" bash -c "$1"
+        "$build_tools_image" timeout --kill-after=30 --signal=KILL 120 bash -c "$1"
 }
 
 # ─────────────────────────────────────────────────────────────────────────
