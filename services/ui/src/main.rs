@@ -1106,8 +1106,10 @@ async fn main() -> Result<()> {
                 last_err = Some(e);
                 if attempt < NATS_CONF_RELOAD_MAX_ATTEMPTS {
                     tokio::time::sleep(nats_conf_reload_delay).await;
-                    nats_conf_reload_delay =
-                        nats_auth_callout::grow_backoff(nats_conf_reload_delay, nats_conf_reload_max_delay);
+                    nats_conf_reload_delay = nats_auth_callout::grow_backoff(
+                        nats_conf_reload_delay,
+                        nats_conf_reload_max_delay,
+                    );
                 }
             }
         }
