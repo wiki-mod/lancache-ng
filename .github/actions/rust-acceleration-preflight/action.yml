@@ -87,11 +87,19 @@ runs:
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
         ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
+        # AG-CI-016: the in-container command needs its own unignorable
+        # kill-timeout, not just this step's outer `timeout-minutes` --
+        # GitHub cancels a timed-out step by sending SIGTERM to this
+        # `docker run` client, which a signal-deaf or network-hung sccache-dist/
+        # distcc-pump call inside the container would not receive, leaving
+        # both the client and the container running and the runner slot
+        # occupied (same failure mode documented in
+        # .github/actions/shellcheck-and-standing-guards/action.yml).
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
-          bash -s <<'PREFLIGHT'
+          timeout --kill-after=30 --signal=KILL 300 bash -s <<'PREFLIGHT'
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"
