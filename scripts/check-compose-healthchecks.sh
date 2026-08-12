@@ -86,6 +86,15 @@ fi
 # for the same container in docs/architecture-ng.md's logging matrix ("Not
 # applicable ... no persistent process").
 #
+# syslog-logs-permissions (deploy/prod, deploy/quickstart): a one-shot
+# ownership-migration init container (`restart: "no"`, `network_mode: none`,
+# `read_only: true` root filesystem) that chowns the shared `logs` volume to
+# the non-root syslog uid/gid before `syslog` starts, gated purely through
+# `depends_on: condition: service_completed_successfully` -- same shape as
+# dhcp-probe above: it runs to completion and exits, so there is no
+# "healthy vs. degraded" state between "just started" and "already exited"
+# for a liveness check to distinguish.
+#
 # retention (deploy/prod, deploy/quickstart, deploy/full-setup; #842 Teil 2,
 # 2026-08-01): a deliberate choice, not an oversight -- this container's own
 # liveness was intentionally never folded into the health-check/restart
@@ -102,6 +111,8 @@ fi
 declare -A EXCLUDED_SERVICES=(
     ["deploy/prod/docker-compose.yml:dhcp-probe"]=1
     ["deploy/quickstart/docker-compose.yml:dhcp-probe"]=1
+    ["deploy/prod/docker-compose.yml:syslog-logs-permissions"]=1
+    ["deploy/quickstart/docker-compose.yml:syslog-logs-permissions"]=1
     ["deploy/prod/docker-compose.yml:retention"]=1
     ["deploy/quickstart/docker-compose.yml:retention"]=1
     ["deploy/full-setup/docker-compose.yml:retention"]=1

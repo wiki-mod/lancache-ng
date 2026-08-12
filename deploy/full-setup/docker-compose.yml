@@ -239,8 +239,14 @@ services:
       # Issue #870: shared with `ui` below (read-only) so this validation
       # stack exercises the same status.json hand-off dev/prod/quickstart use.
       - watchdog-status:/var/run/watchdog
+    # `service_started`, not `service_healthy` -- see
+    # deploy/prod/docker-compose.yml's identical `depends_on:` for the full
+    # reasoning (watchdog's own monitoring must survive a degraded Docker API
+    # channel, not disappear entirely if docker-socket-proxy is briefly slow
+    # to become healthy at startup).
     depends_on:
-      - docker-socket-proxy
+      docker-socket-proxy:
+        condition: service_started
     networks:
       validation:
         ipv4_address: ${VALIDATION_WATCHDOG_IP:-172.30.99.6}
@@ -544,10 +550,17 @@ services:
       validation:
         ipv4_address: ${VALIDATION_UI_IP:-172.30.99.9}
       validation-api:
+    # The dashboard and recovery surface must still start when the Docker API
+    # proxy is unhealthy. Only container creation is required here; individual
+    # Docker-backed actions can report their own degraded state after startup.
+    # proxy and nats likewise retain their previous ordering-only dependency.
     depends_on:
-      - docker-socket-proxy
-      - proxy
-      - nats
+      docker-socket-proxy:
+        condition: service_started
+      proxy:
+        condition: service_started
+      nats:
+        condition: service_started
     restart: unless-stopped
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]

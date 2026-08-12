@@ -27,8 +27,10 @@
 //!    [`health::AlertCounter`]) -- also a `status.json` key, same reasoning.
 //! 4. Issue #842's alert-only monitored services -- `ui`, `dhcp`
 //!    (when `DHCP_MODE=kea`), `dhcp-proxy` (when `DHCP_MODE=dnsmasq-proxy`/
-//!    `dnsmasq-relay`), `netdata`, `syslog` (when `SYSLOG_ENABLED` is
-//!    truthy; the combined fluent-bit+syslog-ng container since the
+//!    `dnsmasq-relay`), `netdata`, `syslog` (when `LOGGING_ENABLED` is
+//!    truthy -- not `SYSLOG_ENABLED`, which gates only the separate
+//!    storage-budget retention engine and can legitimately stay false while
+//!    central logging is active; the combined fluent-bit+syslog-ng container since the
 //!    syslog+fluent-bit consolidation PR, 2026-08 -- #842 originally listed
 //!    `syslog` and `syslog-ng` as two separate monitored targets, merged
 //!    into this one entry now that they are one container, see
