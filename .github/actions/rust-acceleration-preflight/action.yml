@@ -91,7 +91,7 @@ runs:
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
-          bash -s <<'PREFLIGHT'
+          timeout --kill-after=30 --signal=KILL 600 bash -s <<'PREFLIGHT'
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"
