@@ -153,12 +153,33 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 # script's restart-capable set is reserved for services whose restart is
 # an already-reviewed, safe recovery action -- see check_alert_only()'s own
 # comment for the shared alert-only pattern this reuses.
-NTP_ENABLED="${NTP_ENABLED:-0}"
-if is_truthy "$NTP_ENABLED"; then
-    C_NTP="${CONTAINER_NTP:-lancache-ntp}${LANCACHE_CONTAINER_SUFFIX:-}"
-else
-    C_NTP=""
-fi
+# Resolves one alert-only monitoring target's container name into <out_var>,
+# honoring the truthy gate in <enabled_var> and the coordinated
+# LANCACHE_CONTAINER_SUFFIX, or sets <out_var> to empty when the gate is
+# false. <override_var>, if given and non-empty, overrides <base_name> --
+# only C_NTP's caller passes one (CONTAINER_NTP); C_SYSLOG's caller
+# intentionally omits it, matching services/watchdog/src/config.rs's fixed
+# CONTAINER_SYSLOG constant (no separate env var for
+# scripts/check-naming-consistency.sh to validate -- see C_SYSLOG's own call
+# site below for that contract's full rationale). Shared so the
+# gate-check-then-suffix-append mechanics themselves cannot silently diverge
+# between callers or a future third one, even though the override policy
+# each caller chooses stays caller-controlled (Rule-Ref: AG-CODE-011).
+_watchdog_resolve_alert_target() {
+    local enabled_var="$1" out_var="$2" base_name="$3" override_var="${4:-}"
+    local name="$base_name"
+    if [ -n "$override_var" ]; then
+        local override_value="${!override_var:-}"
+        [ -n "$override_value" ] && name="$override_value"
+    fi
+    if is_truthy "${!enabled_var:-0}"; then
+        printf -v "$out_var" '%s%s' "$name" "${LANCACHE_CONTAINER_SUFFIX:-}"
+    else
+        printf -v "$out_var" ''
+    fi
+}
+
+_watchdog_resolve_alert_target NTP_ENABLED C_NTP lancache-ntp CONTAINER_NTP
 
 # docker-socket-proxy (issue #1170 Part 1): a fixed literal, not a
 # ${CONTAINER_*:-...}-style override like the four names above. Those four
@@ -186,11 +207,7 @@ C_DOCKER_PROXY="lancache-docker-socket-proxy"
 # an install without the logging profile has no syslog container to monitor,
 # while SYSLOG_ENABLED controls only the separate storage-budget retention
 # engine and can legitimately remain false while central logging is active.
-if is_truthy "${LOGGING_ENABLED:-0}"; then
-    C_SYSLOG="lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}"
-else
-    C_SYSLOG=""
-fi
+_watchdog_resolve_alert_target LOGGING_ENABLED C_SYSLOG lancache-syslog
 
 # LANCACHE_CONTAINER_SUFFIX (issue #1415): the FATAL guards below no longer
 # compare against the bare literal default -- they compare against this
@@ -503,6 +520,22 @@ check_alert_only() {
     esac
 }
 
+# Builds one comma-prefixed status.json service entry
+# (`,\n    "<name>":   {"status": ..., "health": ..., "failures": ...}`) for
+# write_status()'s optional services below (SSL DNS, syslog, ntp). The
+# always-present services in write_status()'s own heredoc are not built
+# through this helper: the first entry in a JSON object has no leading
+# comma, a genuinely different shape from every optional entry after it, not
+# merely a cosmetic difference this helper could also absorb. Pulled out so
+# a fix to this JSON fragment's shape (key names, quoting, spacing) reaches
+# every optional service at once instead of needing to be manually kept in
+# sync across copies (Rule-Ref: AG-CODE-011).
+_watchdog_status_json_fragment() {
+    local container="$1" health="$2" failures="$3"
+    printf ',\n    "%s":   {"status": "%s",   "health": "%s",   "failures": %s}' \
+        "$container" "$(health_color "$health")" "$health" "$failures"
+}
+
 # Writes the status JSON consumed by the Admin UI dashboard. Built with
 # plain string interpolation rather than a JSON library or `jq` (this image
 # doesn't ship jq for writing, only `curl`/`jq` for reading Docker's health
@@ -519,23 +552,20 @@ write_status() {
 
     local ssl_services=""
     if [ "$SSL_ENABLED" = "1" ]; then
-        ssl_services=",
-    \"$C_DNS_SSL\":   {\"status\": \"$(health_color "$H_DNS_SSL")\",   \"health\": \"$H_DNS_SSL\",   \"failures\": $F_DNS_SSL}"
+        ssl_services=$(_watchdog_status_json_fragment "$C_DNS_SSL" "$H_DNS_SSL" "$F_DNS_SSL")
     fi
 
-    # Same conditional-inclusion shape as ssl_services above. Omitting the key
-    # entirely when C_SYSLOG is empty prevents a deployment without central
-    # logging from showing a permanently unhealthy service that never existed.
+    # Omitting the key entirely when C_SYSLOG/C_NTP is empty prevents a
+    # deployment without central logging/ntp from showing a permanently
+    # unhealthy service that never existed.
     local syslog_service=""
     if [ -n "$C_SYSLOG" ]; then
-        syslog_service=",
-    \"$C_SYSLOG\":   {\"status\": \"$(health_color "$H_SYSLOG")\",   \"health\": \"$H_SYSLOG\",   \"failures\": $F_SYSLOG}"
+        syslog_service=$(_watchdog_status_json_fragment "$C_SYSLOG" "$H_SYSLOG" "$F_SYSLOG")
     fi
 
     local ntp_service=""
     if [ -n "$C_NTP" ]; then
-        ntp_service=",
-    \"$C_NTP\":   {\"status\": \"$(health_color "$H_NTP")\",   \"health\": \"$H_NTP\",   \"failures\": $F_NTP}"
+        ntp_service=$(_watchdog_status_json_fragment "$C_NTP" "$H_NTP" "$F_NTP")
     fi
 
     cat > "${STATUS_FILE}.tmp" <<EOF
