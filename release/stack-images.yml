@@ -94,8 +94,8 @@ runtime:
       # deploy/quickstart/docker-compose.yml defines a `dhcp` service too
       # (confirmed 2026-08-06, issue #849 dhcp-proxy.md finding #12) --
       # this entry was never updated when the quickstart profile grew a
-      # Kea/dnsmasq-proxy DHCP path of its own, so scripts/validate-stack-
-      # images.sh had nothing to check it against.
+      # Kea/dnsmasq-proxy DHCP path of its own, so
+      # scripts/untracked/validate-stack-images.sh had nothing to check it against.
       - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy

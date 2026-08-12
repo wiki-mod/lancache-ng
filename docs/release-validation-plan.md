@@ -872,8 +872,9 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   into a variable first, then grepping the variable via a here-string (eliminates
   the live pipe entirely). The identical shape (`git log | tail | head -n 50`) was
   independently found and fixed the same session in PR #1371's
-  `find_built_ancestor()`. New Standing check row above (`scripts/check-pipefail-
-  early-exit-grep.sh`, wired into the `shellcheck`/`shellcheck-hosted` jobs); a
+  `find_built_ancestor()`. New Standing check row above
+  (`scripts/untracked/check-pipefail-early-exit-grep.sh`, wired into the
+  `shellcheck`/`shellcheck-hosted` jobs); a
   proposed AGENTS.md rule for the general failure class was posted as a PR #1374
   comment for maintainer review, per `AG-WF-025` (originally drafted as
   `AG-VAL-030`, since claimed by an unrelated rule; landed as `AG-VAL-032` via

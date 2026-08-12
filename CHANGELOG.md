@@ -52,9 +52,10 @@ is real, live, running code, not just work sitting in source control.
   #730: this whole mechanism assumes the `dns-standard`/`dns-ssl`
   container is reachable, which is not guaranteed in the crash-loop
   scenario it exists to help recover from -- tracked separately as #763.
-  Also added a real end-to-end CI test (`scripts/dns-zone-rollback-
-  simulation.sh`, wired into `.github/workflows/full-setup-deep-
-  validate.yml`'s `dns-zone-rollback-simulation` job) that drives two real
+  Also added a real end-to-end CI test
+  (`scripts/untracked/simulations/dns-zone-rollback-simulation.sh`, wired
+  into `.github/workflows/full-setup-deep-validate.yml`'s
+  `dns-zone-rollback-simulation` job) that drives two real
   DNS writes through the actual UI/NATS path, calls the rollback listener's
   real HTTP endpoints (auth, list, rollback) against a live `dns-standard`
   container, and confirms via real `dig` queries that both PowerDNS's data
