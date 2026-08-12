@@ -334,12 +334,26 @@ services:
       retries: 2
       start_period: 15s
     # Every Docker health read and restart call goes through this proxy.
-    # Require its /_ping healthcheck before watchdog starts so the first
-    # monitoring cycle has a working Docker API channel, not merely a created
-    # proxy container.
+    # `service_started`, not `service_healthy` -- watchdog's own dashboard
+    # and alert-only monitoring must stay available even when the Docker API
+    # channel itself is degraded, the same reasoning the Admin UI's
+    # identical dependency below already documents. A `service_healthy` gate
+    # here means Compose refuses to create watchdog at all if
+    # docker-socket-proxy fails its own startup healthcheck -- total
+    # monitoring silence for exactly the failure mode watchdog exists to
+    # surface, worse than the brief, self-correcting "unreachable" readings
+    # a `service_started` startup race can produce instead (get_health() and
+    # probe_docker_socket_proxy() both already treat an unreachable proxy as
+    # a normal, non-fatal failure state that clears itself once the proxy
+    # becomes reachable -- confirmed live, PR #1489, 2026-08-12: with
+    # `service_healthy`, watchdog only started ~5s after docker-socket-proxy
+    # itself reached Healthy; RESTART_AFTER=3 consecutive
+    # ~CHECK_INTERVAL-second cycles means one transient unreachable reading
+    # at startup is nowhere near enough to trigger a false restart on any of
+    # this file's restart-capable services).
     depends_on:
       docker-socket-proxy:
-        condition: service_healthy
+        condition: service_started
     networks:
       - default
       - docker-api

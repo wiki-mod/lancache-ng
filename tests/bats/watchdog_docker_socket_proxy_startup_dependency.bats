@@ -2,13 +2,26 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Drift guard for the Docker API proxy startup contract. The watchdog cannot
-# perform health reads or restart calls until HAProxy is genuinely forwarding
-# Docker API requests, so it waits for docker-socket-proxy's real healthcheck.
-# The Admin UI has a different availability requirement: its HTTP server and
-# recovery/dashboard surface must remain startable while Docker API access is
-# degraded, so it waits only for the proxy container to be started. Covers all
-# three compose files that define both services: prod, quickstart, and the
+# Drift guard for the Docker API proxy startup contract. Both watchdog and
+# the Admin UI depend on docker-socket-proxy only via `condition:
+# service_started`, not `service_healthy` -- both must stay alive and
+# available while Docker API access is degraded, not disappear entirely if
+# docker-socket-proxy is briefly slow to become healthy at startup.
+#
+# This was originally `service_healthy` for watchdog specifically (a real
+# design mistake corrected 2026-08-12, PR #1489, after being live-verified
+# against a real CI run): `service_healthy` means Compose refuses to CREATE
+# the watchdog container at all if docker-socket-proxy fails its own
+# startup healthcheck -- total monitoring silence for exactly the failure
+# mode watchdog exists to surface. watchdog.sh's own get_health() and
+# probe_docker_socket_proxy() already treat an unreachable Docker API
+# channel as a normal, non-fatal, self-correcting failure state (an
+# "unreachable" reading that clears itself once the proxy becomes
+# reachable, with RESTART_AFTER=3 consecutive ~CHECK_INTERVAL-second cycles
+# meaning one transient unreachable reading at startup is nowhere near
+# enough to trigger a false restart) -- so there was never a real need for
+# the harder Compose-level gate in the first place. Covers all three
+# compose files that define both services: prod, quickstart, and the
 # full-setup validation harness.
 #
 # This is a structural text scan of the real compose files, using the same
@@ -29,8 +42,10 @@ setup() {
     source "$BATS_TEST_DIRNAME/helpers/compose-service-block-helpers.sh"
 }
 
-# A health-gated watchdog dependency is useful only if the dependency itself
-# exposes a real healthcheck, so verify that precondition explicitly.
+# A `service_started`-only dependency is useful only if the calling code
+# itself tolerates a not-yet-healthy dependency, so verify docker-socket-proxy
+# actually carries a real healthcheck (proving readiness is a real, checkable
+# state, even though neither caller below hard-gates on it at startup).
 @test "docker-socket-proxy defines a healthcheck in every compose file" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" docker-socket-proxy)"
@@ -42,9 +57,11 @@ setup() {
     done
 }
 
-# The watchdog's Docker API operations are its core job, so startup must wait
-# until the proxy is genuinely healthy instead of merely having been created.
-@test "watchdog waits for docker-socket-proxy to be healthy" {
+# watchdog's own dashboard and alert-only monitoring must remain startable
+# while Docker API access is degraded -- see this file's own header comment
+# for the real incident that established this as a requirement, not merely
+# a nice-to-have.
+@test "watchdog waits only for docker-socket-proxy to be started, not healthy" {
     for f in "${compose_files[@]}"; do
         block="$(extract_service_block "$f" watchdog)"
         [ -n "$block" ]
@@ -55,8 +72,8 @@ setup() {
         # Read the dependency's immediately following line so an unrelated
         # condition elsewhere in the service block cannot produce a false pass.
         after_dep="$(awk '/docker-socket-proxy:$/{getline; print; exit}' <<< "$block")"
-        [[ "$after_dep" == *"condition: service_healthy"* ]] || {
-            echo "watchdog's docker-socket-proxy dependency in $f is not condition: service_healthy (got: '$after_dep')" >&2
+        [[ "$after_dep" == *"condition: service_started"* ]] || {
+            echo "watchdog's docker-socket-proxy dependency in $f is not condition: service_started (got: '$after_dep')" >&2
             return 1
         }
     done

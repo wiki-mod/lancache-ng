@@ -780,11 +780,14 @@ services:
       retries: 2
       start_period: 15s
     # Every Docker health read and restart call goes through this proxy.
-    # Require its /_ping healthcheck before watchdog starts so the first
-    # monitoring cycle has a working Docker API channel.
+    # `service_started`, not `service_healthy` -- see
+    # deploy/prod/docker-compose.yml's identical `depends_on:` for the full
+    # reasoning (watchdog's own monitoring must survive a degraded Docker API
+    # channel, not disappear entirely if docker-socket-proxy is briefly slow
+    # to become healthy at startup).
     depends_on:
       docker-socket-proxy:
-        condition: service_healthy
+        condition: service_started
     networks:
       - default
       - docker-api

@@ -239,14 +239,14 @@ services:
       # Issue #870: shared with `ui` below (read-only) so this validation
       # stack exercises the same status.json hand-off dev/prod/quickstart use.
       - watchdog-status:/var/run/watchdog
-    # docker-socket-proxy above already carries a real HTTP healthcheck, so
-    # this validation harness's own watchdog waits for genuine readiness
-    # instead of a bare "container exists" signal -- see
+    # `service_started`, not `service_healthy` -- see
     # deploy/prod/docker-compose.yml's identical `depends_on:` for the full
-    # reasoning.
+    # reasoning (watchdog's own monitoring must survive a degraded Docker API
+    # channel, not disappear entirely if docker-socket-proxy is briefly slow
+    # to become healthy at startup).
     depends_on:
       docker-socket-proxy:
-        condition: service_healthy
+        condition: service_started
     networks:
       validation:
         ipv4_address: ${VALIDATION_WATCHDOG_IP:-172.30.99.6}
