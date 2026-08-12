@@ -176,7 +176,7 @@ setup() {
 }
 
 @test "git dubious-ownership rejection scopes trust to the physical path, not a symlinked SCRIPT_DIR" {
-    # Regression test for a Codex review finding on #609: git checks
+    # Regression test for #609: git checks
     # safe.directory against the repository's real (symlink-resolved) path,
     # not necessarily the path it was invoked through. If SCRIPT_DIR is a
     # symlink to the real checkout, scoping safe.directory to the symlink
@@ -224,7 +224,7 @@ setup() {
 }
 
 @test "git dubious-ownership rejection extracts only the first line's path, not the later config-suggestion quote" {
-    # Regression test for a Codex review finding on #609: real git's
+    # Regression test for #609: real git's
     # dubious-ownership message repeats the path a second time, quoted, in
     # its "git config --global --add safe.directory '<path>'" suggestion a
     # few lines later. A path containing a space forces git to quote it (and

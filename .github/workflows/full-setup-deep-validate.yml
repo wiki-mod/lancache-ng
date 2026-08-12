@@ -68,8 +68,8 @@ on:
   # this filter a PR opened against a base branch build-push.yml ignores
   # would still be marked staging-available here, and
   # ensure-pr-staging-images would poll for tags that no workflow will ever
-  # push until it times out and fails closed (Codex review finding on
-  # #764). Restricting the trigger the same way build-push.yml is restricted
+  # push until it times out and fails closed. Restricting the trigger the
+  # same way build-push.yml is restricted
   # is the correct fix rather than teaching the planner a fallback: a PR
   # against an unprotected branch isn't covered by branch-protection
   # required-status-checks anyway (see the BRANCH PROTECTION NOTE above), so
@@ -565,8 +565,7 @@ jobs:
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
         # setup.sh CLI fresh install, same reason setup-cli-simulation.sh
         # needs it) from build-tools. Same PR-staging-tag preference as
-        # setup-cli-simulation above, for the same reason (Codex review
-        # finding on #764).
+        # setup-cli-simulation above, for the same reason.
         id: build-tools-image
         # See dns-zone-rollback-simulation's "Resolve build-tools image" step
         # for why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/
@@ -737,8 +736,8 @@ jobs:
           # and the eight simulations. should_run is already 'true' here, so this
           # suite must have actually run and succeeded -- never merely be
           # 'skipped' (which check() treats as fine and would let this required
-          # gate go green after silently losing the isolation guarantee, the
-          # Codex review finding on #764 this preserves).
+          # gate go green after silently losing the isolation guarantee this
+          # hard requirement exists to preserve).
           if [[ "$FULL_SETUP_SIMS_RESULT" != "success" ]]; then
             echo "::error::The shared full-setup simulation suite did not succeed (full-setup-sims result: $FULL_SETUP_SIMS_RESULT); see its individual jobs in the checks UI. Failing closed."
             exit 1

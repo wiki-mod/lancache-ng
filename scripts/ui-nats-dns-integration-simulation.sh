@@ -31,8 +31,8 @@ network_name="${compose_project}_validation"
 # addresses this script queries match the real container IPs `docker compose
 # up` below actually assigns. Falls back to the fixed IPs when unset
 # (unchanged behaviour for the manual full-setup-validate.yml); the automatic
-# full-setup-deep-validate.yml gate (#715) sets these per-run (Codex review
-# finding on #764).
+# full-setup-deep-validate.yml gate (#715) sets these per-run so concurrent
+# PR runs on the same self-hosted host get distinct subnets.
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"

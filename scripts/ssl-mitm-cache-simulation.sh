@@ -60,10 +60,9 @@ network_name="${compose_project}_validation"
 # workflow's own compute-validation-network job/comment) so existing
 # behaviour there is unchanged. The full-setup-deep-validate.yml automatic
 # gate (#715) DOES set these, giving each concurrent PR run its own
-# collision-free subnet instead of the fixed one (Codex review finding on
-# #764: without this, two concurrent runs on the same self-hosted host could
-# still overlap on the default subnet despite having distinct Compose
-# project names).
+# collision-free subnet instead of the fixed one: without this, two
+# concurrent runs on the same self-hosted host could still overlap on the
+# default subnet despite having distinct Compose project names.
 proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"

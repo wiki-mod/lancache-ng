@@ -63,8 +63,8 @@ network_name="${compose_project}_validation"
 # deploy/full-setup/docker-compose.yml's own VALIDATION_UI_IP default so this
 # matches the real ui container IP `docker compose up` below assigns. Falls
 # back to the fixed IP when unset (manual full-setup-validate.yml); the
-# automatic full-setup-deep-validate.yml gate (#715) sets it per-run (Codex
-# review finding on #764).
+# automatic full-setup-deep-validate.yml gate (#715) sets it per-run so
+# concurrent PR runs on the same self-hosted host get distinct subnets.
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 registration_token="validation-secondary-registration-token"
 # Issue #681: defined here (not just at first use) so `cleanup`'s `docker rm

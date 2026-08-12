@@ -190,6 +190,33 @@ EOF
     [[ "$output" == *"b.sh:2"* ]] || fail "missing second offender: $output"
 }
 
+@test "fails on the noun form 'review finding'" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+on:
+  push:
+    # The isolation gap was a review finding on PR #764.
+    branches: [master]
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the offending line: $output"
+}
+
+@test "fails when 'review finding' is wrapped across adjacent comment lines" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+on:
+  push:
+    # The isolation gap was a review
+    # finding on PR #764 and must not survive line wrapping.
+    branches: [master]
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:3"* ]] || fail "did not catch the wrapped phrase: $output"
+}
+
 @test "the guard also passes when pointed at the real repository tree" {
     run bash "$script" "$repo_root"
     [ "$status" -eq 0 ] || fail "real repo tree is not clean per this guard: $output"
