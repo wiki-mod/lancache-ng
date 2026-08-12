@@ -1200,7 +1200,7 @@ omitted):**
     recurring claim (that every Docker directory `.github/dependabot.yml`
     groups into one PR shares an identical final-stage base image) is
     concrete and mechanically checkable, unlike the general class this
-    exception covers -- `scripts/check-dependabot-docker-base-consistency.sh`
+    exception covers -- `scripts/tracked/check-dependabot-docker-base-consistency.sh`
     (wired into the `file-headers-check` composite action) now fails CI if
     any listed Dockerfile's final `FROM` line ever diverges from the
     others, with bats coverage

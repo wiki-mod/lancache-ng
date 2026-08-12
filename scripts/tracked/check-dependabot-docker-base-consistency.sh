@@ -19,7 +19,7 @@ if [ "$#" -gt 0 ]; then
     repo_root=$(cd "$1" && pwd)
 else
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    repo_root=$(cd "$script_dir/.." && pwd)
+    repo_root=$(cd "$script_dir/../.." && pwd)
 fi
 cd "$repo_root"
 

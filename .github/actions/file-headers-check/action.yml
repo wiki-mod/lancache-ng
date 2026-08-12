@@ -38,11 +38,11 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-review-chronology-comments.sh
 
-    # See scripts/check-dependabot-docker-base-consistency.sh's own header
+    # See scripts/tracked/check-dependabot-docker-base-consistency.sh's own header
     # for the shared-base-image assumption this guards.
     - name: Check dependabot.yml's docker-group base-image assumption still holds
       shell: bash
       run: >-
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/check-dependabot-docker-base-consistency.sh
+        bash scripts/tracked/check-dependabot-docker-base-consistency.sh

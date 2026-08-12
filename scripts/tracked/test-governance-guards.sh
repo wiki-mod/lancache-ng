@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Runs fixture-style checks for scripts/check-governance-guards.sh.
+# Runs fixture-style checks for scripts/tracked/check-governance-guards.sh.
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"

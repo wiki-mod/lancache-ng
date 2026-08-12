@@ -2,12 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Standing coverage guard for scripts/check-pipefail-early-exit-grep.sh's own
+# Standing coverage guard for scripts/untracked/check-pipefail-early-exit-grep.sh's own
 # test suite: verifies tests/bats/check_pipefail_early_exit_grep.bats
 # actually exercises every top-level path prefix that guard's own scan_files
 # discovery covers, not just some of them. Mirrors this project's existing
-# standing-coverage-check pattern (scripts/check-idempotence-test-coverage.sh,
-# scripts/check-bats-path-filter-coverage.sh, scripts/check-build-tools-smoke-
+# standing-coverage-check pattern (scripts/tracked/check-idempotence-test-coverage.sh,
+# scripts/tracked/check-bats-path-filter-coverage.sh, scripts/tracked/check-build-tools-smoke-
 # coverage.sh): a small, targeted structural check, not full code-coverage
 # instrumentation.
 #
@@ -47,11 +47,11 @@ if [ "$#" -gt 0 ]; then
     repo_root=$(cd "$1" && pwd)
 else
     script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-    repo_root=$(cd "$script_dir/.." && pwd)
+    repo_root=$(cd "$script_dir/../.." && pwd)
 fi
 cd "$repo_root"
 
-guard_script="scripts/check-pipefail-early-exit-grep.sh"
+guard_script="scripts/untracked/check-pipefail-early-exit-grep.sh"
 guard_bats="tests/bats/check_pipefail_early_exit_grep.bats"
 
 for f in "$guard_script" "$guard_bats"; do

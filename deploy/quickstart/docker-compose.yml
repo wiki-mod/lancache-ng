@@ -1261,7 +1261,7 @@ services:
         # from (same constraint as netdata.conf itself, above), so the job
         # config is generated inline instead. Keep this content byte-identical
         # to services/syslog/netdata-web_log.conf if that file ever changes
-        # -- mechanically enforced by scripts/check-logging-matrix.sh
+        # -- mechanically enforced by scripts/tracked/check-logging-matrix.sh
         # (#849 bug-hunt finding observability.md#16), because this inline
         # copy is independent of the real file (not a bind-mount), so a
         # change applied only there never propagates here on its own:

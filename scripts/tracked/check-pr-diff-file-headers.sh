@@ -5,7 +5,7 @@
 # Runs the diff-scoped half of the file-headers/file-headers-hosted jobs'
 # SPDX check (AG-HDR-008): fetches the PR's base branch and exact base SHA,
 # computes the PR's own changed-file list against HEAD, and runs
-# scripts/check-file-headers.sh against exactly that list. Factored out of
+# scripts/tracked/check-file-headers.sh against exactly that list. Factored out of
 # build-push.yml's own inline `run:` block (previously duplicated verbatim
 # across the self-hosted and GitHub-hosted-fallback jobs) so both mirrors
 # call one real, bats-testable script instead of two copies of the same
@@ -26,7 +26,7 @@ set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 # shellcheck source=scripts/lib/git-fetch-retry.sh
-source "$script_dir/lib/git-fetch-retry.sh"
+source "$script_dir/../lib/git-fetch-retry.sh"
 
 : "${SPDX_BASE_SHA:?SPDX_BASE_SHA is required}"
 : "${SPDX_BASE_REF:?SPDX_BASE_REF is required}"
@@ -43,7 +43,7 @@ git cat-file -e "${GITHUB_SHA}^{commit}"
 # command substitution: a process substitution's own exit status is
 # invisible to the reading command and to `set -e`/pipefail alike (the same
 # class of bug already fixed in scripts/check-short-sha-truncation.sh and
-# scripts/check-file-headers.sh's own git-ls-files call), so a real diff
+# scripts/tracked/check-file-headers.sh's own git-ls-files call), so a real diff
 # failure -- a corrupted object, an unreachable commit despite the cat-file
 # checks above racing a concurrent gc -- would otherwise silently report an
 # empty changed-file set as a clean pass instead of failing closed. `$(...)`
