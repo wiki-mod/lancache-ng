@@ -1276,6 +1276,9 @@ services:
         jobs:
           - name: nginx_proxy
             path: /var/log/lancache/nginx-proxy.log
+            log_type: regexp
+            regexp_config:
+              pattern: '^(?P<remote_addr>\S+) - \[(?P<time_local>[^\]]+)\] "(?P<request>[^"]*)" (?P<status>\d+) (?P<body_bytes_sent>\d+) "[^"]*" "(?P<host>[^"]*)"'
         CONF
         # Resolve a shared alarm token before installing the custom notification
         # sender. Quickstart ships the same helper used by the NATS bootstrap.
