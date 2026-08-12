@@ -1,6 +1,6 @@
 #!/bin/bash
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Single source of truth for deriving the short (truncated) commit SHA used
 # in human-readable GHCR tags (sha-<short>, sha-<short>-amd64/-arm64,

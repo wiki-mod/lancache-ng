@@ -1,6 +1,6 @@
 #!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
 #
 # Docker-free unit coverage for scripts/lib/docker-metadata.sh (issue #1095
 # gap G2) -- the single shared derivation every short-SHA call site in
