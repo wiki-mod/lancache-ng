@@ -684,6 +684,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
 
       # Relocated from `shellcheck` (#1245): that job gained a docs-only
@@ -741,6 +742,7 @@ jobs:
             -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
             -e GOVERNANCE_PR_BODY="$governance_pr_body" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
       # Warn-only guard (#893): flags a PR that edits CHANGELOG.md directly, since #899 that
@@ -783,6 +785,7 @@ jobs:
             -w /work \
             -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
           || true
 
@@ -835,6 +838,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
 
   language-policy-hosted:
@@ -1053,6 +1057,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/validate-stack-images.sh
 
       - name: Validate prebuilt production install path
@@ -1064,6 +1069,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -s <<'VALIDATE_PREBUILT'
           set -euo pipefail
 
@@ -1245,6 +1251,7 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -s <<'VALIDATE_COMPOSE'
           set -euo pipefail
 
@@ -2309,6 +2316,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-naming-consistency.sh
 
       - name: Check workflow service lists stay in sync (issue #822)
@@ -2328,6 +2336,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-workflow-service-lists.sh
 
       - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
@@ -2346,6 +2355,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-vex-drift.sh
 
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
@@ -2365,6 +2375,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-netdata-curl-pin.sh
 
       - name: Check config-writer idempotence test coverage (#640)
@@ -2376,6 +2387,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-idempotence-test-coverage.sh
 
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
@@ -2395,6 +2407,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-bats-path-filter-coverage.sh
 
       - name: Check setup.sh/simulation-script prompt drift (issue #1176)
@@ -2417,6 +2430,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-setup-prompt-drift.sh
 
       - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
@@ -2435,6 +2449,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-proxy-cache-env-doc-drift.sh
 
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
@@ -2522,6 +2537,7 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/check-logging-matrix.sh
 
       - name: Remove fallback compose validation image
@@ -3448,6 +3464,7 @@ jobs:
             -v "$PWD/coverage-dns:/coverage-dns" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 1800 \
             bash -c 'set -euo pipefail
               cargo tarpaulin \
                 --engine llvm \
@@ -3469,6 +3486,7 @@ jobs:
             -v "$PWD/coverage-ui:/coverage-ui" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 1800 \
             bash -c 'set -euo pipefail
               cargo tarpaulin \
                 --engine llvm \
@@ -3490,6 +3508,7 @@ jobs:
             -v "$PWD/coverage-badge:/coverage-badge" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -c 'set -euo pipefail
 
               # Extract coverage percentages from JSON reports inside the
@@ -3909,6 +3928,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -3977,6 +3997,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -4047,6 +4068,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -7337,6 +7359,7 @@ jobs:
             -e EXPECTED_PRERELEASE="$expected_prerelease" \
             -v "$notes_file:/tmp/lancache-release-notes.md:ro" \
             "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPDATE_RELEASE'
           set -euo pipefail
 
@@ -7461,6 +7484,7 @@ jobs:
             -e TAG_NAME \
             -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
             "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPLOAD_VEX'
           set -euo pipefail
 
@@ -7616,6 +7640,7 @@ jobs:
             -e ASSET_NAME="$asset" \
             -v "$PWD/$asset:/tmp/$asset:ro" \
             "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPLOAD_SBOM'
           set -euo pipefail
 
