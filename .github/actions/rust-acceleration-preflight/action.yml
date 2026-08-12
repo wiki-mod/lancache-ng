@@ -109,11 +109,19 @@ runs:
         # regardless of whether the trap ran -- there is no host-shared or
         # writable-mount state (mount_args above are all `:ro`) that could
         # leak past a missed trap.
+        # 600s, not the 300s used for pure-text-scan checks elsewhere in this
+        # project: this preflight makes real network calls (sccache-dist
+        # --dist-status, distcc-pump --startup probing every candidate host
+        # via lsdistcc) that can legitimately take longer than a text scan
+        # under real network latency. The calling job (`build` in
+        # build-push.yml) has its own timeout-minutes: 150 covering the full
+        # Rust/Docker build that follows, so 600s here for this early step
+        # leaves the overwhelming majority of that budget intact.
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
-          timeout --kill-after=30 --signal=KILL 300 bash -s <<'PREFLIGHT'
+          timeout --kill-after=30 --signal=KILL 600 bash -s <<'PREFLIGHT'
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"

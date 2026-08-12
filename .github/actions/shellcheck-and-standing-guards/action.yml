@@ -93,13 +93,21 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
+        # 600s, not the 300s used for this file's other (pure text-scan)
+        # steps: this script makes real curl calls to api.github.com per
+        # pinned action and has its own rate-limit retry/backoff path
+        # (tests/bats/check_action_node_versions.bats covers a transient
+        # rate-limit response that recovers on a later attempt) that can
+        # legitimately need more time than a text scan under real GitHub API
+        # backoff -- still well inside the calling step's own 900s
+        # (timeout-minutes: 15) budget for this whole composite action.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
           -w /work \
           -e GH_TOKEN \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-action-node-versions.sh
+          timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage (#896)
       # Standing guard: every full-setup-validate.yml/
