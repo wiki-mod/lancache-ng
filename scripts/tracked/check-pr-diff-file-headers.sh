@@ -42,9 +42,9 @@ git cat-file -e "${GITHUB_SHA}^{commit}"
 # `mapfile -t x < <(git diff ...)` process substitution or a `$(...)`
 # command substitution: a process substitution's own exit status is
 # invisible to the reading command and to `set -e`/pipefail alike (the same
-# class of bug already fixed in scripts/check-short-sha-truncation.sh and
-# scripts/tracked/check-file-headers.sh's own git-ls-files call), so a real diff
-# failure -- a corrupted object, an unreachable commit despite the cat-file
+# class of bug already fixed in scripts/tracked/check-file-headers.sh's own
+# git-ls-files call), so a real diff failure -- a corrupted object, an
+# unreachable commit despite the cat-file
 # checks above racing a concurrent gc -- would otherwise silently report an
 # empty changed-file set as a clean pass instead of failing closed. `$(...)`
 # command substitution has the same exit-status problem AND additionally
