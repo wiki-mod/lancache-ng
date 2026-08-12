@@ -60,6 +60,12 @@ is_zero_sha() {
 # touches a workflow file -- every other push is a guaranteed no-op for it,
 # and this hook otherwise runs synchronously before every single push.
 workflow_changed=0
+# local_ref (the first of git's four pre-push stdin fields per updated ref:
+# local ref, local sha1, remote ref, remote sha1) is read but never used --
+# it must still be named here so `read` assigns the remaining three fields
+# to the correct variables; dropping it would shift local_sha into the
+# local_ref slot instead.
+# shellcheck disable=SC2034
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
   is_zero_sha "$local_sha" && continue # branch/tag deletion: nothing to scan
