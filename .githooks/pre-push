@@ -81,7 +81,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 
   if [ -n "$base" ]; then
-    if git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null | grep -q .; then
+    # Capture into a variable first, then test for non-empty output instead
+    # of piping git diff directly into `grep -q .` (AG-VAL-032): grep -q can
+    # exit the instant it sees the first output line while git diff is still
+    # writing further changed paths, which under `set -o pipefail` (this
+    # hook enables it above) can make the pipeline report git diff's own
+    # SIGPIPE exit (141) instead of grep's successful match -- silently
+    # taking the "no workflow file changed" branch even when one did.
+    changed_workflow_files=$(git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null) || changed_workflow_files=""
+    if [ -n "$changed_workflow_files" ]; then
       workflow_changed=1
     fi
   else

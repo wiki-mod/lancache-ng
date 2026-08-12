@@ -186,7 +186,13 @@ jobs:
             rust_via_shared_classifier=true
           else
             classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/untracked/classify-image-impact.sh)"
-            if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|watchdog|workflow)=true$'; then
+            # here-string, not `printf ... | grep -q` (AG-VAL-032): grep -q
+            # can exit on its first match while printf is still writing the
+            # classifier's remaining `key=value` lines, and under pipefail
+            # that can surface as printf's own SIGPIPE (141) instead of
+            # grep's successful match, silently skipping the Rust CodeQL
+            # matrix entry even when a Rust-relevant service changed.
+            if grep -qE '^(dns_rust|ui|watchdog|workflow)=true$' <<<"$classifier_output"; then
               rust_via_shared_classifier=true
             fi
           fi

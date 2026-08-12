@@ -1486,7 +1486,13 @@ jobs:
               return 1
             fi
 
-            if printf '%s\n' "$output" | grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)'; then
+            # here-string, not `printf ... | grep -q`: AG-VAL-032 -- grep -q
+            # can exit as soon as it matches while the producer is still
+            # writing, and under this heredoc's own `set -euo pipefail`
+            # (above) that can surface as the producer's SIGPIPE (141)
+            # instead of grep's successful match, silently skipping this
+            # branch and missing a real docker-compose warning.
+            if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
               printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
               return 1
             fi
@@ -2264,7 +2270,9 @@ jobs:
               MERGED_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000 \
               bash "$guard_script"
             )"
-            if printf '%s' "$derived_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            # here-string per AG-VAL-032, same SIGPIPE-under-pipefail hazard
+            # as the other `printf | grep -q` conversions in this file.
+            if grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$derived_tag"; then
               echo "::error::build-tools.yml's branch-tag derivation must never be able to emit a release-shaped tag; ref '$candidate_ref' produced '$derived_tag'."
               exit 1
             fi
@@ -5964,7 +5972,9 @@ jobs:
           fi
 
           if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
-            if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
+            # here-string per AG-VAL-032, same SIGPIPE-under-pipefail hazard
+            # as the other `printf | grep -q` conversions in this file.
+            if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
               echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
               exit 1
             fi
