@@ -661,6 +661,10 @@ RUN set -euo pipefail; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
 
+# A generic default working directory for interactive/manual use of this
+# image (e.g. a developer shelling in locally); CI callers never rely on
+# it, since every CI invocation of this image explicitly bind-mounts the
+# checked-out repository at /work and passes -w /work of its own accord.
 WORKDIR /workspace
 
 CMD ["bash"]
