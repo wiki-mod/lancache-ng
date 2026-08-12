@@ -1048,9 +1048,9 @@ explicit pass:**
     functions, not a new live-nginx harness) -- recorded here rather than
     rushed into an under-verified script under time pressure.
   - **Tracking**: bug-hunt #849 finding #14 (2026-08-06). Follow-up: a
-    dedicated `scripts/proxy-slice-redirect-cache-simulation.sh` (mirroring
-    the existing `proxy-*-simulation.sh` scripts' shape) is the concrete next
-    step, not yet built.
+    dedicated `scripts/untracked/simulations/proxy-slice-redirect-cache-simulation.sh`
+    (mirroring the existing `proxy-*-simulation.sh` scripts' shape and location)
+    is the concrete next step, not yet built.
   - **Validation**: No automated coverage exists for this exact path today.
     `scripts/untracked/simulations/ssl-mitm-cache-simulation.sh`'s own comment explains why *its*
     assertions check the literal HTTP status (to guard against a redirect
