@@ -23,18 +23,8 @@ setup() {
         "$repo_root/deploy/prod/docker-compose.yml"
         "$repo_root/deploy/quickstart/docker-compose.yml"
     )
-}
-
-# The helper stops at the next top-level service so network declarations from
-# neighboring services cannot accidentally satisfy the target assertion.
-extract_service_block() {
-    local file="$1" service="$2"
-    awk -v svc="  ${service}:" '
-        $0 == svc { capture = 1; print; next }
-        capture && /^[A-Za-z]/ { exit }
-        capture && /^  [A-Za-z0-9_-]+:$/ { exit }
-        capture { print }
-    ' "$file"
+    # shellcheck source=tests/bats/helpers/compose-service-block-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/compose-service-block-helpers.sh"
 }
 
 # Isolation requires an explicit dedicated network in each real deployment;

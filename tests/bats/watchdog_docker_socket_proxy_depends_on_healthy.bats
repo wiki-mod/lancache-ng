@@ -25,18 +25,8 @@ setup() {
         "$repo_root/deploy/quickstart/docker-compose.yml"
         "$repo_root/deploy/full-setup/docker-compose.yml"
     )
-}
-
-# The helper stops at the next top-level service so a condition from another
-# service cannot accidentally satisfy an assertion for the target service.
-extract_service_block() {
-    local file="$1" service="$2"
-    awk -v svc="  ${service}:" '
-        $0 == svc { capture = 1; print; next }
-        capture && /^[A-Za-z]/ { exit }
-        capture && /^  [A-Za-z0-9_-]+:$/ { exit }
-        capture { print }
-    ' "$file"
+    # shellcheck source=tests/bats/helpers/compose-service-block-helpers.sh
+    source "$BATS_TEST_DIRNAME/helpers/compose-service-block-helpers.sh"
 }
 
 # A health-gated watchdog dependency is useful only if the dependency itself
