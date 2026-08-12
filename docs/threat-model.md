@@ -246,10 +246,12 @@ untrusted network · **Impact**: High
   rather than accepting them. This is a genuinely new write-capable network
   endpoint on the Admin UI, not merely a restatement of an existing one —
   worth naming explicitly because bug hunt finding #20 already established
-  that any container on the `lancache` Docker network can reach Netdata's
-  own REST API unauthenticated; without this token check, any container on
-  that same network could also inject fabricated alarms into the Admin UI
-  dashboard.
+  that Netdata's own REST API has no authentication of its own; a later
+  correction narrowed which containers can even reach it at all (Netdata now
+  joins a dedicated `netdata-net` bridge shared only with `ui`, not the
+  shared `lancache` network every other service is on), but any container
+  that does join that network could still inject fabricated alarms into the
+  Admin UI dashboard without this token check.
 
 **Residual risk**: Low, and entirely operator-controlled: it exists only if the
 operator sets `ALLOW_INSECURE_UI=true` *and* exposes the UI beyond the trusted
@@ -257,7 +259,8 @@ LAN. The quickstart binds the UI to the LAN IP by default and documents
 `UI_BIND_IP=127.0.0.1` to restrict it further. Separately, `POST
 /api/netdata-alarms`'s token check is scoped to *this* endpoint only — it does
 not change finding #20's underlying fact that Netdata's own API (port 19999,
-internal-network-only) has no authentication of its own.
+reachable only from containers on the `netdata-net` bridge) has no
+authentication of its own.
 
 ---
 
@@ -313,15 +316,16 @@ record changes, or subscribes to read cache/DNS metadata.
 (forged DNS records reprogram what the appliance spoofs)
 
 **Mitigations** (verified in `deploy/quickstart/docker-compose.yml`):
-- NATS is **not published on the host** in the default deployment — it is only
-  reachable on the internal Docker network. This also covers nats-server's own
-  HTTP monitor endpoint (`http_port: 8222`, added for the Docker healthcheck
-  and Netdata's NATS collector): it carries no credentials of its own
-  (nats-server's monitor has no built-in auth), so any container reachable on
-  the same internal Docker network can read `/varz`/`/healthz` without a NATS
-  role credential — but it is read-only server metadata (version, connection
-  counts), not the DNS-record data path itself, and stays unreachable from
-  outside the Docker network exactly like the client port.
+- NATS is **not published on the host** in the default deployment; it is only
+  reachable on the internal Docker network. The internal HTTP monitor endpoint
+  (`http_port: 8222`) exists for the Docker healthcheck and is not consumed by
+  Netdata in this stack. It carries no credentials of its own (nats-server's
+  monitor has no built-in auth), so any container reachable on the same internal
+  Docker network can read `/varz`/`/healthz` without a NATS role credential. The
+  endpoint exposes read-only server metadata such as version and connection
+  counts, not the DNS-record data path, and remains unreachable from outside the
+  Docker network exactly like the client port. NATS does not join Netdata's
+  dedicated isolated network because no active collector path requires it.
 - Access is **credentialled and role-scoped**, not a single shared account.
   Four static identities exist with least-privilege permissions:
   - **UI writer** — may only `publish` `lancache.dns.record` / `lancache.dns.flush`.

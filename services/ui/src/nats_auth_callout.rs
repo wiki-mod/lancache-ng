@@ -504,8 +504,14 @@ fn seal_response_if_needed(
 // docs/bug-hunt/ui-core.md, issue #849). Pulled out as a pure function so
 // the arithmetic itself has a unit test independent of a live NATS
 // connection, which the surrounding loop cannot practically be tested
-// against in this codebase.
-fn grow_backoff(delay: std::time::Duration, max_delay: std::time::Duration) -> std::time::Duration {
+// against in this codebase. `pub(crate)`, not private: `main.rs`'s initial
+// nats.conf reload retry loop reuses this same growth step (AG-CODE-011)
+// rather than re-implementing it a third time alongside `connect_nats_with_retry`'s
+// own inline doubling.
+pub(crate) fn grow_backoff(
+    delay: std::time::Duration,
+    max_delay: std::time::Duration,
+) -> std::time::Duration {
     std::cmp::min(delay * 2, max_delay)
 }
 
