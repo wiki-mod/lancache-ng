@@ -4,16 +4,15 @@
 # Health monitor and auto-restart-on-failure daemon.
 #
 # File-retention responsibilities (cache-age purge, syslog-ng storage-budget
-# pruning, fluent-bit self-log rotation) moved out of this file into the
-# standalone services/watchdog/retention.sh (#842, 2026-08-01), run as a
-# genuinely separate OS process by the compose `command:` override -- see
-# that file's header for the full blast-radius-separation rationale. This
-# file no longer reads CACHE_VALID_DAYS/SYSLOG_ENABLED/SYSLOG_*/
-# FLUENT_BIT_SELFLOG_* at all; CACHE_DIR is the one exception, still read
-# here for disk_info()'s unrelated disk-usage-percentage reporting into
-# status.json, resolved independently of retention.sh's own copy (see that
-# file's resolve_cache_dir() comment for why this is deliberate duplication,
-# not shared state).
+# pruning, fluent-bit self-log rotation) live in the standalone
+# services/watchdog/retention.sh process. This file retains CACHE_DIR only for
+# disk_info()'s independent status.json disk-usage reporting. LOGGING_ENABLED
+# remains here because it is a runtime-presence gate, not a retention setting:
+# it decides whether the combined syslog+fluent-bit container exists and should
+# be monitored alert-only. SYSLOG_ENABLED is intentionally narrower and belongs
+# to the retention/pruning engine. DHCP_MODE is carried through Compose for the
+# Rust implementation's alert-only target resolution, while the live Bash path
+# uses LOGGING_ENABLED for syslog presence.
 
 set -euo pipefail
 
@@ -24,8 +23,8 @@ DISK_WARN_PCT="${DISK_WARN_PCT:-85}"
 DISK_ALARM_PCT="${DISK_ALARM_PCT:-95}"
 STATUS_FILE="${STATUS_FILE:-/var/run/watchdog/status.json}"
 
-F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0; F_NTP=0
-H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"; H_NTP="unknown"
+F_PROXY=0; F_DNS_STD=0; F_DNS_SSL=0; F_NATS=0; F_DOCKER_PROXY=0; F_SYSLOG=0; F_NTP=0
+H_PROXY="unknown"; H_DNS_STD="unknown"; H_DNS_SSL="unknown"; H_NATS="unknown"; H_DOCKER_PROXY="unknown"; H_SYSLOG="unknown"; H_NTP="unknown"
 
 log() { echo "[watchdog] $(date -u +%H:%M:%S) $*"; }
 # Some diagnostics (resolve_cache_dir()'s fail-closed error, the CONTAINER_*
@@ -154,12 +153,33 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 # script's restart-capable set is reserved for services whose restart is
 # an already-reviewed, safe recovery action -- see check_alert_only()'s own
 # comment for the shared alert-only pattern this reuses.
-NTP_ENABLED="${NTP_ENABLED:-0}"
-if is_truthy "$NTP_ENABLED"; then
-    C_NTP="${CONTAINER_NTP:-lancache-ntp}"
-else
-    C_NTP=""
-fi
+# Resolves one alert-only monitoring target's container name into <out_var>,
+# honoring the truthy gate in <enabled_var> and the coordinated
+# LANCACHE_CONTAINER_SUFFIX, or sets <out_var> to empty when the gate is
+# false. <override_var>, if given and non-empty, overrides <base_name> --
+# only C_NTP's caller passes one (CONTAINER_NTP); C_SYSLOG's caller
+# intentionally omits it, matching services/watchdog/src/config.rs's fixed
+# CONTAINER_SYSLOG constant (no separate env var for
+# scripts/check-naming-consistency.sh to validate -- see C_SYSLOG's own call
+# site below for that contract's full rationale). Shared so the
+# gate-check-then-suffix-append mechanics themselves cannot silently diverge
+# between callers or a future third one, even though the override policy
+# each caller chooses stays caller-controlled (Rule-Ref: AG-CODE-011).
+_watchdog_resolve_alert_target() {
+    local enabled_var="$1" out_var="$2" base_name="$3" override_var="${4:-}"
+    local name="$base_name"
+    if [ -n "$override_var" ]; then
+        local override_value="${!override_var:-}"
+        [ -n "$override_value" ] && name="$override_value"
+    fi
+    if is_truthy "${!enabled_var:-0}"; then
+        printf -v "$out_var" '%s%s' "$name" "${LANCACHE_CONTAINER_SUFFIX:-}"
+    else
+        printf -v "$out_var" ''
+    fi
+}
+
+_watchdog_resolve_alert_target NTP_ENABLED C_NTP lancache-ntp CONTAINER_NTP
 
 # docker-socket-proxy (issue #1170 Part 1): a fixed literal, not a
 # ${CONTAINER_*:-...}-style override like the four names above. Those four
@@ -177,6 +197,17 @@ fi
 # allowlist would be wrong, not merely unnecessary. It exists purely as the
 # stable status.json/dashboard key and log label for this probe.
 C_DOCKER_PROXY="lancache-docker-socket-proxy"
+
+# syslog uses the same fixed-name contract as the Rust implementation:
+# services/watchdog/src/config.rs exposes CONTAINER_SYSLOG as a plain constant,
+# not an environment override, so there is no separate CONTAINER_SYSLOG value
+# for scripts/check-naming-consistency.sh to validate. The coordinated suffix
+# still applies because the real Compose container name and Docker-proxy
+# allowlist both use it. LOGGING_ENABLED, not SYSLOG_ENABLED, gates presence:
+# an install without the logging profile has no syslog container to monitor,
+# while SYSLOG_ENABLED controls only the separate storage-budget retention
+# engine and can legitimately remain false while central logging is active.
+_watchdog_resolve_alert_target LOGGING_ENABLED C_SYSLOG lancache-syslog
 
 # LANCACHE_CONTAINER_SUFFIX (issue #1415): the FATAL guards below no longer
 # compare against the bare literal default -- they compare against this
@@ -489,6 +520,22 @@ check_alert_only() {
     esac
 }
 
+# Builds one comma-prefixed status.json service entry
+# (`,\n    "<name>":   {"status": ..., "health": ..., "failures": ...}`) for
+# write_status()'s optional services below (SSL DNS, syslog, ntp). The
+# always-present services in write_status()'s own heredoc are not built
+# through this helper: the first entry in a JSON object has no leading
+# comma, a genuinely different shape from every optional entry after it, not
+# merely a cosmetic difference this helper could also absorb. Pulled out so
+# a fix to this JSON fragment's shape (key names, quoting, spacing) reaches
+# every optional service at once instead of needing to be manually kept in
+# sync across copies (Rule-Ref: AG-CODE-011).
+_watchdog_status_json_fragment() {
+    local container="$1" health="$2" failures="$3"
+    printf ',\n    "%s":   {"status": "%s",   "health": "%s",   "failures": %s}' \
+        "$container" "$(health_color "$health")" "$health" "$failures"
+}
+
 # Writes the status JSON consumed by the Admin UI dashboard. Built with
 # plain string interpolation rather than a JSON library or `jq` (this image
 # doesn't ship jq for writing, only `curl`/`jq` for reading Docker's health
@@ -505,18 +552,20 @@ write_status() {
 
     local ssl_services=""
     if [ "$SSL_ENABLED" = "1" ]; then
-        ssl_services=",
-    \"$C_DNS_SSL\":   {\"status\": \"$(health_color "$H_DNS_SSL")\",   \"health\": \"$H_DNS_SSL\",   \"failures\": $F_DNS_SSL}"
+        ssl_services=$(_watchdog_status_json_fragment "$C_DNS_SSL" "$H_DNS_SSL" "$F_DNS_SSL")
     fi
 
-    # Issue #1296: omitted entirely (not even an empty/placeholder entry)
-    # when ntp isn't enabled -- same "the key's presence is itself
-    # meaningful" contract services/ui/src/watchdog_status.rs's own
-    # HashMap-based reader already relies on for ssl_services above.
+    # Omitting the key entirely when C_SYSLOG/C_NTP is empty prevents a
+    # deployment without central logging/ntp from showing a permanently
+    # unhealthy service that never existed.
+    local syslog_service=""
+    if [ -n "$C_SYSLOG" ]; then
+        syslog_service=$(_watchdog_status_json_fragment "$C_SYSLOG" "$H_SYSLOG" "$F_SYSLOG")
+    fi
+
     local ntp_service=""
     if [ -n "$C_NTP" ]; then
-        ntp_service=",
-    \"$C_NTP\":   {\"status\": \"$(health_color "$H_NTP")\",   \"health\": \"$H_NTP\",   \"failures\": $F_NTP}"
+        ntp_service=$(_watchdog_status_json_fragment "$C_NTP" "$H_NTP" "$F_NTP")
     fi
 
     cat > "${STATUS_FILE}.tmp" <<EOF
@@ -526,7 +575,7 @@ write_status() {
     "$C_PROXY": {"status": "$(health_color "$H_PROXY")", "health": "$H_PROXY", "failures": $F_PROXY},
   "$C_DNS_STD":   {"status": "$(health_color "$H_DNS_STD")",   "health": "$H_DNS_STD",   "failures": $F_DNS_STD},
   "$C_NATS":   {"status": "$(health_color "$H_NATS")",   "health": "$H_NATS",   "failures": $F_NATS},
-  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}${ntp_service}
+  "$C_DOCKER_PROXY": {"status": "$(health_color "$H_DOCKER_PROXY")", "health": "$H_DOCKER_PROXY", "failures": $F_DOCKER_PROXY}${ssl_services}${syslog_service}${ntp_service}
   },
   "disk": {
     "cache": ${disk_cache}
@@ -536,7 +585,7 @@ EOF
     mv "${STATUS_FILE}.tmp" "$STATUS_FILE"
 }
 
-log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY${C_NTP:+ $C_NTP}"
+log "Watchdog started. Monitoring: $C_PROXY $C_DNS_STD $C_DNS_SSL $C_NATS (SSL_ENABLED=$SSL_ENABLED); alert-only probe: $C_DOCKER_PROXY; alert-only monitored: ${C_SYSLOG:-none}${C_NTP:+ $C_NTP}"
 log "Cache directory: $CACHE_DIR"
 log "Interval: ${CHECK_INTERVAL}s | Restart after: ${RESTART_AFTER} | Disk warn: ${DISK_WARN_PCT}% alarm: ${DISK_ALARM_PCT}%"
 
@@ -551,9 +600,12 @@ while true; do
     # see probe_docker_socket_proxy()'s own comment for why this daemon must
     # never attempt to restart its own Docker API gateway.
     probe_docker_socket_proxy F_DOCKER_PROXY H_DOCKER_PROXY
-    # Alert-only (issue #1296): see check_alert_only()'s own comment. Only
-    # run when NTP_ENABLED actually provisioned a real `ntp` container --
-    # C_NTP is the empty string otherwise (see its own comment above).
+    # Syslog is alert-only because making it restart-capable would require a
+    # separate Docker-proxy allowlist widening. Skip the check entirely when
+    # LOGGING_ENABLED says the container is not part of this deployment.
+    if [ -n "$C_SYSLOG" ]; then
+        check_alert_only "$C_SYSLOG" F_SYSLOG H_SYSLOG
+    fi
     if [ -n "$C_NTP" ]; then
         check_alert_only "$C_NTP" F_NTP H_NTP
     fi

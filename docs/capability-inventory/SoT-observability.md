@@ -171,17 +171,40 @@ to the operator anywhere in this project:**
   topology doesn't prevent, since netdata itself isn't behind a proxy —
   see network section below — but is undocumented as a supported
   integration path).
-- netdata sits on the plain `lancache` network like every other service —
-  it is **not** on the `docker-api` internal network (that's only for the
-  Admin UI's socket-proxy path) and has no other network isolation beyond
-  Docker's default bridge; nothing prevents another container on the same
-  `lancache` network from hitting `http://netdata:19999` directly and using
-  any of its full (non-allowlisted) API surface, including `alarms`, `info`,
-  `allmetrics` — the allowlisting in `netdata_proxy.rs` only constrains what
-  the *Admin UI's own outbound path* can request, not network-level access
-  to netdata itself. (This mirrors the pattern already flagged for the
-  broader threat model re: read-only Docker-socket access — not a new class
-  of finding, just noting it applies to netdata's HTTP API surface too.)
+- **Netdata network isolation:** netdata is scoped to a dedicated
+  `netdata-net` bridge shared with the Admin UI, the bridge-networked
+  component that consumes `NETDATA_URL`. Netdata is not attached to the
+  shared `default` network or the `docker-api` network. Bridge-networked
+  siblings such as proxy, DNS, watchdog, and NATS therefore have no direct
+  Compose-network route to `http://netdata:19999`; the Admin UI's existing
+  `netdata_proxy.rs` allowlist remains the application-level boundary for
+  its own outbound calls. NATS stays on `default` only because the pinned
+  Netdata image has no active NATS go.d job in this stack, and its shipped
+  default job targets loopback rather than the `nats` Compose DNS name.
+  Adding NATS to `netdata-net` would only widen reachability to Netdata's
+  unauthenticated API. `netdata-net` is deliberately not `internal: true`
+  because the Netdata image may need outbound network access for its own
+  operation.
+- **Known limitation: host-networked DHCP services remain outside
+  Compose-level Netdata isolation.**
+  - **Scope:** `dhcp`, `dhcp-proxy`, and `dhcp-probe` in the real prod and
+    quickstart deployment profiles.
+  - **Reason:** all three use `network_mode: host` for load-bearing DHCP or
+    host-link detection behavior. Host networking shares the host routing
+    table directly, so Compose bridge membership is not consulted and the
+    services can still route to Docker bridge addresses, including the
+    `netdata-net` subnet.
+  - **Tracking:** the observability network-isolation finding under #849.
+  - **Validation:** `tests/bats/netdata_network_isolation.bats` checks the
+    real prod and quickstart Compose files, asserts Netdata stays off the
+    shared `default` network, asserts NATS stays off `netdata-net`, and
+    asserts `dhcp`, `dhcp-proxy`, and `dhcp-probe` remain explicitly
+    host-networked without pretending Compose membership isolates them.
+    This is a structural topology guard, not a live reachability proof.
+  - **Non-Expansion:** this exception applies only to the three
+    host-networked DHCP services. It does not permit any bridge-networked
+    sibling to regain a direct route to Netdata, and it does not permit the
+    Admin UI to lose its required `netdata-net` membership.
 
 ## 3. Central logging pipeline (`syslog-ng` / `fluent-bit`) — status per #453/#632/#633
 

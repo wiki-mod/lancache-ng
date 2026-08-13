@@ -331,18 +331,11 @@ EXPECT_SCRIPT
 [[ -f "$install_dir/docker-compose.yml" ]] \
     || { echo "::error::Fresh install did not copy docker-compose.yml into $install_dir." >&2; exit 1; }
 
-echo "== Phase 2: confirming the logging profile (SYSLOG_ENABLED, COMPOSE_PROFILES+=logging) =="
+echo "== Phase 2: confirming logging and the static NATS marker identity =="
 
-# Issue #1343: the wizard's "Enable central logging?" prompt (Phase 1 above,
-# accepted at its default "Y") already wrote LOGGING_ENABLED=1 and put
-# `logging` into COMPOSE_PROFILES, so this block is now a defense-in-depth
-# double-check rather than the only place either got set -- kept because the
-# dedup logic below is a safe no-op when `logging` is already present, and
-# because SYSLOG_ENABLED itself (a separate flag the Admin UI's /logs route
-# reads to decide whether to render the syslog panel at all) still has no
-# wizard prompt of its own. Same direct-.env-mutation technique
-# setup-cli-simulation.sh's own Phase 2/3 use for scenarios setup.sh's wizard
-# doesn't cover.
+# The logging profile must be active for the real /logs path. SYSLOG_ENABLED
+# separately enables the Admin UI's central-log reader, so assert both rather
+# than relying on the setup wizard's current defaults.
 if grep -q '^SYSLOG_ENABLED=' "$install_dir/.env"; then
     sed -i 's/^SYSLOG_ENABLED=.*/SYSLOG_ENABLED=true/' "$install_dir/.env"
 else
@@ -374,6 +367,22 @@ grep -qF 'SYSLOG_ENABLED=true' "$install_dir/.env" \
     || { echo "::error::Failed to set SYSLOG_ENABLED=true in .env." >&2; exit 1; }
 grep -qF 'logging' "$install_dir/.env" \
     || { echo "::error::Failed to add the logging profile to COMPOSE_PROFILES in .env." >&2; exit 1; }
+
+# Trigger 3 needs a marker produced by nats-server itself. With auth_callout
+# enabled, an unknown username is delegated to the Admin UI responder and the
+# responder intentionally returns a generic error that does not echo that
+# username. Make this run's marker the real static callout-bypass username
+# before the stack starts instead. nats-server then recognizes the marker in
+# auth_users and keeps a wrong-password attempt on its local static-auth path,
+# whose normal error log includes the attempted username.
+if grep -q '^NATS_CALLOUT_USER=' "$install_dir/.env"; then
+    sed -i "s/^NATS_CALLOUT_USER=.*/NATS_CALLOUT_USER=${marker_nats}/" "$install_dir/.env"
+else
+    echo "::error::Fresh install did not define NATS_CALLOUT_USER in .env." >&2
+    exit 1
+fi
+grep -qF "NATS_CALLOUT_USER=${marker_nats}" "$install_dir/.env" \
+    || { echo "::error::Failed to assign the per-run NATS marker to NATS_CALLOUT_USER." >&2; exit 1; }
 
 # watchdog's CHECK_INTERVAL is a literal `30` in deploy/quickstart/
 # docker-compose.yml (not `${CHECK_INTERVAL:-30}`), so it cannot be
@@ -754,31 +763,34 @@ run_client "curl -sS -o /dev/null -b /shared/cookiejar \
     'http://$ip_standard:8080/domains/dns/add'" || true
 assert_marker_reaches_ui "$marker_ui" "ui (Rejected invalid dns domain warning)"
 
-echo "== Trigger 3/8: nats -- a real authentication failure carrying a unique username =="
-# An earlier version of this trigger created a durable JetStream consumer
-# named after the marker (via the real nats-subscriber binary) and expected
-# nats-server's own log to mention that name -- confirmed directly (live,
-# against the real nats:2-alpine image) that it never does, at any log
-# level short of full protocol trace (`trace: true`, which logs every
-# message's raw payload). That was a 100%-reproducible design gap, not a
-# timing race: the consumer name is only ever printed by the short-lived
-# CLIENT process, whose stdout this script already discards, never by
-# nats-server itself at a verbosity this project's real quickstart
-# nats.conf would ever enable in production (trace-level payload logging
-# would flood the forwarded logging pipeline with every real DNS record
-# synced over NATS).
+echo "== Trigger 3/8: nats -- real static-user authentication failure carrying the per-run username =="
+# The marker is the stack's real NATS_CALLOUT_USER for this test run. That
+# identity is both a static user and an auth_users bypass identity, so a wrong
+# password is rejected by nats-server's local static-auth path instead of being
+# delegated to the Admin UI auth-callout responder. The resulting normal [ERR]
+# authentication log contains the attempted username and therefore gives NATS
+# its own unique marker without enabling protocol trace or fabricating a line.
 #
-# nats-server DOES log a real, default-verbosity [ERR] line for a failed
-# authentication attempt, including the attempted username verbatim --
-# confirmed directly: `authentication error - User "<value>"`. Authenticating
-# with the marker AS the username (and a wrong password) is a genuine,
-# unmodified-nats.conf, production-observable event nats-server already logs
-# on its own, not a fabricated line. Implemented as a raw NATS protocol
-# CONNECT over bash's own /dev/tcp (no new client tool or image, matching
-# this project's own no-new-runtime-language stance): read the server's INFO
-# banner, send a CONNECT carrying the marker as the username, then give the
-# server a moment to log the resulting authentication error before the
-# container exits.
+# First prove the generated runtime config retained that contract. Also prove
+# the marker is not already visible through /logs before the deliberate bad
+# CONNECT, otherwise the post-trigger assertion could pass on unrelated output.
+if ! "${compose[@]}" exec -T nats grep -Fq "user: \"$marker_nats\"" /etc/nats/nats.conf; then
+    echo "::error::NATS runtime config does not contain the per-run static callout-bypass username ($marker_nats)." >&2
+    exit 1
+fi
+if ! "${compose[@]}" exec -T nats grep -Fq "\"$marker_nats\"" /etc/nats/auth_callout.conf; then
+    echo "::error::NATS auth_callout.conf does not list the per-run static username in auth_users ($marker_nats)." >&2
+    exit 1
+fi
+if ! body="$(run_client "curl -sS 'http://$ip_standard:8080/logs'")"; then
+    echo "::error::Failed to fetch the Admin UI /logs route before triggering the NATS authentication marker." >&2
+    exit 1
+fi
+if grep -qF "$marker_nats" <<<"$body"; then
+    echo "::error::NATS marker ($marker_nats) was already visible via /logs before the deliberate authentication failure, so it would not prove the NATS trigger." >&2
+    exit 1
+fi
+
 docker run --rm --network "$network_name" \
     -e "NATS_AUTH_MARKER=$marker_nats" \
     "$BUILD_TOOLS_IMAGE" bash -c '
@@ -789,7 +801,7 @@ docker run --rm --network "$network_name" \
         read -r -t 3 _ <&3
         sleep 1
     ' >/dev/null 2>&1 || true
-assert_marker_reaches_ui "$marker_nats" "nats (authentication-error log line carrying the attempted username)"
+assert_marker_reaches_ui "$marker_nats" "nats (static-user authentication-error log line carrying the attempted username)"
 
 echo "== Trigger 4/8 and 5/8: dns-standard + dns-ssl -- one real DNS record add via the Admin UI =="
 # Both dns-standard's and dns-ssl's own nats-subscriber processes durably

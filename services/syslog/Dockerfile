@@ -67,8 +67,8 @@ RUN apk add --no-cache \
     # (see syslog-ng.conf's own header comment for what this replaces).
     && addgroup -g 10001 lancache \
     && adduser -D -H -u 10001 -G lancache lancache \
-    && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data \
-    && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data
+    && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache \
+    && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache
 # `/data` (fluent-bit's storage.path/DB/log root, see fluent-bit.conf) is a
 # NAMED volume in deploy/*/docker-compose.yml (syslog-data:/data), not a bind
 # mount. Docker initializes a fresh named volume's content from whatever
@@ -91,6 +91,16 @@ RUN apk add --no-cache \
 # finding) -- setup.sh is updated in this PR to pre-create/chown that host
 # directory so a fresh install never hits it, but the detector still catches
 # a stale/unfixed install or a runtime permission change regardless.
+# `/var/log/lancache` is the same NAMED-volume-inheritance case as `/data`
+# above, not a bind mount: it is where fluent-bit.conf's three `file` OUTPUTs
+# (nginx-proxy.log/-error.log/-stream.log, the plain-text copies Netdata
+# parses) write. Left off this chown line, a fresh named volume inherits no
+# in-image content for a path this Dockerfile never created, so Docker
+# auto-creates it as root:root 0755 on first mount -- and this container's
+# non-root `lancache` uid 10001 only carries CAP_DAC_READ_SEARCH (a read-only
+# bypass, see the capability posture comment below), never a write bypass, so
+# every file-output write into it fails closed with EACCES/"error opening"
+# (live-reproduced in the syslog-forwarding-simulation CI job).
 
 # Copy the pinned fluent-bit binary and its full shared-library closure into
 # a private prefix -- never mixed into Alpine's own musl /usr/lib, so this
