@@ -45,29 +45,29 @@ repo="wiki-mod/lancache-ng"
 # touching them still gets a staging tag pushed (see #626's build-job
 # change), so they need reaping too. build-tools is included: full-setup-
 # validate's client-simulation step pulls it at the PR staging tag as well.
-# syslog added while this PR was in progress (merged in from current_dev,
-# #1428/#1431's fluent-bit+syslog-ng combined container): it is a real entry
-# in build-push.yml's own build/build-arm64 matrix like every other service
-# here, so scripts/tracked/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY
+# syslog added (merged in from current_dev, #1428/#1431's fluent-bit+syslog-ng
+# combined container): it is a real entry in build-push.yml's own
+# build/build-arm64 matrix like every other service here, so
+# scripts/tracked/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY
 # entry for this file (equal to the FULL canonical set, not a subset) would
 # fail this file the moment syslog landed in the matrix without this array
-# following it -- this is that follow-along update, done as part of merging
-# current_dev's own unrelated syslog-matrix-array fix (which had updated the
-# OLD inline copy of this array, in .github/workflows/gc-pr-staging-images.
-# yml itself, before this PR moved it here) into this branch.
+# following it -- this is that follow-along update. current_dev's own
+# syslog-matrix-array fix had updated the OLD inline copy of this array (in
+# .github/workflows/gc-pr-staging-images.yml itself, before it moved here);
+# this array carries that same update onto the new location.
 services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
 
 # Bounded, PER-SERVICE (not global) reaper cap: a single global cap shared
 # across services in a fixed iteration order would let the first service in
 # the list (proxy) consume the entire run's budget against the ~13,600-
-# version untagged backlog this PR deliberately does NOT clean up (that is a
-# separate, maintainer-supervised one-time pass -- see this repo's issue
+# version untagged backlog this reaper deliberately does NOT clean up (that
+# is a separate, maintainer-supervised one-time pass -- see this repo's issue
 # tracker for the dedicated backlog-drain effort), starving every later
 # service in the same run. 40 per service x 8 services = at most 320
 # deletions attempted per run: comfortably inside the classic PAT's
 # 5000-requests/hour REST budget even counting the paginated listing calls,
-# the closed-PR-tag `gh api DELETE` calls, and (new in this PR) one anonymous
-# registry manifest GET per tagged version plus up to one more per
+# the closed-PR-tag `gh api DELETE` calls, and the orphan classification's
+# one anonymous registry manifest GET per tagged version plus up to one more per
 # about-to-delete orphan candidate. Hitting this cap is logged as a
 # `::notice::`, not an error -- there is always a next scheduled/close-
 # triggered run to keep draining the same service further.
@@ -195,7 +195,7 @@ process_service() {
   rm -f "$versions_stderr"
 
   # `gh api --paginate` against this exact array-shaped endpoint was
-  # verified live during this PR (2026-08-06, against the real
+  # verified live (2026-08-06, against the real
   # lancache-ng/proxy package, which has 3678 versions across 37 pages at
   # per_page=100 per its own real `Link: ...; rel="last"` response header):
   # a plain (non-paginated) call returns exactly 100 entries (page 1 only),
@@ -378,7 +378,7 @@ process_service() {
         # so blanket-protecting all of them costs nothing worth trading for
         # that fragile inference.
         #
-        # CORRECTED (issue #1095 G8 follow-up): the real invariant this branch
+        # CORRECTED (issue #1095 follow-up): the real invariant this branch
         # protects is "successfully-scanned sha-<commit> tags stay tabu," not
         # every sha-<commit> tag unconditionally regardless of outcome -- a
         # scan-failed image was never a valid backfill candidate in the first
@@ -507,8 +507,8 @@ process_service() {
     return
   fi
 
-  # Pass 2: orphan (untagged, unreferenced, old enough) classification --
-  # the new mechanism this PR adds. Re-reads the SAME version_list captured
+  # Pass 2: orphan (untagged, unreferenced, old enough) classification.
+  # Re-reads the SAME version_list captured
   # once at the top of this function (not a fresh listing call), so Pass 1's
   # children_digests reflects a single, internally consistent snapshot of
   # this service's manifest graph.

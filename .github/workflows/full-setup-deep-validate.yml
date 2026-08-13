@@ -28,7 +28,7 @@
 #
 # BRANCH PROTECTION NOTE: making this a REQUIRED check is a repository
 # branch-protection setting, which lives in GitHub's settings and not in any
-# file in this repo -- it cannot be set by this PR's diff. A maintainer must
+# file in this repo -- no PR's diff can set it. A maintainer must
 # add the "deep full-setup validation" job (the always-run aggregate below,
 # whose name is stable precisely so it can be required) to the branch
 # protection required-status-checks list for v0.2.0/master. The aggregate is
@@ -51,10 +51,9 @@
 # heavy-tier demand per PR run (sims move off light onto the same small pool
 # builds already compete for), a real, separate capacity concern that
 # intersects with issue #1065's heavy-pool saturation finding, not one this
-# note's ordering argument resolves. See the PR body for the capacity
-# trade-off; #715 states CI time is not the constraint but acknowledges
-# self-hosted CAPACITY under higher trigger frequency is a real, separate
-# concern to watch.
+# note's ordering argument resolves. #715 states CI time is not the
+# constraint but acknowledges self-hosted CAPACITY under higher trigger
+# frequency is a real, separate concern to watch.
 
 name: Full-Setup Deep Validate
 

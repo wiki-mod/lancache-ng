@@ -19,7 +19,7 @@
 # build-tools image, not a git work tree) -- see the script's own
 # fail-closed-on-real-errors / warn-and-skip-on-ambiguous-lookups split.
 #
-# KNOWN LIMITATION (see #990's WIP comment and this PR's own body): GitHub
+# KNOWN LIMITATION (see #990's WIP comment): GitHub
 # only fires a workflow's `schedule:` trigger from the copy of the workflow
 # file present on the repository's *default* branch (currently `master`),
 # not from whichever branch a PR adding it merges into. This repo's active

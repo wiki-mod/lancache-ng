@@ -993,7 +993,7 @@ saf_base_commit_has_confirmed_run() {
 # service-affecting commit is a genuine CI problem worth surfacing on its
 # own, not a reason to keep hunting for an even older substitute.
 #
-# #1095 F-22 (2026-08-07): the confirmed-untouched case described above used
+# Issue #1095 (2026-08-07): the confirmed-untouched case described above used
 # to be reached ONLY here, after paying the full wait -- a candidate whose
 # own diff never touched <service> still burned the full wait, up to
 # <freshness_hard_ceiling_seconds> (and, if a confirmed-active retry
@@ -1198,7 +1198,7 @@ saf_find_built_ancestor() {
     # whether that run actually produced a confirmed-fresh image for
     # <service>.
     #
-    # #1095 F-22 (2026-08-07, confirmed live against runs 31184925428/
+    # Issue #1095 (2026-08-07, confirmed live against runs 31184925428/
     # 31187... for PR #1468): four untouched services each independently
     # paid the full 600s ancestor-candidate ceiling waiting on the exact same
     # candidate commit, ~40 minutes total, when a cheap, no-network,
@@ -1247,7 +1247,7 @@ saf_find_built_ancestor() {
     # JUDGMENT CALL further down. So if this candidate's own run is still
     # genuinely IN FLIGHT (not aborted, not yet reached the retag step), the
     # probe will not see the tag yet and this candidate is skipped in favor
-    # of an older one -- where the pre-F-22 code would instead have waited
+    # of an older one -- where the earlier code would instead have waited
     # out the full budget and likely found it. This is a deliberate
     # freshness-for-speed trade, not an oversight: the older ancestor this
     # falls back to still carries the same full untouched-diff proof, so
@@ -1255,7 +1255,7 @@ saf_find_built_ancestor() {
     # (still-valid) candidate gets picked. If this trade-off proves too
     # aggressive in practice, the fix is to call saf_candidate_run_is_active()
     # before the 0/0 probe and only skip on a confirmed-not-active answer --
-    # deliberately not done here to keep this pass's change minimal and
+    # deliberately not done here, to keep this change minimal and
     # single-purpose.
     local candidate_pre_service_untouched_status=0
     saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_pre_service_untouched_status=$?
@@ -1307,7 +1307,7 @@ saf_find_built_ancestor() {
     # -- even after the activity-confirmed extended retry, if one applied.
     # Before applying the JUDGMENT CALL above (stop, do not walk further):
     # re-derive the same service-scoped untouched check the PRE-wait check
-    # above already ran (#1095 F-22). This is now normally redundant (a
+    # above already ran (issue #1095). This is now normally redundant (a
     # positive pre-check already `continue`d past this candidate before ever
     # reaching the wait), EXCEPT when the pre-check was inconclusive (status
     # 2 -- a transient git/fetch issue), in which case the wait still ran per
@@ -1505,13 +1505,13 @@ saf_resolve_untouched_backfill_source() {
     # longer cannot help: no push run exists, and the paths are confirmed
     # ignorable, so there is no in-flight push build to wait out.
     #
-    # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): $base_image is
+    # allow_reverse_ancestry=true (issue #1095, 2026-08-07): $base_image is
     # always an immutable per-commit sha-<base_sha> tag here, never a mutable
     # channel tag -- exactly the same safety condition
     # sif_wait_for_fresh_base_image's own allow_reverse_ancestry doc requires,
     # and exactly the same reasoning saf_find_built_ancestor's own candidate
     # checks already rely on (see that function's own comments). Before this
-    # fix, this specific call site was the one F-20 named as still exposed:
+    # fix, this specific call site was the one still left exposed:
     # push-reuse (Step 4, #1095) can retag $base_image FOR $base_sha's own
     # commit while content-copying an older commit's build, which keeps that
     # older commit's org.opencontainers.image.revision label (imagetools
@@ -1542,7 +1542,7 @@ saf_resolve_untouched_backfill_source() {
   # header for why this specific wait, unlike the ancestor-candidate checks,
   # needs congestion-scale headroom.
   #
-  # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): same reasoning as
+  # allow_reverse_ancestry=true (issue #1095, 2026-08-07): same reasoning as
   # Step 1's fast-path call above -- $base_image is always an immutable
   # per-commit tag, so a push-reuse retag that kept an older source commit's
   # revision label is exactly as safe to accept here as it already is for

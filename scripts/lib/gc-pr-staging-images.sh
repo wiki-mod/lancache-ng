@@ -41,8 +41,8 @@
 # gcps_version_name_is_digest <name>
 #
 # A GHCR container package version's `.name` field equals the manifest
-# digest (`sha256:<64 hex chars>`) -- verified live during this PR
-# (2026-08-06) via a real, unauthenticated `gh api
+# digest (`sha256:<64 hex chars>`) -- verified live (2026-08-06) via a
+# real, unauthenticated `gh api
 # "orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions?per_page=2"`
 # call against this project's own real `proxy` package, e.g.
 # `"name":"sha256:9c4b1dc4751ddc63099f1f65015442240d7de9faae3e3eb3992f3de3287e861b"`
@@ -203,15 +203,15 @@ gcps_is_old_enough_to_delete() {
 # LOOKUP_FAILED answer for every single PR number, and the caller would
 # report a healthy-looking "GC complete" summary while the closed-PR
 # tagged-version reap path did effectively nothing that entire run, for a
-# reason nothing in the log surfaces. Investigated live (2026-08-06, this
-# PR): the one real historical scheduled run with a suspiciously low
+# reason nothing in the log surfaces. Investigated live (2026-08-06): the
+# one real historical scheduled run with a suspiciously low
 # deletion rate (2026-08-02, run 30736443878: 10 deleted, 21919 kept) was
 # checked against its own real GitHub Actions log -- zero real runtime
 # occurrences of either LOOKUP_FAILED warning message exist in that log
 # (the only matches found were the workflow's own pre-run source-code echo,
 # not an actual invocation), positively ruling out a systemic PAT/lookup
 # failure as that run's cause; that run's low delete count is explained
-# entirely by the classification-gap defect this PR's whole extraction
+# entirely by the classification-gap defect this whole extraction
 # fixes (the vast majority of "kept" versions there were untagged
 # entirely, never reachable by the pre-fix tag-only check, not because
 # their PR state was unknown). That verification does not retroactively

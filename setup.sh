@@ -1650,7 +1650,7 @@ install_quickstart_compose_assets() {
     socket_proxy_target="$install_dir/scripts/untracked/docker-socket-proxy.sh"
     helper_target="$install_dir/scripts/shared-secret-bootstrap.sh"
     # docker-socket-proxy.sh's own source moved one directory level deeper
-    # (issue #1095 F-16, scripts/untracked/docker-socket-proxy.sh); the
+    # (issue #1095, scripts/untracked/docker-socket-proxy.sh); the
     # installed copy mirrors that same nesting, so the target directory
     # needs both levels created, not just the flat "scripts" mkdir that
     # sufficed before that move.
@@ -5154,7 +5154,7 @@ cmd_converge_reconcile() {
     # built for; see docs/architecture-ng.md for the same caveat stated
     # operator-facing. Not fixed here (would mean writing
     # config/prod/proxy.env from this tick too, a separate, deploy/prod-
-    # specific change out of scope for this PR).
+    # specific change out of scope here).
     ui_cache_max_gb=$(lancache_read_ui_settings_override "$install_dir" "$env_file" "CACHE_MAX_GB")
     if [[ -n "$ui_cache_max_gb" ]] && lancache_ui_cache_max_gb_override_is_valid "$ui_cache_max_gb"; then
         ui_cache_max_gb=$(( 10#$ui_cache_max_gb ))

@@ -17,7 +17,7 @@
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     lib="$repo_root/scripts/lib/staging-image-freshness.sh"
-    # #1095 F-21: staging-image-freshness.sh's own _sif_inspect now routes
+    # Issue #1095: staging-image-freshness.sh's own _sif_inspect now routes
     # its registry reads through ghcr_retry (scripts/lib/ghcr-retry.sh) --
     # must be sourced first so the real (non-stubbed) docker branch below
     # can find it, matching every other dual script/workflow-step caller's
@@ -351,7 +351,7 @@ STUB
 @test "sif_image_revision (real docker branch, no stub): a confirmed-absence registry error returns status 2" {
     fake_docker_returning_stderr "Error response from daemon: manifest unknown"
     # Direct `$(... 2>/dev/null)` capture, not bats' `run` (which merges
-    # stdout+stderr into $output): #1095 F-21's ghcr_retry wrapping means a
+    # stdout+stderr into $output): issue #1095's ghcr_retry wrapping means a
     # genuine failure path now legitimately logs its own ::warning::/::error::
     # diagnostics to real stderr (this project's normal, desired CI-log
     # visibility for every other ghcr_retry call site) -- `run` would fold
@@ -371,7 +371,7 @@ STUB
 
 @test "sif_image_revision (real docker branch, no stub): an unrecognized/transient registry error returns status 1 (unchanged ambiguous case)" {
     fake_docker_returning_stderr "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
-    # #1095 F-21: sif_image_revision's registry reads now go through
+    # Issue #1095: sif_image_revision's registry reads now go through
     # ghcr_retry, which defaults to 4 attempts/30s backoff -- a caller-less
     # direct call like this one (unlike sif_wait_for_fresh_base_image, which
     # scopes this down itself) would otherwise genuinely wait up to 90s here
@@ -394,7 +394,7 @@ STUB
     [ -z "$result" ]
 }
 
-# #1095 F-21: a fake `docker` that SUCCEEDS with a real multi-platform index
+# Issue #1095: a fake `docker` that SUCCEEDS with a real multi-platform index
 # on --raw, then echoes a fixed revision label on --format, logging every
 # invocation's own argv so the test can assert exactly which image
 # reference the second (--format) call targeted.
@@ -422,7 +422,7 @@ STUB
 }
 
 @test "sif_image_revision (real docker branch): a digest-ref input (repo@sha256:...) resolves its multi-platform child correctly, not truncated mid-digest" {
-    # #1095 F-21's digest-pinning fix passes sif_image_revision a caller-
+    # Issue #1095's digest-pinning fix passes sif_image_revision a caller-
     # resolved repo@sha256:... reference (not only a mutable tag), so it can
     # verify safety against, and export, the exact same immutable digest.
     # The ORIGINAL "${image%:*}@digest" strip is only correct for a tag-ref

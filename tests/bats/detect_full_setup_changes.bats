@@ -103,7 +103,7 @@ val() {
     [ "$(val should_run)" = "true" ]
 }
 
-# F-16 (issue #1095): a CI-tooling-only script (verified zero stack
+# Issue #1095: a CI-tooling-only script (verified zero stack
 # dependency, now living under scripts/tracked/ -- see that directory's own
 # README and detect-full-setup-changes.sh's header comment for the full
 # history) must no longer force the deep suite to run on its own. Reproduces
@@ -113,13 +113,13 @@ val() {
 # regresses. This now exercises the scripts/tracked/ prefix match, not the
 # (now-empty) ci_tooling_only_scripts array -- see the dedicated array-is-
 # empty test below for that.
-@test "F-16: CI-tooling-only script change alone does not force should_run" {
+@test "CI-tooling-only script change alone does not force should_run" {
     run_detect "AGENTS.md" "scripts/tracked/check-pr-title-convention.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
 
-# F-16 follow-up (post-v0.3.0-release execution, issue #1095): once every
+# Follow-up (post-v0.3.0-release execution, issue #1095): once every
 # individually-verified CI-tooling-only script actually moved into
 # scripts/tracked/ (git mv, not a fresh add), the by-name
 # ci_tooling_only_scripts array became redundant -- scripts/tracked/'s own
@@ -128,7 +128,7 @@ val() {
 # empty, not merely unused, so a future accidental re-population (e.g. a
 # careless revert) is caught here rather than silently reintroducing
 # by-name maintenance the directory-prefix design was meant to retire.
-@test "F-16: ci_tooling_only_scripts array is empty now that scripts/tracked/ is populated" {
+@test "ci_tooling_only_scripts array is empty now that scripts/tracked/ is populated" {
     # The script has no "am I sourced" guard -- it always runs emit() at the
     # bottom -- so source it (rather than exec it) inside a subshell with a
     # real CHANGED_FILES fixture, redirecting emit()'s own stdout away, then
@@ -145,7 +145,7 @@ val() {
     [ "$array_count" = "0" ]
 }
 
-@test "F-16: a mix of an allowlisted CI-tooling script and a real simulation script still runs the suite" {
+@test "a mix of an allowlisted CI-tooling script and a real simulation script still runs the suite" {
     # Not every touched scripts/ path is on the allowlist here, so should_run
     # must stay true -- the allowlist only narrows the all-safe case, never a
     # mixed diff.
@@ -153,24 +153,24 @@ val() {
     [ "$(val should_run)" = "true" ]
 }
 
-@test "F-16: an unclassified/new scripts/ file still fails closed to should_run true" {
+@test "an unclassified/new scripts/ file still fails closed to should_run true" {
     run_detect "scripts/some-brand-new-script-not-yet-classified.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "true" ]
 }
 
-@test "F-16: scripts/lib/ changes still fail closed to should_run true (allowlist never widens to a prefix)" {
+@test "scripts/lib/ changes still fail closed to should_run true (allowlist never widens to a prefix)" {
     run_detect "scripts/lib/ghcr-retry.sh"
     [ "$(val should_run)" = "true" ]
 }
 
-@test "F-16: any path under scripts/tracked/ is recognized as CI-tooling-only, even without an array entry" {
+@test "any path under scripts/tracked/ is recognized as CI-tooling-only, even without an array entry" {
     run_detect "scripts/tracked/some-newly-migrated-guard.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "false" ]
 }
 
-@test "F-16: scripts/untracked/ gets no special prefix handling and still fails closed to should_run true" {
+@test "scripts/untracked/ gets no special prefix handling and still fails closed to should_run true" {
     run_detect "scripts/untracked/some-utility.sh"
     [ "$(val scripts)" = "true" ]
     [ "$(val should_run)" = "true" ]

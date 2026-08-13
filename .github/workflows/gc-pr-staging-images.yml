@@ -47,18 +47,18 @@
 # version's own state is simple, avoids duplicating the reap logic, and
 # doubles as a general sweep on every PR close for free.
 #
-# NOTE (AG-CI-018/AG-CI-019, unverified either direction as of this PR): the
+# NOTE (AG-CI-018/AG-CI-019, unverified either direction): the
 # `schedule:` trigger only ever fires from this file's copy on the
 # repository's DEFAULT branch (currently `master`) -- confirmed generally
 # true for `schedule:` triggers by issue #1254's `nightly-refresh.yml`
 # incident, not re-verified specifically for this file. Whatever
-# classification/cap logic lands here via this PR on `current_dev` will not
-# actually run on a real schedule until a release promotes it to `master`.
-# The `pull_request: closed` trigger's own evaluating-branch semantics were
-# NOT independently re-verified as part of this PR either (AG-CI-019: don't
-# assert either direction without checking) -- treat both as open questions
-# for whoever next investigates this workflow's live behavior, not as
-# settled by this comment.
+# classification/cap logic lands here on `current_dev` will not actually
+# run on a real schedule until a release promotes it to `master`. The
+# `pull_request: closed` trigger's own evaluating-branch semantics were NOT
+# independently re-verified either (AG-CI-019: don't assert either
+# direction without checking) -- treat both as open questions for whoever
+# next investigates this workflow's live behavior, not as settled by this
+# comment.
 name: GC PR Staging Images
 
 on:
@@ -115,15 +115,15 @@ jobs:
     # "TEMPORARY DIAGNOSTIC BUMP...this bump to 150 is explicitly a test"
     # placeholder (2026-08-03) that was never revisited. Real runs since that
     # bump (no longer hitting a timeout/cancellation) completed a full sweep
-    # across all 8 services in 20-30 minutes. This PR adds, per tagged
-    # version, one anonymous registry manifest GET (for the new orphan
-    # manifest-graph classification -- see scripts/lib/gc-pr-staging-images.sh)
-    # plus, per about-to-delete orphan candidate, one more GET to check for a
+    # across all 8 services in 20-30 minutes. The orphan manifest-graph
+    # classification (see scripts/lib/gc-pr-staging-images.sh) adds, per
+    # tagged version, one anonymous registry manifest GET, plus, per
+    # about-to-delete orphan candidate, one more GET to check for a
     # referrers-API attestation subject -- real added work, not free, but
     # bounded by max_deletions_per_service (see GC_MAX_DELETIONS_PER_SERVICE
     # in scripts/untracked/gc-pr-staging-images.sh) rather than by the full ~13,600-
-    # version untagged backlog this PR deliberately does not drain in one
-    # pass. 60 minutes is double the observed 20-30 minute baseline -- enough
+    # version untagged backlog, which this classification deliberately does
+    # not drain in one pass. 60 minutes is double the observed 20-30 minute baseline -- enough
     # headroom for the new per-version registry calls under normal GHCR
     # response times, without reintroducing a multi-hour silent-hang window
     # the way 150 minutes did.

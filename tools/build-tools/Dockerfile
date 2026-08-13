@@ -487,7 +487,7 @@ RUN set -euo pipefail; \
 # to cross-compile to musl can do so without repeating the ad hoc apt-get/
 # rustup steps #815's research already validated once. #815 explicitly
 # recommends adding this once for both of its known consumers rather than
-# duplicating the toolchain setup per-crate: services/ui (this PR's own
+# duplicating the toolchain setup per-crate: services/ui (its own
 # network-verification build) and services/dns's nats-subscriber crate (its
 # own musl retargeting is a separate, not-in-scope-here migration -- see that
 # crate's own follow-up -- but must not be precluded by this image lacking
@@ -535,7 +535,7 @@ RUN set -euo pipefail; \
 # triple) alongside its existing required_tools verification. Both checks
 # were first written as `<producer> | grep -q...` and failed a real build on
 # lancache-240 with exit code 141 (SIGPIPE), not a logic error, and a real
-# CI run on this PR reproduced the identical failure: `grep -q` exits as
+# CI run reproduced the identical failure: `grep -q` exits as
 # soon as it finds its first match, closing its end of the pipe early --
 # since the producer (`rustc -vV`, `rustup target list --installed`) is
 # still writing further lines at that moment (`host:` is not the last line

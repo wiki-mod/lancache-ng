@@ -33,7 +33,7 @@
 # classify-image-impact.sh (source the shared booleans, keep should_run on top)
 # is a viable next step but revisits #715's deliberate decoupling, so it is
 # surfaced for maintainer review (#819) rather than done unilaterally here.
-# F-16 (#1095, 2026-07-31) note: should_run's ci_tooling_only_scripts
+# Issue #1095 (2026-07-31) note: should_run's ci_tooling_only_scripts
 # allowlist (added below) is this script's own addition -- classify-
 # image-impact.sh has no should_run concept and therefore no equivalent
 # allowlist to mirror. Narrowing should_run here does not create mirror
@@ -99,7 +99,7 @@ touches_exact() {
     return 1
 }
 
-# F-16 (issue #1095, 2026-07-31): scripts/ originally had no subdirectory
+# Issue #1095 (2026-07-31): scripts/ originally had no subdirectory
 # structure to path-filter against, so before this allowlist existed ANY
 # change under scripts/ -- including a pure CI/governance-lint script with
 # zero product or stack dependency -- forced should_run=true below, running
@@ -110,9 +110,9 @@ touches_exact() {
 # same day) fixed it with a by-name array allowlist as an interim measure,
 # since the real subdirectory move it should have been was blocked by
 # concurrent in-flight PRs and an explicit "nothing happens before the
-# v0.3.0 release" maintainer instruction (see this issue's F-16 thread).
+# v0.3.0 release" maintainer instruction (per issue #1095).
 #
-# scripts/tracked/ (issue #1095 F-16, executed post-v0.3.0-release): the 24
+# scripts/tracked/ (issue #1095, executed post-v0.3.0-release): the 24
 # scripts PR #1341 individually verified (full-repo grep sweep -- every
 # .github/workflows/*.yml, every other scripts/** file, setup.sh, and every
 # services/**/Dockerfile -- confirming each is invoked only from
@@ -229,7 +229,7 @@ emit() {
     output_bool "deploy" touches_prefix "deploy/"
     # `scripts`/`setup_runtime` deliberately stay a blunt, unnarrowed
     # touches_prefix "scripts/" here (unlike should_run's own scripts/ clause
-    # below, which the F-16 allowlist narrows) -- neither is declared as an
+    # below, which the scripts/tracked/ allowlist narrows) -- neither is declared as an
     # output of full-setup-deep-validate.yml's `plan` job (confirmed: only
     # should_run/image_tag/pr_staging_available/base_channel_tag/workflow/
     # proxy/dns_image/watchdog/ui/build_tools/dhcp/dhcp_proxy/ntp are), so
@@ -269,8 +269,8 @@ emit() {
     # real end-to-end simulation could catch a regression in. A docs-only (or
     # empty) diff skips the expensive suite. Deliberately broad: #715 states
     # CI time is not the constraint, catching real runtime regressions
-    # automatically is -- see the scripts/ clause below (F-16, #1095) for the
-    # one place this pass narrows that breadth, and why #715's own intent is
+    # automatically is -- see the scripts/ clause below (#1095) for the
+    # one place that narrows that breadth, and why #715's own intent is
     # preserved rather than overridden.
     if [[ "$docs_only" == "true" || "$any_changed" == "false" ]]; then
         printf 'should_run=false\n'
@@ -283,7 +283,7 @@ emit() {
     # service rebuild in build-push.
     #
     # The scripts/ clause is intentionally narrower than a plain
-    # touches_prefix "scripts/" (F-16, #1095): #715's "driver scripts" intent
+    # touches_prefix "scripts/" (#1095): #715's "driver scripts" intent
     # was scripts the running stack actually exercises (the *-simulation.sh
     # scripts, setup.sh's own helpers, etc.), not a pure CI/governance-lint
     # script with zero stack dependency -- see

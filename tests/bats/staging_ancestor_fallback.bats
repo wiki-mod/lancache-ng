@@ -1858,7 +1858,7 @@ STUB
     [[ "$output" == *"$broken_sha"* ]]
 }
 
-@test "saf_find_built_ancestor: #1095 F-22 -- an untouched candidate is skipped via a single probe, never the full poll budget" {
+@test "saf_find_built_ancestor: an untouched candidate is skipped via a single probe, never the full poll budget" {
     # The two tests above already prove the OUTCOME (untouched candidate
     # walked past, touched candidate blocks) using a 0/0 freshness budget for
     # the ancestor-candidate check -- which makes the pre-fix and post-fix
@@ -1874,7 +1874,7 @@ STUB
     # setup() stubs `sleep` as a no-op -- see that comment -- so a poll loop
     # here would spin as fast as possible, not literally sleep, but would
     # still call the stub far more than once before $SECONDS crosses the
-    # ceiling). Post-fix (#1095 F-22), the pre-check confirms "untouched"
+    # ceiling). Post-fix (issue #1095), the pre-check confirms "untouched"
     # before ever entering that loop and pays for exactly one non-polling
     # (0/0 budget) probe instead, so the stub must be invoked exactly once
     # for this candidate's own image regardless of the 5s budget passed in.

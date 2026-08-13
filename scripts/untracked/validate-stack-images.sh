@@ -376,7 +376,7 @@ require_grep 'is missing required platform' \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
 # container-scan's OWN per-run local-build cache dir (the same literal pattern this
 # check used to require) was removed along with the local-build branch it belonged to
-# (issue #1095 G8 fix): container-scan no longer builds or scans anything locally for a
+# (issue #1095): container-scan no longer builds or scans anything locally for a
 # changed service, so there is no cache dir left to key. The surviving check below (the
 # pushed-digest scan's cache dir, in build/build-arm64) still enforces #904's real
 # invariant for the one Trivy cache directory that still exists.

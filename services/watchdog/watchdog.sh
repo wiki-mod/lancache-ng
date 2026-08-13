@@ -160,7 +160,7 @@ C_NATS="${CONTAINER_NATS:-lancache-nats}"
 # only C_NTP's caller passes one (CONTAINER_NTP); C_SYSLOG's caller
 # intentionally omits it, matching services/watchdog/src/config.rs's fixed
 # CONTAINER_SYSLOG constant (no separate env var for
-# scripts/check-naming-consistency.sh to validate -- see C_SYSLOG's own call
+# scripts/tracked/check-naming-consistency.sh to validate -- see C_SYSLOG's own call
 # site below for that contract's full rationale). Shared so the
 # gate-check-then-suffix-append mechanics themselves cannot silently diverge
 # between callers or a future third one, even though the override policy
@@ -201,7 +201,7 @@ C_DOCKER_PROXY="lancache-docker-socket-proxy"
 # syslog uses the same fixed-name contract as the Rust implementation:
 # services/watchdog/src/config.rs exposes CONTAINER_SYSLOG as a plain constant,
 # not an environment override, so there is no separate CONTAINER_SYSLOG value
-# for scripts/check-naming-consistency.sh to validate. The coordinated suffix
+# for scripts/tracked/check-naming-consistency.sh to validate. The coordinated suffix
 # still applies because the real Compose container name and Docker-proxy
 # allowlist both use it. LOGGING_ENABLED, not SYSLOG_ENABLED, gates presence:
 # an install without the logging profile has no syslog container to monitor,

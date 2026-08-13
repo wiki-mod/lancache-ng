@@ -88,12 +88,13 @@ done
 #     (issue #791): the smoke test's strict/published-image path trusts
 #     whatever image is *currently* published under the mutable :latest/
 #     :nightly tag, which does not carry musl-gcc until the build-tools
-#     workflow rebuilds and republishes it after this PR merges. Making
-#     musl-gcc a hard smoke-test requirement immediately would fail every
-#     unrelated PR's CI during the window between this PR merging and that
-#     republish completing, for a tool no consumer simulation script invokes
-#     yet (the real proof this PR performs is a one-off SSH-driven build, not
-#     a repeatable simulation script). Revisit moving musl-gcc from here into
+#     workflow rebuilds and republishes it after the musl-target addition
+#     merges. Making musl-gcc a hard smoke-test requirement immediately
+#     would fail every unrelated PR's CI during the window between that
+#     merge and the republish completing, for a tool no consumer simulation
+#     script invokes yet (the real proof performed for the musl-target
+#     addition was a one-off SSH-driven build, not a repeatable simulation
+#     script). Revisit moving musl-gcc from here into
 #     smoke_test_image()'s required_tools once a real consumer simulation
 #     script depends on it directly.
 EXCLUDED_TOOLS=(

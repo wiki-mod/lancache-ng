@@ -2104,14 +2104,14 @@ jobs:
           # Container-scan's own local scan-build networking entitlement (`allow_args+=(--
           # allow network.host)` and its explicit docker-container Buildx builder) has no
           # code path to check anymore: container-scan no longer runs any local `docker
-          # buildx build` for a changed service (issue #1095 G8 fix), so no check for it
-          # lives here. A plain `grep -F '<literal>' .github/workflows/build-push.yml`
+          # buildx build` for a changed service (issue #1095), so no check for it lives
+          # here. A plain `grep -F '<literal>' .github/workflows/build-push.yml`
           # check embedded in this same file always matches its own quoted source line
           # whenever the literal is simple text with no shell-escaping quirks, independent
           # of whether the real code it names still exists -- unlike the anchored `grep -E
           # '^...$'` checks (e.g. the `network:`/`allow:` pair directly above), which do not
-          # self-match. That defect class is broader than these two removed checks and is
-          # tracked separately, not audited or fixed in this PR.
+          # self-match. That defect class is broader than these two removed checks and
+          # remains unaudited/unfixed here.
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -4762,7 +4762,7 @@ jobs:
     # Never runs on `pull_request` (see `if:` below) -- PRs exercise Dockerfiles via
     # `build` below with no vulnerability scan; that gap is separate and untouched here.
     #
-    # UPDATED (issue #1095, closes finding G8 / originally #1348): used to unconditionally
+    # UPDATED (issue #1095, originally #1348): used to unconditionally
     # `docker buildx build --load` its own throwaway, never-pushed image per changed
     # service, then scan THAT -- a second, independent build of the same commit that
     # `build`/`build-arm64` also build and push moments later. A fresh `docker buildx
@@ -4775,7 +4775,7 @@ jobs:
     # removed: a changed service now only pays for the cheap reuse-eligibility check
     # above, and the pushed-digest scan in build/build-arm64 is the sole real gate.
     #
-    # The OTHER branch ("should-scan == false", Step 4 / #1331 / #1339, G11 via #1467)
+    # The OTHER branch ("should-scan == false", Step 4 / #1331 / #1339, via #1467)
     # is untouched: when a service is proven unchanged there is no new build to scan, so
     # this job Trivy-scans the already-published channel image by digest instead.
     #
@@ -4809,7 +4809,7 @@ jobs:
     # full #979 rationale. On push, `build`'s `if:` requires
     # `needs['container-scan'].result == 'success'`, so this scan is a hard gate on the
     # channel publish path: cancelling it in a merge cascade starves the channel. On a PR
-    # it is safe to cancel a superseded scan -- it never builds locally (G8 fix) and at
+    # it is safe to cancel a superseded scan -- it never builds locally and at
     # most reads a remote image (never pushes), so `build` cleanly skips it via `needs`.
     #
     # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) keep their own
@@ -4824,11 +4824,12 @@ jobs:
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
     # Runner selector kept aligned with build/build-arm64's own per-arch split even
-    # though this job no longer builds anything (G8 fix): the surviving "should-scan ==
+    # though this job no longer builds anything: the surviving "should-scan ==
     # false" branch's registry pull + Trivy scan still benefits from the same split, and
     # one shared convention beats a second, independently-tuned selector.
     runs-on: ${{ fromJSON(matrix.runner) }}
-    # Post-G8-fix timing: a changed service ("should-scan == true") only runs the cheap
+    # Timing (container-scan no longer builds locally): a changed service
+    # ("should-scan == true") only runs the cheap
     # reuse-eligibility check and finishes in seconds; an unchanged service ("should-scan
     # == false") pulls the channel image and Trivy-scans it, same cost as always. 60
     # minutes gives headroom for a cold layer cache or vuln-DB refresh on that branch,
@@ -4842,7 +4843,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # G8 fix (issue #1095): this job no longer builds anything, so `context`,
+          # Issue #1095: this job no longer builds anything, so `context`,
           # `build_contexts`, `description`, and `platform` (only ever consumed by the
           # now-removed throwaway-build step) are dropped from this matrix entirely --
           # only `service`/`platform_tag`/`runner` are still read below. Runner tiers are
@@ -4968,8 +4969,8 @@ jobs:
           fi
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
-      # A changed service ("should-scan == true") does nothing further in this job (G8
-      # fix, issue #1095): no local build, no local scan. build/build-arm64's own "Scan
+      # A changed service ("should-scan == true") does nothing further in this job
+      # (issue #1095): no local build, no local scan. build/build-arm64's own "Scan
       # pushed service digest with Trivy" step is the sole scan for that case.
 
       - name: Self-heal Trivy's own default cache directory ownership
@@ -5009,7 +5010,7 @@ jobs:
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
-          # #1095 F-21: consume determine-push-reuse-scope's own already-pinned,
+          # Issue #1095: consume determine-push-reuse-scope's own already-pinned,
           # already-verified digest instead of independently re-resolving the mutable
           # channel tag a second time here -- the digest TOCTOU race two Codex review
           # threads on PR #1378 found (a channel refresh between that job's verification
@@ -5051,7 +5052,7 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # UTC-day bucket for the scan-result cache below (issue #1095, G11): bounds how
+      # UTC-day bucket for the scan-result cache below (issue #1095): bounds how
       # long an unchanged digest can skip a real Trivy re-scan, so a newly disclosed
       # CVE against it is still caught within a day instead of never. Computed once
       # here (not inside the composite action) so the freshness policy stays a plain,
@@ -5062,7 +5063,7 @@ jobs:
         run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
       # A multi-platform image-ref: Trivy/Docker resolve it to the runner's own native
-      # platform automatically. G11 fix: skips the scan below entirely when this exact
+      # platform automatically. Skips the scan below entirely when this exact
       # digest already scanned clean today (see .github/actions/trivy-scan-with-cache).
       - name: Scan channel image with Trivy (no rebuild)
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
@@ -5072,7 +5073,7 @@ jobs:
           digest: ${{ steps.channel-image.outputs.digest }}
           cache-key-scope: ${{ matrix.service }}-${{ matrix.platform_tag }}
           freshness-bucket: ${{ steps.scan-cache-bucket.outputs.value }}
-          # vuln-db-cache-dir intentionally omitted (G8 fix removed this job's own
+          # vuln-db-cache-dir intentionally omitted (this job no longer has its own
           # managed cache dir): trivy-action falls back to its own default
           # (~/.cache/trivy), which "Self-heal Trivy's own default cache directory
           # ownership" above already keeps writable.
@@ -5130,7 +5131,7 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # #1095 F-21: the exact immutable manifest-list digest this job pinned
+      # Issue #1095: the exact immutable manifest-list digest this job pinned
       # AND verified reuse safety against, for every service that came back
       # reuse=true -- empty for a service that stayed reuse=false. Every
       # downstream consumer (container-scan, build, build-arm64) reads this
@@ -5192,7 +5193,7 @@ jobs:
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
-          # #1095 F-21: needed both for push_reuse_decide's own sif_image_revision
+          # Issue #1095: needed both for push_reuse_decide's own sif_image_revision
           # call (now ghcr_retry-wrapped, see scripts/lib/staging-image-freshness.sh)
           # and for this step's own digest-pinning read below.
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -5210,7 +5211,7 @@ jobs:
           # latest, everything else -> nightly) with nothing build-tools-specific in its actual
           # logic despite this file's name -- reused as-is here rather than duplicating the
           # same mapping a second time (the "single-source CI logic, no silent second copy"
-          # concern issue #1095 itself names as a risk for this refactor).
+          # concern issue #1095 itself names as a risk for this kind of extraction).
           # shellcheck source=scripts/lib/build-tools-channel.sh
           source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
@@ -5253,7 +5254,7 @@ jobs:
           #
           # Writes this service's own digest_<service>=<digest> line straight to
           # $GITHUB_OUTPUT (not returned via stdout alongside the true/false verdict) whenever
-          # reuse is safe -- #1095 F-21's digest-pinning fix (see this job's own `outputs:`
+          # reuse is safe -- issue #1095's digest-pinning fix (see this job's own `outputs:`
           # comment above for the full TOCTOU-race rationale). Prints only "true"/"false" on
           # stdout, unchanged, so the existing `$(decide_one ...)` capture pattern below still
           # works exactly as before.
@@ -5429,7 +5430,7 @@ jobs:
           # Dockerfile only: issue #842's planned Rust rewrite must trigger a fresh
           # re-evaluation, not a grandfathered stay on light. container-scan's own matrix
           # mirrors this split (kept in sync manually) even though it no longer builds
-          # anything itself (G8 fix) -- see that job's own comment for why it still cares.
+          # anything itself -- see that job's own comment for why it still cares.
           - service: proxy
             context: services/proxy
             # cdn-domains.txt lives in services/dns/, outside this image's own
@@ -5650,7 +5651,7 @@ jobs:
       # Because both steps read the identical output, the two decisions cannot disagree,
       # so no service is ever left without a real scan on this path.
       #
-      # #1095 F-21: resolves the linux/amd64 child digest from determine-push-reuse-scope's
+      # Issue #1095: resolves the linux/amd64 child digest from determine-push-reuse-scope's
       # own already-pinned, already-verified manifest-list digest (DIGEST_*) instead of
       # independently re-resolving the mutable channel tag here -- the digest TOCTOU race
       # two Codex review threads on PR #1378 found. This registry read is now against an
@@ -5658,14 +5659,14 @@ jobs:
       # content than what was verified -- unlike the old mutable-tag read, this closes the
       # race rather than merely shrinking its window.
       #
-      # push-supersession-check gate (issue #1095 Part 1, added here by #1095 F-21):
+      # push-supersession-check gate (issue #1095 Part 1):
       # "Determine whether this service needs building" above forces should-build to
       # 'false' for EVERY service on a superseded push, regardless of whether
       # determine-push-reuse-scope ever verified (and pinned a digest for) this specific
       # service -- unlike a genuine reuse=true case, a superseded push's DIGEST_* output
       # for this service can legitimately be empty. Without this guard, this step would
       # still run, find no pinned digest, and hard-fail via the empty-digest check below,
-      # where the pre-#1095-F-21 code merely (silently, and separately not-quite-safely)
+      # where the earlier code merely (silently, and separately not-quite-safely)
       # retagged from the mutable tag directly. Matches container-scan's own "Resolve
       # channel image for unchanged-scan retag" step, which already carries this same
       # condition for the identical reason.
@@ -6196,7 +6197,7 @@ jobs:
       - name: Scan pushed service digest with Trivy
         # Step 3 (issue #1095): generalized from build-tools-only to every service -- the
         # exact pushed digest is scanned before provenance and channel promotion for all 8
-        # services now. G8 fix: this is now the ONLY vulnerability scan for a changed
+        # services now. This is now the ONLY vulnerability scan for a changed
         # service on a trusted ref -- container-scan's own throwaway rebuild-and-scan
         # (which used to scan a different, never-published image with a different
         # digest) was removed, since it never verified the artifact actually published.
@@ -6516,7 +6517,7 @@ jobs:
 
       # Mirrors build's own "Retag unchanged service image" step exactly,
       # just for the linux/arm64 leg -- see that step's comment for the full
-      # Step 4/#1095 rationale, including the #1095 F-21 digest-pinning fix
+      # Step 4/#1095 rationale, including the issue #1095 digest-pinning fix
       # and the push-supersession-check guard's own reasoning. Both legs run
       # independently in parallel jobs but resolve the SAME pinned digest
       # determine-push-reuse-scope exported, so they always agree on which
@@ -7035,9 +7036,10 @@ jobs:
       # unconditionally every push for every service with valid per-arch inputs, and
       # `docker buildx imagetools create` is deterministic for identical inputs, so an
       # unchanged service gets the exact same merged digest recreated and re-attested on
-      # every single push -- the same waste shape as G11, but for provenance attestations,
-      # firing far more often. Also fixes a real, separate gap found in the same pass:
-      # `syslog` (wired in by issue #1428/#1433) had no attest step here at all until now.
+      # every single push -- the same redundant-rescan waste shape the scan-result cache
+      # above fixes for Trivy, but for provenance attestations, firing far more often.
+      # Also fixes a real, separate gap: `syslog` (wired in by issue #1428/#1433) had no
+      # attest step here at all until now.
       - name: Attest proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.proxy_digest != ''
         uses: ./.github/actions/ghcr-attest-with-cache

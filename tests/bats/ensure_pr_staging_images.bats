@@ -556,9 +556,9 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
 }
 
-@test "#1095 F-20: BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
+@test "BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
     # Discriminating test for the two allow_reverse_ancestry=true call sites
-    # F-20 added inside saf_resolve_untouched_backfill_source() (Step 1's
+    # issue #1095 added inside saf_resolve_untouched_backfill_source() (Step 1's
     # fast path here, since every service is untouched by default per
     # setup()'s docs-only fixture -- Step 2's normal-path call site carries
     # the identical fix and reasoning, see that call site's own comment).
@@ -574,7 +574,7 @@ STUB
     # through to saf_find_built_ancestor, and that walk finds nothing usable
     # either (every ancestor's own tag is also stubbed absent) -- a hard
     # failure, not a quieter wrong-answer. Verified this test fails against
-    # the pre-F-20 baseline for exactly that reason (status non-zero, "No
+    # the earlier baseline for exactly that reason (status non-zero, "No
     # usable ancestor" error) before writing this comment.
     revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
     cat > "$revision_map_stub" <<STUB
@@ -841,7 +841,7 @@ STUB
     # would let the ordinary backfill succeed before this scenario is even
     # reached, the same reason the dedicated "confirmed run" test below needs
     # this override too. `exit 1` for every image, not "echo an older
-    # ancestor's sha" (#1095 F-20, 2026-08-07): since
+    # ancestor's sha" (issue #1095, 2026-08-07): since
     # saf_resolve_untouched_backfill_source's own BASE_SHA-level checks now
     # pass allow_reverse_ancestry=true (the same push-reuse-retag-aware
     # acceptance saf_find_built_ancestor's own candidate checks already used),
@@ -909,7 +909,7 @@ STUB
     # Force the exact-BASE_SHA freshness check to fail first, so the script
     # actually reaches the new fallback decision point instead of succeeding
     # earlier. `exit 1` (no such image), not "echo an older ancestor's sha"
-    # (#1095 F-20, 2026-08-07): saf_resolve_untouched_backfill_source's own
+    # (issue #1095, 2026-08-07): saf_resolve_untouched_backfill_source's own
     # BASE_SHA-level checks now pass allow_reverse_ancestry=true, so echoing
     # a genuine ancestor of base_sha here would now be legitimately accepted
     # as fresh instead of refused -- see the "#808: ... is NOT back-filled
@@ -952,7 +952,7 @@ STUB
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$indeterminate_stub"
 
     # Force the exact-BASE_SHA freshness check to fail first. `exit 1` (no
-    # such image), not "echo an older ancestor's sha" (#1095 F-20,
+    # such image), not "echo an older ancestor's sha" (issue #1095,
     # 2026-08-07): saf_resolve_untouched_backfill_source's own BASE_SHA-level
     # checks now pass allow_reverse_ancestry=true, so echoing a genuine
     # ancestor of base_sha here would now be legitimately accepted as fresh

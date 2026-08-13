@@ -65,7 +65,7 @@
 #     caught here mechanically instead of relying on manual review to
 #     notice it" -- "review" and "notice" are far enough apart, and "notice"
 #     is not one of the tracked discovery verbs, so this does not match).
-#   - "remembered during review" (scripts/check-idempotence-test-
+#   - "remembered during review" (scripts/tracked/check-idempotence-test-
 #     coverage.sh) -- "remembered" is deliberately not in the discovery-verb
 #     list; it describes a general process improvement, not a chronology
 #     claim about THIS comment's own discovery.
@@ -75,12 +75,12 @@
 #     unless it is actually paired with a discovery verb next to "review"
 #     (pattern 1 above still catches that combined case, e.g. "regression
 #     pin for a bug caught in review").
-#   - "after this PR merges" / "until this PR's OWN builds" (scripts/check-
-#     build-tools-smoke-coverage.sh, scripts/untracked/ensure-pr-staging-images.sh,
-#     full-setup-deep-validate.yml) -- these describe live CI/workflow
-#     semantics about whatever PR is CURRENTLY running through the
-#     pipeline (a dynamic runtime referent, re-evaluated fresh on every
-#     run), not a historical reference to the PR that introduced the
+#   - "until this PR's OWN builds" (full-setup-deep-validate.yml) and similar
+#     phrasing scattered across scripts/lib/*.sh and .github/workflows/*.yml
+#     (e.g. "this PR's own base commit", "this PR touched") -- these describe
+#     live CI/workflow semantics about whatever PR is CURRENTLY running
+#     through the pipeline (a dynamic runtime referent, re-evaluated fresh on
+#     every run), not a historical reference to the PR that introduced the
 #     comment. Pattern 2 only matches "fix/change/commit/patch" nouns,
 #     deliberately excluding "PR", so these stay unmatched.
 #

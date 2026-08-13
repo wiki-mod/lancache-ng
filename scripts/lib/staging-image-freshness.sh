@@ -203,7 +203,7 @@ _sif_inspect_attempt() {
 #
 # Internal helper: runs `docker buildx imagetools inspect "$@"` through the
 # project's shared ghcr_retry wrapper (scripts/lib/ghcr-retry.sh) instead of
-# a single bare attempt (#1095 F-21: PR #1378 widened this function's real
+# a single bare attempt (issue #1095: PR #1378 widened this function's real
 # callers from 2 to 8 services -- 12 more unprotected registry reads per
 # eligible push -- without retry coverage, so a single transient GHCR error
 # on any one of them was read as "revision undeterminable" and silently
@@ -300,7 +300,7 @@ sif_image_revision() {
       # Strip whatever reference form $image already carries before
       # appending the resolved child "@digest" -- $image can now be either
       # a mutable tag (repo:nightly) or an already-pinned digest reference
-      # (repo@sha256:...; #1095 F-21's digest-TOCTOU fix passes this form so
+      # (repo@sha256:...; issue #1095's digest-TOCTOU fix passes this form so
       # a caller can verify and export the exact same immutable reference,
       # see scripts/lib/push-reuse.sh's own header). A single
       # "${image%:*}" strip (the original form of this line) is only
@@ -495,12 +495,12 @@ sif_wait_for_fresh_base_image() {
   local allow_reverse_ancestry="${7:-}"
 
   # Scope ghcr_retry's own internal retry/backoff (added to sif_image_revision's
-  # underlying _sif_inspect calls by #1095 F-21) to match THIS call's own
+  # underlying _sif_inspect calls per issue #1095) to match THIS call's own
   # budget shape, rather than letting either extreme apply everywhere:
   #
   # - A genuine multi-iteration poll (hard_ceiling_seconds > 0) already IS a
   #   retry loop -- that is what "wait" means here, and its own budget/
-  #   ceiling contract is load-bearing (the F-22 incident, #1095, measured
+  #   ceiling contract is load-bearing (issue #1095's incident measured
   #   several services burning ~612s each against this exact ceiling).
   #   Letting ghcr_retry's own up-to-90s internal retry-with-backoff run
   #   silently inside a single poll iteration would eat into that same
@@ -510,8 +510,8 @@ sif_wait_for_fresh_base_image() {
   #   (no internal retry at all; a transient blip just becomes another "keep
   #   polling" iteration, the same outer-loop-driven recovery this function
   #   always relies on for any other transient condition).
-  # - A single non-polling probe (hard_ceiling_seconds == 0 -- e.g. F-22's
-  #   "one direct check before assuming the ancestor walk is needed" fast
+  # - A single non-polling probe (hard_ceiling_seconds == 0 -- e.g. issue
+  #   #1095's "one direct check before assuming the ancestor walk is needed" fast
   #   path, scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor())
   #   gets exactly ONE iteration of this outer loop, so it has ZERO
   #   redundancy of its own against a transient GHCR error -- confirmed live

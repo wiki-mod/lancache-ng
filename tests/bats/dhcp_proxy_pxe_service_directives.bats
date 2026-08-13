@@ -23,7 +23,7 @@
 # scenario needs its own isolated network (two dnsmasq-proxy instances on
 # one broadcast domain would both answer the same broadcast DISCOVER,
 # making a "no reply for arch 0" assertion meaningless) and is out of scope
-# for this pass -- see the #849 tracking comment for that residual gap.
+# here -- see the #849 tracking comment for that residual gap.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
