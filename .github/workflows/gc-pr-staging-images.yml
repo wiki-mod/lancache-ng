@@ -47,18 +47,46 @@
 # version's own state is simple, avoids duplicating the reap logic, and
 # doubles as a general sweep on every PR close for free.
 #
-# NOTE (AG-CI-018/AG-CI-019, unverified either direction as of this PR): the
-# `schedule:` trigger only ever fires from this file's copy on the
-# repository's DEFAULT branch (currently `master`) -- confirmed generally
-# true for `schedule:` triggers by issue #1254's `nightly-refresh.yml`
-# incident, not re-verified specifically for this file. Whatever
-# classification/cap logic lands here via this PR on `current_dev` will not
-# actually run on a real schedule until a release promotes it to `master`.
-# The `pull_request: closed` trigger's own evaluating-branch semantics were
-# NOT independently re-verified as part of this PR either (AG-CI-019: don't
-# assert either direction without checking) -- treat both as open questions
-# for whoever next investigates this workflow's live behavior, not as
-# settled by this comment.
+# NOTE (AG-CI-018/AG-CI-019): the `schedule:` trigger only ever fires from
+# this file's copy on the repository's DEFAULT branch (currently `master`)
+# -- confirmed generally true for `schedule:` triggers by issue #1254's
+# `nightly-refresh.yml` incident, not re-verified specifically for this file.
+# Whatever classification/cap logic lands here via this PR on `current_dev`
+# will not actually run on a real schedule until a release promotes it to
+# `master`.
+#
+# The `pull_request: closed` trigger's own evaluating-branch semantics WERE
+# independently verified live (2026-08-13, issue #1095's checkout-failure
+# investigation, see the "Verify required scripts exist on the default
+# branch" step below for the fix this produced): for `pull_request` events,
+# GitHub evaluates this workflow's JOB DEFINITION (steps, sparse-checkout
+# patterns, `run:` commands) from the closed PR's own HEAD BRANCH copy of
+# this file -- never from `master`, regardless of the `ref:` input passed to
+# `actions/checkout` below. That `ref:` input only controls which commit's
+# CONTENT gets checked out; it does not change which commit's copy of this
+# YAML file GitHub used to build the job graph in the first place. Confirmed
+# via three real job logs (runs 31673827569/31613327375/31594464341, all
+# `event: pull_request`, head branches based on `current_dev` post-#1095's
+# 2026-08-06 script-extraction commit 7b03f99b): each one ran THIS job's
+# 3-path sparse-checkout definition while checking out `master`'s content --
+# and `master` (last promoted at v0.3.0, no release since) still lacks
+# `scripts/gc-pr-staging-images.sh` and `scripts/lib/gc-pr-staging-images.sh`
+# entirely. Non-cone sparse-checkout matching zero real paths in the checked-
+# out tree makes git treat almost every other file as "outside the sparse
+# scope, must be removed" -- and `error: Path 'X' not uptodate; will not
+# remove from working tree` (a safety refusal non-cone sparse-checkout does
+# not always let even `--force` override) fires for whichever subset happens
+# to have any real stat/content difference from that runner instance's own
+# checkout history, followed by `scripts/gc-pr-staging-images.sh: No such
+# file or directory` (exit 127) once the doomed checkout partially completes.
+# This reproduced on 3 independent runner instances across 2 hosts because
+# it is deterministic content drift between the evaluating branch and the
+# pinned `ref:`, not a corrupted or leftover-dirty working directory --
+# confirmed by the successful-run counterexample: every real success in the
+# last 40 runs came from either a `schedule:` run (always uses `master`'s own
+# copy, which -- pre-#1095's extraction -- has no checkout step and no
+# sparse-checkout at all) or a `pull_request`-triggered run whose head branch
+# still matched `master`'s pre-extraction, script-less shape.
 name: GC PR Staging Images
 
 on:
@@ -148,11 +176,74 @@ jobs:
             echo "have-pat=false" >> "$GITHUB_OUTPUT"
           fi
 
+      # This job's JOB DEFINITION (this file's steps, including the
+      # sparse-checkout patterns below) is evaluated from whichever branch
+      # actually triggered the run -- the closed PR's own head branch for
+      # `pull_request: closed`, or the default branch for `schedule:`/
+      # `workflow_dispatch:` (see the AG-CI-018/AG-CI-019 header note above).
+      # The `Checkout` step's own `ref:` is deliberately pinned to the
+      # default branch instead (security reason documented on that step
+      # below), which means the two can name script paths that do not
+      # actually exist yet in what gets checked out: an active development
+      # branch can already have this job's script-extraction merged (as
+      # `current_dev` has, since 7b03f99b, 2026-08-06) while the default
+      # branch -- only updated at a release cut -- still lacks it. Root-
+      # caused live 2026-08-13 (issue #1095): every `pull_request`-triggered
+      # run since 7b03f99b landed hit this exact mismatch, because `master`
+      # (last promoted at v0.3.0) still lacks two of the three paths below.
+      # A non-cone sparse-checkout applied against a ref where the patterns
+      # match nothing makes git try to remove almost the entire tree, which
+      # trips `error: Path 'X' not uptodate; will not remove from working
+      # tree` for whatever subset differs from that runner instance's prior
+      # checkout -- not a corrupted runner, a guaranteed-to-fail checkout
+      # given the current content mismatch. This preflight turns that
+      # guaranteed failure into an accurate, informative skip instead of a
+      # misleading red job: it does not restore GC functionality by itself
+      # (the reap script genuinely cannot run against `master`'s content
+      # until a release promotes the extraction there -- see AG-CI-019,
+      # tracked for a decision in issue #1095), it only stops this workflow
+      # from failing loudly for a condition that is not actually fixable
+      # from inside a single `pull_request`-triggered run.
+      - name: Verify required scripts exist on the default branch
+        id: script-check
+        if: steps.creds.outputs.have-pat == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # Read-only Contents-API existence check, one call per required
+          # path -- deliberately NOT using GHCR_PACKAGE_DELETE_PAT (that
+          # credential is scoped for package deletion, not repo reads; the
+          # default, unprivileged GITHUB_TOKEN already has read access to
+          # this repository's own contents). `--silent` discards the file
+          # body (irrelevant here, and this repo disallows fetching it
+          # through a non-reviewed ref regardless -- see the Checkout step's
+          # own comment); only the HTTP status decides presence/absence.
+          required_paths=(
+            "scripts/gc-pr-staging-images.sh"
+            "scripts/lib/ghcr-retry.sh"
+            "scripts/lib/gc-pr-staging-images.sh"
+          )
+          missing=()
+          for path in "${required_paths[@]}"; do
+            if ! gh api "repos/${{ github.repository }}/contents/${path}?ref=${DEFAULT_BRANCH}" --silent >/dev/null 2>&1; then
+              missing+=("$path")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::warning::Skipping GC reap: ${#missing[@]} required script path(s) do not exist yet on the default branch ('${DEFAULT_BRANCH}'): ${missing[*]}. This job's own job definition was evaluated from a branch that already has issue #1095's scripts/gc-pr-staging-images.sh extraction (2026-08-06, commit 7b03f99b), but the default branch has not received it via a release yet -- attempting the sparse checkout below against that mismatch is a guaranteed failure (git tries to remove nearly the whole tree and hits 'not uptodate' errors), not a real GC attempt. This self-heals automatically once a release promotes the extraction to the default branch; until then, PR staging tags accumulate in GHCR same as the missing-PAT case above. See issue #1095."
+            echo "scripts-present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "scripts-present=true" >> "$GITHUB_OUTPUT"
+          fi
+
       # Needed only because the reap logic now lives in a real script file
       # (scripts/gc-pr-staging-images.sh) instead of inline YAML -- the
       # pre-extraction version of this workflow never checked out the repo
       # at all, since every line it needed was already inline. `sparse-
-      # checkout` keeps this light (just the two script paths this job
+      # checkout` keeps this light (just the three script paths this job
       # actually runs), matching AG-CI-002's "route lightweight static
       # checks to the light runner tier" intent -- this job has no other use
       # for the rest of the repository tree.
@@ -175,9 +266,11 @@ jobs:
       # for closed-PR sweeps (and the `schedule:`/`workflow_dispatch:`
       # triggers below) after they land on the default branch -- consistent
       # with this file's own AG-CI-018 note above about `schedule:` already
-      # only ever running the default-branch copy.
+      # only ever running the default-branch copy. The `scripts-present`
+      # check above exists precisely because that lag is real and ongoing,
+      # not merely theoretical.
       - name: Checkout gc-pr-staging-images.sh and its lib
-        if: steps.creds.outputs.have-pat == 'true'
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
@@ -188,7 +281,7 @@ jobs:
           sparse-checkout-cone-mode: false
 
       - name: Reap staging tags and orphaned versions
-        if: steps.creds.outputs.have-pat == 'true'
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash scripts/gc-pr-staging-images.sh
@@ -227,6 +320,17 @@ jobs:
       # re-narrow down to the three paths above again. `if: always()` so a
       # failing reap script still leaves the runner clean for whatever job
       # runs on it next.
+      #
+      # Deliberately NOT additionally gated on `steps.script-check.outputs.
+      # scripts-present`: when the preflight above skips the Checkout step
+      # (default-branch content mismatch, see that step's own comment), this
+      # step's own `git sparse-checkout`/`git checkout --force` commands run
+      # against an already-unsparse tree and are trivial, side-effect-free
+      # no-ops (0 skip-worktree bits to sweep, verified below) -- keeping the
+      # gate simpler and running this step unconditionally on every
+      # `have-pat` run remains a real, still-useful safety net for any
+      # narrowing left over from a run that predates this fix, rather than
+      # only self-healing on runs where the checkout itself happened to run.
       - name: Restore full working tree for the next job on this runner
         if: always() && steps.creds.outputs.have-pat == 'true'
         run: |
