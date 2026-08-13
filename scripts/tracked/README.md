@@ -18,6 +18,6 @@ header comment for the full history).
 Populated 2026-08-07 (post-v0.3.0-release "touch it, move it" scheme
 finalized on 2026-07-31, execution deferred until after the release per an
 explicit maintainer instruction -- see issue #1095's F-16 discussion). The
-24 scripts here are exactly the ones PR #1341 individually verified and
+28 scripts here are exactly the ones PR #1341 individually verified and
 allowlisted by name before this directory existed; git history preserves
 that verification's provenance via `git mv`, not a fresh add.
