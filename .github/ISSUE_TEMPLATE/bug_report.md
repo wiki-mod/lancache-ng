@@ -18,5 +18,5 @@ What actually happened.
 
 **Environment**
 - Mode: [ ] standard [ ] ssl
-- OS / Docker version:
-- Logs (if any):
+- OS / Docker version (`docker --version`, `docker compose version`):
+- Logs (if any, e.g. `docker logs lancache-<service>` -- container names match `lancache-proxy`, `lancache-dns-standard`, `lancache-dns-ssl`, `lancache-watchdog`, `lancache-dhcp`, `lancache-syslog`, `lancache-ui`, etc.):
