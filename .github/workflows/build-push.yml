@@ -1070,18 +1070,10 @@ jobs:
             exit 1
           fi
 
-          # State-root migration contract:
-          # - manual prod keeps one normal root knob (LANCACHE_STATE_DIR)
-          # - optional per-service keys are preserved only for real legacy/custom paths
-          # - setup.sh must not treat a bare /srv/lancache directory as active state
-          #
-          # CACHE_DIR_STANDARD/CACHE_DIR_SSL are deliberately NOT in this loop. Every other key
-          # here is a legitimate, permanent advanced override an operator may still want. The two
-          # cache keys are different: they are being fully retired in favor of one shared
-          # CACHE_DIR, so setup.sh update collapses them into CACHE_DIR and unconditionally
-          # removes them (remove_env_key) instead of preserving them -- keeping them
-          # "preservable" would recreate the exact split-brain this migration exists to
-          # eliminate.
+          # What: Validates state-root migration contract: one LANCACHE_STATE_DIR + optional legacy per-service keys.
+          # Why: CACHE_DIR_STANDARD/CACHE_DIR_SSL retired in favor of shared CACHE_DIR; other keys
+          # preserved as permanent advanced overrides. Split-brain avoidance critical for migration.
+          # From: (state-root migration contract enforcement)
           for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
               || { echo "::error::setup.sh update must preserve ${key} only when legacy/custom state would otherwise move away from the one-root contract."; exit 1; }
@@ -1103,9 +1095,9 @@ jobs:
             || { echo "::error::setup.sh deploy/prod updates must default runtime state to /opt/lancache-ng, not the checkout."; exit 1; }
           grep -F 'install_dir=$(realpath -m "$install_dir")' setup.sh >/dev/null \
             || { echo "::error::setup.sh update must normalize install_dir before cd so deploy/prod backups are path-stable."; exit 1; }
-          # Manual deploy/prod rollback snapshot:
-          # capture every repo-root input reached via ../../ and remap that
-          # snapshot to a different checkout path during restore.
+          # What: Snapshot repo-root inputs reached via ../../ and remap on restore.
+          # Why: Manual deploy/prod rollback must preserve arbitrary install paths.
+          # From: (backup/restore contract)
           grep -F 'deploy_prod_repo_input_paths()' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must snapshot repo-root runtime inputs reached via ../../ paths."; exit 1; }
           grep -F 'config/prod' setup.sh >/dev/null \
