@@ -281,7 +281,12 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_ccache; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
-    if [ "${ccache_enabled:-0}" = "1" ]; then ccache -s || true; fi; \
+    # ccache_enabled=1 only ever gets set after the earlier probe compile
+    # (line ~211) already proved ccache works, so a failing `ccache -s` here
+    # would itself be a genuine, unexpected fault -- not a case to swallow.
+    # This stats dump was explicitly requested for the build log; silently
+    # discarding its own failure with `|| true` would contradict that intent.
+    if [ "${ccache_enabled:-0}" = "1" ]; then ccache -s; fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b

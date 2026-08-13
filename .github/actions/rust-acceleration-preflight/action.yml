@@ -401,8 +401,18 @@ runs:
               # From: Issue #887
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
-                export CCACHE_REMOTE_STORAGE
-                CCACHE_REMOTE_STORAGE="$(cat /run/lancache/ccache-redis-url)"
+                ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
+                # services/dns/Dockerfile's own ccache configuration accepts a bare
+                # host:port and normalizes it to a redis:// scheme before handing it
+                # to ccache -- ccache itself rejects a schemeless endpoint outright
+                # (confirmed against the installed ccache 4.9.1: "Scheme ... is
+                # invalid"), so this preflight must apply the identical normalization
+                # or it fails validating configurations the real build accepts.
+                case "$ccache_redis_endpoint" in
+                  redis://*|redis+unix:*) ;;
+                  *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;;
+                esac
+                export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"
                 export CCACHE_PREFIX=distcc
                 export CCACHE_COMPILERCHECK=content
                 printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/ccache-probe.c"

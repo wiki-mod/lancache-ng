@@ -1631,7 +1631,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'BUILD_PUSH_GUARD_2'
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_2'
           set -euo pipefail
 
           missing_required=0
@@ -1798,7 +1798,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'BUILD_PUSH_GUARD_3'
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_3'
           set -euo pipefail
 
           setup_required_keys=(
@@ -1984,7 +1984,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'BUILD_PUSH_GUARD_4'
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_4'
           set -euo pipefail
 
           grep -F 'systemctl stop lancache-converge.service' setup.sh >/dev/null \
@@ -2150,7 +2150,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'BUILD_PUSH_GUARD_5'
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_5'
           set -euo pipefail
 
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
@@ -2277,6 +2277,20 @@ jobs:
           grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
+          BUILD_PUSH_GUARD_5
+
+      - name: Validate sccache/distcc Dockerfile wiring and promote-tags extraction
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_6'
+          set -euo pipefail
+
           # build-tools.yml's "Promote mutable tags" step writes a branch-name-derived mutable
           # tag, and this repo has a branch literally named "v0.2.0" -- without the "-tc" ("test
           # candidate") suffix, a push to that branch would publish build-tools:v0.2.0, the
@@ -2306,19 +2320,6 @@ jobs:
             echo "::error::Could not extract build-tools.yml's \"Promote mutable tags\" derivation logic -- its step name or tag-derivation lines may have moved; update the extraction markers in build-push.yml's guard alongside them."
             exit 1
           fi
-          BUILD_PUSH_GUARD_5
-
-      - name: Validate sccache/distcc Dockerfile wiring and promote-tags extraction
-        run: |
-          set -euo pipefail
-
-          docker run --rm -i \
-            --user "$(id -u):$(id -g)" \
-            -v "$PWD:/work:ro" \
-            -w /work \
-            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'BUILD_PUSH_GUARD_6'
-          set -euo pipefail
 
           # Write the extracted lines to a real script file rather than a
           # bash -c string: the extracted text already contains its own
@@ -2455,7 +2456,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'BUILD_PUSH_GUARD_7'
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_7'
           set -euo pipefail
 
           # ccache-over-distcc guard (issue #887): services/dns/Dockerfile only for now

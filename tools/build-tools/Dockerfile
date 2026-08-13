@@ -242,7 +242,7 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # What: installs ccache from Debian's own package (not source-built).
 # Why: caches the C-dependency compile step (`-sys` crates, e.g. `ring`) that
 # distcc alone only distributes, never caches; sccache was ruled out for this
-# same job (#860) because it always shells its own `-E` pass through `CC`,
+# same job because it always shells its own `-E` pass through `CC`,
 # which crashes against a `,cpp`-tagged distcc host list, while ccache
 # preprocesses locally by default (checked against ccache's own manual, not
 # assumed -- Rule-Ref: AG-VAL-023); no per-feature trimming reason exists to
