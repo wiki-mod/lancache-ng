@@ -308,8 +308,10 @@ check_bare_issue_ref_duplicates_from() {
     # sweep: the overwhelming majority of tracked files carry no `From:`
     # pointer at all yet, since AG-CODE-012 adoption is still in progress) --
     # skips the 4-process extraction pipeline below entirely for those files.
-    grep -qaE 'From:' "$path" 2>/dev/null || return 0
-    from_nums=$(grep -aE 'From:' "$path" 2>/dev/null | grep -aoE '#[0-9]+' | tr -d '#' | sort -u || true)
+    # -I (not -a): consistent with every other grep in this script, a binary
+    # file is never treated as a text match.
+    grep -qEI 'From:' "$path" 2>/dev/null || return 0
+    from_nums=$(grep -EI 'From:' "$path" 2>/dev/null | grep -oEI '#[0-9]+' | tr -d '#' | sort -u || true)
     [ -z "$from_nums" ] && return 0
 
     while IFS= read -r num; do
@@ -321,7 +323,7 @@ check_bare_issue_ref_duplicates_from() {
         # the one place this number is SUPPOSED to live); every other line
         # citing the same number is the redundant duplicate this check
         # exists to catch.
-        grep -aEnI "(^|[^0-9])#${num}([^0-9]|$)" "$path" 2>/dev/null | grep -av 'From:' || true
+        grep -EnI "(^|[^0-9])#${num}([^0-9]|$)" "$path" 2>/dev/null | grep -vE 'From:' || true
     done <<< "$from_nums"
 }
 

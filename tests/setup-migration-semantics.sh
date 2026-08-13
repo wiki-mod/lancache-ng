@@ -9,9 +9,15 @@ set -euo pipefail
 
 # Extract and source the .env helper functions from setup.sh.
 # Only the functions we need are sourced to keep the test deterministic.
+# STATUS: as of 2026-08-13, this function is unused (nothing in this file or
+# elsewhere in the repo calls it) and its hardcoded line range below no
+# longer matches env_key_exists()/write_env_file()'s real current location
+# in setup.sh (1095/1863) -- a dead-code/stale-range defect distinct from
+# this file's own scope, left unfixed pending a maintainer decision on
+# whether to remove this helper or replace the range with a non-line-number
+# extraction mechanism.
 setup_sh_helpers() {
     local setup_sh="$1"
-    # Extract from env_key_exists() through write_env_file().
     sed -n '446,628p' "$setup_sh"
 }
 
