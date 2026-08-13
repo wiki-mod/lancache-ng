@@ -4348,42 +4348,13 @@ jobs:
           fi
 
   container-scan:
-    # Never runs on `pull_request` (see `if:` below) -- PRs exercise Dockerfiles via
-    # `build` below with no vulnerability scan; that gap is separate and untouched here.
+    # What: Never runs on pull_request (PRs get their own Trivy scan via build's "Scan pushed service digest" step); on push/tag it Trivy-scans either a changed service's just-pushed digest or an unchanged service's already-published channel image, whichever build/determine-push-reuse-scope decided.
+    # Why: An earlier version rebuilt each changed service in a second, throwaway `docker buildx build --load` just to scan it, but a fresh build always stamps a new `created` timestamp, so that scan's digest never matched what build/build-arm64 actually pushed -- removed, since build/build-arm64's own pushed-digest Trivy step already covers the real shipped artifact; the unchanged-service digest-scan branch is untouched.
+    # From: Issue #1095 | PR #1532
     #
-    # UPDATED (issue #1095, closes finding G8 / originally #1348): used to unconditionally
-    # `docker buildx build --load` its own throwaway, never-pushed image per changed
-    # service, then scan THAT -- a second, independent build of the same commit that
-    # `build`/`build-arm64` also build and push moments later. A fresh `docker buildx
-    # build` stamps a new `created` timestamp every time, so the two never share a digest
-    # even for byte-identical inputs: "kit 678/345/675 goes in, kit 654 comes out" --
-    # this job's scan verdict was never about the artifact actually shipped. `build`/
-    # `build-arm64`'s own "Scan pushed service digest with Trivy" step (Step 3, all 8
-    # services) already scans the EXACT pushed digest, so the throwaway rebuild bought no
-    # provenance, only redundant compute. That branch ("should-scan == true" below) is
-    # removed: a changed service now only pays for the cheap reuse-eligibility check
-    # above, and the pushed-digest scan in build/build-arm64 is the sole real gate.
-    #
-    # The OTHER branch ("should-scan == false", Step 4 / #1331 / #1339, G11 via #1467)
-    # is untouched: when a service is proven unchanged there is no new build to scan, so
-    # this job Trivy-scans the already-published channel image by digest instead.
-    #
-    # UPDATED (issue #1290): this used to be a bare `if:` relying on GitHub's implicit
-    # `&& success()`, which was safe only while `validate-compose` and (since #1095 Part
-    # 1) `push-supersession-check` stayed root jobs with no `if:`/`needs:` of their own.
-    # Adding `determine-push-reuse-scope` to `needs:` below breaks that invariant: its own
-    # `if:` only fires on `push` to a branch ref, so it legitimately shows `skipped` on
-    # pull_request/schedule/workflow_dispatch/tag-push -- and implicit success() treats a
-    # skipped need exactly like a failed one, which would have silently skipped
-    # container-scan (and weakened the build gate) on every one of those events. Hardened
-    # below to explicitly tolerate `determine-push-reuse-scope` showing either `success`
-    # or `skipped`, matching the same fail-safe idiom used for the four Rust jobs'
-    # detect-changes dependency elsewhere. `validate-compose` and
-    # `push-supersession-check` both remain plain root jobs with no `if:`/`needs:`, so
-    # neither can ever legitimately show `skipped` -- checked for plain `success` below,
-    # not the success-or-skipped tolerance `determine-push-reuse-scope` needs. INVARIANT:
-    # the plain `== 'success'` checks hold ONLY while both stay root jobs. If either ever
-    # gains an `if:`/`needs:` that can skip, widen its own check here to match.
+    # What: Requires validate-compose/push-supersession-check to show plain `success` but tolerates determine-push-reuse-scope showing `success` or `skipped`.
+    # Why: determine-push-reuse-scope's own `if:` only fires on a push to a branch ref, so it legitimately skips on pull_request/schedule/workflow_dispatch/tag-push -- GitHub's implicit success() treats a skipped need like a failed one, which would silently skip container-scan on those events; validate-compose/push-supersession-check remain plain root jobs with no `if:`/`needs:` of their own, so they can never legitimately skip and stay on the stricter check -- if either ever gains a conditional `if:`, this check must widen to match.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -4954,41 +4925,14 @@ jobs:
         (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
         (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
       }}
-    # Per-service runner selection (issue #1095, AG-CI-002 measured exception): mirrors
-    # container-scan's own `${{ fromJSON(matrix.runner) }}` pattern -- see this job's
-    # matrix comment above for which services route to light vs heavy and why.
+    # What: Selects the runner per matrix service via `${{ fromJSON(matrix.runner) }}`, mirroring container-scan's own pattern.
+    # Why: An AG-CI-002 measured exception; see this job's matrix comment above for which services route to light vs heavy and why.
+    # From: Issue #1095 | PR #1532
     runs-on: ${{ fromJSON(matrix.runner) }}
     timeout-minutes: 150
-    # Job-level concurrency (#888, keyed per matrix service and per ref). CANONICAL
-    # RATIONALE for this whole workflow's channel publish path -- container-scan/
-    # build-arm64 and the shellcheck/validate-compose/line-endings/ci_scope_policy gates
-    # all point here for the full story.
-    #
-    # cancel-in-progress is scoped to pull_request events ONLY (issue #979). On a PR, a
-    # newer push to the same branch supersedes the older commit, so cancelling the older
-    # service build reclaims a scarce self-hosted slot (heavy or light, per matrix.runner
-    # above -- otherwise pinned for the full ~150-minute timeout) with no downside: a PR's own commits are never promoted to a
-    # channel, GHCR tag writes are atomic (a cancelled build leaves no corrupt or
-    # partially-visible sha-* tag), and merge-manifests already requires
-    # `needs.build.result == 'success'`, so a cancelled build cleanly stops the pipeline.
-    #
-    # On push/tag it must NOT cancel. This branch build is what publishes the commit's
-    # sha-* images that promote turns into the latest/nightly channel (#825/#1141: master
-    # -> latest, current_dev -> nightly). The top-level group uses a run_id-scoped key for
-    # push (never collides), so a rapid merge cascade runs every push's build fully in
-    # parallel with no throttle. With cancel-in-progress:true each new push tore down the
-    # previous push's in-progress build before it finished; in a fast enough cascade NO
-    # build completed for 90+ minutes, starving the channel and failing #808's freshness
-    # gate on unrelated PRs (issue #979, a recurrence of #777's starvation one layer
-    # below the promote job). With cancel false the in-progress build always survives to
-    # completion; the channel still advances toward HEAD because GitHub keeps only the
-    # newest pending run per group regardless of this flag (see promote's #897 comment),
-    # and #808 needs the base channel built at-or-after a PR's base commit, not exactly at
-    # it. Release (tag) builds are unaffected: a tag ref never collides.
-    #
-    # The group key still isolates workflow_dispatch and reruns with a run_id suffix so a
-    # PR rerun cannot cancel the original PR run's build; on push/tag the flag is false
-    # anyway.
+    # What: Job-level concurrency, keyed per matrix service and per ref; cancel-in-progress is true only for pull_request events, false for push/tag/workflow_dispatch. This is the canonical rationale other jobs on the channel publish path (container-scan/build-arm64, shellcheck/validate-compose/line-endings/ci_scope_policy) point back to.
+    # Why: On a PR, a newer push supersedes the older commit, so cancelling the older build reclaims a scarce self-hosted slot with no downside (PR commits are never promoted to a channel, GHCR tag writes are atomic, and merge-manifests already requires build to succeed). On push/tag this build publishes the sha-* images promote turns into the latest/nightly channel, and the top-level group's run_id-scoped push key lets every push's build run fully in parallel -- cancelling in-progress builds there let a fast merge cascade starve the channel for 90+ minutes with no build ever completing, whereas leaving them uncancelled always lets one survive to completion while GitHub still advances the channel by keeping only the newest pending run per group. A run_id suffix on the group key still stops a PR rerun from cancelling the original run's build.
+    # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
         ${{
@@ -5229,37 +5173,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Step 4 (issue #1095): generalized to whichever service this matrix row is
-      # currently building, including build-tools (issue #1290) -- determine-push-
-      # reuse-scope already did the real verification, so this step only needs to resolve
-      # the pinned digest's own linux/amd64 child digest and retag it. No rebuild, no
-      # recompilation needed here. No separate Trivy scan needed here either: container-
-      # scan's "Determine per-service publish scan reuse" step reads this exact same
-      # determine-push-reuse-scope decision for every service, so whenever this step's own
-      # should-build is false for a service, container-scan's "Scan channel image with
-      # Trivy (no rebuild)" step already scanned that exact digest directly this run.
-      # Because both steps read the identical output, the two decisions cannot disagree,
-      # so no service is ever left without a real scan on this path.
-      #
-      # #1095 F-21: resolves the linux/amd64 child digest from determine-push-reuse-scope's
-      # own already-pinned, already-verified manifest-list digest (DIGEST_*) instead of
-      # independently re-resolving the mutable channel tag here -- the digest TOCTOU race
-      # two Codex review threads on PR #1378 found. This registry read is now against an
-      # IMMUTABLE digest reference, so no matter when it runs, it cannot observe different
-      # content than what was verified -- unlike the old mutable-tag read, this closes the
-      # race rather than merely shrinking its window.
-      #
-      # push-supersession-check gate (issue #1095 Part 1, added here by #1095 F-21):
-      # "Determine whether this service needs building" above forces should-build to
-      # 'false' for EVERY service on a superseded push, regardless of whether
-      # determine-push-reuse-scope ever verified (and pinned a digest for) this specific
-      # service -- unlike a genuine reuse=true case, a superseded push's DIGEST_* output
-      # for this service can legitimately be empty. Without this guard, this step would
-      # still run, find no pinned digest, and hard-fail via the empty-digest check below,
-      # where the pre-#1095-F-21 code merely (silently, and separately not-quite-safely)
-      # retagged from the mutable tag directly. Matches container-scan's own "Resolve
-      # channel image for unchanged-scan retag" step, which already carries this same
-      # condition for the identical reason.
+      # What: Retags an already-verified, unchanged service's image for this commit (no rebuild/recompile), resolving the linux/amd64 child digest from determine-push-reuse-scope's own pinned, already-verified manifest-list digest rather than re-resolving the mutable channel tag; also requires push-supersession-check's `superseded != 'true'`.
+      # Why: Reading an immutable digest reference (instead of a mutable tag) closes a digest time-of-check-to-time-of-use race, since it cannot observe different content regardless of timing; the supersession guard is needed because the earlier "Determine whether this service needs building" step forces should-build to false for every service on a superseded push even when determine-push-reuse-scope never pinned a digest for this one, which would otherwise hard-fail on the empty-digest check below (container-scan's matching retag step carries the identical guard) -- no separate Trivy scan runs here either, since container-scan's own reuse-scan step reads this exact same determine-push-reuse-scope decision, so the two can never disagree and no service goes unscanned.
+      # From: Issue #1095 | PR #1532, PR #1378
       - name: Retag unchanged service image for this commit (linux/amd64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
