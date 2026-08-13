@@ -415,6 +415,7 @@ jobs:
             cargo
             cargo-audit
             cargo-tarpaulin
+            ccache
             clippy-driver
             dig
             distcc
@@ -438,6 +439,7 @@ jobs:
           cargo-audit --version
           cargo tarpaulin --version
           cargo-tarpaulin --version
+          ccache --version
           sccache --version
           actionlint --version
           bats --version
@@ -895,6 +897,7 @@ jobs:
             cargo
             cargo-audit
             cargo-tarpaulin
+            ccache
             clippy-driver
             dig
             distcc
@@ -918,6 +921,7 @@ jobs:
           cargo-audit --version
           cargo tarpaulin --version
           cargo-tarpaulin --version
+          ccache --version
           sccache --version
           actionlint --version
           bats --version
