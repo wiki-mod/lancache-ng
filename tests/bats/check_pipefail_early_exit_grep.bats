@@ -397,7 +397,12 @@ write_script() {
     run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"if-without-else-then-\$?"* || "$output" == *"has no else clause"* ]]
-    [[ "$output" == *"scripts/fetch.sh:5"* ]]
+    # write_script's own shebang + "set -euo pipefail" preamble is 2 lines,
+    # so within this fixture: fetch() {=3, if curl=4, return 0=5, fi=6,
+    # local status=$?=7 -- the guard reports the $? line (the violation
+    # itself), not the fi line, matching the real repo's own
+    # check-netdata-curl-pin.sh:156 (fi at 155, $? read at 156) shape.
+    [[ "$output" == *"scripts/fetch.sh:7"* ]]
 }
 
 @test "passes when the fix pattern (explicit if/else status capture) is used instead" {
@@ -508,7 +513,11 @@ write_script() {
         '}'
     run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"scripts/fetch.sh:6"* ]]
+    # Preamble is 2 lines (see the previous test's comment for the full
+    # count convention); within this fixture: fetch() {=3, outer if=4,
+    # inner if curl=5, return 0=6, inner fi=7, local status=$?=8 -- the
+    # guard reports the $? line.
+    [[ "$output" == *"scripts/fetch.sh:8"* ]]
 }
 
 @test "the real repository passes this guard repo-wide (scripts/**, tools/**, setup.sh)" {
