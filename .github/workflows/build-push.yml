@@ -4682,21 +4682,9 @@ jobs:
           } >> "$GITHUB_OUTPUT"
 
   build:
-    # This job is the only place that publishes service sha-* images. It stays on
-    # self-hosted runners because the heavy Rust/image path depends on the shared
-    # build-tools image, sccache/distcc acceleration, and registry credentials. It still
-    # waits for lightweight validation, policy checks, and trusted-ref vulnerability
-    # scans before publishing. UPDATED (Step 3, issue #1095): for every service
-    # (originally build-tools only), it also scans the exact pushed digest before
-    # attestation/promotion can proceed -- see "Scan pushed service digest with Trivy"
-    # below.
-    #
-    # Also skipped on a metadata-only pull_request event -- see the trigger's own
-    # `types:` comment at the top of this file. Those events never carry a new commit, so
-    # there is no new image content for this job to build or push -- a prior run already
-    # published the sha-* (and, on a same-repo PR, pr-<N>-sha-<short>) tags for this exact
-    # commit. merge-manifests/full-setup-validate downstream already tolerate a skipped
-    # build/build-arm64 cleanly via their own `needs.build.result == 'success'` gates.
+    # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
+    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push -- a prior run already published the sha-*/pr-<N>-sha-<short> tags for this exact commit, and merge-manifests/full-setup-validate downstream already tolerate a skipped build/build-arm64 cleanly via their own `needs.build.result == 'success'` gates.
+    # From: Issue #1095 | PR #1532
     needs:
       - shellcheck
       - validate-compose
@@ -6339,22 +6327,9 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      # actions/attest is a standalone action step, so it cannot run inside the bash loops
-      # above -- one explicit step per service is required, same as promote's single
-      # "Attest stack pointer provenance" step just repeated for each merged multi-platform
-      # manifest. Each step is gated only on its own digest output being non-empty: the
-      # "Create ..." step above already skips (via `continue`, not a step failure) any
-      # service with no per-arch inputs for this event, which leaves that service's
-      # *_digest output unset here -- nothing else needs checking.
-      #
-      # Routed through ghcr-attest-with-cache (issue #1095, attestation-caching finding),
-      # not ghcr-attest-retry directly: "Create multi-platform manifests" above runs
-      # unconditionally every push for every service with valid per-arch inputs, and
-      # `docker buildx imagetools create` is deterministic for identical inputs, so an
-      # unchanged service gets the exact same merged digest recreated and re-attested on
-      # every single push -- the same waste shape as G11, but for provenance attestations,
-      # firing far more often. Also fixes a real, separate gap found in the same pass:
-      # `syslog` (wired in by issue #1428/#1433) had no attest step here at all until now.
+      # What: One explicit attest step per service (actions/attest cannot run inside the bash loops above), gated only on its own digest output being non-empty, routed through ghcr-attest-with-cache rather than ghcr-attest-retry directly; includes syslog, which previously had no attest step here.
+      # Why: The "Create ..." step above already skips (via `continue`, not a step failure) any service with no per-arch inputs for this event, leaving that service's *_digest output unset -- nothing else needs checking; "Create multi-platform manifests" runs unconditionally every push for every service with valid inputs, and `docker buildx imagetools create` is deterministic for identical inputs, so an unchanged service would otherwise get the exact same merged digest recreated and re-attested on every push, wasting attestation calls the same way an unchanged service's rebuild would waste compute.
+      # From: Issue #1095 | PR #1532
       - name: Attest proxy merged manifest provenance
         if: steps.create-trusted-manifests.outputs.proxy_digest != ''
         uses: ./.github/actions/ghcr-attest-with-cache
