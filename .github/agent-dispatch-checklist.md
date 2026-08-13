@@ -13,7 +13,7 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 3. **Worktree binding, named and absolute**, verified before every commit via `git rev-parse --show-toplevel`/`git branch --show-current`. (AG-WF-002, AG-WF-024)
 4. **Rebase-first** onto the current base before any work begins — AND re-verify the rebase is still current immediately before declaring the task finished, not only at the start. (AG-WF-002)
 5. **Empty marker commit, first action, before any code change.** The commit message must state both the task/issue binding AND that this checklist was read and accepted — the confirmation lives as a durable, git-anchored artifact tied to the worktree, not only as a chat statement. (AG-WF-002, AG-WF-017)
-6. **Language split, stated explicitly**: prose/reports German, GitHub content English. (AG-CC-002/003, AG-GH-001)
+6. **Language split, stated explicitly**: prose/reports German, GitHub content English. This applies to the dispatch prompt's own instructional prose too, not only to the agent's output — pasting this checklist (English, quoted verbatim per its own instruction above) does not license writing the surrounding task description in English; only literal quoted material (code, log output, file paths, commit messages, GitHub content) stays English. (AG-CC-002/003, AG-GH-001)
 7. **`CLD-<unixtime>` identity marker** on every GitHub-visible write, and on every marker commit — obtained fresh via `date +%s` at write time, never invented/estimated. (AG-WF-017)
 8. **WIP cadence**: within 15 min, then every 15 min, real timestamp comparison. (AG-GH-013)
 9. **Check for existing coverage** before starting new branch/investigation work. (AG-GH-017)
@@ -39,3 +39,4 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 7. **Fix a found defect in the same pass**, don't defer to a comment. (AG-WF-027)
 8. **Treat a found bug as a failure class**, search the rest of the codebase for the same pattern. (AG-WF-011, AG-CI-015)
 9. **Never work or commit in an unverified/unknown worktree.** Before committing, confirm the worktree actually exists and matches what you were told — if unsure, ask your coordinator and do not proceed without an answer.
+10. **Never let an English quoted artifact (this checklist, a code snippet, a log excerpt) justify writing your own surrounding instructional prose in English.** (AG-CC-003)
