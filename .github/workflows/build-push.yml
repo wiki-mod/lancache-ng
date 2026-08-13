@@ -4329,25 +4329,9 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
-        # Step 3 (issue #1095): generalizes what used to be build-tools-only
-        # ("Enable build-tools publish scan", issue #1290) to every matrix.service. No
-        # service unconditionally builds a local throwaway image just to scan it on every
-        # trusted-ref push when determine-push-reuse-scope has already proven it is safe to
-        # reuse the published channel image instead. This reads determine-push-reuse-scope's
-        # `reuse_<service>` output -- the SAME already-verified three-part decision (channel
-        # image revision label + real git ancestry + a real content diff via
-        # scripts/classify-image-impact.sh) that build/build-arm64's own retag-vs-rebuild
-        # decision trusts -- rather than a second, weaker, independently-computed check.
-        # Consuming the SAME decision matters concretely: a narrower check could say
-        # "unchanged" while the wider one correctly falls back to a real rebuild (channel
-        # image stale/unverifiable, the #808 failure shape), and if that happened with two
-        # independently-computed checks, a freshly rebuilt-and-published image could go
-        # completely unscanned this run. Sharing one decision makes that disagreement
-        # structurally impossible -- this is what closes the scan-coverage hole named in
-        # issue #1095's own "Correction 1": since should-scan and should-build are both
-        # derived from the identical output per service, neither can go to false while the
-        # other stays true. Fails safe to a full scan whenever determine-push-reuse-scope did
-        # not run or did not succeed, matching this job's own hardened `if:`.
+        # What: Reads determine-push-reuse-scope's `reuse_<service>` output for every matrix.service, the same already-verified three-part decision (channel image revision label + real git ancestry + a real content diff via scripts/classify-image-impact.sh) build/build-arm64's own retag-vs-rebuild decision trusts, instead of a second, independently-computed check; fails safe to a full scan whenever determine-push-reuse-scope did not run or did not succeed.
+        # Why: A narrower, independently-computed check could say "unchanged" while the wider one correctly falls back to a real rebuild, and if the two disagreed, a freshly rebuilt-and-published image could go completely unscanned this run -- sharing one decision makes that disagreement structurally impossible, since should-scan and should-build both derive from the identical per-service output and neither can go false while the other stays true.
+        # From: Issue #1095 | PR #1532
         id: push-scan-changes
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
@@ -4494,30 +4478,14 @@ jobs:
           freshness-bucket: ${{ steps.scan-cache-bucket.outputs.value }}
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-          # vuln-db-cache-dir intentionally omitted (G8 fix removed this job's own
-          # managed cache dir): trivy-action falls back to its own default
-          # (~/.cache/trivy), which "Self-heal Trivy's own default cache directory
-          # ownership" above already keeps writable.
+          # What: vuln-db-cache-dir intentionally omitted; trivy-action falls back to its own default (~/.cache/trivy).
+          # Why: "Self-heal Trivy's own default cache directory ownership" above already keeps that default writable, so this job no longer needs its own managed cache dir.
+          # From: Issue #1095 | PR #1532
 
   determine-push-reuse-scope:
-    # Step 4 (issue #1095): decides, once per push (not once per build/build-arm64/
-    # per-arch matrix row), whether each allowlisted product service can safely retag its
-    # already-published channel image instead of paying for a real rebuild+rescan this
-    # run. This job exists as a SEPARATE job -- not inline in build/build-arm64's own
-    # "Determine whether this service needs building" step -- for one load-bearing
-    # reason: the verification this decision requires (sif_is_ancestor_or_equal, and a
-    # real content diff via scripts/classify-image-impact.sh from the channel image's own
-    # build commit) needs full git history, and build/build-arm64's own checkouts use the
-    # default shallow clone. Running the decision here once, with the one job in this
-    # push path that already has full history, means build and build-arm64 both just read
-    # a plain true/false output -- provably agreeing with each other without either
-    # needing its own deep checkout or duplicating the verification logic per arch.
-    #
-    # See scripts/lib/push-reuse.sh's own header comment for the full rationale of WHY a
-    # channel image (not the immediately-preceding push's own predecessor commit) is the
-    # reuse source, and why ancestry alone (without the content diff) is not sufficient
-    # evidence of "safe to reuse" -- issue #1095's own "C-7" finding and issue #1290's
-    # corrected implementation converge on this same three-part verification.
+    # What: Decides once per push (not once per build/build-arm64/per-arch matrix row) whether each allowlisted product service can safely retag its already-published channel image instead of paying for a real rebuild+rescan; build/build-arm64 just read this job's plain true/false output.
+    # Why: The verification (ancestry check plus a real content diff via scripts/classify-image-impact.sh from the channel image's own build commit) needs full git history, which build/build-arm64's own shallow checkouts don't have -- running it once here, in the one job in this push path with full history, lets both jobs agree without either needing its own deep checkout or duplicated per-arch logic; see scripts/lib/push-reuse.sh's own header comment for why a channel image (not the immediately-preceding push's predecessor commit) is the reuse source, and why ancestry alone without the content diff is not sufficient evidence of "safe to reuse."
+    # From: Issue #1095 | PR #1532
     name: determine push reuse scope (Step 4)
     needs: detect-changes
     # Branches only -- a release tag push has no meaningful "channel" to
