@@ -78,8 +78,7 @@ description: >-
   gated on `dockerhub-username` being non-empty, mirroring the existing
   GHCR login's own "additive defense-in-depth, not a hard dependency"
   framing -- a caller of this action that never sets them simply never logs
-  in to Docker Hub and relies on the first two (unchanged) tiers, exactly
-  as before this change.
+  in to Docker Hub and relies solely on the GHCR and mirror.gcr.io tiers.
 
   Fix, beyond the retry itself: `trivy-config.yaml` (alongside this file,
   passed via trivy-action's own `trivy-config` INPUT, never an env var --
