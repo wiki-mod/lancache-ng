@@ -6885,39 +6885,13 @@ jobs:
             fi
           fi
 
-          # Branch-to-channel mapping. Original #825/#1141 decision (2026-07-23): master =
-          # stable, current_dev = nightly, vY.X.Z = archived release -- master publishes the
-          # stable `latest` channel; current_dev published `nightly` continuously from its own
-          # tip.
-          #
-          # SUPERSEDED for current_dev by the #1254/#1255 "real once-daily nightly" decision
-          # (2026-07-25): a plain current_dev PUSH no longer moves the mutable `nightly`
-          # pointer at all. Every push still builds, scans, and publishes that commit's
-          # durable per-service sha-<commit> tags completely unchanged (that happens in
-          # build/build-arm64/merge-manifests above, not here, and does not depend on
-          # channel_tags) -- the ONLY change is that this job no longer also repoints
-          # `nightly` at every commit unconditionally. `nightly` is instead refreshed exactly
-          # once a day (01:00 UTC) plus on-demand, by nightly-refresh.yml dispatching this same
-          # workflow against current_dev's tip with `channel: nightly` -- landing in the
-          # workflow_dispatch REQUESTED_CHANNEL path a few lines below, the same path a human
-          # operator already had for an ad-hoc spot-check promotion. Because promote only runs
-          # after build/test/scan succeed, this keeps nightly green-gated and fail-closed: a
-          # broken current_dev tip simply never reaches this job, so nightly holds its last
-          # good state instead of being force-moved onto a red commit. See #1254's feasibility
-          # comment for why #808's untouched-service backfill does not depend on nightly
-          # staying continuously fresh either -- it now backfills from the PR base commit's own
-          # durable sha-<commit> tag instead.
-          #
-          # A version-numbered integration branch (v0.2.0, v0.3.0, ...) is an archived release
-          # freeze: it still takes deliberate backports, but deliberately gets NO channel_tags
-          # entry at all -- there is no live channel fed from it anymore (see setup.sh's
-          # matching hard cut of LANCACHE_IMAGE_CHANNEL=dev for the operator-facing side of this
-          # same retirement).
+          # What: Maps the triggering ref to its channel tag(s): master -> `latest`, tag refs -> the tag itself (plus rc handling below), current_dev -> no automatic channel tag, archived vX.Y.Z integration branches -> none.
+          # Why: `nightly` used to move on every current_dev push; it is now refreshed only once daily (01:00 UTC) plus on-demand by nightly-refresh.yml dispatching this workflow with channel: nightly (the workflow_dispatch REQUESTED_CHANNEL path below), so a broken current_dev tip never reaches this job and nightly holds its last good state instead of being force-moved onto a red commit -- every push still publishes its own durable per-service sha-<commit> tags unaffected, in build/build-arm64/merge-manifests above, regardless of this change. An archived integration branch still takes deliberate backports but deliberately gets no live channel.
+          # From: Issue #1095 | PR #1532
           if [[ "$GITHUB_REF" = "refs/heads/master" ]]; then
             channel_tags+=(latest)
           elif [[ "$GITHUB_REF" = "refs/heads/current_dev" ]]; then
-            : # #1254/#1255: deliberately no automatic channel tag on a plain
-              # push anymore -- see the comment above this if/elif chain.
+            : # Deliberately no automatic channel tag on a plain push; see the comment above this if/elif chain.
           elif [[ "$GITHUB_REF" = refs/tags/v* ]]; then
             channel_tags+=("$GITHUB_REF_NAME")
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
