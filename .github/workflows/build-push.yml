@@ -2667,21 +2667,9 @@ jobs:
           fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
 
-      # deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for every service,
-      # and the "Run client simulation" step below pulls build-tools at that same tag --
-      # but build/build-arm64 only push the PR staging tag for services detect-changes says
-      # this PR actually touched (deliberate additional push cost -- see #626 -- not
-      # "rebuild everything per PR for free"). Any untouched service has no image at the
-      # staging tag yet, so back-fill it with a cheap registry-side copy from the base-ref
-      # channel image (the correct thing to validate for an untouched service anyway). This
-      # mirrors the `promote`/`merge-manifests` jobs' own `docker buildx imagetools create`
-      # pattern for moving/combining tags without re-pulling image layers.
-      #
-      # Gated on pr-staging-available, not a bare `github.event_name == 'pull_request'`: a
-      # Dependabot/fork PR has no PR staging tag for ANY service, so
-      # steps.channel.outputs.tag already equals base_channel_tag above -- there is nothing
-      # to back-fill, and attempting to log in/push here with that PR's read-only
-      # GITHUB_TOKEN would just fail instead of skipping cleanly.
+      # What: Backfills any service detect-changes says this PR did NOT touch with a cheap registry-side copy (`docker buildx imagetools create`) from the base-ref channel image, at the PR's staging tag; gated on pr-staging-available, not a bare pull_request check.
+      # Why: deploy/full-setup/docker-compose.yml uses one LANCACHE_IMAGE_TAG for every service, but build/build-arm64 only push a PR staging tag for services this PR actually changed, so an untouched service has no image there yet -- the base-ref channel image is the correct thing to validate for it anyway. A Dependabot/fork PR has no staging tag for any service (steps.channel.outputs.tag already equals base_channel_tag), so there is nothing to back-fill, and logging in/pushing with that PR's read-only GITHUB_TOKEN would fail instead of skipping cleanly.
+      # From: Issue #1095 | PR #1532
       - name: Set up Docker Buildx
         if: steps.channel.outputs.pr-staging-available == 'true'
         id: buildx
@@ -2875,23 +2863,9 @@ jobs:
             docker:latest \
             docker compose -f docker-compose.yml config >/dev/null
 
-      # VALIDATION_SUBNET (and the matching VALIDATION_*_IP/VALIDATION_GATEWAY vars) starts
-      # from the candidate compute-validation-network derived per-run (#623), but that job's
-      # hash derivation alone has an unlocked check-then-create race between two genuinely
-      # concurrent workflow runs on the same self-hosted host (#703): two runs could derive
-      # the same slot, both pass a `docker network ls`-based pre-flight check (only catches
-      # a leftover network, not another run mid-check), and race the kernel to create the
-      # bridge, with only one winning.
-      #
-      # This step closes that gap with the same host-local `flock` idiom this project
-      # already uses for another shared-per-host resource (build-tools.yml's own Buildx
-      # cache lock), via scripts/lib/reserve-validation-subnet.sh -- the exact same helper
-      # and retry-on-collision loop full-setup-validate.yml's own step uses (see that step's
-      # comment for the full mechanism, including why COMPOSE_PROJECT_NAME/
-      # VALIDATION_UI_PORT are rederived here too, not just the subnet). Static config
-      # validation above only checks YAML/Compose structure -- a successful `docker compose
-      # up` here does not yet mean the stack is healthy (see "Wait for the stack to
-      # stabilize" below: #450/#485, dnsmasq trying to bind an already-used port).
+      # What: Reserves the validation subnet via a host-local `flock` (scripts/lib/reserve-validation-subnet.sh) with a retry-on-collision loop, then starts the stack; static config validation above only checks YAML/Compose structure, not runtime health (see "Wait for the stack to stabilize" below).
+      # Why: compute-validation-network's per-run hash derivation alone has an unlocked check-then-create race between two genuinely concurrent runs on the same self-hosted host -- both could derive the same slot, pass the old `docker network ls` pre-flight (which only catches a leftover network, not a concurrent run), then race the kernel to create the bridge with only one winning; the flock idiom mirrors the one already used for another shared-per-host resource (build-tools.yml's Buildx cache lock).
+      # From: Issue #1095 | PR #1532
       - name: Reserve a validation subnet and start the stack (locked, retries on collision)
         uses: ./.github/actions/reserve-validation-subnet-stack
         with:
@@ -3354,23 +3328,9 @@ jobs:
           command: cargo test --locked --manifest-path services/ui/Cargo.toml
 
   rust_coverage:
-    # Also skipped on a metadata-only pull_request event -- see
-    # dns_rust_quality's comment above for the full reasoning. This is a
-    # required branch-protection check on master/v0.2.0 ("coverage (Rust)"),
-    # but it already tolerates a clean `skipped` result today for any PR whose
-    # path scoping below finds no relevant Rust change (e.g. a docs-only PR);
-    # this adds one more, equally clean skip source, not a new failure mode.
-    #
-    # Scope note (2026-08 watchdog Rust CI wiring update): watchdog is
-    # deliberately NOT added to this job's `needs:`/tarpaulin invocation even
-    # though it now has its own dns/ui-shaped rust-quality/test/cargo-audit
-    # jobs above. Coverage here uses a per-crate PASS/FAIL threshold model
-    # (see the "Run coverage" step below) that would need a new threshold
-    # number deliberately chosen for the watchdog crate, which is a separate
-    # decision this CI-wiring change does not make on its own; the watchdog
-    # crate's own 38 unit tests already run and gate merges via watchdog_test
-    # above, just without a tracked coverage percentage yet. Revisit if/when a
-    # maintainer wants a coverage threshold for this crate specifically.
+    # What: Also skips on a metadata-only pull_request event, same as dns_rust_quality above; watchdog is deliberately NOT included in this job's `needs:`/tarpaulin invocation even though it has its own rust-quality/test/cargo-audit jobs.
+    # Why: This required branch-protection check ("coverage (Rust)") already tolerates a clean `skipped` result for any PR whose path scoping finds no relevant Rust change, so a metadata-only skip is one more equally clean source, not a new failure mode; coverage here uses a per-crate PASS/FAIL threshold that would need a deliberately-chosen number for the watchdog crate, a separate decision this job does not make on its own -- watchdog's 38 unit tests already run and gate merges via watchdog_test, just without a tracked coverage percentage yet.
+    # From: Issue #1095 | PR #1532
     name: coverage (Rust)
     needs: [validate-compose, dns_test, ui_test, detect-changes]
     if: >-
@@ -3605,24 +3565,9 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # Real runs: 10-12s. Same 15-minute floor as detect-changes above.
     timeout-minutes: 15
-    # Job-level concurrency, keyed per source ref: the top-level group (see top of file)
-    # is run_id-suffixed for push events and therefore never collides, so it no longer
-    # serializes same-branch badge publishes the way its old, fully-global key used to.
-    # cancel-in-progress stays false: this queues a second same-branch publish behind a
-    # running one instead of racing it.
-    #
-    # Deliberately per-ref, NOT workflow-wide: a single shared group would let unrelated
-    # branches queue behind each other, and GitHub's concurrency queue only ever holds one
-    # pending job per group -- a burst of publishes for OTHER branches can bump a given
-    # branch's already-queued publish entirely before it starts, silently skipping that
-    # branch's badge update for this push. Per-ref scoping gives every branch its own
-    # queue slot.
-    #
-    # What per-ref scoping does NOT do is stop two DIFFERENT branches' publishes from
-    # running at the literal same time and racing the shared `badges` branch -- that race
-    # is instead handled below, by retrying the fetch/commit/push instead of doing it
-    # once. A badge push is cheap/fast enough that neither the per-branch queueing nor the
-    # retry loop is a capacity concern the way cancellation is for build/container-scan.
+    # What: Job-level concurrency keyed per source ref, cancel-in-progress: false, so a second same-branch badge publish queues behind a running one instead of racing it.
+    # Why: The top-level group is run_id-suffixed for push events and no longer serializes same-branch badge publishes on its own; per-ref (not workflow-wide) scoping gives every branch its own queue slot, since GitHub's concurrency queue only holds one pending job per group and a workflow-wide group would let a burst of other branches' publishes bump a given branch's queued publish before it starts. Per-ref scoping does not stop two different branches' publishes racing the shared `badges` branch itself -- that race is handled below by retrying the fetch/commit/push instead of doing it once, cheap enough that neither queueing nor retrying is a capacity concern the way cancellation is for build/container-scan.
+    # From: Issue #1095 | PR #1532
     concurrency:
       group: ${{ github.workflow }}-badge-${{ github.ref }}
       cancel-in-progress: false
