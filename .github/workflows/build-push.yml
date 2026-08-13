@@ -18,7 +18,7 @@ on:
         options: [none, nightly]
         default: none
   schedule:
-    # What: Daily 01:00 UTC stable-channel refresh of `latest` on master (nightly has its own schedule, #1254).
+    # What: Daily 01:00 UTC stable-channel refresh of `latest` on master (nightly has its own separate schedule).
     # Why: `promote` only moves `latest` on push, so cron prevents drift between master pushes; GitHub only
     # evaluates `schedule:` from the workflow file on the default branch (master), so `nightly-refresh.yml`'s
     # own copy of this cron stays inert until it merges there; the resulting 03:00 CEST summer landing is a
@@ -28,11 +28,14 @@ on:
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
-    # What: Applies paths-ignore to push events, mirroring pull_request; all-docs pushes skip heavy jobs.
+    # What: Push-only paths-ignore (`pull_request` below has none); an all-docs push suppresses the entire
+    # run, not just heavy jobs.
     # Why: Doc-only merge commits (the only push type on master per AG-WF-004) used to unconditionally rerun
-    # the 8-service build/scan pipeline on the scarce lancache-heavy pool; tags never hit paths-ignore (GitHub
-    # doesn't evaluate path filters for tags:) and `!CHANGELOG.md` stays un-ignored so check-changelog-direct-
-    # edit.sh still sees CHANGELOG-only pushes (#1203, #1095).
+    # the 8-service build/scan pipeline on the scarce lancache-heavy pool, and a push run not existing is
+    # safe here since nothing is waiting on it to merge, unlike a PR's required checks (which is why
+    # `pull_request`'s own trigger-level paths-ignore was removed instead); tags never hit paths-ignore
+    # (GitHub doesn't evaluate path filters for tags:) and `!CHANGELOG.md` stays un-ignored so
+    # check-changelog-direct-edit.sh still sees CHANGELOG-only pushes.
     # From: Issue #1095 | PR #1532
     paths-ignore:
       - "**/*.md"
@@ -45,24 +48,28 @@ on:
     # (build/build-arm64, the Rust quality/test/audit jobs, and rust_coverage) must be kept in sync with this
     # list.
     # Why: Trigger-level paths-ignore broke required checks on docs-only PRs by making the whole run not
-    # exist (#1245); metadata events carry no code change, so per-job action filters skip redundant Rust
-    # reruns while pr-tracking-metadata-check stays unconditional to validate AG-GH-008 freshness.
+    # exist; metadata events carry no code change, so per-job action filters skip redundant Rust reruns
+    # while pr-tracking-metadata-check stays unconditional to validate AG-GH-008 freshness.
     # From: Issue #1095 | PR #1532, AG-GH-008
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
-  # What: Declares workflow-level permissions floor; job-level blocks can only narrow this.
-  # Why: Job grants are silently capped if not present here; pr-template-check needs pull-requests:read
-  # but would fail without this floor (#903).
+  # What: Declares workflow-level default permissions; a job-level `permissions:` block replaces (not
+  # merely narrows) this default for that job, and can grant less, more, or different scopes.
+  # Why: Every job here that reads live PR content already declares its own `pull-requests: read`, so this
+  # floor is not load-bearing for them (this file's own job-level `contents: write` grants, absent from this
+  # default, prove job blocks can widen); it exists as the safe default for a future job that omits its own
+  # permissions block.
   # From: Issue #1095 | PR #1532
   pull-requests: read
 
 concurrency:
   # What: Push/tag use run_id-scoped key (never collides); PR uses per-ref key; cancel-in-progress: false.
-  # Why: Run-id scoping eliminates push serialization (#897); cancel-in-progress broke immediately for PRs
-  # opened with labels/milestone, killing detect-changes mid-run (#888), so PR-level cancellation stays off
-  # and build/container-scan instead get their own safe per-job cancellation groups (#979).
+  # Why: Run-id scoping eliminates push serialization; cancel-in-progress broke immediately for PRs opened
+  # with labels/milestone, killing detect-changes mid-run, so PR-level cancellation stays off here and
+  # `build` instead reclaims a superseded PR run via its own safe per-job cancellation group; `container-scan`
+  # never runs on `pull_request`, so its own cancel-in-progress (`pull_request`-only) never actually fires.
   # From: Issue #1095 | PR #1532
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
@@ -156,9 +163,9 @@ jobs:
           fi
 
   # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote.
-  # Why: `cancel-in-progress` on an already-running job starves the channel (#979), so this is a start-gate-
-  # only self-skip for a push already provably superseded; no `if:`/`needs:` keeps its output resolving only
-  # to success/failure/cancelled, never skipped, avoiding the implicit-success-over-skippable hazard (#1095).
+  # Why: `cancel-in-progress` on an already-running job starves the channel, so this is a start-gate-only
+  # self-skip for a push already provably superseded; no `if:`/`needs:` keeps its output resolving only to
+  # success/failure/cancelled, never skipped, avoiding the implicit-success-over-skippable hazard.
   # From: Issue #1095 | PR #1532
   push-supersession-check:
     name: check for a newer push already superseding this one
@@ -218,7 +225,7 @@ jobs:
     timeout-minutes: 15
     # What: Job-level concurrency with cancel-in-progress: true; reclaims superseded runs.
     # Why: Safe to cancel (no hard-failing script consumes result); build/build-arm64's `if:` gates
-    # cleanly skip on cancelled result (#891, #888/#892).
+    # cleanly skip on cancelled result.
     # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
@@ -239,10 +246,11 @@ jobs:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
         # What: Diff-scoped SPDX header check on this PR's changed files (not repo-wide).
-        # Why: The whole-repo check stays soft since the AG-HDR-008 backfill isn't complete, but a file this
-        # PR actively touches has no such exception; base.sha is fetched by exact SHA (not the branch tip)
-        # since it can lag on a long-lived PR, and this runs inside the pinned build-tools image so a
-        # self-hosted runner with stale host tooling can't diverge from the project's own toolchain.
+        # Why: The repo-wide check above is already a hard gate too (AG-HDR-008's backfill is complete, no
+        # soft exception remains); this step exists for PR-specific error attribution instead, and fetches
+        # base.sha by exact SHA (not the branch tip) since that can lag on a long-lived PR, running inside
+        # the pinned build-tools image so a self-hosted runner with stale host tooling can't diverge from
+        # the project's own toolchain.
         # From: AG-HDR-008
         if: github.event_name == 'pull_request'
         env:
@@ -262,7 +270,7 @@ jobs:
               'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
 
   compose-healthchecks:
-    # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration (#1169).
+    # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration.
     # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier; its
     # job-level concurrency group safely cancels mid-flight since only build/build-arm64's own PR-only
     # `if:` gate consumes the result, and that gate cleanly skips rather than errors on cancelled.
@@ -313,8 +321,8 @@ jobs:
           set -euo pipefail
           # What: Fetch PR body live via gh pr view (not webhook payload snapshot); the stderr capture and
           # byte-count notice below are TEMPORARY diagnostics, to be removed once root-caused.
-          # Why: Webhook snapshot can lag actual PR body (#903/#905); the diagnostics were added after two
-          # 2026-07-16 fetches returned an empty body with no visible gh CLI error despite those fixes.
+          # Why: Webhook snapshot can lag actual PR body; the diagnostics were added after two 2026-07-16
+          # fetches returned an empty body with no visible gh CLI error despite earlier fixes to this fetch.
           # From: Issue #1095 | PR #1532
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
             echo "::error::gh pr view failed, exit code $?"
@@ -325,8 +333,11 @@ jobs:
           bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-template-check-hosted:
-    # What: GitHub-hosted fallback for pr-template-check; reads only webhook context.
-    # Why: Zero-LAN-dependency; no needs: dependency, so fallback works when self-hosted unavailable.
+    # What: GitHub-hosted fallback for pr-template-check; LAN-independent (no needs: dependency), but its
+    # validation step below still fetches the PR body live via `gh pr view` (GH_TOKEN, pull-requests:read).
+    # Why: No needs: dependency lets the fallback work when self-hosted runners are unavailable; that is
+    # unrelated to the live API call, so do not strip GH_TOKEN/pull-requests:read assuming this job reads
+    # only the webhook snapshot.
     # From: docs/ci-github-hosted-fallback-decision.md
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
@@ -387,7 +398,7 @@ jobs:
         # (AG-OP-006/AG-OP-009), only PATCHing when the live milestone is empty, and running before the fetch
         # avoids the fetch step observing an empty milestone on a fresh Dependabot PR and failing before this
         # step's own assignment takes effect, at the accepted one-time cost of a `milestoned` re-trigger the
-        # first time it fires on a given PR (#1278).
+        # first time it fires on a given PR.
         # From: Issue #1095 | PR #1532, AG-GH-008, AG-OP-006, AG-OP-009
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
@@ -420,7 +431,7 @@ jobs:
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
 
       # What: Fetch and validate steps extracted to composite action pr-tracking-metadata-fetch-and-validate.
-      # Why: Dedup finding #1095; "Auto-assign" step stays here (warning-path text differs between jobs).
+      # Why: Dedup finding; "Auto-assign" step stays here since its warning-path text differs between jobs.
       # From: Issue #1095 | PR #1532
       - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
         with:
@@ -625,23 +636,25 @@ jobs:
       - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
-    # What: Checks Unix line-endings (#601), plus governance guardrails and the CHANGELOG.md warn relocated
-    # from shellcheck so they still run on every PR regardless of diff scope.
+    # What: Checks Unix line-endings, plus governance guardrails and the CHANGELOG.md warn relocated from
+    # shellcheck so they still run on every PR regardless of diff scope.
     # Why: DO NOT RENAME this job -- `name: line endings` is the required-status-check string in current_dev's
     # branch protection, and renaming it would silently create a new, never-satisfied required check while the
-    # old name stays expected forever, exactly #1245's bug class from a different cause (#601, #1245, #1014).
+    # old name stays expected forever, the same bug class from a different cause; the same caution applies if
+    # `full-setup-validate` is ever decomposed -- its exact required-check name and `if:` condition must be
+    # preserved too.
     # From: Issue #1095 | PR #1532, AG-VAL-016
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: Timeout increased from 15 to 25 minutes to budget for relocated governance/changelog steps.
-    # Why: Live gh pr view + git fetches add overhead beyond 7-11s line-ending-only time (#1245).
+    # Why: Live gh pr view + git fetches add overhead beyond 7-11s line-ending-only time.
     # From: Issue #1095 | PR #1532
     timeout-minutes: 25
     # What: Job-level concurrency with cancel-in-progress: pull_request-only.
     # Why: On push, line-endings is a hard gate on the channel publish path, so a cancelled run would make
     # build/build-arm64 skip and starve the channel; on a PR, a cancelled result cleanly skips them instead,
-    # so cancelling a superseded run there just reclaims a runner slot (see `build`'s comment for #979).
+    # so cancelling a superseded run there just reclaims a runner slot.
     # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
@@ -654,8 +667,8 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     # What: Declares pull-requests:read for governance guardrails (PR title/body fetch via gh pr view).
-    # Why: Moved here from shellcheck along with the step itself (#1245/#805); contents:read is restated too,
-    # since job-level permissions replace rather than extend the workflow-level defaults (#903).
+    # Why: Moved here from shellcheck along with the step itself; contents:read is restated too, since
+    # job-level permissions replace rather than extend the workflow-level defaults.
     # From: Issue #1095 | PR #1532
     permissions:
       contents: read
@@ -672,7 +685,7 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
 
-      # What: Governance guardrails step relocated from shellcheck (#1245).
+      # What: Governance guardrails step relocated from shellcheck.
       # Why: Shellcheck gained docs-only self-skip; this check must run on every PR regardless.
       # From: Issue #1095 | PR #1532
       - name: Run governance guardrails
@@ -834,10 +847,12 @@ jobs:
       - name: Check for banned-language source files (AG-REL-001)
         run: bash scripts/check-language-policy.sh
 
-  # What: GitHub-hosted fallbacks limited to cheap lint jobs (file-headers, compose-healthchecks, shellcheck, etc).
+  # What: GitHub-hosted fallbacks limited to cheap lint jobs (file-headers, compose-healthchecks, line-endings,
+  # language-policy, shellcheck, pr-template-check, pr-tracking-metadata-check, pr-title-convention-check,
+  # and watchdog_test).
   # Why: Rust builds/scans need build-tools/sccache/distcc/credentials with no safe hosted equivalent yet, and
   # a ci_scope_policy-hosted fallback isn't feasible either since it would just queue indefinitely waiting on
-  # those same self-hosted-only Rust job dependencies (#509).
+  # those same self-hosted-only Rust job dependencies.
   # From: Issue #1095 | PR #1532, docs/ci-github-hosted-fallback-decision.md
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected by
@@ -1169,8 +1184,8 @@ jobs:
 
       - name: Validate compose files
         env:
-          # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted (no compose file reads them #445).
-          # Why: SSL/STANDARD_CACHE_MAX_GB stay for deploys without setup.sh update yet (#445).
+          # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted (no compose file reads them).
+          # Why: SSL/STANDARD_CACHE_MAX_GB stay for deploys without setup.sh update yet.
           # From: Issue #1095 | PR #1532
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
@@ -1275,7 +1290,7 @@ jobs:
           validate_compose --env-file deploy/quickstart/.env -f deploy/quickstart/docker-compose.yml --profile ssl
 
           # What: Profile-less renders skip inactive profiles; DHCP/logging need explicit activation.
-          # Why: Compose omits services behind inactive profiles, skipping their validation (#343/#453).
+          # Why: Compose omits services behind inactive profiles, skipping their validation.
           # From: Issue #1095 | PR #1532
           for compose_file in \
             deploy/prod/docker-compose.yml \
