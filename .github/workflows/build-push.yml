@@ -982,34 +982,13 @@ jobs:
     # contracts and exports one smoke-tested build-tools image reference for all
     # downstream jobs, so later jobs do not independently select mutable tags.
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 20-72s (the docker-run/grep checks in this job are cheap).
-    # 30 minutes rather than the 15-minute floor used by the other light
-    # script jobs in this file: select-build-tools-image.sh's resolution
-    # step can fall back to a local Docker build of the (large) build-tools
-    # image if the published one is unavailable or fails its smoke test --
-    # real work this job's own comment below explicitly calls out -- and
-    # that fallback build is not represented in the fast-path samples above.
+    # What: 30-minute timeout, above the other light script jobs' 15-minute floor, though real runs finish in 20-72s.
+    # Why: select-build-tools-image.sh's resolution step can fall back to a local Docker build of the (large) build-tools image if the published one is unavailable or fails its smoke test, and that fallback build is not represented in the fast-path timing above.
+    # From: Issue #1095 | PR #1532
     timeout-minutes: 30
-    # Job-level concurrency (#891 follow-up): cancel-in-progress is pull_request-only --
-    # see `build`'s group comment for the full #979 rationale. validate-compose is the
-    # shared `needs:` root that exports the smoke-tested build-tools image for the whole
-    # workflow, and it is an unconditional success gate for build/build-arm64. So on push
-    # it is the sharpest gate on the channel publish path: cancelling it in a merge cascade
-    # makes the entire build path skip and starves the channel -- it must survive to
-    # completion there. On a PR every consumer cleanly skips a cancelled result, so
-    # reclaiming a superseded run is pure benefit.
-    #
-    # NOTE: because validate-compose no longer cancels on push, its downstream
-    # `skipped` cascade onto dns_test/ui_test/watchdog_test/dns_cargo_audit/
-    # ui_cargo_audit/watchdog_cargo_audit can no longer fire on push. dns_test/
-    # ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/watchdog_cargo_audit
-    # (watchdog_test/watchdog_cargo_audit added by the 2026-08 watchdog Rust CI
-    # wiring update, now that they compile the watchdog crate the same way
-    # dns/ui already did) still keep their own cancel-on-push groups
-    # (deliberately unchanged -- they are NOT on the publish path, so
-    # cancelling a superseded push's copy saves scarce runners at no
-    # freshness cost), so ci_scope_policy still needs its direct-cancellation
-    # tolerance for them; see ci_scope_policy's comment.
+    # What: Job-level concurrency; cancel-in-progress is pull_request-only, never on push/tag.
+    # Why: validate-compose is the shared `needs:` root that exports the smoke-tested build-tools image and is an unconditional success gate for build/build-arm64, so on push it is the sharpest gate on the channel publish path and must survive to completion (cancelling it in a merge cascade would make the entire build path skip and starve the channel); on a PR every consumer cleanly skips a cancelled result, so reclaiming a superseded run is pure benefit. dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/watchdog_cargo_audit keep their own separate cancel-on-push groups since they are not on the publish path, so ci_scope_policy still needs its direct-cancellation tolerance for those specifically (see its own comment).
+    # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
         ${{
@@ -2612,60 +2591,24 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # scripts/lib/staging-ancestor-fallback.sh's shared ancestor-fallback recovery path
-      # (sourced by the "Ensure PR staging tags exist for full-setup services" step below)
-      # reads build-push.yml's own past runs from
-      # `/repos/{repo}/actions/workflows/build-push.yml/runs` -- via plain `curl` +
-      # `GH_TOKEN`, never the `gh` CLI (AG-CI-001: `gh` must not be assumed present on a
-      # bare `lancache-light` runner), but the REST endpoint requires this scope either way.
+      # What: actions: read, required by the REST call scripts/lib/staging-ancestor-fallback.sh's ancestor-fallback recovery path makes to this workflow's own past-runs endpoint.
+      # Why: That call uses plain `curl` + `GH_TOKEN`, never the `gh` CLI (AG-CI-001: not assumed present on a bare lancache-light runner), but the REST endpoint still requires this scope either way.
+      # From: Issue #1095 | PR #1532, AG-CI-001
       actions: read
-    # None of VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, or VALIDATION_UI_PORT
-    # are set here from compute-validation-network's outputs (unlike
-    # LANCACHE_IMAGE_REGISTRY/PREFIX/TAG below, which stay per-step since they don't
-    # participate in this at all). This job used to set all of them as fixed job-level
-    # env, then run the same check-then-create pattern
-    # full-setup-validate.yml itself had before issue #703's linked run confirmed for real:
-    # two genuinely concurrent runs on the same self-hosted host can derive the identical
-    # slot from compute-validation-network's hash-only derivation, both pass the old
-    # `docker network ls`-based pre-flight check (which only catches a leftover network
-    # from a PREVIOUS run, not another run mid-check), and then race the kernel to create
-    # the bridge, with only one winning. This job hits this race under real concurrency
-    # more often than full-setup-validate.yml (workflow_dispatch-only) does.
-    #
-    # This job now uses the exact same host-local flock reservation
-    # (scripts/lib/reserve-validation-subnet.sh) and retry-on-collision loop
-    # full-setup-validate.yml's own step uses -- see that step's comment for the full
-    # mechanism. A job-level `env:` entry is re-applied on top of every step's
-    # accumulated $GITHUB_ENV state, so a fixed entry here would always win in every later
-    # step, silently overriding whatever a retry inside that step writes -- exactly why
-    # none of these are set here.
+    # What: VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, and VALIDATION_UI_PORT are deliberately NOT set as fixed job-level env; they come from a host-local flock reservation (scripts/lib/reserve-validation-subnet.sh) and retry-on-collision loop instead, matching full-setup-validate.yml's own step.
+    # Why: A job-level `env:` entry is re-applied on top of every step's accumulated $GITHUB_ENV state, so a fixed value here would always win in later steps and silently override whatever a retry writes; a fixed value previously let two genuinely concurrent runs on the same self-hosted host derive the identical network slot from compute-validation-network's hash-only derivation, both pass the old `docker network ls` pre-flight (which only catches a leftover network from a PREVIOUS run, not a concurrent one), then race the kernel to create the bridge with only one winning -- a race this job hits more often than the workflow_dispatch-only full-setup-validate.yml.
+    # From: Issue #1095 | PR #1532
     steps:
-      # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so the
-      # "Ensure PR staging tags exist for full-setup services" step below can
-      # prove real git ancestry (`git merge-base --is-ancestor`) between this
-      # PR's base.sha and a base-channel image's build-commit label. Same
-      # requirement, and same fix, as the `detect-changes` job's own
-      # fetch-depth: 0 checkout (needed for its own merge-base-based diff).
+      # What: fetch-depth: 0 instead of the default shallow depth-1 clone.
+      # Why: The "Ensure PR staging tags exist for full-setup services" step below needs real git ancestry (`git merge-base --is-ancestor`) between this PR's base.sha and a base-channel image's build-commit label, the same requirement detect-changes' own fetch-depth: 0 checkout has for its merge-base diff.
+      # From: Issue #1095 | PR #1532
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      # `latest` is contractually a stable-release-only channel (see
-      # docs/release-versioning.md) -- it is never moved by a v0.2.0 (or any other
-      # pre-release integration branch) push, so it always reflects the last real release,
-      # not this branch's current code. Validating a pre-release branch against `latest`
-      # therefore checks the wrong image for the wrong reason. Mirror the same ref-to-channel
-      # mapping the `promote` job uses so this job validates the channel this branch
-      # actually publishes to.
-      #
-      # On a pull_request event this now resolves to the PR's OWN staging tag (see #626)
-      # instead of the base-ref channel, so this job actually tests the PR's own commits --
-      # UNLESS this is a Dependabot PR or a fork PR: those get a read-only GITHUB_TOKEN, so
-      # build/build-arm64 never push anything for them and there is no PR staging tag to
-      # validate against. pr-staging-available captures that so every later step can gate
-      # off one flag instead of re-deriving it. base_channel_tag is always computed: it is
-      # the resolved tag itself when staging isn't available, and the fallback source for any
-      # full-setup service an eligible PR did not touch either way.
+      # What: Resolves the image channel to validate against, mirroring the same ref-to-channel mapping the promote job uses; on a pull_request event it resolves to the PR's own staging tag instead, captured in pr-staging-available so later steps gate off one flag.
+      # Why: `latest` is contractually a stable-release-only channel (docs/release-versioning.md), never moved by a pre-release integration branch push, so validating a pre-release branch against it would check the wrong image; a Dependabot or fork PR gets a read-only GITHUB_TOKEN, so build/build-arm64 never push anything for it and there is no PR staging tag to validate against, leaving base_channel_tag (always computed) as the fallback source for any full-setup service such a PR did not touch.
+      # From: Issue #1095 | PR #1532
       - name: Determine validation image channel
         id: channel
         env:
