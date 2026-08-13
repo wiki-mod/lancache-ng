@@ -5999,19 +5999,13 @@ jobs:
             echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
           fi
 
-          # ccache-over-distcc (issue #887, services/dns/Dockerfile's nats-subscriber
-          # C-dependency compile path only -- see that Dockerfile's own comment for the
-          # full architecture rationale). Deliberately reuses the same Redis endpoint
-          # already required for sccache above rather than a second repository secret:
-          # ccache's own fixed `ccache:` key namespace never collides with sccache's
-          # distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance.
-          # No separate CCACHE_REDIS_MODE on/off variable exists (unlike
-          # SCCACHE_REDIS_MODE) -- ccache activates automatically whenever the Redis
-          # and distcc infrastructure it layers on top of are both already configured,
-          # and every ccache failure path in the Dockerfile falls back to plain distcc
-          # (then to a fully local compile) without ever hard-failing the build, so a
-          # separate kill switch has no real operational need yet. Add one if the
-          # maintainer wants independent on/off control later.
+          # What: reuses the sccache Redis secret file for ccache too (services/dns
+          # only; see that Dockerfile's own comment for the full rationale).
+          # Why: ccache's fixed `ccache:` key namespace never collides with sccache's
+          # `SCCACHE_REDIS_KEY_PREFIX`-based one; no separate CCACHE_REDIS_MODE toggle
+          # exists yet because every ccache failure path already falls back to plain
+          # distcc without hard-failing the build.
+          # From: Issue #887
           if [ "$redis_enabled" = "1" ] && [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
             secret_files+=("ccache_redis_url=$redis_file")
             echo "ccache-redis-file=$redis_file" >> "$GITHUB_OUTPUT"

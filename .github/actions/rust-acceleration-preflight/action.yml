@@ -392,14 +392,13 @@ runs:
                 echo "[INFO] plain cc fallback completed."
               fi
 
-              # ccache-over-distcc (issue #887, services/dns/Dockerfile only). Only
-              # meaningful once real distcc dispatch above (not a fallback) actually
-              # succeeded -- ccache's CCACHE_PREFIX=distcc has nothing real to prefix
-              # otherwise. Mirrors the sccache validation above: a real remote Redis
-              # write, then a real remote Redis *read* from a deliberately fresh local
-              # CCACHE_DIR (a different builder container in production would never
-              # share local disk state either), so this can't pass on local-disk-only
-              # caching alone.
+              # What: validates ccache-over-distcc (services/dns only) with a real Redis
+              # write, then a real Redis read from a deliberately fresh local
+              # CCACHE_DIR, mirroring the sccache validation above.
+              # Why: only meaningful once real distcc dispatch above succeeded, and a
+              # fresh CCACHE_DIR proves the Redis round trip instead of passing on
+              # local-disk-only caching alone.
+              # From: Issue #887
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
                 export CCACHE_REMOTE_STORAGE

@@ -82,53 +82,31 @@ COPY nats-subscriber/ .
 #   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
 #                            shuts down distcc-pump and restores the pre-distcc PATH/env.
 #   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
-#   configure_ccache/disable_ccache (issue #887) - opt-in cache layer IN FRONT of distcc,
-#                            only if distcc itself is already enabled and a ccache Redis
-#                            secret was mounted; probes with a trivial compile first, same
-#                            as configure_distcc. Uses ccache's own documented
-#                            `CC="ccache <real compiler>"` + `CCACHE_PREFIX=distcc` wiring
-#                            (ccache's manual: CCACHE_PREFIX prefixes only the real *compile*
-#                            invocation with the named wrapper -- ccache still preprocesses
-#                            locally by itself for its own cache-key computation unless
-#                            CCACHE_PREFIX_CPP is also set, which this deliberately does not
-#                            set). This is why ccache avoids the failure sccache hit for this
-#                            same job (#860): sccache instead always shells its OWN `-E`
-#                            preprocessing pass through whatever `CC` names, which crashes
-#                            against a `,cpp`-tagged distcc host list -- ccache's local
-#                            preprocessing never touches that code path at all. Empirically
-#                            confirmed on a real runner before this file was written (issue
-#                            #887): real remote distcc dispatch with `,cpp,lzo` tags intact,
-#                            real cache hits on rebuild, real `CCACHE_REMOTE_STORAGE=redis://`
-#                            writes, including against this exact `ring`/`aws-lc-sys`-class
-#                            dependency tree. `$real_cc`/`$real_gcc`/`$real_cxx`/`$real_gxx`
-#                            (resolved from `$original_path`, before configure_distcc's own
-#                            masquerade dir ever lands on PATH) are used here rather than the
-#                            plain `cc`/`gcc`/`c++`/`g++` names configure_distcc's own CC=cc
-#                            uses: `CC="ccache cc"` after configure_distcc has already run
-#                            would resolve "cc" through the masquerade symlink dir onto
-#                            *distcc itself* a second time, so ccache's own CCACHE_PREFIX=distcc
-#                            would end up recursively wrapping distcc around distcc, not
-#                            around the real compiler -- resolving the absolute path up front
-#                            avoids that trap regardless of call order. `CCACHE_COMPILERCHECK`
-#                            is set to `content` (checked against ccache's own manual, not the
-#                            `mtime` default) because this cache is shared over Redis across
-#                            builder containers and build-tools image versions -- the manual
-#                            documents `content` as specifically coping better with compiler
-#                            upgrades between builds, exactly this scenario, at the cost of
-#                            slightly slower hashing. Redis endpoint reuses the same
-#                            `SCCACHE_REDIS_URL`-sourced value already used for sccache (see
-#                            build-push.yml) rather than a second GitHub secret: ccache's own
-#                            Redis remote-storage backend has no documented custom key-prefix
-#                            attribute (checked its manual, not assumed), but ccache's own
-#                            fixed internal key namespace (`ccache:`-prefixed keys, confirmed
-#                            live) never collides with sccache's own distinct
-#                            `SCCACHE_REDIS_KEY_PREFIX`-based namespace on the same instance.
+#   configure_ccache/disable_ccache - opt-in cache layer in front of distcc, only once
+#                            distcc is already enabled and a ccache Redis secret was
+#                            mounted; probes with a trivial compile first, same as
+#                            configure_distcc.
+#     What: `CC="ccache <real compiler>"` + `CCACHE_PREFIX=distcc` +
+#     `CCACHE_REMOTE_STORAGE=redis://...` + `CCACHE_COMPILERCHECK=content`.
+#     Why: ccache preprocesses locally by default (unlike sccache, which always shells
+#     its own `-E` pass through `CC` and crashes on a `,cpp`-tagged distcc host list,
+#     #860); `content` checking avoids false hits from a Redis cache shared across
+#     build-tools image versions (ccache's own manual documents `mtime`'s default
+#     tradeoff here).
+#     From: Issue #887
+#   `$real_cc`/`$real_gcc`/`$real_cxx`/`$real_gxx` are resolved from `$original_path`
+#     before configure_distcc mutates PATH.
+#     Why: `CC="ccache cc"` after configure_distcc would resolve "cc" through the
+#     masquerade dir onto distcc itself, wrapping distcc around distcc instead of the
+#     real compiler.
+#   Redis endpoint reuses the same `SCCACHE_REDIS_URL`-sourced secret already used for
+#     sccache (see build-push.yml), not a second GitHub secret.
+#     Why: ccache's own fixed `ccache:` key namespace never collides with sccache's
+#     distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
-#   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with plain
-#                            distcc (ccache disabled) first on failure, then with a normal
-#                            local compiler (distcc disabled too) if that also fails -- three
-#                            fallback tiers total, matching this project's existing
-#                            never-break-the-build philosophy for build acceleration.
+#   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
+#                            plain distcc first on failure, then a normal local compiler
+#                            if that also fails (three fallback tiers total).
 # NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
@@ -222,7 +200,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
         ccache_enabled=1; \
         printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/ccache-probe.c"; \
-        if ! "$CC" -c "$ccache_probe_dir/ccache-probe.c" -o "$ccache_probe_dir/ccache-probe.o" >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
+        if ! $CC -c "$ccache_probe_dir/ccache-probe.c" -o "$ccache_probe_dir/ccache-probe.o" >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
           cat "$ccache_probe_dir/ccache-probe.log" >&2; \
           disable_ccache; \
           rm -rf "$ccache_probe_dir"; \
