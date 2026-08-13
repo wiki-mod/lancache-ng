@@ -41,6 +41,10 @@ runs:
     - id: attempt1
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
 EOF
+    # with: block is fully wired (both dockerhub keys) so this fixture tests
+    # only the direct-usage concern its own name describes -- the separate
+    # dockerhub-wiring concern (issue #1535 follow-up) has its own dedicated
+    # pass/fail fixtures further below.
     cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
 name: build
 on: push
@@ -48,6 +52,11 @@ jobs:
   scan:
     steps:
       - uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
 EOF
 
     run bash "$script" "$fixture_root"

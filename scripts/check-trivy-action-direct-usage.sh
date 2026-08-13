@@ -92,6 +92,20 @@ check_dockerhub_wiring() {
         out=$(awk '
             function indent(line,    t) { t = line; sub(/[^ ].*$/, "", t); return length(t) }
             function trimmed(line,    t) { t = line; gsub(/^[ \t]+/, "", t); return t }
+            # Column where `key` (e.g. "uses:", "with:") actually starts in
+            # the raw line, whether or not it is preceded by a YAML list
+            # dash. Needed because this repos own real call sites mix two
+            # step-item shapes: `- name: ...` (a step-start marker) with
+            # `uses:`/`with:` as later SIBLING keys at indent+2, versus a
+            # test/edge-case shape like `- uses: ...` where the dash and
+            # `uses:` share one line and `with:` is a CHILD at indent+2 of
+            # the dash itself. Comparing raw leading-whitespace counts
+            # conflates these two cases (the dash eats 2 columns that
+            # belong to the key, not the line); comparing the column the
+            # key text itself starts at does not, since a sibling `with:`
+            # and a same-step `uses:` key always start at the same column
+            # either way.
+            function keycol(line, key,    i) { i = index(line, key); return (i == 0) ? -1 : i - 1 }
             function report(reason) {
                 print FILENAME ":" useline ": trivy-scan-retry call site " reason
                 bad++
@@ -99,7 +113,7 @@ check_dockerhub_wiring() {
             function start_uses(line) {
                 state = 1
                 useline = FNR
-                usesindent = indent(line)
+                usesindent = keycol(line, "uses:")
             }
             FNR == 1 { state = 0; useline = 0; usesindent = 0 }
             {
@@ -112,7 +126,7 @@ check_dockerhub_wiring() {
                 }
                 if (state == 1) {
                     if (t == "" || t ~ /^#/) next
-                    if (t ~ /^with:[ \t]*(#.*)?$/ && indent($0) == usesindent) {
+                    if (t ~ /^with:[ \t]*(#.*)?$/ && keycol($0, "with:") == usesindent) {
                         state = 2
                         withindent = indent($0)
                         hasuser = 0; haspass = 0
