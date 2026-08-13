@@ -100,9 +100,12 @@ COPY nats-subscriber/ .
 #     masquerade dir onto distcc itself, wrapping distcc around distcc instead of the
 #     real compiler.
 #   Redis endpoint reuses the same `SCCACHE_REDIS_URL`-sourced secret already used for
-#     sccache (see build-push.yml), not a second GitHub secret.
+#     sccache (see build-push.yml), not a second GitHub secret, normalizing it onto a
+#     `redis://` scheme if it doesn't already carry one.
 #     Why: ccache's own fixed `ccache:` key namespace never collides with sccache's
-#     distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance.
+#     distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance, and
+#     ccache's manual requires an explicit scheme (confirmed live: an unscoped
+#     `host:port` value fails with "Cannot parse URL ... Scheme ... is invalid").
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
@@ -193,7 +196,12 @@ RUN --mount=type=secret,id=sccache_redis_url \
       if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
         ccache_probe_dir="$(mktemp -d)"; \
         echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2; \
-        export CCACHE_REMOTE_STORAGE="$(cat /run/secrets/ccache_redis_url)"; \
+        ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
+        case "$ccache_redis_endpoint" in \
+          redis://*|redis+unix:*) ;; \
+          *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;; \
+        esac; \
+        export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"; \
         export CCACHE_DIR=/tmp/ccache-dns; \
         export CCACHE_PREFIX=distcc; \
         export CCACHE_COMPILERCHECK=content; \
