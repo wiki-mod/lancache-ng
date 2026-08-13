@@ -77,6 +77,25 @@ repo_root=$(cd "$script_dir/../.." && pwd)
 # with no arguments while the bats suite points it at a single self-contained
 # fixture file (matrix + arrays together, exactly like the original
 # single-file invocation this script started as) with no further arguments.
+# Optional --hosted-fallback <path> flag, consumed before the positional
+# workflow/extra-file arguments below: build-push-hosted-fallback.yml (#1500,
+# service-metadata drift found during the Fresh-Port audit) duplicates the
+# same build-matrix service decision a third way -- associative bash maps
+# (contexts/build_contexts/descriptions) plus a selected=(...) default set --
+# rather than a services=(...)/full_setup_services=(...) array this guard's
+# existing check_services_arrays/check_full_setup_arrays functions already
+# understand. That representation needs its own comparison logic
+# (check_hosted_fallback_matrix below), so it is threaded through as a named
+# flag rather than another positional array-bearing file, and is optional
+# (empty hosted_fallback = skip) so the single-file bats-fixture invocation
+# path stays exactly as before for callers that don't pass it.
+hosted_fallback=""
+if [[ "${1:-}" == "--hosted-fallback" ]]; then
+    [[ -n "${2:-}" ]] || { printf "[SERVICE LISTS] --hosted-fallback requires a path\n" >&2; exit 1; }
+    hosted_fallback="$2"
+    shift 2
+fi
+
 if [[ -n "${1:-}" ]]; then
     workflow="$1"
     shift
@@ -84,6 +103,7 @@ if [[ -n "${1:-}" ]]; then
 else
     cd "$repo_root"
     workflow=".github/workflows/build-push.yml"
+    hosted_fallback="${hosted_fallback:-.github/workflows/build-push-hosted-fallback.yml}"
     extra_files=(
         "scripts/untracked/gc-pr-staging-images.sh"
         ".github/workflows/backfill-stack-latest.yml"
@@ -312,6 +332,60 @@ check_full_setup_arrays() {
     done
 }
 
+# The GitHub-hosted build fallback duplicates the same build-matrix service
+# decision in associative maps rather than services=(...) arrays. Validate the
+# keys and default selection against the canonical build matrix so a new service
+# cannot silently disappear only when the fallback path is needed.
+assoc_array_keys() {
+    local file="$1" array_name="$2"
+    awk -v target="$array_name" '
+      BEGIN { in_block=0; found=0 }
+      $0 ~ "^[[:space:]]*declare -A[[:space:]]+" target "=\\([[:space:]]*$" { in_block=1; found=1; next }
+      in_block && /^[[:space:]]*\)[[:space:]]*$/ { in_block=0; exit }
+      in_block {
+        line=$0
+        if (line ~ /^[[:space:]]*\[[a-z0-9-]+\]=/) {
+          sub(/^[[:space:]]*\[/, "", line)
+          sub(/\].*$/, "", line)
+          print line
+        }
+      }
+      END { if (!found) exit 2 }
+    ' "$file" | sort -u
+}
+
+check_hosted_fallback_matrix() {
+    local file="$1" array_name elements selected_entry selected_elements
+    local -a selected_entries
+    [[ -f "$file" ]] || { fail "expected hosted fallback workflow not found: $file"; return; }
+
+    for array_name in contexts build_contexts descriptions; do
+        if ! elements="$(assoc_array_keys "$file" "$array_name")"; then
+            fail "hosted fallback $file is missing declare -A ${array_name}=(...)"
+            continue
+        fi
+        if [[ "$elements" != "$canonical" ]]; then
+            fail "hosted fallback ${array_name} keys in $file diverge from the build matrix."
+            printf "    expected: %s\n" "$canonical_oneline" >&2
+            printf "    found:    %s\n" "$(printf '%s' "$elements" | tr '\n' ' ')" >&2
+        fi
+    done
+
+    mapfile -t selected_entries < <(grep -nE '^[[:space:]]*selected=\(' "$file" || true)
+    if [[ ${#selected_entries[@]} -eq 0 ]]; then
+        fail "hosted fallback $file has no selected=(...) default service set"
+        return
+    fi
+    for selected_entry in "${selected_entries[@]}"; do
+        selected_elements="$(array_elements "${selected_entry#*:}")"
+        if [[ "$selected_elements" != "$canonical" ]]; then
+            fail "hosted fallback selected=(...) at $file:${selected_entry%%:*} diverges from the build matrix."
+            printf "    expected: %s\n" "$canonical_oneline" >&2
+            printf "    found:    %s\n" "$(printf '%s' "$selected_elements" | tr '\n' ' ')" >&2
+        fi
+    done
+}
+
 # Per-extra-file expectation of which array kind each file must declare at
 # least one of (basename-keyed, same reasoning as SUBSET_SERVICES_FILES
 # above). This is what lets check_services_arrays/check_full_setup_arrays
@@ -334,6 +408,7 @@ declare -A REQUIRES_FULL_SETUP_ARRAY=(
 # only the services=(...) equality case has no reason to include one.
 check_services_arrays "$workflow" "required"
 check_full_setup_arrays "$workflow" "optional"
+[[ -z "$hosted_fallback" ]] || check_hosted_fallback_matrix "$hosted_fallback"
 
 for file in "${extra_files[@]}"; do
     if [[ ! -f "$file" ]]; then

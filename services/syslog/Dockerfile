@@ -45,6 +45,8 @@ FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c
 
 FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
 
+LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
+
 # syslog-ng ships in Alpine's STABLE main repo (confirmed live: 4.7.1-r1 on
 # 3.20, the version this Dockerfile actually pins) -- the POC's own
 # Dockerfile comment already established this; only fluent-bit needed the

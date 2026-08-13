@@ -74,7 +74,7 @@ on:
         default: "no"
       services:
         description: >-
-          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ui,build-tools
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools
           to build, or "all".
         required: false
         default: all
@@ -177,6 +177,8 @@ jobs:
             [watchdog]=services/watchdog
             [dhcp]=services/dhcp
             [dhcp-proxy]=services/dhcp-proxy
+            [ntp]=services/ntp
+            [syslog]=services/syslog
             [ui]=services/ui
             [build-tools]=tools/build-tools
           )
@@ -186,6 +188,8 @@ jobs:
             [watchdog]=""
             [dhcp]=""
             [dhcp-proxy]=""
+            [ntp]=""
+            [syslog]=""
             [ui]=""
             [build-tools]=""
           )
@@ -195,6 +199,8 @@ jobs:
             [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
             [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
+            [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
           )
@@ -204,7 +210,7 @@ jobs:
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
