@@ -370,7 +370,7 @@ write_script() {
 ## --------------------------------------------------------------------------
 ## check_if_without_else_status() coverage (issue #1449, added alongside the
 ## fix for the confirmed real instance in
-## scripts/check-netdata-curl-pin.sh's fetch_bundled_packages_version()).
+## scripts/untracked/check-netdata-curl-pin.sh's fetch_bundled_packages_version()).
 ## This second check is deliberately NOT gated on the file mentioning
 ## "pipefail" (see this guard's own header comment), so write_script's
 ## `set -euo pipefail` preamble is not load-bearing for these fixtures the
@@ -380,7 +380,7 @@ write_script() {
 ## --------------------------------------------------------------------------
 
 @test "fails on the exact real-incident pattern: if-without-else immediately followed by a \$? read expecting the real status" {
-    # Minimal reproduction of scripts/check-netdata-curl-pin.sh's
+    # Minimal reproduction of scripts/untracked/check-netdata-curl-pin.sh's
     # fetch_bundled_packages_version() shape before its fix: an
     # if-without-else whose then-branch returns early on success, with the
     # very next line reading $? expecting the tested command's real
@@ -401,14 +401,14 @@ write_script() {
     # so within this fixture: fetch() {=3, if curl=4, return 0=5, fi=6,
     # local status=$?=7 -- the guard reports the $? line (the violation
     # itself), not the fi line, matching the real repo's own
-    # check-netdata-curl-pin.sh:156 (fi at 155, $? read at 156) shape.
+    # scripts/untracked/check-netdata-curl-pin.sh:156 (fi at 155, $? read at 156) shape.
     [[ "$output" == *"scripts/fetch.sh:7"* ]]
 }
 
 @test "passes when the fix pattern (explicit if/else status capture) is used instead" {
     # scripts/lib/ghcr-retry.sh's/scripts/lib/git-fetch-retry.sh's own
     # already-established pattern for this exact case, and the pattern
-    # scripts/check-netdata-curl-pin.sh was fixed to use.
+    # scripts/untracked/check-netdata-curl-pin.sh was fixed to use.
     write_script "scripts/fetch.sh" \
         'fetch() {' \
         '  if curl -fsSL "$1"; then' \
@@ -424,7 +424,7 @@ write_script() {
 }
 
 @test "passes on a guard-clause if-without-else whose fallthrough case does not read \$?" {
-    # scripts/dhcp-kea-lease-flow-simulation.sh's kea_ctrl_add_reservation()
+    # scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh's kea_ctrl_add_reservation()
     # shape: the tested condition represents FAILURE, handled with an
     # explicit early return inside the then-branch; the untaken (success)
     # path correctly falls through to an implicit 0 with nothing after the

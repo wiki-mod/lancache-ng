@@ -84,7 +84,7 @@
 # `0`, not `22`.
 #
 # Confirmed real instance this pattern was added to catch:
-# scripts/check-netdata-curl-pin.sh's fetch_bundled_packages_version() read
+# scripts/untracked/check-netdata-curl-pin.sh's fetch_bundled_packages_version() read
 # `local status=$?` immediately after `if curl -fsSL "${url}"; then return 0;
 # fi` with no else -- every curl failure, including a genuine HTTP 404
 # (exit 22), silently read status=0, so the confirmed-absence fast-fail
