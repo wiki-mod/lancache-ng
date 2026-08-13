@@ -5497,13 +5497,17 @@ cmd_create_logs_for_issue() {
     # version number for a short interactive message; a diagnostic bundle
     # benefits from the fuller string instead). Disk space has no prior
     # helper to reuse — nothing in this script gathers it today — so `df -h`
-    # is added fresh.
+    # is added fresh. Distro (ID/VERSION_ID/PRETTY_NAME) is likewise new here:
+    # `uname -srm` alone reports kernel, not distro, and this script's own
+    # Debian/Ubuntu/RHEL-family install paths (install_docker_apt_repo() and
+    # its siblings above) already source /etc/os-release the same way.
     {
         printf 'Generated: %s UTC\n' "$stamp"
         printf 'Install directory: %s\n' "$install_dir"
         printf 'Docker: %s\n' "$(docker --version 2>/dev/null || printf 'not found')"
         printf 'Docker Compose: %s\n' "$(docker compose version 2>/dev/null || printf 'not found')"
         printf 'Kernel: %s\n' "$(uname -srm 2>/dev/null || printf 'unknown')"
+        printf 'OS: %s\n' "$(if [[ -r /etc/os-release ]]; then (. /etc/os-release; printf '%s' "${PRETTY_NAME:-$ID $VERSION_ID}"); else printf 'unknown'; fi)"
         printf '\nDisk usage:\n'
         df -h 2>/dev/null || true
     } | logbundle_redact_stream "$secrets_file" > "$dest/host-facts.txt"
