@@ -149,11 +149,29 @@ fetch_bundled_packages_version() {
   local netdata_version="$1"
   local url="https://raw.githubusercontent.com/netdata/netdata/${netdata_version}/packaging/makeself/bundled-packages.version"
   local attempt
+  local status
   for attempt in 1 2 3; do
+    # Deliberately `if curl ...; then status=0; else status=$?; fi`, not the
+    # more obvious `if curl ...; then return 0; fi` followed by a bare
+    # `local status=$?`: per POSIX, an `if` with no `else` clause that takes
+    # the false branch reports the WHOLE if-construct's own exit status (0)
+    # on the next `$?` read, not curl's real failure code -- confirmed live
+    # (`f() { return 22; }; if f; then :; fi; status=$?; echo "$status"`
+    # prints 0, not 22). That silently broke the exit-22 (confirmed 404)
+    # classification below: every curl failure, including a real 404, would
+    # have read status=0 and fallen through to the generic
+    # retry-then-give-up path instead. This project's own established
+    # pattern for exactly this case (scripts/lib/ghcr-retry.sh's
+    # ghcr_retry(), scripts/lib/git-fetch-retry.sh's git_fetch_retry()) uses
+    # an explicit else branch instead; reused here per AG-CODE-011.
     if curl -fsSL "${url}"; then
+      status=0
+    else
+      status=$?
+    fi
+    if [ "${status}" -eq 0 ]; then
       return 0
     fi
-    local status=$?
     # curl's exit 22 (--fail HTTP error, e.g. a real 404) is not retried;
     # anything else (network/timeout/5xx) gets up to 2 more attempts.
     if [ "${status}" -eq 22 ]; then

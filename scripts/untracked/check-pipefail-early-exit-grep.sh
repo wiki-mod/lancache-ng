@@ -71,6 +71,59 @@
 # somewhere in the file), and it cannot tell whether a matched pipe is
 # actually safe. A reviewed-safe line can be marked with a trailing
 # `# pipefail-safe: <reason>` comment to suppress a false positive.
+#
+# SECOND, INDEPENDENT CHECK (added 2026-08-13, issue #1449, AG-VAL-029
+# maintainer decision: extend this existing guard rather than add a new
+# script or new workflow wiring): a different but related POSIX shell
+# gotcha -- an `if CMD; then BLOCK; fi` with NO `else` clause, where the very
+# next line of code reads `$?` expecting CMD's real exit status. POSIX/bash
+# define a condition-only `if` that takes no branch (false condition, no
+# matching `else`) as exiting the WHOLE if construct with status 0,
+# unconditionally -- not the tested command's own exit code. Confirmed live:
+# `f() { return 22; }; if f; then :; fi; status=$?; echo "$status"` prints
+# `0`, not `22`.
+#
+# Confirmed real instance this pattern was added to catch:
+# scripts/check-netdata-curl-pin.sh's fetch_bundled_packages_version() read
+# `local status=$?` immediately after `if curl -fsSL "${url}"; then return 0;
+# fi` with no else -- every curl failure, including a genuine HTTP 404
+# (exit 22), silently read status=0, so the confirmed-absence fast-fail
+# branch could never fire. Fixed in the same pass this second check was
+# added (see check_if_without_else_status() below).
+#
+# Deliberately NOT gated on the file mentioning "pipefail" (unlike the check
+# above): this bug is not pipefail-specific -- it manifests under plain
+# `set -e`, or even with no strict mode at all, whenever a caller reads $?
+# expecting a real value. Runs against the same repo-wide scan_files this
+# script already discovers, for every file, unconditionally.
+#
+# WHAT THIS SECOND CHECK DOES NOT DO: a deliberately cheap, token-based
+# heuristic (splitting each line on whitespace/`;` and watching for bare
+# `if`/`elif`/`else`/`fi` tokens with a per-nesting-depth "did this if see an
+# else" flag), not a real shell parser -- it can in principle be fooled by an
+# `if`/`fi`-shaped string inside unusual quoting or a heredoc body. It only
+# flags a `$?` read on the SINGLE line immediately following a qualifying
+# `fi` (skipping only blank/comment lines in between): any other command
+# between the `fi` and the `$?` read would itself become the value `$?`
+# captures, which is a different, unrelated correctness question outside
+# this check's scope. A reviewed-safe line can be marked with a trailing
+# `# if-status-safe: <reason>` comment to suppress a false positive,
+# mirroring this file's `# pipefail-safe:` convention above.
+#
+# SCOPE NOTE (recorded per AG-VAL-029/AG-VAL-028, not silently omitted): the
+# original repo-wide audit for this bug class (issue #1449) additionally
+# covered tests/bats/**, .github/workflows/*.yml, and
+# .github/actions/**/action.yml (all came back clean at audit time) -- this
+# standing check does not cover those, since it deliberately reuses this
+# script's own existing scan_files (scripts/**, tools/**, services/**,
+# setup.sh, plus their Dockerfiles) per the maintainer's "extend this
+# script, no new workflow wiring" decision. That is a real, deliberate
+# scope gap versus the one-off audit, not an oversight. This file's name
+# (check-pipefail-early-exit-grep.sh) now undersells its actual scope for
+# the same "no new wiring" reason: renaming it would require updating
+# .github/actions/shellcheck-and-standing-guards/action.yml's own reference,
+# which is itself a (trivial but real) workflow-wiring change the
+# maintainer's decision did not ask for.
 set -euo pipefail
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -184,9 +237,90 @@ for file in "${scan_files[@]}"; do
   done < <(grep -nE "$pattern" "$file" || true)
 done
 
+# check_if_without_else_status <file>
+# Emits one "<fi-line>:<status-line>:<status-line-content>" record per
+# qualifying candidate: a `fi` that closes an if-block with no matching
+# `else`/`elif` at its own nesting depth, whose immediate next non-blank,
+# non-comment line contains a literal `$?`. See this file's own header
+# comment above ("SECOND, INDEPENDENT CHECK") for the full rationale, the
+# confirmed real incident this exists to catch, and this heuristic's
+# documented limits.
+#
+# Implemented as a single awk pass (not per-line grep, unlike the pipefail
+# check above): this pattern is inherently a two-line adjacency question
+# (what immediately follows a specific `fi`), plus a same-file nesting-depth
+# question (did THIS if have an else), neither of which a single-line regex
+# can answer on its own. The whole file is read into an array first (the
+# `{ lines[NR] = $0 }` pattern-action pair) so the END block can freely look
+# both backward (nesting depth as of a given `fi`) and forward (the next
+# real line after it) without needing bash to re-read the file a second
+# time.
+check_if_without_else_status() {
+  local file="$1"
+  awk '
+    { lines[NR] = $0 }
+    END {
+      depth = 0
+      nc = 0
+      for (i = 1; i <= NR; i++) {
+        line = lines[i]
+        stripped = line
+        sub(/#.*/, "", stripped)
+        n = split(stripped, toks, /[ \t;]+/)
+        for (k = 1; k <= n; k++) {
+          t = toks[k]
+          if (t == "if") {
+            depth++
+            has_else[depth] = 0
+          } else if (t == "elif" || t == "else") {
+            if (depth > 0) has_else[depth] = 1
+          } else if (t == "fi") {
+            if (depth > 0) {
+              if (has_else[depth] == 0) {
+                nc++
+                fi_candidates[nc] = i
+              }
+              depth--
+            }
+          }
+        }
+      }
+      for (c = 1; c <= nc; c++) {
+        fi_i = fi_candidates[c]
+        checked = 0
+        for (j = fi_i + 1; j <= NR && checked < 6; j++) {
+          nxt = lines[j]
+          if (nxt ~ /^[ \t]*$/) continue
+          ns = nxt
+          sub(/^[ \t]*/, "", ns)
+          if (ns ~ /^#/) { checked++; continue }
+          checked++
+          if (nxt ~ /\$\?/ && nxt !~ /#[ \t]*if-status-safe:/) {
+            printf "%d:%d:%s\n", fi_i, j, nxt
+          }
+          break
+        }
+      }
+    }
+  ' "$file"
+}
+
+for file in "${scan_files[@]}"; do
+  [ -f "$file" ] || continue
+
+  while IFS=: read -r fi_line status_line status_content; do
+    [ -n "$fi_line" ] || continue
+    fail "$file:$status_line: reads \$? on the line immediately after an if-block (whose \`fi\` is at $file:$fi_line) that has no else clause -- per POSIX, an if-construct that takes no branch (false condition, no matching else) reports the WHOLE if statement's own exit status (0), not the tested command's real exit code, so this \$? read can never observe a real failure from that command. Use an explicit 'if CMD; then STATUS=0; else STATUS=\$?; fi' (this project's own established pattern, see scripts/lib/ghcr-retry.sh's ghcr_retry()/scripts/lib/git-fetch-retry.sh's git_fetch_retry()), or an equivalent 'CMD && { ...; return/exit 0; }' whose fallthrough \$? is CMD's own real status, instead -- or mark the line reviewed-safe with a trailing '# if-status-safe: <reason>' comment if this \$? read is provably not consuming the if's masked status. Line: $status_content"
+  done < <(check_if_without_else_status "$file")
+done
+
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-pipefail-early-exit-grep: %d finding(s). See AGENTS.md AG-VAL-029/AG-VAL-032 for the full failure-class writeup.\n' "$failures" >&2
+  printf '::error::check-pipefail-early-exit-grep: %d finding(s) across both checks (early-exiting-consumer-into-pipefail and if-without-else-then-$?). See AGENTS.md AG-VAL-029/AG-VAL-032 for the full failure-class writeup, and see issue #1449 for the if-without-else-then-$? class specifically.\n' "$failures" >&2
   exit 1
 fi
 
-printf 'check-pipefail-early-exit-grep: OK (no early-exiting consumer piped from a live producer found across %d scanned scripts/Dockerfiles).\n' "${#scan_files[@]}"
+# The literal "$?" text below is prose inside a printf message describing
+# this file's own second check, not a real $? expansion reading the
+# preceding `if`'s status -- self-flagged by check_if_without_else_status()
+# above without this marker, confirmed a false positive by inspection.
+printf 'check-pipefail-early-exit-grep: OK (no early-exiting consumer piped from a live producer, and no if-without-else block immediately followed by a masked $? read, found across %d scanned scripts/Dockerfiles).\n' "${#scan_files[@]}" # if-status-safe: literal "$?" is prose in the message text, not a real status read of the preceding if
