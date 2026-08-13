@@ -89,8 +89,8 @@ COPY nats-subscriber/ .
 #     What: `CC="ccache <real compiler>"` + `CCACHE_PREFIX=distcc` +
 #     `CCACHE_REMOTE_STORAGE=redis://...` + `CCACHE_COMPILERCHECK=content`.
 #     Why: ccache preprocesses locally by default (unlike sccache, which always shells
-#     its own `-E` pass through `CC` and crashes on a `,cpp`-tagged distcc host list,
-#     #860); `content` checking avoids false hits from a Redis cache shared across
+#     its own `-E` pass through `CC` and crashes on a `,cpp`-tagged distcc host list);
+#     `content` checking avoids false hits from a Redis cache shared across
 #     build-tools image versions (ccache's own manual documents `mtime`'s default
 #     tradeoff here).
 #     From: Issue #887
@@ -104,8 +104,8 @@ COPY nats-subscriber/ .
 #     `redis://` scheme if it doesn't already carry one.
 #     Why: ccache's own fixed `ccache:` key namespace never collides with sccache's
 #     distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance, and
-#     ccache's manual requires an explicit scheme (confirmed live: an unscoped
-#     `host:port` value fails with "Cannot parse URL ... Scheme ... is invalid").
+#     ccache's manual requires an explicit scheme -- an unscoped `host:port` value
+#     fails with "Cannot parse URL ... Scheme ... is invalid".
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
@@ -281,11 +281,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_ccache; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
-    # ccache_enabled=1 only ever gets set after the earlier probe compile
-    # (line ~211) already proved ccache works, so a failing `ccache -s` here
-    # would itself be a genuine, unexpected fault -- not a case to swallow.
-    # This stats dump was explicitly requested for the build log; silently
-    # discarding its own failure with `|| true` would contradict that intent.
+    # ccache_enabled=1 only follows a successful probe compile above, so a
+    # failing stats dump here is a real fault, not an expected/optional one.
     if [ "${ccache_enabled:-0}" = "1" ]; then ccache -s; fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 

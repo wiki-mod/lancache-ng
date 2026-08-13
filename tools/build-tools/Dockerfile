@@ -244,8 +244,7 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # distcc alone only distributes, never caches; sccache was ruled out for this
 # same job because it always shells its own `-E` pass through `CC`,
 # which crashes against a `,cpp`-tagged distcc host list, while ccache
-# preprocesses locally by default (checked against ccache's own manual, not
-# assumed -- Rule-Ref: AG-VAL-023); no per-feature trimming reason exists to
+# preprocesses locally by default; no per-feature trimming reason exists to
 # source-build it the way sccache's own install below does.
 # From: Issue #887
 RUN set -euo pipefail; \

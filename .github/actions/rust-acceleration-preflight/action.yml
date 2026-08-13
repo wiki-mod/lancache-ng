@@ -23,8 +23,8 @@ inputs:
     default: ""
   ccache-redis-file:
     description: |
-      Optional file containing the ccache Redis remote-storage endpoint (issue #887,
-      services/dns/Dockerfile's ccache-over-distcc C-dependency cache only). Reuses the
+      Optional file containing the ccache Redis remote-storage endpoint for
+      services/dns/Dockerfile's ccache-over-distcc C-dependency cache only. Reuses the
       same Redis URL as redis-file -- see build-push.yml's own comment on why this is
       not a second secret.
     required: false
@@ -402,12 +402,10 @@ runs:
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
                 ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
-                # services/dns/Dockerfile's own ccache configuration accepts a bare
-                # host:port and normalizes it to a redis:// scheme before handing it
-                # to ccache -- ccache itself rejects a schemeless endpoint outright
-                # (confirmed against the installed ccache 4.9.1: "Scheme ... is
-                # invalid"), so this preflight must apply the identical normalization
-                # or it fails validating configurations the real build accepts.
+                # ccache rejects a schemeless remote-storage endpoint outright;
+                # mirror services/dns/Dockerfile's own bare-host:port normalization
+                # here so this preflight validates the same configurations the
+                # real build accepts.
                 case "$ccache_redis_endpoint" in
                   redis://*|redis+unix:*) ;;
                   *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;;
