@@ -5287,7 +5287,7 @@ logbundle_key_looks_like_secret() {
 # Prints one non-empty, non-placeholder secret VALUE per line, longest first,
 # gathered from every given env file for every key that is either in
 # logbundle_secret_env_keys or matches logbundle_key_looks_like_secret.
-# secret_value_is_placeholder (line ~890) is reused here so a still-default
+# secret_value_is_placeholder() is reused here so a still-default
 # CHANGE_ME_*/lancache-*-secret placeholder is never treated as a real
 # secret needing redaction (that would just clutter every log line
 # containing e.g. "CHANGE_ME" with a confusing [REDACTED]).
@@ -6200,9 +6200,10 @@ cmd_update_ip() {
     # docker-compose.yml just removed. An explicit override such as
     # 127.0.0.1 will not match current_ip_standard and is left alone. The
     # `-n` guard also leaves a deliberately empty UI_BIND_IP= untouched: that
-    # empty state already tracks IP_STANDARD automatically via Compose's
-    # ${UI_BIND_IP:-${IP_STANDARD}} fallback (see line ~1114), so rewriting
-    # it here is unnecessary and would just turn it into a fixed value.
+    # empty state already tracks IP_STANDARD automatically via
+    # deploy/quickstart/docker-compose.yml's own UI port mapping's
+    # `${UI_BIND_IP:-${IP_STANDARD}}` fallback, so rewriting it here is
+    # unnecessary and would just turn it into a fixed value.
     if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
         sed -i "s|^UI_BIND_IP=.*|UI_BIND_IP=$new_ip_standard|" "$deploy_env"
         print_ok "Updated: $deploy_env (UI_BIND_IP)"

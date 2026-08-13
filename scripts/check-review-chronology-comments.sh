@@ -2,6 +2,18 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
+# Three related, mechanically-detectable AG-CODE-002/003/012 comment-content
+# checks, kept in one file per the maintainer's explicit "more monolith, more
+# functions per script" direction rather than one narrow script per pattern
+# (2026-08-13 comment-guard generalization). Each check is its own function
+# below; this header documents what each one matches, why, and -- just as
+# important -- what related pattern was investigated and deliberately NOT
+# automated, and why (AG-VAL-028 explicitly allows declining to add a check
+# as long as the reason is recorded).
+#
+# ============================================================================
+# Check 1: check_review_chronology() -- REVIEW-CHRONOLOGY COMMENTS
+# ============================================================================
 # Enforces AG-CODE-003 ("Do not reference the current task, PR number, or fix
 # in a comment... that belongs in the PR/commit description, not in code
 # that outlives the change") for one specific, mechanically-detectable
@@ -37,15 +49,6 @@
 # established this exact review-chronology sub-pattern as a recurring, real
 # violation class worth a standing mechanical guard rather than relying on
 # manual review to catch it again each time (AG-VAL-028).
-#
-# Detection is deliberately per-line, not a full-file/multiline scan: every
-# real instance found in this repository's own audit had the offending
-# phrase entirely on one line, and a per-line grep keeps the false-positive
-# surface small and the match easy to point at with a file:line reference.
-# The known, accepted tradeoff is that a phrase awkwardly split across a
-# line wrap would not be caught -- the same simplicity tradeoff this
-# project's other line-oriented guards (e.g. check-file-headers.sh,
-# check-workflow-line-limit.sh) already make.
 #
 # Patterns matched (case-insensitive):
 #   1. A discovery verb (caught/found/flagged/spotted/identified/discovered)
@@ -83,6 +86,120 @@
 #     run), not a historical reference to the PR that introduced the
 #     comment. Pattern 2 only matches "fix/change/commit/patch" nouns,
 #     deliberately excluding "PR", so these stay unmatched.
+#
+# ============================================================================
+# Check 2: check_fragile_line_references() -- "(line ~N)" SELF-REFERENCES
+# ============================================================================
+# Flags a comment that points at another part of the same or a different
+# file by raw line number -- "(line ~890)", "(see line ~1114)", "(line 15)".
+# These go stale the moment either file is edited (a line inserted above the
+# target silently makes the citation point at the wrong code, with nothing
+# to catch the drift), unlike a reference by function/variable/step name,
+# which keeps pointing at the right place across refactors as long as the
+# name itself doesn't change. A real, 2026-08-13 repo-wide audit found five
+# genuine instances, all now fixed alongside adding this check: setup.sh
+# (x2, one already redundant with an adjacent function-name reference and
+# simply dropped, one rewritten to name the docker-compose.yml port-mapping
+# fallback it points at instead of a cross-file line number), tests/bats/
+# setup_update_health_baseline.bats and setup_update_idempotence.bats (both
+# citing "setup.sh's own top-level `set -euo pipefail` (line N)" -- the line
+# number added nothing the surrounding sentence didn't already say, so it
+# was dropped outright), and tests/setup-migration-semantics.sh (rewritten
+# to name env_key_exists()/write_env_file() instead of their line numbers).
+# The last of those five also surfaced a related, out-of-scope finding left
+# for the maintainer rather than silently fixed here: the function this
+# comment sits in, setup_sh_helpers(), is never called anywhere in this
+# repository, and its own `sed -n '446,628p'` extraction range is *already*
+# stale relative to those two functions' real current line numbers -- a
+# dead-code/test-infrastructure defect, not a comment-content one, and
+# outside this check's mandate to fix without a separate, verifiable pass.
+#
+# Pattern: an opening parenthesis, an optional "see ", the word "line", an
+# optional "~", then a run of digits -- e.g. "(line 42)", "(see line ~200)".
+# Requiring the literal "(line"/"(see line" sequence (not just \bline\b
+# anywhere near a number) keeps this from matching unrelated prose that
+# merely contains the word "line" near an unrelated number elsewhere in the
+# same sentence (e.g. "port 8080" two words after "the command line" would
+# not match, since no digits directly follow "line" itself).
+#
+# ============================================================================
+# Check 3: check_bare_issue_ref_duplicates_from() -- REDUNDANT #NNN OUTSIDE From:
+# ============================================================================
+# AG-CODE-012 requires a comment naming a PR/Issue number to do so through
+# exactly one bare `From: Issue #N` / `From: PR #N` / `From: #N` pointer --
+# "never a retelling of that context" elsewhere in the same comment/file. A
+# real ground-truth example (PR #1534, commit 787f04f7) shows the actual
+# violation shape: `services/dns/Dockerfile` already carried a correct
+# `From: Issue #887` pointer, and *also* repeated "(issue #887)" inline in
+# three other places (an action `description:` field, a workflow step
+# `name:`, and two more workflow comments) -- all three were fixed by
+# deleting the redundant inline mention, not by rewording it, since the
+# `From:` pointer already carries that exact context.
+#
+# This check reproduces that specific, narrow shape: for each file, collect
+# every `#N` cited on a line containing "From:" (the pointer's own target
+# numbers), then flag any *other* line in that same file that cites one of
+# those same numbers outside a `From:` line -- a same-file duplicate of the
+# file's own already-declared task/issue/PR reference. It deliberately does
+# NOT flag a bare `#N` that cites a DIFFERENT number than any `From:` line in
+# that file: a real, repo-wide sweep (2026-08-13) of every bare `#[0-9]+`
+# reference outside a `From:` line, with no such same-file-duplicate
+# narrowing, returned roughly 2,955 hits across this repository's tracked
+# files -- overwhelmingly legitimate, accepted historical WHY-grounding
+# prose this project already relies on constantly (e.g. "issue #1377's own
+# repo-wide SIGPIPE audit", "the pre-#808 test", "(#623/#703/#820/#932)"
+# citing four unrelated closed issues as prior-art evidence for one design
+# decision). That number is itself the confirmation of AG-VAL-028's own
+# already-recorded assessment of this broader pattern ("case (a)... remains
+# exactly as hard to check cheaply as this note originally said"): a blanket
+# "no bare #N outside From:" check is not viable at this repository's actual
+# writing density, so this check is scoped to the one sub-shape that both has
+# real ground-truth evidence and cannot produce that false-positive flood --
+# a number a file has ALREADY placed in its own `From:` pointer, repeated a
+# second time outside it. Two further sub-shapes were investigated and
+# deliberately NOT automated, per AG-VAL-028's explicit allowance to decline
+# as long as the reason is recorded:
+#   - `#N` inside a GitHub Actions step `name:` field: a repo-wide sweep
+#     found 13 existing, long-standing instances across .github/workflows/
+#     build-push.yml and .github/actions/shellcheck-and-standing-guards/
+#     action.yml (e.g. "Check pinned GitHub Actions for deprecated Node
+#     runtimes (#801)") -- an established, deliberate labeling convention
+#     for standing CI guards that has survived many prior review passes, not
+#     an accidental leak. Flagging it would mean rewriting 13 pre-existing,
+#     accepted step names as a side effect of a comment-content guard, which
+#     needs the maintainer's explicit sign-off, not a mechanical check
+#     silently declaring 13 years of convention non-compliant.
+#   - `#N` inside an action `description:` input field: only 2 genuine hits
+#     exist repo-wide (.github/actions/trivy-scan-with-cache/action.yml's
+#     registry-username/registry-password inputs, both "...issue #1535"),
+#     plus 2 build-matrix `description:` entries in build-push.yml (a
+#     different kind of field -- matrix data, not a UI-facing input
+#     description) citing "issue #1428". Small enough to be plausible for a
+#     future check, but with the step-`name:` convention shown above to be
+#     accepted, a `description:`-only check risks being an arbitrary,
+#     inconsistent carve-out rather than a principled one; left as an open
+#     item for the maintainer rather than encoded here.
+# This check also does not attempt to catch PR #1534's own step-`name:`
+# instance retroactively: that step's "(issue #887/#1535)" lived in
+# build-push.yml while the `From: Issue #887` pointers it duplicated live in
+# a different file (services/dns/Dockerfile) -- this check is deliberately
+# scoped per-file, not cross-file, since cross-file number matching would
+# immediately re-flag the 13 accepted step names above (many of which cite
+# numbers that also happen to appear in some `From:` line somewhere else in
+# this large a repository, coincidentally, with no redundancy relationship
+# between them at all).
+#
+# ============================================================================
+# Shared scanning behavior (all three checks)
+# ============================================================================
+# Detection is deliberately per-line, not a full-file/multiline scan: every
+# real instance found in this repository's own audits had the offending
+# phrase entirely on one line, and a per-line grep keeps the false-positive
+# surface small and the match easy to point at with a file:line reference.
+# The known, accepted tradeoff is that a phrase awkwardly split across a
+# line wrap would not be caught -- the same simplicity tradeoff this
+# project's other line-oriented guards (e.g. check-file-headers.sh,
+# check-workflow-line-limit.sh) already make.
 #
 # Accepts an optional repo_root argument (defaults to this script's own
 # repo) so tests/bats/check_review_chronology_comments.bats can point it at
@@ -138,16 +255,16 @@ is_excluded() {
 }
 
 # Extended regex, matched case-insensitively (grep -Ei) against each line
-# independently. See the header comment above for what each alternative
-# targets and why, and for the deliberately-excluded near-miss phrasings.
-# Deliberately tight adjacency, not a wide free-text window: an earlier
-# draft of this pattern used a generic "up to 40 characters of anything"
-# gap between the discovery verb and "review", which would also match a
-# sentence like "every service found in the matrix; review the list when
-# adding one" -- a real risk against ~9000-line comment-heavy files like
-# build-push.yml. [[:space:]] (POSIX, not the GNU-only \s) is used for
-# whitespace, matching the convention scripts/check-governance-guards.sh
-# already established for this kind of word-boundary regex in this repo.
+# independently. See "Check 1" above for what each alternative targets and
+# why, and for the deliberately-excluded near-miss phrasings. Deliberately
+# tight adjacency, not a wide free-text window: an earlier draft of this
+# pattern used a generic "up to 40 characters of anything" gap between the
+# discovery verb and "review", which would also match a sentence like
+# "every service found in the matrix; review the list when adding one" -- a
+# real risk against ~9000-line comment-heavy files like build-push.yml.
+# [[:space:]] (POSIX, not the GNU-only \s) is used for whitespace, matching
+# the convention scripts/check-governance-guards.sh already established for
+# this kind of word-boundary regex in this repo.
 DISCOVERY_VERBS='(caught|found|flagged|spotted|identified|discovered|noticed)'
 # "<verb> in/during [a/the/this] [code/pr/peer] [self-]review" -- the verb
 # must be immediately followed by in/during (only whitespace between), and
@@ -165,6 +282,49 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview\\b[^a-zA-Z.]{0,20}\\b${DISCOVERY_VERBS}\
 # self-reference to whichever change introduced the comment.
 REVIEW_CHRONOLOGY_PATTERN+="|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
 
+# See "Check 2" above. Case-insensitive so "(Line 42)" matches too.
+FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
+
+# Checks each line of $1 against $REVIEW_CHRONOLOGY_PATTERN, prefixed with
+# filename:line like every other check here (-H forces the filename prefix
+# even for a single-file invocation, which grep otherwise suppresses).
+check_review_chronology() {
+    grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$1" || true
+}
+
+# Checks each line of $1 against $FRAGILE_LINE_REF_PATTERN. See "Check 2"
+# above for the pattern's exact shape and why it stays this narrow.
+check_fragile_line_references() {
+    grep -EinIH "$FRAGILE_LINE_REF_PATTERN" "$1" || true
+}
+
+# See "Check 3" above. Collects the numbers this file already declared via
+# its own `From:` pointer line(s), then flags any OTHER line repeating one
+# of those same numbers -- a same-file duplicate of an already-declared
+# task/issue/PR reference, per AG-CODE-012's "never a retelling" rule.
+check_bare_issue_ref_duplicates_from() {
+    local path="$1" from_nums num
+    # Cheap single-process short-circuit for the common case (this repo's own
+    # sweep: the overwhelming majority of tracked files carry no `From:`
+    # pointer at all yet, since AG-CODE-012 adoption is still in progress) --
+    # skips the 4-process extraction pipeline below entirely for those files.
+    grep -qaE 'From:' "$path" 2>/dev/null || return 0
+    from_nums=$(grep -aE 'From:' "$path" 2>/dev/null | grep -aoE '#[0-9]+' | tr -d '#' | sort -u || true)
+    [ -z "$from_nums" ] && return 0
+
+    while IFS= read -r num; do
+        [ -n "$num" ] || continue
+        # Word-boundary-equivalent match on the number itself: "(^|[^0-9])"
+        # before and "([^0-9]|$)" after keep "#887" from also matching inside
+        # a longer number like "#8871" that merely happens to start with the
+        # same digits. Lines containing "From:" are excluded here (that is
+        # the one place this number is SUPPOSED to live); every other line
+        # citing the same number is the redundant duplicate this check
+        # exists to catch.
+        grep -aEnI "(^|[^0-9])#${num}([^0-9]|$)" "$path" 2>/dev/null | grep -av 'From:' || true
+    done <<< "$from_nums"
+}
+
 # Checks for ".git" directly under target_root itself, not "somewhere in an
 # enclosing directory" (which `git rev-parse --is-inside-work-tree` would
 # also report true for): a bats fixture tree created under a temp directory
@@ -177,7 +337,9 @@ else
     mapfile -t files < <(find . -type f -print | sed 's#^\./##')
 fi
 
-violations=()
+chronology_violations=()
+fragile_ref_violations=()
+duplicate_ref_violations=()
 for path in "${files[@]}"; do
     [ -f "$path" ] || continue
     is_self_reference "$path" && continue
@@ -189,22 +351,64 @@ for path in "${files[@]}"; do
     # record as a real violation.
     while IFS= read -r match; do
         [ -n "$match" ] || continue
-        violations+=("$match")
-    done < <(grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$path" || true)
+        chronology_violations+=("$match")
+    done < <(check_review_chronology "$path")
+
+    while IFS= read -r match; do
+        [ -n "$match" ] || continue
+        fragile_ref_violations+=("$match")
+    done < <(check_fragile_line_references "$path")
+
+    while IFS= read -r match; do
+        [ -n "$match" ] || continue
+        duplicate_ref_violations+=("$match")
+    done < <(check_bare_issue_ref_duplicates_from "$path")
 done
 
-if [ "${#violations[@]}" -gt 0 ]; then
+violations_found=0
+
+if [ "${#chronology_violations[@]}" -gt 0 ]; then
+    violations_found=1
     echo "Review-chronology comment(s) found (AG-CODE-003 violation):" >&2
-    printf '  %s\n' "${violations[@]}" >&2
+    printf '  %s\n' "${chronology_violations[@]}" >&2
     echo "" >&2
     echo "These narrate the review/fix history of the change they sit in (e.g. \"caught in" >&2
     echo "review\", \"before this fix\") instead of documenting durable technical rationale --" >&2
     echo "that context belongs in the PR/commit description, not in code that outlives the" >&2
     echo "change (AGENTS.md AG-CODE-003). Reword to describe the technical behavior/WHY" >&2
-    echo "directly, without the self-referential review/PR-chronology framing; see" >&2
-    echo "scripts/check-review-chronology-comments.sh's own header comment for worked" >&2
-    echo "examples of how prior real instances in this repo were reworded." >&2
+    echo "directly, without the self-referential review/PR-chronology framing; see this" >&2
+    echo "script's own header comment (Check 1) for worked examples of how prior real" >&2
+    echo "instances in this repo were reworded." >&2
+    echo "" >&2
+fi
+
+if [ "${#fragile_ref_violations[@]}" -gt 0 ]; then
+    violations_found=1
+    echo "Fragile line-number self-reference(s) found (AG-CODE-002 violation):" >&2
+    printf '  %s\n' "${fragile_ref_violations[@]}" >&2
+    echo "" >&2
+    echo "\"(line ~N)\"/\"(see line N)\" references go stale the moment the target file is" >&2
+    echo "edited, with nothing to catch the drift. Reference the function/variable/step name" >&2
+    echo "instead -- it keeps pointing at the right place across refactors; see this script's" >&2
+    echo "own header comment (Check 2) for worked examples." >&2
+    echo "" >&2
+fi
+
+if [ "${#duplicate_ref_violations[@]}" -gt 0 ]; then
+    violations_found=1
+    echo "Issue/PR reference duplicated outside its own From: pointer (AG-CODE-012 violation):" >&2
+    printf '  %s\n' "${duplicate_ref_violations[@]}" >&2
+    echo "" >&2
+    echo "This file already declares this number via a structured \`From: Issue #N\`/\`From:" >&2
+    echo "PR #N\` pointer; AG-CODE-012 requires that pointer to be the sole place a comment" >&2
+    echo "names the number -- \"never a retelling of that context.\" Remove the duplicate inline" >&2
+    echo "mention (the From: pointer already carries it); see this script's own header comment" >&2
+    echo "(Check 3) for the real precedent this reproduces." >&2
+    echo "" >&2
+fi
+
+if [ "$violations_found" -eq 1 ]; then
     exit 1
 fi
 
-echo "No review-chronology comments found -- AG-CODE-003 (review-chronology sub-pattern) holds."
+echo "No review-chronology comments, fragile line-number self-references, or From:-duplicate issue references found -- AG-CODE-002/003/012 (comment-content sub-patterns) hold."

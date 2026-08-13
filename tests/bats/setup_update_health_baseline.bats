@@ -254,7 +254,7 @@ setup() {
 }
 
 @test "wait_for_stack_health's log-dump fallback fires when docker logs itself fails, under real set -euo pipefail" {
-    # setup.sh's own top-level option set (line 15) is set -euo pipefail --
+    # setup.sh's own top-level option set is `set -euo pipefail` --
     # this test enables exactly that (bats runs each @test in its own
     # process, so it cannot leak into any other test) before calling `run`,
     # since the `docker logs ... | sed ... || print_warn ...` line's

@@ -271,9 +271,9 @@ write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update on a quickstart (non-deploy/prod) install runs cleanly under set -u" {
-    # setup.sh's own top-level `set -euo pipefail` (line 16) is not captured
-    # by load_setup_update_helpers (its extraction starts at is_valid_ipv4(),
-    # well after that line), so every other test in this file runs the real
+    # setup.sh's own top-level `set -euo pipefail` is not captured by
+    # load_setup_update_helpers (its extraction starts at is_valid_ipv4(),
+    # well after that point), so every other test in this file runs the real
     # migrate_env_for_update() under whatever options bats itself happens to
     # use -- not necessarily nounset. The prodsync_default_* locals this
     # function declares are only ever assigned inside an

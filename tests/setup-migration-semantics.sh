@@ -11,7 +11,7 @@ set -euo pipefail
 # Only the functions we need are sourced to keep the test deterministic.
 setup_sh_helpers() {
     local setup_sh="$1"
-    # Extract from env_key_exists (line 446) through write_env_file (line 628).
+    # Extract from env_key_exists() through write_env_file().
     sed -n '446,628p' "$setup_sh"
 }
 

@@ -2,8 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises scripts/check-review-chronology-comments.sh (AG-CODE-003's
-# review-chronology sub-pattern) against small, throwaway fixture trees
+# Exercises scripts/check-review-chronology-comments.sh's three checks
+# (review-chronology comments/AG-CODE-003, fragile "(line ~N)" self-
+# references/AG-CODE-002, and issue/PR references duplicated outside their
+# own From: pointer/AG-CODE-012) against small, throwaway fixture trees
 # rather than only this repo's own real tree, so both the passing and
 # failing path are proven -- per AG-VAL-024, a check that only ever runs
 # against an already-green tree never actually proves its fail-closed path
@@ -113,7 +115,7 @@ EOF
 
     run bash "$script" "$fixture_root"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"No review-chronology comments found"* ]] || fail "unexpected output: $output"
+    [[ "$output" == *"No review-chronology comments"* ]] || fail "unexpected output: $output"
 }
 
 @test "passes on 'remembered during review' (a process note, not a discovery verb)" {
@@ -188,6 +190,109 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"a.sh:2"* ]] || fail "missing first offender: $output"
     [[ "$output" == *"b.sh:2"* ]] || fail "missing second offender: $output"
+}
+
+## Check 2: check_fragile_line_references() -- "(line ~N)" self-references
+
+@test "fails and names the file:line when a comment says '(line ~890)'" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+#!/usr/bin/env bash
+# secret_value_is_placeholder (line ~890) is reused here so a still-default
+# placeholder is never treated as a real secret.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
+    [[ "$output" == *"AG-CODE-002"* ]] || fail "did not cite the governing rule: $output"
+}
+
+@test "fails when a comment says '(see line 42 above)'" {
+    cat > "$fixture_root/example.rs" <<'EOF'
+// The retry budget is already exhausted by this point (see line 42 above),
+// so no further attempts happen here.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.rs:1"* ]] || fail "did not name the offending line: $output"
+}
+
+@test "passes on prose mentioning 'line' without an adjacent parenthesized number" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+#!/usr/bin/env bash
+# Every command line argument is validated up front, and the pipeline
+# rejects anything that does not match, well before the 200th line of
+# input is ever reached.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+## Check 3: check_bare_issue_ref_duplicates_from() -- redundant #NNN outside From:
+
+@test "fails when a comment repeats a number already declared by this file's own From: pointer" {
+    cat > "$fixture_root/example.dockerfile" <<'EOF'
+# What: ccache preprocesses locally instead of shelling through distcc.
+# Why: sccache always shells its own -E pass, which crashes against a
+#      ,cpp-tagged distcc host list (the structural cause of issue #887).
+# From: Issue #887
+RUN true
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.dockerfile:3"* ]] || fail "did not name the offending line: $output"
+    [[ "$output" == *"AG-CODE-012"* ]] || fail "did not cite the governing rule: $output"
+}
+
+@test "does not flag the From: pointer line itself" {
+    cat > "$fixture_root/example.dockerfile" <<'EOF'
+# What: normalizes a bare host:port to a redis:// URL before use.
+# Why: ccache's manual requires an explicit scheme.
+# From: Issue #887
+RUN true
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "passes when a comment cites a DIFFERENT number than this file's own From: pointer (historical WHY-grounding stays legal)" {
+    cat > "$fixture_root/example.dockerfile" <<'EOF'
+# What: installs findutils so `find -printf` works under BusyBox.
+# Why: the same BusyBox gap already hit and fixed for services/watchdog,
+#      see issue #1346 and issue #1347 for the prior two instances.
+# From: Issue #887
+RUN true
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "passes on bare #NNN references in a file with no From: pointer at all (repo-wide historical-citation convention stays legal)" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+#!/usr/bin/env bash
+# always()-teardown to release (#623/#703/#820/#932); see issue #1014 for the
+# original subnet-reservation design this extends.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "passes when the duplicate-looking number is actually a different, longer number (#8871 does not match a From: #887)" {
+    cat > "$fixture_root/example.dockerfile" <<'EOF'
+# What: retries the upload once on a transient failure.
+# Why: mirrors the retry budget introduced for issue #8871's flaky-mirror fix.
+# From: Issue #887
+RUN true
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
 }
 
 @test "the guard also passes when pointed at the real repository tree" {
