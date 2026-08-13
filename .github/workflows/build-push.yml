@@ -18,17 +18,19 @@ on:
         options: [none, nightly]
         default: none
   schedule:
-    # What: Daily stable-channel refresh of `latest` on master.
-    # Why: `promote` only moves `latest` on push; cron prevents drift between master pushes (#1035).
-    # `nightly` (current_dev) has separate schedule in nightly-refresh.yml (#1254).
+    # What: Daily 01:00 UTC stable-channel refresh of `latest` on master (nightly has its own schedule, #1254).
+    # Why: `promote` only moves `latest` on push, so cron prevents drift between master pushes; the resulting
+    # 03:00 CEST landing in summer is a deliberately accepted one-hour seasonal drift, not a bug (#1035).
     # From: #1035, #1056, #1254
     - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
     # What: Applies paths-ignore to push events, mirroring pull_request; all-docs pushes skip heavy jobs.
-    # Why: Doc-only merge commits (the only push type on master per AG-WF-004) used to unconditionally
-    # rerun the 8-service build/scan pipeline on the scarce lancache-heavy pool (#1203, #1095).
+    # Why: Doc-only merge commits (the only push type on master per AG-WF-004) used to unconditionally rerun
+    # the 8-service build/scan pipeline on the scarce lancache-heavy pool; tags never hit paths-ignore (GitHub
+    # doesn't evaluate path filters for tags:) and `!CHANGELOG.md` stays un-ignored so check-changelog-direct-
+    # edit.sh still sees CHANGELOG-only pushes (#1203, #1095).
     # From: #1095, #1203
     paths-ignore:
       - "**/*.md"
@@ -36,11 +38,12 @@ on:
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # What: Adds metadata-change triggers (labeled/milestoned/etc.); implements action-level filters per job.
-    # Why: Trigger-level paths-ignore broke required checks on docs-only PRs (#1245); metadata events carry
-    # no code changes but need to re-trigger workflow for AG-GH-008 label/milestone validation. Job-level
-    # action filters skip redundant Rust builds on non-code events; pr-tracking-metadata-check remains
-    # unconditional to validate labels/milestone freshness (#1245, AG-GH-008).
+    # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) on top
+    # of opened/synchronize/reopened; every downstream job whose own `if:` also filters on event `action`
+    # (build/build-arm64 and the Rust quality/test/audit jobs) must be kept in sync with this list.
+    # Why: Trigger-level paths-ignore broke required checks on docs-only PRs by making the whole run not
+    # exist (#1245); metadata events carry no code change, so per-job action filters skip redundant Rust
+    # reruns while pr-tracking-metadata-check stays unconditional to validate AG-GH-008 freshness.
     # From: #1203, #1245, AG-GH-008
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
@@ -54,9 +57,9 @@ permissions:
 
 concurrency:
   # What: Push/tag use run_id-scoped key (never collides); PR uses per-ref key; cancel-in-progress: false.
-  # Why: Run-id scoping (from #897's promote git-ref lock) eliminates push serialization. PR-level
-  # cancellation broke immediately when PR opened with labels (#888/#979), killing detect-changes mid-run.
-  # Per-job cancellation for build/container-scan handles PR supersession safely (#979).
+  # Why: Run-id scoping eliminates push serialization (#897); cancel-in-progress broke immediately for PRs
+  # opened with labels/milestone, killing detect-changes mid-run (#888), so PR-level cancellation stays off
+  # and build/container-scan instead get their own safe per-job cancellation groups (#979).
   # From: #897, #888, #979
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
@@ -72,10 +75,10 @@ defaults:
     shell: bash
 
 jobs:
-  # What: Classifies changed paths for PR/push event scoping of six Rust jobs and build/container-scan.
-  # Why: PR/push diffs degrade gracefully to --all-changed on missing bases (#1095); Rust job gates
-  # reuse known-good results from PR; build/container-scan use separate cross-run-ordering-safe
-  # determine-push-reuse-scope job for safe re-tagging (#1095).
+  # What: Classifies changed paths for PR/push event scoping of six Rust test/audit jobs and build/container-scan.
+  # Why: PR/push diffs degrade gracefully to --all-changed on missing bases (#1095); the six Rust jobs' own
+  # `if:` fail safe to running whenever this job did not produce a successful classification, and
+  # build/container-scan use the separate determine-push-reuse-scope job instead for safe re-tagging (#1095).
   # From: #1095
   detect-changes:
     name: detect changed paths
@@ -148,9 +151,9 @@ jobs:
           fi
 
   # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote.
-  # Why: `cancel-in-progress` on running jobs starves the channel (#979); this early check
-  # skips only pushes already provably superseded. No `if:`/`needs:` prevents implicit-success
-  # hazard; output is explicit success/failure/cancelled, never skipped (#1095).
+  # Why: `cancel-in-progress` on an already-running job starves the channel (#979), so this is a start-gate-
+  # only self-skip for a push already provably superseded; no `if:`/`needs:` keeps its output resolving only
+  # to success/failure/cancelled, never skipped, avoiding the implicit-success-over-skippable hazard (#1095).
   # From: #1095, #979
   push-supersession-check:
     name: check for a newer push already superseding this one
@@ -230,10 +233,11 @@ jobs:
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # What: Diff-scoped SPDX header check on PR-touched files (not repo-wide).
-        # Why: Whole-repo check is soft (backfill incomplete); PR-touched files have no exception (AG-HDR-008).
-        # Base.sha fetch by exact SHA avoids long-lived PR stale-snapshot lag; runs in build-tools image
-        # to ensure tooling consistency (#903 verification contract).
+        # What: Diff-scoped SPDX header check on this PR's changed files (not repo-wide).
+        # Why: The whole-repo check stays soft since the AG-HDR-008 backfill isn't complete, but a file this
+        # PR actively touches has no such exception; base.sha is fetched by exact SHA (not the branch tip)
+        # since it can lag on a long-lived PR, and this runs inside the pinned build-tools image so a
+        # self-hosted runner with stale host tooling can't diverge from the project's own toolchain.
         # From: AG-HDR-008
         if: github.event_name == 'pull_request'
         env:
@@ -254,8 +258,9 @@ jobs:
 
   compose-healthchecks:
     # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration (#1169).
-    # Why: Plain bash/grep script (no Docker/build-tools dependency); runs on light tier.
-    # Job-level concurrency safely cancels mid-flight since build/build-arm64 cleanly skip on cancelled.
+    # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier; its
+    # job-level concurrency group safely cancels mid-flight since only build/build-arm64's own PR-only
+    # `if:` gate consumes the result, and that gate cleanly skips rather than errors on cancelled.
     # From: #1169
     name: compose healthchecks
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -367,9 +372,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
         # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT.
-        # Why: AG-GH-008 requires every PR carry milestone; Dependabot cannot set its own. Prior exemption
-        # (#1061-#1064) replaced by auto-tagging (#1278) since GITHUB_TOKEN cannot write Projects v2.
-        # Idempotent per AG-OP-006/AG-OP-009; one-time workflow re-trigger cost on first milestone set (#1278).
+        # Why: AG-GH-008 requires every PR carry a milestone but Dependabot can't set its own, so this replaced
+        # the prior blanket exemption (#1061-#1064) since GITHUB_TOKEN can't write Projects v2 data; it is
+        # idempotent (AG-OP-006/AG-OP-009), only PATCHing when the live milestone is empty, at the accepted
+        # one-time cost of a `milestoned` re-trigger the first time it fires on a given PR (#1278).
         # From: #1278, #1270, #1163, AG-GH-008, AG-OP-006, AG-OP-009
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
@@ -377,8 +383,7 @@ jobs:
           PR_NUMBER: ${{ github.event.pull_request.number }}
           REPO: ${{ github.repository }}
           # What: Milestone #11 = "LanCache-NG Roadmap" catch-all for non-version-tied PRs/issues.
-          # Why: Milestone renumber/rename requires updating this value and comment together.
-          # From: (repository-specific configuration)
+          # Why: If this milestone is ever renumbered or renamed, this value and comment must be updated together.
           DEPENDABOT_MILESTONE_NUMBER: 11
         run: |
           set -euo pipefail
@@ -392,8 +397,9 @@ jobs:
             exit 0
           fi
           # What: Uses `if !` to keep set -e active; API failures degrade to warning, not abort.
-          # Why: Per AG-VAL-004, command forming `if` test is exempt from errexit. Authoritative
-          # milestone gate is in check-pr-tracking-metadata.sh; best-effort auto-tag failure still caught.
+          # Why: Per AG-VAL-004, a command forming an `if` test is exempt from errexit, so a real API failure
+          # degrades to a warning instead of aborting the job, since the authoritative gate is the milestone
+          # check inside check-pr-tracking-metadata.sh a few steps below.
           # From: AG-VAL-004
           if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
             echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
@@ -424,9 +430,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
-        # What: Fallback resolves build-tools image independently (no depends on validate-compose).
-        # Why: Needs dependency would defeat fallback purpose when self-hosted unavailable.
-        # Matches shellcheck-hosted pattern.
+        # What: Fallback resolves build-tools image independently, without depending on validate-compose.
+        # Why: A needs: dependency on that job would defeat the fallback's purpose when self-hosted runners
+        # are unavailable; matches the shellcheck-hosted job's own resolution step.
         # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -437,9 +443,10 @@ jobs:
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Auto-assign Dependabot PR milestone
-        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs.
-        # Why: Dependabot cannot set milestone; PROJECT_AUTOMATION_PAT reaches this job (#1278).
-        # Same rationale as primary pr-tracking-metadata-check job.
+        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs, same as the primary
+        # pr-tracking-metadata-check job's identical step.
+        # Why: Dependabot cannot set its own milestone; PROJECT_AUTOMATION_PAT still reaches this job on a
+        # same-repo Dependabot PR, replacing the prior blanket exemption (#1061-#1064).
         # From: #1278, #1061, #1064, AG-GH-008
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
@@ -604,10 +611,11 @@ jobs:
       - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
-    # What: Checks Unix line-endings (#601) + governance guardrails (relocated from shellcheck) + CHANGELOG.md warn.
-    # Why: .gitattributes doesn't catch pre-existing CRLF; governance checks must run on every PR regardless
-    # of diff scope (#1245). DO NOT RENAME job (it's a required-status-check name in current_dev branch protection).
-    # Relocate/rename would create permanent new never-satisfied check while old name stays forever (#1245's bug).
+    # What: Checks Unix line-endings (#601), plus governance guardrails and the CHANGELOG.md warn relocated
+    # from shellcheck so they still run on every PR regardless of diff scope.
+    # Why: DO NOT RENAME this job -- `name: line endings` is the required-status-check string in current_dev's
+    # branch protection, and renaming it would silently create a new, never-satisfied required check while the
+    # old name stays expected forever, exactly #1245's bug class from a different cause (#601, #1245, #1014).
     # From: #601, #1245, #1014, AG-VAL-016
     name: line endings
     needs: validate-compose
@@ -617,8 +625,9 @@ jobs:
     # From: #1245
     timeout-minutes: 25
     # What: Job-level concurrency with cancel-in-progress: pull_request-only.
-    # Why: On push, line-endings is hard gate on channel publish path (#979/#891); on PR,
-    # cancelled result cleanly skips build/build-arm64. See `build` job comment for #979 rationale.
+    # Why: On push, line-endings is a hard gate on the channel publish path, so a cancelled run would make
+    # build/build-arm64 skip and starve the channel; on a PR, a cancelled result cleanly skips them instead,
+    # so cancelling a superseded run there just reclaims a runner slot (see `build`'s comment for #979).
     # From: #891, #979
     concurrency:
       group: >-
@@ -631,8 +640,8 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     # What: Declares pull-requests:read for governance guardrails (PR title/body fetch via gh pr view).
-    # Why: Moved here from shellcheck along with step itself (#1245/#805). contents:read is restated
-    # since job-level permissions replace (not extend) workflow defaults (#903).
+    # Why: Moved here from shellcheck along with the step itself (#1245/#805); contents:read is restated too,
+    # since job-level permissions replace rather than extend the workflow-level defaults (#903).
     # From: #805, #1245, #903
     permissions:
       contents: read
@@ -812,8 +821,9 @@ jobs:
         run: bash scripts/check-language-policy.sh
 
   # What: GitHub-hosted fallbacks limited to cheap lint jobs (file-headers, compose-healthchecks, shellcheck, etc).
-  # Why: Rust builds/scans need build-tools/sccache/distcc/credentials (no safe hosted equivalent yet).
-  # ci_scope_policy-hosted not feasible: would queue indefinitely waiting on self-hosted-only Rust dependencies (#509).
+  # Why: Rust builds/scans need build-tools/sccache/distcc/credentials with no safe hosted equivalent yet, and
+  # a ci_scope_policy-hosted fallback isn't feasible either since it would just queue indefinitely waiting on
+  # those same self-hosted-only Rust job dependencies (#509).
   # From: #1169, #509, docs/ci-github-hosted-fallback-decision.md
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected by
@@ -993,9 +1003,9 @@ jobs:
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
           # What: Authenticates GHCR pull via github.actor + GITHUB_TOKEN.
-          # Why: Without auth, anonymous pulls hit lower rate limit; confirmed failure under concurrent load.
-          # Every other GHCR job already auth this way; this job was the gap.
-          # From: (rate-limit enforcement/build-tools image delivery)
+          # Why: An anonymous pull hits a much lower GHCR rate limit and fails closed under real concurrent
+          # load, confirmed live for this exact job; every other GHCR-pulling job already authenticates this
+          # way, so this job was the one remaining gap.
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -1023,10 +1033,9 @@ jobs:
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
-      # What: Removes buildx builder immediately after select step (only buildx consumer).
-      # Why: Fallback path uses plain docker build (not buildx); keep-alive saves no resources.
-      # Clean up here rather than end-of-job cleanup.
-      # From: (build optimization)
+      # What: Removes the buildx builder right after the select step, its only consumer in this job.
+      # Why: The fallback path (if ever taken) uses plain docker build, not buildx, so nothing later in this
+      # job needs the builder kept alive until the job's own end-of-job cleanup.
       - name: Remove buildx builder
         if: always()
         run: |
@@ -1070,10 +1079,11 @@ jobs:
             exit 1
           fi
 
-          # What: Validates state-root migration contract: one LANCACHE_STATE_DIR + optional legacy per-service keys.
-          # Why: CACHE_DIR_STANDARD/CACHE_DIR_SSL retired in favor of shared CACHE_DIR; other keys
-          # preserved as permanent advanced overrides. Split-brain avoidance critical for migration.
-          # From: (state-root migration contract enforcement)
+          # What: Validates the state-root migration contract: one LANCACHE_STATE_DIR plus optional legacy
+          # per-service override keys, preserved only for real legacy/custom paths.
+          # Why: CACHE_DIR_STANDARD/CACHE_DIR_SSL are deliberately excluded and unconditionally removed instead,
+          # since keeping them "preservable" would recreate the exact cache-path split-brain this migration
+          # to a single shared CACHE_DIR exists to eliminate.
           for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
               || { echo "::error::setup.sh update must preserve ${key} only when legacy/custom state would otherwise move away from the one-root contract."; exit 1; }
@@ -1097,7 +1107,6 @@ jobs:
             || { echo "::error::setup.sh update must normalize install_dir before cd so deploy/prod backups are path-stable."; exit 1; }
           # What: Snapshot repo-root inputs reached via ../../ and remap on restore.
           # Why: Manual deploy/prod rollback must preserve arbitrary install paths.
-          # From: (backup/restore contract)
           grep -F 'deploy_prod_repo_input_paths()' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must snapshot repo-root runtime inputs reached via ../../ paths."; exit 1; }
           grep -F 'config/prod' setup.sh >/dev/null \
