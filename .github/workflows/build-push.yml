@@ -1607,9 +1607,21 @@ jobs:
             }
 
           for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
+            # Anchored on the full "scripts/untracked/docker-socket-proxy.sh"
+            # source prefix, not just the "docker-socket-proxy.sh:/usr/local/bin/..."
+            # mount-target suffix: a target-only match is satisfied equally by a
+            # stale source path (e.g. "./scripts/docker-socket-proxy.sh:...", missing
+            # a required subdirectory prefix) as by the real current one, since only
+            # the right-hand side of the bind-mount ever differs between them. This
+            # exact anchoring gap let a stale bind-mount source path pass this check
+            # for real once (issue #1095): Docker silently creates an empty directory
+            # at a bind-mount source that doesn't exist, so the affected container
+            # failed at runtime with "is a directory" instead of this static check
+            # failing at review time -- a source-path move that isn't reflected in
+            # every consumer is exactly the class this anchoring exists to catch.
+            grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline or divergent copy."
+                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline, divergent, or stale pre-move copy."
                 exit 1
               }
             # Match only the real top-level YAML key/anchor syntax here, not
