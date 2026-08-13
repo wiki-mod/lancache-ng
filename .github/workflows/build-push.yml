@@ -2164,26 +2164,16 @@ jobs:
           bash scripts/validate-stack-images.sh
           VALIDATE_COMPOSE
 
-      # Deliberately its OWN step, not appended to "Validate compose files" above: that
-      # step's embedded script is already large enough that actionlint's shellcheck
-      # integration deadlocks on it (a real, reproduced hang -- the exact same awk guards
-      # pass instantly in a small isolated script, but reliably hang actionlint once embedded
-      # in the oversized script, and the unmodified pre-existing script does not hang, so
-      # this is a genuine size/threshold interaction in actionlint's own subprocess handling,
-      # not a defect in this shell code). Keeping this content in its own step is the
-      # minimal, safe fix -- do not merge back into "Validate compose files" without
-      # re-confirming actionlint still completes.
+      # What: Deliberately its own step, not appended to "Validate compose files" above; do not merge back without re-confirming actionlint still completes.
+      # Why: That step's embedded script is already large enough that actionlint's shellcheck integration deadlocks on it -- the exact same awk guards pass instantly in a small isolated script but reliably hang actionlint once embedded in the oversized one, and the unmodified pre-existing script does not hang, confirming a genuine size/threshold interaction in actionlint's own subprocess handling rather than a defect in this shell code.
+      # From: Issue #1095 | PR #1532
       - name: Validate channel/branch-model mapping (#825/#1141)
         run: |
           set -euo pipefail
 
-          # #825/#1141 branch-model decision: master -> latest, archived
-          # vY.X.Z branches -> no live channel. current_dev's own mapping was
-          # SUPERSEDED by #1254/#1255 below -- see that guard for the current
-          # invariant. These awk guards are scoped to each branch's own
-          # if/elif arm (not a flat grep -F for the channel_tags line alone)
-          # so a regression that keeps both literal strings in the file but
-          # ties them to the wrong branch would still be caught.
+          # What: Checks the branch-model decision (master -> latest, archived vY.X.Z branches -> no live channel), scoped to each branch's own if/elif arm rather than a flat grep -F for the channel_tags line alone.
+          # Why: A flat grep would pass even if a regression kept both literal strings in the file but tied them to the wrong branch; current_dev's own mapping is superseded by the guard below, which carries the current invariant.
+          # From: Issue #1095 | PR #1532
           if ! awk '
             /if \[\[ "\$GITHUB_REF" = "refs\/heads\/master" \]\]; then/ { in_branch=1; next }
             in_branch && /^ *elif/ { in_branch=0 }
@@ -2193,12 +2183,9 @@ jobs:
             echo "::error::Master promotion must publish the latest channel."
             exit 1
           fi
-          # #1254/#1255 (2026-07-25) supersedes the current_dev half of the #825/#1141 mapping
-          # above: a current_dev PUSH must NOT auto-publish the nightly channel anymore (nightly
-          # is now a real once-daily scheduled/dispatch-only, green-gated channel -- see the
-          # `promote` job's own "Branch-to-channel mapping" comment). This guard is the mirror
-          # image of the old one: it fails if the auto-publish regresses back in, rather than
-          # failing if it is missing.
+          # What: Fails if a current_dev push regresses back to auto-publishing the nightly channel -- the mirror image of the guard above, which instead fails if the mapping is missing.
+          # Why: nightly is now a real once-daily scheduled/dispatch-only, green-gated channel (see the promote job's own "Branch-to-channel mapping" comment), so a plain current_dev push must not move it anymore.
+          # From: Issue #1095 | PR #1532
           if awk '
             /elif \[\[ "\$GITHUB_REF" = "refs\/heads\/current_dev" \]\]; then/ { in_branch=1; next }
             in_branch && /^ *elif/ { in_branch=0 }
@@ -2208,33 +2195,25 @@ jobs:
             echo "::error::current_dev push must no longer auto-publish the nightly channel (#1254/#1255 -- nightly is promoted only via the scheduled/manual channel-input dispatch path, see nightly-refresh.yml)."
             exit 1
           fi
-          # The scheduled/manual refresh path itself must actually exist and
-          # target current_dev with channel=nightly -- otherwise removing the
-          # auto-publish above would leave nightly never refreshed at all
-          # (a silent full outage of the pre-1.0 default channel, not merely
-          # slower staleness).
+          # What: Checks that nightly-refresh.yml exists.
+          # Why: Without it, removing the current_dev auto-publish above would leave nightly never refreshed at all -- a silent full outage of the pre-1.0 default channel, not merely slower staleness.
+          # From: Issue #1095 | PR #1532
           if [[ ! -f .github/workflows/nightly-refresh.yml ]]; then
             echo "::error::nightly-refresh.yml is missing; nightly would never be promoted once current_dev pushes stop auto-publishing it (#1254/#1255)."
             exit 1
           fi
-          # Explicit if/! instead of a chained `A && B && C || D` (shellcheck
-          # SC2015: that shape is not real if-then-else, since D can also run
-          # when an earlier `&&` term itself fails to execute for an
-          # unrelated reason -- not just when the check's condition is
-          # false). Not a false positive here: this is a real, if narrow,
-          # correctness footgun this project's own AG-VAL-001 ("warnings are
-          # errors") does not carve out an exception for.
+          # What: Explicit if/! instead of a chained `A && B && C || D`.
+          # Why: shellcheck SC2015 flags that chained shape as not real if-then-else, since D can also run when an earlier `&&` term fails to execute for an unrelated reason, not just when the check's condition is false -- a real, if narrow, correctness footgun AG-VAL-001 ("warnings are errors") does not carve out an exception for.
+          # From: Issue #1095 | PR #1532, AG-VAL-001
           if ! { grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
               && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
               && grep -F 'channel=nightly' .github/workflows/nightly-refresh.yml >/dev/null; }; then
             echo "::error::nightly-refresh.yml must dispatch build-push.yml against current_dev with channel=nightly (#1254/#1255)."
             exit 1
           fi
-          # Scoped to the promote job's own channel_tags=() ... 0-tags-check
-          # block (not a flat file-wide grep -F): a flat search for this
-          # exact literal would also match this very guard's own source line
-          # a few lines above, making the check tautologically fail on every
-          # run regardless of the real promote logic.
+          # What: Scoped to the promote job's own channel_tags=() ... 0-tags-check block, not a flat file-wide grep -F.
+          # Why: A flat search for this exact literal would also match this guard's own source line a few lines above, making the check tautologically fail on every run regardless of the real promote logic.
+          # From: Issue #1095 | PR #1532
           if ! awk '
             /^ *channel_tags=\(\)$/ { in_scope=1; next }
             in_scope && /if \(\( \$\{#channel_tags\[@\]\} == 0 \)\)/ { in_scope=0 }
@@ -2257,14 +2236,9 @@ jobs:
             bash scripts/check-naming-consistency.sh
 
       - name: Check workflow service lists stay in sync (issue #822)
-        # Guards against a service silently dropping out of manifest merge, channel
-        # promotion, release, PR-staging-tag garbage collection, or latest-channel backfill
-        # when a new one is added to the build matrix but one of the several hardcoded
-        # `services=(...)`/`full_setup_services=(...)` copies is missed. With no arguments,
-        # the script checks this file's own 4 copies plus gc-pr-staging-images.yml,
-        # backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh -- all real files
-        # found to duplicate this same #822 recurrence shape. Runs in the build-tools
-        # container because it needs GNU grep -P, same as the naming-consistency guard above.
+        # What: Checks this file's own 4 hardcoded `services=(...)`/`full_setup_services=(...)` copies, plus gc-pr-staging-images.yml, backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh; runs in the build-tools container because it needs GNU grep -P, same as the naming-consistency guard above.
+        # Why: Guards against a service silently dropping out of manifest merge, channel promotion, release, PR-staging-tag garbage collection, or latest-channel backfill when a new one is added to the build matrix but one of these hardcoded copies is missed.
+        # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
 
@@ -2276,13 +2250,9 @@ jobs:
             bash scripts/check-workflow-service-lists.sh
 
       - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
-        # OSPS-VM-04.02: the committed OpenVEX document (vex.openvex.json) must
-        # be regenerated from .trivyignore.yaml whenever the accepted-
-        # vulnerability list changes. This guard fails closed if it drifts, so
-        # a PR editing .trivyignore.yaml without regenerating the VEX document
-        # cannot ship a stale supply-chain artifact. Runs in the build-tools
-        # container because scripts/check-vex-drift.sh needs jq, same as the
-        # naming/service-list guards above.
+        # What: Fails closed if the committed OpenVEX document (vex.openvex.json) drifts from .trivyignore.yaml; runs in the build-tools container because scripts/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
+        # Why: OSPS-VM-04.02 requires vex.openvex.json to be regenerated from .trivyignore.yaml whenever the accepted-vulnerability list changes, so a PR editing .trivyignore.yaml without regenerating it cannot ship a stale supply-chain artifact.
+        # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
 
@@ -2294,14 +2264,9 @@ jobs:
             bash scripts/check-vex-drift.sh
 
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
-        # services/netdata/Dockerfile installs netdata's official static musl build, which
-        # statically links its OWN vendored curl (confirmed via `ldd`: not a distro package
-        # Trivy's os-pkg scanner can see -- see PR #1352). This is the maintainer-approved
-        # (option (c)) tracking mechanism that keeps that now-invisible risk from silently
-        # falling off radar: it reads netdata's own upstream build recipe for the pinned
-        # NETDATA_VERSION and fails if the vendored curl is still inside the affected range for
-        # issue #1304's 7 tracked CVE IDs. Needs real network access to fetch that recipe from
-        # netdata's GitHub repository, unlike the other checks in this job.
+        # What: Reads netdata's own upstream build recipe for the pinned NETDATA_VERSION and fails if the vendored curl is still inside the affected range for 7 tracked CVE IDs; needs real network access to fetch that recipe, unlike the other checks in this job.
+        # Why: services/netdata/Dockerfile installs netdata's official static musl build, which statically links its own vendored curl -- not a distro package Trivy's os-pkg scanner can see -- so this is the maintainer-approved tracking mechanism keeping that now-invisible risk from silently falling off radar.
+        # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
 
@@ -2324,14 +2289,9 @@ jobs:
             bash scripts/check-idempotence-test-coverage.sh
 
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
-        # Guards against the exact recurrence shape #873/#880 fixed once as a one-off manual
-        # trace but explicitly did not build a durable guard for (tracked as follow-up #879):
-        # a PR adding or extending a tests/bats/*.bats suite to source/read a new repo file,
-        # without also adding that path to build-tools.yml's on.push.paths/
-        # on.pull_request.paths -- the bats suite's regression coverage would then exist on
-        # paper but silently never run for the exact changes most likely to need it. Runs in
-        # the build-tools container for the same real bash/grep/awk/sed semantics the other
-        # check-*.sh guards above require.
+        # What: Checks that every repo file a tests/bats/*.bats suite sources/reads is also listed in build-tools.yml's on.push.paths/on.pull_request.paths; runs in the build-tools container for the same real bash/grep/awk/sed semantics the other check-*.sh guards above require.
+        # Why: Without this, a PR adding or extending a bats suite to depend on a new file, without adding that path to the trigger filters, leaves regression coverage that exists on paper but silently never runs for the exact changes most likely to need it.
+        # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
 
@@ -2343,17 +2303,9 @@ jobs:
             bash scripts/check-bats-path-filter-coverage.sh
 
       - name: Check setup.sh/simulation-script prompt drift (issue #1176)
-        # Guards the failure class #1112/#1171 and #1082/#1175 both share: a PR changes
-        # something several other files depend on by hand-duplicated convention, and nothing
-        # catches the ones left stale until CI happens to exercise them days later on an
-        # unrelated PR. This instance: setup.sh's interactive install wizard and the two
-        # expect-driven simulation scripts (scripts/setup-cli-simulation.sh,
-        # scripts/syslog-forwarding-simulation.sh) that hand-encode its prompt sequence. PR
-        # #1082 added a new unconditional prompt without updating either simulation script,
-        # hanging both until timeout (#1175) -- discovered only because those jobs happened to
-        # run against an unrelated PR. scripts/check-setup-prompt-drift.sh fails closed
-        # whenever an unconditional wizard prompt is missing a matching expect_prompt answer in
-        # either script, or a simulation script's pattern no longer matches any real prompt.
+        # What: scripts/check-setup-prompt-drift.sh fails closed whenever an unconditional wizard prompt in setup.sh's interactive install wizard is missing a matching expect_prompt answer in scripts/setup-cli-simulation.sh or scripts/syslog-forwarding-simulation.sh, or a simulation script's pattern no longer matches any real prompt.
+        # Why: These two expect-driven simulation scripts hand-encode setup.sh's prompt sequence by convention with nothing checking they stay in sync; a new unconditional prompt added without updating either script hung both until timeout, discovered only because those jobs happened to run against an unrelated PR.
+        # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
 
@@ -2365,13 +2317,9 @@ jobs:
             bash scripts/check-setup-prompt-drift.sh
 
       - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
-        # Guards the exact incident this bug-hunt item found: docs/architecture-ng.md's nginx
-        # cache-configuration table hand-duplicates each CACHE_* variable's default value as a
-        # literal string, with nothing that ever checked it against the real shipped default in
-        # config/prod/proxy.env. CACHE_MEM_MB's documented default was `200` while the real
-        # shipped default had been `512` since the variable was introduced 2026-06-18/19 -- a
-        # ~7-week-old, unnoticed drift, per AG-VAL-029. scripts/check-proxy-cache-env-doc-drift.sh
-        # fails closed whenever a documented CACHE_* default disagrees with proxy.env's real value.
+        # What: scripts/check-proxy-cache-env-doc-drift.sh fails closed whenever a documented CACHE_* default in docs/architecture-ng.md's nginx cache-configuration table disagrees with config/prod/proxy.env's real value.
+        # Why: That table hand-duplicates each CACHE_* variable's default as a literal string with nothing checking it against the real shipped default; CACHE_MEM_MB's documented default was found stale for roughly 7 weeks after the real default changed, an unnoticed drift class this guard closes per AG-VAL-029.
+        # From: Issue #1095 | PR #1532, AG-VAL-029
         run: |
           set -euo pipefail
 
@@ -2383,13 +2331,9 @@ jobs:
             bash scripts/check-proxy-cache-env-doc-drift.sh
 
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
-        # check-logging-matrix.sh itself shells out to `docker compose ...
-        # config --services` per Compose file, which -- same as the "Validate
-        # compose files" step above -- needs every required variable set to
-        # something so interpolation doesn't fail before the service list can
-        # even be read. Reuses that step's exact dummy values; kept as a
-        # second `env:` block (not merged into that step) so this stays a
-        # separately attributable, independently rerunnable CI check.
+        # What: Reuses the "Validate compose files" step's exact dummy env values, kept as its own separate `env:` block rather than merged into that step.
+        # Why: check-logging-matrix.sh shells out to `docker compose ... config --services` per Compose file, which needs every required variable set to something so interpolation does not fail before the service list can be read; keeping a separate block leaves this a separately attributable, independently rerunnable CI check.
+        # From: Issue #1095 | PR #1532
         env:
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
@@ -6465,7 +6409,7 @@ jobs:
   promote:
     # What: Promotion runs as a separate job from image build, gated by an explicit `!cancelled() && needs.X.result == 'success'` condition instead of a bare `github.event_name != 'pull_request'`.
     # Why: A bare condition gets GitHub's implicit `&& success()` appended, which walks the whole transitive needs graph including PR-only jobs (detect-changes/file-headers/pr-template-check) that always skip on push -- success() treats a skipped dependency as failed, so promote silently never ran on push even though build succeeded (confirmed live); !cancelled() avoids that skipped-as-failure trap while still stopping the job on a real maintainer cancellation, unlike always().
-    # From: Issue #532 | Issue #1095 | PR #1532
+    # From: Issue #1095 | PR #1532
     name: promote stack image channels
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
