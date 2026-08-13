@@ -215,6 +215,16 @@ RUN --mount=type=secret,id=sccache_redis_url \
           echo "[INFO] ccache probe unavailable; continuing with plain distcc (no cache layer)." >&2; \
           return 0; \
         fi; \
+        ccache_probe_stats="$ccache_probe_dir/ccache-probe-stats.log"; \
+        ccache --print-stats > "$ccache_probe_stats"; \
+        if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_probe_stats" \
+          || ! grep -qE '^remote_storage_write[[:space:]]+[1-9]' "$ccache_probe_stats"; then \
+          cat "$ccache_probe_stats" >&2; \
+          disable_ccache; \
+          rm -rf "$ccache_probe_dir"; \
+          echo "[INFO] ccache probe compiled but its Redis remote-storage write failed; continuing with plain distcc (no cache layer)." >&2; \
+          return 0; \
+        fi; \
         rm -rf "$ccache_probe_dir"; \
       fi; \
     }; \
