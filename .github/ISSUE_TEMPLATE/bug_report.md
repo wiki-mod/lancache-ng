@@ -18,5 +18,5 @@ What actually happened.
 
 **Environment**
 - Mode: [ ] standard [ ] ssl
-- OS / Docker version (`docker --version`, `docker compose version`):
-- Logs (if any, e.g. `docker logs lancache-<service>` -- container names match `lancache-proxy`, `lancache-dns-standard`, `lancache-dns-ssl`, `lancache-watchdog`, `lancache-dhcp`, `lancache-syslog`, `lancache-ui`, etc.):
+- OS / Docker version (`cat /etc/os-release`, `docker --version`, `docker compose version`):
+- Logs: run `sudo /opt/lancache-ng/setup.sh create-logs-for-issue` and attach the resulting archive (bundles all service logs, Compose status/config, host/Docker versions, and secret-redacted `.env` data in one step -- review it yourself before attaching, the command never uploads anything automatically):
