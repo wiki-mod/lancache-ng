@@ -66,8 +66,8 @@ Current status:
   runs the project's pinned Trivy action in CycloneDX SBOM mode against that
   digest, and attaches the result to the GitHub release for the tag as a
   `<service>.cdx.json` asset. The covered set is the Trivy-scanned first-party
-  images: `proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `ui`, and
-  `build-tools`. The `stack` channel-pointer image is excluded on purpose: it is
+  images: `proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ntp`, `syslog`,
+  `ui`, and `build-tools`. The `stack` channel-pointer image is excluded on purpose: it is
   a busybox pointer image, not a compiled software asset, and is not
   vulnerability-scanned either.
 - **VEX** (vulnerability disposition) for accepted findings is published as the
@@ -86,7 +86,8 @@ metadata must record the approved upstream digest.
 ## Verifying Release Provenance
 
 Every first-party image digest (`proxy`, `dns`, `watchdog`, `dhcp`,
-`dhcp-proxy`, `ui`, `build-tools`, and the `stack` channel-pointer image) gets a
+`dhcp-proxy`, `ntp`, `syslog`, `ui`, `build-tools`, and the `stack`
+channel-pointer image) gets a
 [GitHub Artifact Attestation](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
 pushed to GHCR alongside it (`.github/actions/ghcr-attest-retry`, wrapping
 `actions/attest`). This attestation is a signed, Sigstore-backed statement that

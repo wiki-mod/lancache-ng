@@ -16,6 +16,8 @@ The first-party runtime package set is:
 - `watchdog`
 - `dhcp`
 - `dhcp-proxy`
+- `ntp`
+- `syslog`
 - `ui`
 
 The first-party tooling package is:

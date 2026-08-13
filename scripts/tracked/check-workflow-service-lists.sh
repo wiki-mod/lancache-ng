@@ -78,10 +78,9 @@ repo_root=$(cd "$script_dir/../.." && pwd)
 # fixture file (matrix + arrays together, exactly like the original
 # single-file invocation this script started as) with no further arguments.
 # Optional --hosted-fallback <path> flag, consumed before the positional
-# workflow/extra-file arguments below: build-push-hosted-fallback.yml (#1500,
-# service-metadata drift found during the Fresh-Port audit) duplicates the
-# same build-matrix service decision a third way -- associative bash maps
-# (contexts/build_contexts/descriptions) plus a selected=(...) default set --
+# workflow/extra-file arguments below: build-push-hosted-fallback.yml
+# duplicates the same build-matrix service decision a third way -- associative
+# bash maps (contexts/build_contexts/descriptions) plus a selected=(...) default set --
 # rather than a services=(...)/full_setup_services=(...) array this guard's
 # existing check_services_arrays/check_full_setup_arrays functions already
 # understand. That representation needs its own comparison logic
@@ -335,7 +334,15 @@ check_full_setup_arrays() {
 # The GitHub-hosted build fallback duplicates the same build-matrix service
 # decision in associative maps rather than services=(...) arrays. Validate the
 # keys and default selection against the canonical build matrix so a new service
-# cannot silently disappear only when the fallback path is needed.
+# cannot silently disappear only when the fallback path is needed. Deliberately
+# checks map KEYS only, not the descriptions map's VALUES: a description-text
+# drift between build-push.yml's matrix and this fallback (e.g. a stale/
+# mismatched wording, not a missing/extra service) is a real but much lower-
+# stakes gap than a service silently failing to build, and value-comparison
+# would need to reach into build-push.yml's own multiline matrix parsing this
+# script does not otherwise do -- out of scope for this guard's #822 failure
+# class (a service silently dropped from a copy), which is about set
+# membership, not per-field content equality.
 assoc_array_keys() {
     local file="$1" array_name="$2"
     awk -v target="$array_name" '

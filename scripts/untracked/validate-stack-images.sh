@@ -71,12 +71,13 @@ metadata_names=$(collect_names metadata)
 external_names=$(collect_names external)
 
 runtime_images=(proxy dns watchdog dhcp dhcp-proxy ntp ui syslog)
-# #1500 (service-metadata drift found during the Fresh-Port audit): ntp had
-# silently fallen out of this array even though release/stack-images.yml's
-# own runtime: section already declared it -- this cross-check makes that
-# specific drift shape (a real runtime image present in the manifest but
-# never asserted against by this script) fail loudly instead of silently
-# passing because runtime_images itself was the stale copy.
+# runtime_images is a hand-maintained copy of the manifest's own runtime:
+# section (collected into runtime_names above) -- nothing keeps the two in
+# sync mechanically otherwise. A service present in the manifest but missing
+# from this array would silently never get checked against the manifest,
+# compose files, or the build matrix below, so assert the two sets are
+# identical rather than only ever iterating over this array's own (possibly
+# incomplete) contents.
 runtime_images_sorted="$(printf '%s\n' "${runtime_images[@]}" | sort)"
 runtime_names_sorted="$(sort <<<"$runtime_names")"
 [[ "$runtime_images_sorted" == "$runtime_names_sorted" ]] || fail "runtime_images must match every runtime image declared by release/stack-images.yml"

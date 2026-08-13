@@ -8198,7 +8198,11 @@ jobs:
         # The Trivy-scanned first-party image set (container-scan's matrix).
         # `stack` is intentionally excluded: it is a busybox channel-pointer
         # image, not a compiled software asset, and is not vuln-scanned either.
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]
+        # syslog joined container-scan's own matrix (#1428/#1433) but this
+        # separate matrix copy was never updated alongside it -- found during
+        # the service-metadata drift audit: every OTHER released first-party
+        # image already got a CycloneDX SBOM, syslog silently never did.
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
