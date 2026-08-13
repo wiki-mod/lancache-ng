@@ -349,12 +349,41 @@ declare -A classify_key_map=(
 )
 
 # Indirection so tests can stub the registry probe without a real daemon.
+#
+# Reuses scripts/lib/staging-image-freshness.sh's own _sif_inspect() helper
+# (already sourced above) instead of a second, independent
+# `docker buildx imagetools inspect ... >/dev/null 2>&1` that discards the
+# registry's own stderr. AG-CODE-011: this exact stderr-swallowing ambiguity
+# was already found and fixed once in this project, in that same library
+# file's sif_image_revision() (issue #1449 / PR #1450, 2026-08-06) -- but
+# that fix only touched the untouched-service base-image-freshness path
+# (sif_wait_for_fresh_base_image). This function is a separate call site
+# (the touched-service wait, wait_for_touched_image() below) that kept the
+# original ambiguity, and it is the one confirmed live incident that
+# actually prompted the #1449 investigation: PR #1354 (2026-08-01),
+# proxy's pr-1354-sha-b477069 tag was confirmed published in GHCR one
+# minute after this exact wait started polling for it (00:45:44 first
+# poll, 00:46:43 GHCR publish timestamp), yet the job kept polling for a
+# full hour before its hard ceiling gave up -- because a `docker buildx
+# imagetools inspect` failure for any reason (network/timeout/rate-limit/
+# auth, or a genuine "does not exist yet") looked identical to this
+# function, with the registry's own distinguishing error text thrown away
+# by `2>/dev/null` before anything could read it.
+#
+# Return codes on failure mirror _sif_inspect()'s own contract: 1 means the
+# underlying registry call failed for a reason that is NOT confirmed to be
+# "does not exist" (network/timeout/rate-limit/auth/an unrecognized error
+# shape) -- the original, ambiguous case. 2 means the registry positively
+# reported no such manifest/tag/digest exists. The STAGING_IMAGE_EXISTS_CMD
+# stub path has no real registry stderr to classify and keeps its existing
+# plain-boolean contract (no caller of that hook needed updating); only
+# wait_for_touched_image() below reads the specific code.
 image_exists() {
     local image="$1"
     if [[ -n "${STAGING_IMAGE_EXISTS_CMD:-}" ]]; then
         "$STAGING_IMAGE_EXISTS_CMD" "$image"
     else
-        docker buildx imagetools inspect "$image" >/dev/null 2>&1
+        _sif_inspect "$image" >/dev/null
     fi
 }
 
@@ -439,12 +468,39 @@ wait_for_touched_image() {
     local last_congestion_check=$((start_time - congestion_check_interval_seconds))
 
     while true; do
-        if image_exists "$pr_image"; then
+        # `image_exists ... && { ...; return 0; }`, not `if image_exists ...;
+        # then ...; fi`: POSIX defines a condition-only `if` with no matching
+        # branch (a false condition and no `else`) as exiting the WHOLE if
+        # statement with status 0, unconditionally -- not the condition
+        # command's own real exit status. That would silently discard
+        # image_exists's 1-vs-2 classification the instant it falls through
+        # to the line below (confirmed live against this exact shape: a
+        # trivial `f() { return 2; }; if f; then :; fi; echo $?` prints 0,
+        # not 2). A `CMD && BLOCK` list has no such gotcha -- when CMD fails
+        # and BLOCK does not run, $? right after is guaranteed to be CMD's
+        # own real exit status, which is what the capture on the next line
+        # actually needs.
+        image_exists "$pr_image" && {
             echo "::notice::$service staging image is present at $pr_image (waited $((SECONDS - start_time))s)."
             return 0
-        fi
+        }
+        # $? here is image_exists's own real exit status (see the comment
+        # above for why this specific control-flow shape is required for
+        # that to hold). See image_exists's own header for what 1 vs. 2
+        # means -- surfacing this distinction in the per-poll log line below
+        # is the actual fix for the PR #1354 incident documented there: a
+        # repeating "still waiting" line reads as one undifferentiated case
+        # to whoever is watching a live job log, when it can actually be
+        # either "genuinely not published yet" or "the registry call itself
+        # failed," two very different things to act on.
+        local exists_status=$?
 
         if (( SECONDS >= hard_deadline )); then
+            if (( exists_status == 2 )); then
+                echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. The registry's last response confirmed no such manifest/tag exists (not a connection/timeout/auth failure) -- this is not a detection blind spot, build-push genuinely never published this tag."
+            else
+                echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. The last registry check did NOT positively confirm absence (network/timeout/rate-limit/auth, or an error shape this check does not yet recognize) -- if this tag is later found to have existed all along, that is evidence of a registry-call failure being misread as absence, not a real missing build."
+            fi
             echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. Even if build-push's run for this PR's head ($pr_head_sha) is still active, this gate refuses to wait any longer -- a run this slow needs its own investigation rather than an ever-longer poll."
             return 1
         fi
@@ -462,7 +518,11 @@ wait_for_touched_image() {
             fi
         fi
 
-        echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s)..."
+        if (( exists_status == 2 )); then
+            echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- registry confirms no such manifest/tag yet (not a connection/timeout/auth failure)..."
+        else
+            echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- last registry check did not positively confirm absence (network/timeout/rate-limit/auth, or an unrecognized error shape); retrying..."
+        fi
         sleep "$poll_interval_seconds"
     done
 }

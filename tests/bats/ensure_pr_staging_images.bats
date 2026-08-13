@@ -247,6 +247,92 @@ STUB
     printf '%s\n' "$output" | grep -q "never appeared"
 }
 
+# --- Real image_exists()/docker-inspect-error-classification coverage -----
+#
+# Every test above (and below) drives image_exists() through its
+# STAGING_IMAGE_EXISTS_CMD stub hook, which never goes anywhere near the
+# real `docker buildx imagetools inspect`/_sif_inspect() code path
+# image_exists() actually calls. That stub-only coverage is exactly why the
+# PR #1354 incident (2026-08-01, documented in image_exists()'s own header)
+# shipped untested: proxy's pr-1354-sha-b477069 tag was confirmed published
+# in GHCR one minute after wait_for_touched_image() started polling for it,
+# yet the job kept polling for a full hour before its hard ceiling gave up,
+# because the original `docker buildx imagetools inspect ... 2>/dev/null`
+# call could not tell "genuinely not published yet" apart from "the
+# registry call itself failed" -- and no test exercised that real call to
+# catch it. These two tests instead put a FAKE `docker` executable ahead of
+# the real one on PATH (no real registry, no real docker daemon -- this
+# project's own "no local Windows testing" rule and AG-CI-001's "assume no
+# tools" both still hold; only a disposable shell script is exercised),
+# mirroring tests/bats/staging_image_freshness.bats's own
+# fake_docker_returning_stderr helper for _sif_inspect()'s sibling caller
+# (sif_image_revision()), so image_exists()'s real _sif_inspect() call and
+# wait_for_touched_image()'s new exists_status-aware log lines both run for
+# real.
+fake_docker_returning_stderr() {
+    local stderr_text="$1"
+    local fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin_dir"
+    cat > "$fake_bin_dir/docker" <<STUB
+#!/usr/bin/env bash
+echo "$stderr_text" >&2
+exit 1
+STUB
+    chmod +x "$fake_bin_dir/docker"
+    PATH="$fake_bin_dir:$PATH"
+}
+
+@test "image_exists real docker path: a confirmed-absence registry error is reported as confirmed absent, not the old ambiguous wording" {
+    unset STAGING_IMAGE_EXISTS_CMD
+    fake_docker_returning_stderr "Error response from daemon: manifest unknown"
+    export PATH
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_INTERVAL_SECONDS=0
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "confirmed no such manifest"
+    # Must NOT print the "everything else" wording alongside the confirmed-
+    # absence one -- proves the branch was actually selected, not merely
+    # appended to.
+    ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
+}
+
+@test "image_exists real docker path: a transient/unrecognized registry error is reported as NOT confirmed absent" {
+    unset STAGING_IMAGE_EXISTS_CMD
+    fake_docker_returning_stderr "dial tcp: lookup ghcr.io: connection refused"
+    export PATH
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_INTERVAL_SECONDS=0
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
+    ! printf '%s\n' "$output" | grep -q "confirmed no such manifest"
+}
+
 @test "workflow change forces every service but build-tools to be treated as touched" {
     # build-tools present (its narrower scoping keeps it touched only if built);
     # proxy/dns/watchdog/ui are forced-touched by the workflow change but none
