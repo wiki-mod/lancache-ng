@@ -21,6 +21,14 @@ inputs:
     description: Optional file containing DISTCC_POTENTIAL_HOSTS.
     required: false
     default: ""
+  ccache-redis-file:
+    description: |
+      Optional file containing the ccache Redis remote-storage endpoint (issue #887,
+      services/dns/Dockerfile's ccache-over-distcc C-dependency cache only). Reuses the
+      same Redis URL as redis-file -- see build-push.yml's own comment on why this is
+      not a second secret.
+    required: false
+    default: ""
   build-tools-image:
     description: |
       Build tools image that provides rustc, sccache, distcc, and distcc-pump.
@@ -48,6 +56,7 @@ runs:
         REDIS_FILE: ${{ inputs.redis-file }}
         DIST_CONFIG_FILE: ${{ inputs.dist-config-file }}
         DISTCC_HOSTS_FILE: ${{ inputs.distcc-hosts-file }}
+        CCACHE_REDIS_FILE: ${{ inputs.ccache-redis-file }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
         BUILD_NETWORK: ${{ inputs.build-network }}
         BUILD_PLATFORM: ${{ inputs.platform }}
@@ -68,6 +77,10 @@ runs:
         if [ -n "$DISTCC_HOSTS_FILE" ]; then
           [ -s "$DISTCC_HOSTS_FILE" ] || { echo "::error::distcc-hosts-file input points to an empty or missing file."; exit 1; }
           mount_args+=(-v "$DISTCC_HOSTS_FILE:/run/lancache/distcc-potential-hosts:ro")
+        fi
+        if [ -n "$CCACHE_REDIS_FILE" ]; then
+          [ -s "$CCACHE_REDIS_FILE" ] || { echo "::error::ccache-redis-file input points to an empty or missing file."; exit 1; }
+          mount_args+=(-v "$CCACHE_REDIS_FILE:/run/lancache/ccache-redis-url:ro")
         fi
 
         if [ "${#mount_args[@]}" -eq 0 ]; then
@@ -377,6 +390,59 @@ runs:
                 plain_log="$preflight_dir/plain-cc.log"
                 run_logged "$plain_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
                 echo "[INFO] plain cc fallback completed."
+              fi
+
+              # ccache-over-distcc (issue #887, services/dns/Dockerfile only). Only
+              # meaningful once real distcc dispatch above (not a fallback) actually
+              # succeeded -- ccache's CCACHE_PREFIX=distcc has nothing real to prefix
+              # otherwise. Mirrors the sccache validation above: a real remote Redis
+              # write, then a real remote Redis *read* from a deliberately fresh local
+              # CCACHE_DIR (a different builder container in production would never
+              # share local disk state either), so this can't pass on local-disk-only
+              # caching alone.
+              if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
+                real_cc="$(PATH="$original_path" command -v cc)"
+                export CCACHE_REMOTE_STORAGE
+                CCACHE_REMOTE_STORAGE="$(cat /run/lancache/ccache-redis-url)"
+                export CCACHE_PREFIX=distcc
+                export CCACHE_COMPILERCHECK=content
+                printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/ccache-probe.c"
+
+                ccache_dir_cold="$preflight_dir/ccache-dir-cold"
+                mkdir -p "$ccache_dir_cold"
+                CCACHE_DIR="$ccache_dir_cold" ccache --zero-stats >/dev/null
+                cold_log="$preflight_dir/ccache-cold.log"
+                run_logged "$cold_log" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c "$preflight_dir/ccache-probe.c" -o "$preflight_dir/ccache-cold.o"
+                cold_stats="$preflight_dir/ccache-cold-stats.log"
+                CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
+                if ! grep -qE '^remote_storage_write[[:space:]]+[1-9]' "$cold_stats"; then
+                  echo "[ERROR] ccache did not record a Redis remote-storage write on the cold compile." >&2
+                  cat "$cold_stats" >&2
+                  exit 1
+                fi
+
+                ccache_dir_warm="$preflight_dir/ccache-dir-warm"
+                mkdir -p "$ccache_dir_warm"
+                CCACHE_DIR="$ccache_dir_warm" ccache --zero-stats >/dev/null
+                warm_log="$preflight_dir/ccache-warm.log"
+                run_logged "$warm_log" env CCACHE_DIR="$ccache_dir_warm" ccache "$real_cc" -c "$preflight_dir/ccache-probe.c" -o "$preflight_dir/ccache-warm.o"
+                warm_stats="$preflight_dir/ccache-warm-stats.log"
+                CCACHE_DIR="$ccache_dir_warm" ccache --print-stats > "$warm_stats"
+                if ! grep -qE '^remote_storage_hit[[:space:]]+[1-9]' "$warm_stats"; then
+                  echo "[ERROR] ccache did not record a Redis remote-storage read hit from a fresh local CCACHE_DIR -- the Redis round trip is not proven, only local-disk caching (if any)." >&2
+                  cat "$warm_stats" >&2
+                  exit 1
+                fi
+                if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$cold_stats" "$warm_stats"; then
+                  echo "[ERROR] ccache recorded a Redis remote-storage error." >&2
+                  cat "$cold_stats" "$warm_stats" >&2
+                  exit 1
+                fi
+
+                unset CCACHE_REMOTE_STORAGE CCACHE_PREFIX CCACHE_COMPILERCHECK
+                echo "[INFO] ccache-over-distcc preflight completed (real Redis write + read confirmed)."
+              elif [ -s /run/lancache/ccache-redis-url ]; then
+                echo "[INFO] ccache-redis-file was provided but real distcc dispatch did not succeed above; skipping ccache preflight (nothing real to prefix)."
               fi
             fi
         PREFLIGHT

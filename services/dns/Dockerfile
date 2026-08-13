@@ -38,6 +38,7 @@ RUN set -eu; \
       command -v "$tool" >/dev/null; \
     done; \
     command -v musl-gcc >/dev/null; \
+    command -v ccache >/dev/null; \
     case "$(dpkg --print-architecture)" in \
       amd64) echo "x86_64-unknown-linux-musl" > /tmp/musl-target; ;; \
       arm64) echo "aarch64-unknown-linux-musl" > /tmp/musl-target; ;; \
@@ -81,8 +82,53 @@ COPY nats-subscriber/ .
 #   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
 #                            shuts down distcc-pump and restores the pre-distcc PATH/env.
 #   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
+#   configure_ccache/disable_ccache (issue #887) - opt-in cache layer IN FRONT of distcc,
+#                            only if distcc itself is already enabled and a ccache Redis
+#                            secret was mounted; probes with a trivial compile first, same
+#                            as configure_distcc. Uses ccache's own documented
+#                            `CC="ccache <real compiler>"` + `CCACHE_PREFIX=distcc` wiring
+#                            (ccache's manual: CCACHE_PREFIX prefixes only the real *compile*
+#                            invocation with the named wrapper -- ccache still preprocesses
+#                            locally by itself for its own cache-key computation unless
+#                            CCACHE_PREFIX_CPP is also set, which this deliberately does not
+#                            set). This is why ccache avoids the failure sccache hit for this
+#                            same job (#860): sccache instead always shells its OWN `-E`
+#                            preprocessing pass through whatever `CC` names, which crashes
+#                            against a `,cpp`-tagged distcc host list -- ccache's local
+#                            preprocessing never touches that code path at all. Empirically
+#                            confirmed on a real runner before this file was written (issue
+#                            #887): real remote distcc dispatch with `,cpp,lzo` tags intact,
+#                            real cache hits on rebuild, real `CCACHE_REMOTE_STORAGE=redis://`
+#                            writes, including against this exact `ring`/`aws-lc-sys`-class
+#                            dependency tree. `$real_cc`/`$real_gcc`/`$real_cxx`/`$real_gxx`
+#                            (resolved from `$original_path`, before configure_distcc's own
+#                            masquerade dir ever lands on PATH) are used here rather than the
+#                            plain `cc`/`gcc`/`c++`/`g++` names configure_distcc's own CC=cc
+#                            uses: `CC="ccache cc"` after configure_distcc has already run
+#                            would resolve "cc" through the masquerade symlink dir onto
+#                            *distcc itself* a second time, so ccache's own CCACHE_PREFIX=distcc
+#                            would end up recursively wrapping distcc around distcc, not
+#                            around the real compiler -- resolving the absolute path up front
+#                            avoids that trap regardless of call order. `CCACHE_COMPILERCHECK`
+#                            is set to `content` (checked against ccache's own manual, not the
+#                            `mtime` default) because this cache is shared over Redis across
+#                            builder containers and build-tools image versions -- the manual
+#                            documents `content` as specifically coping better with compiler
+#                            upgrades between builds, exactly this scenario, at the cost of
+#                            slightly slower hashing. Redis endpoint reuses the same
+#                            `SCCACHE_REDIS_URL`-sourced value already used for sccache (see
+#                            build-push.yml) rather than a second GitHub secret: ccache's own
+#                            Redis remote-storage backend has no documented custom key-prefix
+#                            attribute (checked its manual, not assumed), but ccache's own
+#                            fixed internal key namespace (`ccache:`-prefixed keys, confirmed
+#                            live) never collides with sccache's own distinct
+#                            `SCCACHE_REDIS_KEY_PREFIX`-based namespace on the same instance.
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
-#   run_cargo_build        - builds with distcc if enabled, retrying once locally on failure.
+#   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with plain
+#                            distcc (ccache disabled) first on failure, then with a normal
+#                            local compiler (distcc disabled too) if that also fails -- three
+#                            fallback tiers total, matching this project's existing
+#                            never-break-the-build philosophy for build acceleration.
 # NOTE: comments cannot be embedded inside this block itself. Docker's line-continuation
 # strips the backslash-newline entirely (no newline is inserted), so a "#" comment ending
 # in "\" would swallow every following continuation line as commented-out text instead of
@@ -90,10 +136,16 @@ COPY nats-subscriber/ .
 RUN --mount=type=secret,id=sccache_redis_url \
     --mount=type=secret,id=sccache_dist_config \
     --mount=type=secret,id=distcc_potential_hosts \
+    --mount=type=secret,id=ccache_redis_url \
     set -eu; \
     musl_target="$(cat /tmp/musl-target)"; \
     distcc_enabled=0; \
+    ccache_enabled=0; \
     original_path="$PATH"; \
+    real_cc="$(PATH="$original_path" command -v cc)"; \
+    real_gcc="$(PATH="$original_path" command -v gcc)"; \
+    real_cxx="$(PATH="$original_path" command -v c++)"; \
+    real_gxx="$(PATH="$original_path" command -v g++)"; \
     configure_sccache() { \
       if [ -s /run/secrets/sccache_redis_url ] || [ -s /run/secrets/sccache_dist_config ]; then \
         unset CARGO_MAKEFLAGS MAKEFLAGS; \
@@ -154,6 +206,32 @@ RUN --mount=type=secret,id=sccache_redis_url \
         rm -rf "$distcc_probe_dir"; \
       fi; \
     }; \
+    disable_ccache() { \
+      ccache_enabled=0; \
+      unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX; \
+      export CC=cc GCC=gcc CXX=c++ GXX=g++; \
+    }; \
+    configure_ccache() { \
+      if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
+        ccache_probe_dir="$(mktemp -d)"; \
+        echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2; \
+        export CCACHE_REMOTE_STORAGE="$(cat /run/secrets/ccache_redis_url)"; \
+        export CCACHE_DIR=/tmp/ccache-dns; \
+        export CCACHE_PREFIX=distcc; \
+        export CCACHE_COMPILERCHECK=content; \
+        export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
+        ccache_enabled=1; \
+        printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/ccache-probe.c"; \
+        if ! "$CC" -c "$ccache_probe_dir/ccache-probe.c" -o "$ccache_probe_dir/ccache-probe.o" >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
+          cat "$ccache_probe_dir/ccache-probe.log" >&2; \
+          disable_ccache; \
+          rm -rf "$ccache_probe_dir"; \
+          echo "[INFO] ccache probe unavailable; continuing with plain distcc (no cache layer)." >&2; \
+          return 0; \
+        fi; \
+        rm -rf "$ccache_probe_dir"; \
+      fi; \
+    }; \
     resolve_cargo_jobs() { \
       jobs="${CARGO_BUILD_JOBS:-}"; \
       if [ -z "$jobs" ]; then \
@@ -172,6 +250,20 @@ RUN --mount=type=secret,id=sccache_redis_url \
       cargo_status="$(cat "$cargo_status_file")"; \
       rm -f "$cargo_status_file"; \
       if [ "$cargo_status" = "0" ]; then rm -f "$cargo_log"; return 0; fi; \
+      if [ "${ccache_enabled:-0}" = "1" ]; then \
+        disable_ccache; \
+        echo "[INFO] ccache build path unavailable; retrying with plain distcc (no cache layer)." >&2; \
+        ccache_retry_status_file="$(mktemp)"; \
+        { set +e; cargo build -j "$cargo_jobs" --release --locked --target "$musl_target" 2>&1; echo "$?" >"$ccache_retry_status_file"; set -e; } | tee -a "$cargo_log"; \
+        cargo_status="$(cat "$ccache_retry_status_file")"; \
+        rm -f "$ccache_retry_status_file"; \
+        if [ "$cargo_status" = "0" ]; then \
+          echo "[INFO] plain distcc fallback (ccache disabled) completed." >&2; \
+          rm -f "$cargo_log"; \
+          return 0; \
+        fi; \
+        echo "[INFO] plain distcc fallback also failed; falling through to full local-compiler retry." >&2; \
+      fi; \
       if [ "${distcc_enabled:-0}" = "1" ]; then \
         disable_distcc; \
         unset RUSTC_WRAPPER SCCACHE_REDIS SCCACHE_CONF SCCACHE_REDIS_KEY_PREFIX; \
@@ -200,8 +292,10 @@ RUN --mount=type=secret,id=sccache_redis_url \
     }; \
     configure_sccache; \
     configure_distcc; \
+    configure_ccache; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
+    if [ "${ccache_enabled:-0}" = "1" ]; then ccache -s || true; fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b

@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI and developer validation toolchain with Rust, sccache, distcc, and build utilities.
+# CI and developer validation toolchain with Rust, sccache, ccache, distcc, and build utilities.
 #
 # Intentional build-tools default: use rust:latest so developer and CI
 # validation sees current Rust tooling early. Production service Dockerfiles
@@ -239,6 +239,22 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     && apt-get full-upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
+# ccache (issue #887): caches the C-dependency compile step (`-sys` crates such
+# as `ring`, invoked via `CC` from a build script) that distcc alone only
+# distributes, never caches. sccache was tried first for this same job (#860)
+# and was ruled out structurally: sccache always shells its own `-E`
+# preprocessing pass through whatever `CC` names, which crashes against a
+# `,cpp`-tagged distcc host list, and separately breaks on `aws-lc-sys`'s
+# generated headers. ccache preprocesses locally for its own cache-key
+# computation by default (confirmed against ccache's own manual, not assumed
+# -- Rule-Ref: AG-VAL-023) and only hands the real compile step to `distcc` via
+# `CCACHE_PREFIX`, so it structurally avoids the first failure. Installed from
+# Debian's own package (trixie-backports keeps it current, see the
+# project-wide backports pin above) rather than built from source, matching
+# AG-KD-003's prebuilt-by-default preference -- there is no per-feature
+# trimming reason to source-build it the way sccache's own install below does
+# (that block keeps only the Redis/dist-client feature set; ccache has no
+# comparable oversized default feature surface to trim).
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -247,6 +263,7 @@ RUN set -euo pipefail; \
       bc \
       build-essential \
       ca-certificates \
+      ccache \
       clang \
       cmake \
       curl \
@@ -583,6 +600,7 @@ RUN set -euo pipefail; \
       chown \
       clang \
       c++ \
+      ccache \
       cp \
       curl \
       dhclient \
@@ -634,6 +652,7 @@ RUN set -euo pipefail; \
     cargo fmt --version; \
     cargo clippy --version; \
     sccache --version; \
+    ccache --version; \
     cargo audit --version; \
     cargo tarpaulin --version; \
     actionlint --version; \

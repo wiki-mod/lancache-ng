@@ -2091,6 +2091,12 @@ jobs:
             || { echo "::error::Acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
           grep -F 'SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::Acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
+          grep -F 'ccache-redis-file:' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F "CCACHE_PREFIX=distcc" .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'remote_storage_write' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'remote_storage_hit' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'ccache_dir_warm="$preflight_dir/ccache-dir-warm"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must validate ccache-over-distcc with a real Redis write then a real Redis read from a fresh local CCACHE_DIR."; exit 1; }
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
@@ -2367,6 +2373,24 @@ jobs:
             grep -F 'cargo build -j "$cargo_jobs"' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must use the resolved cargo job count."; exit 1; }
           done
+
+          # ccache-over-distcc guard (issue #887): services/dns/Dockerfile only for now
+          # -- mirrors the sccache/distcc guard block above's style but scoped to the
+          # single file that actually wires ccache today.
+          dns_dockerfile="services/dns/Dockerfile"
+          grep -F -- "--mount=type=secret,id=ccache_redis_url" "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must consume the ccache Redis endpoint through a BuildKit secret."; exit 1; }
+          grep -F 'configure_ccache() { \' "$dns_dockerfile" >/dev/null \
+            && grep -F 'disable_ccache() { \' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must keep the opt-in ccache configure/disable functions."; exit 1; }
+          grep -F 'CCACHE_PREFIX=distcc' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must wire ccache through distcc via CCACHE_PREFIX, not a plain CC swap."; exit 1; }
+          grep -F 'CCACHE_COMPILERCHECK=content' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must use content-based ccache compiler checking, not the mtime default, for a cache shared across build-tools image versions."; exit 1; }
+          grep -F '[ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must only enable ccache once distcc itself is already enabled."; exit 1; }
+          grep -F 'command -v ccache >/dev/null' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must fail closed if the shared build-tools image is missing ccache."; exit 1; }
 
           if awk '
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }
@@ -5975,6 +5999,24 @@ jobs:
             echo "distcc-hosts-file=$distcc_hosts_file" >> "$GITHUB_OUTPUT"
           fi
 
+          # ccache-over-distcc (issue #887, services/dns/Dockerfile's nats-subscriber
+          # C-dependency compile path only -- see that Dockerfile's own comment for the
+          # full architecture rationale). Deliberately reuses the same Redis endpoint
+          # already required for sccache above rather than a second repository secret:
+          # ccache's own fixed `ccache:` key namespace never collides with sccache's
+          # distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance.
+          # No separate CCACHE_REDIS_MODE on/off variable exists (unlike
+          # SCCACHE_REDIS_MODE) -- ccache activates automatically whenever the Redis
+          # and distcc infrastructure it layers on top of are both already configured,
+          # and every ccache failure path in the Dockerfile falls back to plain distcc
+          # (then to a fully local compile) without ever hard-failing the build, so a
+          # separate kill switch has no real operational need yet. Add one if the
+          # maintainer wants independent on/off control later.
+          if [ "$redis_enabled" = "1" ] && [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
+            secret_files+=("ccache_redis_url=$redis_file")
+            echo "ccache-redis-file=$redis_file" >> "$GITHUB_OUTPUT"
+          fi
+
           {
             echo "secret-files<<SECRET_FILES"
             printf '%s\n' "${secret_files[@]}"
@@ -6007,6 +6049,12 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
+          # ccache-over-distcc (issue #887) is services/dns/Dockerfile-only for now
+          # (services/ui/Dockerfile's lancache-distcc-wrapper does not understand
+          # ccache's CCACHE_PREFIX invocation convention yet -- see that Dockerfile's
+          # own wrapper comment). Scoped here, not inside the composite action, so the
+          # action stays a generic, service-agnostic building block.
+          ccache-redis-file: ${{ matrix.service == 'dns' && steps.sccache-secret.outputs.ccache-redis-file || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}
           platform: linux/amd64
