@@ -37,6 +37,12 @@ inputs:
     description: Trivy's own vulnerability-database cache dir (a different concept from this action's scan-result cache above) -- passed through to trivy-action's cache-dir input unchanged.
     required: false
     default: ""
+  registry-username:
+    description: Registry username, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    required: true
+  registry-password:
+    description: Registry password/token, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    required: true
 outputs:
   cache-hit:
     description: "true if a clean-scan marker already existed for this digest+bucket (the Trivy scan below was skipped)."
@@ -51,10 +57,17 @@ runs:
         path: ${{ runner.temp }}/trivy-scan-clean
         key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
 
+    # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue #1535)
+    # around trivy-action, instead of calling it directly: see
+    # .github/actions/trivy-scan-retry's own header comment for the two real
+    # CI failures (PR #1503, #1500) this closes, both hitting trivy's
+    # unauthenticated first-choice DB mirror with zero retry anywhere.
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
-      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      uses: ./.github/actions/trivy-scan-retry
       with:
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
         image-ref: ${{ inputs.image-ref }}
         scanners: vuln,secret
         severity: HIGH,CRITICAL
