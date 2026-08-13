@@ -1620,6 +1620,20 @@ jobs:
             true
           done
 
+          VALIDATE_COMPOSE
+
+      - name: Validate DHCP-proxy env-file contract and required setup/env keys
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -s <<'BUILD_PUSH_GUARD_2'
+          set -euo pipefail
+
           missing_required=0
           while IFS= read -r key; do
             if ! grep -Eq "^${key}=[^[:space:]]+" deploy/quickstart/.env; then
@@ -1772,6 +1786,20 @@ jobs:
             echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
             exit 1
           fi
+
+          BUILD_PUSH_GUARD_2
+
+      - name: Validate setup.sh update-migration and session/cache repair keys
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -s <<'BUILD_PUSH_GUARD_3'
+          set -euo pipefail
 
           setup_required_keys=(
             DDNS_TSIG_KEY
@@ -1945,6 +1973,20 @@ jobs:
             echo "::error::setup.sh update must pause the convergence timer before mutating local install state."
             exit 1
           fi
+          BUILD_PUSH_GUARD_3
+
+      - name: Validate channel-tag promotion and build-tools image guards
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -s <<'BUILD_PUSH_GUARD_4'
+          set -euo pipefail
+
           grep -F 'systemctl stop lancache-converge.service' setup.sh >/dev/null \
             || { echo "::error::setup.sh update must stop any active convergence service before mutating local install state."; exit 1; }
           if ! awk '
@@ -2097,6 +2139,20 @@ jobs:
             && grep -F 'remote_storage_hit' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F 'ccache_dir_warm="$preflight_dir/ccache-dir-warm"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::Acceleration preflight must validate ccache-over-distcc with a real Redis write then a real Redis read from a fresh local CCACHE_DIR."; exit 1; }
+          BUILD_PUSH_GUARD_4
+
+      - name: Validate acceleration-infrastructure (sccache/distcc/ccache preflight) wiring
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -s <<'BUILD_PUSH_GUARD_5'
+          set -euo pipefail
+
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
@@ -2250,6 +2306,20 @@ jobs:
             echo "::error::Could not extract build-tools.yml's \"Promote mutable tags\" derivation logic -- its step name or tag-derivation lines may have moved; update the extraction markers in build-push.yml's guard alongside them."
             exit 1
           fi
+          BUILD_PUSH_GUARD_5
+
+      - name: Validate sccache/distcc Dockerfile wiring and promote-tags extraction
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -s <<'BUILD_PUSH_GUARD_6'
+          set -euo pipefail
+
           # Write the extracted lines to a real script file rather than a
           # bash -c string: the extracted text already contains its own
           # quotes and a multi-line comment, and re-quoting that safely as a
@@ -2374,6 +2444,20 @@ jobs:
               || { echo "::error::$dockerfile must use the resolved cargo job count."; exit 1; }
           done
 
+          BUILD_PUSH_GUARD_6
+
+      - name: Validate ccache-over-distcc wiring and image-tag resolution (issue #887/#1535)
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            bash -s <<'BUILD_PUSH_GUARD_7'
+          set -euo pipefail
+
           # ccache-over-distcc guard (issue #887): services/dns/Dockerfile only for now
           # -- mirrors the sccache/distcc guard block above's style but scoped to the
           # single file that actually wires ccache today.
@@ -2471,7 +2555,8 @@ jobs:
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
-          VALIDATE_COMPOSE
+          BUILD_PUSH_GUARD_7
+
 
       # Deliberately its OWN step, not appended to "Validate compose files" above: that
       # step's embedded script is already large enough that actionlint's shellcheck
