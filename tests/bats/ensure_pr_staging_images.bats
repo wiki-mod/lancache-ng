@@ -247,28 +247,14 @@ STUB
     printf '%s\n' "$output" | grep -q "never appeared"
 }
 
-# --- Real image_exists()/docker-inspect-error-classification coverage -----
-#
-# Every test above (and below) drives image_exists() through its
-# STAGING_IMAGE_EXISTS_CMD stub hook, which never goes anywhere near the
-# real `docker buildx imagetools inspect`/_sif_inspect() code path
-# image_exists() actually calls. That stub-only coverage is exactly why the
-# PR #1354 incident (2026-08-01, documented in image_exists()'s own header)
-# shipped untested: proxy's pr-1354-sha-b477069 tag was confirmed published
-# in GHCR one minute after wait_for_touched_image() started polling for it,
-# yet the job kept polling for a full hour before its hard ceiling gave up,
-# because the original `docker buildx imagetools inspect ... 2>/dev/null`
-# call could not tell "genuinely not published yet" apart from "the
-# registry call itself failed" -- and no test exercised that real call to
-# catch it. These two tests instead put a FAKE `docker` executable ahead of
-# the real one on PATH (no real registry, no real docker daemon -- this
-# project's own "no local Windows testing" rule and AG-CI-001's "assume no
-# tools" both still hold; only a disposable shell script is exercised),
-# mirroring tests/bats/staging_image_freshness.bats's own
-# fake_docker_returning_stderr helper for _sif_inspect()'s sibling caller
-# (sif_image_revision()), so image_exists()'s real _sif_inspect() call and
-# wait_for_touched_image()'s new exists_status-aware log lines both run for
-# real.
+# What: Real (non-stubbed) coverage for image_exists()'s _sif_inspect() call
+# path, using a fake `docker` executable ahead of the real one on PATH (no
+# real registry/daemon), mirroring staging_image_freshness.bats's own
+# fake_docker_returning_stderr helper.
+# Why: Every other test in this file drives image_exists() through the
+# STAGING_IMAGE_EXISTS_CMD stub hook, which never exercises the real
+# docker-calling branch, so a regression there would go undetected.
+# From: PR #1538, Issue #1449
 fake_docker_returning_stderr() {
     local stderr_text="$1"
     local fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
@@ -303,12 +289,18 @@ STUB
     run bash "$script"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "confirmed no such manifest"
-    # Must NOT print the "everything else" wording alongside the confirmed-
-    # absence one -- proves the branch was actually selected, not merely
-    # appended to.
+    # What: asserts the "did NOT positively confirm absence" wording is absent.
+    # Why: proves the confirmed-absence branch was actually selected, not merely appended alongside the other wording.
+    # From: PR #1538, Issue #1449
     ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
 }
 
+# What: fake `docker` yields an unrecognized/transient error, not a
+# confirmed-absence one, for image_exists()'s other branch.
+# Why: exercises the exists_status==1 path (registry call failed,
+# not confirmed absent) so both halves of the tri-state contract are covered
+# by a real docker-calling test, not just the confirmed-absence half above.
+# From: PR #1538, Issue #1449
 @test "image_exists real docker path: a transient/unrecognized registry error is reported as NOT confirmed absent" {
     unset STAGING_IMAGE_EXISTS_CMD
     fake_docker_returning_stderr "dial tcp: lookup ghcr.io: connection refused"
