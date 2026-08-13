@@ -228,6 +228,19 @@ require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
 require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
+# release-sbom's own `service: [...]` flow-sequence matrix is a fourth,
+# independent copy of the same service-list class: it is neither a `-
+# service:` build-matrix entry (so scripts/tracked/check-workflow-service-lists.sh's
+# canonical extraction never sees it) nor a `services=(...)`/
+# `full_setup_services=(...)` bash array (so that same guard's own array
+# checks don't reach it either) -- syslog silently missing from just this
+# one copy (while every other released first-party image already got a
+# CycloneDX SBOM) is exactly the drift shape this narrower literal check
+# exists to catch mechanically instead of relying on manual review to
+# notice a fifth recurrence.
+require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools\]' \
+  .github/workflows/build-push.yml \
+  'release-sbom must cover every Trivy-scanned first-party image (mirrors container-scan matrix)'
 
 forbidden_latest_default_branch='type=raw,value=latest,enable={{is_default'
 forbidden_latest_default_branch="${forbidden_latest_default_branch}_branch}}"
