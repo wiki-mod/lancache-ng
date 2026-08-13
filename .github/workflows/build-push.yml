@@ -1660,11 +1660,9 @@ jobs:
           grep -F 'needs: promote' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Release notes must run after channel promotion."; exit 1; }
 
-          # Only prerelease is protected here, not draft: prerelease/stable is a
-          # real maintainer policy call PATCH must never silently flip, but a
-          # draft has no legitimate "leave it hidden forever" case once this
-          # job runs -- forcing draft:false in that path (2026-08-03 fix) is
-          # required, not a violation, so it must not trip this guard.
+          # What: Only prerelease is protected here, not draft.
+          # Why: prerelease/stable is a real maintainer policy call PATCH must never silently flip, but a draft has no legitimate "leave it hidden forever" case once this job runs, so forcing draft:false there is required and must not trip this guard.
+          # From: Issue #1095 | PR #1532
           if awk '
             /if \[ "\$status" = "200" \]/ { in_patch=1 }
             /elif \[ "\$status" = "404" \]/ { in_patch=0 }
@@ -1845,17 +1843,9 @@ jobs:
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
-          # Container-scan's own local scan-build networking entitlement (`allow_args+=(--
-          # allow network.host)` and its explicit docker-container Buildx builder) has no
-          # code path to check anymore: container-scan no longer runs any local `docker
-          # buildx build` for a changed service (issue #1095 G8 fix), so no check for it
-          # lives here. A plain `grep -F '<literal>' .github/workflows/build-push.yml`
-          # check embedded in this same file always matches its own quoted source line
-          # whenever the literal is simple text with no shell-escaping quirks, independent
-          # of whether the real code it names still exists -- unlike the anchored `grep -E
-          # '^...$'` checks (e.g. the `network:`/`allow:` pair directly above), which do not
-          # self-match. That defect class is broader than these two removed checks and is
-          # tracked separately, not audited or fixed in this PR.
+          # What: No check remains here for container-scan's old local scan-build networking entitlement (`allow_args+=(--allow network.host)` and its explicit docker-container Buildx builder).
+          # Why: container-scan no longer runs any local `docker buildx build` for a changed service, so there is no code path left to check; a plain `grep -F '<literal>'` check embedded in this same file would always self-match its own quoted source line regardless of whether the real code still exists, unlike the anchored `grep -E '^...$'` checks above (e.g. the network:/allow: pair) which do not self-match -- that broader self-matching defect class is tracked separately, not audited here.
+          # From: Issue #1095 | PR #1532
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--out-dir' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -1873,12 +1863,9 @@ jobs:
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
           grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
-          # Positive check (not a "must NOT contain the old pattern" negative
-          # check): the old negative form quoted the forbidden pattern as its
-          # own grep -F argument using single quotes, so the check's own
-          # source line was a byte-for-byte match of the thing it was
-          # supposed to detect as absent -- it would have failed
-          # unconditionally, forever, regardless of the real code below.
+          # What: A positive check (grep for the correct pattern), not a "must NOT contain the old pattern" negative check.
+          # Why: The old negative form quoted the forbidden pattern as its own grep -F argument, so the check's own source line was a byte-for-byte match of the thing it claimed to detect as absent -- it would have failed unconditionally, forever, regardless of the real code below.
+          # From: Issue #1095 | PR #1532
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
           grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
@@ -1909,25 +1896,18 @@ jobs:
             || { echo "::error::Shellcheck must depend on validate-compose so it uses the validated build-tools image."; exit 1; }
           grep -F 'runs-on: [self-hosted, linux, lancache, lancache-heavy]' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow's amd64 leg must run on the heavy runner tier."; exit 1; }
-          # arm64 builds natively on a GitHub-hosted runner (same rationale as
-          # build-push.yml's build-arm64, #592) instead of QEMU on the
-          # self-hosted pool -- confirmed on #606 that emulating the
-          # docker-compose source build added for CVE-2026-39822 fails
-          # reproducibly under QEMU with a Go compiler "bufio: buffer full"
-          # error. This must not regress back to an emulated arm64 leg.
+          # What: arm64 builds natively on a GitHub-hosted runner, same as build-push.yml's own build-arm64, instead of QEMU on the self-hosted pool; must not regress back to an emulated arm64 leg.
+          # Why: Emulating the docker-compose source build added for CVE-2026-39822 fails reproducibly under QEMU with a Go compiler "bufio: buffer full" error.
+          # From: Issue #1095 | PR #1532
           grep -F 'runs-on: ubuntu-24.04-arm' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow's arm64 leg must run natively on ubuntu-24.04-arm, not QEMU."; exit 1; }
           grep -F 'setup-qemu-action' .github/workflows/build-tools.yml >/dev/null \
             && { echo "::error::The build-tools workflow must not reintroduce QEMU emulation for its arm64 leg."; exit 1; }
           awk '
             /name: Build and push amd64 build-tools image/ { in_publish = 1; found = 0; next }
-            # Anchored on an actual step declaration ("- name: ..."), not a bare /name: /
-            # substring match: a with: input ending in name (for example a username input on the
-            # ghcr-build-push-retry composite action) also contains the literal substring
-            # "name: " and would otherwise be misread as the next steps boundary, ending the scan
-            # before it reaches "pull: true" below. NOTE: no apostrophes in this comment -- this
-            # whole block is inside a bash single-quoted awk script, and a single quote here would
-            # close that string early and hand the rest of the line to bash as literal commands.
+            # What: Anchored on an actual step declaration ("- name: ..."), not a bare /name: / substring match.
+            # Why: A with: input ending in name (for example a username input on the ghcr-build-push-retry composite action) also contains the literal substring "name: " and would otherwise be misread as the next steps boundary, ending the scan before it reaches "pull: true" below. NOTE: no apostrophes anywhere in this comment block -- it sits inside a bash single-quoted awk script, and a single quote here would close that string early and hand the rest of the line to bash as literal commands.
+            # From: Issue #1095 | PR #1532
             in_publish && /^[[:space:]]*- name: / { exit found ? 0 : 1 }
             in_publish && /pull: true/ { found = 1 }
             END { if (in_publish) exit found ? 0 : 1; exit 1 }
@@ -1946,13 +1926,9 @@ jobs:
           grep -F 'image-ref:' .github/workflows/build-tools.yml | grep -F 'BUILD_TOOLS_IMAGE' | grep -F 'steps.build.outputs.digest' >/dev/null \
             && grep -F 'image-ref:' .github/workflows/build-push.yml | grep -F 'github.repository' | grep -F 'matrix.service' | grep -F 'steps.build.outputs.digest' >/dev/null \
             || { echo "::error::Build-tools publish paths must scan the exact pushed digest before attestation/promotion."; exit 1; }
-          # build/build-arm64's "Build and push" step (#822) now runs through
-          # .github/actions/ghcr-build-push-retry instead of a bare
-          # docker/build-push-action + inline "retry-build" sibling step, so
-          # steps.build.outputs.digest above already resolves to whichever
-          # internal attempt succeeded -- there is no separate retry-build
-          # step id left to reference. Guard that the retry wrapper itself
-          # stays wired in, instead of the now-removed digest-fallback text.
+          # What: Guards that the ghcr-build-push-retry wrapper itself stays wired into build/build-arm64's "Build and push" step, not the now-removed digest-fallback text.
+          # Why: That step runs through .github/actions/ghcr-build-push-retry instead of a bare docker/build-push-action plus an inline "retry-build" sibling step, so steps.build.outputs.digest already resolves to whichever internal attempt succeeded -- there is no separate retry-build step id left to reference.
+          # From: Issue #1095 | PR #1532
           grep -F 'uses: ./.github/actions/ghcr-build-push-retry' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::build/build-arm64 must publish through the shared ghcr-build-push-retry composite action so GHCR pushes retry on transient 401s (#822)."; exit 1; }
           grep -F 'Note arm64 scan coverage deferral' .github/workflows/build-tools.yml >/dev/null \
@@ -1965,25 +1941,14 @@ jobs:
           grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
-          # build-tools.yml's "Promote mutable tags" step writes a branch-name-derived mutable
-          # tag, and this repo has a branch literally named "v0.2.0" -- without the "-tc" ("test
-          # candidate") suffix, a push to that branch would publish build-tools:v0.2.0, the
-          # exact tag build-push.yml's own promote job below writes as the real, immutable
-          # vX.Y.Z stable-release tag once that version is actually tagged. A pin check alone
-          # (grepping for the literal branch_tag string) would pass even if a future edit kept
-          # that literal in place but then overwrote branch_tag again for a release-shaped ref.
-          # Instead of retyping the derivation logic here (which could quietly drift from the
-          # real thing), this extracts build-tools.yml's actual "Promote mutable tags" run
-          # script and executes those exact lines under real and adversarial ref names, including
-          # "v0.2.0" itself, failing if any come out shaped like a real release tag. Because
-          # this runs the real script text, a bypass added anywhere in that range is caught too.
+          # What: Extracts build-tools.yml's actual "Promote mutable tags" run script and executes those exact lines under real and adversarial ref names (including "v0.2.0"), failing if any come out shaped like a real release tag.
+          # Why: This repo has a branch literally named "v0.2.0"; without the "-tc" ("test candidate") suffix, a push to it would publish build-tools:v0.2.0, the exact immutable vX.Y.Z tag promote writes for a real stable release. A pin check alone (grepping for the literal branch_tag string) would pass even if a future edit kept that literal but overwrote branch_tag again for a release-shaped ref; executing the real script text instead of retyping the derivation logic catches a bypass added anywhere in that range too.
+          # From: Issue #1095 | PR #1532
           grep -F 'branch_tag="${sanitized_ref}-tc"' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
-          # Anchored on the plain substring "sanitized_ref=" (no regex
-          # metacharacters) rather than a fuller literal match: this awk
-          # script must behave identically on CI's mawk and on gawk used
-          # for local testing, and mid-pattern "$" escaping is exactly where
-          # those implementations are known to diverge in ERE mode.
+          # What: Anchored on the plain substring "sanitized_ref=" (no regex metacharacters), not a fuller literal match.
+          # Why: This awk script must behave identically on CI's mawk and on gawk used for local testing, and mid-pattern "$" escaping is exactly where those implementations are known to diverge in ERE mode.
+          # From: Issue #1095 | PR #1532
           promote_tags_script="$(awk '
             /name: Promote mutable tags/ { in_step = 1 }
             in_step && /sanitized_ref=/ { capture = 1 }
