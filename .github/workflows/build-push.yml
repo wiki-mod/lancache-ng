@@ -5066,6 +5066,8 @@ jobs:
           freshness-bucket: ${{ steps.scan-cache-bucket.outputs.value }}
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           # vuln-db-cache-dir intentionally omitted (G8 fix removed this job's own
           # managed cache dir): trivy-action falls back to its own default
           # (~/.cache/trivy), which "Self-heal Trivy's own default cache directory

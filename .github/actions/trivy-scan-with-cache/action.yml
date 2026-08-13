@@ -43,6 +43,18 @@ inputs:
   registry-password:
     description: Registry password/token, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
     required: true
+  dockerhub-username:
+    description: >-
+      Docker Hub username, forwarded to trivy-scan-retry for its optional
+      third DB-source tier (issue #1535 follow-up). Optional, default "" --
+      matches trivy-scan-retry's own optionality, this action does not add
+      a hard dependency on top of it.
+    required: false
+    default: ""
+  dockerhub-password:
+    description: Docker Hub password/token, forwarded to trivy-scan-retry (issue #1535 follow-up).
+    required: false
+    default: ""
 outputs:
   cache-hit:
     description: "true if a clean-scan marker already existed for this digest+bucket (the Trivy scan below was skipped)."
@@ -68,6 +80,8 @@ runs:
       with:
         username: ${{ inputs.registry-username }}
         password: ${{ inputs.registry-password }}
+        dockerhub-username: ${{ inputs.dockerhub-username }}
+        dockerhub-password: ${{ inputs.dockerhub-password }}
         image-ref: ${{ inputs.image-ref }}
         scanners: vuln,secret
         severity: HIGH,CRITICAL

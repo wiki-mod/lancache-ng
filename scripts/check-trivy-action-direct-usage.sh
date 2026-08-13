@@ -21,8 +21,13 @@
 # the direct-usage check above, just one level deeper (inside the wrapper's
 # own contract instead of around it). check_dockerhub_wiring() below is a
 # second, independent check for that: it walks every real
-# `uses: ./.github/actions/trivy-scan-retry` call site in .github/workflows
-# and flags any whose `with:` block is missing either key. Kept in this
+# `uses: ./.github/actions/trivy-scan-retry` call site in both
+# .github/workflows and .github/actions -- a real call site can sit one
+# level removed from a workflow file (.github/actions/trivy-scan-with-cache
+# wraps trivy-scan-retry and is itself called from build-push.yml, a shape
+# a workflows-only search silently missed until a repo-wide grep caught it
+# during this same task) -- and flags any whose `with:` block is missing
+# either key. Kept in this
 # same file (not split into a second script) because both checks exist to
 # answer the same underlying question -- "is every real call site actually
 # using the wrapper's full, current contract" -- for the one wrapper this
@@ -171,7 +176,7 @@ check_dockerhub_wiring() {
             done
         fi
         violations=$((violations + rc))
-    done < <(grep -rl --include='*.yml' --include='*.yaml' 'uses: *\./\.github/actions/trivy-scan-retry' .github/workflows 2>/dev/null || true)
+    done < <(grep -rl --include='*.yml' --include='*.yaml' 'uses: *\./\.github/actions/trivy-scan-retry' .github/workflows .github/actions 2>/dev/null || true)
     return "$violations"
 }
 
