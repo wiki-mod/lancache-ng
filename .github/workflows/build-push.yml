@@ -4607,22 +4607,9 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # Step 4 allowlist (issue #1095): all 8 first-party product/tooling
-          # services go through the identical decide_one() call below, with
-          # no per-service branching -- each gets the same three-part
-          # verification (channel image revision label + real git ancestry +
-          # a real content diff via scripts/classify-image-impact.sh) that
-          # scripts/lib/push-reuse.sh's own header documents in full.
-          # build-tools shares this same allowlist (rather than keeping the
-          # separate, hand-rolled verification it originally had, built
-          # independently and in parallel with this job before the
-          # duplication between the two was noticed) so there is exactly one
-          # implementation of this check in the codebase, not two drifting
-          # copies. Real push-path verification status (which services have
-          # actually been observed taking the positive reuse=true retag
-          # branch on a live push, as opposed to only ever having been
-          # exercised in tests) belongs in the PR/issue trail, not here --
-          # see issue #1095's own comment history for current status.
+          # What: All 8 first-party product/tooling services (including build-tools) go through the identical decide_one() call below, with no per-service branching.
+          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; build-tools used to have its own separate, hand-rolled verification built independently, so sharing this allowlist keeps exactly one implementation of the check in the codebase instead of two drifting copies. Real push-path verification status (which services have actually been observed taking the reuse=true retag branch on a live push, not just in tests) belongs in the PR/issue trail, not in this comment.
+          # From: Issue #1095 | PR #1532
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools)
 
           is_allowlisted() {
@@ -4633,20 +4620,9 @@ jobs:
           }
 
           # decide_one <classify_key> <matrix_service> <before_sha_changed>
-          #
-          # <before_sha_changed> is detect-changes' own before..sha verdict for this service --
-          # a cheap pre-check that lets a service known to have changed in THIS push skip the
-          # registry round-trip entirely (it must rebuild regardless of channel state; see
-          # push-reuse.sh's header for why "changed since revision" is a strict superset of
-          # "changed since before" whenever revision precedes before, which the channel's own
-          # once-daily refresh cadence guarantees in practice).
-          #
-          # Writes this service's own digest_<service>=<digest> line straight to
-          # $GITHUB_OUTPUT (not returned via stdout alongside the true/false verdict) whenever
-          # reuse is safe -- #1095 F-21's digest-pinning fix (see this job's own `outputs:`
-          # comment above for the full TOCTOU-race rationale). Prints only "true"/"false" on
-          # stdout, unchanged, so the existing `$(decide_one ...)` capture pattern below still
-          # works exactly as before.
+          # What: <before_sha_changed> is detect-changes' own before..sha verdict, a cheap pre-check that skips the registry round-trip for a service known to have changed in this push; writes digest_<service>=<digest> straight to $GITHUB_OUTPUT whenever reuse is safe, while still printing only "true"/"false" on stdout for the existing `$(decide_one ...)` capture pattern.
+          # Why: "Changed since revision" is a strict superset of "changed since before" whenever revision precedes before (guaranteed in practice by the channel's own once-daily refresh cadence), so this pre-check is safe; the digest is written via $GITHUB_OUTPUT rather than stdout to close a time-of-check-to-time-of-use race (see this job's own `outputs:` comment above).
+          # From: Issue #1095 | PR #1532
           decide_one() {
             local classify_key="$1" matrix_service="$2" before_sha_changed="$3"
             local output_key="${matrix_service//-/_}"
