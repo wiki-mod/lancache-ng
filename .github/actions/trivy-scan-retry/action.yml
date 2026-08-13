@@ -17,16 +17,69 @@ description: >-
   Two real CI failures (issue #1535: PR #1503 "failed to download artifact
   from mirror.gcr.io/aquasec/trivy-db:2", PR #1500 "Unable to initialize the
   Java DB") both hit trivy's *first* default DB mirror
-  (mirror.gcr.io/aquasec/trivy-db, a GCR-hosted proxy of the Docker Hub
-  image `aquasec/trivy-db` -- so it inherits Docker Hub's separate anonymous
-  pull rate limit, the same class of problem this project already knows
-  from Docker Hub rate limiting elsewhere) with no retry anywhere. Trivy's
-  own internal fallback (aquasecurity/trivy's pkg/oci/artifact.go
+  (mirror.gcr.io/aquasec/trivy-db, a GCR-hosted pull-through cache of the
+  Docker Hub image `aquasec/trivy-db`) with no retry anywhere. Trivy's own
+  internal fallback (aquasecurity/trivy's pkg/oci/artifact.go
   Artifacts.Download) only tries its second configured repository when the
   first failure is classified as a *transient* transport error; a failure
   shape outside that classification aborts immediately with exactly the
   "failed to download artifact from <repo>: <err>" message both PRs hit,
   never reaching the second mirror at all.
+
+  CORRECTED CLAIM (issue #1535 follow-up, 2026-08-13): an earlier version of
+  this comment asserted that mirror.gcr.io "inherits Docker Hub's separate
+  anonymous pull rate limit" because it proxies a Docker Hub image. That
+  causal mechanism was checked live and does not hold: a real anonymous
+  Docker Hub rate-limit counter was read from registry-1.docker.io
+  (`x-ratelimit-remaining` on a real manifest GET, confirming a 100
+  pull/hour anonymous-per-IP budget), then 8 real manifest pulls were made
+  against mirror.gcr.io/v2/aquasec/trivy-db back to back, then the Docker
+  Hub counter was re-read -- it had not moved (delta 0 across 8 pulls,
+  beyond the +/-1 noise a single measurement call itself introduces).
+  mirror.gcr.io fetches upstream (when it needs to at all -- this image is
+  popular enough to very likely be cache-hot) through Google's own
+  infrastructure identity, not the calling client's IP/account, so it does
+  not draw down this project's own Docker Hub quota the way a direct
+  anonymous docker.io pull would. Whatever actually caused the two PR
+  failures above is more likely a GCR-side mirror-service issue (its own
+  capacity/reliability characteristics, decoupled from Docker Hub's
+  per-caller limit) than Docker Hub rate limiting proxied through it -- an
+  already-covered case, since AG-CI-013 already treats "any external,
+  occasionally-transiently-failing dependency" as requiring exactly the
+  retry wrapper this whole file implements, regardless of the specific
+  upstream failure mechanism. This does not change the GHCR-then-mirror
+  ordering below, which this correction leaves untouched.
+
+  THIRD DB-SOURCE TIER: DIRECTLY-AUTHENTICATED DOCKER HUB (issue #1535
+  follow-up, 2026-08-13): `docker.io/aquasec/trivy-db`/`trivy-java-db` were
+  added as a third, last-resort db.repository/db.java-repository entry in
+  trivy-config.yaml, using this project's own long-unused `DOCKERHUB_TOKEN`/
+  `DOCKERHUB_USERNAME` repository secrets (present since 2026-06-25, never
+  actually wired into any workflow before this). Confirmed live as real,
+  independently pullable repositories -- not assumed from the mirror.gcr.io
+  proxy relationship -- via a real anonymous token exchange
+  (auth.docker.io/token) plus a manifest GET against registry-1.docker.io
+  for both `aquasec/trivy-db:2` and `aquasec/trivy-java-db:1`, both
+  returning `200 OK` with a real manifest digest. ORDER: GHCR first (this
+  project's own registry, no known cap) and mirror.gcr.io second are left
+  exactly as PR #1542 shipped them; Docker Hub goes *last* (third), not
+  second as an earlier draft of this fix assumed, precisely because of the
+  correction above -- if mirror.gcr.io does not measurably draw down this
+  project's own Docker Hub quota, there is no quota-conservation reason to
+  place a real, finite, credentialed budget (100 anonymous pulls/hour per
+  IP was the confirmed floor; authenticated raises it, but it is still a
+  shared, exhaustible, cross-CI budget, unlike GHCR which has no documented
+  per-IP cap) ahead of an already-working, effectively-uncapped-from-this-
+  project's-perspective tier. Docker Hub here is additional redundancy for
+  the case both existing tiers fail together (a GHCR outage coinciding with
+  a GCR mirror-service issue), not a fix for a specific confirmed
+  inheritance mechanism. The two new `dockerhub-username`/`dockerhub-password`
+  inputs below are optional (default empty) and their login steps are
+  gated on `dockerhub-username` being non-empty, mirroring the existing
+  GHCR login's own "additive defense-in-depth, not a hard dependency"
+  framing -- a caller of this action that never sets them simply never logs
+  in to Docker Hub and relies on the first two (unchanged) tiers, exactly
+  as before this change.
 
   Fix, beyond the retry itself: `trivy-config.yaml` (alongside this file,
   passed via trivy-action's own `trivy-config` INPUT, never an env var --
@@ -146,6 +199,18 @@ inputs:
   password:
     description: Registry password/token to authenticate with (initially, and again before each retry).
     required: true
+  dockerhub-username:
+    description: >-
+      Docker Hub username for the optional, additive third DB-source tier
+      (docker.io/aquasec/trivy-db, tried last -- see this file's own header
+      comment). Left blank (the default), the login step is skipped entirely
+      and this action behaves exactly as it did before this input existed.
+    required: false
+    default: ""
+  dockerhub-password:
+    description: Docker Hub password/access token to pair with dockerhub-username (initially, and again before each retry).
+    required: false
+    default: ""
   backoff-seconds:
     description: Seconds to wait before each retry, before re-authenticating.
     required: false
@@ -225,6 +290,26 @@ runs:
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
 
+    - name: Log in to Docker Hub for the third DB-source tier
+      # Gated on dockerhub-username being set: this whole tier is optional
+      # (see this file's own header comment) -- a caller that never sets it
+      # skips this step entirely rather than failing on an empty login.
+      # continue-on-error: same additive-defense-in-depth reasoning as the
+      # GHCR login above. No `registry:` input: docker/login-action's own
+      # documented Docker Hub example omits it and defaults to Docker Hub
+      # (confirmed against that action's own README, issue #1535
+      # follow-up) -- `docker login docker.io` and a bare `docker login`
+      # were also confirmed live to hit the identical
+      # registry-1.docker.io/v2/ endpoint, so passing an explicit
+      # `docker.io` hostname would add a guess with no verified benefit
+      # over the documented default.
+      if: inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
+
     - id: attempt1
       uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
       continue-on-error: true
@@ -276,6 +361,19 @@ runs:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
+
+    # Same compound condition as the GHCR re-auth immediately above, plus
+    # the dockerhub-username optionality guard (see the initial Docker Hub
+    # login step's own comment) -- kept adjacent and condition-identical on
+    # purpose so a future edit to one retry gate cannot silently diverge
+    # from its twin.
+    - name: Re-authenticate to Docker Hub before retry 1
+      if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' && inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
 
     - id: attempt2
       if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
@@ -330,6 +428,20 @@ runs:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
+
+    # Same compound condition as the GHCR re-auth immediately above, plus
+    # the dockerhub-username optionality guard -- see retry 1's identical
+    # Docker Hub re-auth step for the full reasoning.
+    - name: Re-authenticate to Docker Hub before retry 2
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
 
     - id: attempt3
       if: >-
@@ -388,6 +500,21 @@ runs:
         registry: ${{ inputs.registry }}
         username: ${{ inputs.username }}
         password: ${{ inputs.password }}
+
+    # Same compound condition as the GHCR re-auth immediately above, plus
+    # the dockerhub-username optionality guard -- see retry 1's identical
+    # Docker Hub re-auth step for the full reasoning.
+    - name: Re-authenticate to Docker Hub before retry 3
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true' &&
+        inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
 
     - id: attempt4
       if: >-

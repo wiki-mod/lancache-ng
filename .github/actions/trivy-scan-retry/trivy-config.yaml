@@ -17,13 +17,23 @@
 # pkg/db/db.go / pkg/javadb/client.go) so GHCR -- this project's own
 # already-used, already-authenticated (see action.yml's login step)
 # registry -- is tried first, falling back to trivy's normal Docker
-# Hub-backed GCR mirror second rather than dropping it. See action.yml's
-# header comment for the full issue #1535 root cause and the schema-version
-# coupling these two tags carry.
+# Hub-backed GCR mirror second rather than dropping it, then a third,
+# directly-authenticated Docker Hub pull last (issue #1535 follow-up: see
+# action.yml's header comment for why this third entry exists, why it sits
+# last rather than second, and the live measurement that determined the
+# order). Both new docker.io entries were confirmed live as real,
+# independently pullable repositories (not assumed from the mirror.gcr.io
+# proxy relationship) via a real anonymous token exchange + manifest GET
+# against registry-1.docker.io, same schema-version tags as the existing
+# two entries (trivy's db.SchemaVersion=2, javadb.SchemaVersion=1). See
+# action.yml's header comment for the full issue #1535 root cause and the
+# schema-version coupling these tags carry.
 db:
   repository:
     - ghcr.io/aquasecurity/trivy-db:2
     - mirror.gcr.io/aquasec/trivy-db:2
+    - docker.io/aquasec/trivy-db:2
   java-repository:
     - ghcr.io/aquasecurity/trivy-java-db:1
     - mirror.gcr.io/aquasec/trivy-java-db:1
+    - docker.io/aquasec/trivy-java-db:1
