@@ -95,12 +95,36 @@ description: >-
 
   Directing the report to a file instead of trivy's own stdout means the
   human-readable table no longer appears inline within the `uses:
-  aquasecurity/trivy-action` step's own log the way it used to -- a real,
-  deliberate behavior change, not an oversight. The final "Show Trivy
-  report" step below restores that visibility by printing the file's
-  content (whichever attempt actually produced it) to the job log
-  unconditionally, so a human reading the raw Actions log still sees the
-  same table, just attributed to a different step.
+  aquasecurity/trivy-action` step's own log the way it used to for
+  `format: table` (this project's default, used by every plain
+  vulnerability-scan call site) -- a real, deliberate behavior change, not
+  an oversight. The final "Show Trivy report" step below restores that
+  visibility for the table case specifically (`if: inputs.format ==
+  'table'`) by printing the file's content (whichever attempt actually
+  produced it) to the job log, so a human reading the raw Actions log
+  still sees the same table, just attributed to a different step. Not
+  gated the same way for a non-table format (e.g. the release-sbom job's
+  `format: cyclonedx`): that call site's `output` file was already the
+  caller-provided final artifact, written straight to disk with nothing
+  ever in stdout to "restore" -- cat-ing a machine-readable
+  JSON/SARIF/etc. document into the job log would be new noise, not
+  restored visibility, so this step stays silent for it.
+
+  Every element of this file/env/entrypoint chain was independently
+  confirmed by reading aquasecurity/trivy-action's own `action.yaml` and
+  `entrypoint.sh` at the pinned commit, not assumed from the `output`
+  input's one-line description: `inputs.output` becomes `INPUT_OUTPUT` env
+  for the "Set Trivy environment variables" step, which (since this
+  action always supplies a non-empty, non-default value via the
+  `outpath` step below) unconditionally exports `TRIVY_OUTPUT` into
+  `trivy_envs.txt`; `entrypoint.sh` sources that file, then runs the
+  `trivy` binary directly with no pre-creation of the output path, no
+  post-processing of its content (the only content-adjacent step is
+  SARIF severity handling, gated on `TRIVY_FORMAT == sarif`, which none
+  of this project's call sites use), and no self-`cat` to stdout --
+  exactly the same file-creation behavior already verified directly
+  against the real `trivy` CLI binary in the three live cases below, not
+  a different code path trivy-action might have wrapped it in.
 
   The db-repository schema-version tags in trivy-config.yaml (":2" for
   trivy-db, ":1" for trivy-java-db) are trivy's own current defaults,
@@ -394,8 +418,16 @@ runs:
     # (needed for the classification steps above) suppresses it from the
     # `uses: aquasecurity/trivy-action` step's own stdout. Runs regardless
     # of overall pass/fail so a genuine finding is still visible here.
+    # Gated to table format specifically: table is the only format whose
+    # content was ever previously visible directly in the job log (trivy's
+    # default, used by every plain vulnerability-scan call site). A
+    # non-table format (e.g. the release-sbom job's cyclonedx output) was
+    # already being written straight to its own caller-provided `output`
+    # file before this action existed -- it was never in stdout to begin
+    # with, so cat-ing a ~25 KB machine-readable JSON/SARIF/etc. document
+    # into the log here would be new noise, not restored visibility.
     - name: Show Trivy report
-      if: always()
+      if: always() && inputs.format == 'table'
       shell: bash
       run: |
         set -euo pipefail
