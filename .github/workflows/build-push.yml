@@ -3676,22 +3676,9 @@ jobs:
           done
 
   watchdog_test:
-    # Watchdog test now covers two different artifacts under one job: the
-    # shell-script syntax/executable-bit gate for watchdog.sh (still the
-    # production entrypoint) below, PLUS (new, #1355 follow-up) a real
-    # `cargo test` run for the Rust crate now living alongside it in the same
-    # services/watchdog/ directory. This mirrors dns_test/ui_test's shape
-    # (gated on its own rust_quality job's result, running on lancache-heavy
-    # since it now compiles, same metadata-only-event and content-change
-    # scoping) rather than staying on the cheap lancache-light tier the
-    # shell-only version used before the Rust crate existed -- the compile
-    # cost is now real, so this job needs the same tier and job-level
-    # concurrency treatment its dns/ui counterparts already have. See
-    # ci_scope_policy's own comment for the corresponding policy-side change
-    # this requires (watchdog_test moves from require_success_or_intentional_
-    # skip() to require_success_or_intentional_cancellation() on push, the
-    # same tolerance dns_test/ui_test already needed once they gained their
-    # own cancel-on-push groups).
+    # What: Covers two artifacts in one job: watchdog.sh's shell-script syntax/executable-bit gate (still the production entrypoint), plus a real `cargo test` run for the Rust crate now living alongside it in services/watchdog/.
+    # Why: Mirrors dns_test/ui_test's shape (gated on its own rust_quality job, lancache-heavy tier, same metadata-only-event and content-change scoping) instead of the cheap lancache-light tier the shell-only version used before the crate existed, since the compile cost is now real -- ci_scope_policy's own tolerance for this job moves accordingly (require_success_or_intentional_skip() to require_success_or_intentional_cancellation() on push, matching dns_test/ui_test once they gained their own cancel-on-push groups).
+    # From: Issue #1095 | PR #1532
     name: test (watchdog)
     needs: [validate-compose, watchdog_rust_quality, detect-changes]
     # Path-scoped like dns_test/ui_test (#1095's shape) -- see
@@ -3716,13 +3703,13 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Same reasoning and value as dns_test/ui_test above (compiles via the
-    # same cargo-with-sccache-fallback path, so shares its cold-compile risk).
+    # What: 45-minute timeout, same value as dns_test/ui_test above.
+    # Why: Compiles via the same cargo-with-sccache-fallback path, so shares their cold-compile risk.
+    # From: Issue #1095 | PR #1532
     timeout-minutes: 45
-    # Job-level concurrency, mirroring dns_test/ui_test's own group (#891/#979
-    # pattern): now that this job does real compile work on the scarce
-    # lancache-heavy pool, a superseded commit's run should be reclaimed the
-    # same way those two already are.
+    # What: Job-level concurrency mirroring dns_test/ui_test's own group.
+    # Why: Now that this job does real compile work on the scarce lancache-heavy pool, a superseded commit's run should be reclaimed the same way those two already are.
+    # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
         ${{
@@ -3769,24 +3756,9 @@ jobs:
           command: cargo test --locked --manifest-path services/watchdog/Cargo.toml
 
   watchdog_test-hosted:
-    # Unlike watchdog_test above, this fallback deliberately does not gate on
-    # detect-changes/validate-compose (both self-hosted-only). Depending on
-    # them here would reintroduce the same trap that ruled out a
-    # ci_scope_policy-hosted job elsewhere in this file: if self-hosted
-    # runners are genuinely unavailable (the scenario this fallback exists
-    # for), a needs: dependency on a self-hosted-only job would just sit
-    # queued forever. The check itself (bash -n plus an executable-bit test
-    # on one small script) is cheap enough to run unconditionally every time,
-    # same as file-headers-hosted/line-endings-hosted/shellcheck-hosted.
-    #
-    # This hosted fallback deliberately covers only the shell-script half of
-    # watchdog_test above -- it does NOT run `cargo test` for the Rust crate
-    # (2026-08 watchdog Rust CI wiring update), for the same reason dns/ui
-    # never got a hosted fallback for their own rust-quality/test/cargo-audit
-    # jobs: real Rust compilation depends on the shared build-tools image and
-    # sccache/distcc acceleration, which have no safe hosted equivalent yet
-    # (see docs/ci-github-hosted-fallback-decision.md). A green run here is
-    # NOT proof the watchdog crate compiles or its tests pass.
+    # What: Does not gate on detect-changes/validate-compose (both self-hosted-only), and covers only watchdog.sh's shell-script check -- it does NOT run `cargo test` for the Rust crate.
+    # Why: A needs: dependency on a self-hosted-only job would sit queued forever if self-hosted runners are genuinely unavailable, the exact scenario this fallback exists for, so the cheap bash -n/executable-bit check runs unconditionally instead, matching file-headers-hosted/line-endings-hosted/shellcheck-hosted; real Rust compilation depends on the shared build-tools image and sccache/distcc acceleration, which have no safe hosted equivalent yet, the same reason dns/ui never got a hosted fallback for their rust-quality/test/cargo-audit jobs -- a green run here is NOT proof the watchdog crate compiles or its tests pass.
+    # From: Issue #1095 | PR #1532, docs/ci-github-hosted-fallback-decision.md
     name: test (watchdog) (GitHub-hosted fallback)
     runs-on: ubuntu-latest
     # Real runs: 3-5s. Same 15-minute floor as detect-changes above.
