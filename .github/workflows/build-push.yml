@@ -6803,28 +6803,9 @@ jobs:
           subject-digest: ${{ steps.create-pr-staging-manifests.outputs.syslog_digest }}
 
   promote:
-    # Promotion is intentionally separate from image build. It moves coherent channel
-    # tags only after all sha-* source images for the same commit exist.
-    #
-    # The `if:` below must stay in an explicit `<status-fn>() && needs.X.result ==
-    # 'success'` form, not a bare `github.event_name != 'pull_request'`. A bare condition
-    # gets an implicit `&& success()` appended by GitHub Actions, and `success()` walks
-    # the WHOLE transitive needs graph (promote -> merge-manifests -> build, build-arm64
-    # -> detect-changes, file-headers, pr-template-check, ...), not just this job's own
-    # direct `needs: merge-manifests`. detect-changes/file-headers/pr-template-check are
-    # intentionally `if: github.event_name == 'pull_request'` (they skip on every push),
-    # but `success()` treats a skipped job the same as a failed one -- so on every real
-    # push to master or a vX.Y.Z branch, the implicit success() check silently evaluated
-    # false and this job never ran, even though `build` itself completed successfully
-    # (confirmed directly: run 28958519247 on v0.2.0, all 7 build matrix legs succeeded,
-    # promote still skipped). This is why dev/nightly were never actually promoted
-    # despite the channel-resolution logic in this job being correct (see issue #532).
-    #
-    # Use `!cancelled()`, not `always()`, as the status function: `always()` would also
-    # make this job proceed to move public tags even if a maintainer cancels the run
-    # after build succeeds -- `!cancelled()` suppresses the same implicit-success()-
-    # over-skipped-deps problem while still correctly stopping the job on a real
-    # cancellation.
+    # What: Promotion runs as a separate job from image build, gated by an explicit `!cancelled() && needs.X.result == 'success'` condition instead of a bare `github.event_name != 'pull_request'`.
+    # Why: A bare condition gets GitHub's implicit `&& success()` appended, which walks the whole transitive needs graph including PR-only jobs (detect-changes/file-headers/pr-template-check) that always skip on push -- success() treats a skipped dependency as failed, so promote silently never ran on push even though build succeeded (confirmed live); !cancelled() avoids that skipped-as-failure trap while still stopping the job on a real maintainer cancellation, unlike always().
+    # From: Issue #532 | Issue #1095 | PR #1532
     name: promote stack image channels
     needs: merge-manifests
     if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
@@ -6837,74 +6818,30 @@ jobs:
     # that real lock-wait ceiling plus this job's own work with headroom, so normal lock
     # contention can never be mistaken for a hang.
     timeout-minutes: 45
-    # Promote only repoints already-built, already-pushed sha-* images at mutable
-    # channel tags -- it is idempotent and fast, unlike the rest of this workflow, where
-    # cancelling stale in-flight work for a superseded commit is desirable. Originally
-    # added (#793) because promote used to share the top-level publish concurrency group
-    # with the slow build/test/scan pipeline: a rapid burst of pushes could drop
-    # promote's entire run while it was still queued, before it ever started (#777).
-    # Giving promote its own group here stopped it from competing for that same single
-    # pending slot.
-    #
-    # CORRECTION (#888): this job-level group does NOT, by itself, protect promote from
-    # being killed mid-execution if the top-level group's own cancel-in-progress were
-    # ever true and cancelled the whole run out from under it -- a job-level group only
-    # serializes THIS job against OTHER users of this exact same group name (currently
-    # just backfill-stack-latest.yml); it is not a shield against the enclosing run's own
-    # cancellation. Confirmed against GitHub's docs: workflow-level
-    # cancel-in-progress:true tears down the entire previous run, including jobs already
-    # in progress, regardless of any job-level group they belong to. This is why the
-    # top-level group (see top of file) uses a run_id-suffixed key for push/tag events
-    # instead of being flipped to cancel-in-progress:true -- that keeps promote safe by
-    # construction, not by this group's own cancel-in-progress setting (which stays false
-    # here purely for the backfill-serialization reason above).
-    #
-    # REMOVED (#897): this job-level `concurrency:` group is exactly what let a newer
-    # pending `promote` run silently CANCEL an older one that was still queued, before
-    # the older run's very first step had executed -- GitHub's concurrency-group
-    # primitive holds at most one PENDING request per group, and a merely-queued job is
-    # not protected by anything its own steps could do. #892 (narrowing cancellation to
-    # build/container-scan instead of the whole run) made this practically reachable:
-    # multiple tag pushes/dispatches can now build in parallel and reach this point at
-    # nearly the same time. Real mutual exclusion (still GLOBAL, not per-ref --
-    # re-scoping per-ref would reintroduce #777, a promotion racing
-    # backfill-stack-latest.yml's own tag move for a different ref) now comes from
-    # scripts/lib/promote-lock.sh's "Acquire the cross-workflow promote lock" step
-    # below instead: every promote/backfill-latest run is now admitted immediately and
-    # self-serializes via a git-ref-backed lock that is atomic on GitHub's remote
-    # regardless of which self-hosted host picks up the job (checked for real: lancache-
-    # heavy spans several distinct physical hosts, so a host-local flock would not have
-    # provided real exclusion here). backfill-stack-latest.yml was updated to use the
-    # exact same lock so the #777 property still holds.
+    # What: Real mutual exclusion for promote comes from scripts/lib/promote-lock.sh's cross-workflow promote lock (a global, git-ref-backed, remote-atomic lock), not a job-level `concurrency:` group -- promote and backfill-stack-latest.yml both admit immediately and self-serialize through it.
+    # Why: A prior job-level concurrency group let a newer pending promote run silently cancel an older, still-queued one before its first step ran (GitHub only holds one pending request per group, and a queued job has no self-protection), which became practically reachable once parallel tag pushes/dispatches could all reach this point together; a job-level group also cannot protect a job from the enclosing workflow run's own cancellation (only the top-level group's run_id-suffixed push/tag key does that, per GitHub's documented cancel-in-progress:true behavior), and the lock stays global rather than per-ref specifically to avoid racing backfill-stack-latest.yml's own tag move for a different ref; a host-local lock would not work either, since the lancache-heavy pool spans several physical hosts.
+    # From: Issue #1095 | PR #1532
     permissions:
-      # Widened from `contents: read` (#897): the promote-lock mechanism
-      # above needs to push/delete a dedicated, non-branch/non-tag ref
-      # (refs/promote-lock/global) on this repo to implement its
-      # compare-and-swap acquire/release. This does not grant any ability to
-      # write to master/v0.2.0/tags -- branch protection rulesets only match
-      # refs/heads/* ref-name conditions, and this lock ref lives outside
-      # both refs/heads/* and refs/tags/* entirely.
+      # What: contents: write, needed by the promote-lock mechanism above to push/delete a dedicated non-branch/non-tag ref (refs/promote-lock/global) for its compare-and-swap acquire/release.
+      # Why: This does not grant any ability to write to master/v0.2.0/tags -- branch protection rulesets only match refs/heads/*, and this lock ref lives outside both refs/heads/* and refs/tags/*.
+      # From: Issue #1095 | PR #1532
       contents: write
       packages: write
       id-token: write
       attestations: write
       artifact-metadata: write
     steps:
-      # fetch-depth: 0 is required by the version-bump step below: `git
-      # describe --tags` and the classify-image-impact.sh merge-base diff both
-      # need full tag/commit history, which a default shallow checkout does
-      # not have.
+      # What: fetch-depth: 0 for a full-history checkout.
+      # Why: The version-bump step below needs `git describe --tags` and classify-image-impact.sh's merge-base diff, neither of which works with a default shallow checkout.
+      # From: Issue #1095 | PR #1532
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
 
-      # Real, cross-host mutual exclusion for the tag-moving work below (issue #897 -- see
-      # this job's own `permissions:`/removed `concurrency:` comments for the full
-      # reasoning). Runs immediately after checkout, before any image work starts, so a run
-      # that cannot get the lock never touches GHCR at all. Fails closed: if every attempt
-      # is exhausted, promote_lock_acquire_with_retry prints ::error:: and returns 1, which
-      # -- under `set -euo pipefail` -- stops this step (and the job) before any tag moves.
+      # What: Acquires real, cross-host mutual exclusion for the tag-moving work below, immediately after checkout and before any image work starts.
+      # Why: A run that cannot get the lock must never touch GHCR at all; promote_lock_acquire_with_retry fails closed (prints ::error:: and returns 1 once every attempt is exhausted), which under `set -euo pipefail` stops the step and job before any tag moves.
+      # From: Issue #1095 | PR #1532
       - name: Acquire the cross-workflow promote lock
         env:
           GITHUB_RUN_ID: ${{ github.run_id }}
@@ -7278,99 +7215,22 @@ jobs:
             exit 0
           fi
 
-          # Idempotency: if this exact tag somehow already exists remotely
-          # (a re-run, or a previous attempt that pushed the tag but failed a
-          # later step), do not fail or push a duplicate -- another run
-          # already covered this commit's release.
+          # What: Skips tag creation if this exact tag already exists on origin.
+          # Why: A re-run, or an earlier attempt that pushed the tag but failed a later step, must not fail or push a duplicate -- another run already covered this commit's release.
+          # From: Issue #1095 | PR #1532
           if [[ -n "$(git ls-remote --tags origin "refs/tags/${next_tag}" 2>/dev/null)" ]]; then
             echo "::notice::${next_tag} already exists on origin; nothing to do."
             exit 0
           fi
 
           git tag -a "$next_tag" "$COMMIT_SHA" -m "Automated patch release ${next_tag}"
-          # PROJECT_AUTOMATION_PAT (not secrets.GITHUB_TOKEN) authors this push so the tag push
-          # actually re-triggers build-push.yml on refs/tags/v* -- GITHUB_TOKEN-authored pushes
-          # are deliberately not re-triggered by GitHub (anti-recursion), which would otherwise
-          # leave this tag published but its own release job never run.
-          #
-          # The token is passed as an HTTP Basic-Auth header, not embedded in the remote URL:
-          # an embedded URL is a plain-argv secret (visible via `ps` for its lifetime) and,
-          # worse, git itself echoes the full URL -- credentials included -- into its own
-          # error/verbose output on a failed push, which would leak the PAT straight into this
-          # step's own log.
-          #
-          # The header value is set via GIT_CONFIG_COUNT/KEY_n/VALUE_n (Git 2.31+), not
-          # `-c http.extraheader=...`: a `-c` value is still a plain-argv secret for this
-          # invocation's lifetime, it just avoids the URL-embedding/log-echo problems above. An
-          # environment variable is not readable via `ps` at all (only via
-          # `/proc/<pid>/environ`, restricted to the same user or root), closing that remaining
-          # exposure. The real PAT header (index 1 below) is scoped to this exact push URL
-          # (`http.<url>.extraheader`, not a bare `http.extraheader`) so it cannot leak into
-          # unrelated git operations in this same shell -- index 0 is a separate, unrelated key
-          # (see below) that resets checkout's own persisted header, not a secret. This whole
-          # GIT_CONFIG_COUNT list is set only for this one command's environment, never written
-          # to `.git/config`.
+          # What: Pushes the release tag authenticated as PROJECT_AUTOMATION_PAT via an HTTP Basic-Auth header set through Git 2.31+'s GIT_CONFIG_COUNT/KEY_n/VALUE_n mechanism, never embedded in the remote URL or passed via `-c`.
+          # Why: A GITHUB_TOKEN-authored push does not re-trigger build-push.yml on refs/tags/v* (GitHub's anti-recursion protection), so the release job would never run for this tag; an embedded-URL or `-c`-supplied token is a plain-argv secret visible via `ps` for its lifetime, and an embedded URL also gets echoed into git's own error/verbose output on a failed push, while an environment variable is readable only via /proc/<pid>/environ.
+          # From: Issue #1095 | PR #1532
           push_url="https://github.com/${REPOSITORY}.git"
-          # actions/checkout (persist-credentials: true, the default throughout this workflow)
-          # does NOT write its GITHUB_TOKEN Authorization extraheader directly into this job's
-          # local .git/config. It writes it into a separate temp file
-          # (_work/_temp/git-credentials-<uuid>.config) and wires it in via an
-          # `includeIf.gitdir:<workdir>.path <that file>` entry in .git/config -- confirmed from
-          # a real failed run's log (run 30328171211, 2026-07-28). That included file's entry
-          # and the PROJECT_AUTOMATION_PAT-scoped one set below both match this push's URL, and
-          # git's http backend sends every matching extraheader as its own Authorization header
-          # on the same request -- GitHub's HTTP endpoint rejects a request carrying two
-          # Authorization headers with a 400. This is a real, confirmed regression (every real
-          # run 2026-07-19 through 2026-07-28 hit it, distinct from the two bugs #1054 already
-          # fixed; see #819's verification comments for the affected run IDs).
-          #
-          # PR #1230 (2026-07-24) tried to fix this with the `git config --local --unset-all
-          # ...` line below, on the theory that checkout's header lived directly in
-          # .git/config's own [http ...] section. It does not: `--local` only ever reads/writes
-          # to .git/config itself, never a file merely includeIf-referenced from it, so that
-          # command always exits 5 ("no such section") and the `2>/dev/null || true` silently
-          # swallowed that as if it had succeeded -- the includeIf-sourced header was never
-          # actually removed, and the very next real run hit the identical "Duplicate header:
-          # Authorization" / 400 failure this was supposed to fix. Kept below anyway as a free,
-          # harmless defense-in-depth line in case some future checkout version really does
-          # write this key straight into .git/config -- but it must never be trusted as the
-          # actual fix on its own again.
-          #
-          # The real fix: git's `http.extraHeader` (and its per-URL form) documents that
-          # setting an entry to the empty string resets the accumulated list for that exact key
-          # (git's own http.adoc docs: an empty value resets the extra headers to the empty
-          # list). git-config(1)'s ENVIRONMENT section documents the precedence that makes this
-          # usable here: these environment variables override values in configuration files,
-          # but are overridden by any explicit options passed via `git -c` -- i.e. file-based
-          # config (includeIf-included files included) < env-based GIT_CONFIG_COUNT < `-c`. So
-          # an empty-value reset for checkout's OWN key (the bare host key, not scoped to this
-          # repo's specific path), supplied via GIT_CONFIG_COUNT, clears the file-based value
-          # for this one `git push` invocation only, without touching any on-disk file. This
-          # does NOT collapse into a single reset+set pair on one key: checkout's bare-host key
-          # and the PROJECT_AUTOMATION_PAT's repo-path-scoped key below are two DIFFERENT
-          # config keys that both matched this same push URL simultaneously -- exactly why both
-          # headers were being sent in the first place -- so both must be listed here; resetting
-          # one has no effect on the other.
-          #
-          # Deliberately NOT done via `-c http.https://github.com/.extraheader=` instead of a
-          # GIT_CONFIG_COUNT entry, even though it is the same empty-reset trick: `-c` is
-          # documented as HIGHER precedence than GIT_CONFIG_COUNT, so a `-c`-based reset is
-          # applied after, and therefore also wipes out, the real PAT header set via
-          # GIT_CONFIG_COUNT below -- verified for real: doing the reset via `-c` while keeping
-          # the real header on GIT_CONFIG_COUNT silently dropped the Authorization header
-          # entirely (the push request went out unauthenticated). Keeping both the reset and
-          # the real header on the same GIT_CONFIG_COUNT list (index 0 then index 1) avoids
-          # this, since entries within one source apply in index order.
-          #
-          # Verified for real (2026-07-30, self-hosted runner): reproduced the identical
-          # "Duplicate header: Authorization" / 400 failure via a real, harmless
-          # `git ls-remote` against this same repo, using checkout's actual persisted-credential
-          # shape and this step's own exact shell lines, with only `git push` swapped for
-          # `git ls-remote`; confirmed `--local --unset-all` alone left it reproducing every
-          # time, then confirmed adding this empty-value reset entry eliminates it -- exactly
-          # one Authorization header sent. Nothing later in this job needs the original
-          # GITHUB_TOKEN git credential -- the next step authenticates its own registry call
-          # explicitly via secrets.GITHUB_TOKEN, not via this ambient git config.
+          # What: Resets checkout's own persisted Authorization extraheader for this push URL to empty (GIT_CONFIG_COUNT index 0) before setting the real PROJECT_AUTOMATION_PAT header (index 1); the plain `git config --local --unset-all` below is kept only as harmless defense-in-depth, not as the actual fix.
+          # Why: actions/checkout (persist-credentials: true) wires its GITHUB_TOKEN header into .git/config via an includeIf-referenced temp file rather than a directly editable [http] section, so `--local --unset-all` cannot remove it, and both headers matching this push URL make GitHub reject the request with "Duplicate header: Authorization" (400) -- confirmed on real runs and via a live reproduction. git's documented empty-value reset for http.extraHeader clears the file-based value for one invocation without touching any on-disk file (env-based GIT_CONFIG_COUNT beats file config but loses to `-c`, which would instead wipe the real header set here), and the two colliding keys (checkout's bare-host key and this PAT's repo-path-scoped key) must both be listed since resetting one does not affect the other; nothing later in this job needs the original GITHUB_TOKEN git credential, since the next step authenticates its own registry call explicitly via secrets.GITHUB_TOKEN.
+          # From: Issue #1095 | PR #1532
           git config --local --unset-all "http.https://github.com/.extraheader" 2>/dev/null || true
           GIT_CONFIG_COUNT=2 \
           GIT_CONFIG_KEY_0="http.https://github.com/.extraheader" \
