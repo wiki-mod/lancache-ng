@@ -19,9 +19,11 @@ on:
         default: none
   schedule:
     # What: Daily 01:00 UTC stable-channel refresh of `latest` on master (nightly has its own schedule, #1254).
-    # Why: `promote` only moves `latest` on push, so cron prevents drift between master pushes; the resulting
-    # 03:00 CEST landing in summer is a deliberately accepted one-hour seasonal drift, not a bug (#1035).
-    # From: #1035, #1056, #1254
+    # Why: `promote` only moves `latest` on push, so cron prevents drift between master pushes; GitHub only
+    # evaluates `schedule:` from the workflow file on the default branch (master), so `nightly-refresh.yml`'s
+    # own copy of this cron stays inert until it merges there; the resulting 03:00 CEST summer landing is a
+    # deliberately accepted one-hour drift, not a bug.
+    # From: Issue #1095 | PR #1532
     - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
@@ -31,7 +33,7 @@ on:
     # the 8-service build/scan pipeline on the scarce lancache-heavy pool; tags never hit paths-ignore (GitHub
     # doesn't evaluate path filters for tags:) and `!CHANGELOG.md` stays un-ignored so check-changelog-direct-
     # edit.sh still sees CHANGELOG-only pushes (#1203, #1095).
-    # From: #1095, #1203
+    # From: Issue #1095 | PR #1532
     paths-ignore:
       - "**/*.md"
       - "docs/**"
@@ -40,11 +42,12 @@ on:
     branches: [master, current_dev, "v[0-9]*"]
     # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) on top
     # of opened/synchronize/reopened; every downstream job whose own `if:` also filters on event `action`
-    # (build/build-arm64 and the Rust quality/test/audit jobs) must be kept in sync with this list.
+    # (build/build-arm64, the Rust quality/test/audit jobs, and rust_coverage) must be kept in sync with this
+    # list.
     # Why: Trigger-level paths-ignore broke required checks on docs-only PRs by making the whole run not
     # exist (#1245); metadata events carry no code change, so per-job action filters skip redundant Rust
     # reruns while pr-tracking-metadata-check stays unconditional to validate AG-GH-008 freshness.
-    # From: #1203, #1245, AG-GH-008
+    # From: Issue #1095 | PR #1532, AG-GH-008
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
@@ -52,7 +55,7 @@ permissions:
   # What: Declares workflow-level permissions floor; job-level blocks can only narrow this.
   # Why: Job grants are silently capped if not present here; pr-template-check needs pull-requests:read
   # but would fail without this floor (#903).
-  # From: #903
+  # From: Issue #1095 | PR #1532
   pull-requests: read
 
 concurrency:
@@ -60,7 +63,7 @@ concurrency:
   # Why: Run-id scoping eliminates push serialization (#897); cancel-in-progress broke immediately for PRs
   # opened with labels/milestone, killing detect-changes mid-run (#888), so PR-level cancellation stays off
   # and build/container-scan instead get their own safe per-job cancellation groups (#979).
-  # From: #897, #888, #979
+  # From: Issue #1095 | PR #1532
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
@@ -75,11 +78,13 @@ defaults:
     shell: bash
 
 jobs:
-  # What: Classifies changed paths for PR/push event scoping of six Rust test/audit jobs and build/container-scan.
-  # Why: PR/push diffs degrade gracefully to --all-changed on missing bases (#1095); the six Rust jobs' own
-  # `if:` fail safe to running whenever this job did not produce a successful classification, and
-  # build/container-scan use the separate determine-push-reuse-scope job instead for safe re-tagging (#1095).
-  # From: #1095
+  # What: Classifies changed paths for PR/push event scoping of the six Rust test/audit jobs, `build`/
+  # `build-arm64`'s PR-time image scoping, and `determine-push-reuse-scope`'s push-time reuse decision.
+  # Why: PR/push diffs degrade gracefully to --all-changed on missing bases; the six Rust jobs' own `if:` fail
+  # safe to running whenever this job did not produce a successful classification, and `container-scan` (which
+  # never runs on pull_request) depends on `determine-push-reuse-scope` for its push-time re-tagging decision,
+  # not on this job directly.
+  # From: Issue #1095 | PR #1532
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -154,7 +159,7 @@ jobs:
   # Why: `cancel-in-progress` on an already-running job starves the channel (#979), so this is a start-gate-
   # only self-skip for a push already provably superseded; no `if:`/`needs:` keeps its output resolving only
   # to success/failure/cancelled, never skipped, avoiding the implicit-success-over-skippable hazard (#1095).
-  # From: #1095, #979
+  # From: Issue #1095 | PR #1532
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -214,7 +219,7 @@ jobs:
     # What: Job-level concurrency with cancel-in-progress: true; reclaims superseded runs.
     # Why: Safe to cancel (no hard-failing script consumes result); build/build-arm64's `if:` gates
     # cleanly skip on cancelled result (#891, #888/#892).
-    # From: #891, #888, #892
+    # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
         ${{
@@ -261,7 +266,7 @@ jobs:
     # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier; its
     # job-level concurrency group safely cancels mid-flight since only build/build-arm64's own PR-only
     # `if:` gate consumes the result, and that gate cleanly skips rather than errors on cancelled.
-    # From: #1169
+    # From: Issue #1095 | PR #1532
     name: compose healthchecks
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 15
@@ -306,9 +311,11 @@ jobs:
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # What: Fetch PR body live via gh pr view (not webhook payload snapshot).
-          # Why: Webhook snapshot can lag actual PR body; live fetch ensures current content (#903/#905).
-          # From: #903, #905
+          # What: Fetch PR body live via gh pr view (not webhook payload snapshot); the stderr capture and
+          # byte-count notice below are TEMPORARY diagnostics, to be removed once root-caused.
+          # Why: Webhook snapshot can lag actual PR body (#903/#905); the diagnostics were added after two
+          # 2026-07-16 fetches returned an empty body with no visible gh CLI error despite those fixes.
+          # From: Issue #1095 | PR #1532
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
             echo "::error::gh pr view failed, exit code $?"
             cat /tmp/pr-body-live.stderr
@@ -352,9 +359,11 @@ jobs:
           bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
-    # What: Enforces AG-GH-008: PR must carry labels, milestone, and project-board placement.
-    # Why: check-pr-tracking-metadata.sh requires python3/curl; runs in build-tools image per
-    # AG-VAL-016 (treat host tools as absent/stale), same as shellcheck and governance checks.
+    # What: Enforces AG-GH-008: PR must carry labels and milestone; project-board placement is enforced too
+    # whenever a read:project-scoped token (PROJECT_AUTOMATION_PAT) is available to this run.
+    # Why: check-pr-tracking-metadata.sh requires python3/curl, so it runs in the build-tools image per
+    # AG-VAL-016 (treat host tools as absent/stale); without that token, or on any fork PR (secrets withheld),
+    # project-board membership only warns instead of failing.
     # From: AG-GH-008, AG-VAL-016
     name: PR tracking metadata (labels/milestone/project)
     if: github.event_name == 'pull_request'
@@ -371,12 +380,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
-        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT.
+        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT;
+        # must run before the composite action below fetches current labels/milestone.
         # Why: AG-GH-008 requires every PR carry a milestone but Dependabot can't set its own, so this replaced
-        # the prior blanket exemption (#1061-#1064) since GITHUB_TOKEN can't write Projects v2 data; it is
-        # idempotent (AG-OP-006/AG-OP-009), only PATCHing when the live milestone is empty, at the accepted
-        # one-time cost of a `milestoned` re-trigger the first time it fires on a given PR (#1278).
-        # From: #1278, #1270, #1163, AG-GH-008, AG-OP-006, AG-OP-009
+        # the prior blanket exemption since GITHUB_TOKEN can't write Projects v2 data; it is idempotent
+        # (AG-OP-006/AG-OP-009), only PATCHing when the live milestone is empty, and running before the fetch
+        # avoids the fetch step observing an empty milestone on a fresh Dependabot PR and failing before this
+        # step's own assignment takes effect, at the accepted one-time cost of a `milestoned` re-trigger the
+        # first time it fires on a given PR (#1278).
+        # From: Issue #1095 | PR #1532, AG-GH-008, AG-OP-006, AG-OP-009
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
@@ -409,7 +421,7 @@ jobs:
 
       # What: Fetch and validate steps extracted to composite action pr-tracking-metadata-fetch-and-validate.
       # Why: Dedup finding #1095; "Auto-assign" step stays here (warning-path text differs between jobs).
-      # From: #1095
+      # From: Issue #1095 | PR #1532
       - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -444,10 +456,12 @@ jobs:
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Auto-assign Dependabot PR milestone
         # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs, same as the primary
-        # pr-tracking-metadata-check job's identical step.
+        # pr-tracking-metadata-check job's identical step, and must likewise run before the composite action
+        # below fetches current labels/milestone.
         # Why: Dependabot cannot set its own milestone; PROJECT_AUTOMATION_PAT still reaches this job on a
-        # same-repo Dependabot PR, replacing the prior blanket exemption (#1061-#1064).
-        # From: #1278, #1061, #1064, AG-GH-008
+        # same-repo Dependabot PR, replacing the prior blanket exemption, and the before-fetch ordering avoids
+        # the same empty-milestone false failure documented on the primary job's identical step.
+        # From: Issue #1095 | PR #1532, AG-GH-008
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
@@ -616,19 +630,19 @@ jobs:
     # Why: DO NOT RENAME this job -- `name: line endings` is the required-status-check string in current_dev's
     # branch protection, and renaming it would silently create a new, never-satisfied required check while the
     # old name stays expected forever, exactly #1245's bug class from a different cause (#601, #1245, #1014).
-    # From: #601, #1245, #1014, AG-VAL-016
+    # From: Issue #1095 | PR #1532, AG-VAL-016
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: Timeout increased from 15 to 25 minutes to budget for relocated governance/changelog steps.
     # Why: Live gh pr view + git fetches add overhead beyond 7-11s line-ending-only time (#1245).
-    # From: #1245
+    # From: Issue #1095 | PR #1532
     timeout-minutes: 25
     # What: Job-level concurrency with cancel-in-progress: pull_request-only.
     # Why: On push, line-endings is a hard gate on the channel publish path, so a cancelled run would make
     # build/build-arm64 skip and starve the channel; on a PR, a cancelled result cleanly skips them instead,
     # so cancelling a superseded run there just reclaims a runner slot (see `build`'s comment for #979).
-    # From: #891, #979
+    # From: Issue #1095 | PR #1532
     concurrency:
       group: >-
         ${{
@@ -642,7 +656,7 @@ jobs:
     # What: Declares pull-requests:read for governance guardrails (PR title/body fetch via gh pr view).
     # Why: Moved here from shellcheck along with the step itself (#1245/#805); contents:read is restated too,
     # since job-level permissions replace rather than extend the workflow-level defaults (#903).
-    # From: #805, #1245, #903
+    # From: Issue #1095 | PR #1532
     permissions:
       contents: read
       pull-requests: read
@@ -660,7 +674,7 @@ jobs:
 
       # What: Governance guardrails step relocated from shellcheck (#1245).
       # Why: Shellcheck gained docs-only self-skip; this check must run on every PR regardless.
-      # From: #1245
+      # From: Issue #1095 | PR #1532
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
         env:
@@ -824,7 +838,7 @@ jobs:
   # Why: Rust builds/scans need build-tools/sccache/distcc/credentials with no safe hosted equivalent yet, and
   # a ci_scope_policy-hosted fallback isn't feasible either since it would just queue indefinitely waiting on
   # those same self-hosted-only Rust job dependencies (#509).
-  # From: #1169, #509, docs/ci-github-hosted-fallback-decision.md
+  # From: Issue #1095 | PR #1532, docs/ci-github-hosted-fallback-decision.md
   shellcheck:
     # ShellCheck and ActionLint run inside the same build-tools image selected by
     # validate-compose, keeping linting independent from whatever happens to be installed
@@ -1080,10 +1094,13 @@ jobs:
           fi
 
           # What: Validates the state-root migration contract: one LANCACHE_STATE_DIR plus optional legacy
-          # per-service override keys, preserved only for real legacy/custom paths.
+          # per-service override keys, preserved only for real legacy/custom paths, and a bare /srv/lancache
+          # directory alone never counts as active legacy state.
           # Why: CACHE_DIR_STANDARD/CACHE_DIR_SSL are deliberately excluded and unconditionally removed instead,
           # since keeping them "preservable" would recreate the exact cache-path split-brain this migration
-          # to a single shared CACHE_DIR exists to eliminate.
+          # to a single shared CACHE_DIR exists to eliminate; the bare-directory exclusion is why
+          # legacy_state_root_or_default() below only selects the legacy root when known child state exists.
+          # From: Issue #1095 | PR #1532
           for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
               || { echo "::error::setup.sh update must preserve ${key} only when legacy/custom state would otherwise move away from the one-root contract."; exit 1; }
@@ -1154,7 +1171,7 @@ jobs:
         env:
           # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted (no compose file reads them #445).
           # Why: SSL/STANDARD_CACHE_MAX_GB stay for deploys without setup.sh update yet (#445).
-          # From: #445
+          # From: Issue #1095 | PR #1532
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
           CACHE_MEM_MB: "256"
@@ -1259,7 +1276,7 @@ jobs:
 
           # What: Profile-less renders skip inactive profiles; DHCP/logging need explicit activation.
           # Why: Compose omits services behind inactive profiles, skipping their validation (#343/#453).
-          # From: #343, #453
+          # From: Issue #1095 | PR #1532
           for compose_file in \
             deploy/prod/docker-compose.yml \
             deploy/quickstart/docker-compose.yml; do
