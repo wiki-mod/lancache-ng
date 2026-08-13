@@ -5174,6 +5174,8 @@ jobs:
           digest: ${{ steps.channel-image.outputs.digest }}
           cache-key-scope: ${{ matrix.service }}-${{ matrix.platform_tag }}
           freshness-bucket: ${{ steps.scan-cache-bucket.outputs.value }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
           # vuln-db-cache-dir intentionally omitted (G8 fix removed this job's own
           # managed cache dir): trivy-action falls back to its own default
           # (~/.cache/trivy), which "Self-heal Trivy's own default cache directory
@@ -6323,9 +6325,13 @@ jobs:
             github.event_name != 'pull_request' &&
             steps.build.outcome == 'success'
           }}
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): retry wrapper (issue #1535) below can run up to 4
+        # scan attempts, so the bound must cover the worst case.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -6872,9 +6878,13 @@ jobs:
             github.event_name != 'pull_request' &&
             steps.build.outcome == 'success'
           }}
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): retry wrapper (issue #1535) below can run up to 4
+        # scan attempts, so the bound must cover the worst case.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -8301,10 +8311,14 @@ jobs:
     # and none has completed in recorded history. Anchored instead to container-scan's
     # per-service class of real data (24s-7min per service for a full image build + Trivy
     # scan; this job only pulls an already-built digest and re-runs Trivy for the
-    # CycloneDX SBOM output, so it is never slower than that per-service work). 45 minutes
-    # gives real headroom over container-scan's own per-service worst case. Flagged
-    # explicitly as an estimate, not a measurement.
-    timeout-minutes: 45
+    # CycloneDX SBOM output, so it is never slower than that per-service work). Was 45
+    # minutes ("real headroom over container-scan's own per-service worst case") before
+    # issue #1535's trivy-scan-retry wrapper: the Trivy step below can now retry up to 4
+    # times (worst case ~42 min: 4 x its own 10m timeout + 3 x 30s backoff) instead of
+    # failing on the first attempt, so 45 minutes no longer leaves real headroom over the
+    # step's own new worst case once checkout/digest-resolution/buildx overhead is added.
+    # Flagged explicitly as an estimate, not a measurement, same as before.
+    timeout-minutes: 65
     permissions:
       contents: write
       packages: read
@@ -8366,12 +8380,19 @@ jobs:
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Generate CycloneDX SBOM with Trivy
-        # Same pinned trivy-action the scan jobs use, in SBOM mode. Scans the
-        # digest-qualified reference resolved above (mirrors build-arm64's
-        # "Scan pushed service digest with Trivy" step, which likewise
-        # scans a ghcr.io/...@sha256:... reference after the GHCR login).
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+        # #1535) around the same pinned trivy-action the scan jobs use, in
+        # SBOM mode. Scans the digest-qualified reference resolved above
+        # (mirrors build-arm64's "Scan pushed service digest with Trivy"
+        # step, which likewise scans a ghcr.io/...@sha256:... reference
+        # after the GHCR login). timeout-minutes added (none before): see
+        # this job's own timeout-minutes comment above for the worst-case
+        # math now that this step can retry up to 4 times.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           scan-type: image
           image-ref: ${{ steps.digest.outputs.image-ref }}
           format: cyclonedx
