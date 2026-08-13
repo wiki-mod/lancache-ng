@@ -107,6 +107,16 @@ EXCLUDED_TOOLS=(
   test timeout xargs xz
   # Musl cross-compilation toolchain (issue #815)
   musl-gcc
+  # What: ccache, excluded from smoke_test_image()'s required_tools.
+  # Why: same chicken-and-egg case as musl-gcc directly above -- the smoke
+  # test's strict/published-image path trusts the currently published
+  # :latest/:nightly tag, which lacks ccache until this PR's build-tools
+  # change is merged and republished; requiring it now would fail every
+  # unrelated PR during that window, for a tool consumed only from inside a
+  # real Dockerfile build (services/dns/Dockerfile's configure_ccache()),
+  # never via a standalone consumer simulation script.
+  # From: Issue #887
+  ccache
 )
 
 # Multi-word capabilities the Dockerfile verifies via a subcommand invocation

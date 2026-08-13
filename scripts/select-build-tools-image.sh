@@ -81,7 +81,6 @@ smoke_test_image() {
       rustfmt
       clippy-driver
       sccache
-      ccache
       cargo-audit
       shellcheck
       actionlint
@@ -138,7 +137,6 @@ smoke_test_image() {
     shellspec --version >/dev/null
     cargo-audit --version >/dev/null
     sccache --version >/dev/null
-    ccache --version >/dev/null
     distcc --version >/dev/null
     distcc-pump --help >/dev/null
     expect -v >/dev/null
