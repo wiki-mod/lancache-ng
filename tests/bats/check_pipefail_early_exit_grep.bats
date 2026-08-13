@@ -367,6 +367,150 @@ write_script() {
     [[ "$output" == *"git ls-files\` itself failed"* ]]
 }
 
+## --------------------------------------------------------------------------
+## check_if_without_else_status() coverage (issue #1449, added alongside the
+## fix for the confirmed real instance in
+## scripts/check-netdata-curl-pin.sh's fetch_bundled_packages_version()).
+## This second check is deliberately NOT gated on the file mentioning
+## "pipefail" (see this guard's own header comment), so write_script's
+## `set -euo pipefail` preamble is not load-bearing for these fixtures the
+## way it is for the pipefail-consumer tests above -- kept anyway for
+## consistency with this file's existing helper and because the real
+## incident file also happened to use `set -euo pipefail`.
+## --------------------------------------------------------------------------
+
+@test "fails on the exact real-incident pattern: if-without-else immediately followed by a \$? read expecting the real status" {
+    # Minimal reproduction of scripts/check-netdata-curl-pin.sh's
+    # fetch_bundled_packages_version() shape before its fix: an
+    # if-without-else whose then-branch returns early on success, with the
+    # very next line reading $? expecting the tested command's real
+    # (failure) exit status -- which POSIX instead reports as 0 whenever the
+    # if takes no branch at all.
+    write_script "scripts/fetch.sh" \
+        'fetch() {' \
+        '  if curl -fsSL "$1"; then' \
+        '    return 0' \
+        '  fi' \
+        '  local status=$?' \
+        '  return "$status"' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"if-without-else-then-\$?"* || "$output" == *"has no else clause"* ]]
+    [[ "$output" == *"scripts/fetch.sh:5"* ]]
+}
+
+@test "passes when the fix pattern (explicit if/else status capture) is used instead" {
+    # scripts/lib/ghcr-retry.sh's/scripts/lib/git-fetch-retry.sh's own
+    # already-established pattern for this exact case, and the pattern
+    # scripts/check-netdata-curl-pin.sh was fixed to use.
+    write_script "scripts/fetch.sh" \
+        'fetch() {' \
+        '  if curl -fsSL "$1"; then' \
+        '    status=0' \
+        '  else' \
+        '    status=$?' \
+        '  fi' \
+        '  return "$status"' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "passes on a guard-clause if-without-else whose fallthrough case does not read \$?" {
+    # scripts/dhcp-kea-lease-flow-simulation.sh's kea_ctrl_add_reservation()
+    # shape: the tested condition represents FAILURE, handled with an
+    # explicit early return inside the then-branch; the untaken (success)
+    # path correctly falls through to an implicit 0 with nothing after the
+    # fi reading $? at all. This is the safe mirror image of the real bug
+    # (which instead tests for success and leaves the untaken failure path
+    # to incorrectly default to 0), and must not be flagged.
+    write_script "scripts/reserve.sh" \
+        'reserve() {' \
+        '  if ! check_ok "$1"; then' \
+        '    echo "failed" >&2' \
+        '    return 1' \
+        '  fi' \
+        '  echo "reservation added"' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "passes when a real command runs between the fi and the \$? read" {
+    # The $? read here legitimately belongs to log_result, not to the
+    # preceding if-without-else -- an intervening real command between the
+    # fi and the $? read means $? was never the if's own masked status to
+    # begin with, so this must not be flagged.
+    write_script "scripts/fetch.sh" \
+        'fetch() {' \
+        '  if curl -fsSL "$1"; then' \
+        '    echo "got it"' \
+        '  fi' \
+        '  log_result "$1"' \
+        '  status=$?' \
+        '  return "$status"' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "passes on an if/else/fi (has a real else) immediately followed by a \$? read" {
+    # A branch always runs here (either the then or the else), so $?
+    # immediately after the fi genuinely reflects whichever branch's own
+    # last command ran -- not the masked-0 case this guard targets.
+    write_script "scripts/fetch.sh" \
+        'fetch() {' \
+        '  if curl -fsSL "$1"; then' \
+        '    log_ok' \
+        '  else' \
+        '    log_fail' \
+        '  fi' \
+        '  status=$?' \
+        '  return "$status"' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "does not fail when the offending \$? line is marked reviewed-safe" {
+    write_script "scripts/fetch.sh" \
+        'fetch() {' \
+        '  if curl -fsSL "$1"; then' \
+        '    return 0' \
+        '  fi' \
+        '  local status=$? # if-status-safe: caller only checks $1 emptiness, never this status' \
+        '  return "$status"' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "fails on a nested if-without-else (depth 2) immediately followed by a \$? read" {
+    # Confirms the nesting-depth tracking (not just a flat "last fi seen")
+    # correctly attributes the missing-else check to the INNER if, not the
+    # outer one, when the inner if is the one immediately followed by $?.
+    write_script "scripts/fetch.sh" \
+        'fetch() {' \
+        '  if [ -n "$1" ]; then' \
+        '    if curl -fsSL "$1"; then' \
+        '      return 0' \
+        '    fi' \
+        '    local status=$?' \
+        '    return "$status"' \
+        '  fi' \
+        '  return 1' \
+        '}'
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scripts/fetch.sh:6"* ]]
+}
+
 @test "the real repository passes this guard repo-wide (scripts/**, tools/**, setup.sh)" {
     # Defense-in-depth self-check: every file the real, repo-wide scan_files
     # discovers today must actually satisfy this guard, so a future edit
