@@ -247,6 +247,8 @@ EOF
     [[ "$output" == *"ui-nats-dns-integration-simulation.sh"* ]]
 }
 
+# The four tests below cover the YAML `run:` block-scalar parser rewrite.
+# From: Issue #1095 | PR #1501.
 @test "does not treat a workflow paths filter entry as a script invocation" {
     # `on.*.paths` is YAML configuration data, not shell content. A path that
     # happens to name a non-executable script must not be classified as a
