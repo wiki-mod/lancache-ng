@@ -53,7 +53,10 @@ _github_api_cache_hit() {
   cache_file="$(_github_api_cache_path "$url")" || return 1
   [[ -s "$cache_file" ]] || return 1
   now="$(date +%s)" || return 1
-  mtime="$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)" || return 1
+  # Why: GNU stat only (`-c`) -- this project's build-tools image stays
+  # Debian-based (AG-KD-009), so a BSD `stat -f` fallback would be untested,
+  # unreachable dead code in every environment this actually runs in.
+  mtime="$(stat -c %Y "$cache_file" 2>/dev/null)" || return 1
   [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
   age_seconds=$(( now - mtime ))
   (( age_seconds >= 0 && age_seconds < GITHUB_API_CACHE_TTL_SECONDS )) || return 1
