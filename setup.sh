@@ -5716,10 +5716,17 @@ kea_ctrl_post() {
     # secret, visible to any other process on the host for curl's whole
     # lifetime (e.g. `ps aux`, /proc/<pid>/cmdline). KEA_CTRL_TOKEN is
     # generated as a hex string by default (see ensure_secret_env_key's
-    # hex32 kind), so it never contains the '"' that would break the quoted
-    # config value below; this is unchanged from the previous -u form, which
-    # had no such validation either.
-    if ! http_status=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token" | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
+    # hex32 kind), but ensure_secret_env_key never rewrites an already-usable
+    # operator-supplied value, so a manually-set token isn't actually
+    # guaranteed hex-only; curl's -K value is itself a quoted string with
+    # \\/\" escape sequences (verified against curl's own --manual text), so
+    # the token is escaped the same way deploy/*/docker-compose.yml's Kea
+    # healthcheck and this file's own JSON-body construction elsewhere
+    # already escape untrusted values, rather than relying on the generator's
+    # charset as an unstated precondition.
+    local kea_ctrl_token_escaped
+    kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    if ! http_status=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token_escaped" | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -K - \
         -d "$body" \

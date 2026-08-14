@@ -907,6 +907,22 @@ services:
     # despite the daemon being fine (live-verified: exactly this failure mode).
     # Mirrors the entrypoint's own placeholder list so both sides agree on which
     # value is authoritative.
+    #
+    # What: Basic-Auth credential is passed to curl via -K (config read from
+    # stdin), not -u/--user on the command line, and the token is escaped
+    # before being embedded in that quoted config value. Why: an unquoted -u
+    # admin:$$token was real argument-injection into curl's argv (a
+    # whitespace-split, dash-leading word in $$token would be parsed as an
+    # additional curl flag), and even quoted, -u puts the secret in plain
+    # argv, visible to any other host process for curl's whole lifetime (ps
+    # aux, /proc/<pid>/cmdline); curl's -K value is itself a quoted string
+    # with \\/\" escape sequences (verified against curl's own --manual
+    # text), so an operator-supplied token containing a literal '"' or '\'
+    # would otherwise silently truncate or corrupt the credential -- kept
+    # identical to deploy/prod/docker-compose.yml's dhcp healthcheck (see
+    # tests/bats/dhcp_healthcheck_placeholder_parity.bats, which already
+    # enforces these two healthchecks staying in sync) and to setup.sh's
+    # kea_ctrl_post(). From: Issue #1304
     healthcheck:
       test:
         - CMD-SHELL
@@ -918,7 +934,8 @@ services:
           case "$$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac;
           case "$$token" in lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) token="" ;; esac;
           [ -n "$$token" ] || token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)";
-          curl -sf -u admin:$$token
+          esc_token="$$(printf '%s' "$$token" | sed 's/\\/\\\\/g; s/"/\\"/g')";
+          printf 'user = "admin:%s"\n' "$$esc_token" | curl -sf -K -
           -H 'Content-Type: application/json'
           -d '{"command":"config-get","service":["dhcp4"]}'
           "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
