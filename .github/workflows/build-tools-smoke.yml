@@ -10,7 +10,11 @@
 # scarce lancache-heavy capacity; scripts/check-bats-path-filter-coverage.sh
 # targets this file's own path filters as the workflow that actually
 # executes both suites against a real dependency change (issue #1253/#1255,
-# #879).
+# #879). build-tools.yml still runs the same two suites too, but only
+# against the local image it just built on its own now-narrow trigger --
+# that is a smoke test of the freshly built image itself, not a
+# regression gate for test/script changes, so it is not a duplicate of
+# this workflow.
 # From: PR #1501.
 name: Build Tools Smoke Tests
 
@@ -61,6 +65,11 @@ on:
       - "scripts/check-dependabot-docker-base-consistency.sh"
       - "scripts/check-trivy-action-direct-usage.sh"
       - "scripts/generate-vex.sh"
+      # What: lists scripts/setup-cli-simulation.sh and
+      # scripts/syslog-forwarding-simulation.sh.
+      # Why: both are real tests/bats/healthcheck_service_lists.bats
+      # dependencies.
+      # From: PR #1501.
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       # What: lists scripts/gc-pr-staging-images.sh.
@@ -167,6 +176,11 @@ on:
       - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
+      # What: lists deploy/secondary/docker-compose.yml.
+      # Why: tests/bats/setup_secondary_docker_compose.bats's
+      # cmd_secondary heredoc sync-guard uses this as its checked-in
+      # reference file (issue #946).
+      # From: PR #1501.
       - "deploy/secondary/docker-compose.yml"
       # What: lists deploy/full-setup/docker-compose.yml.
       # Why: tests/bats/watchdog_docker_socket_proxy_startup_dependency.bats
@@ -219,6 +233,11 @@ on:
       - "scripts/check-dependabot-docker-base-consistency.sh"
       - "scripts/check-trivy-action-direct-usage.sh"
       - "scripts/generate-vex.sh"
+      # What: lists scripts/setup-cli-simulation.sh and
+      # scripts/syslog-forwarding-simulation.sh.
+      # Why: both are real tests/bats/healthcheck_service_lists.bats
+      # dependencies.
+      # From: PR #1501.
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       # What: lists scripts/gc-pr-staging-images.sh.
@@ -285,6 +304,11 @@ on:
       - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
+      # What: lists deploy/secondary/docker-compose.yml.
+      # Why: tests/bats/setup_secondary_docker_compose.bats's
+      # cmd_secondary heredoc sync-guard uses this as its checked-in
+      # reference file (issue #946).
+      # From: PR #1501.
       - "deploy/secondary/docker-compose.yml"
       # What: lists deploy/full-setup/docker-compose.yml.
       # Why: tests/bats/watchdog_docker_socket_proxy_startup_dependency.bats
