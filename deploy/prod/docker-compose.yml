@@ -2,25 +2,20 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
-# (NATS, docker-socket-proxy) wired up with production-sized defaults
+# What: production stack -- proxy, DNS, DHCP, Admin UI, and supporting
+# services (NATS, docker-socket-proxy) with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# This is the only *production* deployment profile -- see AGENTS.md's AG-KD-008
-# for why there is no parallel deploy/dev stack (corrected 2026-08-05, issue #1391
-# doc-sweep audit: this used to cite CLAUDE.md's "No Separate Dev Environment"
-# section, which moved to AGENTS.md on 2026-07-31; deploy/quickstart/ and
-# deploy/full-setup/ are the other two real profiles that exist today, for
-# quickstart and CI-validation use respectively).
+# Why: the only production deployment profile (AGENTS.md AG-KD-008 -- no
+# parallel deploy/dev stack); deploy/quickstart/ and deploy/full-setup/ are
+# this project's other two real profiles, for quickstart and CI-validation
+# use respectively.
 
 name: lancache-ng
 
-# The Docker socket proxy's HAProxy allowlist lives in exactly one place,
-# scripts/docker-socket-proxy.sh (mounted read-only below), which is the
-# canonical source per docs/naming-conventions.md. This file used to also
-# carry an unreferenced x-docker-socket-proxy-command YAML anchor with a
-# near-duplicate copy of that same config -- it was never aliased anywhere
-# (dead weight that could silently drift from the real script with no
-# functional effect) and has been removed.
+# What: the Docker socket proxy's HAProxy allowlist lives in exactly one
+# place, scripts/docker-socket-proxy.sh (mounted read-only below).
+# Why: docs/naming-conventions.md names this the canonical source -- do not
+# duplicate the allowlist as a YAML anchor in this file.
 
 services:
 
@@ -364,91 +359,53 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── Retention (file-retention daemon, #842 Teil 2) ────────────────────────
-  # Dedicated sidecar for services/watchdog/retention.sh (cache-age purge,
-  # syslog-ng storage-budget retention, fluent-bit self-log rotation) --
-  # split into its own compose service, separate from `watchdog` above, on
-  # the maintainer's explicit architecture decision (issue #842 comment
-  # thread, 2026-08-01): a bug or compromise in this destructive
-  # find/rm-driven logic must be contained by real container-level
-  # boundaries (capabilities, filesystem, mounts), not merely by running in
-  # a different OS process inside the same container (Teil 1's own
-  # process-split, still true and still valuable, but not a Docker-level
-  # containment boundary by itself).
+  # ── Retention (file-retention daemon) ─────────────────────────────────────
+  # What: dedicated sidecar for services/watchdog/retention.sh (cache-age
+  # purge, syslog-ng storage-budget retention, fluent-bit self-log rotation),
+  # split into its own compose service, separate from `watchdog` above.
+  # Why: a bug or compromise in this destructive find/rm-driven logic must be
+  # contained by real container-level boundaries (capabilities, filesystem,
+  # mounts), not merely by running in a separate OS process inside the same
+  # container.
+  # From: Issue #842
   #
-  # `cap_drop: [ALL]` then adding back only what's proven necessary (not
-  # assumed):
-  #   - DAC_OVERRIDE: retention.sh deletes files it does not own, in
-  #     directories it does not control the permissions of -- confirmed live
-  #     on a real runner: nginx creates proxy-cache entries as
-  #     `nginx:nginx` (re-confirmed 2026-08-06 on services/proxy's Alpine
-  #     base, issue #815 -- the owning username changed from Debian's
-  #     `www-data` to Alpine's `nginx`, but the underlying mode bits and
-  #     reasoning below are unchanged), mode 0700/0600 (no group/other bits
-  #     at all, hardcoded by nginx itself -- confirmed even a process umask
-  #     set before nginx starts has zero effect on this). This is still the
-  #     binding reason DAC_OVERRIDE is kept, unchanged by the syslog
-  #     consolidation below.
-  #
-  #     CORRECTED (syslog+fluent-bit consolidation PR, 2026-08): this
-  #     comment previously also named syslog-ng's own output tree (then
-  #     root-owned, `dir-perm(0750)`, `chgrp`'d to gid 10001 for the Admin
-  #     UI's read-only access) and fluent-bit's self-log (then root-owned by
-  #     the separate pinned third-party fluent-bit image's own default) as
-  #     two more targets DAC_OVERRIDE was needed for. Both are now natively
-  #     owned by uid 10001 instead: the combined `syslog` service below runs
-  #     entirely as that fixed non-root uid (see its own Dockerfile), so
-  #     everything it writes -- the syslog-ng output tree AND its own
-  #     fluent-bit self-log -- is already uid-10001-owned by construction,
-  #     with no root-then-chgrp step needed at all. retention.sh's own
-  #     uid-10001 identity (after its setpriv drop, see below) can now
-  #     delete/truncate both without DAC_OVERRIDE -- only the nginx
-  #     cache-entries case above still requires it. Narrowing retention.sh's
-  #     own `cap_add` list to drop DAC_OVERRIDE (replacing it with the
-  #     already-narrower DAC_READ_SEARCH the syslog consolidation itself
-  #     uses, or another equally-scoped grant, whichever proves sufficient
-  #     for the deletion side too) is real follow-up work this PR does not
-  #     attempt -- it touches a different service's own entrypoint/
-  #     capability posture and needs the same live-verified methodology this
-  #     PR applied to `syslog`, not a re-derivation from this comment alone.
+  # `cap_drop: [ALL]` then adding back only what's proven necessary on a real
+  # runner, not assumed:
+  #   - DAC_OVERRIDE: retention.sh deletes proxy-cache entries nginx creates
+  #     as `nginx:nginx`, mode 0700/0600 (no group/other bits, hardcoded by
+  #     nginx itself, unaffected by any process umask) -- the sole remaining
+  #     reason this capability is kept.
   #   - SETUID, SETGID, SETPCAP: needed ONLY transiently, for
   #     retention-entrypoint.sh's own root-to-`lancache`(10001) privilege
-  #     drop via `setpriv` -- confirmed empirically (`/proc/self/status`
-  #     before/after) that the final long-running retention.sh process
-  #     retains NONE of these three; only DAC_OVERRIDE survives in its
-  #     Effective/Permitted/Bounding/Ambient capability sets. See
-  #     retention-entrypoint.sh's own header for the full mechanism and why
-  #     a bare `user: "10001:10001"` here could not deliver both "non-root"
-  #     and "can still do its job" at once (a capability added via
-  #     `cap_add` does not reach a non-root process's effective set without
-  #     this drop sequence -- confirmed the naive way first, then fixed).
+  #     drop via `setpriv` -- confirmed via `/proc/self/status` before/after
+  #     that the long-running retention.sh process retains NONE of these
+  #     three; only DAC_OVERRIDE survives in its capability sets. See
+  #     retention-entrypoint.sh's own header for why a bare
+  #     `user: "10001:10001"` cannot deliver this instead (`cap_add` alone
+  #     does not reach a non-root process's effective set without the drop
+  #     sequence).
   #   - CHOWN: also needed only transiently, by retention-entrypoint.sh's own
-  #     root-phase `chown` of the retention-state/watchdog-logs paths before
-  #     the privilege drop (a fresh named volume or one that predates this
-  #     change may not already be owned by `lancache`) -- found the hard way
-  #     (not assumed): the first real end-to-end container run failed with
-  #     "chown: changing ownership ... Operation not permitted" without it,
-  #     since `cap_drop: ALL` removes CHOWN from root itself, not just from
-  #     the eventual non-root user. Stripped back out of the final process's
-  #     capability set by the same `--bounding-set=-all,+dac_override` call
-  #     that already removes SETUID/SETGID/SETPCAP -- retention.sh itself
-  #     never needs to change any file's ownership, only delete/truncate.
+  #     root-phase `chown` of the retention-state/watchdog-logs paths, since
+  #     a fresh or pre-existing named volume may not already be owned by
+  #     `lancache` and `cap_drop: ALL` removes CHOWN from root too, not just
+  #     the eventual non-root user; stripped back out by the same
+  #     `--bounding-set` call that already removes SETUID/SETGID/SETPCAP.
   #
-  # CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks on
-  # every path this container can see -- not a small residual detail, and
-  # not oversold as one here. What actually bounds this container's blast
-  # radius is the mount set below (only the four paths retention.sh's own
-  # three functions and stamp file genuinely need, nothing else, no Docker
-  # socket, no other service's volumes) plus `read_only: true` (the
-  # capability bypasses permission CHECKS on paths the mount namespace
-  # already exposes; it does not expose any additional path, and does not
-  # defeat the read-only root filesystem itself). `network_mode: none`
-  # since retention.sh never makes or accepts a network connection (date,
-  # find, du, stat, rm, cp, zstd, mktemp, realpath only) -- verified this
-  # container still starts and completes a full purge/prune/rotate cycle
-  # with networking removed entirely, so this is real containment, not a
-  # theoretical one; note this replaces `networks:`, which is mutually
-  # exclusive with `network_mode`.
+  # What: CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks
+  # on every path this container can see.
+  # Why: the blast radius is bounded by the mount set below (only the four
+  # paths retention.sh's own functions and stamp file need, no Docker
+  # socket, no other service's volumes), `read_only: true` (the capability
+  # bypasses permission checks but exposes no additional path), and
+  # `network_mode: none` (retention.sh never makes or accepts a network
+  # connection) -- verified live that a full purge/prune/rotate cycle still
+  # completes with networking removed entirely.
+  #
+  # STATUS: as of 2026-08-14, DAC_OVERRIDE stays scoped to the nginx
+  # cache-entries case above; narrowing it (e.g. to the already-narrower
+  # DAC_READ_SEARCH the `syslog` service below uses) needs the same
+  # live-verified methodology already applied there, not a re-derivation
+  # from this comment alone.
   retention:
     container_name: lancache-retention
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
@@ -470,9 +427,11 @@ services:
       - /tmp
     env_file:
       - ../../config/prod/watchdog.env
-    # Same rationale as watchdog's own identical block before this split --
-    # see git history for that comment; unchanged here since retention.sh is
-    # the process that actually acts on every one of these variables now.
+    # What: passes the same runtime presence-gate variables as watchdog's own
+    # environment block above.
+    # Why: watchdog.env is static and cannot interpolate per-install values;
+    # retention.sh, not watchdog.sh, is the process that actually acts on
+    # every one of these SYSLOG_* variables.
     environment:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
@@ -686,26 +645,20 @@ services:
       # genuine LAN traffic without needing network_mode: host. Bound to all
       # interfaces, matching how `dhcp`'s port 67/udp is published above.
       - "123:123/udp"
-    # Least-privilege hardening (issue #1358): before this, `ntp` had only
-    # `cap_add: [SYS_TIME]` layered on top of Docker's full default
-    # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
-    # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
-    # proven necessary (same pattern as PR #1360's `retention` service, see
-    # its own comment in this file), removes every one of those unused
-    # defaults instead of relying on chronyd's own good behavior to not
-    # misuse them. This set was NOT guessed -- determined empirically on a
-    # real runner via `strace` against the real chronyd binary, starting
-    # from `cap_drop: ALL` and adding capabilities one at a time until each
-    # specific "Operation not permitted" error (each one tied to a specific
-    # syscall in the strace output) went away, INCLUDING a negative check
-    # (re-removing a capability that was added and confirming its specific
-    # failure comes back, not just adding until things looked fine) -- see
-    # the PR implementing this issue for the full session. Real end-to-end
-    # clock-stepping under this exact capability set is additionally
+    # What: `cap_drop: [ALL]` first (removing Docker's full default set,
+    # e.g. CAP_SYS_CHROOT), then only these capabilities are added back,
+    # matching the same least-privilege pattern as the `retention` service's
+    # own capability posture above.
+    # Why: each capability here was determined empirically via `strace`
+    # against the real chronyd binary -- starting from `cap_drop: ALL` and
+    # adding capabilities one at a time until each specific "Operation not
+    # permitted" error went away, including a negative check (re-removing a
+    # capability and confirming its specific failure returns). Real
+    # end-to-end clock-stepping under this exact set is additionally
     # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
-    # GitHub-hosted CI job, the only environment in this project's CI that
-    # runs on a real, non-LXC-nested kernel (see that script's own header) --
-    # kept in sync with this cap_add list; update both together.
+    # GitHub-hosted CI job (the only CI environment on a real, non-LXC-nested
+    # kernel) -- keep both in sync.
+    # From: Issue #1358
     cap_drop:
       - ALL
     cap_add:
@@ -1142,27 +1095,28 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── Central logging: syslog + fluent-bit combined container (issue #453/#633
-  # baseline superseded here; see this PR for the full rationale) ───────────
-  # Replaces the previous two separate services (`syslog` = fluent-bit
-  # collector/forwarder, `syslog-ng` = central receiver) with ONE container
-  # running both -- a deliberate maintainer decision to accept crash-coupling
-  # and a single Docker HEALTHCHECK slot (mitigated below by a real
-  # dual-process check + structured status file) in exchange for one image
-  # to build/scan/patch instead of two. See services/syslog/Dockerfile's own
-  # header for the full real-vs-POC comparison this PR ran on a self-hosted
-  # runner: the exact pinned fluent-bit binary bundled with its glibc closure
-  # into a stable (non-edge) Alpine base, the two privileged-port/capability
-  # findings that contradicted the original POC's assumptions, and the
-  # `set -eu`/`wait -n` errexit bug this PR's own verification caught and
-  # fixed. `profiles: [logging]` is unchanged from before (issue #1343:
-  # on by default for setup.sh-managed installs, still off by default for a
-  # from-scratch manual deploy/prod install, matching ntp/dhcp-kea/
-  # dhcp-proxy's sibling profile-gating convention).
-  # Named volumes keep their existing ownership across image upgrades, so the
-  # image-layer chown alone cannot migrate an already-populated `logs` volume.
-  # This short-lived least-privilege initializer repairs both the directory and
-  # any old proxy-log copies before the non-root syslog service opens them.
+  # ── Central logging: syslog + fluent-bit combined container ───────────────
+  # What: ONE container running both fluent-bit (collector/forwarder) and
+  # syslog-ng (central receiver), replacing the previous two separate
+  # services. See services/syslog/Dockerfile's own header for the full
+  # real-vs-POC comparison (pinned fluent-bit binary + glibc closure on a
+  # stable Alpine base, the privileged-port/capability findings, the
+  # `set -eu`/`wait -n` errexit fix).
+  # Why: a deliberate maintainer decision to accept crash-coupling and a
+  # single Docker HEALTHCHECK slot (mitigated below by a real dual-process
+  # check + structured status file) in exchange for one image to
+  # build/scan/patch instead of two. `profiles: [logging]` matches
+  # ntp/dhcp-kea/dhcp-proxy's sibling profile-gating convention: on by
+  # default for setup.sh-managed installs, off for a from-scratch manual
+  # deploy/prod install.
+  # From: Issue #453 | Issue #633 | Issue #1343
+  #
+  # What: this short-lived least-privilege initializer chowns the `logs`
+  # volume and any old proxy-log copies before the non-root syslog service
+  # opens them.
+  # Why: named volumes keep their existing ownership across image upgrades,
+  # so the image-layer chown alone cannot migrate an already-populated
+  # volume.
   syslog-logs-permissions:
     container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
@@ -1181,36 +1135,31 @@ services:
     restart: "no"
 
   syslog:
-    # container_name (issue #842/#849, merged from current_dev's #1420):
-    # watchdog's Rust rewrite needs a stable, predictable Docker API path
-    # (/containers/<name>/json) to add this service to its alert-only
-    # monitored set -- without a fixed name, Compose's auto-generated one
-    # (<project>-syslog-1) would depend on the project name/directory and
-    # break the moment either changes. #1420 added this same fixed name to
-    # BOTH the old separate `syslog` (fluent-bit) and `syslog-ng` services;
-    # this consolidation PR's single combined service keeps exactly one of
-    # those two names (`lancache-syslog`) -- see this PR's report/services/
-    # watchdog/src/main.rs's updated resolve_alert_only_targets() for why
-    # `lancache-syslog-ng` is no longer a separate monitored target at all
-    # (that container no longer exists once these two services become one).
+    # What: a fixed container_name (`lancache-syslog`), the one this combined
+    # service keeps of the two names the former separate `syslog`/`syslog-ng`
+    # services used.
+    # Why: watchdog's Rust rewrite needs a stable, predictable Docker API
+    # path (/containers/<name>/json) to add this service to its alert-only
+    # monitored set -- Compose's auto-generated name would depend on the
+    # project name/directory and break the moment either changes.
+    # `lancache-syslog-ng` is no longer a separate monitored target since
+    # that container no longer exists (see resolve_alert_only_targets() in
+    # services/watchdog/src/main.rs).
+    # From: Issue #842 | Issue #849
     container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # Least-privilege posture, empirically determined (see Dockerfile's own
-    # extensive comment for the full methodology and the two dead-end
-    # designs -- a runtime su-exec privilege drop, and plain
-    # `cap_add: DAC_READ_SEARCH` alone -- this PR tried and disproved before
-    # arriving here): the whole container runs as fixed non-root uid 10001
-    # (Dockerfile USER), with exactly ONE added capability so fluent-bit can
-    # read today's root:root 0640 producer logs it doesn't own.
-    # DAC_READ_SEARCH (read-only bypass) is narrower than the POC's own
-    # proposed CAP_DAC_OVERRIDE (read+write bypass) -- verified live that the
-    # narrower capability is sufficient for fluent-bit's actual access
-    # pattern. HARD INVARIANT (verified live): the fluent-bit interpreter
-    # binary carries a matching `setcap` file capability baked into the
-    # image, so running this exact image WITHOUT `cap_add: [DAC_READ_SEARCH]`
-    # fails closed at exec (not a silent capability downgrade) -- never
-    # remove one side of this pair without the other.
+    # What: the whole container runs as fixed non-root uid 10001 (Dockerfile
+    # USER), with exactly ONE added capability (DAC_READ_SEARCH, a read-only
+    # bypass) so fluent-bit can read today's root:root 0640 producer logs it
+    # doesn't own.
+    # Why: empirically determined the narrowest sufficient grant -- see
+    # Dockerfile's own comment for the full methodology. HARD INVARIANT
+    # (verified live): the fluent-bit interpreter binary carries a matching
+    # `setcap` file capability baked into the image, so running this exact
+    # image WITHOUT `cap_add: [DAC_READ_SEARCH]` fails closed at exec, not a
+    # silent capability downgrade -- never remove one side of this pair
+    # without the other.
     cap_drop:
       - ALL
     cap_add:
@@ -1240,17 +1189,13 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
-      # Central log receiver destination (previously the separate
-      # `syslog-ng` service's own mount, and briefly ALSO a second,
-      # independent mount on a different balabit/syslog-ng container in
-      # current_dev's #1420, merged concurrently with this PR -- that whole
-      # second service is superseded by this one combined container, not
-      # merged alongside it). Bind-mounted, not a named volume -- Docker
-      # auto-creates a missing host directory as root:root 0755, which the
-      # non-root (uid 10001) syslog-ng process in this container cannot
-      # write its own per-host subdirectories into. setup.sh pre-creates and
-      # chowns this path on fresh install specifically to avoid that (see
-      # setup.sh's own comment); the data-loss detector above is the
+      # What: central log receiver destination, bind-mounted rather than a
+      # named volume.
+      # Why: Docker auto-creates a missing host directory as root:root 0755,
+      # which the non-root (uid 10001) syslog-ng process in this container
+      # cannot write its own per-host subdirectories into; setup.sh
+      # pre-creates and chowns this path on fresh install to avoid that (see
+      # setup.sh's own comment), and the data-loss detector above is the
       # defense-in-depth backstop for an install that predates that fix or
       # has its permissions changed later.
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng

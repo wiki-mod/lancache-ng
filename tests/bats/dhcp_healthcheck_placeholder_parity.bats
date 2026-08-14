@@ -41,16 +41,12 @@ extract_detection() {
 }
 
 # extract_auth_call <compose-file>
-# Prints the dhcp healthcheck's shared-secret-file fallback through its final
-# curl/jq invocation -- the part extract_detection() deliberately excludes.
-# From: Issue #1304 | PR #1550: PR #1550 hardened deploy/prod's Basic-Auth
-# handling (curl -u -> curl -K plus token escaping) but left
-# deploy/quickstart's identical healthcheck on the vulnerable -u form,
-# entirely undetected by this file's existing "share an identical
-# placeholder-detection fragment" test because that test's own capture
-# window stops before this part of the healthcheck ever begins. This
-# extraction closes that blind spot so the two files' credential-handling
-# code, not just their placeholder-detection code, is required to match.
+# What: prints the dhcp healthcheck's shared-secret-file fallback through
+# its final curl/jq invocation -- the part extract_detection() excludes.
+# Why: closes a blind spot where the two compose files' credential-handling
+# code, not just their placeholder-detection code, could silently diverge
+# undetected by the existing detection-fragment test alone.
+# From: Issue #1304 | PR #1550
 extract_auth_call() {
     awk '
         /kea-ctrl-token 2>\/dev\/null/ { capture = 1 }

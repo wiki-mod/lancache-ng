@@ -22,13 +22,10 @@
 
 name: lancache-ng
 
-# The Docker socket proxy's HAProxy allowlist lives in exactly one place,
-# scripts/docker-socket-proxy.sh (mounted read-only below), which is the
-# canonical source per docs/naming-conventions.md. This file used to also
-# carry an unreferenced x-docker-socket-proxy-command YAML anchor with a
-# near-duplicate copy of that same config -- it was never aliased anywhere
-# (dead weight that could silently drift from the real script with no
-# functional effect) and has been removed.
+# What: the Docker socket proxy's HAProxy allowlist lives in exactly one
+# place, scripts/docker-socket-proxy.sh (mounted read-only below).
+# Why: docs/naming-conventions.md names this the canonical source -- do not
+# duplicate the allowlist as a YAML anchor in this file.
 #
 # LANCACHE_CONTAINER_SUFFIX (issue #1415): every container_name: below is
 # `lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`. Left unset (the
@@ -451,38 +448,36 @@ services:
       driver: json-file
       options: {max-size: "5m", max-file: "2"}
 
-  # ── Central logging: syslog + fluent-bit combined container (issue #453/#633
-  # baseline superseded here; see this PR for the full rationale) ───────────
-  # Replaces the previous two separate services (`syslog` = fluent-bit
-  # collector/forwarder, `syslog-ng` = central receiver) with ONE container
-  # running both -- a deliberate maintainer decision to accept crash-coupling
-  # and a single Docker HEALTHCHECK slot (mitigated below by a real
-  # dual-process check + structured status file) in exchange for one image
-  # to build/scan/patch instead of two. See services/syslog/Dockerfile's own
-  # header for the full real-vs-POC comparison this PR ran on a self-hosted
-  # runner: the exact pinned fluent-bit binary bundled with its glibc closure
-  # into a stable (non-edge) Alpine base, the two privileged-port/capability
-  # findings that contradicted the original POC's assumptions, and the
-  # `set -eu`/`wait -n` errexit bug this PR's own verification caught and
-  # fixed. `profiles: [logging]` is unchanged from before (issue #1343:
-  # on by default for setup.sh-managed installs, still off by default for a
-  # from-scratch manual deploy/quickstart install, matching ntp/dhcp-kea/
-  # dhcp-proxy's sibling profile-gating convention).
+  # ── Central logging: syslog + fluent-bit combined container ───────────────
+  # What: ONE container running both fluent-bit (collector/forwarder) and
+  # syslog-ng (central receiver), replacing the previous two separate
+  # services. See services/syslog/Dockerfile's own header for the full
+  # real-vs-POC comparison (pinned fluent-bit binary + glibc closure on a
+  # stable Alpine base, the privileged-port/capability findings, the
+  # `set -eu`/`wait -n` errexit fix).
+  # Why: a deliberate maintainer decision to accept crash-coupling and a
+  # single Docker HEALTHCHECK slot (mitigated below by a real dual-process
+  # check + structured status file) in exchange for one image to
+  # build/scan/patch instead of two. `profiles: [logging]` matches
+  # ntp/dhcp-kea/dhcp-proxy's sibling profile-gating convention: on by
+  # default for setup.sh-managed installs, off for a from-scratch manual
+  # deploy/quickstart install.
+  # From: Issue #453 | Issue #633 | Issue #1343
   #
-  # `logs-syslog-ng` below is a NAMED volume (unlike prod's bind-mounted
-  # SYSLOG_NG_LOG_DIR): a fresh named volume inherits its mount point's
-  # in-image ownership when Docker first populates it (confirmed Docker
-  # behavior for a destination path that already exists with content in the
-  # image), and this image's Dockerfile already chowns
-  # /var/log/lancache-syslog-ng to uid 10001 at build time -- so quickstart
-  # does not depend on setup.sh's separate bind-mount pre-chown step the way
-  # prod does. The data-loss detector below still applies regardless (e.g.
-  # a volume created by an older image version, or reused across an
-  # upgrade Docker does not re-populate).
-  # Named volumes keep their existing ownership across image upgrades, so the
-  # image-layer chown alone cannot migrate an already-populated `logs` volume.
-  # This short-lived least-privilege initializer repairs both the directory and
-  # any old proxy-log copies before the non-root syslog service opens them.
+  # What: `logs-syslog-ng` below is a NAMED volume, unlike prod's
+  # bind-mounted SYSLOG_NG_LOG_DIR.
+  # Why: a fresh named volume inherits this Dockerfile's build-time chown to
+  # uid 10001 when Docker first populates it, so quickstart never hits the
+  # root:root ownership problem prod's bind mount needs setup.sh/the
+  # data-loss detector to guard against -- that detector still applies here
+  # too, e.g. for a volume created by an older image version.
+  #
+  # What: this short-lived least-privilege initializer chowns the `logs`
+  # volume and any old proxy-log copies before the non-root syslog service
+  # opens them.
+  # Why: named volumes keep their existing ownership across image upgrades,
+  # so the image-layer chown alone cannot migrate an already-populated
+  # volume.
   syslog-logs-permissions:
     container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
@@ -504,21 +499,17 @@ services:
     container_name: lancache-syslog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # Least-privilege posture, empirically determined (see Dockerfile's own
-    # extensive comment for the full methodology and the two dead-end
-    # designs -- a runtime su-exec privilege drop, and plain
-    # `cap_add: DAC_READ_SEARCH` alone -- this PR tried and disproved before
-    # arriving here): the whole container runs as fixed non-root uid 10001
-    # (Dockerfile USER), with exactly ONE added capability so fluent-bit can
-    # read today's root:root 0640 producer logs it doesn't own.
-    # DAC_READ_SEARCH (read-only bypass) is narrower than the POC's own
-    # proposed CAP_DAC_OVERRIDE (read+write bypass) -- verified live that the
-    # narrower capability is sufficient for fluent-bit's actual access
-    # pattern. HARD INVARIANT (verified live): the fluent-bit interpreter
-    # binary carries a matching `setcap` file capability baked into the
-    # image, so running this exact image WITHOUT `cap_add: [DAC_READ_SEARCH]`
-    # fails closed at exec (not a silent capability downgrade) -- never
-    # remove one side of this pair without the other.
+    # What: the whole container runs as fixed non-root uid 10001 (Dockerfile
+    # USER), with exactly ONE added capability (DAC_READ_SEARCH, a read-only
+    # bypass) so fluent-bit can read today's root:root 0640 producer logs it
+    # doesn't own.
+    # Why: empirically determined the narrowest sufficient grant -- see
+    # Dockerfile's own comment for the full methodology. HARD INVARIANT
+    # (verified live): the fluent-bit interpreter binary carries a matching
+    # `setcap` file capability baked into the image, so running this exact
+    # image WITHOUT `cap_add: [DAC_READ_SEARCH]` fails closed at exec, not a
+    # silent capability downgrade -- never remove one side of this pair
+    # without the other.
     cap_drop:
       - ALL
     cap_add:
@@ -548,18 +539,13 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
-      # Central log receiver destination (previously the separate
-      # `syslog-ng` service's own mount, and briefly ALSO a second,
-      # independent mount on a different balabit/syslog-ng container in
-      # current_dev's #1420, merged concurrently with this PR -- that whole
-      # second service is superseded by this one combined container, not
-      # merged alongside it). This is a named volume (not a bind mount, see
-      # deploy/prod/docker-compose.yml's own comment for why prod differs
-      # here) -- Docker's own image-content inheritance for a fresh named
-      # volume already gives it this Dockerfile's build-time chown to uid
-      # 10001, so quickstart never hits the root:root ownership problem
-      # prod's bind mount needs setup.sh/the data-loss detector to guard
-      # against.
+      # What: central log receiver destination, a named volume (not a bind
+      # mount, see deploy/prod/docker-compose.yml's own comment for why prod
+      # differs here).
+      # Why: Docker's own image-content inheritance for a fresh named volume
+      # already gives it this Dockerfile's build-time chown to uid 10001, so
+      # quickstart never hits the root:root ownership problem prod's bind
+      # mount needs setup.sh/the data-loss detector to guard against.
       - logs-syslog-ng:/var/log/lancache-syslog-ng
     # Real dual-process check (services/syslog/healthcheck.sh): verifies
     # fluent-bit AND syslog-ng independently and only reports healthy when
