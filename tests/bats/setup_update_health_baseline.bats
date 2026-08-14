@@ -2,29 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Regression coverage for the pre-update health-baseline gate (issue #1391's
-# post-merge-verification finding): setup.sh update's post-update health gate
-# used to fail on ANY currently-unhealthy non-UI service, with no way to tell
-# "this service regressed because of what the update just did" apart from
-# "this service was already broken before the update started, for a reason
-# the update did not cause or change." Real-world consequence: an opt-in
-# service that can never become healthy in a given environment (e.g. ntp
-# crash-looping under this project's LXC-hosted CI runners' CAP_SYS_TIME
-# limitation, issue #1296) permanently blocked every future update, including
-# unrelated security fixes, until the operator manually disabled it.
-#
-# capture_stack_health_baseline + wait_for_stack_health's baseline-aware gate
-# fix that: only a service that WAS healthy pre-update (or has no baseline at
-# all -- a brand-new service, or a fresh install) counts as a gate failure
-# when it is unhealthy afterward. A service already unhealthy pre-update does
-# not block the gate, but a REAL regression (healthy -> unhealthy) still does.
-#
-# Uses fake dc_update/docker shell functions (redefined after sourcing the
-# real setup.sh range via load_setup_functional_health_helpers) instead of a
-# real Docker daemon, so this suite is fast and fully deterministic -- see
-# each test's own FAKE_* table setup for the exact container states it
-# simulates. This mirrors setup_functional_health_gate.bats's existing use of
-# the same helper for the neighboring verify_stack_functional_health gate.
+# What: Coverage for setup.sh's pre-update health-baseline gate --
+#   capture_stack_health_baseline + wait_for_stack_health only fail the gate
+#   on a real regression (healthy pre-update, unhealthy after), not a
+#   service already unhealthy before the update started.
+# Why: Without a baseline, one permanently-unhealthy opt-in service (e.g.
+#   ntp under this project's CI runners) blocked every future update.
+#   Fake dc_update/docker functions keep this deterministic and fast.
+# From: Issue #1391 | PR #1546
 
 bats_require_minimum_version 1.5.0
 
@@ -36,56 +21,39 @@ setup() {
     source "$BATS_TEST_DIRNAME/helpers/setup-functional-health-helpers.sh"
     load_setup_functional_health_helpers "$repo_root" "$helper_file"
 
-    # The captured setup.sh range's own `declare -A _UPDATE_HEALTH_BASELINE=()`
-    # (see setup.sh's "update / auto-update shared internals" section) runs as
-    # part of the `source` call above -- but that `source` executes inside
-    # THIS function (bats' own setup()), so a plain `declare` without `-g`
-    # scopes the array LOCAL to setup() and it evaporates the moment setup()
-    # returns. A later plain reassignment in the @test body / in
-    # capture_stack_health_baseline itself would then create a fresh, un-
-    # declared global that bash defaults to an INDEXED array -- silently
-    # turning `_UPDATE_HEALTH_BASELINE[ntp]="0"` into an arithmetic-subscript
-    # assignment (unset bareword "ntp" evaluates to 0), colliding with
-    # `_UPDATE_HEALTH_BASELINE[proxy]="1"` at the very same index 0. Only
-    # matters for this test harness's re-use of `source`-inside-a-function;
-    # setup.sh's own real top-level `source`/execution never hits this, since
-    # it is never itself inside a function. Re-declaring with an explicit
-    # `-g` here forces true global+associative scope regardless of the
-    # function context the sourcing happened in, closing the gap for good.
+    # What: Re-declares the sourced _UPDATE_HEALTH_BASELINE as global+associative.
+    # Why: `source` runs inside this function, so a plain (non -g) `declare`
+    #   scopes it local to setup() and it evaporates on return; a later
+    #   reassignment would then silently create an INDEXED global instead,
+    #   colliding keys via arithmetic-subscript coercion. Test-harness-only;
+    #   setup.sh's own top-level source never runs inside a function.
     declare -gA _UPDATE_HEALTH_BASELINE=()
 
-    # verify_stack_functional_health's own curl/dig probes are covered by
-    # setup_functional_health_gate.bats; stubbed out here to a plain success
-    # so these tests isolate the per-container baseline/regression logic.
+    # What: Stubs verify_stack_functional_health to a plain success.
+    # Why: Its curl/dig probes are covered by setup_functional_health_gate.bats;
+    #   stubbing isolates the per-container baseline/regression logic here.
     verify_stack_functional_health() { return 0; }
 
-    # Fake container tables, keyed by service name / container id. Each test
-    # populates only the entries it needs; an unset lookup reads as empty,
-    # which the fakes below treat the same way real `docker`/`dc_update`
-    # would treat a container that doesn't exist.
+    # What: Fake container tables, keyed by service name / container id.
+    # Why: An unset lookup reads empty, same as the fakes below treat a
+    #   container that doesn't exist for real docker/dc_update.
     declare -gA FAKE_CONTAINER_ID=()
     declare -gA FAKE_HEALTH=()          # container id -> "" (no healthcheck) | healthy | unhealthy | starting
     declare -gA FAKE_STATUS=()          # container id -> running | exited | restarting
     declare -gA FAKE_RESTART_POLICY=()  # container id -> no | always
     declare -gA FAKE_EXIT_CODE=()       # container id -> exit code string
-    # Per-service scripted health sequence, used by the "flaky single sample"
-    # test to return a different reading on successive calls -- simulating a
-    # container's real state changing between capture_stack_health_baseline's
-    # own samples, exactly like a genuinely crash-looping container would.
-    # The position within the sequence is tracked via a file under
-    # BATS_TEST_TMPDIR (see the fake docker() function below), not a bash
-    # variable -- a subshell-persistence requirement, not a style choice.
+    # What: Per-service scripted health sequence (one reading consumed per call).
+    # Why: Simulates a flapping container's state changing between samples;
+    #   tracked via a file (see fake docker() below), not a bash variable,
+    #   since a subshell copy would discard an in-memory counter.
     declare -gA FAKE_HEALTH_SEQUENCE=() # service -> space-separated sequence of health readings, consumed one per call
 
-    # Speed up capture_stack_health_baseline's own multi-sample wait and
-    # wait_for_stack_health's poll interval so these tests run in a second or
-    # two rather than the real several-second production intervals.
+    # What: Shortens the baseline sample count/interval for fast test runs.
     _UPDATE_HEALTH_BASELINE_SAMPLES=3
     _UPDATE_HEALTH_BASELINE_SAMPLE_INTERVAL=0
 
-    # Overrides the real dc_update (docker compose --env-file ... "$@"):
-    # only the one call shape service_container_id actually issues
-    # ("ps -a -q <service>") is handled.
+    # What: Overrides dc_update; only the "ps -a -q <service>" shape used by
+    #   service_container_id is handled.
     dc_update() {
         if [[ "$1" = "ps" ]]; then
             local svc="$4"
@@ -94,31 +62,18 @@ setup() {
         return 0
     }
 
-    # Overrides the real `docker` binary: only the three `docker inspect
-    # --format '...'` shapes service_container_is_healthy actually issues are
-    # handled, dispatched on which field the format string asks for. A
-    # service listed in FAKE_HEALTH_SEQUENCE consumes one reading per call
-    # (simulating a flapping container); everything else reads a fixed value
-    # from the FAKE_* tables above.
-    #
-    # The per-service call counter is a FILE under BATS_TEST_TMPDIR, not a
-    # bash associative-array entry: service_container_is_healthy invokes this
-    # function via `health=$(docker inspect ...)` -- a command substitution,
-    # which forks a subshell. Any in-memory variable this function mutated
-    # (including an associative-array element) would be a copy-on-write
-    # change local to that subshell and silently discarded the moment it
-    # exits, so a would-be counter would read back as 0 forever no matter how
-    # many samples ran. A real file's content survives past the subshell
-    # exit, since it is a genuine filesystem side effect, not process memory.
+    # What: Overrides `docker`; dispatches the three `inspect --format` shapes
+    #   service_container_is_healthy issues, plus `docker logs`.
+    # Why: The per-service call counter for FAKE_HEALTH_SEQUENCE is a file
+    #   under BATS_TEST_TMPDIR, not an associative-array entry -- this
+    #   function runs via `$(docker inspect ...)`, a subshell whose in-memory
+    #   mutations are discarded on exit, so only a real file survives across
+    #   calls to track "which reading is next."
     docker() {
-        # Fakes the regressed-service log dump (wait_for_stack_health's own
-        # `docker logs --tail 50 "$container_id"` call) with a recognizable
-        # line by default, so a test can assert the dump actually reached the
-        # output instead of merely not crashing. Set FAKE_LOGS_SHOULD_FAIL=1
-        # to instead simulate `docker logs` itself failing (e.g. the
-        # container was removed between the health check and the dump), for
-        # the test proving the `|| print_warn` fallback fires under this
-        # script's real `set -euo pipefail`.
+        # What: Fakes `docker logs --tail 50` with a recognizable line, or a
+        #   failure when FAKE_LOGS_SHOULD_FAIL=1 (container already gone).
+        # Why: Proves the `|| print_warn` fallback fires under real
+        #   `set -euo pipefail`, not just that the dump doesn't crash.
         if [[ "$1" = "logs" ]]; then
             if [[ "${FAKE_LOGS_SHOULD_FAIL:-0}" = "1" ]]; then
                 return 1
@@ -141,10 +96,9 @@ setup() {
                     local idx=0
                     [[ -f "$count_file" ]] && idx=$(<"$count_file")
                     printf '%s' "$(( idx + 1 ))" > "$count_file"
-                    # Once the scripted sequence is exhausted, keep returning
-                    # its last entry rather than reading an unset index as
-                    # empty (which would misrepresent "no healthcheck
-                    # declared" instead of continuing the scripted state).
+                    # What: Clamps idx to the last entry once the sequence is exhausted.
+                    # Why: An unset index would read empty, misrepresenting
+                    #   "no healthcheck declared" instead of the scripted state.
                     (( idx >= ${#sequence[@]} )) && idx=$(( ${#sequence[@]} - 1 ))
                     printf '%s' "${sequence[$idx]}"
                 else
@@ -181,15 +135,10 @@ setup() {
 }
 
 @test "capture_stack_health_baseline does not mistake a single lucky sample of a flapping container for stable health" {
-    # Simulates issue #1391's exact hazard: a crash-looping container with no
-    # declared HEALTHCHECK can transiently read .State.Health empty / status
-    # "running" for an instant between one restart and the next crash. A
-    # single-sample baseline would misread this as healthy; requiring
-    # _UPDATE_HEALTH_BASELINE_SAMPLES consecutive healthy reads must not.
+    # What: A crash-looping container reads healthy once, then unhealthy.
+    # Why: A single sample would misread the healthy blip as stable; only
+    #   _UPDATE_HEALTH_BASELINE_SAMPLES consecutive healthy reads may count.
     FAKE_CONTAINER_ID[flaky]="c-flaky"
-    # Sample 1 (mid-restart-window): healthcheck reports healthy once...
-    # Sample 2: ...but the container has already crashed and restarted by
-    # the time the next sample is taken, so this must fail the streak.
     FAKE_HEALTH_SEQUENCE[flaky]="healthy unhealthy unhealthy"
 
     capture_stack_health_baseline flaky
@@ -207,9 +156,9 @@ setup() {
 }
 
 @test "capture_stack_health_baseline leaves a brand-new service (no pre-existing container) out of the baseline map entirely" {
-    # No FAKE_CONTAINER_ID entry at all for "watchdog" -- service_container_id
-    # returns empty, exactly like docker compose ps -a -q would for a service
-    # this update is introducing for the first time.
+    # What: No FAKE_CONTAINER_ID entry for "watchdog".
+    # Why: Mirrors `docker compose ps -a -q` for a service the update is
+    #   introducing for the first time.
     capture_stack_health_baseline watchdog
 
     run bash -c '[[ -v _UPDATE_HEALTH_BASELINE[watchdog] ]]'
@@ -254,13 +203,10 @@ setup() {
 }
 
 @test "wait_for_stack_health's log-dump fallback fires when docker logs itself fails, under real set -euo pipefail" {
-    # setup.sh's own top-level option set is `set -euo pipefail` --
-    # this test enables exactly that (bats runs each @test in its own
-    # process, so it cannot leak into any other test) before calling `run`,
-    # since the `docker logs ... | sed ... || print_warn ...` line's
-    # fallback is only reachable at all when a failing producer's status
-    # actually propagates through the pipe, which plain `set -e` alone does
-    # not provide.
+    # What: Enables set -euo pipefail (bats isolates each @test's process).
+    # Why: The `docker logs ... | sed ... || print_warn` fallback is only
+    #   reachable when a failing producer's status propagates through the
+    #   pipe, which plain `set -e` alone does not provide.
     set -euo pipefail
     FAKE_CONTAINER_ID[proxy]="c-proxy"
     FAKE_HEALTH[c-proxy]="unhealthy"
@@ -276,13 +222,11 @@ setup() {
 }
 
 # ── _REGRESSED_SERVICE_SYSLOG_HOST / dump_service_syslog_ng_tail ──────────────
-# nats/dhcp-proxy/syslog are the three services docs/architecture-ng.md's
-# logging matrix documents as having no dual stdout+file log mode -- once
-# LOGGING_ENABLED redirects their one available destination to a file,
-# `docker logs` alone (the FAKE_CRASH_LINE dump above) goes permanently
-# quiet for them. These tests point INSTALL_DIR/_UPDATE_ENV_FILE at a throwaway
-# tmp tree instead of touching the real filesystem's default
-# /opt/lancache-ng, so they need no root/real-install access.
+# What: nats/dhcp-proxy/syslog have no dual stdout+file log mode; once
+#   LOGGING_ENABLED redirects them to file, `docker logs` alone goes quiet.
+# Why: Tests point INSTALL_DIR/_UPDATE_ENV_FILE at a throwaway tmp tree,
+#   needing no root/real-install access.
+# From: PR #1546
 
 @test "wait_for_stack_health also tails today's forwarded syslog-ng file for a known-quiet regressed service" {
     INSTALL_DIR="$BATS_TEST_TMPDIR/install"
@@ -316,9 +260,8 @@ setup() {
 
     run wait_for_stack_health 2 nats
     [ "$status" -eq 1 ]
-    # The file exists and would produce a match if read -- proving this is a
-    # real "skipped because LOGGING_ENABLED=0" outcome, not an accidental
-    # miss from a wrong path.
+    # What: File exists and would match if read.
+    # Why: Proves this is a real LOGGING_ENABLED=0 skip, not a wrong-path miss.
     [[ "$output" != *"Last 50 forwarded log lines"* ]]
     [[ "$output" != *"FAKE_NATS_SYSLOG_LINE"* ]]
 }
@@ -327,8 +270,9 @@ setup() {
     INSTALL_DIR="$BATS_TEST_TMPDIR/install"
     _UPDATE_ENV_FILE="$BATS_TEST_TMPDIR/.env"
     : > "$_UPDATE_ENV_FILE"
-    # Deliberately no mkdir/file: a freshly-updated stack whose syslog-ng
-    # bind mount has not received any forwarded lines for this service yet.
+    # What: No mkdir/file created.
+    # Why: Simulates a fresh stack whose syslog-ng bind mount has not
+    #   received any forwarded lines for this service yet.
 
     FAKE_CONTAINER_ID[nats]="c-nats"
     FAKE_HEALTH[c-nats]="unhealthy"
@@ -354,10 +298,9 @@ setup() {
 }
 
 @test "wait_for_stack_health reports no container found when a regressed service's container is already gone" {
-    # Deliberately no FAKE_CONTAINER_ID entry: the fake dc_update "ps -a -q"
-    # lookup above returns empty for any unlisted service, exactly like a
-    # container docker compose can no longer find (already removed/recreated
-    # by the time the gate's failure path runs).
+    # What: No FAKE_CONTAINER_ID entry for "ghost".
+    # Why: Mirrors a container docker compose can no longer find (already
+    #   removed/recreated by the time the gate's failure path runs).
     _UPDATE_HEALTH_BASELINE=([ghost]="1")
 
     run wait_for_stack_health 2 ghost
@@ -397,7 +340,6 @@ setup() {
     run wait_for_stack_health 2 ntp proxy
     [ "$status" -eq 1 ]
     [[ "$output" == *"proxy"* ]]
-    # The already-broken, non-regressed service must be named as forgiven,
-    # not folded into the regression failure message.
+    # What: ntp must be named as forgiven, not folded into the regression message.
     [[ "$output" != *"regressed"*"ntp"* ]]
 }

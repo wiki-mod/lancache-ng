@@ -1,27 +1,24 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Test setup.sh migration semantics: verify that existing non-empty .env values
-# are preserved by default and not overwritten during migrations or updates.
-# This test validates the AGENTS.md guarantee: "Existing non-empty local values
-# must be preserved by default."
+# What: Verifies existing non-empty .env values are preserved by default,
+#   not overwritten during migrations/updates.
+# Why: Validates the AGENTS.md guarantee "Existing non-empty local values
+#   must be preserved by default."
+# From: PR #1546
 set -euo pipefail
 
-# Extract and source the .env helper functions from setup.sh.
-# Only the functions we need are sourced to keep the test deterministic.
-# STATUS: as of 2026-08-13, this function is unused (nothing in this file or
-# elsewhere in the repo calls it) and its hardcoded line range below no
-# longer matches env_key_exists()/write_env_file()'s real current location
-# in setup.sh (1095/1863) -- a dead-code/stale-range defect distinct from
-# this file's own scope, left unfixed pending a maintainer decision on
-# whether to remove this helper or replace the range with a non-line-number
-# extraction mechanism.
+# What: Would extract setup.sh's .env helper functions by hardcoded line range.
+# Why: STATUS as of 2026-08-13: unused (nothing calls it) and its range no
+#   longer matches env_key_exists()/write_env_file()'s real current location
+#   -- left unfixed pending a maintainer decision on removing this helper
+#   vs. a non-line-number extraction mechanism.
 setup_sh_helpers() {
     local setup_sh="$1"
     sed -n '446,628p' "$setup_sh"
 }
 
-# Helper to run a single test in isolation.
+# What: Runs a single test function against its own scratch env file.
 run_test() {
     local test_name="$1"
     local test_func="$2"
@@ -36,73 +33,63 @@ run_test() {
     fi
 }
 
-# Test 1: Existing non-empty value is preserved when append_env_key_if_missing is called.
-# AGENTS.md guarantee: "Existing non-empty local values must be preserved by default."
+# What: Existing non-empty value is preserved when append_env_key_if_missing is called.
+# Why: Validates the same AGENTS.md guarantee cited in the file header.
 test_existing_value_preserved() {
     local env_file="$1"
 
-    # Simulate a user's existing configuration.
     printf 'STANDARD_CACHE_MAX_GB=100.0\n' > "$env_file"
 
-    # The setup.sh helper function should NOT overwrite an existing key.
     env_key_exists() {
         grep -q "^${1}=" "${2}" 2>/dev/null
     }
 
-    # Call the same logic as setup.sh uses: only add if missing.
     env_key_exists STANDARD_CACHE_MAX_GB "$env_file" || printf 'STANDARD_CACHE_MAX_GB=50.0\n' >> "$env_file"
 
-    # Verify the original value was not overwritten.
     local actual
     actual=$(grep '^STANDARD_CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
     [ "$actual" = "100.0" ] || return 1
 
-    # Verify there is only one copy of the key (no duplicate lines).
+    # What: Only one copy of the key (no duplicate lines).
     local count
     count=$(grep -c '^STANDARD_CACHE_MAX_GB=' "$env_file")
     [ "$count" = "1" ] || return 1
 }
 
-# Test 2: Missing keys are added on first run (install).
-# AGENTS.md guarantee: "Setup...logic must converge old or incomplete installations
-# toward the current expected state."
+# What: Missing keys are added on first run (install).
+# Why: AGENTS.md guarantee: setup logic must converge old/incomplete
+#   installations toward the current expected state.
 test_missing_key_added() {
     local env_file="$1"
 
-    # Start with an empty .env (fresh install).
     : > "$env_file"
 
     env_key_exists() {
         grep -q "^${1}=" "${2}" 2>/dev/null
     }
 
-    # Call setup.sh helper logic: add missing keys with defaults.
     env_key_exists STANDARD_CACHE_MAX_GB "$env_file" || printf 'STANDARD_CACHE_MAX_GB=50.0\n' >> "$env_file"
 
-    # Verify the key was added with the default.
     local actual
     actual=$(grep '^STANDARD_CACHE_MAX_GB=' "$env_file" | cut -d= -f2)
     [ "$actual" = "50.0" ] || return 1
 }
 
-# Test 3: Empty optional values remain empty (not replaced).
-# AGENTS.md guarantee: "Existing non-empty local values must be preserved by default."
-# Extended: even intentionally-empty values must not be replaced.
+# What: Empty optional values remain empty (not replaced) -- extends the
+#   preserve-by-default guarantee to intentionally-empty values too.
+# Why: e.g. UI_BIND_IP= deliberately triggers the
+#   ${UI_BIND_IP:-${IP_STANDARD}} compose fallback to IP_STANDARD.
 test_empty_value_preserved() {
     local env_file="$1"
 
-    # A user may deliberately leave an optional key empty to trigger compose fallback.
-    # Example: UI_BIND_IP= causes ${UI_BIND_IP:-${IP_STANDARD}} to use IP_STANDARD.
     printf 'UI_BIND_IP=\n' > "$env_file"
 
     env_key_exists() {
         grep -q "^${1}=" "${2}" 2>/dev/null
     }
 
-    # The key exists (even though it's empty), so append_env_key_if_missing must not touch it.
     env_key_exists UI_BIND_IP "$env_file" || printf 'UI_BIND_IP=192.168.1.10\n' >> "$env_file"
 
-    # Verify the empty value was preserved.
     local actual
     actual=$(grep '^UI_BIND_IP=' "$env_file" | cut -d= -f2)
     [ "$actual" = "" ] || return 1
@@ -119,14 +106,12 @@ main() {
         exit 1
     fi
 
-    # Create a temporary test environment.
     local test_dir
     test_dir=$(mktemp -d) || exit 1
     trap 'rm -rf "$test_dir"' EXIT
 
     local failed=0
 
-    # Run all tests in subshells to keep the environment clean.
     run_test "existing non-empty value is preserved" \
         test_existing_value_preserved "$test_dir/test1.env" || ((failed++))
 

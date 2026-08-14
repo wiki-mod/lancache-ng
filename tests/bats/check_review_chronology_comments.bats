@@ -2,19 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises scripts/check-review-chronology-comments.sh's three checks
-# (review-chronology comments/AG-CODE-003, fragile "(line ~N)" self-
-# references/AG-CODE-002, and issue/PR references duplicated outside their
-# own From: pointer/AG-CODE-012) against small, throwaway fixture trees
-# rather than only this repo's own real tree, so both the passing and
-# failing path are proven -- per AG-VAL-024, a check that only ever runs
-# against an already-green tree never actually proves its fail-closed path
-# is reachable. Mirrors tests/bats/check_workflow_line_limit.bats's fixture
-# shape (a plain `mktemp -d` tree, not BATS_TEST_TMPDIR) so there is no
-# ambiguity about whether the fixture root sits inside this repository's own
-# git working tree -- a real concern for this specific script, since it
-# switches its file-listing strategy on whether ".git" exists directly under
-# the root it is pointed at.
+# What: Exercises the script's three checks (AG-CODE-002/003/012) against
+#   throwaway fixture trees, both the passing and failing path.
+# Why: A `mktemp -d` tree (not BATS_TEST_TMPDIR) keeps the fixture root
+#   unambiguously outside this repo's own .git, since the script switches
+#   its file-listing strategy on that.
+# From: PR #1546
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -161,12 +154,9 @@ EOF
 }
 
 @test "does not flag itself: the script's own file and its bats test are excluded from the scan" {
-    # This script's header comment, and this very test file, legitimately
-    # quote the banned phrasing verbatim as documentation of what they
-    # detect -- if the self-reference exclusion were missing or broken, the
-    # guard would fail against its own repository the moment this file (or
-    # the script) were added, since both literally contain e.g. "caught in
-    # review" as example text.
+    # What: Copies the script and this test file into the fixture and scans it.
+    # Why: Both quote the banned phrasing verbatim; without the self-
+    #   reference exclusion, the guard would fail against its own repo.
     mkdir -p "$fixture_root/scripts" "$fixture_root/tests/bats"
     cp "$script" "$fixture_root/scripts/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \
