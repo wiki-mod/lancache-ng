@@ -63,8 +63,11 @@ services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
 # version untagged backlog this PR deliberately does NOT clean up (that is a
 # separate, maintainer-supervised one-time pass -- see this repo's issue
 # tracker for the dedicated backlog-drain effort), starving every later
-# service in the same run. 40 per service x 8 services = at most 320
-# deletions attempted per run: comfortably inside the classic PAT's
+# service in the same run. 40 per service x 9 services (see the
+# services=(...) array below; stale "8 services" corrected 2026-08-14 --
+# syslog joined the array in #1428/#1431, this comment's own arithmetic just
+# never followed) = at most 360 deletions attempted per run: comfortably
+# inside the classic PAT's
 # 5000-requests/hour REST budget even counting the paginated listing calls,
 # the closed-PR-tag `gh api DELETE` calls, and (new in this PR) one anonymous
 # registry manifest GET per tagged version plus up to one more per
@@ -119,6 +122,35 @@ declare -A pr_state_cache=()
 # catching it loudly costs nothing on a genuinely healthy run.
 max_pr_lookup_failures="${GC_MAX_PR_LOOKUP_FAILURES:-10}"
 pr_lookup_failures=0
+
+# A single service reporting "no GHCR package yet" (a genuine HTTP 404 on
+# the versions-listing call) is deliberately NOT an error on its own -- see
+# process_service's own comment at that check for the real, live-verified
+# case this protects (a service newly added to build-push.yml's matrix
+# ahead of its first real push). But GitHub's own REST API documentation
+# for this exact endpoint says some resources return 404 instead of 403
+# when the caller lacks access, so a bare 404 is not a generally valid
+# proof of absence either (issue #1557, item 72 of PR #1501's whole-file
+# audit). Live-checked during this fix (2026-08-14): the package-metadata
+# endpoint (`GET orgs/<org>/packages/container/<package>`, no `/versions`)
+# and this versions-listing endpoint return an IDENTICAL 404 body/message
+# for a genuinely nonexistent package -- there is no separate metadata call
+# that discriminates a real-absence 404 from an access-denied one, so
+# probing a second endpoint per candidate 404 (an earlier draft of this fix)
+# would not actually have told the two cases apart. This project has no
+# credential with read:packages deliberately stripped to test the
+# access-denied side of that claim directly; it rests on GitHub's own
+# general REST documentation for the endpoint family, not on a live
+# reproduction of the ambiguous case itself. The same class of problem already
+# has an established, working answer in this file for PR-state lookups
+# (see max_pr_lookup_failures above): an isolated occurrence is normal and
+# must not fail the run, but nearly every configured service hitting this
+# same code path in one run is far more consistent with a systemic
+# credential/scope problem than with several services all genuinely
+# launching in the same run. Threshold is computed from the real service
+# count rather than hardcoded, so it stays correct as services are
+# added/removed from the services=(...) array below.
+services_not_found=0
 
 had_errors=0
 deleted=0
@@ -186,6 +218,11 @@ process_service() {
     # project's own AG-CI-013/related rules exist to prevent.
     if [[ "$list_error" == *"HTTP 404"* ]]; then
       echo "::notice::lancache-ng/${service} has no GHCR package yet (HTTP 404 listing its versions) -- nothing to reap for a service with no images published. Not treated as an error."
+      # Counted, not just logged: see this variable's own declaration above
+      # for why a single occurrence must stay a safe notice, but nearly
+      # every configured service hitting this path in the same run must not
+      # still read as a healthy summary (issue #1557, item 72).
+      services_not_found=$((services_not_found + 1))
       return
     fi
     echo "::error::Failed to list package versions for lancache-ng/${service}: $list_error"
@@ -249,7 +286,15 @@ process_service() {
       continue
     fi
     if ! gcps_version_name_is_digest "$name"; then
-      echo "::warning::A $service package version's .name ('$name') is not the expected sha256:<64-hex> digest shape -- disabling orphan (untagged-version) classification for this service this run. Closed-PR tagged-version reaping is unaffected."
+      # AG-VAL-001 (issue #1557, item 79 of PR #1501's whole-file audit):
+      # this used to be `::warning::`-only with no had_errors=1, unlike the
+      # near-identical jq-read-failure case immediately above, which already
+      # sets had_errors=1. Both are "required classification evidence for
+      # this service is unavailable" states -- a malformed digest shape
+      # disables orphan classification exactly like a jq failure does, so a
+      # run hitting this must not still exit 0 and report a clean summary.
+      echo "::error::A $service package version's .name ('$name') is not the expected sha256:<64-hex> digest shape -- disabling orphan (untagged-version) classification for this service this run. Closed-PR tagged-version reaping is unaffected."
+      had_errors=1
       orphan_phase_ok=0
       continue
     fi
@@ -264,7 +309,7 @@ process_service() {
   # a service with zero currently-tagged versions, since Pass 1's own loop
   # body never reaches the token-fetch code for an untagged entry (it
   # `continue`s out before that point). A wholly untagged service is
-  # unlikely for any of these 8 always-actively-published services in
+  # unlikely for any of these 9 always-actively-published services in
   # practice, but Pass 2 still needs a working token to check orphan
   # candidates' own manifests either way, so fetching it here once keeps the
   # token's lifetime independent of Pass 1's per-entry tag shape.
@@ -333,7 +378,18 @@ process_service() {
       [[ -z "$tag" ]] && continue
       if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
         local pr_number="${BASH_REMATCH[1]}"
-        case "$(gcps_pr_lookup_state "$pr_number" "$repo" pr_state_cache)" in
+        # Called as a PLAIN STATEMENT with a result-variable argument, NOT
+        # wrapped in `$(...)`: command substitution forks a subshell, and
+        # gcps_pr_lookup_state's own pr_state_cache nameref writes would then
+        # land on that subshell's private copy of the array and vanish the
+        # instant it exits -- silently defeating the whole point of passing
+        # a cache through in the first place (issue #1557, item 74 of PR
+        # #1501's whole-file audit: this exact call site is what the bug was
+        # in, even though gcps_pr_lookup_state's own direct unit tests never
+        # caught it, since they invoke it as a plain statement too).
+        local pr_state
+        gcps_pr_lookup_state "$pr_number" "$repo" pr_state_cache pr_state
+        case "$pr_state" in
           OPEN)
             protected=1
             ;;
@@ -460,13 +516,25 @@ process_service() {
     fi
 
     local created_at created_epoch
+    # AG-VAL-001 (issue #1557, item 79): a malformed/unreadable .created_at
+    # is required evidence GHCR should always be returning -- unlike an
+    # isolated ambiguous PR-state lookup (a transient network/rate-limit
+    # blip this reaper already deliberately tolerates up to
+    # max_pr_lookup_failures before failing the run), a bad timestamp on a
+    # real GHCR record is a "should never happen" data-integrity signal.
+    # The candidate is still kept (fail-closed, unchanged), but per this
+    # project's own PR-1501 review finding, the run's exit code must also
+    # reflect that required evidence was unavailable rather than silently
+    # reporting a clean summary.
     if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
-      echo "::warning::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
+      echo "::error::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
+      had_errors=1
       kept=$((kept + 1))
       continue
     fi
     if ! created_epoch="$(gcps_created_at_to_epoch "$created_at")"; then
-      echo "::warning::Could not parse created_at ('$created_at') for $service version $version_id -- keeping it this run (fail closed) rather than risk deleting something mid-flight."
+      echo "::error::Could not parse created_at ('$created_at') for $service version $version_id -- keeping it this run (fail closed) rather than risk deleting something mid-flight."
+      had_errors=1
       kept=$((kept + 1))
       continue
     fi
@@ -540,12 +608,20 @@ process_service() {
     fi
 
     local created_at created_epoch
+    # AG-VAL-001 (issue #1557, item 79): same required-evidence reasoning as
+    # Pass 1's identical check above -- both a jq read failure and an
+    # unparseable timestamp must flag had_errors, and (this branch used to
+    # have NO message at all, unlike Pass 1's equivalent) both must actually
+    # report why via a log line, not fail silently.
     if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
-      echo "::warning::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
+      echo "::error::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
+      had_errors=1
       kept=$((kept + 1))
       continue
     fi
     if ! created_epoch="$(gcps_created_at_to_epoch "$created_at")"; then
+      echo "::error::Could not parse created_at ('$created_at') for $service version $version_id -- keeping it this run (fail closed) rather than risk deleting something mid-flight."
+      had_errors=1
       kept=$((kept + 1))
       continue
     fi
@@ -574,8 +650,15 @@ process_service() {
     # cheap insurance against deleting a still-relevant attestation whose
     # subject image is still alive.
     local candidate_manifest
+    # AG-VAL-001 (issue #1557, item 79): required evidence (whether this
+    # candidate is a live referrers-API attestation) was unavailable -- the
+    # candidate is correctly kept either way (fail closed, unchanged), but
+    # this must also flag had_errors so the run's exit code reflects that a
+    # required check could not be completed, matching the identical
+    # reasoning already applied to Pass 1's own manifest-fetch failure above.
     if ! candidate_manifest="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$service" "$name" "$repo" "$registry_token")" || [[ -z "$candidate_manifest" ]]; then
-      echo "::warning::Could not fetch $service candidate orphan $name's own manifest to check for a subject reference -- keeping it this run rather than risk deleting a live attestation."
+      echo "::error::Could not fetch $service candidate orphan $name's own manifest to check for a subject reference -- keeping it this run rather than risk deleting a live attestation."
+      had_errors=1
       kept=$((kept + 1))
       continue
     fi
@@ -650,6 +733,23 @@ main() {
   fi
   if (( pr_lookup_failures >= max_pr_lookup_failures )); then
     echo "::error::$pr_lookup_failures PR-state lookups failed this run (threshold: $max_pr_lookup_failures) -- this many ambiguous lookups is far more consistent with a systemic problem (GHCR_PACKAGE_DELETE_PAT missing its repo/public_repo scope, or the pulls API being rate-limited) than with isolated transient blips. Every one of those versions was still kept safely, but reporting this run as a plain success would hide that the closed-PR tagged-version reap path likely did far less real work than it should have. Investigated live during this mechanism's own 2026-08-06 root-cause pass: the one prior real scheduled run with a suspiciously low delete count (2026-08-02, 10 deleted/21919 kept) was confirmed, via its own actual GitHub Actions log, to have hit ZERO real LOOKUP_FAILED occurrences -- that run's low count was fully explained by the classification-gap defect this whole file's extraction fixes, not by this failure mode. This threshold exists so a FUTURE occurrence of this different failure shape is caught loudly instead of requiring another manual log audit to notice."
+    had_errors=1
+  fi
+
+  # A single service reporting "no GHCR package yet" is a safe, expected
+  # notice (see services_not_found's own declaration above). But GitHub's
+  # own REST docs say a 404 here can also hide an authorization failure
+  # this reaper cannot positively distinguish from genuine absence per
+  # call, so more than half of the currently-configured services hitting
+  # this path in the SAME run is treated the same way pr_lookup_failures'
+  # own threshold already treats pervasive ambiguous PR lookups: not proof
+  # of a real problem, but far more consistent with one (GHCR_PACKAGE_DELETE_
+  # PAT losing read:packages, or the packages API being rate-limited) than
+  # with several services all genuinely launching in the same run (issue
+  # #1557, item 72).
+  local max_services_not_found=$(( (${#services[@]} / 2) + 1 ))
+  if (( services_not_found >= max_services_not_found )); then
+    echo "::error::$services_not_found of ${#services[@]} configured services reported no GHCR package yet this run (threshold: $max_services_not_found) -- this many simultaneous 404s is far more consistent with GHCR_PACKAGE_DELETE_PAT losing its read:packages scope (which GitHub's own REST docs say can also surface as 404, not just 403) than with that many services genuinely never having published an image. Each one was still safely treated as nothing-to-reap, but reporting this run as a plain success would hide that the reap path likely did far less real work than it should have across the whole services list, not just one service."
     had_errors=1
   fi
 

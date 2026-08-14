@@ -281,6 +281,71 @@ setup() {
     [ "$(wc -l < "$call_log")" -eq 1 ]
 }
 
+@test "gcps_pr_lookup_state populates a 4th-arg result variable without printing being required" {
+    gh() { printf '{"state":"open"}\n'; }
+    export -f gh
+    declare -A cache=()
+    local result
+    gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >/dev/null
+    [ "$result" = "OPEN" ]
+    # Second call is a cache hit -- the early-return branch must populate the
+    # 4th-arg output too, not just the post-lookup branch.
+    gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >/dev/null
+    [ "$result" = "OPEN" ]
+}
+
+@test "process_service: caching a PR's state actually works through the real caller call site (issue #1557 item 74)" {
+    # gcps_pr_lookup_state's own direct-invocation caching test above passed
+    # even while the real production call site in process_service() was
+    # broken: that call site used to wrap the lookup in `$(...)`, which forks
+    # a subshell and discards the nameref cache mutation the instant the
+    # subshell exits, so every tagged version's PR lookup re-hit `gh api`
+    # even for a PR number already resolved earlier in the same run. This
+    # test exercises the real call site (two versions tagged for the same PR,
+    # matching the amd64/arm64 per-arch-leg shape build-push.yml actually
+    # produces) and asserts the pulls API is only actually invoked once.
+    call_log="$BATS_TEST_TMPDIR/pulls_calls"
+    : > "$call_log"
+    export call_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            cat <<VERSIONS_JSON
+[
+  {"id":1,"name":"sha256:$(printf 'c%.0s' {1..64})","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-77-sha-1234567-amd64"]}}},
+  {"id":2,"name":"sha256:$(printf 'd%.0s' {1..64})","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-77-sha-1234567-arm64"]}}}
+]
+VERSIONS_JSON
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            echo "call" >> "$call_log"
+            printf '{"state":"open"}\n'
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    curl() {
+        local args="$*"
+        if [[ "$args" == *"ghcr.io/token"* ]]; then
+            printf '{"token":"faketoken"}\n'
+            return 0
+        fi
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+        return 0
+    }
+    export -f curl
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 2 ]
+    [ "$(wc -l < "$call_log")" -eq 1 ]
+}
+
 # ---------------------------------------------------------------------------
 # gcps_registry_anon_token / gcps_fetch_manifest -- mocked `curl`
 # ---------------------------------------------------------------------------
@@ -427,6 +492,33 @@ VERSIONS_JSON
     [ "$deleted" -eq 0 ]
     [ "$kept" -eq 0 ]
     [ "$had_errors" -eq 0 ]
+    # shellcheck disable=SC2154 # set as a global by the sourced
+    # process_service()
+    [ "$services_not_found" -eq 1 ]
+}
+
+@test "main(): every configured service reporting no GHCR package yet crosses the systemic-404 threshold (issue #1557 item 72)" {
+    # shellcheck disable=SC2034 # read by main() in the sourced script
+    GH_TOKEN="unused-but-required-by-main"
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            echo '{"message":"Package not found.","documentation_url":"https://docs.github.com/rest/packages/packages#list-package-versions-for-a-package-owned-by-an-organization","status":"404"}'
+            echo "gh: Package not found. (HTTP 404)" >&2
+            return 1
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    # `run` forks a subshell for main()'s own `exit 1` -- see the identical
+    # pattern (and its own comment) for the pervasive-PR-lookup-failure
+    # main() test further down this file.
+    run --separate-stderr main
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"of ${#services[@]} configured services reported no GHCR package yet this run"* ]]
+    [[ "$output" == *"One or more package-version listings, manifest fetches, or deletions failed"* ]]
 }
 
 @test "process_service: a manifest-fetch failure disables orphan classification for that service (fails closed)" {
@@ -487,6 +579,117 @@ VERSIONS_JSON
     # exercising.
     [ "$deleted" -eq 0 ]
     [ ! -s "$delete_log" ]
+    [ "$had_errors" -eq 1 ]
+}
+
+# Added 2026-08-14 (issue #1557, item 79 of PR #1501's whole-file audit):
+# these three cases used to be `::warning::`-only with no had_errors=1 --
+# unlike the sibling failure modes above (a jq read failure, a manifest
+# fetch failure), which already correctly set had_errors=1. All of these
+# are the same class under AG-VAL-001: required classification/deletion-
+# safety evidence was unavailable, so the run must not still report a clean
+# exit code even though the individual candidate is correctly kept either
+# way (fail-closed behavior itself is unchanged by this fix).
+
+@test "process_service: a malformed digest-shape .name sets had_errors (issue #1557 item 79)" {
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            cat <<VERSIONS_JSON
+[
+  {"id":30,"name":"not-a-real-digest","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-deadbee"]}}}
+]
+VERSIONS_JSON
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$had_errors" -eq 1 ]
+}
+
+@test "process_service: an unparseable created_at on a closed-PR candidate sets had_errors (issue #1557 item 79)" {
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            cat <<VERSIONS_JSON
+[
+  {"id":31,"name":"sha256:$(printf 'e%.0s' {1..64})","created_at":"not-a-real-timestamp","metadata":{"container":{"tags":["pr-55-sha-1234567"]}}}
+]
+VERSIONS_JSON
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    curl() {
+        local args="$*"
+        if [[ "$args" == *"ghcr.io/token"* ]]; then
+            printf '{"token":"faketoken"}\n'
+            return 0
+        fi
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+        return 0
+    }
+    export -f curl
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 1 ]
+    [ "$had_errors" -eq 1 ]
+}
+
+@test "process_service: a failed candidate-orphan manifest fetch in Pass 2 sets had_errors (issue #1557 item 79)" {
+    local orphan_digest
+    orphan_digest="sha256:$(printf 'f%.0s' {1..64})"
+
+    # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
+    GHCR_RETRY_BACKOFF_SECONDS=0
+    # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
+    GHCR_RETRY_MAX_ATTEMPTS=2
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            cat <<VERSIONS_JSON
+[
+  {"id":32,"name":"$orphan_digest","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":[]}}}
+]
+VERSIONS_JSON
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+
+    curl() {
+        local args="$*"
+        if [[ "$args" == *"ghcr.io/token"* ]]; then
+            printf '{"token":"faketoken"}\n'
+            return 0
+        fi
+        # The untagged candidate has no children to protect it via Pass 1's
+        # own manifest graph, so it reaches Pass 2's own candidate-manifest
+        # fetch, which fails here (simulated registry outage).
+        echo "simulated registry failure" >&2
+        return 1
+    }
+    export -f curl
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 1 ]
     [ "$had_errors" -eq 1 ]
 }
 

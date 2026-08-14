@@ -176,12 +176,30 @@ gcps_is_old_enough_to_delete() {
   (( now_epoch - created_at_epoch >= min_age_seconds ))
 }
 
-# gcps_pr_lookup_state <pr-number> <repository> <cache-array-name>
+# gcps_pr_lookup_state <pr-number> <repository> <cache-array-name> [<result-var-name>]
 #
 # Prints exactly one of OPEN / CLOSED / LOOKUP_FAILED for PR <pr-number> in
 # <repository>, using the caller-provided associative array (referenced by
 # name via nameref, so the same cache persists across calls within one
 # service's tag loop) to avoid repeat API calls for the same PR number.
+#
+# CALLER-SIDE CACHING PITFALL (fixed 2026-08-14, issue #1557, item 74 of
+# PR #1501's whole-file audit): the nameref cache mutation above only
+# survives back into the CALLER's own shell if this function is invoked as a
+# plain statement. A caller that wraps the call in command substitution
+# (`x="$(gcps_pr_lookup_state ...)"`) forks a subshell for the call -- the
+# cache write happens on that subshell's own copy of the array and is
+# discarded the instant the subshell exits, so the cache never actually
+# persists across PRs/services despite this function's own logic being
+# correct in isolation. This function's direct unit tests below (which call
+# it as a plain statement) could not catch this, because they don't exhibit
+# the bug; only scripts/gc-pr-staging-images.sh's real call-site shape
+# (`case "$(gcps_pr_lookup_state ...)"`) did. The optional 4th argument below
+# exists so a caller can get the classification into a variable WITHOUT
+# command substitution: pass an already-`local`-declared variable name and
+# this function binds it via its own nameref and assigns the result to it
+# directly, in addition to (not instead of) the existing stdout print this
+# function's callers and tests already rely on.
 #
 # Ported verbatim (comments included) from the pre-extraction workflow's
 # own pr_lookup_state(): this exact distinction -- a confirmed answer
@@ -224,11 +242,15 @@ gcps_is_old_enough_to_delete() {
 # time it might genuinely occur, rather than relying on another manual log
 # audit to notice it again.
 gcps_pr_lookup_state() {
-  local pr_number="$1" repository="$2" cache_array_name="$3"
+  local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
   local api_output pr_state
 
   if [[ -n "${cache_ref[$pr_number]:-}" ]]; then
+    if [[ -n "$result_var_name" ]]; then
+      local -n result_ref="$result_var_name"
+      result_ref="${cache_ref[$pr_number]}"
+    fi
     printf '%s\n' "${cache_ref[$pr_number]}"
     return
   fi
@@ -264,6 +286,10 @@ gcps_pr_lookup_state() {
     cache_ref["$pr_number"]="LOOKUP_FAILED"
   fi
 
+  if [[ -n "$result_var_name" ]]; then
+    local -n result_ref="$result_var_name"
+    result_ref="${cache_ref[$pr_number]}"
+  fi
   printf '%s\n' "${cache_ref[$pr_number]}"
 }
 
