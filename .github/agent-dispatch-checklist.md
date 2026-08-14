@@ -27,12 +27,14 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 17. **Remove the worktree once finished** (pushed/PR opened, or explicitly told to stop) — a leftover worktree becomes the next agent's recycled-slot collision otherwise. (AG-WF-002)
 18. **Apply AGENTS.md in full — no shortcuts, no cherry-picking only the parts that seem relevant to the immediate task.**
 19. **Prefer native local commands over an API call at any time, instead and/or before an API call — use the API when there is no local equivalent.** (AG-VAL-005)
+20. **New file = formal DISACK by default.** Before creating any new script, library, or test-suite file, complete the required search: does an existing file already own the same conceptual class/responsibility (extend it), or do related sibling files already exist that should be consolidated instead? State the result of this check in the PR. The DISACK lifts only by extending an existing file, or by a documented check plus an explicit maintainer/coordinator ACK obtained *before* the file is created. (AG-CODE-013)
+21. **Ground every factual claim in evidence actually obtained — a file actually read, a command actually run, an output actually observed.** State what was checked, not just the conclusion. A statement's strength must never exceed the evidence behind it: label anything unverified as such ("not verified"/"not tested") instead of presenting a plausible guess as fact. (AG-INT-001)
 
 ## Don't
 
 1. **Not allowed to spawn own sub-agents** unless the task explicitly authorizes coordinating them — flagged: not yet backed by a numbered AGENTS.md rule.
 2. **A pause/stop is lifted only by a fresh literal "ACK."** (AG-WF-038)
-3. **Never a mutating git command against the shared main checkout, under any circumstance.** Never lie, invent, or attempt to misrepresent what happened. If unsure, stop and ask the coordinator for verification/clarification — do not continue until that clarification is satisfied.
+3. **Never a mutating git command against the shared main checkout, under any circumstance.** Never lie, invent, or attempt to misrepresent what happened. If unsure, stop and ask the coordinator for verification/clarification — do not continue until that clarification is satisfied. (AG-INT-001)
 4. **Never trust a recycled or unfamiliar worktree as clean without verifying it first.** If it's not what you were told to expect, stop and clarify with your coordinator before doing any work in it. (AG-WF-024)
 5. **Never declare multi-item work "complete" from memory** — recount against the full list.
 6. **Never downgrade a verification requirement to "stichprobenartig"** without explicit authorization.
@@ -40,3 +42,5 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 8. **Treat a found bug as a failure class**, search the rest of the codebase for the same pattern. (AG-WF-011, AG-CI-015)
 9. **Never work or commit in an unverified/unknown worktree.** Before committing, confirm the worktree actually exists and matches what you were told — if unsure, ask your coordinator and do not proceed without an answer.
 10. **Never let an English quoted artifact (this checklist, a code snippet, a log excerpt) justify writing your own surrounding instructional prose in English.** (AG-CC-003)
+11. **Never create a new file because it is more convenient than reading/extending an existing one, and never create the file first and ask for the ACK afterward.** A plausible-sounding reason for a new file is not itself an ACK. If genuinely uncertain whether an existing file should be extended instead, stop and ask the coordinator — do not create the file while that is unresolved. (AG-CODE-013)
+12. **Never suppress, filter, downgrade, or hide a real warning/error/failure signal to make a check appear to pass** (`|| true`, redirecting stderr, excluding a failing target from scope, relabeling a failure as expected/skipped, retrying silently until green, etc.). A check that genuinely doesn't apply gets an explicit SKIP/NOT-RUN with a stated reason — never execute-and-discard. (AG-INT-002)
