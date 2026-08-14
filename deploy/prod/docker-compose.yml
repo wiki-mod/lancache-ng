@@ -9,7 +9,6 @@
 # parallel deploy/dev stack); deploy/quickstart/ and deploy/full-setup/ are
 # this project's other two real profiles, for quickstart and CI-validation
 # use respectively.
-# From: Issue #1391
 
 name: lancache-ng
 
