@@ -62,7 +62,7 @@ else
 fi
 # Why: how many of a package's own newest vX.Y.Z tags still count as a
 # "supported stable release" for protected-reference classification (see
-# audit_package's supported_releases computation below). From: Issue #1501.
+# audit_package's supported_releases computation below). From: Issue #1095 | PR #1501.
 if minimum_stable_releases="$(sra_read_minimum_stable_releases "$manifest")"; then
   :
 else
@@ -187,7 +187,7 @@ audit_package() {
   # caused once, run 31774741729) so the per-version classification loop
   # below can look up whether a given vX.Y.Z tag is still one of this
   # package's `minimum_stable_releases` newest stable releases. From: Issue
-  # #1501.
+  # #1095 | PR #1501.
   local release_tags_file="$package_dir/release-tags.txt"
   if jq -r '.metadata.container.tags[]? // empty' "$versions_file" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -u >"$release_tags_file"; then
     :
@@ -294,7 +294,7 @@ audit_package() {
       # completely untagged version -- e.g. an attestation/referrer manifest,
       # the common case among the tens of thousands of versions a live audit
       # classifies -- since sra_extra_tag_protect_reason could only ever
-      # return the fallback there anyway. From: Issue #1501.
+      # return the fallback there anyway. From: Issue #1095 | PR #1501.
       if (( other_count > 0 )); then
         reason="$(sra_extra_tag_protect_reason "$tags" "$supported_releases" "non-ordinary-version")" || {
           echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
@@ -319,7 +319,7 @@ audit_package() {
       # object as its originating sha-<commit> tag. Unlike the root_count==0
       # branch above, this version DOES have a resolvable sha-<commit> root
       # -- per the maintainer's protected-reference scope clarification
-      # (Issue #1501), "protected" means the digest is actually still
+      # (Issue #1095 | PR #1501), "protected" means the digest is actually still
       # referenced by nightly/latest/a supported release right now, not
       # merely "carries some extra tag" -- so an unrecognized extra tag (an
       # rc/staging tag, or a release tag past minimum_stable_releases) must
@@ -410,7 +410,7 @@ audit_package() {
     # plain root (no extra tag) or a root carrying an unrecognized extra tag
     # (an rc/staging tag, or a release tag past minimum_stable_releases)
     # falls through into ordinary ranking here (see audit_package's
-    # other_count>0 branch). From: Issue #1501.
+    # other_count>0 branch). From: Issue #1095 | PR #1501.
     if (( legacy_position <= retention_keep )); then
       budget="within-${retention_keep}"
       decision="protect"

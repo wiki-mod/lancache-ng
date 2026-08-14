@@ -21,7 +21,7 @@ _sra_read_manifest_positive_integer() {
   # parse the identical two-space-indented top-level-scalar shape, just
   # under different keys; sharing the exactly-one-match/positive-integer
   # parsing rule here avoids a second, driftable copy of it (AG-CODE-011).
-  # From: Issue #1501.
+  # From: Issue #1095 | PR #1501.
   local manifest="${1:?_sra_read_manifest_positive_integer: manifest is required}"
   local key="${2:?_sra_read_manifest_positive_integer: key is required}"
   local matches value
@@ -49,7 +49,7 @@ sra_read_minimum_stable_releases() {
   # Why: sra_select_supported_release_tags needs this count to know how many
   # of a package's own vX.Y.Z tags are still "supported" stable releases for
   # protected-reference classification (docs/release-versioning.md's
-  # Retention section). From: Issue #1501.
+  # Retention section). From: Issue #1095 | PR #1501.
   local manifest="${1:?sra_read_minimum_stable_releases: manifest is required}"
   _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
@@ -233,7 +233,7 @@ sra_is_stable_release_tag() {
   # Why: distinct from a release-candidate tag (vX.Y.Z-rc.N, see
   # release/stack-images.yml's release_candidate channel) -- only a genuine
   # stable release counts toward retention.minimum_stable_releases. From:
-  # Issue #1501.
+  # Issue #1095 | PR #1501.
   local tag="${1:?sra_is_stable_release_tag: tag is required}"
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
@@ -242,7 +242,7 @@ sra_release_sort_key() {
   # What: converts a vX.Y.Z tag into a zero-padded, lexically-sortable key.
   # Why: bash has no native semver comparator; zero-padding each numeric
   # component lets a plain `sort -r` order releases newest-first without a
-  # per-component numeric comparison loop. From: Issue #1501.
+  # per-component numeric comparison loop. From: Issue #1095 | PR #1501.
   local tag="${1:?sra_release_sort_key: tag is required}"
   local major minor patch
   sra_is_stable_release_tag "$tag" || return 1
@@ -258,7 +258,7 @@ sra_select_supported_release_tags() {
   # is computed per package from tags already fetched during the audit,
   # avoiding a separate GitHub Releases API call (AG-VAL-005 prefers a native
   # local computation over an API call whenever both do the same job). From:
-  # Issue #1501.
+  # Issue #1095 | PR #1501.
   local count="${1:?sra_select_supported_release_tags: count is required}"
   [[ "$count" =~ ^[1-9][0-9]*$ ]] || return 1
 
@@ -291,7 +291,7 @@ sra_classify_channel_tag() {
   # is a stable release tag" from "this is some other, unrecognized tag" so
   # the caller can report a specific protection reason instead of a single
   # generic bucket (docs/release-versioning.md's Retention section). From:
-  # Issue #1501.
+  # Issue #1095 | PR #1501.
   local tag="${1:?sra_classify_channel_tag: tag is required}"
   case "$tag" in
     nightly) printf 'nightly\n' ;;
@@ -317,7 +317,12 @@ sra_other_tags_from_csv() {
   # avoid). Deriving "other" tags in pure bash from that value, instead of
   # a second jq/base64 round-trip per version, avoids reintroducing exactly
   # that per-version jq overhead for every one of the tens of thousands of
-  # package versions a live audit classifies. From: Issue #1501.
+  # package versions a live audit classifies. Splitting on a literal comma
+  # (rather than the @base64-per-tag encoding sra_version_tag_facts uses) is
+  # safe only because the OCI distribution spec's tag-name grammar
+  # ([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}) forbids commas in a real tag; this
+  # function must not be reused for a delimiter that isn't grammar-excluded
+  # this way. From: Issue #1095 | PR #1501.
   local tags_csv="${1?sra_other_tags_from_csv: tags CSV argument is required}"
   local tag kind
   local -a tag_array=()
@@ -344,7 +349,7 @@ sra_protected_reference_reason() {
   # reading the report needs. Returning failure (not a reason string) lets
   # the caller fall back to its own existing, still-honest generic reason
   # when the extra tag matches none of these specific channels. From: Issue
-  # #1501.
+  # #1095 | PR #1501.
   local other_tags="${1?sra_protected_reference_reason: other tags argument is required}"
   local supported_releases="${2?sra_protected_reference_reason: supported releases argument is required}"
   local tag channel has_nightly=0 has_latest=0 has_stable=0
@@ -383,10 +388,10 @@ sra_extra_tag_protect_reason() {
   # stays protect -- only the reason text varies; this differs from the
   # orchestrator's other_count>0-with-a-root-tag case (which must be able to
   # fall through to ordinary ranking instead of always protecting, per the
-  # maintainer's protected-reference scope clarification on Issue #1501, so
+  # maintainer's protected-reference scope clarification on Issue #1095 | PR #1501, so
   # that branch calls sra_protected_reference_reason directly and checks its
   # own success/failure rather than using this always-succeeds wrapper).
-  # From: Issue #1501.
+  # From: Issue #1095 | PR #1501.
   local tags_csv="${1?sra_extra_tag_protect_reason: tags CSV argument is required}"
   local supported_releases="${2?sra_extra_tag_protect_reason: supported releases argument is required}"
   local fallback_reason="${3:?sra_extra_tag_protect_reason: fallback reason is required}"

@@ -958,6 +958,34 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   pattern, or explicit digest/alias) — see `docs/release-versioning.md`'s
   Retention section for the current data-model boundary this leaves in place.
 
+  **Update, same day (protected-reference model, PR #1501):** the audit's
+  generic `non-sha-tag-attached`/`non-ordinary-version`/
+  `acceptance-evidence-unavailable` reasons are now specific
+  (`nightly-channel-protected`, `latest-channel-protected`,
+  `stable-release-protected`, `+`-joined when more than one applies)
+  whenever a version's digest is currently referenced by `nightly`, `latest`,
+  or one of a package's `minimum_stable_releases` (3) newest stable release
+  tags — derived from already-fetched GHCR tag data, no extra API call. A
+  root carrying only an *unrecognized* extra tag (a release-candidate/staging
+  tag, or a release tag past `minimum_stable_releases`) is no longer
+  blanket-protected; it now falls through into the same ordinary
+  root-candidate ranking as a plain root. 14 new `tests/bats/sha_retention_
+  audit.bats` cases cover every new helper (`sra_read_minimum_stable_releases`,
+  `sra_is_stable_release_tag`, `sra_release_sort_key`,
+  `sra_select_supported_release_tags`, `sra_classify_channel_tag`,
+  `sra_other_tags_from_csv`, `sra_protected_reference_reason`,
+  `sra_extra_tag_protect_reason`), including the combined-reason case, the
+  unsupported-old-release case, and the unrecognized-tag fallthrough case —
+  this file's own standing coverage for this subsystem, satisfying AG-VAL-029
+  for this change rather than leaving it as a point fix with no durable
+  regression net. **Not implemented, recorded as an open gap below rather
+  than silently skipped:** a "previous nightly" safety net (protecting the
+  digest `nightly` pointed at immediately before the current one) — see
+  `docs/release-versioning.md`'s Retention section for why (GHCR exposes no
+  tag history; a real implementation needs a new `actions: read` lookup
+  against `nightly-refresh.yml`'s own run history) and the maintainer
+  decision requested in PR #1501's `#issuecomment-5292505929`.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -1273,6 +1301,22 @@ omitted):**
     GitHub-bound output from Rule-Ref: AG-GH-001 in any way. Revisit if this tool (or
     a future one) ever exposes an on-demand, scriptable review trigger that
     would make a real CI check practical.
+
+- **F-17 SHA retention audit: no "previous nightly" protection** (PR #1501,
+  2026-08-14) — the protected-reference model protects only the exact digest
+  `nightly` currently points at, not whichever digest it pointed at
+  immediately before that. GHCR's package-version API exposes no tag
+  history at all (only the current pointer), so proving "the previous
+  nightly build" requires reading `nightly-refresh.yml`'s own GitHub Actions
+  run history via a new `actions: read` permission and API surface this
+  audit's workflow does not have today. In practice, `accepted_ordinary_
+  roots_per_package` (30) already retains far more than one prior build's
+  `sha-<commit>` root as ordinary ranked history regardless of channel-tag
+  status, so a last-known-good nightly commit typically stays available as
+  an ordinary root even without dedicated channel-level protection — but
+  this is incidental retention, not a proven guarantee. **Tracking**: PR
+  #1501's `#issuecomment-5292505929` records the open maintainer decision on
+  whether to build the dedicated lookup.
 
 ---
 
