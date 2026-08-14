@@ -139,10 +139,10 @@ command_word_script() {
 # What: splits a shell line into command segments at &&, ||, ;, | using
 # plain bash string/glob matching, not a YAML library or PCRE grep.
 # Why: stays a lightweight command-word scanner, not a full Bash parser --
-# the workflow's real shell syntax is validated separately by
-# shellcheck/bash; a YAML library would add a runtime dependency this
-# project deliberately avoids for its own guards (Rule-Ref: AG-REL-001),
-# and both PCRE grep and a POSIX-awk rewrite are known to misbehave on this
+# the workflow's real shell syntax is validated separately by bash and
+# ShellCheck; a YAML library would add a runtime dependency this project
+# deliberately avoids for its own guards (Rule-Ref: AG-REL-001), and both
+# PCRE grep and a POSIX-awk rewrite are known to misbehave on this
 # project's actual self-hosted runners (see
 # check-idempotence-test-coverage.sh's own header).
 # From: Issue #1019 | Issue #1095 | PR #1501.
