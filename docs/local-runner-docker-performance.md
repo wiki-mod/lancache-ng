@@ -200,6 +200,19 @@ Important rules:
 - use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
   since a build-tools image rebuild changes the compiler's mtime but not
   necessarily its output
+- `CCACHE_EXTRAFILES` folds the resolved `$BUILD_TOOLS_IMAGE` reference into
+  every cache key, so a client-side toolchain upgrade (a new build-tools
+  image) always produces a fresh remote key instead of reusing an object
+  built by an older client compiler
+- **known limitation:** that namespacing only covers the client side. The
+  actual `192.168.1.229`/`192.168.1.240` distcc hosts run a natively
+  installed `distccd`/`gcc`, provisioned by hand and independent of the
+  build-tools image lifecycle -- there is no repository script or workflow
+  that pins or upgrades them together. If a farm host's compiler is upgraded
+  without a matching build-tools image change, a remote cache hit can still
+  serve an object built by the old remote toolchain. Keep farm host compiler
+  upgrades infrequent and deliberate until a stronger remote-identity check
+  exists
 - every ccache failure detected *before* the real Cargo build (a failed
   probe compile, or the probe's own Redis write/read check) falls back to
   plain distcc with no cache layer, rather than hard-failing the build; a

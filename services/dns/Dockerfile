@@ -114,10 +114,15 @@ COPY nats-subscriber/ .
 #     fails with "Cannot parse URL ... Scheme ... is invalid".
 #   `CCACHE_EXTRAFILES=/tmp/ccache-toolchain-id` (containing `$BUILD_TOOLS_IMAGE`) and
 #     `CCACHE_BASEDIR="$ccache_probe_dir"` plus a `cd`+relative-path probe compile.
-#     Why: `CCACHE_COMPILERCHECK=content` only hashes the local `cc` binary, never the
-#     remote distcc host's own compiler, so a farm toolchain upgrade could otherwise
-#     still serve a stale remote hit -- EXTRAFILES ties the key to the resolved
-#     build-tools image instead. BASEDIR+relative-path keeps the probe's own key stable
+#     Why: `CCACHE_COMPILERCHECK=content` only hashes the local `cc` binary, so without
+#     EXTRAFILES a client-side build-tools image upgrade would keep reusing a Redis
+#     object built by the old client compiler. EXTRAFILES closes that gap by tying the
+#     key to the resolved build-tools image. It does NOT cover the remote distcc host's
+#     own compiler: `192.168.1.229`/`192.168.1.240` run a natively installed
+#     `distccd`/`gcc`, provisioned by hand and independent of this image's lifecycle, so
+#     an out-of-band farm host compiler upgrade is not reflected in the cache key (see
+#     docs/local-runner-docker-performance.md's "known limitation" note). BASEDIR+
+#     relative-path keeps the probe's own key stable
 #     across builds despite `$ccache_probe_dir` being a fresh mktemp path every time;
 #     without it, every build would leak a new, never-reused Redis entry. Consequently the
 #     probe's own success check accepts either a remote write OR a remote hit as proof of
