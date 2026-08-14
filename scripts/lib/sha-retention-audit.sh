@@ -104,6 +104,44 @@ sra_commit_is_on_history_ref() {
   git -C "$git_dir" merge-base --is-ancestor "$commit" "$history_ref"
 }
 
+sra_version_created_at() {
+  # What: extracts the GHCR-reported build timestamp for one package version.
+  # Why: display-only -- the dry-run report shows a real build date per
+  # candidate, but ranking must stay 100% git-history-derived (see the
+  # created_at-reuse defect this audit was rebuilt to avoid), so this helper
+  # is never called from the ranking path.
+  local version_json="${1:?sra_version_created_at: version JSON is required}"
+  local created_at
+
+  command -v jq >/dev/null 2>&1 || return 1
+  if created_at="$(jq -r '.created_at // empty' <<<"$version_json")"; then
+    :
+  else
+    return 1
+  fi
+  [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  printf '%s\n' "$created_at"
+}
+
+sra_emit_record() {
+  # What: formats one AUDIT report line for a classified package version.
+  # Why: a pure formatter (no I/O beyond stdout) so the dry-run would-delete
+  # labeling and the built/decision fields are directly unit-testable,
+  # instead of only reachable through a full live-GHCR orchestrator run.
+  local class="${1:?sra_emit_record: class is required}"
+  local package="${2:?sra_emit_record: package is required}"
+  local id="${3:?sra_emit_record: id is required}"
+  local digest="${4:?sra_emit_record: digest is required}"
+  local tags="${5:?sra_emit_record: tags is required}"
+  local built="${6:?sra_emit_record: built is required}"
+  local legacy_rank="${7:?sra_emit_record: legacy_rank is required}"
+  local budget="${8:?sra_emit_record: budget is required}"
+  local decision="${9:?sra_emit_record: decision is required}"
+  local reason="${10:?sra_emit_record: reason is required}"
+  printf 'AUDIT\tclass=%s\tpackage=%s\tid=%s\tdigest=%s\ttags=%s\tbuilt=%s\tlegacy_rank=%s\tbudget=%s\tacceptance=unknown\tdecision=%s\treason=%s\n' \
+    "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_rank" "$budget" "$decision" "$reason"
+}
+
 sra_version_tag_facts() {
   local version_json="${1:?sra_version_tag_facts: version JSON is required}"
   local encoded_tags encoded_tag tag kind root_count=0 child_count=0 other_count=0

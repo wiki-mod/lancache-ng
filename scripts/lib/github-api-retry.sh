@@ -6,7 +6,11 @@
 # appears in argv or in this helper's retry diagnostics. This is separate
 # from the registry retry helper because API GETs have no registry-login
 # recovery step, and a recovered transient must remain a notice rather than
-# the warning emitted by the registry-oriented helper.
+# the warning emitted by the registry-oriented helper. An optional TTL file
+# cache (GITHUB_API_CACHE_DIR) sits in front of the retry loop so repeated
+# report runs in a short window do not re-spend shared GHCR rate-limit budget
+# on unchanged data; it is off by default and never replaces the real GET on
+# a cache miss or expiry.
 
 if [[ -n "${GITHUB_API_RETRY_SH_LOADED:-}" ]]; then
   if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -19,6 +23,55 @@ GITHUB_API_RETRY_SH_LOADED=1
 GITHUB_API_RETRY_ATTEMPTS="${GITHUB_API_RETRY_ATTEMPTS:-4}"
 GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
 GITHUB_API_HTTP_STATUS=""
+# What: optional TTL file cache for successful GET responses, keyed by URL.
+# Why: repeated report runs (e.g. a workflow_dispatch re-run shortly after
+# another one, or several PRs' synchronize-triggered audits close together)
+# would otherwise re-fetch identical package-version pages from the GHCR API
+# every time, burning shared rate-limit budget for data that has not changed.
+# Disabled (empty dir) by default so existing callers/tests are unaffected.
+GITHUB_API_CACHE_DIR="${GITHUB_API_CACHE_DIR:-}"
+GITHUB_API_CACHE_TTL_SECONDS="${GITHUB_API_CACHE_TTL_SECONDS:-600}"
+
+_github_api_cache_path() {
+  local url="${1:?_github_api_cache_path: url is required}"
+  command -v sha256sum >/dev/null 2>&1 || return 1
+  local digest
+  digest="$(printf '%s' "$url" | sha256sum | awk '{print $1}')"
+  [[ "$digest" =~ ^[0-9a-f]{64}$ ]] || return 1
+  printf '%s/%s.json\n' "$GITHUB_API_CACHE_DIR" "$digest"
+}
+
+_github_api_cache_hit() {
+  # What: checks for a fresh (within TTL), non-empty cached response.
+  # Why: mtime-based freshness lets a cache directory be safely reused across
+  # runs (e.g. restored by actions/cache) without ever serving data older
+  # than GITHUB_API_CACHE_TTL_SECONDS as if it were current.
+  local url="${1:?_github_api_cache_hit: url is required}"
+  local body_file="${2:?_github_api_cache_hit: body file is required}"
+  [[ -n "$GITHUB_API_CACHE_DIR" ]] || return 1
+  local cache_file age_seconds now mtime
+  cache_file="$(_github_api_cache_path "$url")" || return 1
+  [[ -s "$cache_file" ]] || return 1
+  now="$(date +%s)" || return 1
+  mtime="$(stat -c %Y "$cache_file" 2>/dev/null || stat -f %m "$cache_file" 2>/dev/null)" || return 1
+  [[ "$mtime" =~ ^[0-9]+$ ]] || return 1
+  age_seconds=$(( now - mtime ))
+  (( age_seconds >= 0 && age_seconds < GITHUB_API_CACHE_TTL_SECONDS )) || return 1
+  cp -- "$cache_file" "$body_file"
+}
+
+_github_api_cache_store() {
+  # Why: caching is a rate-limit optimization, never a correctness
+  # requirement -- a failure to write the cache must not fail the real GET
+  # that already succeeded, so every step here is best-effort.
+  local url="${1:?_github_api_cache_store: url is required}"
+  local body_file="${2:?_github_api_cache_store: body file is required}"
+  [[ -n "$GITHUB_API_CACHE_DIR" ]] || return 0
+  local cache_file
+  cache_file="$(_github_api_cache_path "$url")" || return 0
+  mkdir -p -- "$GITHUB_API_CACHE_DIR" 2>/dev/null || return 0
+  cp -- "$body_file" "$cache_file" 2>/dev/null || true
+}
 
 _github_api_get_once() {
   local url="${1:?_github_api_get_once: url is required}"
@@ -60,6 +113,11 @@ github_api_get_with_retry() {
     return 1
   }
 
+  if _github_api_cache_hit "$url" "$body_file"; then
+    echo "::notice::Serving GHCR API response for $url from the local rate-limit cache (age < ${GITHUB_API_CACHE_TTL_SECONDS}s)." >&2
+    return 0
+  fi
+
   local attempt call_status http_status
   for (( attempt=1; attempt<=GITHUB_API_RETRY_ATTEMPTS; attempt++ )); do
     : >"$body_file"
@@ -71,6 +129,7 @@ github_api_get_with_retry() {
     http_status="$GITHUB_API_HTTP_STATUS"
 
     if (( call_status == 0 )) && [[ "$http_status" == "200" ]]; then
+      _github_api_cache_store "$url" "$body_file"
       return 0
     fi
 

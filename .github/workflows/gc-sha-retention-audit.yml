@@ -42,6 +42,11 @@ jobs:
       packages: read
     env:
       AUDIT_CHECKOUT: ${{ github.workspace }}/f17-sha-retention-audit
+      # Why: kept outside AUDIT_CHECKOUT (which is bind-mounted read-only into
+      # the container and is fully removed at the end of every run) so cached
+      # GHCR API responses can survive across runs via actions/cache while
+      # the isolated checkout itself stays disposable.
+      AUDIT_API_CACHE_DIR: ${{ runner.temp }}/f17-sha-retention-api-cache
 
     steps:
       - name: Prepare dedicated audit checkout directory
@@ -129,6 +134,24 @@ jobs:
               bash scripts/check-workflow-line-limit.sh
             '
 
+      - name: Prepare rate-limit-aware API response cache directory
+        run: |
+          set -euo pipefail
+          mkdir -p -- "$AUDIT_API_CACHE_DIR"
+
+      # Why: a rolling cache (unique save key, prefix-matched restore key) so
+      # a re-run shortly after another one reuses recent GHCR package-version
+      # pages instead of re-spending shared rate-limit budget; the audit
+      # script itself enforces the actual freshness TTL on whatever this
+      # restores, so a stale restored entry is still never served as current.
+      - name: Restore GHCR API response cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AUDIT_API_CACHE_DIR }}
+          key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: |
+            sha-retention-api-cache-
+
       - name: Run live protect-only GHCR audit
         working-directory: f17-sha-retention-audit
         env:
@@ -141,10 +164,22 @@ jobs:
             -e GH_TOKEN \
             -e GITHUB_REPOSITORY \
             -e SRA_HISTORY_REF=origin/current_dev \
+            -e GITHUB_API_CACHE_DIR=/cache \
             -v "$PWD:/work:ro" \
+            -v "${AUDIT_API_CACHE_DIR}:/cache:rw" \
             -w /work \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30s 25m bash scripts/untracked/gc-sha-retention-audit.sh
+
+      # Why: always() so a failed/timed-out audit run still saves whatever
+      # pages it did fetch before failing, rather than discarding real
+      # rate-limit-relevant progress on every non-success run.
+      - name: Save GHCR API response cache
+        if: always()
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.AUDIT_API_CACHE_DIR }}
+          key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Remove dedicated audit checkout directory
         if: always()

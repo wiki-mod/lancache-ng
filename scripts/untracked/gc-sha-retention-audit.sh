@@ -3,7 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Read-only GHCR retention audit. It inventories first-party package versions,
 # validates every version/tag shape, ranks legacy ordinary roots from Git
-# history, and reports protection reasons. It never deletes package versions.
+# history, and reports protection reasons. Ordinary roots beyond the accepted
+# budget are labeled would-delete with their real build date as a dry-run
+# report only; this script never issues a package-version DELETE call.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -116,13 +118,6 @@ while IFS= read -r history_commit; do
   history_rank["$history_commit"]="$history_position"
 done <"$history_file"
 
-emit_record() {
-  local class="$1" package="$2" id="$3" digest="$4" tags="$5"
-  local legacy_rank="$6" budget="$7" reason="$8"
-  printf 'AUDIT\tclass=%s\tpackage=%s\tid=%s\tdigest=%s\ttags=%s\tlegacy_rank=%s\tbudget=%s\tacceptance=unknown\tdecision=protect\treason=%s\n' \
-    "$class" "$package" "$id" "$digest" "$tags" "$legacy_rank" "$budget" "$reason"
-}
-
 audit_package() {
   local class="${1:?audit_package: class is required}"
   local package="${2:?audit_package: package is required}"
@@ -179,9 +174,10 @@ audit_package() {
 
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
-  local version_json id digest tags facts root_count child_count other_count
+  local version_json id digest tags built facts root_count child_count other_count
   local encoded_tags encoded_tag tag kind prefix full_commit rank min_rank
   local root_resolution_failed
+  local missing_build_date_count=0
   declare -A seen_id_digest=()
   declare -A seen_digest_id=()
 
@@ -205,6 +201,18 @@ audit_package() {
     seen_id_digest["$id"]="$digest"
     seen_digest_id["$digest"]="$id"
 
+    # Why: a missing/malformed build date is a real data-quality defect in
+    # the image-publish pipeline (e.g. a dropped OCI created label), not an
+    # absence to fold silently into an unrelated classification -- it is
+    # named here as its own finding rather than left out of the report.
+    if built="$(sra_version_created_at "$version_json")"; then
+      :
+    else
+      built="unknown"
+      (( missing_build_date_count += 1 ))
+      echo "::warning::Package version $id (digest $digest) in ${repository_name}/${package} has no usable GHCR build date; this is a build-pipeline defect, not audit absence." >&2
+    fi
+
     if facts="$(sra_version_tag_facts "$version_json")"; then
       :
     else
@@ -218,23 +226,23 @@ audit_package() {
     }
 
     if [[ "$class" == "metadata" ]]; then
-      emit_record "$class" "$package" "$id" "$digest" "$tags" "n/a" "protected" "metadata-stack-identity"
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "metadata-stack-identity"
       continue
     fi
     if (( root_count == 0 && child_count > 0 )); then
-      emit_record "$class" "$package" "$id" "$digest" "$tags" "n/a" "closure" "artifact-child-closure-unresolved"
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
       continue
     fi
     if (( root_count == 0 )); then
-      emit_record "$class" "$package" "$id" "$digest" "$tags" "n/a" "protected" "non-ordinary-version"
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-ordinary-version"
       continue
     fi
     if (( child_count > 0 )); then
-      emit_record "$class" "$package" "$id" "$digest" "$tags" "n/a" "protected" "mixed-root-and-child-tags"
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "mixed-root-and-child-tags"
       continue
     fi
     if (( other_count > 0 )); then
-      emit_record "$class" "$package" "$id" "$digest" "$tags" "n/a" "protected" "non-sha-tag-attached"
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-sha-tag-attached"
       continue
     fi
 
@@ -281,11 +289,11 @@ audit_package() {
     done <<<"$encoded_tags"
 
     if [[ "$root_resolution_failed" == "true" || "$min_rank" == "0" ]]; then
-      emit_record "$class" "$package" "$id" "$digest" "$tags" "unknown" "protected" "sha-resolution-or-history-unknown"
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-resolution-or-history-unknown"
       continue
     fi
 
-    printf '%s\t%s\t%s\t%s\n' "$min_rank" "$id" "$digest" "$tags" >>"$root_candidates"
+    printf '%s\t%s\t%s\t%s\t%s\n' "$min_rank" "$id" "$digest" "$tags" "$built" >>"$root_candidates"
   done <"$versions_file"
 
   local sorted_candidates="$package_dir/root-candidates.sorted.tsv"
@@ -296,20 +304,30 @@ audit_package() {
     return 1
   fi
 
-  local legacy_position=0 budget
-  while IFS=$'\t' read -r rank id digest tags; do
+  local legacy_position=0 budget decision would_delete_count=0
+  while IFS=$'\t' read -r rank id digest tags built; do
     [[ -n "$id" ]] || continue
     (( legacy_position += 1 ))
+    # Why: beyond-budget ordinary roots are reported as dry-run "would
+    # delete" candidates (never actually deleted -- see the no-DELETE-path
+    # Bats guard) so a maintainer reading the report sees exactly which
+    # builds are past the accepted-roots budget, not just a protect count.
     if (( legacy_position <= retention_keep )); then
       budget="within-${retention_keep}"
+      decision="protect"
     else
       budget="beyond-${retention_keep}"
+      decision="would-delete"
+      (( would_delete_count += 1 ))
     fi
-    emit_record "$class" "$package" "$id" "$digest" "$tags" "$legacy_position" "$budget" "acceptance-evidence-unavailable"
+    sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_position" "$budget" "$decision" "acceptance-evidence-unavailable"
   done <"$sorted_candidates"
 
-  printf 'SUMMARY\tclass=%s\tpackage=%s\tlegacy_roots=%s\tretention_keep=%s\tdecision=protect-only\n' \
-    "$class" "$package" "$legacy_position" "$retention_keep"
+  printf 'SUMMARY\tclass=%s\tpackage=%s\tlegacy_roots=%s\tretention_keep=%s\twould_delete_count=%s\tmissing_build_date_count=%s\tdecision=protect-only\n' \
+    "$class" "$package" "$legacy_position" "$retention_keep" "$would_delete_count" "$missing_build_date_count"
+  if (( would_delete_count > 0 )); then
+    echo "::notice::${repository_name}/${package}: $would_delete_count ordinary root(s) past the accepted-roots budget of $retention_keep in this dry-run report; no deletion was performed." >&2
+  fi
 }
 
 overall_status=0
@@ -332,4 +350,4 @@ if (( overall_status != 0 )); then
   exit 1
 fi
 
-echo "::notice::SHA retention audit completed in protect-only mode. Legacy budget position is informational because canonical acceptance evidence is not yet available to this audit." >&2
+echo "::notice::SHA retention audit completed in protect-only mode. Beyond-budget candidates are labeled would-delete for this dry-run report only; nothing was deleted. Legacy budget position is informational because canonical acceptance evidence is not yet available to this audit." >&2

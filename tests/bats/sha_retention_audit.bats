@@ -18,10 +18,13 @@ teardown() {
 }
 
 # The manifest value is the single machine-readable ordinary-root budget.
-@test "retention manifest defines exactly ten accepted ordinary roots" {
+# Raised 10 -> 30: a burst of concurrently open PRs that each only touch
+# YAML/governance files still produces one new build-tools sha-<commit>
+# image per push, so a ten-slot window could evict still-relevant history.
+@test "retention manifest defines exactly thirty accepted ordinary roots" {
   run sra_read_retention_keep "$repo_root/release/stack-images.yml"
   [ "$status" -eq 0 ]
-  [ "$output" = "10" ]
+  [ "$output" = "30" ]
 }
 
 # A duplicate key would create two competing retention values, so parsing must fail.
@@ -205,6 +208,81 @@ EOF
 
   run sra_resolve_commit_prefix "$git_dir" deadbee
   [ "$status" -ne 0 ]
+}
+
+# The dry-run report shows a real build date per candidate; created_at must
+# never feed ranking (see docs/release-versioning.md's Retention section).
+@test "version created_at is extracted for display when well-formed" {
+  version='{"created_at":"2026-08-01T12:00:00Z","metadata":{"container":{"tags":["sha-abcdef1"]}}}'
+  run sra_version_created_at "$version"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2026-08-01T12:00:00Z" ]
+}
+
+# A missing/malformed build date is a real build-pipeline defect, not proof
+# of absence; the caller must be able to detect it and report it separately.
+@test "version created_at fails closed when missing or malformed" {
+  run sra_version_created_at '{"metadata":{"container":{"tags":["sha-abcdef1"]}}}'
+  [ "$status" -ne 0 ]
+
+  run sra_version_created_at '{"created_at":"not-a-timestamp","metadata":{"container":{"tags":["sha-abcdef1"]}}}'
+  [ "$status" -ne 0 ]
+}
+
+# Within-budget candidates stay a plain protect decision.
+@test "emit_record labels a within-budget candidate as protect" {
+  run sra_emit_record runtime proxy 1 sha256:aa sha-abcdef1 2026-08-01T12:00:00Z 3 within-30 protect acceptance-evidence-unavailable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"budget=within-30"* ]]
+  [[ "$output" == *"decision=protect"* ]]
+  [[ "$output" == *"built=2026-08-01T12:00:00Z"* ]]
+}
+
+# Beyond-budget candidates are the dry-run "I would delete this" report line.
+@test "emit_record labels a beyond-budget candidate as would-delete" {
+  run sra_emit_record runtime proxy 2 sha256:bb sha-1234567 2026-01-01T00:00:00Z 31 beyond-30 would-delete acceptance-evidence-unavailable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"budget=beyond-30"* ]]
+  [[ "$output" == *"decision=would-delete"* ]]
+}
+
+# A cold cache (no directory configured) must fall through to a real GET,
+# exactly matching this helper's pre-caching behavior.
+@test "GitHub REST retry performs a real GET when no cache directory is set" {
+  calls=0
+  _github_api_get_once() {
+    calls=$(( calls + 1 ))
+    GITHUB_API_HTTP_STATUS="200"
+    printf '[]\n' >"$2"
+    return 0
+  }
+  GITHUB_API_CACHE_DIR=""
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/body.json" >/dev/null
+  [ "$calls" -eq 1 ]
+}
+
+# A fresh cached response must be served without a second real GET, and a
+# response older than the TTL must not be trusted as current.
+@test "GitHub REST retry serves a fresh cache hit without a real GET, and expires it" {
+  calls=0
+  _github_api_get_once() {
+    calls=$(( calls + 1 ))
+    GITHUB_API_HTTP_STATUS="200"
+    printf '[]\n' >"$2"
+    return 0
+  }
+  GITHUB_API_CACHE_DIR="$tmp_dir/api-cache"
+  GITHUB_API_CACHE_TTL_SECONDS=600
+  mkdir -p "$GITHUB_API_CACHE_DIR"
+
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/first.json" >/dev/null
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/second.json" >/dev/null
+  [ "$calls" -eq 1 ]
+
+  # Force the cached entry to look older than the TTL without sleeping.
+  touch -d "@$(( $(date +%s) - 700 ))" "$GITHUB_API_CACHE_DIR"/*.json
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/third.json" >/dev/null
+  [ "$calls" -eq 2 ]
 }
 
 # The retention audit surface must remain structurally incapable of package deletion.

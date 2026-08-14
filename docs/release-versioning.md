@@ -330,10 +330,14 @@ bad pull without guessing which image was running.
 ## Retention
 
 `release/stack-images.yml` defines the retention contract. The normal history
-budget is `accepted_ordinary_roots_per_package: 10`: for each first-party
-runtime or tooling package, keep the ten newest **accepted ordinary root
-identities**. The current accepted identity counts as one of those ten, so the
-rolling window is one current plus nine previous accepted roots.
+budget is `accepted_ordinary_roots_per_package: 30`: for each first-party
+runtime or tooling package, keep the thirty newest **accepted ordinary root
+identities**. The current accepted identity counts as one of those thirty, so
+the rolling window is one current plus twenty-nine previous accepted roots.
+(Raised from 10 to 30: a period with many concurrently open PRs that each
+only change YAML/governance files still produces one new build-tools
+`sha-<commit>` image per push, and a ten-slot window could evict still-live
+history from those PRs before they merge.)
 
 The budget counts stored root identity, not tag names. Multiple immutable
 `sha-<commit>` aliases that resolve to the same root digest consume one ordinary
@@ -374,6 +378,30 @@ that turns the audit itself into a package-version deletion path. Destructive
 activation is a separate approval and validation boundary and must fail closed
 when acceptance, package-version schema, protected references, or artifact-graph
 closure cannot be proven.
+
+The audit reports every package version beyond the accepted-roots budget as a
+labeled dry-run candidate (`decision=would-delete`) rather than folding it into
+the same blanket `protect` reason as a genuinely protected identity, and each
+reported candidate carries the real GHCR `created_at` build date for that
+specific package version alongside its tag and digest, so a maintainer reading
+the report sees which build a candidate is, not only a count. `created_at` is
+used for this display purpose only; it is never read as input to the
+acceptance-ranking decision itself (that ranking is git-history-derived, see
+above) — using package-registry timestamps to decide ranking was the exact
+`created_at`-reuse defect this audit was rebuilt to avoid. If GHCR does not
+return a usable build date for a specific version, that is treated as a real
+data-quality defect in the build/publish pipeline (e.g. a missing container
+timestamp), reported as its own distinct finding, and never silently folded
+into an unrelated protect/would-delete reason.
+
+**Deferred, not yet authorized:** a future destructive-activation pass is
+expected to need selection by more than "beyond the ordinary-roots budget" —
+concretely, filtering by an explicit date or date range, by a tag matched
+against a time span, and by free-text/pattern input (a specific `sha-<commit>`
+alias, a full `sha256:` digest, or a PR-associated tag). None of that selection
+or activation logic exists yet. This note exists so the dry-run report's data
+model (build date, tag, digest, rank) is not redesigned again once that
+decision is made, not as a description of current behavior.
 
 ## CI Guardrails
 
