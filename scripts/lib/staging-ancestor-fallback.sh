@@ -33,18 +33,12 @@
 # ghcr-retry.sh/staging-image-freshness.sh aren't: this file only defines
 # functions for a caller to invoke under the caller's own shell options.
 #
-# Issue #1095 G2: the short-SHA truncations below need the single declared
-# derivation (dmeta_short_sha()) -- self-sourced here, resolving the path
-# INLINE with no intermediate named variable, rather than adding
-# scripts/lib/docker-metadata.sh to the "callers must source first" list
-# above: not every real caller of this file (tests/bats/
-# staging_ancestor_fallback.bats' own setup() included) already sources it.
-# A sourced library file (unlike a directly-executed script) runs in
-# whichever caller's shell sources it, so a bare top-level variable
-# assignment here (e.g. `script_dir=...`) would silently overwrite an
-# identically-named variable already in scope in that caller -- resolving
-# the path inline, with no named variable at all, avoids that class of
-# collision entirely regardless of what the caller happens to be named.
+# What: self-sources docker-metadata.sh inline, with no intermediate
+#   `script_dir`-style variable.
+# Why: not every real caller already sources docker-metadata.sh, and a bare
+#   top-level assignment here would silently overwrite a caller's own
+#   identically-named variable.
+# From: Issue #1095 (G2) | PR #1503
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"
 
 # Process-lifetime cache for saf_find_built_ancestor's own per-candidate run
@@ -1056,16 +1050,11 @@ saf_find_built_ancestor() {
   fi
 
   local candidate has_run ancestor_image candidate_paths_status
-  # A separate assignment so a dmeta_short_sha() failure (malformed
-  # DOCKER_METADATA_SHORT_SHA_LENGTH) aborts under `set -e` and is visible
-  # via $? -- embedding the call directly inside the
-  # ancestor_image="...$(...)" string below would let a non-zero
-  # dmeta_short_sha() exit be silently absorbed by the surrounding
-  # assignment, producing a truncated-looking but wrong tag
-  # (ghcr.io/.../svc:sha-) instead of failing closed (Rule-Ref: AG-VAL-030 --
-  # a `set -e`-dependent construct must be provably observable, not merely
-  # assumed safe because the enclosing shell has `set -e`). Mirrors
-  # base_sha_short further down in this same file.
+  # What: assigns the short SHA to a local before use in ancestor_image.
+  # Why: embedding the call directly in the ancestor_image="...$(...)"
+  #   string would let a non-zero exit be silently absorbed by the
+  #   surrounding assignment (Rule-Ref: AG-VAL-030).
+  # From: Issue #1095 (G2) | PR #1503
   local candidate_sha_short
   while IFS= read -r candidate; do
     [[ -z "$candidate" ]] && continue
@@ -1183,15 +1172,11 @@ saf_find_built_ancestor() {
           # exactly as safe to use as the has_run==0 case already is. Only
           # when the image ALSO does not exist does this remain a genuine,
           # unbuilt real change that must still fail closed.
-          # Read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length -- assigned
-          # separately (not embedded in the ancestor_image="...$(...)"
-          # string) so a dmeta_short_sha() failure is caught by this explicit
-          # `||` check. This file has no top-level `set -e` (see this file's
-          # own header), so embedding the call would let a non-zero exit be
-          # silently absorbed by the outer assignment, producing a
-          # truncated-looking-but-wrong tag (ghcr.io/.../svc:sha-) instead of
-          # failing closed (Rule-Ref: AG-VAL-030).
+          # What: assigns the short SHA to a local before use in ancestor_image.
+          # Why: this file has no top-level set -e; embedding the call in the
+          #   assignment string would let a non-zero exit pass silently
+          #   (Rule-Ref: AG-VAL-030).
+          # From: Issue #1095 (G2) | PR #1503
           candidate_sha_short="$(dmeta_short_sha "$candidate")" || {
             echo "::error::Could not derive the short SHA for ancestor candidate $candidate (see dmeta_short_sha's own error above). Refusing to build an ancestor_image tag from an incomplete value." >&2
             return 1
@@ -1297,10 +1282,10 @@ saf_find_built_ancestor() {
     # single-purpose.
     local candidate_pre_service_untouched_status=0
     saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_pre_service_untouched_status=$?
-    # Same separate-assignment fail-closed shape as the other ancestor_image
-    # site above in this function (Rule-Ref: AG-VAL-030) -- see that site's
-    # comment for why the dmeta_short_sha() call must not be embedded
-    # directly inside this string.
+    # What: same separate-assignment shape as this function's other
+    #   ancestor_image site above.
+    # Why: see that site's comment (Rule-Ref: AG-VAL-030).
+    # From: Issue #1095 (G2) | PR #1503
     candidate_sha_short="$(dmeta_short_sha "$candidate")" || {
       echo "::error::Could not derive the short SHA for ancestor candidate $candidate (see dmeta_short_sha's own error above). Refusing to build an ancestor_image tag from an incomplete value." >&2
       return 1
@@ -1513,13 +1498,11 @@ saf_resolve_untouched_backfill_source() {
   # environment, not a parameter.
   local -x STAGING_FRESHNESS_GIT_DIR="$git_dir"
 
-  # Read the one declared short-SHA derivation instead of independently
-  # hardcoding the truncation length. Checked explicitly with || -- this
-  # file has no top-level `set -e` (see its own header: functions must fail
-  # closed via their own explicit checks, not rely on a caller's shell
-  # options), so an unchecked failure here would silently continue with
-  # base_sha_short empty and base_image="ghcr.io/.../svc:sha-" instead of
-  # aborting (Rule-Ref: AG-VAL-030).
+  # What: assigns the short SHA to a local, checked explicitly with ||.
+  # Why: this file has no top-level set -e; an unchecked failure would
+  #   silently continue with base_image="ghcr.io/.../svc:sha-" instead of
+  #   aborting (Rule-Ref: AG-VAL-030).
+  # From: Issue #1095 (G2) | PR #1503
   local base_sha_short
   base_sha_short="$(dmeta_short_sha "$base_sha")" || {
     echo "::error::Could not derive the short SHA for base_sha $base_sha (see dmeta_short_sha's own error above). Refusing to build a base_image tag from an incomplete value." >&2
@@ -1527,8 +1510,11 @@ saf_resolve_untouched_backfill_source() {
   }
   local base_image="ghcr.io/${repository}/${service}:sha-${base_sha_short}"
   local ancestor_sha
-  # Issue #1095 G2: shared by both the fast-path and regular-path branches
-  # below that report/return an ancestor's own short-SHA tag.
+  # What: declared once, shared by the fast-path and regular-path branches
+  #   below that each assign and read it.
+  # Why: avoids a separate `local` declaration (and separate-assignment
+  #   fail-closed shape) duplicated in both branches.
+  # From: Issue #1095 (G2) | PR #1503
   local ancestor_sha_short
 
   # Step 1: fast-path pre-check (see this function's own header). Either
@@ -1591,10 +1577,9 @@ saf_resolve_untouched_backfill_source() {
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
       return 1
     fi
-    # Read the one declared short-SHA derivation instead of independently
-    # hardcoding the truncation length. Checked explicitly with || -- same
-    # fail-closed shape as base_sha_short above, for the same "no top-level
-    # set -e in this file" reason (Rule-Ref: AG-VAL-030).
+    # What: same separate-assignment shape as base_sha_short above.
+    # Why: see that site's comment (Rule-Ref: AG-VAL-030).
+    # From: Issue #1095 (G2) | PR #1503
     ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")" || {
       echo "::error::Could not derive the short SHA for ancestor $ancestor_sha (see dmeta_short_sha's own error above). Refusing to substitute a tag built from an incomplete value." >&2
       return 1
@@ -1662,10 +1647,10 @@ saf_resolve_untouched_backfill_source() {
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
     return 1
   fi
-  # Read the one declared short-SHA derivation instead of independently
-  # hardcoding the truncation length. Checked explicitly with || -- same
-  # fail-closed shape as this function's earlier ancestor_sha_short site
-  # above (Rule-Ref: AG-VAL-030).
+  # What: same separate-assignment shape as this function's earlier
+  #   ancestor_sha_short site above.
+  # Why: see that site's comment (Rule-Ref: AG-VAL-030).
+  # From: Issue #1095 (G2) | PR #1503
   ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")" || {
     echo "::error::Could not derive the short SHA for ancestor $ancestor_sha (see dmeta_short_sha's own error above). Refusing to substitute a tag built from an incomplete value." >&2
     return 1

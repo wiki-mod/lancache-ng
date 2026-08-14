@@ -91,15 +91,11 @@ setup() {
 }
 
 @test "resolve tag: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed instead of returning pr-<N>-sha- (AG-VAL-030)" {
-    # Issue #1095 G2 follow-up: the eligible-PR branch built
-    # printf 'pr-%s-sha-%s\n' "$pr_number" "$(dmeta_short_sha "$build_sha")"
-    # -- printf's OWN exit status stays 0 even if the command substitution
-    # inside its argument list fails, so embedding the call there (as this
-    # line originally did) would have returned 0 with a truncated
-    # "pr-715-sha-" tag instead of failing. Fixed by assigning to a local
-    # first and checking its exit status with || return 1. This test proves
-    # that through the real vit_resolve_tag entry point, not dmeta_short_sha
-    # directly.
+    # What: proves vit_resolve_tag itself fails closed, not just dmeta_short_sha.
+    # Why: printf's own exit status stays 0 even if a command substitution
+    #   inside its argument fails, so the caller must check dmeta_short_sha's
+    #   own exit status separately.
+    # From: Issue #1095 (G2) | PR #1503
     export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
     run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
         "someuser" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""

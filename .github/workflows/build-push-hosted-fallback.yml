@@ -402,15 +402,12 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length -- this file already
-          # declared DOCKER_METADATA_SHORT_SHA_LENGTH above but read it nowhere.
-          # Assigned separately, not embedded inside printf's argument list:
-          # printf's OWN exit status would still be 0 even if the command
-          # substitution inside its argument failed (this is a `set -e`
-          # blind spot, unlike a bare `var="$(cmd)"` assignment, which set -e
-          # DOES catch), so embedding it here would silently ship a
-          # truncated "value=" output instead of failing this step.
+          # What: assigns the short SHA to a local before printf, instead of
+          #   embedding the call in printf's argument list.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
 
@@ -632,18 +629,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Single-source GHCR owner/repo derivation instead of trusting
-          # github.repository's own casing directly (Rule-Ref: AG-CI-022's
-          # documented G1 incident) -- this bash-reachable spot previously read
-          # the raw github context value directly via a step-level
-          # REPOSITORY env entry, bypassing dmeta_ghcr_repo() entirely.
-          # NOTE: never write the literal double-curly GHA expression
-          # syntax in a run: step's own text (even inside a #-comment) --
-          # GitHub Actions' expression substitution scans the whole run:
-          # block before the shell ever sees it, so a stray occurrence
-          # (especially split across lines) gets parsed as a real
-          # expression and can break the workflow at dispatch time,
-          # confirmed live via actionlint against this exact wording.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           source_tag="sha-${SHORT_SHA}"

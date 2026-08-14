@@ -101,15 +101,10 @@ concurrency:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
-  # Issue #1095 G2: must stay equal to build-push.yml's own
-  # DOCKER_METADATA_SHORT_SHA_LENGTH declaration -- GitHub Actions has no
-  # mechanism to share an env value across separate workflow files, so this
-  # is a second declaration of the same project-wide constant, not a second
-  # independent choice of length. scripts/lib/docker-metadata.sh's
-  # dmeta_short_sha() (this file's own single derivation, same as
-  # build-push.yml) falls back to 7 if this were ever removed, but an
-  # explicit declaration here keeps the value visible rather than relying on
-  # a silent fallback.
+  # What: declares the same short-SHA length as build-push.yml's own env.
+  # Why: Actions has no mechanism to share an env value across workflow
+  #   files, so both copies must be kept equal by hand.
+  # From: Issue #1095 (G2) | PR #1503
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   # run_id-run_attempt suffixed, not a fixed name: build-tools and
   # build-tools-arm64 each load a *local* scan image onto their own runner's
@@ -332,8 +327,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
@@ -870,8 +866,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
@@ -1122,8 +1119,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-amd64"
           arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-arm64"

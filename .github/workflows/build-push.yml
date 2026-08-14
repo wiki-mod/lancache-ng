@@ -650,12 +650,10 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          # Issue #1095 G1 (minor, non-casing-bug cleanup found alongside the real fix):
-          # GITHUB_REPOSITORY is already a default Actions env var with exactly this
-          # value -- restating it here via ${{ github.repository }} recomputed a value
-          # already available under the identical name for no reason. Removed; the
-          # `-e GITHUB_REPOSITORY` docker run flag below still forwards the (unchanged)
-          # default host value into the container.
+          # What: no step-level GITHUB_REPOSITORY entry (the docker run flag
+          #   below still forwards it into the container).
+          # Why: GITHUB_REPOSITORY is already a default Actions env var.
+          # From: Issue #1095 (G1) | PR #1503
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -2607,8 +2605,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # Calls scripts/lib/validation-image-tag.sh's own functions instead of reimplementing
@@ -2706,8 +2705,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
@@ -2884,11 +2884,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Single-source GHCR owner/repo derivation instead of trusting
-          # github.repository's own casing directly (Rule-Ref: AG-CI-022's
-          # documented G1 incident) -- this bash-reachable spot was previously
-          # bypassing dmeta_ghcr_repo() by constructing the full image
-          # reference as a raw YAML expression.
+          # What: builds the image ref from the single declared GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${CHANNEL_TAG}"
           export FULL_SETUP_CLIENT_TOOLS_IMAGE
           scripts/full-setup-client-simulation.sh
@@ -4416,10 +4414,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # What: Derives the lowercased GHCR owner/repo once for this step's case mapping below.
-          # Why: Issue #1095 G1's single declared source, replacing an independent
-          #   github.repository-casing assumption at each site.
-          # From: PR #1499 | Issue #1095
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           repository="$(dmeta_ghcr_repo)"
           case "$MATRIX_SERVICE" in
             proxy) digest="$DIGEST_PROXY" ;;
@@ -4580,8 +4577,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
@@ -4675,22 +4673,11 @@ jobs:
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
-  # Issue #1095 G7: build's and build-arm64's should-build admission decision used to
-  # be a byte-identical copy of the same long `if:` expression, maintained independently
-  # in both jobs -- a future fix applied to only one copy would silently leave the other
-  # architecture leg running (or not running) under a different rule with no CI signal
-  # that they had diverged. This job computes that decision exactly once and exposes it
-  # as a plain output both legs read, the same "single upstream job, plain output,
-  # provably-agreeing consumers" shape `determine-push-reuse-scope` already uses above
-  # for a different decision.
-  #
-  # Deliberately its own job with `if: always()` and NO other conditional logic of its
-  # own (same shape as push-supersession-check): it can only ever resolve
-  # success/failure/cancelled, never "skipped", so build/build-arm64's own consumption
-  # of its result does not reintroduce the implicit-success()-over-a-skippable-dependency
-  # hazard documented on container-scan/promote's `if:` blocks elsewhere in this file.
-  # Runs on the light tier: it only evaluates already-computed `needs.*.result` values
-  # and one boolean expression, no real work of its own.
+  # What: computes build/build-arm64's shared should-build admission once,
+  #   exposed as a plain output both jobs read.
+  # Why: the two jobs previously each duplicated the same boolean `if:`
+  #   byte-for-byte; a fix to one copy could silently leave the other diverged.
+  # From: Issue #1095 (G7) | PR #1503
   determine-build-admission:
     name: determine build/build-arm64 admission (G7)
     needs:
@@ -4704,6 +4691,10 @@ jobs:
       - pr-template-check
       - pr-tracking-metadata-check
       - pr-title-convention-check
+    # What: never resolves to "skipped" (if: always(), no other condition).
+    # Why: avoids the implicit-success()-over-a-skippable-dependency hazard
+    #   noted on container-scan/promote's own `if:` blocks in this file.
+    # From: Issue #1095 (G7) | PR #1503
     if: always()
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 15
@@ -4713,11 +4704,10 @@ jobs:
       - name: Decide whether build/build-arm64 may run
         id: decide
         env:
-          # Mirrors the exact expression build/build-arm64 each carried independently
-          # before this job existed -- see this job's own top comment. Read as plain env
-          # strings rather than interpolated straight into the shell logic below, so a
-          # malformed value (e.g. a typo'd result string) fails the `case` pattern match
-          # below loudly instead of being silently accepted by a raw `[[ ... ]]` expansion.
+          # What: passes each dependency's result as a plain env string.
+          # Why: a malformed value fails the `case` match below loudly
+          #   instead of silently passing a raw `[[ ... ]]` expansion.
+          # From: Issue #1095 (G7) | PR #1503
           SHELLCHECK_RESULT: ${{ needs.shellcheck.result }}
           VALIDATE_COMPOSE_RESULT: ${{ needs['validate-compose'].result }}
           CI_SCOPE_POLICY_RESULT: ${{ needs.ci_scope_policy.result }}
@@ -4737,15 +4727,16 @@ jobs:
 
           admitted=true
 
-          # Unconditional gates -- must pass regardless of event type.
+          # What: Step 1 -- gates required regardless of event type.
           is_success "$SHELLCHECK_RESULT" || admitted=false
           is_success "$VALIDATE_COMPOSE_RESULT" || admitted=false
           is_success "$CI_SCOPE_POLICY_RESULT" || admitted=false
           is_success "$LINE_ENDINGS_RESULT" || admitted=false
 
-          # A metadata-only pull_request event (label/milestone changed, no new commit)
-          # never carries new image content -- see build's own top comment for why this
-          # skips cleanly rather than treating it as a gate failure.
+          # What: Step 2 -- rejects a metadata-only pull_request event.
+          # Why: labeled/unlabeled/milestoned/demilestoned never carry a new
+          #   commit, so there is no new image content to build.
+          # From: Issue #1095 (G7) | PR #1503
           case "$EVENT_NAME" in
             pull_request)
               case "$EVENT_ACTION" in
@@ -4756,10 +4747,10 @@ jobs:
               ;;
           esac
 
-          # pull_request-only gates: these jobs only run on a pull_request event, so a
-          # push/tag/workflow_dispatch run must not require their result at all (a plain
-          # `is_success` check would fail closed on a non-pull_request event where the
-          # job never even ran, i.e. "skipped").
+          # What: Step 3 -- pull_request-only gates, skipped otherwise.
+          # Why: these jobs only run on pull_request; a plain is_success check
+          #   would fail closed on any other event where they never ran.
+          # From: Issue #1095 (G7) | PR #1503
           if [ "$EVENT_NAME" = "pull_request" ]; then
             is_success "$FILE_HEADERS_RESULT" || admitted=false
             is_success "$COMPOSE_HEALTHCHECKS_RESULT" || admitted=false
@@ -4767,8 +4758,10 @@ jobs:
             is_success "$PR_TRACKING_METADATA_CHECK_RESULT" || admitted=false
             is_success "$PR_TITLE_CONVENTION_CHECK_RESULT" || admitted=false
           else
-            # container-scan is the inverse shape: it only matters OFF a pull_request
-            # event (see build's own if: block, which is what this mirrors).
+            # What: container-scan gate, required only off pull_request.
+            # Why: mirrors build's own if: block (container-scan is the
+            #   inverse shape of the pull_request-only gates above).
+            # From: Issue #1095 (G7) | PR #1503
             is_success "$CONTAINER_SCAN_RESULT" || admitted=false
           fi
 
@@ -4778,6 +4771,9 @@ jobs:
     # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
     # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. Issue #1095 G7: the admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
     # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
+    # What: needs: still lists every check job below even though if: no longer reads most of their .result directly.
+    # Why: several of their outputs (e.g. validate-compose's build_tools_image) are consumed elsewhere in this job, and Actions only exposes outputs to jobs listed in needs:.
+    # From: Issue #1095 (G7) | PR #1503
     needs:
       - determine-build-admission
       - shellcheck
@@ -5084,8 +5080,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
@@ -5110,8 +5107,9 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-amd64"
 
@@ -5174,13 +5172,15 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
@@ -5686,11 +5686,9 @@ jobs:
     # Also skipped on a metadata-only pull_request event -- see `build`'s identical
     # comment above.
     #
-    # Issue #1095 G7: same admission-consolidation change as `build` above, and for the
-    # identical reason -- see determine-build-admission's own top comment. `needs:` stays
-    # the same superset for the same reason `build`'s own comment explains (several of
-    # these jobs' outputs, e.g. validate-compose's build_tools_image below, are consumed
-    # elsewhere in this job).
+    # What: `needs:` mirrors `build`'s own superset, for the same reason.
+    # Why: see `build`'s own `needs:` comment above.
+    # From: Issue #1095 (G7) | PR #1503
     needs:
       - determine-build-admission
       - shellcheck
@@ -5950,8 +5948,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
@@ -5976,8 +5975,9 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-arm64"
 
@@ -6025,13 +6025,15 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
@@ -6282,12 +6284,14 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
 
@@ -6399,12 +6403,14 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -6725,12 +6731,14 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
@@ -6980,8 +6988,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # This is core release machinery on the release-bearing branch, not
@@ -7169,8 +7178,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           read -r -a services <<< "$SERVICES"
@@ -7205,12 +7215,14 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # Issue #1095 G2: read the one declared short-SHA derivation instead of
-          # independently hardcoding the truncation length.
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
@@ -7409,8 +7421,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           if [ ! -s vex.openvex.json ]; then
@@ -7527,8 +7540,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
@@ -7592,8 +7606,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # Issue #1095 G1: read the single lowercased GHCR owner/repo derivation
-          # instead of trusting github.repository was already correctly cased.
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
           asset="${SERVICE}.cdx.json"

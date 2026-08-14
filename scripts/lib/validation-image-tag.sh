@@ -27,25 +27,12 @@
 # #715 is to REUSE that exact pr-<N>-sha-<short> mechanism, never invent a
 # second, divergent one.
 #
-# Issue #1095 G2: vit_resolve_tag() below needs the single declared
-# short-SHA derivation (dmeta_short_sha()), not its own independent
-# hardcode -- self-source it, rather than relying on every caller of this
-# file to have sourced docker-metadata.sh first. Deliberately NOT using
-# scripts/lib/run-in-validation-subnet.sh's own named `script_dir` variable
-# convention here: that script is always DIRECTLY EXECUTED (its own process,
-# its own shell), never sourced, so a bare top-level variable it sets cannot
-# collide with anything. This file is SOURCED by other scripts (see the
-# header above) -- `source` runs in the CALLING script's own shell, so a
-# bare `script_dir=...` here would silently overwrite an identically-named
-# variable already in scope there: both of this file's real callers
-# (scripts/plan-deep-validation.sh, scripts/ensure-pr-staging-images.sh)
-# set their own `script_dir` at their own top level before sourcing this
-# file, and depend on that variable retaining ITS OWN value afterward (e.g.
-# plan-deep-validation.sh's later `$script_dir/detect-full-setup-
-# changes.sh` call). Resolving the path inline, with no intermediate
-# variable at all, avoids that collision entirely rather than picking a
-# different-but-still-guessable variable name.
-# entirely rather than picking a "probably unique enough" variable name.
+# What: self-sources docker-metadata.sh inline, with no intermediate
+#   `script_dir`-style variable.
+# Why: this file is itself sourced by callers that already have their own
+#   `script_dir` in scope (e.g. plan-deep-validation.sh); a bare top-level
+#   assignment here would silently overwrite it.
+# From: Issue #1095 (G2) | PR #1503
 # shellcheck source=scripts/lib/docker-metadata.sh
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"
 
@@ -126,15 +113,12 @@ vit_resolve_tag() {
     fi
 
     if [[ "$(vit_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
-        # Read the one declared short-SHA derivation instead of
-        # independently hardcoding the truncation length -- assigned to its
-        # own local first, checked explicitly with ||, rather than embedded
-        # inside printf's argument list. printf's OWN exit status would stay
-        # 0 even if the command substitution inside its argument failed, so
-        # this file's caller having `set -e` could not have caught it either
-        # -- a malformed DOCKER_METADATA_SHORT_SHA_LENGTH would have
-        # silently resolved to "pr-<N>-sha-" instead of failing, exactly the
-        # tag build-push.yml never pushed (Rule-Ref: AG-VAL-030).
+        # What: assigns the short SHA to a local before printf, instead of
+        #   embedding the call in printf's argument list.
+        # Why: printf's own exit status stays 0 even if a command
+        #   substitution inside its argument fails, so `set -e` cannot catch
+        #   a failure embedded there (Rule-Ref: AG-VAL-030).
+        # From: Issue #1095 (G2) | PR #1503
         local pr_short_sha
         pr_short_sha="$(dmeta_short_sha "$build_sha")" || return 1
         printf 'pr-%s-sha-%s\n' "$pr_number" "$pr_short_sha"
