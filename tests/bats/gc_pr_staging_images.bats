@@ -2,12 +2,14 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free unit coverage for scripts/lib/gc-pr-staging-images.sh -- the
-# manifest-graph classification functions scripts/gc-pr-staging-images.sh
-# uses to fix the confirmed root cause (issue #1095) of
-# .github/workflows/gc-pr-staging-images.yml never reaping the ~55% of this
-# project's GHCR package versions that carry no tag at all (Buildx's own
-# per-platform manifests and attestation/SBOM sub-manifests).
+# Docker-free unit coverage for scripts/gc-pr-staging-images.sh's manifest-
+# graph classification functions (merged 2026-08-14, issue #1557, from a
+# formerly separate scripts/lib/gc-pr-staging-images.sh into this one file --
+# see that script's own header for why) -- the functions that fix the
+# confirmed root cause (issue #1095) of .github/workflows/gc-pr-staging-images.yml
+# never reaping the ~55% of this project's GHCR package versions that carry
+# no tag at all (Buildx's own per-platform manifests and attestation/SBOM
+# sub-manifests).
 #
 # Each case here regresses a specific way that classification could
 # silently delete something still alive, per the real risk the maintainer's
@@ -39,6 +41,28 @@
 #     GitHub Actions log showed zero actual LOOKUP_FAILED occurrences,
 #     ruling this out as ITS cause, but the failure mode itself is real and
 #     was previously completely unguarded against for any future run.
+#
+# MERGED (2026-08-14, issue #1557): this file also now carries the former
+# tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats suite (near
+# the bottom, its own header comment kept intact) -- at the maintainer's
+# explicit direction to consolidate to one Bats file per script. That suite
+# tests a genuinely different subsystem (the git-plumbing sparse-checkout
+# recovery step embedded in .github/workflows/gc-pr-staging-images.yml
+# itself, via a throwaway local git repository) with no setup/fixture logic
+# actually shared with the classification tests above: this file's own
+# setup()/teardown() below therefore only do the classification suite's
+# cheap, universal part (source the script); the sparse-checkout suite's own
+# git-repo/extracted-restore-script fixture is created by an explicit
+# `setup_sparse_checkout_fixture` helper each of ITS OWN tests calls as its
+# first line, not by the shared setup() -- concatenating the two suites'
+# original same-named setup()/teardown() functions verbatim would have
+# silently let the second definition clobber the first (bash function
+# redefinition is silent), breaking the classification suite entirely, and
+# folding the git-repo fixture into the shared setup() unconditionally would
+# pay that fixture's cost on every single classification test and would
+# `skip` (bats' per-test skip, triggered by setup() calling it) the WHOLE
+# classification suite too on a git-less runner, not just the sparse-
+# checkout suite that actually needs git.
 
 # What: declares the minimum bats-core version this file requires.
 # Why: several tests below use `run --separate-stderr` (bats-core >=1.5.0);
@@ -50,23 +74,31 @@ bats_require_minimum_version 1.5.0
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # Sourcing scripts/gc-pr-staging-images.sh (rather than just its lib)
-    # pulls in process_service() and every config variable it needs
-    # (org/repo/services/max_deletions_per_service/min_age_seconds/
+    # Sourcing scripts/gc-pr-staging-images.sh pulls in every gcps_*
+    # classification function, process_service(), and every config variable
+    # it needs (org/repo/services/max_deletions_per_service/min_age_seconds/
     # now_epoch/pr_state_cache/had_errors/deleted/kept) for the end-to-end
     # tests further down, without running main() -- the
     # `[[ "${BASH_SOURCE[0]}" == "${0}" ]]` guard at that script's own
     # bottom only calls main() when the file is EXECUTED, never when
     # `source`d, which is exactly what makes it safe to source here without
-    # a real GH_TOKEN or real gh/jq/curl/date binaries. Harmless for the
-    # pure-function tests above this line too -- it re-sources
-    # scripts/lib/gc-pr-staging-images.sh itself (idempotent function
-    # redefinition) and just adds a few extra global variables they don't
-    # otherwise use. No GH_TOKEN needs to be set for this: main()'s own
-    # `: "${GH_TOKEN:?...}"` line is inside main()'s body, which the guard
-    # never invokes here, so it is simply never evaluated during sourcing.
+    # a real GH_TOKEN or real gh/jq/curl/date binaries. This is the same
+    # source-guard idiom that used to justify a separate scripts/lib/
+    # file for the pure-function tests above this line too -- the two files
+    # were merged (issue #1557) once it became clear the guard alone already
+    # provides everything the split was for.
     # shellcheck source=scripts/gc-pr-staging-images.sh
     source "$repo_root/scripts/gc-pr-staging-images.sh"
+}
+
+teardown() {
+    # Safe to run unconditionally for EVERY test in this file, not just the
+    # sparse-checkout-restore group below: test_repo/restore_script are only
+    # ever set by setup_sparse_checkout_fixture(), so for every other test in
+    # this file both expansions below are empty and both guards short-circuit
+    # to a no-op.
+    [[ -n "${test_repo:-}" ]] && rm -rf "$test_repo"
+    [[ -n "${restore_script:-}" ]] && rm -f "$restore_script"
 }
 
 # ---------------------------------------------------------------------------
@@ -895,4 +927,240 @@ VERSIONS_JSON
     [ "$status" -eq 1 ]
     [[ "$output" == *"PR-state lookups failed this run (threshold: 2)"* ]]
     [[ "$output" == *"One or more package-version listings, manifest fetches, or deletions failed"* ]]
+}
+
+# ---------------------------------------------------------------------------
+# Sparse-checkout restore step (merged in from the former
+# tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats, issue #1557)
+# ---------------------------------------------------------------------------
+#
+# Regression coverage for the runner-corruption root cause found while
+# investigating widespread "No such file or directory" / "Can't find
+# 'action.yml'" CI failures on 2026-08-07 (self-hosted runners, several
+# unrelated build-push.yml jobs, traced to the runner's own _diag worker
+# logs). Root cause: actions/checkout@v7.0.1's sparseCheckoutNonConeMode()
+# (the code path .github/workflows/gc-pr-staging-images.yml's
+# `sparse-checkout-cone-mode: false` selects) sets core.sparseCheckout via
+# `git config` but writes the path patterns by appending directly to
+# .git/info/sparse-checkout with a raw file write, never going through the
+# `git sparse-checkout set` porcelain command.
+#
+# Reproduced repeatedly, live, on a self-hosted runner host (git 2.47.3,
+# 2026-08-07), both against the real lancache-ng repository and against
+# throwaway synthetic repositories of varying size: a sparse-checkout state
+# set up that way does not reliably clear on a later job's plain `git
+# sparse-checkout disable` call, nor on `git sparse-checkout init`
+# immediately followed by `disable` -- both report exit 0, and across
+# repeated runs the outcome varied between full recovery and index
+# skip-worktree bits staying set on every path outside the narrow set. The
+# exact trigger for the variation was not isolated. Self-hosted runners
+# reuse one working directory across unrelated jobs/workflows, so whatever
+# state a job leaves behind is inherited by the next job scheduled onto the
+# same runner instance -- and a lingering core.sparseCheckout=true is
+# dangerous even when the tree happens to look complete right now, because
+# git re-applies whatever sparse-checkout config is active on every future
+# tree-changing operation, so the next job's checkout of a genuinely
+# different commit would re-narrow down to the old paths again.
+#
+# Because `disable`'s own exit code proved unreliable as a success signal,
+# the workflow's fix does not trust it: it sweeps any remaining index
+# skip-worktree bits directly via `git update-index --no-skip-worktree`, and
+# asserts (failing the job loudly) that none remain afterward rather than
+# assuming the restore worked. That assertion itself captures `git ls-files
+# -v`'s output into a variable before counting matches with awk instead of
+# piping straight into `grep -c` -- `grep -c`'s own "no match" exit code
+# (1) is indistinguishable from a real git failure once wrapped in `||
+# true`, and an empty resulting count would make `[ "$x" -ne 0 ]` a runtime
+# error rather than a `set -e`-fatal one inside an `if` condition, silently
+# skipping the check instead of failing it. These cases regress the failure
+# mode (so a future change to the workflow's checkout step can't silently
+# reintroduce it undetected), every stage of the fix (including the case
+# where `disable` alone provably does not clear an existing skip-worktree
+# bit), and that the step genuinely fails closed -- non-zero exit, not a
+# silent no-op -- when git itself is broken. No network access and no real
+# lancache-ng clone needed -- a throwaway local `git init` repository
+# reproduces the same git plumbing behavior.
+
+# setup_sparse_checkout_fixture
+#
+# Called explicitly as the first line of every test in this group (NOT via
+# the file-wide setup() above -- see this file's own header comment for why
+# the two suites' fixtures are kept separate rather than merged into one
+# shared setup()/teardown()). Populates test_repo/restore_script, which the
+# file-wide teardown() above already knows how to clean up.
+setup_sparse_checkout_fixture() {
+    if ! command -v git >/dev/null 2>&1; then
+        skip "git not available"
+    fi
+
+    test_repo="$(mktemp -d)"
+    git -C "$test_repo" init --quiet --initial-branch=main
+    git -C "$test_repo" config user.email "test@example.invalid"
+    git -C "$test_repo" config user.name "Test"
+
+    # A handful of tracked files standing in for the real repo's tree: two
+    # inside the narrow set gc-pr-staging-images.yml actually checks out,
+    # and two representing everything else (e.g. a workflow-referenced
+    # composite action) that a later, unrelated job's checkout step needs.
+    mkdir -p "$test_repo/scripts/lib" "$test_repo/.github/actions/some-action"
+    echo "narrow-a" >"$test_repo/scripts/narrow-a.sh"
+    echo "narrow-b" >"$test_repo/scripts/lib/narrow-b.sh"
+    echo "outside-a" >"$test_repo/README.md"
+    echo "outside-b" >"$test_repo/.github/actions/some-action/action.yml"
+    git -C "$test_repo" add -A
+    git -C "$test_repo" commit --quiet -m "seed"
+
+    # gc-pr-staging-images.yml's "Restore full working tree for the next job
+    # on this runner" step verbatim (same commands, same order), extracted
+    # into its own script file rather than a bash function defined in this
+    # test file: bats' own `run` implementation does not reliably preserve
+    # `set -e` semantics for a function invoked through it, which masked a
+    # real fail-closed bug during development of this test (an in-file
+    # function reported exit 0 for a directory that isn't a git repository,
+    # while the identical commands run as a standalone script correctly
+    # exited non-zero) -- running it as a real external script sidesteps
+    # that bats-specific pitfall entirely and is also a closer match to how
+    # the workflow itself executes it (a real `bash` process running a
+    # `run:` block's script, not a shell function call).
+    restore_script="$(mktemp)"
+    cat >"$restore_script" <<'RESTORE_SCRIPT'
+#!/usr/bin/env bash
+cd "$1" || exit 1
+set -euo pipefail
+git sparse-checkout init || true
+git sparse-checkout disable || true
+git config --local --unset-all core.sparseCheckout || true
+rm -f .git/info/sparse-checkout
+
+# `git ls-files -v` is captured into a variable BEFORE piping to awk, not
+# piped to it directly: a real git failure here must trip `set -e`
+# immediately via this plain assignment, which a direct pipe into awk would
+# instead hide behind awk's own exit code.
+ls_files_before="$(git ls-files -v)"
+mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
+if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
+  git update-index --no-skip-worktree -- "${remaining_skip_worktree[@]}"
+fi
+git checkout --progress --force HEAD -- .
+
+# Counts with awk rather than `grep -c`: awk's own exit code is 0 regardless
+# of match count, so a zero-match "fully restored" result needs no `|| true`
+# fallback that could otherwise let remaining_after end up empty/invalid and
+# silently skip the check below under `set -e` (an empty `[ "$x" -ne 0 ]`
+# comparison is a runtime error, not a fatal one, inside an `if` condition).
+ls_files_after="$(git ls-files -v)"
+remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
+if [ "$remaining_after" -ne 0 ]; then
+  echo "::error::${remaining_after} path(s) still carry the skip-worktree bit after the restore sequence" >&2
+  exit 1
+fi
+RESTORE_SCRIPT
+}
+
+# Mirrors actions/checkout's sparseCheckoutNonConeMode(): `git config
+# core.sparseCheckout true` plus a raw append to .git/info/sparse-checkout,
+# never `git sparse-checkout set`. This is the exact setup path
+# gc-pr-staging-images.yml's `sparse-checkout-cone-mode: false` selects.
+narrow_via_legacy_manual_append() {
+    git -C "$test_repo" config core.sparseCheckout true
+    printf '\nscripts/narrow-a.sh\nscripts/lib/narrow-b.sh\n' >>"$test_repo/.git/info/sparse-checkout"
+    git -C "$test_repo" checkout --progress --force HEAD >/dev/null 2>&1
+}
+
+# Runs the restore script (see setup_sparse_checkout_fixture() above)
+# against the directory given as $1 -- a real git repo for the recovery-path
+# tests below, or a non-repo directory for the fail-closed test.
+run_workflow_restore_step() {
+    bash "$restore_script" "$1"
+}
+
+@test "legacy manual sparse-checkout setup narrows the working tree as expected" {
+    setup_sparse_checkout_fixture
+    narrow_via_legacy_manual_append
+    [ -f "$test_repo/scripts/narrow-a.sh" ]
+    [ ! -f "$test_repo/README.md" ]
+    [ ! -f "$test_repo/.github/actions/some-action/action.yml" ]
+}
+
+@test "plain 'git sparse-checkout disable' does not reliably clear core.sparseCheckout" {
+    setup_sparse_checkout_fixture
+    narrow_via_legacy_manual_append
+
+    run git -C "$test_repo" sparse-checkout disable
+    [ "$status" -eq 0 ]
+    run git -C "$test_repo" checkout --progress --force HEAD
+    [ "$status" -eq 0 ]
+
+    # This is the actual bug: `disable` reports success, but
+    # core.sparseCheckout was never actually cleared -- confirmed as the one
+    # consistently-reproducible part of this failure across every repetition
+    # against both this minimal fixture and the real lancache-ng repository.
+    # (Whether files outside the narrow set are also still missing from the
+    # working tree at this exact point varied between repetitions in the real
+    # reproductions and is deliberately not asserted here -- the config being
+    # left dangling is the part proven reliable, and is dangerous on its own.)
+    run git -C "$test_repo" config --local --get core.sparseCheckout
+    [ "$status" -eq 0 ]
+    [ "$output" = "true" ]
+}
+
+@test "the workflow's restore step fully restores a legacy-manual narrow checkout and its assertion passes" {
+    setup_sparse_checkout_fixture
+    narrow_via_legacy_manual_append
+
+    run run_workflow_restore_step "$test_repo"
+    [ "$status" -eq 0 ]
+
+    [ -f "$test_repo/README.md" ]
+    [ -f "$test_repo/.github/actions/some-action/action.yml" ]
+    [ -f "$test_repo/scripts/narrow-a.sh" ]
+    [ -f "$test_repo/scripts/lib/narrow-b.sh" ]
+
+    # core.sparseCheckout must genuinely be gone, not just report success --
+    # a later job's own checkout step never re-sets it, so a lingering true
+    # here would keep re-narrowing every future tree-changing operation on
+    # this working directory.
+    run git -C "$test_repo" config --local --get core.sparseCheckout
+    [ "$status" -eq 1 ]
+
+    run git -C "$test_repo" ls-files -v
+    [ "$status" -eq 0 ]
+    [[ "$output" != *$'\nS '* ]]
+    [[ "$output" != S\ * ]]
+}
+
+@test "the workflow's restore step's own sweep recovers a skip-worktree bit regardless of how it was set" {
+    setup_sparse_checkout_fixture
+    # Sets a skip-worktree bit directly rather than via the flaky
+    # legacy-setup reproduction above, so this test does not depend on
+    # reproducing that specific flakiness to prove the step's own
+    # sweep+assert logic (the part that does not rely on `disable` or
+    # `init` succeeding) is sound on its own.
+    git -C "$test_repo" update-index --skip-worktree README.md
+    rm -f "$test_repo/README.md"
+
+    run run_workflow_restore_step "$test_repo"
+    [ "$status" -eq 0 ]
+    [ -f "$test_repo/README.md" ]
+
+    run git -C "$test_repo" ls-files -v
+    [[ "$output" != *$'\nS '* ]]
+    [[ "$output" != S\ * ]]
+}
+
+@test "the workflow's restore step fails closed (non-zero exit) instead of silently succeeding when git itself is broken" {
+    setup_sparse_checkout_fixture
+    # Regression for a subtler hazard the sweep/assert logic itself could
+    # introduce: if the final skip-worktree count were computed via
+    # `grep -c ... || true` instead of awk, a genuine git failure at that
+    # point could leave the count variable empty, and `[ "$x" -ne 0 ]` on an
+    # empty string is a *runtime* error inside an `if` condition -- not a
+    # fatal one under `set -e` -- so the check would be silently skipped and
+    # the step would exit 0 despite never having verified anything. Proves
+    # the actual shipped behavior (fails closed) against a directory that
+    # is not a git repository at all, rather than reasoning about it.
+    not_a_repo="$(mktemp -d)"
+    run run_workflow_restore_step "$not_a_repo"
+    [ "$status" -ne 0 ]
+    rm -rf "$not_a_repo"
 }
