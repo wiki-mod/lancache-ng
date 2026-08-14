@@ -41,7 +41,7 @@ extract_netdata_version() {
   # instead of piping grep straight into head.
   # Why: || true avoids errexit on a legit zero-match; the capture avoids
   # SIGPIPE if a second match line ever appears.
-  # From: Issue #1304 | PR #1352 | Issue #1377
+  # From: Issue #1377 | PR #1414
   version_line="$(grep -E '^ARG NETDATA_VERSION=' "${dockerfile_path}" || true)"
   version="$(head -1 <<<"${version_line}" | cut -d= -f2 | tr -d '[:space:]')"
   if [ -z "${version}" ]; then
@@ -64,7 +64,7 @@ extract_curl_version_tag() {
   # instead of piping grep straight into head.
   # Why: || true avoids errexit on a legit zero-match; the capture avoids
   # SIGPIPE if a second match line ever appears.
-  # From: Issue #1304 | PR #1352 | Issue #1377
+  # From: Issue #1377 | PR #1414
   curl_version_line="$(grep -E '^CURL_VERSION=' <<<"${content}" || true)"
   raw="$(head -1 <<<"${curl_version_line}" | sed -E 's/^CURL_VERSION="?curl-([0-9_]+)"?.*/\1/' || true)"
   if [ -z "${raw}" ]; then
@@ -87,7 +87,7 @@ version_ge() {
 # upstream repo, retrying transient failures with backoff.
 # Why: a real 404 (missing tag/moved path) is a genuine failure and is not
 # retried; only network/timeout/5xx responses get up to 2 more attempts.
-# From: Issue #1304 | PR #1352 | Issue #1449 | PR #1539
+# From: Issue #1304 | PR #1352
 fetch_bundled_packages_version() {
   local netdata_version="$1"
   local url="https://raw.githubusercontent.com/netdata/netdata/${netdata_version}/packaging/makeself/bundled-packages.version"
