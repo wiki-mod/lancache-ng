@@ -25,46 +25,37 @@
 # obviously map to a released version), extract CURL_VERSION, and compare it
 # against CURL_SAFE_THRESHOLD below.
 #
-# CURL_SAFE_THRESHOLD provenance (verified against curl.se's own per-CVE
-# pages, 2026-07-31, PR #1352): every one of the 7 CVE IDs issue #1304
-# tracks (CVE-2026-12064, CVE-2026-8286, CVE-2026-8927, CVE-2026-8932,
-# CVE-2026-9079, CVE-2026-9080, CVE-2026-9545) states "Not affected
-# versions: curl < X and >= 8.21.0" -- i.e. 8.21.0 is the actual fixed
-# version for every one of them. This is a snapshot of that one specific,
-# already-known CVE set, not a live feed: if curl discloses a NEW CVE after
-# 8.21.0 with a later fixed version, this script's hardcoded threshold goes
-# stale silently, since it has no way to know about a CVE that doesn't
-# exist in this comment yet. Whoever bumps NETDATA_VERSION in
-# services/netdata/Dockerfile must re-check curl's own vulnerability list
-# (https://curl.se/docs/vulnerabilities.html) at that time and bump
-# CURL_SAFE_THRESHOLD (and this comment's date) if a newer curl release has
-# fixed something new since 2026-07-31.
+# CURL_SAFE_THRESHOLD provenance:
+# What: curl.se's per-CVE pages state "not affected: curl >= 8.21.0" for all
+# 7 tracked CVE IDs (re-checked 2026-08-14, still current) -- but a real
+# Trivy scan of a real curl 8.21.0-2~bpo13+1 package still reports all 7 as
+# affected/FixedVersion:None. This threshold is KNOWN IMPRECISE: a
+# `::warning::`-free run is not proof the CVEs are actually gone.
+# Why: advisory text and real package-scan results disagree, and the cause
+# (Trivy-DB/tracker mapping gap vs. genuinely unfixed build) is unresolved.
+# Re-check curl.se and bump this threshold/date if a newer curl fixes
+# something new -- that alone would not close this predicate-vs-scan gap.
+# From: Refs #1304 (2026-08-05 and 2026-08-14 scan comments); PR #1352.
 #
-# ACCEPTED_UNTIL: the known-affected state is real TODAY (netdata v2.10.4
-# vendors curl 8.17.0, confirmed below threshold) -- making this check a
-# hard, unconditional failure the moment it merges would turn this
-# project's whole `validate-compose` gate permanently red for every future
-# PR, for a risk this repository does not control the fix for (it lives in
-# netdata's own upstream build recipe, not this project's Dockerfile).
-# That is not what the maintainer's option (c) decision on PR #1352 asked
-# for ("merge for the benefits, track the risk", not "block all CI until
-# netdata ships a fix"). So: below the threshold is a `::warning::`, not a
-# blocking `::error::`, while today's date is on or before ACCEPTED_UNTIL --
-# visible on every run, but non-blocking, mirroring the same time-boxed-
-# acceptance shape this project already uses for `.trivyignore.yaml`'s own
-# `expired_at` fields and `PR_TITLE_LINT_MODE`'s warn-then-block transition.
-# Once ACCEPTED_UNTIL passes, a still-affected pin becomes a hard failure --
-# this is a deliberate escalation, not a bug: the point of a checkpoint
-# date is that silence past it is no longer acceptable, and whoever re-
-# reviews issue #1304's accept-and-VEX decision at its own 2026-08-15
-# checkpoint should update this date (and re-verify CURL_SAFE_THRESHOLD)
-# together with that review, not treat them as unrelated.
+# ACCEPTED_UNTIL:
+# What: 2026-08-29, a 14-day stopgap extension from the original 2026-08-15
+# checkpoint (unconditional hard-fail would turn `validate-compose`
+# permanently red for a risk this repo doesn't control the fix for; warn-
+# then-error mirrors `.trivyignore.yaml`'s own time-boxed-acceptance shape).
+# Why: issue #1304's Decision 2, option (b) -- extend as a stopgap while
+# option (a) (fixing this check's own logic instead of trusting the
+# disproven version threshold above) stays open follow-up work.
+# From: maintainer ACK given verbally in this session's chat on 2026-08-14,
+# recorded after the fact per AG-WF-029 in
+# https://github.com/wiki-mod/lancache-ng/issues/1304#issuecomment-5291306811;
+# decision text in
+# https://github.com/wiki-mod/lancache-ng/issues/1304#issuecomment-5290015035.
 set -euo pipefail
 
 CURL_SAFE_THRESHOLD="8.21.0"
 TRACKED_CVES=(CVE-2026-12064 CVE-2026-8286 CVE-2026-8927 CVE-2026-8932 CVE-2026-9079 CVE-2026-9080 CVE-2026-9545)
-TRACKED_CVES_SOURCE_DATE="2026-07-31"
-ACCEPTED_UNTIL="2026-08-15"
+TRACKED_CVES_SOURCE_DATE="2026-08-14"
+ACCEPTED_UNTIL="2026-08-29"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
@@ -227,7 +218,7 @@ main() {
     for line in "${finding_lines[@]:1}"; do
       echo "::error::${line}" >&2
     done
-    echo "::error::This grace period (ACCEPTED_UNTIL=${ACCEPTED_UNTIL}, per issue #1304/PR #1352) has PASSED -- today is ${today}. This is now a hard failure, not a warning: re-review issue #1304's accept-and-VEX decision (its own 2026-08-15 checkpoint), and either bump ACCEPTED_UNTIL after that re-review, update CURL_SAFE_THRESHOLD if a newer netdata release vendors a fixed curl, or resolve the underlying risk another way. Do not silently push this date out without an actual re-review." >&2
+    echo "::error::This grace period (ACCEPTED_UNTIL=${ACCEPTED_UNTIL}, per issue #1304/PR #1352) has PASSED -- today is ${today}. This is now a hard failure, not a warning: re-review issue #1304's accept-and-VEX decision (its own dated checkpoint, currently ${ACCEPTED_UNTIL}), and either bump ACCEPTED_UNTIL after that re-review, update CURL_SAFE_THRESHOLD if a newer netdata release vendors a fixed curl, or resolve the underlying risk another way. Do not silently push this date out without an actual re-review." >&2
     return 1
   fi
 

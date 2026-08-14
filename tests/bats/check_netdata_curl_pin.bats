@@ -97,7 +97,7 @@ EOF
 
 # --- main(): end-to-end via the BUNDLED_PACKAGES_CONTENT_FILE test hook -----
 #
-# ACCEPTED_UNTIL="2026-08-15" is a hardcoded time-boxed acceptance window
+# ACCEPTED_UNTIL="2026-08-29" is a hardcoded time-boxed acceptance window
 # (see the script's own header comment): a still-affected pin only WARNS
 # (exit 0) before that date, and FAILS (exit 1) on or after it. Tests below
 # use the NETDATA_CURL_PIN_TODAY test hook to exercise both sides of that
@@ -120,7 +120,7 @@ EOF
 @test "main: a still-vulnerable pinned curl version FAILS (blocking) once the grace-period deadline has passed" {
     write_dockerfile_fixture "v2.10.4"
     write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-16" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-30" \
         run bash "$script" "$dockerfile_fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"::error::"* ]]
@@ -132,7 +132,7 @@ EOF
 @test "main: exactly on the grace-period deadline still WARNS, not fails (deadline is inclusive)" {
     write_dockerfile_fixture "v2.10.4"
     write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-15" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-29" \
         run bash "$script" "$dockerfile_fixture"
     [ "$status" -eq 0 ]
     [[ "$output" == *"::warning::"* ]]
@@ -176,7 +176,7 @@ EOF
     # not just a synthetic fixture value.
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_17_0"
-    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-16" \
+    BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-30" \
         run bash "$script" "$real_dockerfile"
     [ "$status" -ne 0 ]
 }
