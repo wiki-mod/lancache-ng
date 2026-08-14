@@ -82,11 +82,10 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # deploy/quickstart/docker-compose.yml defines a `dhcp` service too
-      # (confirmed 2026-08-06, issue #849 dhcp-proxy.md finding #12) --
-      # this entry was never updated when the quickstart profile grew a
-      # Kea/dnsmasq-proxy DHCP path of its own, so scripts/validate-stack-
-      # images.sh had nothing to check it against.
+      # What: deploy/quickstart/docker-compose.yml defines a `dhcp` too.
+      # Why: never updated when quickstart grew its own Kea/dnsmasq-proxy
+      # DHCP path, so validate-stack-images.sh had nothing to check.
+      # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
@@ -96,7 +95,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # Same gap as dhcp above (issue #849 dhcp-proxy.md finding #12).
+      # What: same gap as dhcp above.
+      # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: ntp
     image: ghcr.io/wiki-mod/lancache-ng/ntp
@@ -106,9 +106,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # Same gap as dhcp/dhcp-proxy above, found while fixing those two
-      # (AG-WF-011: same failure class, same file) -- deploy/quickstart/
-      # docker-compose.yml defines an `ntp` service too.
+      # What: same gap as dhcp/dhcp-proxy above (AG-WF-011 failure class).
+      # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
