@@ -60,6 +60,15 @@ else
   echo "::error::Cannot read exactly one valid accepted_ordinary_roots_per_package value from $manifest." >&2
   exit 1
 fi
+# Why: how many of a package's own newest vX.Y.Z tags still count as a
+# "supported stable release" for protected-reference classification (see
+# audit_package's supported_releases computation below). From: Issue #1501.
+if minimum_stable_releases="$(sra_read_minimum_stable_releases "$manifest")"; then
+  :
+else
+  echo "::error::Cannot read exactly one valid minimum_stable_releases value from $manifest." >&2
+  exit 1
+fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-sha-retention-audit.XXXXXX")"
 cleanup() {
@@ -172,11 +181,35 @@ audit_package() {
     return 1
   }
 
+  # Why: computed once per package via a single jq pass over the whole
+  # already-fetched versions file (not one jq call per version -- see this
+  # file's own header comment on the timeout a per-version jq call already
+  # caused once, run 31774741729) so the per-version classification loop
+  # below can look up whether a given vX.Y.Z tag is still one of this
+  # package's `minimum_stable_releases` newest stable releases. From: Issue
+  # #1501.
+  local release_tags_file="$package_dir/release-tags.txt"
+  if jq -r '.metadata.container.tags[]? // empty' "$versions_file" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -u >"$release_tags_file"; then
+    :
+  else
+    # Why: grep exits 1 under `set -o pipefail` when a brand-new package has
+    # no stable-release tags at all yet -- that is a legitimate empty
+    # result, not a real failure, and must not abort the audit. Proven live:
+    # `set -euo pipefail; jq ... | grep -E ... | sort -u >file` exits 1 on a
+    # zero-match grep even though `sort` itself succeeds (AG-VAL-030).
+    : >"$release_tags_file"
+  fi
+  local supported_releases
+  supported_releases="$(sra_select_supported_release_tags "$minimum_stable_releases" <"$release_tags_file")" || {
+    echo "::error::Cannot select supported stable-release tags for ${repository_name}/${package}." >&2
+    return 1
+  }
+
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
   local version_json id digest tags built facts root_count child_count other_count
   local encoded_tags encoded_tag tag kind prefix full_commit rank min_rank
-  local root_resolution_failed
+  local root_resolution_failed reason other_tags
   local missing_build_date_count=0
   declare -A seen_id_digest=()
   declare -A seen_digest_id=()
@@ -252,7 +285,25 @@ audit_package() {
       continue
     fi
     if (( root_count == 0 )); then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-ordinary-version"
+      # Why: a version with no sha-<commit> alias at all has no git-history
+      # root to rank by, so it always stays protect regardless of its extra
+      # tags -- but classify it by the specific channel/release its attached
+      # tag identifies whenever possible, instead of the generic
+      # non-ordinary-version bucket. The other_count>0 guard skips the
+      # (bash-only, but still non-free) other-tag scan entirely for a
+      # completely untagged version -- e.g. an attestation/referrer manifest,
+      # the common case among the tens of thousands of versions a live audit
+      # classifies -- since sra_extra_tag_protect_reason could only ever
+      # return the fallback there anyway. From: Issue #1501.
+      if (( other_count > 0 )); then
+        reason="$(sra_extra_tag_protect_reason "$tags" "$supported_releases" "non-ordinary-version")" || {
+          echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
+          return 1
+        }
+      else
+        reason="non-ordinary-version"
+      fi
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
       continue
     fi
     if (( child_count > 0 )); then
@@ -260,8 +311,29 @@ audit_package() {
       continue
     fi
     if (( other_count > 0 )); then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-sha-tag-attached"
-      continue
+      # Why: this is the common real case -- a sha-<commit> root tag
+      # additionally carrying nightly/latest/a release tag, since the
+      # promote job retags rather than rebuilds (build-push.yml's `docker
+      # buildx imagetools create --prefer-index=false`), so a currently
+      # active channel/release always lands on the same digest/version
+      # object as its originating sha-<commit> tag. Unlike the root_count==0
+      # branch above, this version DOES have a resolvable sha-<commit> root
+      # -- per the maintainer's protected-reference scope clarification
+      # (Issue #1501), "protected" means the digest is actually still
+      # referenced by nightly/latest/a supported release right now, not
+      # merely "carries some extra tag" -- so an unrecognized extra tag (an
+      # rc/staging tag, or a release tag past minimum_stable_releases) must
+      # NOT unconditionally protect this version anymore; it falls through
+      # into the same ordinary root-candidate ranking every plain root goes
+      # through below.
+      other_tags="$(sra_other_tags_from_csv "$tags")" || {
+        echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
+        return 1
+      }
+      if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
+        continue
+      fi
     fi
 
     if encoded_tags="$(jq -r '.metadata.container.tags[] | @base64' <<<"$version_json")"; then
@@ -330,6 +402,15 @@ audit_package() {
     # delete" candidates (never actually deleted -- see the no-DELETE-path
     # Bats guard) so a maintainer reading the report sees exactly which
     # builds are past the accepted-roots budget, not just a protect count.
+    # "acceptance-evidence-unavailable" stays correct for every row reached
+    # here: a version whose digest is actually still referenced by nightly/
+    # latest/a supported release was already classified above with its own
+    # specific nightly-channel-protected/latest-channel-protected/
+    # stable-release-protected reason and never reaches this loop; only a
+    # plain root (no extra tag) or a root carrying an unrecognized extra tag
+    # (an rc/staging tag, or a release tag past minimum_stable_releases)
+    # falls through into ordinary ranking here (see audit_package's
+    # other_count>0 branch). From: Issue #1501.
     if (( legacy_position <= retention_keep )); then
       budget="within-${retention_keep}"
       decision="protect"

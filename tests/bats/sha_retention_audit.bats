@@ -38,6 +38,32 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+# minimum_stable_releases feeds sra_select_supported_release_tags's "how many
+# of a package's own newest stable releases stay protected" question.
+@test "retention manifest defines exactly three minimum stable releases" {
+  run sra_read_minimum_stable_releases "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
+}
+
+# The refactor sharing _sra_read_manifest_positive_integer between
+# sra_read_retention_keep and sra_read_minimum_stable_releases must not let
+# the two keys' values bleed into each other.
+@test "retention keep and minimum stable releases parse independently" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  accepted_ordinary_roots_per_package: 30
+  minimum_stable_releases: 3
+EOF
+  run sra_read_retention_keep "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "30" ]
+
+  run sra_read_minimum_stable_releases "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
+}
+
 # Runtime and tooling retention must follow the same publisher inventory as build-push.
 @test "manifest runtime and tooling packages match the build matrix" {
   package_inventory="$(sra_manifest_packages "$repo_root/release/stack-images.yml")"
@@ -308,6 +334,138 @@ EOF
   touch -d "@$(( $(date +%s) - 700 ))" "$GITHUB_API_CACHE_DIR"/*.json
   github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/third.json" >/dev/null
   [ "$calls" -eq 2 ]
+}
+
+# Only a genuine vX.Y.Z stable release counts -- a release-candidate tag
+# must not be mistaken for one (docs/release-versioning.md's Retention
+# section: only stable releases count toward minimum_stable_releases).
+@test "stable release tag shape accepts vX.Y.Z and rejects rc/other shapes" {
+  run sra_is_stable_release_tag "v1.2.3"
+  [ "$status" -eq 0 ]
+
+  run sra_is_stable_release_tag "v1.2.3-rc.1"
+  [ "$status" -ne 0 ]
+
+  run sra_is_stable_release_tag "nightly"
+  [ "$status" -ne 0 ]
+
+  run sra_is_stable_release_tag "v1.2"
+  [ "$status" -ne 0 ]
+}
+
+# Bash has no native semver comparator; the zero-padded key must order
+# releases correctly even across differing digit widths (v2.0.0 > v1.20.0).
+@test "release sort key orders newer releases ahead of older ones" {
+  key_low="$(sra_release_sort_key "v1.20.0")"
+  key_high="$(sra_release_sort_key "v2.0.0")"
+  [[ "$key_high" > "$key_low" ]]
+}
+
+@test "release sort key rejects a non-stable-release tag" {
+  run sra_release_sort_key "v1.2.3-rc.1"
+  [ "$status" -ne 0 ]
+}
+
+# retention.minimum_stable_releases (3) selects the newest 3 by real semver
+# order, not by input/file order.
+@test "select supported release tags picks the newest N by semver" {
+  supported="$(printf 'v1.0.0\nv1.2.0\nv1.10.0\nv2.0.0\n' | sra_select_supported_release_tags 3)"
+  [ "$supported" = $'v2.0.0\nv1.10.0\nv1.2.0' ]
+}
+
+# An empty release-tag set (a brand-new package with no stable release yet)
+# is a legitimate empty result, not a failure.
+@test "select supported release tags returns empty for a package with no releases yet" {
+  supported="$(printf '' | sra_select_supported_release_tags 3)"
+  [ -z "$supported" ]
+}
+
+@test "channel tag classifier recognizes nightly, latest, and stable release shapes" {
+  run sra_classify_channel_tag "nightly"
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly" ]
+
+  run sra_classify_channel_tag "latest"
+  [ "$status" -eq 0 ]
+  [ "$output" = "latest" ]
+
+  run sra_classify_channel_tag "v0.4.1"
+  [ "$status" -eq 0 ]
+  [ "$output" = "stable-release" ]
+
+  run sra_classify_channel_tag "v0.4.1-rc.2"
+  [ "$status" -eq 0 ]
+  [ "$output" = "other" ]
+
+  run sra_classify_channel_tag "pr-1501-staging"
+  [ "$status" -eq 0 ]
+  [ "$output" = "other" ]
+}
+
+# The orchestrator's root_count==0/other_count>0 branches need the actual
+# "other"-kind tag text, not just sra_version_tag_facts's count, derived in
+# pure bash from the already-extracted comma-joined tag list (no extra jq
+# round-trip per version -- see the function's own Why comment).
+@test "other tags from csv excludes sha root and child aliases" {
+  other_tags="$(sra_other_tags_from_csv "sha-abcdef1,sha-abcdef1-amd64,nightly,v0.4.1")"
+  [[ "$other_tags" == *"nightly"* ]]
+  [[ "$other_tags" == *"v0.4.1"* ]]
+  [[ "$other_tags" != *"sha-abcdef1"* ]]
+}
+
+# A digest can legitimately be nightly AND latest AND a just-cut stable
+# release at once (current_dev and master sharing a commit right after a
+# promotion) -- all applicable reasons must be reported, not just one.
+@test "protected reference reason combines every channel that applies" {
+  other_tags=$'nightly\nlatest\nv0.4.1'
+  supported="v0.4.1"
+  run sra_protected_reference_reason "$other_tags" "$supported"
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly-channel-protected+latest-channel-protected+stable-release-protected" ]
+}
+
+@test "protected reference reason reports only the channel that actually applies" {
+  run sra_protected_reference_reason "nightly" ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly-channel-protected" ]
+}
+
+# An old, no-longer-supported release tag (past minimum_stable_releases) must
+# not be mislabeled as stable-release-protected -- it is real history, but
+# not one of the currently supported releases.
+@test "protected reference reason does not credit an unsupported old release tag" {
+  supported=$'v0.5.0\nv0.4.2\nv0.4.1'
+  run sra_protected_reference_reason "v0.1.0" "$supported"
+  [ "$status" -ne 0 ]
+}
+
+# A totally unrecognized extra tag (not nightly/latest/a supported release)
+# must not be mislabeled as one of the specific protected channels. This
+# matters beyond the root_count==0 fallback case: per the maintainer's
+# protected-reference scope clarification (Issue #1501), a root tag carrying
+# only an unrecognized extra tag must NOT be blanket-protected either -- the
+# orchestrator's other_count>0 branch relies on this exact failure to decide
+# whether to fall through into ordinary root-candidate ranking instead of
+# short-circuiting to protect.
+@test "protected reference reason fails for an unrecognized tag" {
+  run sra_protected_reference_reason "pr-1501-staging" ""
+  [ "$status" -ne 0 ]
+}
+
+@test "extra tag protect reason returns the specific channel when one matches" {
+  run sra_extra_tag_protect_reason "sha-abcdef1,nightly" "" "non-ordinary-version"
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly-channel-protected" ]
+}
+
+# sra_extra_tag_protect_reason always succeeds with a fallback -- this is
+# deliberately only correct for the root_count==0 branch (see the
+# function's own Why comment), which has no root tag to rank by regardless
+# of whether its extra tag is recognized.
+@test "extra tag protect reason falls back to the caller's generic reason" {
+  run sra_extra_tag_protect_reason "pr-1501-staging" "" "non-ordinary-version"
+  [ "$status" -eq 0 ]
+  [ "$output" = "non-ordinary-version" ]
 }
 
 # The retention audit surface must remain structurally incapable of package deletion.

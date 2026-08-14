@@ -2,7 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # Pure helpers for the read-only SHA retention audit. The functions validate
-# the exact manifest/version shapes the audit relies on and never mutate GHCR.
+# the exact manifest/version shapes the audit relies on, classify whether a
+# version's digest is protected by the nightly/latest channels or a
+# supported stable release, and never mutate GHCR.
 
 if [[ -n "${SHA_RETENTION_AUDIT_LIB_LOADED:-}" ]]; then
   if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -12,11 +14,19 @@ if [[ -n "${SHA_RETENTION_AUDIT_LIB_LOADED:-}" ]]; then
 fi
 SHA_RETENTION_AUDIT_LIB_LOADED=1
 
-sra_read_retention_keep() {
-  local manifest="${1:?sra_read_retention_keep: manifest is required}"
+_sra_read_manifest_positive_integer() {
+  # What: reads exactly one "  <key>: <positive-integer>" top-level-indented
+  # scalar line from the manifest and returns its integer value.
+  # Why: sra_read_retention_keep and sra_read_minimum_stable_releases both
+  # parse the identical two-space-indented top-level-scalar shape, just
+  # under different keys; sharing the exactly-one-match/positive-integer
+  # parsing rule here avoids a second, driftable copy of it (AG-CODE-011).
+  # From: Issue #1501.
+  local manifest="${1:?_sra_read_manifest_positive_integer: manifest is required}"
+  local key="${2:?_sra_read_manifest_positive_integer: key is required}"
   local matches value
 
-  if matches="$(awk '/^  accepted_ordinary_roots_per_package: / { print }' "$manifest")"; then
+  if matches="$(awk -v k="  ${key}: " 'index($0, k) == 1 { print }' "$manifest")"; then
     :
   else
     return 1
@@ -24,9 +34,24 @@ sra_read_retention_keep() {
   [[ -n "$matches" ]] || return 1
   [[ "$(wc -l <<<"$matches" | tr -d '[:space:]')" == "1" ]] || return 1
 
-  value="${matches#  accepted_ordinary_roots_per_package: }"
+  value="${matches#"  ${key}: "}"
   [[ "$value" =~ ^[1-9][0-9]*$ ]] || return 1
   printf '%s\n' "$value"
+}
+
+sra_read_retention_keep() {
+  local manifest="${1:?sra_read_retention_keep: manifest is required}"
+  _sra_read_manifest_positive_integer "$manifest" "accepted_ordinary_roots_per_package"
+}
+
+sra_read_minimum_stable_releases() {
+  # What: reads retention.minimum_stable_releases from the manifest.
+  # Why: sra_select_supported_release_tags needs this count to know how many
+  # of a package's own vX.Y.Z tags are still "supported" stable releases for
+  # protected-reference classification (docs/release-versioning.md's
+  # Retention section). From: Issue #1501.
+  local manifest="${1:?sra_read_minimum_stable_releases: manifest is required}"
+  _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
 
 sra_manifest_packages() {
@@ -200,4 +225,177 @@ sra_version_tag_facts() {
   done <<<"$encoded_tags"
 
   printf '%s\t%s\t%s\n' "$root_count" "$child_count" "$other_count"
+}
+
+sra_is_stable_release_tag() {
+  # What: checks whether a tag has the stable-release shape vX.Y.Z, with no
+  # pre-release suffix.
+  # Why: distinct from a release-candidate tag (vX.Y.Z-rc.N, see
+  # release/stack-images.yml's release_candidate channel) -- only a genuine
+  # stable release counts toward retention.minimum_stable_releases. From:
+  # Issue #1501.
+  local tag="${1:?sra_is_stable_release_tag: tag is required}"
+  [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
+}
+
+sra_release_sort_key() {
+  # What: converts a vX.Y.Z tag into a zero-padded, lexically-sortable key.
+  # Why: bash has no native semver comparator; zero-padding each numeric
+  # component lets a plain `sort -r` order releases newest-first without a
+  # per-component numeric comparison loop. From: Issue #1501.
+  local tag="${1:?sra_release_sort_key: tag is required}"
+  local major minor patch
+  sra_is_stable_release_tag "$tag" || return 1
+  IFS='.' read -r major minor patch <<<"${tag#v}"
+  printf '%020d.%020d.%020d\n' "$major" "$minor" "$patch"
+}
+
+sra_select_supported_release_tags() {
+  # What: reads stable-release tags (one per line) from stdin and prints the
+  # newest `count` of them, one per line, newest first.
+  # Why: retention.minimum_stable_releases (release/stack-images.yml) defines
+  # how many of a package's own recent stable releases stay protected; this
+  # is computed per package from tags already fetched during the audit,
+  # avoiding a separate GitHub Releases API call (AG-VAL-005 prefers a native
+  # local computation over an API call whenever both do the same job). From:
+  # Issue #1501.
+  local count="${1:?sra_select_supported_release_tags: count is required}"
+  [[ "$count" =~ ^[1-9][0-9]*$ ]] || return 1
+
+  local tag key
+  local -a keyed=()
+  while IFS= read -r tag; do
+    [[ -n "$tag" ]] || continue
+    key="$(sra_release_sort_key "$tag")" || return 1
+    keyed+=("${key}|${tag}")
+  done
+
+  (( ${#keyed[@]} > 0 )) || return 0
+  # Why: `sort -r | head -n "$count"` would pipe a live producer into an
+  # early-exiting consumer under the caller's `set -o pipefail`, which can
+  # report pipeline failure via SIGPIPE even though `head` itself matched
+  # correctly (AG-VAL-032, enforced repo-wide by
+  # scripts/check-pipefail-early-exit-grep.sh). Capturing into a variable
+  # first and applying `head`/`cut` via here-strings avoids the live pipe
+  # entirely.
+  local sorted selected
+  sorted="$(printf '%s\n' "${keyed[@]}" | sort -r)"
+  selected="$(head -n "$count" <<<"$sorted")"
+  cut -d'|' -f2- <<<"$selected"
+}
+
+sra_classify_channel_tag() {
+  # What: classifies one non-SHA ("other"-kind) tag into the protected
+  # channel it identifies, if any.
+  # Why: separates "this is literally the nightly/latest pointer" from "this
+  # is a stable release tag" from "this is some other, unrecognized tag" so
+  # the caller can report a specific protection reason instead of a single
+  # generic bucket (docs/release-versioning.md's Retention section). From:
+  # Issue #1501.
+  local tag="${1:?sra_classify_channel_tag: tag is required}"
+  case "$tag" in
+    nightly) printf 'nightly\n' ;;
+    latest) printf 'latest\n' ;;
+    *)
+      if sra_is_stable_release_tag "$tag"; then
+        printf 'stable-release\n'
+      else
+        printf 'other\n'
+      fi
+      ;;
+  esac
+}
+
+sra_other_tags_from_csv() {
+  # What: extracts every "other"-kind tag (per sra_tag_kind) from an
+  # already comma-joined tag list -- i.e. every tag that is not a
+  # sha-<commit> root or sha-<commit>-<arch> child alias -- one per line.
+  # Why: the orchestrator's hot per-version loop already extracts a
+  # comma-joined tag list via one combined jq call per version (see
+  # gc-sha-retention-audit.sh's own Why comment on the per-version jq
+  # timeout, run 31774741729, that combined call was already built to
+  # avoid). Deriving "other" tags in pure bash from that value, instead of
+  # a second jq/base64 round-trip per version, avoids reintroducing exactly
+  # that per-version jq overhead for every one of the tens of thousands of
+  # package versions a live audit classifies. From: Issue #1501.
+  local tags_csv="${1?sra_other_tags_from_csv: tags CSV argument is required}"
+  local tag kind
+  local -a tag_array=()
+
+  IFS=',' read -r -a tag_array <<<"$tags_csv"
+  for tag in "${tag_array[@]}"; do
+    [[ -n "$tag" ]] || continue
+    kind="$(sra_tag_kind "$tag")" || return 1
+    [[ "$kind" == other$'\t'* ]] || continue
+    printf '%s\n' "$tag"
+  done
+}
+
+sra_protected_reference_reason() {
+  # What: given a version's "other"-kind tags and a package's supported
+  # stable-release tag set, returns a "+"-joined, specific protection reason
+  # (nightly-channel-protected, latest-channel-protected,
+  # stable-release-protected) covering every protected channel that actually
+  # applies to this version, or fails when none apply.
+  # Why: a digest can legitimately be nightly AND latest AND a just-cut
+  # stable release all at once (e.g. immediately after a promotion, when
+  # current_dev and master briefly share a commit) -- collapsing that into
+  # one arbitrarily-picked reason would hide real information a maintainer
+  # reading the report needs. Returning failure (not a reason string) lets
+  # the caller fall back to its own existing, still-honest generic reason
+  # when the extra tag matches none of these specific channels. From: Issue
+  # #1501.
+  local other_tags="${1?sra_protected_reference_reason: other tags argument is required}"
+  local supported_releases="${2?sra_protected_reference_reason: supported releases argument is required}"
+  local tag channel has_nightly=0 has_latest=0 has_stable=0
+
+  while IFS= read -r tag; do
+    [[ -n "$tag" ]] || continue
+    channel="$(sra_classify_channel_tag "$tag")" || return 1
+    case "$channel" in
+      nightly) has_nightly=1 ;;
+      latest) has_latest=1 ;;
+      stable-release)
+        if [[ -n "$supported_releases" ]] && grep -qxF "$tag" <<<"$supported_releases"; then
+          has_stable=1
+        fi
+        ;;
+    esac
+  done <<<"$other_tags"
+
+  local -a reasons=()
+  (( has_nightly )) && reasons+=("nightly-channel-protected")
+  (( has_latest )) && reasons+=("latest-channel-protected")
+  (( has_stable )) && reasons+=("stable-release-protected")
+  (( ${#reasons[@]} > 0 )) || return 1
+
+  local joined
+  joined="$(IFS='+'; printf '%s' "${reasons[*]}")"
+  printf '%s\n' "$joined"
+}
+
+sra_extra_tag_protect_reason() {
+  # What: combines sra_other_tags_from_csv + sra_protected_reference_reason
+  # into the single call the orchestrator's root_count==0 branch needs,
+  # falling back to a caller-supplied generic reason when no specific
+  # protected channel matches. Why: a version with no sha-<commit> alias at
+  # all has nothing a git-history root rank could apply to, so it always
+  # stays protect -- only the reason text varies; this differs from the
+  # orchestrator's other_count>0-with-a-root-tag case (which must be able to
+  # fall through to ordinary ranking instead of always protecting, per the
+  # maintainer's protected-reference scope clarification on Issue #1501, so
+  # that branch calls sra_protected_reference_reason directly and checks its
+  # own success/failure rather than using this always-succeeds wrapper).
+  # From: Issue #1501.
+  local tags_csv="${1?sra_extra_tag_protect_reason: tags CSV argument is required}"
+  local supported_releases="${2?sra_extra_tag_protect_reason: supported releases argument is required}"
+  local fallback_reason="${3:?sra_extra_tag_protect_reason: fallback reason is required}"
+  local other_tags reason
+
+  other_tags="$(sra_other_tags_from_csv "$tags_csv")" || return 1
+  if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
+    printf '%s\n' "$reason"
+  else
+    printf '%s\n' "$fallback_reason"
+  fi
 }

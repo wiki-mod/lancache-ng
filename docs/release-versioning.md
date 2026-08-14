@@ -355,11 +355,11 @@ destructive deletion authority.
 
 Protected references are exceptions to the rolling ordinary-history budget.
 The exact digest/root identities required by `nightly`, `latest`, a supported
-stable release, an accepted stack identity, or an explicitly recorded rollback
-anchor remain protected together with their required artifact closure even when
-they fall outside the thirty ordinary accepted roots. Git ancestry can help classify
-where a legacy SHA came from, but being an ancestor of a protected branch or tag
-is not by itself a permanent storage exemption.
+stable release, or an accepted stack identity remain protected together with
+their required artifact closure even when they fall outside the thirty
+ordinary accepted roots. Git ancestry can help classify where a legacy SHA
+came from, but being an ancestor of a protected branch or tag is not by
+itself a permanent storage exemption.
 
 The project must additionally keep at least the current stable release and two
 previous stable releases for the full first-party image set. Release digests,
@@ -370,6 +370,99 @@ Mutable channels such as `latest` and `nightly` may move, but the exact digests
 they still reference are protected. Historical channel targets are not retained
 merely because a mutable channel once pointed at them unless another retention
 rule still protects that identity.
+
+**The protected-reference model (issue #1501)**: the audit
+(`scripts/lib/sha-retention-audit.sh`, `scripts/untracked/gc-sha-retention-audit.sh`)
+checks every classified package version's attached tags against the
+`nightly`/`latest`/supported-stable-release categories above (the "accepted
+stack identity" category was already handled separately and unconditionally,
+via the `metadata-stack-identity` reason for the `stack` pointer package) and
+reports a specific reason instead of a generic one whenever a match is found:
+
+- `nightly-channel-protected` — this exact digest currently carries the
+  `nightly` tag.
+- `latest-channel-protected` — this exact digest currently carries the
+  `latest` tag.
+- `stable-release-protected` — this exact digest carries a `vX.Y.Z` tag that
+  is still among this package's `minimum_stable_releases` (3) newest stable
+  releases, selected by real semver order from the package's own tag
+  inventory rather than an extra GitHub Releases API call.
+
+A digest can carry more than one of these at once (e.g. immediately after a
+promotion, when `current_dev` and `master` briefly share a commit); the audit
+reports every applicable reason, `+`-joined
+(e.g. `nightly-channel-protected+stable-release-protected`), rather than
+picking one arbitrarily.
+
+This works because the promote job (`build-push.yml`) always retags an
+existing digest (`docker buildx imagetools create --prefer-index=false`)
+rather than rebuilding, so a currently active channel or release tag always
+lands on the exact same GHCR package-version object as the `sha-<commit>` tag
+it originated from — the audit does not need a second, separate
+digest-matching pass to find this; it only needs to read the already-fetched
+tag list honestly instead of collapsing it into a single generic bucket.
+
+**Protection is current-state-only, never "was ever" (maintainer
+clarification, 2026-08-14)**: a real live audit found 32,895 package
+versions across the 9 first-party packages, which is far more than blanket
+"anything ever nightly/latest stays protected forever" retention could
+justify. This is why a tag-based check is the correct mechanism rather than
+a source of over-protection: a registry tag name resolves to exactly one
+digest at a time, so a GHCR package version's own `tags` array is, by
+construction, the *live* pointer set, never a history of everything a tag
+ever pointed at — once `nightly`/`latest` moves to a new digest, the old
+digest's version object simply stops carrying that tag at all, and this
+audit reads that same live state. The same applies to
+`stable-release-protected`: it credits only a `vX.Y.Z` tag currently among
+the newest `minimum_stable_releases`, never an older, no-longer-supported
+release tag. A version whose only extra tag is unrecognized — a
+release-candidate, a staging tag, or a release tag past
+`minimum_stable_releases` — is **not** blanket-protected anymore: it falls
+through into the same ordinary root-candidate ranking (`legacy_rank`,
+budget) as a plain `sha-<commit>` root, since it still has a resolvable
+git-history root to rank by. `non-sha-tag-attached`/`non-ordinary-version`
+now only ever label a root with no *resolvable* commit history at all (the
+`root_count==0` case), not "carries some extra tag."
+
+**Deliberately not implemented: a "previous nightly" safety net.** The
+maintainer's real operational intent for `nightly` protection is narrower
+than "every digest nightly ever pointed at," but broader than "only the
+current one" — in the case a broken `current_dev` tip gets built as
+`nightly`, an operator needs to fall back to the last *working* nightly
+build. This audit protects only the exact current `nightly` digest; it does
+not separately protect whichever digest was `nightly` immediately before
+that. Implementing that would require reading `nightly-refresh.yml`'s own
+GitHub Actions run history (GHCR itself exposes no tag history at all, only
+the current pointer) via a new Actions API surface and an `actions: read`
+permission this audit's workflow does not currently have — a real, but
+separate, follow-up scope, not a silent gap: `accepted_ordinary_roots_per_package`
+(30) already retains far more than one prior build's `sha-<commit>` root as
+ordinary history regardless of channel-tag status, so a last-known-good
+nightly commit typically stays available as an ordinary root in practice
+even without dedicated channel-level protection for it. See issue #1501's
+comment thread for the maintainer decision on whether to build the
+dedicated Actions-API lookup.
+
+**Rollback anchor, researched and deliberately not a separate check**: this
+project has no centrally-recorded, GHCR-queryable "rollback anchor" registry
+distinct from the categories above. `setup.sh`'s
+`reset-to-last-known-good-config` mechanism restores local Kea/PowerDNS
+*configuration* snapshots on an operator's own install — it never touches a
+GHCR image tag or digest, so it is out of scope for this audit by
+construction. The only image-level rollback mechanism that exists is
+`setup.sh update`'s own pre-update backup, which archives whatever
+`LANCACHE_IMAGE_TAG` (a `sha-<commit>` or `vX.Y.Z` value) was active on
+*that one operator's own LAN install*, restorable via `migrate_env_for_update`'s
+`preserve_image_tag` path — this data lives only in that operator's local
+backup archive, never in GHCR or this repository, so no CI-side audit can
+ever discover it. `release/stack-images.yml`'s own
+`protect_release_and_rollback_digests: true` field name reflects this: it
+treats "release" and "rollback" protection as the same thing, because a
+rollback in this project always targets an already-published, still-tagged
+stable release — which `stable-release-protected` above already covers. A
+separate `rollback-anchor-protected` reason was considered and rejected as a
+fabricated check with no real data source, rather than left as a
+silently-dropped requirement.
 
 Automated cleanup must be explicitly approved and must consume the manifest
 retention contract plus canonical accepted/protected identity evidence. A
