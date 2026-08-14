@@ -112,7 +112,9 @@ main() {
   echo "Checking netdata ${netdata_version}'s pinned curl version against issue #1304's tracked CVE set (fixed at curl ${CURL_SAFE_THRESHOLD}, per curl.se as of ${TRACKED_CVES_SOURCE_DATE})..."
 
   # What: BUNDLED_PACKAGES_CONTENT_FILE, when set, substitutes a local
-  # fixture for the real network fetch, keeping bats coverage offline.
+  # fixture for the real network fetch.
+  # Why: keeps bats coverage offline and deterministic, independent of
+  # GitHub's raw content host being reachable.
   # From: Issue #1304
   if [ -n "${BUNDLED_PACKAGES_CONTENT_FILE:-}" ]; then
     bundled_packages_content="$(cat "${BUNDLED_PACKAGES_CONTENT_FILE}")"
@@ -161,6 +163,8 @@ main() {
 
 # What: allows this script to be sourced by tests (to reach the functions
 # above without running main()) as well as executed directly in CI.
+# Why: lets bats reach the functions directly without triggering the real
+# network fetch main() would otherwise perform.
 # From: Issue #1304
 if [ "${BASH_SOURCE[0]}" = "${0}" ]; then
   main "$@"
