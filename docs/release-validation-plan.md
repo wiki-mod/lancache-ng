@@ -925,6 +925,39 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `sparse-checkout` input without a matching restore step does not exist yet;
   recorded as an open gap in Coverage Assessment below.
 
+### Additions dated 2026-08-14 (real incident since the 2026-08-07 survey above)
+
+- **F-17 SHA retention audit** (issue #1095, PR #1501, new — protect-only, no
+  destructive path exists yet) — `release/stack-images.yml`'s retention contract
+  gained `accepted_ordinary_roots_per_package` (raised from a first draft of 10 to
+  30 during review, since a burst of concurrently open PRs that each only touch
+  YAML/governance files still produces one new build-tools `sha-<commit>` image per
+  push, and a ten-slot window could evict still-relevant recent history). A new
+  read-only GHCR audit (`.github/workflows/gc-sha-retention-audit.yml`,
+  `scripts/untracked/gc-sha-retention-audit.sh`, `scripts/lib/sha-retention-
+  audit.sh`, `scripts/lib/github-api-retry.sh`) inventories every first-party
+  package version, ranks legacy ordinary roots from first-parent Git history, and
+  reports beyond-budget candidates as a labeled dry-run `decision=would-delete`
+  line (real GHCR `created_at` build date attached for display only, never fed
+  into ranking) rather than issuing any deletion call. `tests/bats/sha_retention_
+  audit.bats` includes a structural guard
+  (`retention audit code and workflow contain no destructive package path`) that
+  greps the audit's own implementation and workflow for `-X DELETE`/
+  `delete:packages`/`GHCR_PACKAGE_DELETE_PAT` and fails if any is found. Three
+  real bugs surfaced and were fixed during live CI runs against this workflow
+  rather than only in local/synthetic testing: an invalid `runner` context
+  reference, an overly strict required-argument check that rejected a real
+  legitimately-empty tags field on an untagged package version (run
+  31773692600), and a 25-minute per-package timeout (run 31774741729) traced to
+  redundant per-version `jq` subprocess calls, fixed by consolidating id/digest/
+  tags/`created_at` extraction into one combined `jq` call per version — which
+  itself needed a `|`-delimited `read` instead of `jq`'s `@tsv`, since bash's
+  `read` treats a literal tab as IFS whitespace regardless of the configured
+  `IFS` value and would otherwise silently drop an empty middle field. Deferred,
+  not yet authorized: any destructive-activation pass (selection by date, tag
+  pattern, or explicit digest/alias) — see `docs/release-versioning.md`'s
+  Retention section for the current data-model boundary this leaves in place.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**

@@ -357,7 +357,7 @@ Protected references are exceptions to the rolling ordinary-history budget.
 The exact digest/root identities required by `nightly`, `latest`, a supported
 stable release, an accepted stack identity, or an explicitly recorded rollback
 anchor remain protected together with their required artifact closure even when
-they fall outside the ten ordinary accepted roots. Git ancestry can help classify
+they fall outside the thirty ordinary accepted roots. Git ancestry can help classify
 where a legacy SHA came from, but being an ancestor of a protected branch or tag
 is not by itself a permanent storage exemption.
 
