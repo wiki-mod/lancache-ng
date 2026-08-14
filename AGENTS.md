@@ -49,6 +49,7 @@ This matrix maps the hard rules defined below to how they are currently enforced
 | AG-CODE-010 | Every `#[test]` function needs at least a short comment | Manual review |
 | AG-CODE-011 | Before implementing or modifying any function, helper, check, variable, alias, or other mechanism, a real search (this repo's own codebase, plus any natively-provided capability) for an existing equivalent must happen first, and be reused instead of re-implemented; write an explicit confirmation into the Issue/PR that the search happened | Manual review; no automated check yet |
 | AG-CODE-012 | Every comment follows a strict What/Why/From structure capped at 1-5 sentences, never a narrative; `From:` is mandatory whenever a PR/Issue is known, points to the current one only (not a running log), and must be cross-referenced from the PR/Issue side too | Manual review; no automated check yet |
+| AG-CODE-013 | Creating a new file carries a standing formal DISACK by default, independent of reason; lifted only by extending an existing file that owns the same conceptual class, or by completing the required search/consolidation check and obtaining an explicit maintainer/coordinator ACK before creating the file | Manual review; no automated check yet |
 | AG-DOC-001 | Documentation drift is a defect | Manual review (docs checked against code change) + **known gap**: no automated drift detection script yet |
 | AG-DOC-002 | Precedence: executable checks / current code behavior (item 1) | Manual review |
 | AG-DOC-003 | Precedence: `AGENTS.md` general rules, yields to more-specific lower items (item 2) | Manual review |
@@ -776,6 +777,68 @@ reading the document for anything that needs human judgment.
   If this pre-check search itself turns up an existing violation of this rule already sitting in the codebase — a duplicate, unrelated to the change at hand — do not decide unilaterally whether to fix, flag, or ignore it; ask the maintainer if there is any uncertainty about the right next step.
   Rationale, from a real, lived instance: issue #1441 found that `services/proxy/entrypoint.sh`'s nginx stream-backend map generator implements an empty-SNI fallback independently in its `strict` branch (a named reject target) and its `lazy` branch (no guard at all, silently reproducing the exact bug issue #88 had already fixed once). The two branches were never sharing a common function/constant for "what happens when there's no SNI to route on," so a fix applied to one branch had no structural way to reach the other — the regression was not a one-off oversight, it was the predictable consequence of the duplication itself. A search before writing the `lazy` branch's routing logic would have surfaced the `strict` branch's already-existing guard before a second, unguarded copy ever got written.
   This does not require deduplicating code that is only superficially similar but expresses a genuinely different decision (Rule-Ref: AG-CODE-006 — forcing a shared abstraction onto code that is coincidentally shaped alike, but conceptually independent, trades one readability problem for a worse one). The test is "would a bug fix or behavior change to one copy need to apply to the other(s) to stay correct?" — if yes, share it; if the two copies are allowed to diverge on purpose, duplication is fine and abstracting them would be the actual mistake.
+- **[AG-CODE-013]** **Creating a new file carries a standing formal DISACK.** The DISACK applies by default and is independent of the reason offered for creating the file. Convenience, implementation speed, naming neatness, perceived separation of concerns, or an apparently legitimate special case do not lift it. No new file may be created — including provisionally, temporarily, or as part of an implementation experiment — until the checks below have been completed. The DISACK is lifted only when: (a) an existing file is identified as the appropriate home and is extended instead; or (b) the required consolidation/search checks have been completed and documented, no suitable existing home exists, and an explicit maintainer/coordinator ACK for the new file has been obtained before the file is created. Reasoning that a new file "makes sense" is not an ACK and does not substitute for the required checks.
+
+  **Required checks.** Before creating any new script, library, test-suite file, or other monolith-capable implementation file: search the same directory and related implementation area for files covering the same conceptual capability or lifecycle; determine whether the proposed behavior can be added to an existing file through a function, option, flag, subcommand, case dispatch, reusable helper, or additional test case; check whether two or more existing files already implement variants of the same operation and should be consolidated instead of adding another member to the family; search for duplicated or near-duplicated setup, validation, cleanup, argument parsing, resource discovery, logging, error handling, comments, or control flow (duplication is evidence that consolidation or shared implementation is required); check currently open issues and PRs for another consumer of the same not-yet-built capability, and if multiple consumers need it, implement the capability once and have them reuse it. State the result of this check in the implementation/PR — a silent or implicit check does not satisfy this rule.
+
+  **How to decide whether files belong to the same conceptual class.** Files should normally be treated as candidates for consolidation when they operate on the same resource or lifecycle and differ primarily by: execution mode (`--dry-run`, `verify`, `apply`, `delete`, `retire`); policy or safety level; filtering or selection criteria; environment or target; phase of the same operator workflow; small variations in otherwise shared control flow; duplicated setup, validation, cleanup, or reporting logic. For example, `prune-old-dry-run.sh` / `prune-old-verify-before-delete.sh` / `prune-old-delete.sh` should normally become one cohesive `prune-and-retire.sh --dry-run` / `--verify` / `--delete`, with shared internal functions rather than copied implementations.
+
+  **Consolidation requirements.** Extend an existing file whose established responsibility already covers, or is the closest conceptual owner of, the capability — regardless of whether that file is formally organized as a library, a script, a test suite, an action, or any other implementation file, and even if its name is not a literal match for the new behavior; this is the default expectation, not a special case reserved for files labeled as libraries. Prefer flags, options, subcommands, functions, or case dispatch over sibling files. Implement shared behavior exactly once. Treat a growing family of near-identical standalone files as evidence of an existing design problem to correct, not as precedent for creating another one.
+
+  **Do not:** create a new file because doing so is easier than understanding or extending an existing implementation; create a new file merely because the new behavior has a distinct name; create `*-dry-run`, `*-verify`, `*-cleanup`, `*-delete`, `*-simulation`, or similar sibling scripts when those are modes or phases of the same underlying capability; copy an existing file and modify it into a new variant; duplicate functions, boilerplate, comments, parsing, validation, cleanup, or error handling between sibling implementations; evade this rule by moving file sprawl from `scripts/` into `scripts/lib/`; create one library file per helper function unless the file type or framework structurally requires such decomposition; create the file first and request ACK afterward; interpret an existing family of fragmented files as justification for adding another — evaluate the family for consolidation first.
+
+  **Cohesion constraint.** This rule requires consolidation of the same conceptual capability, not arbitrary monolithization. Unrelated responsibilities must not be forced into the same file merely to reduce file count. The objective is one coherent implementation per capability, with internal reuse — not one tiny file per variation, and not one unrelated god-file containing everything.
+
+  **File-type exception.** The consolidation preference applies where a file type naturally supports internal reuse and dispatch, such as shell scripts and Bats suites. It does not require artificial consolidation where the native composition model of the format uses separate units. GitHub Actions composite actions are an example: directory-per-action plus `uses:` composition is the native reuse mechanism. Combining unrelated composite actions into one condition-heavy YAML file would replace structural reuse with declarative branching and is therefore not required by this rule.
+
+  **Uncertainty.** If there is genuine uncertainty about whether an existing file should be extended, whether existing files should first be consolidated, or whether a new file is justified: the DISACK remains in force. Stop and request a maintainer/coordinator decision. Absence of certainty is not permission to create the file.
+
+  **Core principle.** A new requirement does not imply a new file. File boundaries follow conceptual ownership, not issue boundaries, feature requests, execution modes, implementation tasks, or the convenience of the current change.
+
+  **Decision algorithm:**
+  ```
+  About to create any new file, for any reason
+          |
+          v
+     FORMAL DISACK
+          |
+          v
+  Search existing files for the same conceptual class/responsibility
+          |
+          +--> Same capability already implemented somewhere?
+          |        |
+          |        +--> Yes --> Extend it. NO NEW FILE.
+          |
+          v
+  Any existing file already owns this conceptual class/responsibility,
+  even if this exact capability is new?
+          |
+          +--> Yes --> Add it as a function/option/flag/subcommand/
+          |            case dispatch/helper to that file. NO NEW FILE.
+          |
+          v
+  Related sibling files exist (same resource/lifecycle, differ by
+  mode/phase/policy)?
+          |
+          +--> Yes --> Consolidate them into one implementation
+          |            with the new capability as another mode.
+          |            NO NEW FILE.
+          |
+          v
+  No suitable home genuinely exists anywhere?
+          |
+          +--> Document search + rationale
+                          |
+                          v
+                 Maintainer explicit ACK?
+                    |             |
+                   No            Yes
+                    |             |
+                  DISACK     ACK --> New file permitted
+                  stands
+  ```
+
+  **Enforcement interpretation.** The default state is always `NEW FILE = DISACK` until the required search/consolidation process proves that no appropriate existing home exists and a maintainer/coordinator explicitly changes that state to `NEW FILE = ACK`. A plausible reason, architectural preference, implementation convenience, issue scope, agent judgment, or statement that a file is "cleaner" or "more modular" never changes the state by itself.
 
 ## File Headers
 
