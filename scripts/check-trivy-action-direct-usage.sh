@@ -97,7 +97,7 @@ check_dockerhub_wiring() {
             function bad_value_reason(v, expected_secret) {
                 if (v == "") return "empty value"
                 if (v ~ /inputs\./) return ""
-                if (v ~ ("secrets\\." expected_secret)) return ""
+                if (v ~ ("secrets\\." expected_secret "([^A-Za-z0-9_]|$)")) return ""
                 if (v ~ /secrets\./) return "references the wrong secret (expected secrets." expected_secret ")"
                 return "does not reference secrets." expected_secret " or a forwarded inputs.* value"
             }

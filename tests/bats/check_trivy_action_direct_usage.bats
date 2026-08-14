@@ -343,6 +343,31 @@ EOF
     [[ "$output" == *"references the wrong secret (expected secrets.DOCKERHUB_USERNAME)"* ]] || fail "missing expected message: $output"
 }
 
+# Regression proof for the wrong-secret regex's own word-boundary fix: an
+# unanchored match would let a longer name sharing the same prefix
+# (DOCKERHUB_USERNAME_OLD) falsely pass as the expected secret.
+@test "fails when a trivy-scan-retry call site references a longer secret name sharing the expected prefix" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME_OLD }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *"references the wrong secret (expected secrets.DOCKERHUB_USERNAME)"* ]] || fail "missing expected message: $output"
+}
+
 # bad_value_reason()'s last branch: a value that is neither a secrets.*
 # nor an inputs.* reference at all (a hardcoded literal), distinct from
 # the wrong-secret-name case above.
