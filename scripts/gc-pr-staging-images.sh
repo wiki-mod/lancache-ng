@@ -3,65 +3,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Reaps GHCR container package versions for this project's own images
-# (services/* plus build-tools) that are no longer needed: closed-PR
-# `pr-<N>-sha-<short>` staging tags (the original #626 mechanism this file
-# replaces the former inline workflow logic for) AND genuinely orphaned
-# untagged versions (the per-platform manifests and Buildx attestation/SBOM
-# sub-manifests every multi-arch push creates automatically). Invoked by
-# .github/workflows/gc-pr-staging-images.yml -- see that file's own header
-# for the two triggers (pull_request: closed, and a periodic full sweep).
-#
-# EXTRACTED (2026-08-06, issue #1095) from that workflow's own inline `run:`
-# block into a standalone script for two reasons: (1) AG-CI-021's
-# workflow-file line/byte ceiling makes every line moved out of YAML a small
-# but real safety margin against the "self-modifying pull_request event
-# creates zero runs" failure mode that ceiling exists to prevent; (2) pure
-# classification logic can be sourced directly by a bats suite with mocked
-# `gh`/`curl`/`jq` responses (tests/bats/gc_pr_staging_images.bats), which an
-# inline YAML `run:` block cannot be, satisfying AG-VAL-029's "a confirmed
-# real CI defect needs a durable, repeatable check" requirement for the
-# classification-gap defect this file fixes (see "Two independent defects"
-# below for what that gap was).
-#
-# MERGED (2026-08-14, issue #1557): this file and the classification/lookup
-# functions that used to live in a separate scripts/lib/gc-pr-staging-images.sh
-# are now one file, at the maintainer's explicit direction. The entry-
-# script/library split served one purpose -- letting Bats `source` pure
-# classification logic without also running main()'s real-credential/
-# real-tool top-level entry logic -- and the BASH_SOURCE source-guard idiom
-# at this file's own bottom already provides that on its own: Bats sourcing
-# this single file gets every gcps_* function and process_service() for
-# free, exactly as it did with two files, without main() ever executing
-# from the `source` line. `From: Issue #1557 | PR #1559`.
-#
-# Two independent defects motivated the original 2026-08-06 extraction, not
-# just a style preference:
-#
-#   1. CLASSIFICATION GAP: the pre-extraction logic only ever considered a
-#      package version deletable when EVERY tag on it was a closed-PR
-#      `pr-<N>-sha-<short>` tag. A version with NO tags at all -- the
-#      per-platform manifests and buildx attestation/SBOM sub-manifests
-#      Buildx automatically creates on every multi-arch push -- never entered
-#      that check (the tag-classification loop it depends on never executes
-#      for an empty tag list), so it was kept forever regardless of age or
-#      whether anything still referenced it. Confirmed live (2026-08-06):
-#      roughly 55% of this project's ~24,734 GHCR package versions across 8
-#      services are completely untagged, and none of them were ever reachable
-#      by the old logic. gcps_extract_manifest_children() below is the fix:
-#      it reads the actual manifest graph (which digests a tagged manifest
-#      references as children) so an untagged version can be proven either
-#      "still referenced by something tagged" (keep) or "genuinely orphaned"
-#      (eligible, subject to the age gate in process_service() below).
-#   2. RATE-LIMIT/CONCURRENCY GAP: fixed by the workflow's own
-#      `concurrency:` block, not by anything in this file -- documented here
-#      only so a reader of this file's history knows both defects were fixed
-#      together, not this one alone.
-#
-# NOT in scope here: the concurrency fix for the OTHER confirmed root cause
-# (two simultaneous full sweeps sharing one PAT's rate-limit budget) lives
-# entirely in the calling workflow's own `concurrency:` block -- nothing in
-# this script can fix a problem that is about how many COPIES of it GitHub
-# Actions schedules, only the workflow YAML controls that.
+# (services/* plus build-tools): closed-PR pr-<N>-sha-<short> staging tags,
+# and orphaned untagged versions (per-platform manifests and Buildx
+# attestation/SBOM sub-manifests every multi-arch push creates). Invoked by
+# .github/workflows/gc-pr-staging-images.yml; extracted from that workflow's
+# inline `run:` block into a standalone, Bats-sourceable script (#1095).
+# gcps_extract_manifest_children() below fixes the classification gap #1095
+# found -- the pre-extraction logic never considered an untagged version
+# deletable at all. The classification/lookup functions that used to live in
+# a separate scripts/lib/gc-pr-staging-images.sh are merged into this one
+# file (#1557); the BASH_SOURCE guard at the bottom still lets Bats source
+# every function here without running main().
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -69,92 +21,24 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$script_dir/lib/ghcr-retry.sh"
 
 # --- Classification/lookup functions (merged in from the former
-# scripts/lib/gc-pr-staging-images.sh, issue #1557) ---------------------
-#
-# These used to deliberately NOT run under `set -euo pipefail` (matching
-# every other file under scripts/lib/, which can be sourced by a caller with
-# different shell-option expectations) -- now that they live in this
-# specific file's own top level, they inherit this file's `set -euo
-# pipefail` above directly. This is not a behavior change: every function
-# below was already written to guard its own risky commands explicitly
-# (`if ! x="$(...)"` rather than a bare assignment) precisely because its
-# ORIGINAL caller also ran under `set -euo pipefail`, per each function's own
-# comments below -- none of them relied on a lenient caller to begin with.
+# scripts/lib/gc-pr-staging-images.sh) ---------------------
+# What: these functions now inherit this file's `set -euo pipefail` instead of running unguarded as a scripts/lib/ sourced file did.
+# Why: not a behavior change -- every function below already guards its own risky commands explicitly (`if ! x="$(...)"`) rather than relying on a lenient caller.
+# From: Issue #1557 | PR #1559
 
 # gcps_version_name_is_digest <name>
-#
-# A GHCR container package version's `.name` field equals the manifest
-# digest (`sha256:<64 hex chars>`) -- verified live during this PR
-# (2026-08-06) via a real, unauthenticated `gh api
-# "orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions?per_page=2"`
-# call against this project's own real `proxy` package, e.g.
-# `"name":"sha256:9c4b1dc4751ddc63099f1f65015442240d7de9faae3e3eb3992f3de3287e861b"`
-# -- which is exactly what the orphan classification below needs to compare
-# against manifest-referenced child digests. This function exists so that
-# fact is checked at runtime too, not just trusted forever: if GitHub ever
-# changes what `.name` contains (or a malformed response slips through),
-# every digest comparison downstream would silently compare against the
-# wrong value and could misclassify a still-referenced manifest as an
-# orphan. The caller must treat a failing check here as a reason to skip
-# orphan classification for the WHOLE service, not just the one malformed
-# entry -- a partially-populated protected-digest set is more dangerous than
-# an empty one (see process_service()'s own comment at its call site).
+# What: checks a GHCR package version's `.name` matches `sha256:<64 hex>` (confirmed live against this project's own `proxy` package).
+# Why: orphan classification compares this value against manifest-referenced child digests; a failing check must make the caller skip orphan classification for the whole service, not just this entry, since a partially-populated protected-digest set is more dangerous than an empty one.
+# From: Issue #1095
 gcps_version_name_is_digest() {
   local name="$1"
   [[ "$name" =~ ^sha256:[0-9a-f]{64}$ ]]
 }
 
 # gcps_extract_manifest_children <manifest-json>
-#
-# Given the raw JSON body of a manifest fetched from the GHCR registry API
-# (GET /v2/<repo>/<service>/manifests/<digest>), prints one child digest per
-# line: every entry in `.manifests[]` (the image-index case: a multi-arch
-# tag's per-platform manifests AND its own Buildx-embedded provenance/SBOM
-# attestation manifests -- Buildx lists both kinds inside the same
-# `manifests[]` array, distinguished only by a `platform: unknown/unknown`
-# value and a `vnd.docker.reference.type: attestation-manifest` annotation
-# neither this function nor its caller needs to inspect, since every entry in
-# this array is unconditionally a child of the parent index regardless of
-# that annotation), plus `.subject.digest` if present (the OCI Referrers-API
-# attestation case: a manifest fetched directly can itself declare which
-# other digest it is "about" via a top-level `subject` field). Prints nothing
-# for a plain single-platform manifest with neither field, which is a normal,
-# expected result (not a failure) -- the caller should check the raw HTTP
-# fetch's own success separately from this function ever printing output.
-#
-# NOTE: this only walks ONE level. This project's own image-building pipeline
-# (build-push.yml/build-tools.yml, confirmed via a repo-wide grep for
-# `actions/attest`/`--provenance`/`--sbom`) never produces a nested index
-# (an index whose own `manifests[]` children are themselves indices), so a
-# single level is sufficient for every real artifact shape this project
-# currently produces; if that ever changes, this function -- and its
-# caller's single-pass child collection -- would need to walk recursively
-# instead.
-#
-# Returns non-zero (and prints nothing) if EITHER jq extraction itself
-# genuinely fails (a broken/missing jq, or a manifest body that passed the
-# caller's own gcps_manifest_looks_valid check yet still trips a jq error on
-# this specific query) -- distinct from a legitimate, successful extraction
-# that simply finds no children (a plain single-platform manifest), which
-# still returns 0 with empty output. This distinction matters because an
-# UNDER-populated children set is dangerous (a still-referenced platform
-# manifest would look orphaned), so the caller must be able to tell "really
-# has no children" apart from "we don't actually know" and treat the latter
-# as a reason to abort orphan classification for the whole service, the same
-# way it already does for an outright manifest-fetch failure.
-#
-# Deliberately does NOT handle GHCR/Buildx's OTHER attestation-association
-# convention, the `sha256-<64-hex>` fallback TAG scheme (an attestation
-# manifest naming its subject via its own tag string instead of a `subject`
-# field in its body) -- confirmed live (2026-08-06, real lancache-ng/proxy
-# package) that a manifest using this scheme has no `subject` field
-# whatsoever, so there is nothing in the JSON body this function receives
-# for it to find; the association only exists in that version's TAG, which
-# this function is never given (it only ever sees a manifest body). The
-# caller (process_service()'s own Pass 1 tag loop, below) handles that case
-# itself, directly off the tag string, for exactly this reason -- see its
-# own comment at the `sha256-<hex>` tag-shape check for the full
-# live-verified rationale.
+# What: prints one child digest per line from a fetched manifest's `.manifests[]` (image-index case) and `.subject.digest` (Referrers-API case); empty output for a plain single-platform manifest is a normal result, not a failure. Does not walk beyond one level, and does not handle GHCR/Buildx's tag-based `sha256-<hex>` attestation convention (process_service()'s tag loop below handles that case directly).
+# Why: a genuine jq extraction failure returns non-zero so the caller can tell "really has no children" apart from "don't know" and abort orphan classification for the whole service rather than under-populate the protected-digest set.
+# From: Issue #1095
 gcps_extract_manifest_children() {
   local manifest_json="$1"
   local manifests_children subject_child
@@ -170,18 +54,9 @@ gcps_extract_manifest_children() {
 }
 
 # gcps_manifest_looks_valid <manifest-json>
-#
-# Returns 0 only when <manifest-json> is well-formed JSON that is
-# recognizable as SOME kind of manifest response (carries `mediaType`, the
-# field every one of the four Accept-header media types this project asks
-# for is required to set). Used by the caller to distinguish "fetched fine,
-# genuinely has no children" (a real single-platform manifest -- proceed)
-# from "the fetch nominally succeeded but returned something we can't trust"
-# (an HTML error page, a truncated body, a registry-side redirect target) --
-# the latter must abort orphan classification for the whole service rather
-# than silently being treated as "zero children" (see this file's own
-# gcps_extract_manifest_children comment for why an empty result must never
-# be trusted blindly).
+# What: returns 0 only when <manifest-json> is well-formed and carries `mediaType`, the field every requested manifest media type must set.
+# Why: distinguishes "fetched fine, genuinely no children" from "fetch nominally succeeded but returned something untrustworthy" (an HTML error page, a truncated body) -- the latter must abort orphan classification, not be treated as "zero children".
+# From: Issue #1095
 gcps_manifest_looks_valid() {
   local manifest_json="$1"
   local media_type
@@ -190,132 +65,48 @@ gcps_manifest_looks_valid() {
 }
 
 # gcps_created_at_to_epoch <iso8601-timestamp>
-#
-# Converts a GHCR package version's `.created_at` (ISO-8601, e.g.
-# "2026-08-01T12:34:56Z") to Unix epoch seconds, or prints nothing and
-# returns non-zero on a parse failure. The caller must treat a parse failure
-# as "too young to delete" (fail closed) rather than "old enough" -- an
-# unparseable timestamp must never be read as satisfying the 24h safety
-# margin every deletion category requires.
+# What: converts a GHCR package version's `.created_at` to Unix epoch seconds, or prints nothing and returns non-zero on a parse failure.
+# Why: the caller must treat a parse failure as "too young to delete" (fail closed), never as satisfying the age-gate safety margin.
+# From: Issue #1095
 gcps_created_at_to_epoch() {
   local created_at="$1"
   date -u -d "$created_at" +%s 2>/dev/null
 }
 
 # gcps_is_old_enough_to_delete <created-at-epoch> <now-epoch> <min-age-seconds>
-#
-# The 24h (or whatever <min-age-seconds> is configured to) safety margin
-# applies uniformly to EVERY deletion category this reaper considers
-# (closed-PR tagged versions and orphaned untagged versions alike) -- an
-# explicit maintainer requirement, not just an orphan-specific guard, because
-# a version that looks deletable by tag/reference state alone can still be
-# the output of a build or promotion that is still actively in flight
-# elsewhere in the pipeline; giving every such race a fixed window to resolve
-# before this reaper ever considers deleting it is cheaper and more robust
-# than trying to enumerate every possible in-flight producer explicitly.
+# What: applies the same min-age safety margin to every deletion category this reaper considers, not just orphans.
+# Why: a version that looks deletable by tag/reference state alone can still be the output of a build/promotion still in flight elsewhere; a fixed age window is cheaper than enumerating every possible in-flight producer.
+# From: Issue #1095
 gcps_is_old_enough_to_delete() {
   local created_at_epoch="$1" now_epoch="$2" min_age_seconds="$3"
   (( now_epoch - created_at_epoch >= min_age_seconds ))
 }
 
 # gcps_pr_lookup_state <pr-number> <repository> <cache-array-name> [<result-var-name>]
-#
-# Prints exactly one of OPEN / CLOSED / LOOKUP_FAILED for PR <pr-number> in
-# <repository>, using the caller-provided associative array (referenced by
-# name via nameref, so the same cache persists across calls within one
-# service's tag loop) to avoid repeat API calls for the same PR number.
-#
-# CALLER-SIDE CACHING PITFALL (fixed 2026-08-14, issue #1557, item 74 of
-# PR #1501's whole-file audit): the nameref cache mutation above only
-# survives back into the CALLER's own shell if this function is invoked as a
-# plain statement. A caller that wraps the call in command substitution
-# (`x="$(gcps_pr_lookup_state ...)"`) forks a subshell for the call -- the
-# cache write happens on that subshell's own copy of the array and is
-# discarded the instant the subshell exits, so the cache never actually
-# persists across PRs/services despite this function's own logic being
-# correct in isolation. This function's direct unit tests below (which call
-# it as a plain statement) could not catch this, because they don't exhibit
-# the bug; only process_service()'s real call-site shape
-# (`case "$(gcps_pr_lookup_state ...)"`) did. The optional 4th argument below
-# exists so a caller can get the classification into a variable WITHOUT
-# command substitution: pass an already-`local`-declared variable name and
-# this function binds it via its own nameref and assigns the result to it
-# directly, in addition to (not instead of) the existing stdout print this
-# function's callers and tests already rely on.
-#
-# Ported verbatim (comments included) from the pre-extraction workflow's
-# own pr_lookup_state(): this exact distinction -- a confirmed answer
-# (`gh api` succeeded, or failed with a real 404) vs. an ambiguous one (any
-# other failure) -- is what stops a transient GitHub/token/rate-limit hiccup
-# from being silently treated as "this PR is closed, safe to delete its
-# images". Collapsing that distinction was a real bug this project already
-# fixed once; re-deriving this function from scratch during the extraction
-# would risk reintroducing it.
-#
-# NOT the same concern as the one this comment used to only cover: treating
-# a LOOKUP_FAILED as "protected" is the correct SAFE default for any single
-# ambiguous lookup, but if EVERY (or nearly every) lookup in a run fails --
-# e.g. GHCR_PACKAGE_DELETE_PAT losing its `repo`/`public_repo` scope in a
-# future rotation, since that scope has nothing to do with the
-# read:packages/delete:packages scopes this token is documented to need, or
-# the pulls API being rate-limited independently of the packages API on the
-# same token -- this function would silently keep returning the safe
-# LOOKUP_FAILED answer for every single PR number, and the caller would
-# report a healthy-looking "GC complete" summary while the closed-PR
-# tagged-version reap path did effectively nothing that entire run, for a
-# reason nothing in the log surfaces. Investigated live (2026-08-06, this
-# PR): the one real historical scheduled run with a suspiciously low
-# deletion rate (2026-08-02, run 30736443878: 10 deleted, 21919 kept) was
-# checked against its own real GitHub Actions log -- zero real runtime
-# occurrences of either LOOKUP_FAILED warning message exist in that log
-# (the only matches found were the workflow's own pre-run source-code echo,
-# not an actual invocation), positively ruling out a systemic PAT/lookup
-# failure as that run's cause; that run's low delete count is explained
-# entirely by the classification-gap defect this PR's whole extraction
-# fixes (the vast majority of "kept" versions there were untagged
-# entirely, never reachable by the pre-fix tag-only check, not because
-# their PR state was unknown). That verification does not retroactively
-# guarantee a FUTURE run can't hit this differently-shaped failure mode,
-# though, so process_service()'s own caller now tracks how many times this
-# function returns LOOKUP_FAILED across a whole run and treats a suspiciously
-# high count as a real, run-failing error (see GC_MAX_PR_LOOKUP_FAILURES
-# below) -- turning a hypothetically silent, healthy-looking no-op into a
-# loud, investigable failure the next time it might genuinely occur, rather
-# than relying on another manual log audit to notice it again.
+# What: prints OPEN/CLOSED/LOOKUP_FAILED for <pr-number>, caching into the caller's nameref-referenced array; the optional 4th arg binds the result directly into a caller variable, since command substitution (`x="$(gcps_pr_lookup_state ...)"`) forks a subshell whose cache writes never survive back to the caller.
+# Why: a confirmed answer (success, or a real 404) is kept distinct from an ambiguous one (any other failure) so a transient API hiccup is never silently treated as "safe to delete"; GC_MAX_PR_LOOKUP_FAILURES below caps how many LOOKUP_FAILED results a whole run tolerates before treating a suspiciously high count as a real failure rather than a silent no-op.
+# From: Issue #1557 | PR #1559
 gcps_pr_lookup_state() {
   local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
-  # NOT named `pr_state`: a caller passing "pr_state" as its own 4th-arg
-  # result-variable name (exactly what process_service()'s own call site
-  # does) would otherwise collide with an identically-named LOCAL variable in
-  # THIS function's own scope. Confirmed empirically while building this fix
-  # (issue #1557, item 74): `local -n result_ref="pr_state"` executed from
-  # INSIDE a function that itself already has `local pr_state` resolves to
-  # that function's OWN local variable, not the caller's -- bash's nameref
-  # lookup finds the nearest matching name, and a function's own locals are
-  # nearer than its caller's. The result_ref assignments below would
-  # silently write to this function's own throwaway variable and the
-  # caller's result variable would never actually be set, with no error of
-  # any kind -- exactly the class of bug this rename exists to rule out
-  # structurally rather than by caller-side convention.
+  # What: this function's own locals are deliberately not named `pr_state`.
+  # Why: a nameref (`local -n result_ref="pr_state"`) resolves to the nearest matching name, so a same-named local in this function's own scope would shadow the caller's variable and silently write to a throwaway copy instead (confirmed empirically).
+  # From: Issue #1557 | PR #1559
   local api_output parsed_state
 
   if [[ -n "${cache_ref[$pr_number]:-}" ]]; then
     if [[ -n "$result_var_name" ]]; then
       local -n result_ref="$result_var_name"
+      # shellcheck disable=SC2034 # written via the result_ref nameref, read by the caller through $result_var_name
       result_ref="${cache_ref[$pr_number]}"
     fi
     printf '%s\n' "${cache_ref[$pr_number]}"
     return
   fi
 
-  # `api_output="$(gh api ...)"` as a bare assignment statement is itself a
-  # "simple command" under `set -e`: if `gh api` returns non-zero, THIS
-  # SCRIPT (not just the function) would exit right here, before a
-  # separately-captured `$?` on the next line could ever be read. Putting the
-  # assignment directly in the `if` condition makes it a tested context, so a
-  # failure is handled by the `else` branches below instead of aborting the
-  # whole GC run.
+  # What: the `gh api` call sits directly in the `if` condition, not a bare assignment before it.
+  # Why: a bare assignment is a "simple command" under `set -e` -- a non-zero `gh api` would exit the whole script before its failure could be handled by the `else` branches below.
+  # From: Issue #1095
   if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
     if parsed_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
       if [[ "$parsed_state" == "open" ]]; then
@@ -324,16 +115,16 @@ gcps_pr_lookup_state() {
         cache_ref["$pr_number"]="CLOSED"
       fi
     else
-      # gh api succeeded (a real response came back) but jq itself failed to
-      # parse it -- same "don't let this bare assignment trip set -e"
-      # reasoning as the gh api call above, applied to every other jq call
-      # in this script.
+      # What: a successful `gh api` response that jq still failed to parse is logged and treated as LOOKUP_FAILED.
+      # Why: same set -e-safe capture-before-check reasoning as the gh api call above.
+      # From: Issue #1095
       echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $parsed_state" >&2
       cache_ref["$pr_number"]="LOOKUP_FAILED"
     fi
   elif [[ "$api_output" == *"HTTP 404"* ]]; then
-    # Confirmed: this PR number genuinely does not exist (deleted,
-    # renumbered, whatever) -- a real answer, not an ambiguous one.
+    # What: a 404 means this PR number genuinely doesn't exist.
+    # Why: a confirmed answer, not an ambiguous one -- safe to mark CLOSED.
+    # From: Issue #1095
     cache_ref["$pr_number"]="CLOSED"
   else
     echo "::warning::Could not determine PR #$pr_number's state (not a 404): $api_output" >&2
@@ -342,35 +133,16 @@ gcps_pr_lookup_state() {
 
   if [[ -n "$result_var_name" ]]; then
     local -n result_ref="$result_var_name"
+    # shellcheck disable=SC2034 # written via the result_ref nameref, read by the caller through $result_var_name
     result_ref="${cache_ref[$pr_number]}"
   fi
   printf '%s\n' "${cache_ref[$pr_number]}"
 }
 
 # gcps_registry_anon_token <service> <repository>
-#
-# Fetches (and the caller is expected to cache -- see process_service()'s own
-# per-service token cache) an anonymous read-only Bearer token scoped to
-# `repository:<repository>/<service>:pull`. This project's GHCR packages are
-# public, so an anonymous pull token is sufficient for manifest reads -- no
-# GHCR_PACKAGE_DELETE_PAT scope is spent on this, and it works even if that
-# PAT is ever scoped down to packages-write-only in the future. Wrapped in
-# ghcr_retry by the caller (see gcps_fetch_manifest below), not internally
-# here, so a caller needing a custom retry policy for the token endpoint
-# specifically still can.
-#
-# Deliberately a two-step capture-then-parse (curl's own output captured and
-# exit status checked FIRST, jq applied to the captured variable second),
-# not a live `curl | jq -r '.token'` pipe: `jq -r '.token'` on a genuinely
-# EMPTY input (confirmed via real invocation: `printf '' | jq -r '.token'`
-# exits 0 with empty output, not a parse error) succeeds even when curl
-# itself failed and produced nothing -- under this file's own `set -o
-# pipefail`, a live pipe's overall exit status is the RIGHTMOST failing
-# command's, so a failed `curl -f` (empty output) feeding a "successful"
-# `jq` would make the whole pipeline report success despite the real fetch
-# having failed. Capturing curl's output into a variable and checking ITS
-# OWN exit status before ever handing anything to jq removes this masking
-# entirely.
+# What: fetches an anonymous read-only Bearer token scoped to `repository:<repository>/<service>:pull`, via a capture-then-parse (never a live `curl | jq` pipe).
+# Why: this project's GHCR packages are public, so no GHCR_PACKAGE_DELETE_PAT scope is spent here. A live pipe would mask a failed curl: under `set -o pipefail` a piped `jq -r '.token'` on empty input still exits 0, so the pipeline's rightmost-command exit status would hide the real curl failure -- capturing curl's output and checking its own exit status first removes that masking.
+# From: Issue #1095
 gcps_registry_anon_token() {
   local service="$1" repository="$2"
   local raw_response
@@ -382,16 +154,9 @@ gcps_registry_anon_token() {
 }
 
 # gcps_fetch_manifest <service> <digest> <repository> <token>
-#
-# Fetches the raw manifest JSON for <digest> in <service>'s repository via
-# the registry's own v2 API (not the GitHub Packages API, which has no
-# manifest-graph endpoint). Requests all four media types a Buildx-produced
-# artifact can be stored as (OCI index, Docker manifest list, OCI manifest,
-# Docker manifest v2) in a single Accept header -- asking for only one and
-# letting the registry pick would risk silently getting back a CONVERTED
-# single-platform manifest with no `manifests[]` at all for an index that
-# genuinely has children, which would look identical to "no children" and
-# defeat the entire protection this mechanism exists to provide.
+# What: fetches the raw manifest JSON for <digest> via the registry's own v2 API (the GitHub Packages API has no manifest-graph endpoint), requesting all four Buildx-producible media types in one Accept header.
+# Why: asking for only one media type risks the registry silently converting an index into a single-platform manifest with no `manifests[]`, indistinguishable from a real "no children" result.
+# From: Issue #1095
 gcps_fetch_manifest() {
   local service="$1" digest="$2" repository="$3" token="$4"
   curl -fsSL --connect-timeout 10 --max-time 30 \
@@ -404,115 +169,38 @@ gcps_fetch_manifest() {
 
 org="wiki-mod"
 repo="wiki-mod/lancache-ng"
-# Every service build-push.yml's build/build-arm64 jobs can push a PR staging
-# tag for. dhcp/dhcp-proxy aren't used by full-setup validate, but a PR
-# touching them still gets a staging tag pushed (see #626's build-job
-# change), so they need reaping too. build-tools is included: full-setup-
-# validate's client-simulation step pulls it at the PR staging tag as well.
-# syslog added while this PR was in progress (merged in from current_dev,
-# #1428/#1431's fluent-bit+syslog-ng combined container): it is a real entry
-# in build-push.yml's own build/build-arm64 matrix like every other service
-# here, so scripts/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY
-# entry for this file (equal to the FULL canonical set, not a subset) would
-# fail this file the moment syslog landed in the matrix without this array
-# following it -- this is that follow-along update, done as part of merging
-# current_dev's own unrelated syslog-matrix-array fix (which had updated the
-# OLD inline copy of this array, in .github/workflows/gc-pr-staging-images.
-# yml itself, before this PR moved it here) into this branch.
+# What: every service build-push.yml's build/build-arm64 jobs can push a PR staging tag for, including ones full-setup-validate doesn't pull directly (dhcp/dhcp-proxy) and build-tools.
+# Why: scripts/check-workflow-service-lists.sh's REQUIRES_SERVICES_ARRAY check requires this array to equal the full canonical service set, so it must track build-push.yml's own matrix (e.g. syslog, #1428/#1431) rather than drift from it.
+# From: Issue #626
 services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
 
-# Bounded, PER-SERVICE (not global) reaper cap: a single global cap shared
-# across services in a fixed iteration order would let the first service in
-# the list (proxy) consume the entire run's budget against the ~13,600-
-# version untagged backlog this PR deliberately does NOT clean up (that is a
-# separate, maintainer-supervised one-time pass -- see this repo's issue
-# tracker for the dedicated backlog-drain effort), starving every later
-# service in the same run. 40 per service x 9 services (see the
-# services=(...) array above; stale "8 services" corrected 2026-08-14 --
-# syslog joined the array in #1428/#1431, this comment's own arithmetic just
-# never followed) = at most 360 deletions attempted per run: comfortably
-# inside the classic PAT's 5000-requests/hour REST budget even counting the
-# paginated listing calls, the closed-PR-tag `gh api DELETE` calls, and (new
-# in this PR) one anonymous registry manifest GET per tagged version plus up
-# to one more per about-to-delete orphan candidate. Hitting this cap is
-# logged as a `::notice::`, not an error -- there is always a next
-# scheduled/close-triggered run to keep draining the same service further.
+# What: a PER-SERVICE (not global) deletion cap -- 40 x 9 services = at most 360 deletions attempted per run.
+# Why: a single global cap in a fixed iteration order would let the first service (proxy) starve every later service against the large untagged backlog; 360 stays comfortably inside the PAT's 5000-requests/hour budget. Hitting the cap logs a `::notice::`, not an error -- the next scheduled/close-triggered run keeps draining further.
+# From: Issue #1095
 max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
 
-# 24-hour safety margin (maintainer-directed, explicit): applies to EVERY
-# deletion category below (closed-PR tagged versions and orphaned untagged
-# versions alike), not just the new orphan path -- a version that looks
-# deletable by tag/reference state alone can still be the direct output of a
-# build, promotion, or backfill that is still actively in flight elsewhere in
-# the pipeline (e.g. scripts/ensure-pr-staging-images.sh's own back-fill
-# `imagetools create` calls, which briefly create a fresh untagged manifest
-# before the tag move lands). Giving every deletion candidate a fixed window
-# to "prove" it is not mid-flight is far simpler and more robust than trying
-# to positively enumerate every possible concurrent producer.
+# What: 24-hour safety margin, applied to every deletion category (closed-PR tags and orphans alike), maintainer-directed and explicit.
+# Why: a version that looks deletable by tag/reference state alone can still be the output of a build/promotion/backfill still in flight (e.g. scripts/ensure-pr-staging-images.sh's backfill); a fixed age window is simpler than enumerating every possible concurrent producer.
+# From: Issue #1095
 min_age_seconds="${GC_MIN_AGE_SECONDS:-86400}"
 
 now_epoch="$(date -u +%s)"
 
-# Confirmed PR states are cached across services (a PR number is unique
-# repo-wide, so a state looked up while processing "proxy" is still valid
-# while processing "dns" moments later) -- kept as a plain top-level
-# associative array (not per-service) so this exact cross-service reuse
-# happens automatically via gcps_pr_lookup_state's nameref parameter. It IS
-# used -- passed by bare name (not "$pr_state_cache") to gcps_pr_lookup_state
-# below, which binds it via `local -n cache_ref=...`. build-push.yml's static
-# analysis job runs per-file with no cross-file (-x) mode, so it never sees
-# that indirect-by-name consumer and can't trace this usage across the
-# source boundary.
+# What: a plain top-level (not per-service) associative array, since a PR number is unique repo-wide and a state looked up for one service stays valid for the next.
+# Why: passed by bare name into gcps_pr_lookup_state's nameref parameter -- build-push.yml's static analysis runs per-file with no cross-file mode, so it can't trace this indirect usage (hence the disable below).
+# From: Issue #1095
 # shellcheck disable=SC2034
 declare -A pr_state_cache=()
 
-# A single ambiguous PR-state lookup (LOOKUP_FAILED) is deliberately safe
-# on its own -- it just keeps that one version, exactly like an open PR (see
-# gcps_pr_lookup_state's own header). But if EVERY (or nearly every) lookup
-# in a run fails -- e.g. GHCR_PACKAGE_DELETE_PAT losing the `repo`/
-# `public_repo` scope its `gh api repos/.../pulls/<N>` calls need, a scope
-# with nothing to do with the read:packages/delete:packages this token is
-# documented to need for the package-version calls, or the pulls API being
-# rate-limited independently of the packages API on the same token -- the
-# closed-PR tagged-version reap path would silently do nothing that entire
-# run while the workflow still reports a healthy-looking "GC complete"
-# summary, with no signal anywhere that anything was wrong. This threshold
-# turns that specific silent-no-op shape into a real, run-failing error
-# instead. 10 is a deliberately low bar: a handful of transient lookup
-# failures in a run processing thousands of tagged versions is unremarkable
-# background noise, but double digits is already far more consistent with a
-# systemic credential/scope/rate-limit problem than with isolated blips, and
-# catching it loudly costs nothing on a genuinely healthy run.
+# What: caps how many LOOKUP_FAILED results (gcps_pr_lookup_state) a whole run tolerates before failing loudly, default 10.
+# Why: a single ambiguous lookup is safe on its own (kept, like an open PR), but nearly every lookup failing (e.g. a PAT losing the `repo`/`public_repo` scope its pulls-API calls need) would otherwise silently no-op the entire closed-PR reap path behind a healthy-looking summary; double digits is far more consistent with a systemic credential/rate-limit problem than isolated blips.
+# From: Issue #1095
 max_pr_lookup_failures="${GC_MAX_PR_LOOKUP_FAILURES:-10}"
 pr_lookup_failures=0
 
-# A single service reporting "no GHCR package yet" (a genuine HTTP 404 on
-# the versions-listing call) is deliberately NOT an error on its own -- see
-# process_service's own comment at that check for the real, live-verified
-# case this protects (a service newly added to build-push.yml's matrix
-# ahead of its first real push). But GitHub's own REST API documentation
-# for this exact endpoint says some resources return 404 instead of 403
-# when the caller lacks access, so a bare 404 is not a generally valid
-# proof of absence either (issue #1557, item 72 of PR #1501's whole-file
-# audit). Live-checked during this fix (2026-08-14): the package-metadata
-# endpoint (`GET orgs/<org>/packages/container/<package>`, no `/versions`)
-# and this versions-listing endpoint return an IDENTICAL 404 body/message
-# for a genuinely nonexistent package -- there is no separate metadata call
-# that discriminates a real-absence 404 from an access-denied one, so
-# probing a second endpoint per candidate 404 (an earlier draft of this fix)
-# would not actually have told the two cases apart. This project has no
-# credential with read:packages deliberately stripped to test the
-# access-denied side of that claim directly; it rests on GitHub's own
-# general REST documentation for the endpoint family, not on a live
-# reproduction of the ambiguous case itself. The same class of problem already
-# has an established, working answer in this file for PR-state lookups
-# (see max_pr_lookup_failures above): an isolated occurrence is normal and
-# must not fail the run, but nearly every configured service hitting this
-# same code path in one run is far more consistent with a systemic
-# credential/scope problem than with several services all genuinely
-# launching in the same run. Threshold is computed from the real service
-# count rather than hardcoded, so it stays correct as services are
-# added/removed from the services=(...) array above.
+# What: counts how many configured services hit "no GHCR package yet" (a genuine 404 on the versions-listing call) in one run; threshold scales off the real service count.
+# Why: a single such service is normal (newly added to the matrix, no push yet), but GitHub's REST docs note some endpoints return 404 instead of 403 on access-denied too -- there is no separate metadata call that discriminates the two cases (checked live), so nearly every service hitting this path is more consistent with a systemic credential problem than several services genuinely launching at once, mirroring max_pr_lookup_failures's same reasoning above.
+# From: Issue #1557 | PR #1559
 services_not_found=0
 
 had_errors=0
@@ -520,71 +208,31 @@ deleted=0
 kept=0
 
 # process_service <service>
-#
-# Runs entirely in the CURRENT shell (called as a plain statement, never
-# wrapped in `$(...)`), so every update this function makes to the
-# top-level had_errors/deleted/kept/pr_state_cache variables above is
-# immediately visible to the next service's own call and to this script's
-# final summary -- deliberately avoiding the exact "$(...) always forks a
-# subshell, so in-memory state changes made inside it vanish the instant it
-# exits" trap scripts/lib/staging-ancestor-fallback.sh's own header
-# documents hitting for real while building that file's cache.
+# What: runs entirely in the current shell (called as a plain statement, never wrapped in `$(...)`).
+# Why: every update to the top-level had_errors/deleted/kept/pr_state_cache variables must stay visible to the next service's call and the final summary -- a subshell would silently discard them, the same trap scripts/lib/staging-ancestor-fallback.sh's own header documents.
+# From: Issue #1095
 process_service() {
   local service="$1"
   local package="lancache-ng%2F${service}"
   local versions_json version_list
 
-  # had_errors turns a listing or delete failure into a failed GC run
-  # instead of a silently "successful" one. Without this, a broken
-  # GHCR_PACKAGE_DELETE_PAT (missing read:packages or delete:packages), a
-  # rate limit, or a missing `gh` binary would make every listing/delete
-  # call fail, the loop below would just see empty results or failed
-  # deletes, and this workflow would report success having inspected or
-  # removed nothing -- exactly the kind of "looks healthy but does nothing"
-  # failure mode that would let staging tags accumulate in GHCR forever
-  # undetected. A single service's listing failure doesn't abort the whole
-  # run immediately: other services still get processed (so a per-package
-  # hiccup doesn't block cleanup everywhere else), but the run still exits
-  # non-zero at the end so CI reflects reality.
-  # Deliberately NOT `2>&1` here (unlike most other `gh api`/jq captures in
-  # this file, where merging streams into the error message is harmless): a
-  # SUCCESSFUL `gh api --paginate` call can still write deprecation/rate-
-  # limit notices to stderr, and merging those into `versions_json` would
-  # silently corrupt the JSON array `jq -c '.[]'` below depends on -- turning
-  # a healthy run into a same-shaped "failed to enumerate" error for a
-  # completely different, spurious reason. stderr is captured to a scratch
-  # file instead, purely for the error message on a genuine failure.
+  # What: had_errors turns a listing/delete failure into a failed GC run; a single service's listing failure doesn't abort the run (others still get processed), but the run exits non-zero at the end. stderr is captured to a scratch file, not merged via `2>&1`.
+  # Why: without had_errors, a broken PAT or rate limit would make every call fail while this workflow reports success having done nothing. Merging stderr into `versions_json` would risk corrupting the JSON `jq -c '.[]'` depends on, since a successful `--paginate` call can still write deprecation/rate-limit notices to stderr.
+  # From: Issue #1095
   local versions_stderr
   versions_stderr="$(mktemp)"
   if ! versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>"$versions_stderr")"; then
     local list_error
     list_error="$(cat "$versions_stderr")"
     rm -f "$versions_stderr"
-    # A real 404 here means the package itself does not exist yet -- e.g. a
-    # service that just joined build-push.yml's build matrix (see this
-    # file's own `services=(...)` comment: syslog, #1428/#1431) but has not
-    # had its first image pushed yet. Confirmed live (2026-08-06) this is a
-    # real, not merely hypothetical, transient state: `gh api` on a genuinely
-    # missing package exits non-zero and writes "gh: Package not found.
-    # (HTTP 404)" to stderr (the raw JSON error body itself goes to STDOUT,
-    # which is why this check reads $list_error -- the stderr capture --
-    # not $versions_json). This is NOT a reaper error: there is nothing to
-    # list, and nothing to reap, for a service with no images published yet
-    # -- it becomes real work again the moment the first image lands, with
-    # no code change needed. Treating it as `had_errors=1` (this function's
-    # ORIGINAL, inherited behavior -- confirmed the pre-extraction workflow's
-    # own inline copy had the exact same defect) would fail this workflow's
-    # every single run the moment any new service is added to the build
-    # matrix ahead of its first real push, for a reason that has nothing to
-    # do with GHCR_PACKAGE_DELETE_PAT, rate limits, or a real listing
-    # failure -- exactly the kind of spurious, confusing red build this
-    # project's own AG-CI-013/related rules exist to prevent.
+    # What: a real 404 here means the package doesn't exist yet (a service newly added to the build matrix, no image pushed yet) -- not a reaper error.
+    # Why: confirmed live that `gh api` writes "Package not found. (HTTP 404)" to stderr (hence reading $list_error, not $versions_json) for this case; treating it as had_errors=1 (the pre-extraction workflow's own inherited behavior) would fail every run the moment a new service joins the matrix, for a reason unrelated to credentials or rate limits.
+    # From: Issue #1095
     if [[ "$list_error" == *"HTTP 404"* ]]; then
       echo "::notice::lancache-ng/${service} has no GHCR package yet (HTTP 404 listing its versions) -- nothing to reap for a service with no images published. Not treated as an error."
-      # Counted, not just logged: see this variable's own declaration above
-      # for why a single occurrence must stay a safe notice, but nearly
-      # every configured service hitting this path in the same run must not
-      # still read as a healthy summary (issue #1557, item 72).
+      # What: counted via services_not_found, not just logged.
+      # Why: a single occurrence is a safe notice, but nearly every service hitting this path in one run must not still read as healthy.
+      # From: Issue #1557 | PR #1559
       services_not_found=$((services_not_found + 1))
       return
     fi
@@ -594,30 +242,13 @@ process_service() {
   fi
   rm -f "$versions_stderr"
 
-  # `gh api --paginate` against this exact array-shaped endpoint was
-  # verified live during this PR (2026-08-06, against the real
-  # lancache-ng/proxy package, which has 3678 versions across 37 pages at
-  # per_page=100 per its own real `Link: ...; rel="last"` response header):
-  # a plain (non-paginated) call returns exactly 100 entries (page 1 only),
-  # while `gh api --paginate ... | jq -c '.[]' | wc -l` -- the identical
-  # command shape used below -- returned the full 3678, proving `--paginate`
-  # really does merge every page into one continuous array rather than
-  # silently truncating to page 1. No sanity-check heuristic is needed here
-  # as a result; an earlier draft of this function warned on an exact
-  # multiple-of-100 count as a possible truncation signal, but that would
-  # have fired constantly on the one case (a real, large count landing on a
-  # round page boundary) that is actually normal, while staying silent on
-  # genuine truncation at any other count -- a heuristic that trains a
-  # reader to ignore its own warnings is worse than no heuristic at all.
+  # What: `gh api --paginate` here merges every page into one continuous array rather than truncating to page 1 (verified live: a real 3678-version/37-page package returned the full count).
+  # Why: no truncation heuristic is layered on top -- an earlier draft warned on exact-multiple-of-100 counts, which fires constantly on the one case (a large count landing on a round page boundary) that is actually normal.
+  # From: Issue #1095
   #
-  # jq's exit status inside a process substitution (`< <(... | jq ...)`) is
-  # NOT checked by `set -e` -- bash simply never looks at it, so a
-  # missing/broken `jq` or malformed input here would make the loop
-  # silently see zero versions and this service would report as "nothing to
-  # clean" instead of "couldn't be inspected." Capturing jq's output via a
-  # checked command substitution first, then feeding a plain variable to
-  # `read` via a here-string, makes a jq failure visible and fails the run,
-  # exactly like every other failure mode in this script.
+  # What: jq's output is captured via a checked command substitution, then fed to `read` via a here-string, not consumed directly inside a process substitution.
+  # Why: jq's exit status inside `< <(...)` is never checked by `set -e`, so a broken jq would otherwise silently report "nothing to clean" instead of failing the run.
+  # From: Issue #1095
   if ! version_list="$(printf '%s' "$versions_json" | jq -c '.[]' 2>&1)"; then
     echo "::error::Failed to enumerate package versions for lancache-ng/${service} via jq: $version_list"
     had_errors=1
@@ -630,15 +261,9 @@ process_service() {
   local -A all_digest_set=()
   local service_deletions=0
 
-  # Pass 0: validate every version's `.name` really is the digest the orphan
-  # phase's digest-set comparisons assume it is, and build that digest set.
-  # ONE malformed entry disables orphan (untagged-version) classification for
-  # the WHOLE service this run -- see gcps_version_name_is_digest's own
-  # comment for why a partially-populated digest set is strictly more
-  # dangerous than an empty one (it would make some still-referenced
-  # manifest silently fail to match, looking exactly like a genuine orphan).
-  # Closed-PR tagged-version reaping below does not depend on this pass at
-  # all and is unaffected either way.
+  # What: Pass 0 validates every version's `.name` is really the digest shape the orphan phase's digest-set comparisons assume, building that digest set.
+  # Why: one malformed entry disables orphan classification for the whole service this run -- a partially-populated digest set is strictly more dangerous than an empty one (a still-referenced manifest would silently fail to match). Closed-PR tagged-version reaping does not depend on this pass.
+  # From: Issue #1095
   local version_entry name
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
@@ -649,13 +274,9 @@ process_service() {
       continue
     fi
     if ! gcps_version_name_is_digest "$name"; then
-      # AG-VAL-001 (issue #1557, item 79 of PR #1501's whole-file audit):
-      # this used to be `::warning::`-only with no had_errors=1, unlike the
-      # near-identical jq-read-failure case immediately above, which already
-      # sets had_errors=1. Both are "required classification evidence for
-      # this service is unavailable" states -- a malformed digest shape
-      # disables orphan classification exactly like a jq failure does, so a
-      # run hitting this must not still exit 0 and report a clean summary.
+      # What: AG-VAL-001 -- a malformed digest shape is now `::error::` + had_errors=1, not the prior `::warning::`-only treatment.
+      # Why: this is the same "required classification evidence unavailable" state as the jq-read failure just above, which already sets had_errors=1; a run hitting this must not exit 0 with a clean-looking summary.
+      # From: Issue #1557 | PR #1559
       echo "::error::A $service package version's .name ('$name') is not the expected sha256:<64-hex> digest shape -- disabling orphan (untagged-version) classification for this service this run. Closed-PR tagged-version reaping is unaffected."
       had_errors=1
       orphan_phase_ok=0
@@ -664,18 +285,9 @@ process_service() {
     all_digest_set["$name"]=1
   done <<< "$version_list"
 
-  # Fetch the anonymous registry pull token ONCE per service, before Pass 1,
-  # regardless of whether this service turns out to have any tagged versions
-  # at all -- deliberately NOT deferred to "the first tagged version Pass 1
-  # happens to see", which would leave registry_token empty (and every
-  # subsequent manifest fetch silently unauthenticated) for the edge case of
-  # a service with zero currently-tagged versions, since Pass 1's own loop
-  # body never reaches the token-fetch code for an untagged entry (it
-  # `continue`s out before that point). A wholly untagged service is
-  # unlikely for any of these 9 always-actively-published services in
-  # practice, but Pass 2 still needs a working token to check orphan
-  # candidates' own manifests either way, so fetching it here once keeps the
-  # token's lifetime independent of Pass 1's per-entry tag shape.
+  # What: fetches the anonymous registry pull token once per service, before Pass 1, regardless of whether this service has any tagged versions.
+  # Why: deferring to "the first tagged version Pass 1 happens to see" would leave registry_token empty for a wholly-untagged service, since that loop `continue`s out before reaching the token-fetch code -- but Pass 2 still needs a working token for orphan candidates either way.
+  # From: Issue #1095
   if [[ "$orphan_phase_ok" == "1" ]]; then
     if ! registry_token="$(ghcr_retry ghcr.io "" "" -- gcps_registry_anon_token "$service" "$repo")" || [[ -z "$registry_token" ]]; then
       echo "::error::Failed to obtain an anonymous registry pull token for $service -- disabling orphan classification for this service this run."
@@ -684,11 +296,9 @@ process_service() {
     fi
   fi
 
-  # Pass 1: closed-PR tagged-version classification (the original #626
-  # logic, unchanged in substance) PLUS -- when orphan_phase_ok -- collecting
-  # every tagged version's own manifest children into children_digests, so
-  # Pass 2 below can tell a genuinely orphaned untagged version apart from
-  # one still referenced by a live tag's image index.
+  # What: Pass 1 -- closed-PR tagged-version classification (the original #626 logic) plus, when orphan_phase_ok, collecting every tagged version's manifest children into children_digests.
+  # Why: Pass 2 below needs children_digests to tell a genuinely orphaned untagged version apart from one still referenced by a live tag's image index.
+  # From: Issue #1095
   local version_id tag_list
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
@@ -709,25 +319,9 @@ process_service() {
       continue # untagged -- classified in Pass 2 below, not here
     fi
 
-    # sha256-<64-hex> attestation-reference tags (see the full live-verified
-    # rationale below, at the tag this shape is actually classified under)
-    # are scanned in their OWN pass over every one of this version's tags,
-    # BEFORE the protected/has_closed_pr_tag decision loop below -- NOT
-    # folded into that loop's own per-tag branch, even though a
-    # sha256-<hex> tag would also be caught there. That decision loop
-    # `break`s as soon as it reaches a decisive tag (protected=1), which is
-    # correct and harmless for a decision (the outcome doesn't change by
-    # looking at more tags once one of them already says "keep"), but WRONG
-    # for data collection: a hypothetical multi-tag version like
-    # ["latest", "sha256-<hex>"] would hit "latest" first, set protected=1,
-    # `break`, and never reach the sha256-<hex> tag at all -- silently
-    # under-populating children_digests, which is exactly the dangerous
-    # direction (a still-referenced manifest looking orphaned) this whole
-    # orphan phase exists to prevent. Every real version sampled live
-    # (2026-08-06) carried exactly one tag, so this ordering bug cannot
-    # currently fire in practice -- but that observation was drawn from a
-    # sample, not a guarantee about every version this reaper will ever see,
-    # so the loop is still written to not depend on it.
+    # What: sha256-<64-hex> attestation-reference tags are scanned in their own pass over every tag, before the protected/has_closed_pr_tag decision loop below, even though the same shape would also be caught there.
+    # Why: that decision loop `break`s on the first decisive tag, which is correct for a decision but would under-populate children_digests for a hypothetical multi-tag version ["latest", "sha256-<hex>"] that hits "latest" first -- the dangerous direction (a still-referenced manifest looking orphaned) this whole phase exists to prevent.
+    # From: Issue #1095
     local attestation_tag
     while IFS= read -r attestation_tag; do
       [[ -z "$attestation_tag" ]] && continue
@@ -741,15 +335,9 @@ process_service() {
       [[ -z "$tag" ]] && continue
       if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
         local pr_number="${BASH_REMATCH[1]}"
-        # Called as a PLAIN STATEMENT with a result-variable argument, NOT
-        # wrapped in `$(...)`: command substitution forks a subshell, and
-        # gcps_pr_lookup_state's own pr_state_cache nameref writes would then
-        # land on that subshell's private copy of the array and vanish the
-        # instant it exits -- silently defeating the whole point of passing
-        # a cache through in the first place (issue #1557, item 74 of PR
-        # #1501's whole-file audit: this exact call site is what the bug was
-        # in, even though gcps_pr_lookup_state's own direct unit tests never
-        # caught it, since they invoke it as a plain statement too).
+        # What: called as a plain statement with a result-variable argument, not wrapped in `$(...)`.
+        # Why: command substitution forks a subshell, so gcps_pr_lookup_state's cache-nameref writes would land on that subshell's private copy and vanish -- this exact call site was the actual bug (item 74), since the function's own unit tests call it as a plain statement too and never caught it.
+        # From: Issue #1557 | PR #1559
         local pr_state
         gcps_pr_lookup_state "$pr_number" "$repo" pr_state_cache pr_state
         case "$pr_state" in
@@ -757,12 +345,9 @@ process_service() {
             protected=1
             ;;
           LOOKUP_FAILED)
-            # An ambiguous lookup is treated exactly like an open PR: keep,
-            # don't delete. See gcps_pr_lookup_state's own comment for why
-            # collapsing these was the actual bug this reaper already fixed
-            # once before. Counted separately from a real OPEN, though: see
-            # max_pr_lookup_failures' own comment at its declaration for why
-            # a run where this happens pervasively must not report success.
+            # What: treated exactly like an open PR (keep, don't delete), but counted separately in pr_lookup_failures.
+            # Why: collapsing OPEN and LOOKUP_FAILED was a real bug this reaper already fixed once; counting separately lets max_pr_lookup_failures catch a run where this happens pervasively.
+            # From: Issue #1095
             protected=1
             pr_lookup_failures=$((pr_lookup_failures + 1))
             ;;
@@ -772,60 +357,9 @@ process_service() {
         esac
         [[ "$protected" == "1" ]] && break
       else
-        # Any non pr-* tag (nightly, dev, latest, vX.Y.Z, sha-<commit>, ...)
-        # is a real published channel/source tag. Never delete it -- this
-        # includes sha-<commit> tags specifically, for every deletion
-        # mechanism this project runs, present and future, regardless of
-        # git-branch reachability or age: scripts/lib/staging-ancestor-
-        # fallback.sh's saf_find_built_ancestor() (called from
-        # saf_resolve_untouched_backfill_source()) walks back from a PR's
-        # base commit looking for a usable sha-<commit> image, but only up to
-        # ancestor_search_depth commits deep -- NOT literally unbounded.
-        # ensure-pr-staging-images.sh defaults that depth to 50
-        # (STAGING_ANCESTOR_SEARCH_DEPTH), overridable via env var, so in
-        # today's default configuration a sha-<commit> tag more than 50
-        # commits behind some future PR's base could never actually be
-        # selected by this specific fallback. That bound does not make any
-        # sha-<commit> tag a safe deletion target from THIS reaper's side,
-        # for two reasons: (1) the depth is an env-var override, not a
-        # constant this script can assume stays 50 forever, and (2) even
-        # within the current bound, this reaper has no way to know in
-        # advance which past commit some future PR's base will land on, so
-        # it cannot tell "more than 50 commits back from every future PR"
-        # apart from "still within reach of the next one" -- the set of
-        # sha-<commit> tags is small (roughly one per commit actually built),
-        # so blanket-protecting all of them costs nothing worth trading for
-        # that fragile inference.
-        #
-        # CORRECTED (issue #1095 G8 follow-up): the real invariant this branch
-        # protects is "successfully-scanned sha-<commit> tags stay tabu," not
-        # every sha-<commit> tag unconditionally regardless of outcome -- a
-        # scan-failed image was never a valid backfill candidate in the first
-        # place, since saf_resolve_untouched_backfill_source() exists to find
-        # a genuinely usable built image, not a disqualified one. This branch
-        # still protects every sha-<commit> tag it encounters with no
-        # per-tag distinction, but that is safe, not merely convenient: a
-        # scan-failed tag is deleted immediately, upstream of this reaper
-        # entirely, by build-push.yml's own "Delete GHCR package version
-        # pushed by a failed scan" step (build/build-arm64 jobs) the moment
-        # "Scan pushed service digest with Trivy" fails against that exact
-        # pushed digest -- so a scan-failed sha-<commit> tag should never
-        # exist by the time any reaper run could see it. This reaper has no
-        # reliable signal of its own to tell a passed-scan tag apart from a
-        # failed one after the fact (GHCR's package-version metadata carries
-        # no scan-result marker), so it deliberately does not attempt that
-        # distinction here -- it relies entirely on the upstream immediate-
-        # delete fix to keep a failed tag from ever reaching this decision in
-        # the first place, rather than trying to re-derive scan outcome from
-        # data this script was never given.
-        #
-        # `sha256-<64-hex>` tags (GHCR/Buildx's legacy referrers-fallback
-        # attestation-association convention) also fall into this branch --
-        # a real one, protected the same as any other non pr-* tag -- but
-        # their target-digest EXTRACTION into children_digests happens in
-        # the dedicated pass above this decision loop, not here: see that
-        # pass's own comment for the full live-verified rationale and for
-        # why it must not be gated by this loop's `break`.
+        # What: any non pr-* tag (nightly, dev, latest, vX.Y.Z, sha-<commit>, sha256-<hex> attestation refs) is a real published tag -- protected unconditionally, with no per-tag pass/fail distinction, including every sha-<commit> tag.
+        # Why: this is safe, not merely convenient -- a scan-failed sha-<commit> tag is already deleted immediately, upstream of this reaper entirely, by build-push.yml's own failed-Trivy-scan cleanup step, so one should never reach this reaper at all; GHCR's package-version metadata carries no scan-result marker for this reaper to re-derive that outcome itself. staging-ancestor-fallback.sh's own backfill search is bounded (STAGING_ANCESTOR_SEARCH_DEPTH, default 50) but that is an env-var override this reaper cannot assume stays fixed, and the set of sha-<commit> tags is small enough that blanket-protecting all of them costs nothing.
+        # From: Issue #1095
         protected=1
         break
       fi
@@ -833,12 +367,9 @@ process_service() {
 
     if [[ "$orphan_phase_ok" == "1" ]]; then
       local version_digest manifest_json
-      # `if ! version_digest=...` (not a bare assignment): under this
-      # script's own `set -euo pipefail`, an unguarded `x="$(jq ...)"`
-      # statement that fails would exit the ENTIRE script right here -- no
-      # summary line, no had_errors exit path, no remaining services --
-      # exactly the failure mode this function's own gcps_pr_lookup_state
-      # header comment already warns about for the identical shape.
+      # What: `if ! version_digest=...`, not a bare assignment.
+      # Why: an unguarded `x="$(jq ...)"` failure would exit the entire script here under `set -euo pipefail` -- no summary, no had_errors path, no remaining services -- the same shape gcps_pr_lookup_state's own header already warns about.
+      # From: Issue #1095
       if ! version_digest="$(printf '%s' "$version_entry" | jq -r '.name' 2>&1)"; then
         echo "::error::Failed to read $service version $version_id's own digest via jq: $version_digest"
         had_errors=1
@@ -853,12 +384,9 @@ process_service() {
           orphan_phase_ok=0
         else
           local child_digest children_output
-          # gcps_extract_manifest_children itself now fails (non-zero exit)
-          # rather than silently printing nothing when jq genuinely errors on
-          # a WELL-FORMED manifest body (as opposed to legitimately having no
-          # children) -- treated the same as a fetch failure above, since an
-          # incompletely-collected children set is what actually protects a
-          # live platform manifest from being misclassified as an orphan.
+          # What: gcps_extract_manifest_children failing is treated the same as a fetch failure above.
+          # Why: an incompletely-collected children set is what actually protects a live platform manifest from being misclassified as an orphan.
+          # From: Issue #1095
           if ! children_output="$(gcps_extract_manifest_children "$manifest_json")"; then
             echo "::error::Failed to extract manifest children for $service digest $version_digest -- disabling orphan classification for this service this run."
             had_errors=1
@@ -879,16 +407,9 @@ process_service() {
     fi
 
     local created_at created_epoch
-    # AG-VAL-001 (issue #1557, item 79): a malformed/unreadable .created_at
-    # is required evidence GHCR should always be returning -- unlike an
-    # isolated ambiguous PR-state lookup (a transient network/rate-limit
-    # blip this reaper already deliberately tolerates up to
-    # max_pr_lookup_failures before failing the run), a bad timestamp on a
-    # real GHCR record is a "should never happen" data-integrity signal.
-    # The candidate is still kept (fail-closed, unchanged), but per this
-    # project's own PR-1501 review finding, the run's exit code must also
-    # reflect that required evidence was unavailable rather than silently
-    # reporting a clean summary.
+    # What: a malformed/unreadable .created_at flags had_errors, not just a keep-as-fail-closed silent path.
+    # Why: unlike an isolated ambiguous PR-state lookup (a transient blip this reaper already tolerates), a bad timestamp on a real GHCR record is a "should never happen" data-integrity signal -- the exit code must reflect that required evidence was unavailable, per AG-VAL-001.
+    # From: Issue #1557 | PR #1559
     if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
       echo "::error::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
       had_errors=1
@@ -912,10 +433,9 @@ process_service() {
       continue
     fi
 
-    # Cosmetic (log message only, the tags this version already has were
-    # fully resolved via tag_list above) -- a jq failure here degrades the
-    # message instead of aborting or failing the run over something that
-    # isn't actually blocking the delete.
+    # What: tags_display is cosmetic (log message only); a jq failure here degrades the message instead of aborting.
+    # Why: this isn't actually blocking the delete, since tag_list above already fully resolved this version's tags.
+    # From: Issue #1095
     local tags_display
     tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []' 2>&1)" || tags_display="<jq error: $tags_display>"
     echo "Deleting $service version $version_id (only closed-PR staging tags: $tags_display)."
@@ -924,11 +444,9 @@ process_service() {
       deleted=$((deleted + 1))
       service_deletions=$((service_deletions + 1))
     else
-      # Logged and counted, not just warned: this is exactly the "PAT can
-      # list but lacks delete:packages" case (or GitHub rejecting one
-      # specific delete) -- if every delete in a run failed this way,
-      # deleted would stay 0 forever while the job still exited 0 unless
-      # had_errors makes it fail below.
+      # What: a failed delete is logged as `::error::` and flags had_errors, not just a warning.
+      # Why: this is the "PAT can list but lacks delete:packages" case (or GitHub rejecting one delete) -- if every delete in a run failed this way, `deleted` would stay 0 while the job still exited 0 without had_errors.
+      # From: Issue #1095
       echo "::error::Failed to delete $service version $version_id (tags: $tags_display): $delete_output"
       had_errors=1
     fi
@@ -938,11 +456,9 @@ process_service() {
     return
   fi
 
-  # Pass 2: orphan (untagged, unreferenced, old enough) classification --
-  # the new mechanism this PR adds. Re-reads the SAME version_list captured
-  # once at the top of this function (not a fresh listing call), so Pass 1's
-  # children_digests reflects a single, internally consistent snapshot of
-  # this service's manifest graph.
+  # What: Pass 2 -- orphan (untagged, unreferenced, old enough) classification, re-reading the same version_list captured at the top of this function.
+  # Why: reusing the same listing (not a fresh call) keeps Pass 1's children_digests a single, internally consistent snapshot of this service's manifest graph.
+  # From: Issue #1095
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
     if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
@@ -963,19 +479,17 @@ process_service() {
       continue
     fi
     if [[ -n "${children_digests[$name]:-}" ]]; then
-      # Still referenced as a child (a platform manifest, or a Buildx-
-      # embedded attestation/SBOM manifest) by at least one currently-tagged
-      # image index. Deleting it would break that live tag.
+      # What: still referenced as a child (a platform manifest, or a Buildx-embedded attestation/SBOM manifest) by at least one currently-tagged image index.
+      # Why: deleting it would break that live tag.
+      # From: Issue #1095
       kept=$((kept + 1))
       continue
     fi
 
     local created_at created_epoch
-    # AG-VAL-001 (issue #1557, item 79): same required-evidence reasoning as
-    # Pass 1's identical check above -- both a jq read failure and an
-    # unparseable timestamp must flag had_errors, and (this branch used to
-    # have NO message at all, unlike Pass 1's equivalent) both must actually
-    # report why via a log line, not fail silently.
+    # What: a jq read failure and an unparseable timestamp both flag had_errors and log why (this branch used to fail silently on both).
+    # Why: same required-evidence reasoning as Pass 1's identical check above (AG-VAL-001).
+    # From: Issue #1557 | PR #1559
     if ! created_at="$(printf '%s' "$version_entry" | jq -r '.created_at' 2>&1)"; then
       echo "::error::Failed to read created_at for $service version $version_id via jq: $created_at -- keeping it this run (fail closed)."
       had_errors=1
@@ -999,26 +513,13 @@ process_service() {
       continue
     fi
 
-    # This candidate has no tag of its own and is not listed as a child in
-    # any currently-tagged manifest's own `manifests[]` array -- but that
-    # array alone does not cover a REFERRERS-API attestation (the shape
-    # actions/attest / .github/actions/ghcr-attest-retry produces, confirmed
-    # in real use by this project's own build-push.yml "Attest image build
-    # provenance" steps): such an attestation is its own separate,
-    # permanently untagged package version that is NEVER listed inside any
-    # index's manifests[] array, and can only be identified by fetching ITS
-    # OWN manifest and reading its top-level `subject` field. One extra
-    # registry GET per about-to-delete candidate (bounded by
-    # max_deletions_per_service, never by the full untagged backlog) is
-    # cheap insurance against deleting a still-relevant attestation whose
-    # subject image is still alive.
+    # What: this candidate has no tag and isn't a child in any tagged manifest's `manifests[]` array, but that array doesn't cover a REFERRERS-API attestation (actions/attest's own shape) -- a permanently untagged version identifiable only by fetching its own manifest's `subject` field.
+    # Why: one extra registry GET per about-to-delete candidate (bounded by max_deletions_per_service) is cheap insurance against deleting a still-relevant attestation whose subject image is still alive.
+    # From: Issue #1095
     local candidate_manifest
-    # AG-VAL-001 (issue #1557, item 79): required evidence (whether this
-    # candidate is a live referrers-API attestation) was unavailable -- the
-    # candidate is correctly kept either way (fail closed, unchanged), but
-    # this must also flag had_errors so the run's exit code reflects that a
-    # required check could not be completed, matching the identical
-    # reasoning already applied to Pass 1's own manifest-fetch failure above.
+    # What: a failed fetch here (required evidence for the referrers-API check) flags had_errors, in addition to keeping the candidate (fail closed).
+    # Why: matches Pass 1's identical manifest-fetch-failure reasoning (AG-VAL-001) -- the exit code must reflect that a required check could not be completed.
+    # From: Issue #1557 | PR #1559
     if ! candidate_manifest="$(ghcr_retry ghcr.io "" "" -- gcps_fetch_manifest "$service" "$name" "$repo" "$registry_token")" || [[ -z "$candidate_manifest" ]]; then
       echo "::error::Could not fetch $service candidate orphan $name's own manifest to check for a subject reference -- keeping it this run rather than risk deleting a live attestation."
       had_errors=1
@@ -1028,8 +529,9 @@ process_service() {
     local subject_digest
     subject_digest="$(printf '%s' "$candidate_manifest" | jq -r '.subject.digest // empty' 2>/dev/null)" || subject_digest=""
     if [[ -n "$subject_digest" ]] && [[ -n "${all_digest_set[$subject_digest]:-}" ]]; then
-      # A live referrers-API attestation: its subject digest is still a
-      # version that exists in this service's package right now.
+      # What: a live referrers-API attestation, subject digest still present in this service's package.
+      # Why: keep it -- deleting would orphan a still-relevant attestation.
+      # From: Issue #1095
       kept=$((kept + 1))
       continue
     fi
@@ -1047,36 +549,18 @@ process_service() {
 }
 
 # main
-#
-# Everything that must NOT happen just from sourcing this file (requiring a
-# real GH_TOKEN, checking for real tools, and actually sweeping every
-# service) lives here rather than at plain top level, specifically so
-# tests/bats/gc_pr_staging_images.bats can `source` this script -- getting
-# every gcps_* function, process_service(), and every config variable above
-# for free -- and call process_service() directly against a mocked
-# `gh`/`curl` without needing a real credential or tripping the capability
-# checks. The BASH_SOURCE guard at the bottom of this file is what decides
-# whether main ever actually runs.
+# What: everything requiring a real GH_TOKEN, real tools, and an actual sweep lives here, not at plain top level.
+# Why: tests/bats/gc_pr_staging_images.bats sources this file to reuse every gcps_* function/process_service()/config variable under mocked gh/curl -- main() must not run out from under a plain `source`, which the BASH_SOURCE guard at this file's bottom enforces.
+# From: Issue #1095
 main() {
-  # No apostrophes or single quotes in this message (shellcheck SC1011): an
-  # apostrophe inside a ${var:?message} expansion gets misparsed by static
-  # analysis as opening a single-quoted string, which then desyncs on the
-  # next real quote character it meets -- this message was rewritten to
-  # avoid both, not just to silence the warning; the actual bash behavior
-  # was never affected.
+  # What: this ${var:?message} error message avoids apostrophes/single quotes (shellcheck SC1011).
+  # Why: an apostrophe inside the expansion gets misparsed as opening a quoted string that then desyncs on the next real quote; bash's actual behavior was never affected, this is a message-wording fix only.
+  # From: Issue #1095
   : "${GH_TOKEN:?GH_TOKEN (the GHCR_PACKAGE_DELETE_PAT secret configured on this repository) is required -- see the calling workflow, specifically its Check for GHCR deletion credentials step, which must gate whether this script ever runs.}"
 
-  # AG-CI-001: self-hosted runners (this job runs on lancache-light, not
-  # inside the pinned build-tools container -- see the calling workflow's
-  # `runs-on:`) must not be assumed to carry any tool beyond the bare OS.
-  # Fail loud and early rather than let a missing tool surface as a
-  # confusing mid-run parse error partway through the first service. `date`
-  # specifically must be a GNU `date` for gcps_created_at_to_epoch's `-d`
-  # flag to parse an ISO-8601 timestamp -- this project's self-hosted
-  # runners are Linux hosts (GNU coreutils `date` is the default there), and
-  # `date -d` is already an established pattern elsewhere in this repo (see
-  # scripts/ntp-cap-sys-time-simulation.sh), but this check alone cannot
-  # distinguish a present-but-non-GNU `date` from a working one.
+  # What: AG-CI-001 -- fails loud and early if gh/jq/curl/date are missing, rather than a confusing mid-run parse error.
+  # Why: self-hosted runners here (lancache-light, not the pinned build-tools container) can't be assumed to carry any tool beyond the bare OS; `date` specifically must be GNU date for gcps_created_at_to_epoch's `-d` flag.
+  # From: Issue #1095
   local required_cmd
   for required_cmd in gh jq curl date; do
     if ! command -v "$required_cmd" >/dev/null 2>&1; then
@@ -1099,17 +583,9 @@ main() {
     had_errors=1
   fi
 
-  # A single service reporting "no GHCR package yet" is a safe, expected
-  # notice (see services_not_found's own declaration above). But GitHub's
-  # own REST docs say a 404 here can also hide an authorization failure
-  # this reaper cannot positively distinguish from genuine absence per
-  # call, so more than half of the currently-configured services hitting
-  # this path in the SAME run is treated the same way pr_lookup_failures'
-  # own threshold already treats pervasive ambiguous PR lookups: not proof
-  # of a real problem, but far more consistent with one (GHCR_PACKAGE_DELETE_
-  # PAT losing read:packages, or the packages API being rate-limited) than
-  # with several services all genuinely launching in the same run (issue
-  # #1557, item 72).
+  # What: more than half of the currently-configured services hitting "no GHCR package yet" in the same run is treated as a real, run-failing error.
+  # Why: a single such service is safe and expected, but GitHub's REST docs say a 404 here can also hide an authorization failure this reaper can't distinguish from genuine absence per call -- mirroring pr_lookup_failures' identical pervasive-ambiguity reasoning.
+  # From: Issue #1557 | PR #1559
   local max_services_not_found=$(( (${#services[@]} / 2) + 1 ))
   if (( services_not_found >= max_services_not_found )); then
     echo "::error::$services_not_found of ${#services[@]} configured services reported no GHCR package yet this run (threshold: $max_services_not_found) -- this many simultaneous 404s is far more consistent with GHCR_PACKAGE_DELETE_PAT losing its read:packages scope (which GitHub's own REST docs say can also surface as 404, not just 403) than with that many services genuinely never having published an image. Each one was still safely treated as nothing-to-reap, but reporting this run as a plain success would hide that the reap path likely did far less real work than it should have across the whole services list, not just one service."
@@ -1122,13 +598,9 @@ main() {
   fi
 }
 
-# `"${BASH_SOURCE[0]}" == "${0}"` is true only when this file is EXECUTED
-# directly (as the calling workflow does: `bash scripts/gc-pr-staging-images.sh`),
-# not when it is `source`d by something else -- the bats suite sources this
-# file to reuse every gcps_* function, process_service(), and its config
-# variables under mocked gh/curl, and must not have main() (which
-# hard-requires a real GH_TOKEN and real tools) run out from under it just
-# from the `source` line.
+# What: `"${BASH_SOURCE[0]}" == "${0}"` is true only when this file is executed directly, not when it's `source`d.
+# Why: the bats suite sources this file to reuse every gcps_* function/process_service()/config variable under mocked gh/curl; main() (hard-requiring a real GH_TOKEN and real tools) must not run out from under a plain `source`.
+# From: Issue #1095
 if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
   main
 fi
