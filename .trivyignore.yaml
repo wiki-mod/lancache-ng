@@ -91,77 +91,87 @@ vulnerabilities:
     expired_at: 2026-11-15
   - id: CVE-2026-12064
     statement: >-
-      Accepted, tracked risk -- not a non-exploitability disposition; curl's
-      vulnerable code genuinely is present here. CVE-2026-12064 is an SSH
-      host-verification bypass triggered by schemeless URLs used with
-      SFTP/SCP.
+      Accepted, tracked risk -- not a non-exploitability disposition. This
+      entry's own disposition for this CVE ID is stated precisely as what
+      was actually measured, not overstated: Trivy reports it
+      `Status: affected`, `FixedVersion: None` against the currently
+      installed package (see below); whether that reflects a genuinely
+      unfixed condition or a Debian-tracker/Trivy-DB mapping gap on a
+      package that is nominally at curl's own stated fixed version is NOT
+      resolved by this review -- issue #1304's own 2026-07-31 comment
+      already raised exactly this question ("could be Trivy's vulnerability
+      DB... not yet having the fixed-at-8.21.0 mapping recorded") and it
+      remains open. CVE-2026-12064 itself is an SSH host-verification
+      bypass triggered by schemeless URLs used with SFTP/SCP.
 
       2026-08-15 checkpoint re-review (performed 2026-08-14, via real
       execution on self-hosted runner lancache-240, not from tracker
       websites alone -- see this entry's own prior history for why that
       distinction matters): all 5 originally-named First-Party images
       (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`,
-      `services/ntp`) are now confirmed Alpine-based (`alpine:3.24`, direct
-      `FROM`-line read of every Dockerfile). Real evidence, not assumed from
-      that alone: built `services/proxy` for real from `current_dev`
-      (`docker buildx build --build-arg BUILD_TOOLS_IMAGE=... --build-context
-      dns-domains=services/dns services/proxy`), confirmed `curl 8.21.0`
-      installed via `curl --version` inside the built image, then ran a real
+      `services/ntp`) share the byte-identical Alpine base image digest
+      `alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b`
+      (grep-confirmed across all 5 Dockerfiles' `FROM` lines) and each
+      installs `curl` via the same `apk add curl` mechanism from the same
+      package repositories. Built `services/proxy` for real from
+      `current_dev` (`docker buildx build --build-arg
+      BUILD_TOOLS_IMAGE=... --build-context dns-domains=services/dns
+      services/proxy`), confirmed `curl 8.21.0` installed via `curl
+      --version` inside the built image, then ran a real
       `aquasec/trivy:latest` (v0.73.0) scan --
       `trivy image --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --scanners vuln`,
-      no `.trivyignore.yaml` applied: **0 total findings of any severity**,
+      no `.trivyignore.yaml` applied: 0 total findings of any severity,
       this CVE ID and the rest of this group entirely absent. Cross-checked
       against a second, independently-published image
-      (`ghcr.io/wiki-mod/lancache-ng/dns:nightly`, pulled fresh): identical
-      base (`alpine:3.24.1`, `curl 8.21.0`) and identical real-scan result
-      (0 findings). Both real scans confirm `curl` genuinely is installed
-      (present in the package list), so this is a real "no longer flagged"
-      result, not merely "package absent." `services/watchdog`/`services/ui`/
-      `services/ntp` were not separately rebuilt this pass -- Trivy's
-      `os-pkgs` finding class has no per-image `PkgPath`, so an identical
-      Alpine base + identical `apk`-installed `curl` package genuinely
-      produces an identical scan result, matching this file's own
-      established precedent for reusing evidence across images sharing this
-      finding class (see PR #1323's consolidation comment on issue #1304).
+      (`ghcr.io/wiki-mod/lancache-ng/dns:nightly`, pulled fresh): also
+      resolves to `curl 8.21.0` and produces the identical real-scan result
+      (0 findings). `services/watchdog`/`services/ui`/`services/ntp` were
+      not separately rebuilt this pass -- the load-bearing fact for
+      generalizing to them is the shared base-image digest plus the
+      identical `apk` install mechanism verified at `curl 8.21.0` on 2 of
+      the 5 images, not any property of Trivy's finding class itself.
       **Real, separate finding, not previously documented anywhere in this
       entry**: `tools/build-tools`'s own image (built via
       `scripts/select-build-tools-image.sh` from `current_dev`, tag
       `lancache-ng-build-tools-validation:local-local-1`) is Debian-based
       (`rust:latest`) and installs `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
       from `trixie-backports` at `8.21.0-2~bpo13+1` -- confirmed via
-      `dpkg -l` inside the built image. A real
-      `trivy image --severity HIGH,CRITICAL --scanners vuln` scan against
-      this image (same date, same runner) found this CVE ID genuinely
-      present: `Status: affected`, `FixedVersion: None`. This is a real gap
-      in every prior version of this entry, which only ever discussed the 5
-      runtime service images and never mentioned `tools/build-tools` as
-      needing this suppression, even though the no-`paths:`-scoping design
-      (re-confirmed below) means it always covered `tools/build-tools` too
-      the moment that image also carried an affected `curl` package.
-      `tools/build-tools`'s actual `curl` usage (grep-confirmed
-      2026-08-14, `tools/build-tools/Dockerfile`): every invocation is
-      `curl -fsSL "https://github.com/.../releases/download/..."` against a
-      small, fixed set of pinned GitHub-release URLs (`cargo-audit`,
-      `cargo-tarpaulin`, `shellspec`) -- no schemeless SFTP/SCP URL, matching
-      the same non-triggering usage shape already established for the 5
-      runtime images' healthcheck/monitoring-loop calls. This entry
-      therefore now names `tools/build-tools` as its real, live scope; the 5
-      originally-named runtime images no longer need it (their own
-      Alpine-migration accuracy notes above stay as historical background,
-      unedited, per this file's convention of not rewriting prior findings).
-      No `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian`
-      finding class -- how curl/libcurl4t64 are detected here, being
-      installed via `apt`/`dpkg` rather than a language-specific analyzer --
-      carries no `PkgPath` at all, unlike this file's existing Go-binary
-      entries above (`docker-compose`/`docker-buildx`, scanned by Trivy's
-      `gobinary` analyzer, which genuinely does report a file path).
-      Confirmed empirically on a real build of the proxy image (prior
-      finding, still valid): an ignore entry for this same CVE ID with a
-      populated but bogus `paths:` value (`usr/bin/curl`) did NOT suppress
-      the finding, while an otherwise identical entry with no `paths:`
-      field at all DID suppress it cleanly. This is a time-boxed
-      acceptance, not an indefinite one: re-review on or before 2026-08-28
-      -- rebuild and re-scan `tools/build-tools` at that time; if
+      `dpkg -l` inside the built image. Real Trivy scans against this image
+      at both `--severity HIGH,CRITICAL` and the full
+      `UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL` range (same date, same runner)
+      found this CVE ID reported: `Status: affected`, `FixedVersion: None`.
+      This is a real gap in every prior version of this entry, which only
+      ever discussed the 5 runtime service images and never mentioned
+      `tools/build-tools` as needing this suppression, even though the
+      no-`paths:`-scoping design (re-confirmed below) means it always
+      covered `tools/build-tools` too the moment that image also carried an
+      affected `curl` package. `tools/build-tools`'s actual `curl` usage
+      (grep-confirmed 2026-08-14, `tools/build-tools/Dockerfile`): every
+      invocation is `curl -fsSL "https://github.com/.../releases/download/..."`
+      against a small, fixed set of pinned GitHub-release URLs
+      (`cargo-audit`, `cargo-tarpaulin`, `shellspec`) -- no schemeless
+      SFTP/SCP URL, matching the same non-triggering usage shape already
+      established for the 5 runtime images' healthcheck/monitoring-loop
+      calls. This entry therefore now names `tools/build-tools` as its real,
+      live scope; the 5 originally-named runtime images no longer need it
+      (their own Alpine-migration accuracy notes above stay as historical
+      background, unedited, per this file's convention of not rewriting
+      prior findings). No `paths:` scoping is given for this entry: Trivy's
+      `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected
+      here, being installed via `apt`/`dpkg` rather than a
+      language-specific analyzer -- carries no `PkgPath` at all, unlike
+      this file's existing Go-binary entries above (`docker-compose`/
+      `docker-buildx`, scanned by Trivy's `gobinary` analyzer, which
+      genuinely does report a file path). Confirmed empirically on a real
+      build of the proxy image (prior finding, still valid): an ignore
+      entry for this same CVE ID with a populated but bogus `paths:` value
+      (`usr/bin/curl`) did NOT suppress the finding, while an otherwise
+      identical entry with no `paths:` field at all DID suppress it
+      cleanly. This is a time-boxed acceptance, not an indefinite one:
+      re-review on or before 2026-08-28 -- rebuild and re-scan
+      `tools/build-tools` at that time, at full severity range (a HIGH-only
+      scan alone previously missed 4 sibling IDs in this same group that had
+      been reclassified to MEDIUM, see CVE-2026-8932 below); if
       trixie/backports/sid has shipped a fix for this CVE ID by then, drop
       this entry; if not, revisit (extend, or investigate a narrower `curl`
       footprint for `tools/build-tools`). See issue #1304 for the complete
@@ -173,59 +183,110 @@ vulnerabilities:
     statement: >-
       Accepted, tracked risk -- same curl finding group as CVE-2026-12064
       above (see that entry for the full background: the 2026-08-15
-      checkpoint's real-execution methodology, why the 5 originally-named
-      runtime images no longer need this entry, why `tools/build-tools` is
-      this entry's real remaining scope, its actual narrow `curl` usage
-      there, why no `paths:` scoping is given, and the 2026-08-28
-      re-review checkpoint). CVE-2026-8286 is an insecure-connection-
-      establishment issue caused by a TLS configuration mismatch. Real,
-      current Trivy scan (2026-08-14, lancache-240) confirms this ID is
-      still present on `tools/build-tools`'s `curl`/`libcurl4t64`/
-      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status: affected`,
-      `FixedVersion: None`) and absent from both real-scanned Alpine-based
-      images, disclosed 2026-07-03.
+      checkpoint's real-execution methodology, why the disposition is
+      stated as "Trivy reports affected" rather than "genuinely
+      vulnerable", why the 5 originally-named runtime images no longer need
+      this entry, why `tools/build-tools` is this entry's real remaining
+      scope, its actual narrow `curl` usage there, why no `paths:` scoping
+      is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8286 is
+      an insecure-connection-establishment issue caused by a TLS
+      configuration mismatch. Real, current Trivy scan (2026-08-14,
+      lancache-240, both HIGH,CRITICAL and full-severity-range) confirms
+      this ID is reported against `tools/build-tools`'s `curl`/
+      `libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status:
+      affected`, `FixedVersion: None`, severity HIGH) and absent from both
+      real-scanned Alpine-based images at any severity, disclosed
+      2026-07-03.
     expired_at: 2026-08-28
   - id: CVE-2026-8927
     statement: >-
       Accepted, tracked risk -- same curl finding group as CVE-2026-12064
       above (see that entry for the full background: the 2026-08-15
-      checkpoint's real-execution methodology, why the 5 originally-named
-      runtime images no longer need this entry, why `tools/build-tools` is
-      this entry's real remaining scope, its actual narrow `curl` usage
-      there, why no `paths:` scoping is given, and the 2026-08-28
-      re-review checkpoint). CVE-2026-8927 is an information-disclosure
-      issue caused by proxy authentication state not being cleared between
-      connections. Real, current Trivy scan (2026-08-14, lancache-240)
-      confirms this ID is still present on `tools/build-tools`'s `curl`/
-      `libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status:
-      affected`, `FixedVersion: None`) and absent from both real-scanned
-      Alpine-based images, disclosed 2026-07-03.
+      checkpoint's real-execution methodology, why the disposition is
+      stated as "Trivy reports affected" rather than "genuinely
+      vulnerable", why the 5 originally-named runtime images no longer need
+      this entry, why `tools/build-tools` is this entry's real remaining
+      scope, its actual narrow `curl` usage there, why no `paths:` scoping
+      is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8927 is
+      an information-disclosure issue caused by proxy authentication state
+      not being cleared between connections. Real, current Trivy scan
+      (2026-08-14, lancache-240, both HIGH,CRITICAL and
+      full-severity-range) confirms this ID is reported against
+      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at
+      `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`,
+      severity HIGH) and absent from both real-scanned Alpine-based images
+      at any severity, disclosed 2026-07-03.
     expired_at: 2026-08-28
-  - id: CVE-2026-8458
+  - id: CVE-2026-8932
     statement: >-
-      New entry, discovered during the 2026-08-15 checkpoint re-review
-      (2026-08-14, real Trivy scan on lancache-240 of the same
-      `tools/build-tools` image built for the CVE-2026-12064/-8286/-8927
-      re-check above) -- not part of this file's original 7-CVE curl group
-      (that group was scoped to CVEs known as of 2026-07-30), but the
-      identical curl/libcurl finding class, on the identical package
-      (`curl`/`libcurl3t64-gnutls`/`libcurl4-gnutls`/`libcurl4-openssl-dev`/
-      `libcurl4t64` at `8.21.0-2~bpo13+1`, `tools/build-tools` only --
-      absent from the real-scanned Alpine-based runtime images), so added
-      here rather than left undocumented (Rule-Ref: AG-WF-011). CVE-2026-8458
-      is a libcurl unauthorized-connection-reuse bug: a Negotiate-
-      authenticated connection can be wrongfully reused for a different
-      'service' due to a logical error in curl's connection-pool reuse
-      criteria. `Status: affected`, `FixedVersion: None`, disclosed
-      2026-07-03 (same batch as the rest of this group). Accepted because
-      `tools/build-tools`'s actual `curl` usage (grep-confirmed
-      2026-08-14) is a small, fixed set of `curl -fsSL "https://..."` calls
-      against pinned GitHub-release URLs with no authentication configured
-      at all -- no Negotiate/Kerberos/NTLM auth, so the connection-pool
-      reuse-criteria bug this CVE describes has no authenticated connection
-      to ever misapply. No `paths:` scoping is given, matching the rest of
-      this group (see CVE-2026-12064 above). Time-boxed acceptance:
-      re-review on or before 2026-08-28, alongside the rest of this group.
+      Accepted, tracked risk -- same curl finding group as CVE-2026-12064
+      above (see that entry for the full background). CVE-2026-8932 is a
+      security-feature-bypass issue caused by improper mTLS connection
+      reuse. This ID was initially, incorrectly, planned for removal
+      earlier in this same checkpoint pass, because the first real Trivy
+      scan of `tools/build-tools` used `--severity HIGH,CRITICAL` only and
+      found no match; a follow-up **full-severity-range** scan
+      (`--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL`, same image, same
+      runner, 2026-08-14) found this ID IS present, at `Severity: MEDIUM`
+      (reclassified down from its originally-tracked HIGH), `Status:
+      affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/
+      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`. Restored, not removed --
+      a HIGH,CRITICAL-only scan is not sufficient evidence that a
+      previously-HIGH finding is gone; it may only have been reclassified.
+      Absent from both real-scanned Alpine-based images at any severity.
+      Same `tools/build-tools`-only scope and narrow non-triggering usage
+      as CVE-2026-12064 above, disclosed 2026-07-03.
+    expired_at: 2026-08-28
+  - id: CVE-2026-9079
+    statement: >-
+      Accepted, tracked risk -- same curl finding group as CVE-2026-12064
+      above (see that entry for the full background, and CVE-2026-8932
+      above for why this ID was restored after an initial incorrect
+      HIGH,CRITICAL-only removal in this same pass). CVE-2026-9079 is an
+      information-disclosure issue caused by failure to clear proxy
+      authentication credentials. Full-severity-range real Trivy scan
+      (2026-08-14, lancache-240) confirms this ID present at `Severity:
+      MEDIUM` (reclassified down from HIGH), `Status: affected`,
+      `FixedVersion: None`, on `tools/build-tools`'s `curl`/`libcurl4t64`/
+      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both
+      real-scanned Alpine-based images at any severity, disclosed
+      2026-07-03.
+    expired_at: 2026-08-28
+  - id: CVE-2026-9080
+    statement: >-
+      Accepted, tracked risk -- same curl finding group as CVE-2026-12064
+      above (see that entry for the full background, and CVE-2026-8932
+      above for why this ID was restored after an initial incorrect
+      HIGH,CRITICAL-only removal in this same pass). CVE-2026-9080 is a
+      use-after-free reachable via `curl_easy_pause()` inside a
+      `CURLMOPT_SOCKETFUNCTION` callback -- a libcurl multi-interface
+      callback API `tools/build-tools`'s own `curl` invocations never use
+      (each is a plain `curl -fsSL` CLI call against a pinned URL, not code
+      linking against libcurl's callback API directly). Full-severity-range
+      real Trivy scan (2026-08-14, lancache-240) confirms this ID present
+      at `Severity: MEDIUM` (reclassified down from HIGH), `Status:
+      affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/
+      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both
+      real-scanned Alpine-based images at any severity, disclosed
+      2026-07-03.
+    expired_at: 2026-08-28
+  - id: CVE-2026-9545
+    statement: >-
+      Accepted, tracked risk -- same curl finding group as CVE-2026-12064
+      above (see that entry for the full background, and CVE-2026-8932
+      above for why this ID was restored after an initial incorrect
+      HIGH,CRITICAL-only removal in this same pass). CVE-2026-9545 is an
+      information-disclosure issue via a cached SSL session and early data
+      -- reachable only across a long-lived process reusing a session,
+      which does not describe `tools/build-tools`'s own `curl` invocations:
+      each is a short-lived, one-shot-per-invocation `curl -fsSL` CLI call
+      during the image build, not a long-lived process. Full-severity-range
+      real Trivy scan (2026-08-14, lancache-240) confirms this ID present
+      at `Severity: MEDIUM` (reclassified down from HIGH), `Status:
+      affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/
+      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both
+      real-scanned Alpine-based images at any severity, disclosed
+      2026-07-03.
     expired_at: 2026-08-28
   - id: CVE-2011-4116
     statement: >-

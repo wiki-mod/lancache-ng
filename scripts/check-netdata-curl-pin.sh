@@ -67,18 +67,23 @@
 # 8.17.0, so bumping to v2.11.0 would not resolve this either -- not
 # attempted here, since it would not fix the underlying risk and is a
 # separate, larger change of its own). No newer netdata release fixes this
-# as of today. Separately, this same checkpoint's real Trivy scans (see
-# .trivyignore.yaml's CVE-2026-12064/-8286/-8927/-8458 entries) found the
-# curl-fixed-at-8.21.0 assumption behind CURL_SAFE_THRESHOLD is not fully
-# uniform across every one of the originally tracked 7 CVE IDs once tested
-# for real against an actual 8.21.0 build (3 of 7 plus one newly-found ID
-# still showed as affected on a real trixie-backports 8.21.0-2~bpo13+1
-# `curl` package) -- CURL_SAFE_THRESHOLD is NOT re-derived from that finding
-# in this pass, since netdata's own vendored curl (8.20.0) is below 8.21.0
-# either way and the gate's actual pass/fail here is unaffected regardless
-# of that per-CVE nuance; flagged so a future re-review does not treat
-# "netdata ships >= 8.21.0" as automatically sufficient without checking
-# the specific CVE set again at that time. ACCEPTED_UNTIL therefore extends
+# as of today. Separately, this same checkpoint's real, full-severity-range
+# Trivy scans (see .trivyignore.yaml's CVE-2026-12064/-8286/-8927/-8932/
+# -9079/-9080/-9545 entries) found Trivy still reports ALL 7 originally
+# tracked CVE IDs against a real `curl 8.21.0-2~bpo13+1` package (on
+# tools/build-tools; 3 at HIGH, 4 reclassified to MEDIUM) -- i.e. the
+# curl-fixed-at-8.21.0 assumption behind CURL_SAFE_THRESHOLD did NOT hold up
+# against a real scan of an actual 8.21.0 build in this pass, for that
+# specific package. Whether that reflects a genuinely unfixed condition or
+# a Debian-tracker/Trivy-DB mapping gap on a package nominally at curl's own
+# stated fixed version is NOT resolved here (see issue #1304's 2026-07-31
+# comment, which already raised the identical question). CURL_SAFE_THRESHOLD
+# is NOT changed in this pass regardless of that open question, since
+# netdata's own vendored curl (8.20.0) is below 8.21.0 either way and the
+# gate's actual pass/fail here is unaffected by it; flagged so a future
+# re-review does not treat "netdata ships >= 8.21.0" as automatically
+# sufficient without a real scan at that time too. ACCEPTED_UNTIL therefore
+# extends
 # to 2026-08-28, matching the `.trivyignore.yaml` curl-group entries' own
 # extended checkpoint from the same re-review pass -- re-verify both
 # together again at that date, per this comment's own original instruction.
