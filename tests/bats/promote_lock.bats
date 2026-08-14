@@ -194,16 +194,27 @@ setup() {
     status_a="$(cat "$result_a")"
     status_b="$(cat "$result_b")"
 
-    # Exactly one of the two must have acquired (0) and the other must have
-    # lost the race (2, "someone else is actively creating/taking it right
-    # now") -- never both 0 (both think they hold it, defeating the whole
-    # point) and never both non-zero (a real bug would have left the lock
-    # unclaimed by anyone).
+    # Exactly one of the two must have acquired (0); the other must have
+    # failed to acquire via either 1 ("held by someone else, not stale") or
+    # 2 ("lost a create/takeover race") -- both are correct, documented
+    # non-acquisition outcomes (see promote_lock_try_acquire's own comment),
+    # and which one the loser gets is a real, unavoidable function of
+    # exactly how far the winner's create+push got before the loser's own
+    # first ls-remote check ran, not something this test controls. Real,
+    # executed proof (staggering the two subshells by as little as 20ms
+    # consistently flips the loser from 2 to 1, while 0ms delay gives 2) is
+    # why this no longer pins the loser to exactly 2 -- CI's real scheduling
+    # jitter under load reliably lands in the 1 case, which a stricter
+    # assertion here previously treated as a failure of the code under
+    # test, not of this assertion's own tighter-than-reality assumption.
+    # 3 ("real failure querying/writing the ref") is excluded either way --
+    # that would mean a genuine bug, not just a timing outcome.
     if [ "$status_a" = "0" ]; then
-        [ "$status_b" = "2" ]
+        [[ "$status_b" == "1" || "$status_b" == "2" ]]
+    elif [ "$status_b" = "0" ]; then
+        [[ "$status_a" == "1" || "$status_a" == "2" ]]
     else
-        [ "$status_a" = "2" ]
-        [ "$status_b" = "0" ]
+        return 1
     fi
 }
 
