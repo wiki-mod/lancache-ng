@@ -4,10 +4,9 @@
 #
 # What: coverage for scripts/check-netdata-curl-pin.sh's version-parsing,
 # comparison, and grace-period logic.
-# Why: all tests run fully offline via the script's own
-# BUNDLED_PACKAGES_CONTENT_FILE test hook, so this suite never depends on
-# GitHub's raw content host being reachable.
-# From: Issue #1304
+# Why: all tests run offline via the script's own
+# BUNDLED_PACKAGES_CONTENT_FILE test hook, no real network needed.
+# From: Issue #1304 | PR #1352
 
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-netdata-curl-pin.sh"
@@ -91,7 +90,7 @@ EOF
 # What: tests below use NETDATA_CURL_PIN_TODAY to exercise both sides of
 # the ACCEPTED_UNTIL grace-period boundary deterministically.
 # Why: avoids depending on (or waiting for) the real wall-clock date.
-# From: Issue #1304
+# From: Issue #1304 | PR #1352
 
 @test "main: a still-vulnerable pinned curl version WARNS (non-blocking) before the grace-period deadline" {
     write_dockerfile_fixture "v2.10.4"
