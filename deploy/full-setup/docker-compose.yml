@@ -55,34 +55,19 @@ services:
       retries: 2
       start_period: 10s
 
-  # Standard-mode passthrough shim (issue #668). Prod's IP_STANDARD:443 is
-  # Docker-port-published straight into this SAME proxy container's own
-  # internal :8443 SNI-passthrough listener (see entrypoint.sh's "Docker
-  # routes IP_SSL:443->container:443 and IP_STANDARD:443->container:8443"
-  # comment, and nginx.conf's stream block) -- a host-IP-scoped port-publish
-  # mechanism this bridge-network validation harness has no equivalent for,
-  # since a single container only ever gets one address per Compose network.
-  # This tiny socat shim reproduces that exact TCP-level :443 -> proxy:8443
-  # forward as a real, separately dialable address instead. dns-standard's
-  # PROXY_IP below now points here rather than at the proxy container's own
-  # address, so a client that only trusts dns-standard's DNS answer genuinely
-  # lands on the SNI-passthrough listener and never on the interception one --
-  # closing the gap issue #668 raised: previously dns-standard and dns-ssl
-  # resolved to the exact same reachable endpoint, so nothing could tell a
-  # correctly-wired dns-ssl apart from one wrongly pointed at the
-  # standard-mode address. scripts/ssl-mitm-cache-simulation.sh proves this
-  # end-to-end by connecting to whatever each DNS server actually answers
-  # with and inspecting the certificate presented there.
+  # What: a socat shim reproducing prod's Docker-port-published
+  # IP_STANDARD:443 -> proxy:8443 forward as a separately dialable address.
+  # Why: this bridge-network validation harness has no per-host-IP publish
+  # mechanism; without it dns-standard and dns-ssl resolved to the same
+  # endpoint, so nothing could tell a miswired dns-ssl apart from correct.
+  # From: Issue #668 | PR #795
   #
-  # Gated behind a Compose profile so only that script (which names this
-  # service explicitly on its own `docker compose up` command line) ever
-  # starts it -- every other job in this harness brings the stack up
-  # unrestricted (`docker compose up -d`, no service list) and has no use
-  # for it; profile-gating keeps this addition a no-op there instead of
-  # requiring every one of those jobs' workflow env blocks to also thread a
-  # per-run VALIDATION_STANDARD_SHIM_IP (an un-threaded default here would
-  # otherwise land outside whatever per-run subnet those jobs reserved and
-  # break their unrelated `docker compose up -d`).
+  # What: gated behind a Compose profile, started only by
+  # scripts/ssl-mitm-cache-simulation.sh's own explicit service name.
+  # Why: every other job brings the stack up unrestricted and has no use
+  # for this shim; an un-threaded default IP would land outside whatever
+  # subnet those jobs reserved and break their unrelated `compose up -d`.
+  # From: Issue #668 | PR #795
   standard-passthrough-shim:
     profiles: [ssl-mitm-proof]
     image: mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
