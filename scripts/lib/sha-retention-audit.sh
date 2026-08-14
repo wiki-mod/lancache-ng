@@ -132,7 +132,12 @@ sra_emit_record() {
   local package="${2:?sra_emit_record: package is required}"
   local id="${3:?sra_emit_record: id is required}"
   local digest="${4:?sra_emit_record: digest is required}"
-  local tags="${5:?sra_emit_record: tags is required}"
+  # Why: a GHCR package version can legitimately have zero tags (e.g. an
+  # untagged attestation/referrer manifest) -- "${5:?}" would wrongly reject
+  # that as a missing argument, since bash's :? form triggers on empty too,
+  # not only unset. "${5?}" (no colon) still catches a genuinely missing
+  # 5th positional argument, which is the actual bug this guard exists for.
+  local tags="${5?sra_emit_record: tags argument is required}"
   local built="${6:?sra_emit_record: built is required}"
   local legacy_rank="${7:?sra_emit_record: legacy_rank is required}"
   local budget="${8:?sra_emit_record: budget is required}"

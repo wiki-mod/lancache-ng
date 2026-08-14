@@ -246,6 +246,16 @@ EOF
   [[ "$output" == *"decision=would-delete"* ]]
 }
 
+# A real live audit run against GHCR crashed here (run 31773692600): an
+# untagged package version (e.g. an attestation/referrer manifest) has a
+# legitimately empty tags string, which a naive "${5:?}" required-argument
+# guard rejects as if the argument were missing entirely.
+@test "emit_record accepts a legitimately empty tags value" {
+  run sra_emit_record runtime proxy 3 sha256:cc "" unknown n/a protected protect non-ordinary-version
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\ttags=\t'* ]]
+}
+
 # A cold cache (no directory configured) must fall through to a real GET,
 # exactly matching this helper's pre-caching behavior.
 @test "GitHub REST retry performs a real GET when no cache directory is set" {
