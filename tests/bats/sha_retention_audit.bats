@@ -1,8 +1,12 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Regression coverage for the protect-only SHA retention audit and its
-# read-only GitHub REST helper.
+# What: regression coverage for the protect-only SHA retention audit and
+# its read-only GitHub REST helper.
+# Why: each test below carries its own short purpose comment (AG-CODE-010);
+# this file-level pointer covers all of them rather than repeating it once
+# per test.
+# From: Issue #1095 | PR #1501.
 
 setup() {
   repo_root="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
@@ -18,9 +22,6 @@ teardown() {
 }
 
 # The manifest value is the single machine-readable ordinary-root budget.
-# Raised 10 -> 30: a burst of concurrently open PRs that each only touch
-# YAML/governance files still produces one new build-tools sha-<commit>
-# image per push, so a ten-slot window could evict still-relevant history.
 @test "retention manifest defines exactly thirty accepted ordinary roots" {
   run sra_read_retention_keep "$repo_root/release/stack-images.yml"
   [ "$status" -eq 0 ]
@@ -287,10 +288,9 @@ EOF
   [[ "$output" == *"decision=would-delete"* ]]
 }
 
-# A real live audit run against GHCR crashed here (run 31773692600): an
-# untagged package version (e.g. an attestation/referrer manifest) has a
+# An untagged package version (e.g. an attestation/referrer manifest) has a
 # legitimately empty tags string, which a naive "${5:?}" required-argument
-# guard rejects as if the argument were missing entirely.
+# guard would reject as if the argument were missing entirely.
 @test "emit_record accepts a legitimately empty tags value" {
   run sra_emit_record runtime proxy 3 sha256:cc "" unknown n/a protected protect non-ordinary-version
   [ "$status" -eq 0 ]

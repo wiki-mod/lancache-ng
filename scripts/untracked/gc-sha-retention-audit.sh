@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Read-only GHCR retention audit. It inventories first-party package versions,
-# validates every version/tag shape, ranks legacy ordinary roots from Git
-# history, and reports protection reasons. Ordinary roots beyond the accepted
-# budget are labeled would-delete with their real build date as a dry-run
-# report only; this script never issues a package-version DELETE call.
+# What: read-only GHCR retention audit -- inventories first-party package
+# versions, ranks legacy ordinary roots from Git history, and reports
+# protection reasons.
+# Why: never issues a DELETE call; roots beyond the accepted budget are
+# labeled would-delete with a real build date, dry-run only.
+# From: Issue #1095 | PR #1501.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -60,9 +61,10 @@ else
   echo "::error::Cannot read exactly one valid accepted_ordinary_roots_per_package value from $manifest." >&2
   exit 1
 fi
-# Why: how many of a package's own newest vX.Y.Z tags still count as a
-# "supported stable release" for protected-reference classification (see
-# audit_package's supported_releases computation below). From: Issue #1095 | PR #1501.
+# What: reads how many of a package's newest vX.Y.Z tags still count as
+# supported (see audit_package's supported_releases computation below).
+# Why: needed for protected-reference classification.
+# From: Issue #1095 | PR #1501.
 if minimum_stable_releases="$(sra_read_minimum_stable_releases "$manifest")"; then
   :
 else
@@ -181,22 +183,20 @@ audit_package() {
     return 1
   }
 
-  # Why: computed once per package via a single jq pass over the whole
-  # already-fetched versions file (not one jq call per version -- see this
-  # file's own header comment on the timeout a per-version jq call already
-  # caused once, run 31774741729) so the per-version classification loop
-  # below can look up whether a given vX.Y.Z tag is still one of this
-  # package's `minimum_stable_releases` newest stable releases. From: Issue
-  # #1095 | PR #1501.
+  # What: computes this package's stable-release tag set once, via a single
+  # jq pass over the whole already-fetched versions file.
+  # Why: avoids a per-version jq call (the class of cost that caused run
+  # 31774741729 to time out); the per-version loop below only looks it up.
+  # From: Issue #1095 | PR #1501.
   local release_tags_file="$package_dir/release-tags.txt"
   if jq -r '.metadata.container.tags[]? // empty' "$versions_file" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -u >"$release_tags_file"; then
     :
   else
-    # Why: grep exits 1 under `set -o pipefail` when a brand-new package has
-    # no stable-release tags at all yet -- that is a legitimate empty
-    # result, not a real failure, and must not abort the audit. Proven live:
-    # `set -euo pipefail; jq ... | grep -E ... | sort -u >file` exits 1 on a
-    # zero-match grep even though `sort` itself succeeds (AG-VAL-030).
+    # What: treats a nonzero exit here as an empty result, not a failure.
+    # Why: grep exits 1 under `set -o pipefail` on zero matches (a brand-new
+    # package with no release tags yet), even though `sort` itself succeeds
+    # (AG-VAL-030).
+    # From: Issue #1095 | PR #1501.
     : >"$release_tags_file"
   fi
   local supported_releases
@@ -217,19 +217,14 @@ audit_package() {
   local version_fields created_at_raw
   while IFS= read -r version_json; do
     [[ -n "$version_json" ]] || continue
-    # Why: id/digest/tags/created_at come from one combined jq call instead
-    # of four separate ones -- a real live audit run against the full GHCR
-    # inventory (thousands of versions per package) timed out at exactly the
-    # 25-minute budget (run 31774741729) once this pass added a per-version
-    # created_at lookup on top of the pre-existing per-version jq calls;
-    # spawning one fewer jq subprocess per version is a real, measurable fix
-    # for that, not a timeout bump. "|" is used instead of jq's built-in
-    # @tsv/actual tab: bash's `read` treats a literal tab as IFS "whitespace"
-    # regardless of what IFS is set to, silently collapsing/losing an empty
-    # middle field (a real, verified-live bug an untagged version's empty
-    # tags field would have hit here) -- "|" is not IFS whitespace, so an
-    # empty field between two delimiters is preserved correctly. None of
-    # id/digest/tags/created_at can legitimately contain "|".
+    # What: extracts id/digest/tags/created_at via one combined jq call,
+    # "|"-joined rather than jq's @tsv.
+    # Why: one call instead of four avoided the per-version subprocess cost
+    # that caused run 31774741729 to time out; "|" is used because bash's
+    # `read` treats a literal tab as IFS whitespace regardless of the IFS
+    # setting, silently collapsing an empty middle field that @tsv would
+    # produce for an untagged version.
+    # From: Issue #1095 | PR #1501.
     if version_fields="$(jq -r '[.id, .name, (.metadata.container.tags | join(",")), (.created_at // "")] | join("|")' <<<"$version_json")"; then
       :
     else
@@ -252,10 +247,10 @@ audit_package() {
     seen_id_digest["$id"]="$digest"
     seen_digest_id["$digest"]="$id"
 
-    # Why: a missing/malformed build date is a real data-quality defect in
-    # the image-publish pipeline (e.g. a dropped OCI created label), not an
-    # absence to fold silently into an unrelated classification -- it is
-    # named here as its own finding rather than left out of the report.
+    # What: reports a missing/malformed build date as its own ::warning::.
+    # Why: it is a real data-quality defect in the image-publish pipeline,
+    # not something to fold silently into an unrelated classification.
+    # From: Issue #1095 | PR #1501.
     if sra_validate_created_at_string "$created_at_raw"; then
       built="$created_at_raw"
     else
@@ -285,16 +280,12 @@ audit_package() {
       continue
     fi
     if (( root_count == 0 )); then
-      # Why: a version with no sha-<commit> alias at all has no git-history
-      # root to rank by, so it always stays protect regardless of its extra
-      # tags -- but classify it by the specific channel/release its attached
-      # tag identifies whenever possible, instead of the generic
-      # non-ordinary-version bucket. The other_count>0 guard skips the
-      # (bash-only, but still non-free) other-tag scan entirely for a
-      # completely untagged version -- e.g. an attestation/referrer manifest,
-      # the common case among the tens of thousands of versions a live audit
-      # classifies -- since sra_extra_tag_protect_reason could only ever
-      # return the fallback there anyway. From: Issue #1095 | PR #1501.
+      # What: classifies a rootless version by its specific channel/release
+      # when possible, skipping the scan entirely when it has no extra tag.
+      # Why: no sha-<commit> alias means no git-history root to rank by, so
+      # it always stays protect regardless of tags; the other_count==0 skip
+      # avoids a no-op scan for the common untagged-attestation case.
+      # From: Issue #1095 | PR #1501.
       if (( other_count > 0 )); then
         reason="$(sra_extra_tag_protect_reason "$tags" "$supported_releases" "non-ordinary-version")" || {
           echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
@@ -311,21 +302,16 @@ audit_package() {
       continue
     fi
     if (( other_count > 0 )); then
-      # Why: this is the common real case -- a sha-<commit> root tag
-      # additionally carrying nightly/latest/a release tag, since the
-      # promote job retags rather than rebuilds (build-push.yml's `docker
-      # buildx imagetools create --prefer-index=false`), so a currently
-      # active channel/release always lands on the same digest/version
-      # object as its originating sha-<commit> tag. Unlike the root_count==0
-      # branch above, this version DOES have a resolvable sha-<commit> root
-      # -- per the maintainer's protected-reference scope clarification
-      # (Issue #1095 | PR #1501), "protected" means the digest is actually still
-      # referenced by nightly/latest/a supported release right now, not
-      # merely "carries some extra tag" -- so an unrecognized extra tag (an
-      # rc/staging tag, or a release tag past minimum_stable_releases) must
-      # NOT unconditionally protect this version anymore; it falls through
-      # into the same ordinary root-candidate ranking every plain root goes
-      # through below.
+      # What: classifies a root tag's extra tags; protects only when a
+      # specific channel/release actually matches, else falls through to
+      # ordinary root-candidate ranking below.
+      # Why: the promote job retags an existing digest rather than
+      # rebuilding (build-push.yml's `docker buildx imagetools create
+      # --prefer-index=false`), so a currently active channel/release always
+      # lands on its originating sha-<commit> version object; an
+      # unrecognized extra tag (rc/staging, or a release past
+      # minimum_stable_releases) must not blanket-protect.
+      # From: Issue #1095 | PR #1501.
       other_tags="$(sra_other_tags_from_csv "$tags")" || {
         echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
         return 1
@@ -398,19 +384,12 @@ audit_package() {
   while IFS=$'\t' read -r rank id digest tags built; do
     [[ -n "$id" ]] || continue
     (( legacy_position += 1 ))
-    # Why: beyond-budget ordinary roots are reported as dry-run "would
-    # delete" candidates (never actually deleted -- see the no-DELETE-path
-    # Bats guard) so a maintainer reading the report sees exactly which
-    # builds are past the accepted-roots budget, not just a protect count.
-    # "acceptance-evidence-unavailable" stays correct for every row reached
-    # here: a version whose digest is actually still referenced by nightly/
-    # latest/a supported release was already classified above with its own
-    # specific nightly-channel-protected/latest-channel-protected/
-    # stable-release-protected reason and never reaches this loop; only a
-    # plain root (no extra tag) or a root carrying an unrecognized extra tag
-    # (an rc/staging tag, or a release tag past minimum_stable_releases)
-    # falls through into ordinary ranking here (see audit_package's
-    # other_count>0 branch). From: Issue #1095 | PR #1501.
+    # What: reports beyond-budget ordinary roots as dry-run "would-delete",
+    # never actually deleted.
+    # Why: a version already protected by a specific channel/release reason
+    # never reaches this loop; only a plain root or one with an unrecognized
+    # extra tag does, so "acceptance-evidence-unavailable" stays correct here.
+    # From: Issue #1095 | PR #1501.
     if (( legacy_position <= retention_keep )); then
       budget="within-${retention_keep}"
       decision="protect"

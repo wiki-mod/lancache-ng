@@ -27,10 +27,11 @@ registry: ghcr.io
 image_prefix: wiki-mod/lancache-ng
 retention:
   minimum_stable_releases: 3
-  # accepted_ordinary_roots_per_package raised 10 -> 30: a burst of concurrently
-  # open PRs that each only touch YAML/governance files still produces one new
-  # build-tools sha-<commit> image per push, so a ten-slot window could evict
-  # still-relevant recent history during a busy review period.
+  # What: raises accepted_ordinary_roots_per_package from 10 to 30.
+  # Why: a burst of concurrently open, YAML/governance-only PRs still
+  # produces one new sha-<commit> image per push; a ten-slot window could
+  # evict still-relevant recent history during a busy review period.
+  # From: Issue #1095 | PR #1501.
   accepted_ordinary_roots_per_package: 30
   keep_mutable_channels:
     - latest

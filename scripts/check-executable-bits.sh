@@ -73,7 +73,7 @@
 #     block on `indent > run_key_indent` rather than the indicator's own
 #     stated column. No `run:` value in this repo's real workflow files uses
 #     one today (grep-verified), so this is an untested, not a proven-safe,
-#     axis of the format. From: PR #1501.
+#     axis of the format. From: Issue #1095 | PR #1501.
 #
 # Accepts an optional repo_root argument (defaults to this script's own repo)
 # so tests/bats/check_executable_bits.bats can point it at a fixture git tree
@@ -218,7 +218,7 @@ split_into_segments() {
 # a no-op-equivalent short-circuit that avoids an expensive per-segment
 # subshell fork on every line -- a real, measured cost on this repo's own
 # largest workflow file, not a narrowing of what gets classified.
-# From: PR #1501.
+# From: Issue #1095 | PR #1501.
 inspect_shell_line() {
   local shell_line="$1" context="$2" segment found
   shell_line="${shell_line#"${shell_line%%[![:space:]]*}"}"
@@ -339,7 +339,7 @@ for file in "${scan_files[@]}"; do
     # Why: yaml_run_value() can never match such a line anyway, so this
     # avoids forking a subshell on every line of the file just to learn
     # "not a run: line" -- a real, measured cost on a large workflow file.
-    # From: PR #1501.
+    # From: Issue #1095 | PR #1501.
     case "$line" in
       *run:*) ;;
       *) continue ;;

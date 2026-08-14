@@ -1,9 +1,11 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Read-only GHCR audit for the ordinary sha-* retention policy. The job uses
-# a dedicated checkout directory and only read permissions so PR code cannot
-# inherit the destructive credentials used by the operational PR/orphan reaper.
+# What: read-only GHCR audit for the ordinary sha-* retention policy.
+# Why: a dedicated checkout directory and read-only permissions keep PR code
+# from ever inheriting the destructive credentials used by the operational
+# PR/orphan reaper.
+# From: Issue #1095 | PR #1501.
 name: SHA Retention Audit
 
 on:
@@ -31,9 +33,11 @@ concurrency:
 
 jobs:
   audit:
-    # Fork PRs cannot prove the real package inventory with repository package
-    # permissions, so they are excluded instead of silently running a weaker
-    # mode that looks equivalent in the check list.
+    # What: skips this job for a fork PR instead of running a weaker mode.
+    # Why: a fork PR cannot hold repository package-read permissions, so a
+    # weaker fallback would look equivalent in the check list while proving
+    # nothing.
+    # From: Issue #1095 | PR #1501.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 35
@@ -129,13 +133,13 @@ jobs:
               bash scripts/check-workflow-line-limit.sh
             '
 
+      # What: computes the cache directory path here and exports it via
+      # GITHUB_ENV for every later step, including the cache actions' with:
+      # blocks.
+      # Why: runner.temp is valid only in step-level context, not in a
+      # job-level env: block.
+      # From: Issue #1095 | PR #1501.
       - name: Prepare rate-limit-aware API response cache directory
-        # Why: runner.temp is only valid in step-level context (unlike
-        # github/vars/secrets, it is NOT available in a job-level env: block,
-        # which a prior version of this workflow got wrong and which broke
-        # GitHub's own workflow-file validation entirely). Computing it here
-        # and exporting via GITHUB_ENV makes it a normal env var for every
-        # later step in this job, including the cache actions' with: blocks.
         env:
           AUDIT_API_CACHE_DIR: ${{ runner.temp }}/f17-sha-retention-api-cache
         run: |
@@ -143,11 +147,12 @@ jobs:
           mkdir -p -- "$AUDIT_API_CACHE_DIR"
           echo "AUDIT_API_CACHE_DIR=$AUDIT_API_CACHE_DIR" >> "$GITHUB_ENV"
 
-      # Why: a rolling cache (unique save key, prefix-matched restore key) so
-      # a re-run shortly after another one reuses recent GHCR package-version
-      # pages instead of re-spending shared rate-limit budget; the audit
-      # script itself enforces the actual freshness TTL on whatever this
-      # restores, so a stale restored entry is still never served as current.
+      # What: restores a rolling GHCR API cache via a unique save key and a
+      # prefix-matched restore key.
+      # Why: lets a re-run shortly after another one reuse recent pages
+      # instead of re-spending shared rate-limit budget; the audit script's
+      # own TTL check still governs whether a restored entry counts as fresh.
+      # From: Issue #1095 | PR #1501.
       - name: Restore GHCR API response cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -175,9 +180,11 @@ jobs:
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30s 25m bash scripts/untracked/gc-sha-retention-audit.sh
 
-      # Why: always() so a failed/timed-out audit run still saves whatever
-      # pages it did fetch before failing, rather than discarding real
-      # rate-limit-relevant progress on every non-success run.
+      # What: saves the cache with if: always(), not only on success.
+      # Why: a failed/timed-out audit run should still keep whatever pages
+      # it fetched before failing, not discard that rate-limit-relevant
+      # progress.
+      # From: Issue #1095 | PR #1501.
       - name: Save GHCR API response cache
         if: always()
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0

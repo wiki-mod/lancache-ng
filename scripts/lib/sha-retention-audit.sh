@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Pure helpers for the read-only SHA retention audit. The functions validate
-# the exact manifest/version shapes the audit relies on, classify whether a
-# version's digest is protected by the nightly/latest channels or a
-# supported stable release, and never mutate GHCR.
+# What: pure helpers for the read-only SHA retention audit -- manifest/
+# version shape validation and protected-reference classification.
+# Why: never mutates GHCR; kept pure so every rule is directly unit-testable
+# without a live audit run.
+# From: Issue #1095 | PR #1501.
 
 if [[ -n "${SHA_RETENTION_AUDIT_LIB_LOADED:-}" ]]; then
   if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
@@ -47,9 +48,9 @@ sra_read_retention_keep() {
 sra_read_minimum_stable_releases() {
   # What: reads retention.minimum_stable_releases from the manifest.
   # Why: sra_select_supported_release_tags needs this count to know how many
-  # of a package's own vX.Y.Z tags are still "supported" stable releases for
-  # protected-reference classification (docs/release-versioning.md's
-  # Retention section). From: Issue #1095 | PR #1501.
+  # recent vX.Y.Z tags stay protected (docs/release-versioning.md's
+  # Retention section).
+  # From: Issue #1095 | PR #1501.
   local manifest="${1:?sra_read_minimum_stable_releases: manifest is required}"
   _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
@@ -133,23 +134,20 @@ sra_validate_created_at_string() {
   # What: checks an already-extracted string against the expected GHCR
   # created_at shape (YYYY-MM-DDTHH:MM:SSZ), with no jq call of its own.
   # Why: split out from sra_version_created_at so the orchestrator's hot loop
-  # can validate a value it already extracted via one combined jq call per
-  # version instead of paying a second per-version jq subprocess just for
-  # this field (a real live-audit timeout, run 31774741729, was traced to
-  # exactly this kind of avoidable per-version subprocess overhead).
+  # validates an already-extracted value instead of paying a second
+  # per-version jq subprocess (the class of cost that caused run 31774741729
+  # to time out).
+  # From: Issue #1095 | PR #1501.
   local created_at="${1?sra_validate_created_at_string: value argument is required}"
   [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
 }
 
 sra_version_created_at() {
   # What: extracts the GHCR-reported build timestamp for one package version.
-  # Why: display-only -- the dry-run report shows a real build date per
-  # candidate, but ranking must stay 100% git-history-derived (see the
-  # created_at-reuse defect this audit was rebuilt to avoid), so this helper
-  # is never called from the ranking path. Kept for direct unit testing and
-  # for any future caller that only has the raw JSON, not already-extracted
-  # fields; the orchestrator's own hot loop calls
-  # sra_validate_created_at_string directly instead (see that function's Why).
+  # Why: display-only -- ranking stays 100% git-history-derived, so this
+  # helper is never called from the ranking path; the orchestrator's hot
+  # loop calls sra_validate_created_at_string directly instead.
+  # From: Issue #1095 | PR #1501.
   local version_json="${1:?sra_version_created_at: version JSON is required}"
   local created_at
 
@@ -165,18 +163,18 @@ sra_version_created_at() {
 
 sra_emit_record() {
   # What: formats one AUDIT report line for a classified package version.
-  # Why: a pure formatter (no I/O beyond stdout) so the dry-run would-delete
-  # labeling and the built/decision fields are directly unit-testable,
-  # instead of only reachable through a full live-GHCR orchestrator run.
+  # Why: a pure formatter (no I/O beyond stdout) so classification fields
+  # stay directly unit-testable instead of reachable only via a live run.
+  # From: Issue #1095 | PR #1501.
   local class="${1:?sra_emit_record: class is required}"
   local package="${2:?sra_emit_record: package is required}"
   local id="${3:?sra_emit_record: id is required}"
   local digest="${4:?sra_emit_record: digest is required}"
+  # What: validates the tags argument with "${5?}" (no colon), not "${5:?}".
   # Why: a GHCR package version can legitimately have zero tags (e.g. an
-  # untagged attestation/referrer manifest) -- "${5:?}" would wrongly reject
-  # that as a missing argument, since bash's :? form triggers on empty too,
-  # not only unset. "${5?}" (no colon) still catches a genuinely missing
-  # 5th positional argument, which is the actual bug this guard exists for.
+  # untagged attestation manifest); the colon form rejects empty as if it
+  # were unset, while the no-colon form still catches a truly missing arg.
+  # From: Issue #1095 | PR #1501.
   local tags="${5?sra_emit_record: tags argument is required}"
   local built="${6:?sra_emit_record: built is required}"
   local legacy_rank="${7:?sra_emit_record: legacy_rank is required}"
@@ -230,19 +228,18 @@ sra_version_tag_facts() {
 sra_is_stable_release_tag() {
   # What: checks whether a tag has the stable-release shape vX.Y.Z, with no
   # pre-release suffix.
-  # Why: distinct from a release-candidate tag (vX.Y.Z-rc.N, see
-  # release/stack-images.yml's release_candidate channel) -- only a genuine
-  # stable release counts toward retention.minimum_stable_releases. From:
-  # Issue #1095 | PR #1501.
+  # Why: distinct from a release-candidate tag (vX.Y.Z-rc.N) -- only a
+  # genuine stable release counts toward minimum_stable_releases.
+  # From: Issue #1095 | PR #1501.
   local tag="${1:?sra_is_stable_release_tag: tag is required}"
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
 }
 
 sra_release_sort_key() {
   # What: converts a vX.Y.Z tag into a zero-padded, lexically-sortable key.
-  # Why: bash has no native semver comparator; zero-padding each numeric
-  # component lets a plain `sort -r` order releases newest-first without a
-  # per-component numeric comparison loop. From: Issue #1095 | PR #1501.
+  # Why: bash has no native semver comparator; zero-padding each component
+  # lets a plain `sort -r` order releases newest-first.
+  # From: Issue #1095 | PR #1501.
   local tag="${1:?sra_release_sort_key: tag is required}"
   local major minor patch
   sra_is_stable_release_tag "$tag" || return 1
@@ -253,12 +250,9 @@ sra_release_sort_key() {
 sra_select_supported_release_tags() {
   # What: reads stable-release tags (one per line) from stdin and prints the
   # newest `count` of them, one per line, newest first.
-  # Why: retention.minimum_stable_releases (release/stack-images.yml) defines
-  # how many of a package's own recent stable releases stay protected; this
-  # is computed per package from tags already fetched during the audit,
-  # avoiding a separate GitHub Releases API call (AG-VAL-005 prefers a native
-  # local computation over an API call whenever both do the same job). From:
-  # Issue #1095 | PR #1501.
+  # Why: computed from tags already fetched during the audit, avoiding a
+  # separate GitHub Releases API call (AG-VAL-005).
+  # From: Issue #1095 | PR #1501.
   local count="${1:?sra_select_supported_release_tags: count is required}"
   [[ "$count" =~ ^[1-9][0-9]*$ ]] || return 1
 
@@ -271,13 +265,12 @@ sra_select_supported_release_tags() {
   done
 
   (( ${#keyed[@]} > 0 )) || return 0
-  # Why: `sort -r | head -n "$count"` would pipe a live producer into an
-  # early-exiting consumer under the caller's `set -o pipefail`, which can
-  # report pipeline failure via SIGPIPE even though `head` itself matched
-  # correctly (AG-VAL-032, enforced repo-wide by
-  # scripts/check-pipefail-early-exit-grep.sh). Capturing into a variable
-  # first and applying `head`/`cut` via here-strings avoids the live pipe
-  # entirely.
+  # What: captures the sorted list into a variable before head/cut, instead
+  # of piping sort directly into them.
+  # Why: a live pipe into an early-exiting consumer under `set -o pipefail`
+  # can report SIGPIPE failure even when the result is correct (AG-VAL-032,
+  # enforced repo-wide by scripts/check-pipefail-early-exit-grep.sh).
+  # From: Issue #1095 | PR #1501.
   local sorted selected
   sorted="$(printf '%s\n' "${keyed[@]}" | sort -r)"
   selected="$(head -n "$count" <<<"$sorted")"
@@ -287,11 +280,9 @@ sra_select_supported_release_tags() {
 sra_classify_channel_tag() {
   # What: classifies one non-SHA ("other"-kind) tag into the protected
   # channel it identifies, if any.
-  # Why: separates "this is literally the nightly/latest pointer" from "this
-  # is a stable release tag" from "this is some other, unrecognized tag" so
-  # the caller can report a specific protection reason instead of a single
-  # generic bucket (docs/release-versioning.md's Retention section). From:
-  # Issue #1095 | PR #1501.
+  # Why: separates nightly/latest/stable-release from an unrecognized tag so
+  # the caller can report a specific protection reason, not a generic one.
+  # From: Issue #1095 | PR #1501.
   local tag="${1:?sra_classify_channel_tag: tag is required}"
   case "$tag" in
     nightly) printf 'nightly\n' ;;
@@ -308,21 +299,14 @@ sra_classify_channel_tag() {
 
 sra_other_tags_from_csv() {
   # What: extracts every "other"-kind tag (per sra_tag_kind) from an
-  # already comma-joined tag list -- i.e. every tag that is not a
-  # sha-<commit> root or sha-<commit>-<arch> child alias -- one per line.
-  # Why: the orchestrator's hot per-version loop already extracts a
-  # comma-joined tag list via one combined jq call per version (see
-  # gc-sha-retention-audit.sh's own Why comment on the per-version jq
-  # timeout, run 31774741729, that combined call was already built to
-  # avoid). Deriving "other" tags in pure bash from that value, instead of
-  # a second jq/base64 round-trip per version, avoids reintroducing exactly
-  # that per-version jq overhead for every one of the tens of thousands of
-  # package versions a live audit classifies. Splitting on a literal comma
-  # (rather than the @base64-per-tag encoding sra_version_tag_facts uses) is
-  # safe only because the OCI distribution spec's tag-name grammar
-  # ([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}) forbids commas in a real tag; this
-  # function must not be reused for a delimiter that isn't grammar-excluded
-  # this way. From: Issue #1095 | PR #1501.
+  # already comma-joined tag list, one per line.
+  # Why: derives this in pure bash from the orchestrator's already-fetched
+  # comma-joined value instead of a second jq/base64 round-trip per version,
+  # avoiding the per-version subprocess overhead that caused run 31774741729
+  # to time out; splitting on a literal comma is safe only because the OCI
+  # distribution spec's tag grammar ([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127})
+  # forbids commas in a real tag.
+  # From: Issue #1095 | PR #1501.
   local tags_csv="${1?sra_other_tags_from_csv: tags CSV argument is required}"
   local tag kind
   local -a tag_array=()
@@ -338,18 +322,13 @@ sra_other_tags_from_csv() {
 
 sra_protected_reference_reason() {
   # What: given a version's "other"-kind tags and a package's supported
-  # stable-release tag set, returns a "+"-joined, specific protection reason
-  # (nightly-channel-protected, latest-channel-protected,
-  # stable-release-protected) covering every protected channel that actually
-  # applies to this version, or fails when none apply.
+  # stable-release set, returns a "+"-joined, specific protection reason
+  # covering every protected channel that applies, or fails when none apply.
   # Why: a digest can legitimately be nightly AND latest AND a just-cut
-  # stable release all at once (e.g. immediately after a promotion, when
-  # current_dev and master briefly share a commit) -- collapsing that into
-  # one arbitrarily-picked reason would hide real information a maintainer
-  # reading the report needs. Returning failure (not a reason string) lets
-  # the caller fall back to its own existing, still-honest generic reason
-  # when the extra tag matches none of these specific channels. From: Issue
-  # #1095 | PR #1501.
+  # release at once; collapsing that into one picked reason would hide real
+  # information. Failure (not a string) lets the caller fall back to its own
+  # generic reason.
+  # From: Issue #1095 | PR #1501.
   local other_tags="${1?sra_protected_reference_reason: other tags argument is required}"
   local supported_releases="${2?sra_protected_reference_reason: supported releases argument is required}"
   local tag channel has_nightly=0 has_latest=0 has_stable=0
@@ -381,16 +360,14 @@ sra_protected_reference_reason() {
 
 sra_extra_tag_protect_reason() {
   # What: combines sra_other_tags_from_csv + sra_protected_reference_reason
-  # into the single call the orchestrator's root_count==0 branch needs,
-  # falling back to a caller-supplied generic reason when no specific
-  # protected channel matches. Why: a version with no sha-<commit> alias at
-  # all has nothing a git-history root rank could apply to, so it always
-  # stays protect -- only the reason text varies; this differs from the
-  # orchestrator's other_count>0-with-a-root-tag case (which must be able to
-  # fall through to ordinary ranking instead of always protecting, per the
-  # maintainer's protected-reference scope clarification on Issue #1095 | PR #1501, so
-  # that branch calls sra_protected_reference_reason directly and checks its
-  # own success/failure rather than using this always-succeeds wrapper).
+  # into one always-succeeding call, falling back to a caller-supplied
+  # generic reason when no specific protected channel matches.
+  # Why: only the orchestrator's root_count==0 branch may use this -- a
+  # version with no sha-<commit> alias always stays protect regardless of
+  # reason. A version WITH a root tag must instead call
+  # sra_protected_reference_reason directly and fall through to ranking on
+  # failure, so this always-succeeding wrapper is deliberately not reused
+  # there.
   # From: Issue #1095 | PR #1501.
   local tags_csv="${1?sra_extra_tag_protect_reason: tags CSV argument is required}"
   local supported_releases="${2?sra_extra_tag_protect_reason: supported releases argument is required}"
