@@ -2459,9 +2459,10 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'BUILD_PUSH_GUARD_7'
           set -euo pipefail
 
-          # ccache-over-distcc guard: services/dns/Dockerfile only for now -- mirrors
-          # the sccache/distcc guard block above's style but scoped to the single file
-          # that actually wires ccache today.
+          # What: guards services/dns/Dockerfile's ccache-over-distcc wiring only.
+          # Why: mirrors the sccache/distcc guard block above's style, scoped to the
+          # single file that actually wires ccache today.
+          # From: Issue #887
           dns_dockerfile="services/dns/Dockerfile"
           grep -F -- "--mount=type=secret,id=ccache_redis_url" "$dns_dockerfile" >/dev/null \
             || { echo "::error::$dns_dockerfile must consume the ccache Redis endpoint through a BuildKit secret."; exit 1; }
@@ -6131,11 +6132,11 @@ jobs:
           redis-file: ${{ steps.sccache-secret.outputs.redis-file }}
           dist-config-file: ${{ steps.sccache-secret.outputs.dist-config-file }}
           distcc-hosts-file: ${{ steps.sccache-secret.outputs.distcc-hosts-file }}
-          # ccache-over-distcc is services/dns/Dockerfile-only for now
-          # (services/ui/Dockerfile's lancache-distcc-wrapper does not understand
-          # ccache's CCACHE_PREFIX invocation convention yet -- see that Dockerfile's
-          # own wrapper comment). Scoped here, not inside the composite action, so the
-          # action stays a generic, service-agnostic building block.
+          # What: passes the ccache Redis file only for matrix.service == 'dns'.
+          # Why: services/ui/Dockerfile's distcc wrapper does not understand ccache's
+          # CCACHE_PREFIX convention yet, and scoping the restriction to this call site
+          # (not the composite action) keeps that action generic and service-agnostic.
+          # From: Issue #887
           ccache-redis-file: ${{ matrix.service == 'dns' && steps.sccache-secret.outputs.ccache-redis-file || '' }}
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           build-network: ${{ env.RUST_ACCELERATION_NETWORK }}

@@ -402,10 +402,11 @@ runs:
               if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
                 real_cc="$(PATH="$original_path" command -v cc)"
                 ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
-                # ccache rejects a schemeless remote-storage endpoint outright;
-                # mirror services/dns/Dockerfile's own bare-host:port normalization
-                # here so this preflight validates the same configurations the
-                # real build accepts.
+                # What: normalizes a schemeless ccache_redis_endpoint to redis://.
+                # Why: ccache rejects a bare host:port outright, and this must accept
+                # the same configurations services/dns/Dockerfile's own normalization
+                # already accepts.
+                # From: Issue #887
                 case "$ccache_redis_endpoint" in
                   redis://*|redis+unix:*) ;;
                   *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;;

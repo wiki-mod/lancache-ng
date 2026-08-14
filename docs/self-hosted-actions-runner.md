@@ -225,6 +225,24 @@ When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
 `PATH`. Install it from source and keep the installed binary on the runner
 service account's `PATH`.
 
+### ccache reuse for services/dns's C-dependency compiles
+
+`services/dns/Dockerfile`'s C-dependency compile path (`ring`, via distcc) can
+layer `ccache` in front of distcc when both a distcc host list and a ccache
+Redis endpoint are configured. This is not a separate secret: it automatically
+reuses the same `SCCACHE_REDIS_URL` value already configured for `sccache`
+above, on the same Redis instance, whenever `DISTCC_POTENTIAL_HOSTS` is also
+set — `ccache`'s own fixed `ccache:` key namespace never collides with
+`sccache`'s distinct `SCCACHE_REDIS_KEY_PREFIX`-based one. There is no
+separate `CCACHE_REDIS_MODE` toggle; every ccache failure path falls back to
+plain distcc (no cache layer) instead of hard-failing the build. Unlike every
+other Rust service builder, `services/dns/Dockerfile` exports
+`CC="ccache <real compiler>"` (not the plain `CC=distcc` documented under
+[Rust builds and distcc/pump](local-runner-docker-performance.md#rust-builds-and-distccpump))
+once both distcc and ccache are enabled. See that Dockerfile's own
+`configure_ccache()`/`disable_ccache()` comments and issue #887 for the full
+mechanism.
+
 ## CodeQL
 
 The CodeQL workflow uses advanced setup with `github/codeql-action` on self-hosted runners labeled `self-hosted`, `linux`, `lancache` and `codeql`. No separate CodeQL package needs to be installed on Debian; the action downloads and manages the CodeQL bundle during the workflow run.

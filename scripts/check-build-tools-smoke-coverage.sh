@@ -96,6 +96,14 @@ done
 #     a repeatable simulation script). Revisit moving musl-gcc from here into
 #     smoke_test_image()'s required_tools once a real consumer simulation
 #     script depends on it directly.
+#
+#     ccache (issue #887) went through this exact same chicken-and-egg
+#     window and was deliberately excluded here for the identical reason
+#     while the bootstrap gap was open. It has since been added to
+#     smoke_test_image()'s own required_tools (PR #1534's follow-up commit
+#     6a773b78), so it is a real, permanently-installed, consumer-verified
+#     tool now -- no longer listed here, since the direction-1 loop below
+#     already finds it covered by smoke_tools and never reaches this list.
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
   cargo-tarpaulin
@@ -107,16 +115,6 @@ EXCLUDED_TOOLS=(
   test timeout xargs xz
   # Musl cross-compilation toolchain (issue #815)
   musl-gcc
-  # What: ccache, excluded from smoke_test_image()'s required_tools.
-  # Why: same chicken-and-egg case as musl-gcc directly above -- the smoke
-  # test's strict/published-image path trusts the currently published
-  # :latest/:nightly tag, which lacks ccache until this PR's build-tools
-  # change is merged and republished; requiring it now would fail every
-  # unrelated PR during that window, for a tool consumed only from inside a
-  # real Dockerfile build (services/dns/Dockerfile's configure_ccache()),
-  # never via a standalone consumer simulation script.
-  # From: Issue #887
-  ccache
 )
 
 # Multi-word capabilities the Dockerfile verifies via a subcommand invocation

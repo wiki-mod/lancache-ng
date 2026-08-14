@@ -291,9 +291,24 @@ RUN --mount=type=secret,id=sccache_redis_url \
     configure_ccache; \
     cargo_jobs="$(resolve_cargo_jobs)"; \
     run_cargo_build; \
-    # ccache_enabled=1 only follows a successful probe compile above, so a
-    # failing stats dump here is a real fault, not an expected/optional one.
-    if [ "${ccache_enabled:-0}" = "1" ]; then ccache -s; fi; \
+    # What: dumps `ccache -s` (fails this RUN under set -eu if that command itself
+    # errors), then inspects `ccache --print-stats` for a nonzero
+    # remote_storage_error recorded during the real Cargo build, not just
+    # configure_ccache's own pre-build probe.
+    # Why: a mid-build Redis outage is nonfatal to ccache and the compile already
+    # succeeded correctly, so this warns rather than failing a build whose only
+    # defect is a missed future cache reuse.
+    # From: Issue #887
+    if [ "${ccache_enabled:-0}" = "1" ]; then \
+      ccache -s; \
+      ccache_final_stats="$(mktemp)"; \
+      ccache --print-stats > "$ccache_final_stats"; \
+      if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
+        echo "[WARN] ccache recorded a Redis remote-storage error during the real Cargo build; this build's binary is unaffected, but later builds may miss cache reuse until Redis recovers." >&2; \
+        cat "$ccache_final_stats" >&2; \
+      fi; \
+      rm -f "$ccache_final_stats"; \
+    fi; \
     cp "target/${musl_target}/release/nats-subscriber" /build/nats-subscriber-out
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
