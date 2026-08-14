@@ -205,11 +205,32 @@ split_into_segments() {
 # Classifies only shell text that came from a GitHub Actions `run:` scalar.
 # Keeping this separate from YAML extraction prevents configuration data that
 # happens to contain script-looking paths from reaching the command scanner.
+#
+# Why the early candidate-substring return: command_word_script() can only
+# ever match a path under scripts/, services/, tests/, or .githooks/ (see
+# script_path_re), so a line containing none of those four substrings can
+# never produce a hit. Skipping split_into_segments/command_word_script for
+# such a line is not a scope narrowing -- it is a pure no-op-equivalent
+# short-circuit -- but it matters a great deal in practice: those two calls
+# fork a subshell/process-substitution per segment, and this repo's own real
+# `build-push.yml` (8000+ lines, 100+ `run:` blocks) drove that path from a
+# single-digit-second scan (the pre-rewrite whole-file `grep -E` pre-filter)
+# to a 60s+ timeout on Windows Git Bash once every physical run-block line
+# started reaching the subshell machinery unconditionally -- measured directly
+# (real timed runs of both versions against the same file), not reasoned
+# about, per Rule-Ref: AG-VAL-024. This restores that same pre-filter
+# discipline at the logical-shell-line level (post YAML-extraction) instead
+# of the old raw-file-line level, so it no longer reintroduces the `paths:`
+# false-positive class this rewrite exists to fix.
 inspect_shell_line() {
   local shell_line="$1" context="$2" segment found
   shell_line="${shell_line#"${shell_line%%[![:space:]]*}"}"
   [ -n "$shell_line" ] || return 0
   case "$shell_line" in \#*) return 0 ;; esac
+  case "$shell_line" in
+    *scripts/*|*services/*|*tests/*|*.githooks/*) ;;
+    *) return 0 ;;
+  esac
 
   while IFS= read -r segment; do
     [ -n "$segment" ] || continue
@@ -315,6 +336,22 @@ for file in "${scan_files[@]}"; do
       # The current physical line belongs to YAML again, so intentionally
       # fall through and test whether it begins another `run:` scalar.
     fi
+
+    # Why this pre-check: yaml_run_value() can only ever match a line whose
+    # trimmed body literally starts with `run:` (plain or quoted), so a line
+    # with no `run:` substring at all can never match -- but calling it via
+    # `$(...)` still forks a subshell regardless of the outcome. Without this
+    # cheap case-based guard, every single line of every scanned workflow
+    # file forks once just to learn "not a run: line," which is exactly the
+    # per-line subprocess cost this project's own build-push.yml (8000+
+    # lines) makes expensive on Windows Git Bash (measured directly: this
+    # loop alone took the whole scan from single-digit seconds to a 60s+
+    # timeout against that one real file, per Rule-Ref: AG-VAL-024). This is
+    # a pure short-circuit, not a narrowing of what gets classified as shell.
+    case "$line" in
+      *run:*) ;;
+      *) continue ;;
+    esac
 
     if run_record="$(yaml_run_value "$line")"; then
       run_key_indent="${run_record%%$'\t'*}"
