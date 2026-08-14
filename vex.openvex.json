@@ -1,15 +1,15 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-14T05:49:23Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-14T08:44:10Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
-  "timestamp": "2026-08-14T05:49:23Z",
+  "timestamp": "2026-08-14T08:44:10Z",
   "version": 1,
   "statements": [
     {
       "vulnerability": {
         "name": "CVE-2026-34040"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -25,13 +25,13 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
-      "impact_statement": "Not exploitable in these artifacts (vulnerable code not present). CVE-2026-34040 is a Docker daemon authorization-plugin bypass: the vulnerable code lives entirely in github.com/docker/docker's pkg/authorization middleware, and the upstream fix (moby/moby commit e89edb19ad7de0407a5d31e3111cb01aa10b5a38, released v29.3.1) changes only pkg/authorization/authz.go. docker-compose and docker-buildx embed github.com/docker/docker solely as an API client library; they neither contain nor execute the daemon-side AuthZ middleware, so the vulnerable code path is absent from these CLI plugin binaries and the scanner is matching the embedded module version string, not reachable code. A version bump does not remove the finding either, verified against upstream on 2026-07-25: from v29 the fix lives in newly split, separately versioned modules (github.com/moby/moby/client, github.com/moby/moby/api), and there is NO v29.x at the old github.com/docker/docker path to pin to (a pseudo-version has nothing to point at). docker/buildx master still requires github.com/docker/docker v28.5.2+incompatible DIRECTLY, and docker/compose main still pulls it in INDIRECTLY, both alongside the new moby/moby/client v0.5.0 + moby/moby/api v1.55.0 modules -- upstream's migration off the old path is incomplete, so building buildx/compose even from their latest main would still embed docker/docker v28.5.2 and trip the same scanner match; completing that import migration ourselves would mean forking their dependency trees (not viable). This is unlike the grpc v1.81.1->v1.82.1 and containerd/containerd/v2 v2.2.4->v2.2.5 minor/patch pins those builds already apply (see #787), where a fixed version existed at the same module path. Verified against the upstream fix commit's file scope AND the current upstream go.mod files. Re-review when upstream buildx/compose finish dropping github.com/docker/docker; this is a non-exploitability disposition, not a wait for a fix at the old path, hence the `status: not_affected` below (generate-vex.sh emits this as an OpenVEX not_affected/vulnerable_code_not_present statement, not the affected/action_statement shape used for entries genuinely awaiting an upstream fix). (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-11-15 in case the underlying module pin or upstream situation has changed.)"
+      "impact_statement": "What: Suppresses CVE-2026-34040 (a Docker daemon authorization-plugin bypass) for the docker-compose and docker-buildx CLI plugin binaries only. Why: Not exploitable in these artifacts (vulnerable code not present). The vulnerable code lives entirely in github.com/docker/docker's pkg/authorization middleware, and the upstream fix (moby/moby commit e89edb19ad7de0407a5d31e3111cb01aa10b5a38, released v29.3.1) changes only pkg/authorization/authz.go. docker-compose and docker-buildx embed github.com/docker/docker solely as an API client library; they neither contain nor execute the daemon-side AuthZ middleware, so the vulnerable code path is absent from these CLI plugin binaries and the scanner is matching the embedded module version string, not reachable code. A version bump does not remove the finding either, verified against upstream on 2026-07-25: from v29 the fix lives in newly split, separately versioned modules (github.com/moby/moby/client, github.com/moby/moby/api), and there is NO v29.x at the old github.com/docker/docker path to pin to (a pseudo-version has nothing to point at). docker/buildx master still requires github.com/docker/docker v28.5.2+incompatible DIRECTLY, and docker/compose main still pulls it in INDIRECTLY, both alongside the new moby/moby/client v0.5.0 + moby/moby/api v1.55.0 modules -- upstream's migration off the old path is incomplete, so building buildx/compose even from their latest main would still embed docker/docker v28.5.2 and trip the same scanner match; completing that import migration ourselves would mean forking their dependency trees (not viable). This is unlike the grpc v1.81.1->v1.82.1 and containerd/containerd/v2 v2.2.4->v2.2.5 minor/patch pins those builds already apply (see #787), where a fixed version existed at the same module path. Verified against the upstream fix commit's file scope AND the current upstream go.mod files. This is a non-exploitability disposition, not a wait for a fix at the old path, hence the `status: not_affected` below (generate-vex.sh emits this as an OpenVEX not_affected/vulnerable_code_not_present statement, not the affected/action_statement shape used for entries genuinely awaiting an upstream fix). DISACK follow-up, live re-verified 2026-08-14 (PR #1548 review, this entry's own `expired_at` was 2026-11-15, well past the file's 14-day convention -- maintainer DISACK, \"i never agreed such a long termin date\"): re-checked at the exact pinned tags this project actually builds (docker/buildx v0.35.0, docker/compose v5.2.0, per tools/build-tools/Dockerfile's DOCKER_BUILDX_VERSION/ DOCKER_COMPOSE_VERSION build args), not the 2026-07-25 finding's own master/main branch tips. Fetched both tags' real go.mod and vendor/modules.txt from GitHub directly: both still pin github.com/docker/docker at v28.5.2+incompatible (direct in buildx, indirect in compose), buildx's vendor/modules.txt still vendors only github.com/docker/docker/pkg/namesgenerator from that module, and moby/moby's own tag list still has no v29.x release at the old module path (newest tag remains v28.5.2). The non-exploitability disposition is unchanged. This was a live source-inspection re-check (go.mod/ vendor/modules.txt/tag list), not a rebuild-and-Trivy-scan -- no image was built or scanned for this specific re-check. From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-08-28 in case the underlying module pin or upstream situation has changed.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-41567"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -47,13 +47,13 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
-      "impact_statement": "Not exploitable in these artifacts (vulnerable code not present). Same github.com/docker/docker v28.5.2+incompatible finding as CVE-2026-34040 above (see that entry for the full \"client-library-only, cannot be bumped\" background) -- this is a newly-disclosed CVE against the same pinned module version, not a regression from any change in this repo. CVE-2026-41567 is a Docker daemon vulnerability in the `PUT /containers/{id}/archive` request handler (and the `docker cp` upload path that hits the same handler): the daemon resolves decompression binaries (e.g. xz/unpigz) from the CONTAINER's filesystem instead of the host's due to an operation-ordering bug, letting a malicious image trojan those binaries for host-level code execution when an operator uploads a compressed archive into it. This is server-side request-handling code, not something a client merely importing github.com/docker/docker as an API client library would ever compile in. Verified directly (not just by the same reasoning as CVE-2026-34040): docker/buildx v0.35.0's own committed vendor/modules.txt lists exactly ONE package vendored from the entire github.com/docker/docker module -- github.com/docker/docker/pkg/ namesgenerator (a trivial random-container-name generator, unrelated to archive/cp handling) -- confirming the actual vulnerable daemon code is not present in this binary at all. (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-11-15 in case the underlying module pin or upstream situation has changed.)"
+      "impact_statement": "What: Suppresses CVE-2026-41567 (a Docker daemon `docker cp`/archive- upload host code execution finding) for the docker-compose and docker-buildx CLI plugin binaries only. Why: Not exploitable in these artifacts (vulnerable code not present). Same github.com/docker/docker v28.5.2+incompatible finding as CVE-2026-34040 above (see that entry for the full \"client-library-only, cannot be bumped\" background) -- this is a newly-disclosed CVE against the same pinned module version, not a regression from any change in this repo. CVE-2026-41567 is a Docker daemon vulnerability in the `PUT /containers/{id}/archive` request handler (and the `docker cp` upload path that hits the same handler): the daemon resolves decompression binaries (e.g. xz/unpigz) from the CONTAINER's filesystem instead of the host's due to an operation-ordering bug, letting a malicious image trojan those binaries for host-level code execution when an operator uploads a compressed archive into it. This is server-side request-handling code, not something a client merely importing github.com/docker/docker as an API client library would ever compile in. Verified directly (not just by the same reasoning as CVE-2026-34040): docker/buildx v0.35.0's own committed vendor/modules.txt lists exactly ONE package vendored from the entire github.com/docker/docker module -- github.com/docker/docker/pkg/ namesgenerator (a trivial random-container-name generator, unrelated to archive/cp handling) -- confirming the actual vulnerable daemon code is not present in this binary at all. DISACK follow-up, live re-verified 2026-08-14: same re-check as CVE-2026-34040 above (see that entry for the full methodology) at the exact pinned tag this project builds (docker/buildx v0.35.0) -- its real, current vendor/modules.txt still vendors only github.com/docker/docker/pkg/namesgenerator from this module, so the daemon-side archive/cp handler this CVE actually needs remains absent. Not a rebuild-and-Trivy-scan re-check, a live source-tree inspection. From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-08-28 in case the underlying module pin or upstream situation has changed.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-42306"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -69,13 +69,13 @@
       ],
       "status": "not_affected",
       "justification": "vulnerable_code_not_present",
-      "impact_statement": "Not exploitable in these artifacts (vulnerable code not present). Same github.com/docker/docker v28.5.2+incompatible finding as CVE-2026-34040 and CVE-2026-41567 above -- see those entries for the shared \"client-library-only, cannot be bumped\" background. CVE-2026-42306 (GHSA-rg2x-37c3-w2rh) is a race condition in the Docker daemon's own `docker cp` implementation that can redirect a copy through a bind mount to write outside the intended container filesystem onto the host. Like CVE-2026-41567, this is daemon-side request-handling code, confirmed absent from these binaries by the same direct vendor/ modules.txt check (only github.com/docker/docker/pkg/namesgenerator is actually vendored from this module in docker/buildx v0.35.0; neither binary implements or executes the daemon's cp handler). (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-11-15 in case the underlying module pin or upstream situation has changed.)"
+      "impact_statement": "What: Suppresses CVE-2026-42306 (a Docker daemon `docker cp` bind-mount race condition) for the docker-compose and docker-buildx CLI plugin binaries only. Why: Not exploitable in these artifacts (vulnerable code not present). Same github.com/docker/docker v28.5.2+incompatible finding as CVE-2026-34040 and CVE-2026-41567 above -- see those entries for the shared \"client-library-only, cannot be bumped\" background. CVE-2026-42306 (GHSA-rg2x-37c3-w2rh) is a race condition in the Docker daemon's own `docker cp` implementation that can redirect a copy through a bind mount to write outside the intended container filesystem onto the host. Like CVE-2026-41567, this is daemon-side request-handling code, confirmed absent from these binaries by the same direct vendor/modules.txt check (only github.com/docker/docker/pkg/namesgenerator is actually vendored from this module in docker/buildx v0.35.0; neither binary implements or executes the daemon's cp handler). DISACK follow-up, live re-verified 2026-08-14: same re-check as CVE-2026-34040 above (see that entry for the full methodology) at the exact pinned tag this project builds (docker/buildx v0.35.0) -- its real, current vendor/modules.txt still vendors only github.com/docker/docker/pkg/namesgenerator from this module, so the daemon-side `docker cp` handler this CVE actually needs remains absent. Not a rebuild-and-Trivy-scan re-check, a live source-tree inspection. From: Issue #1304, PR #1548 (Non-exploitability finding recorded in .trivyignore.yaml; re-verify on or before 2026-08-28 in case the underlying module pin or upstream situation has changed.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-12064"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -83,13 +83,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- not a non-exploitability disposition. This entry's own disposition for this CVE ID is stated precisely as what was actually measured, not overstated: Trivy reports it `Status: affected`, `FixedVersion: None` against the currently installed package (see below); whether that reflects a genuinely unfixed condition or a Debian-tracker/Trivy-DB mapping gap on a package that is nominally at curl's own stated fixed version is NOT resolved by this review -- issue #1304's own 2026-07-31 comment already raised exactly this question (\"could be Trivy's vulnerability DB... not yet having the fixed-at-8.21.0 mapping recorded\") and it remains open. CVE-2026-12064 itself is an SSH host-verification bypass triggered by schemeless URLs used with SFTP/SCP. 2026-08-15 checkpoint re-review (performed 2026-08-14, via real execution on self-hosted runner lancache-240, not from tracker websites alone -- see this entry's own prior history for why that distinction matters): all 5 originally-named First-Party images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`) share the byte-identical Alpine base image digest `alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` (grep-confirmed across all 5 Dockerfiles' `FROM` lines) and each installs `curl` via the same `apk add curl` mechanism from the same package repositories. Built `services/proxy` for real from `current_dev` (`docker buildx build --build-arg BUILD_TOOLS_IMAGE=... --build-context dns-domains=services/dns services/proxy`), confirmed `curl 8.21.0` installed via `curl --version` inside the built image, then ran a real `aquasec/trivy:latest` (v0.73.0) scan -- `trivy image --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --scanners vuln`, no `.trivyignore.yaml` applied: 0 total findings of any severity, this CVE ID and the rest of this group entirely absent. Cross-checked against a second, independently-published image (`ghcr.io/wiki-mod/lancache-ng/dns:nightly`, pulled fresh): also resolves to `curl 8.21.0` and produces the identical real-scan result (0 findings). `services/watchdog`/`services/ui`/`services/ntp` were not separately rebuilt this pass -- the load-bearing fact for generalizing to them is the shared base-image digest plus the identical `apk` install mechanism verified at `curl 8.21.0` on 2 of the 5 images, not any property of Trivy's finding class itself. **Real, separate finding, not previously documented anywhere in this entry**: `tools/build-tools`'s own image (built via `scripts/select-build-tools-image.sh` from `current_dev`, tag `lancache-ng-build-tools-validation:local-local-1`) is Debian-based (`rust:latest`) and installs `curl`/`libcurl4t64`/`libcurl3t64-gnutls` from `trixie-backports` at `8.21.0-2~bpo13+1` -- confirmed via `dpkg -l` inside the built image. Real Trivy scans against this image at both `--severity HIGH,CRITICAL` and the full `UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL` range (same date, same runner) found this CVE ID reported: `Status: affected`, `FixedVersion: None`. This is a real gap in every prior version of this entry, which only ever discussed the 5 runtime service images and never mentioned `tools/build-tools` as needing this suppression, even though the no-`paths:`-scoping design (re-confirmed below) means it always covered `tools/build-tools` too the moment that image also carried an affected `curl` package. `tools/build-tools`'s actual `curl` usage (grep-confirmed 2026-08-14, `tools/build-tools/Dockerfile`): every invocation is `curl -fsSL \"https://github.com/.../releases/download/...\"` against a small, fixed set of pinned GitHub-release URLs (`cargo-audit`, `cargo-tarpaulin`, `shellspec`) -- no schemeless SFTP/SCP URL, matching the same non-triggering usage shape already established for the 5 runtime images' healthcheck/monitoring-loop calls. This entry therefore now names `tools/build-tools` as its real, live scope; the 5 originally-named runtime images no longer need it (their own Alpine-migration accuracy notes above stay as historical background, unedited, per this file's convention of not rewriting prior findings). No `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected here, being installed via `apt`/`dpkg` rather than a language-specific analyzer -- carries no `PkgPath` at all, unlike this file's existing Go-binary entries above (`docker-compose`/ `docker-buildx`, scanned by Trivy's `gobinary` analyzer, which genuinely does report a file path). Confirmed empirically on a real build of the proxy image (prior finding, still valid): an ignore entry for this same CVE ID with a populated but bogus `paths:` value (`usr/bin/curl`) did NOT suppress the finding, while an otherwise identical entry with no `paths:` field at all DID suppress it cleanly. This is a time-boxed acceptance, not an indefinite one: re-review on or before 2026-08-28 -- rebuild and re-scan `tools/build-tools` at that time, at full severity range (a HIGH-only scan alone previously missed 4 sibling IDs in this same group that had been reclassified to MEDIUM, see CVE-2026-8932 below); if trixie/backports/sid has shipped a fix for this CVE ID by then, drop this entry; if not, revisit (extend, or investigate a narrower `curl` footprint for `tools/build-tools`). See issue #1304 for the complete historical Trivy evidence per image and the maintainer's original recorded decision, and this checkpoint's own real-execution findings above. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-12064 (an SSH host-verification bypass via schemeless SFTP/SCP URLs) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Not a non-exploitability disposition. This entry's own disposition for this CVE ID is stated precisely as what was actually measured, not overstated: Trivy reports it `Status: affected`, `FixedVersion: None` against the currently installed package (see below); whether that reflects a genuinely unfixed condition or a Debian-tracker/Trivy-DB mapping gap on a package that is nominally at curl's own stated fixed version is NOT resolved by this review -- issue #1304's own 2026-07-31 comment already raised exactly this question (\"could be Trivy's vulnerability DB... not yet having the fixed-at-8.21.0 mapping recorded\") and it remains open. CVE-2026-12064 itself is an SSH host-verification bypass triggered by schemeless URLs used with SFTP/SCP. 2026-08-15 checkpoint re-review (performed 2026-08-14, via real execution on self-hosted runner lancache-240, not from tracker websites alone -- see this entry's own prior history for why that distinction matters): all 5 originally-named First-Party images (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`, `services/ntp`) share the byte-identical Alpine base image digest `alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b` (grep-confirmed across all 5 Dockerfiles' `FROM` lines) and each installs `curl` via the same `apk add curl` mechanism from the same package repositories. Built `services/proxy` for real from `current_dev` (`docker buildx build --build-arg BUILD_TOOLS_IMAGE=... --build-context dns-domains=services/dns services/proxy`), confirmed `curl 8.21.0` installed via `curl --version` inside the built image, then ran a real `aquasec/trivy:latest` (v0.73.0) scan -- `trivy image --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --scanners vuln`, no `.trivyignore.yaml` applied: 0 total findings of any severity, this CVE ID and the rest of this group entirely absent. Cross-checked against a second, independently-published image (`ghcr.io/wiki-mod/lancache-ng/dns:nightly`, pulled fresh): also resolves to `curl 8.21.0` and produces the identical real-scan result (0 findings). `services/watchdog`/`services/ui`/`services/ntp` were not separately rebuilt this pass -- the load-bearing fact for generalizing to them is the shared base-image digest plus the identical `apk` install mechanism verified at `curl 8.21.0` on 2 of the 5 images, not any property of Trivy's finding class itself. **Real, separate finding, not previously documented anywhere in this entry**: `tools/build-tools`'s own image (built via `scripts/select-build-tools-image.sh` from `current_dev`, tag `lancache-ng-build-tools-validation:local-local-1`) is Debian-based (`rust:latest`) and installs `curl`/`libcurl4t64`/`libcurl3t64-gnutls` from `trixie-backports` at `8.21.0-2~bpo13+1` -- confirmed via `dpkg -l` inside the built image. Real Trivy scans against this image at both `--severity HIGH,CRITICAL` and the full `UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL` range (same date, same runner) found this CVE ID reported: `Status: affected`, `FixedVersion: None`. This is a real gap in every prior version of this entry, which only ever discussed the 5 runtime service images and never mentioned `tools/build-tools` as needing this suppression, even though the no-`paths:`-scoping design (re-confirmed below) means it always covered `tools/build-tools` too the moment that image also carried an affected `curl` package. `tools/build-tools`'s actual `curl` usage (grep-confirmed 2026-08-14, `tools/build-tools/Dockerfile`): every invocation is `curl -fsSL \"https://github.com/.../releases/download/...\"` against a small, fixed set of pinned GitHub-release URLs (`cargo-audit`, `cargo-tarpaulin`, `shellspec`) -- no schemeless SFTP/SCP URL, matching the same non-triggering usage shape already established for the 5 runtime images' healthcheck/monitoring-loop calls. This entry therefore now names `tools/build-tools` as its real, live scope; the 5 originally-named runtime images no longer need it (their own Alpine-migration accuracy notes above stay as historical background, unedited, per this file's convention of not rewriting prior findings). No `paths:` scoping is given for this entry: Trivy's `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected here, being installed via `apt`/`dpkg` rather than a language-specific analyzer -- carries no `PkgPath` at all, unlike this file's existing Go-binary entries above (`docker-compose`/ `docker-buildx`, scanned by Trivy's `gobinary` analyzer, which genuinely does report a file path). Confirmed empirically on a real build of the proxy image (prior finding, still valid): an ignore entry for this same CVE ID with a populated but bogus `paths:` value (`usr/bin/curl`) did NOT suppress the finding, while an otherwise identical entry with no `paths:` field at all DID suppress it cleanly. This is a time-boxed acceptance, not an indefinite one: re-review on or before 2026-08-28 -- rebuild and re-scan `tools/build-tools` at that time, at full severity range (a HIGH-only scan alone previously missed 4 sibling IDs in this same group that had been reclassified to MEDIUM, see CVE-2026-8932 below); if trixie/backports/sid has shipped a fix for this CVE ID by then, drop this entry; if not, revisit (extend, or investigate a narrower `curl` footprint for `tools/build-tools`). See issue #1304 for the complete historical Trivy evidence per image and the maintainer's original recorded decision, and this checkpoint's own real-execution findings above. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-8286"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -97,13 +97,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- same curl finding group as CVE-2026-12064 above (see that entry for the full background: the 2026-08-15 checkpoint's real-execution methodology, why the disposition is stated as \"Trivy reports affected\" rather than \"genuinely vulnerable\", why the 5 originally-named runtime images no longer need this entry, why `tools/build-tools` is this entry's real remaining scope, its actual narrow `curl` usage there, why no `paths:` scoping is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8286 is an insecure-connection-establishment issue caused by a TLS configuration mismatch. Real, current Trivy scan (2026-08-14, lancache-240, both HIGH,CRITICAL and full-severity-range) confirms this ID is reported against `tools/build-tools`'s `curl`/ `libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`, severity HIGH) and absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-8286 (an insecure TLS-configuration-mismatch connection issue) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Same curl finding group as CVE-2026-12064 above (see that entry for the full background: the 2026-08-15 checkpoint's real-execution methodology, why the disposition is stated as \"Trivy reports affected\" rather than \"genuinely vulnerable\", why the 5 originally-named runtime images no longer need this entry, why `tools/build-tools` is this entry's real remaining scope, its actual narrow `curl` usage there, why no `paths:` scoping is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8286 is an insecure-connection-establishment issue caused by a TLS configuration mismatch. Real, current Trivy scan (2026-08-14, lancache-240, both HIGH,CRITICAL and full-severity-range) confirms this ID is reported against `tools/build-tools`'s `curl`/ `libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`, severity HIGH) and absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-8927"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -111,13 +111,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- same curl finding group as CVE-2026-12064 above (see that entry for the full background: the 2026-08-15 checkpoint's real-execution methodology, why the disposition is stated as \"Trivy reports affected\" rather than \"genuinely vulnerable\", why the 5 originally-named runtime images no longer need this entry, why `tools/build-tools` is this entry's real remaining scope, its actual narrow `curl` usage there, why no `paths:` scoping is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8927 is an information-disclosure issue caused by proxy authentication state not being cleared between connections. Real, current Trivy scan (2026-08-14, lancache-240, both HIGH,CRITICAL and full-severity-range) confirms this ID is reported against `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`, severity HIGH) and absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-8927 (a proxy-authentication-state information-disclosure issue) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Same curl finding group as CVE-2026-12064 above (see that entry for the full background: the 2026-08-15 checkpoint's real-execution methodology, why the disposition is stated as \"Trivy reports affected\" rather than \"genuinely vulnerable\", why the 5 originally-named runtime images no longer need this entry, why `tools/build-tools` is this entry's real remaining scope, its actual narrow `curl` usage there, why no `paths:` scoping is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8927 is an information-disclosure issue caused by proxy authentication state not being cleared between connections. Real, current Trivy scan (2026-08-14, lancache-240, both HIGH,CRITICAL and full-severity-range) confirms this ID is reported against `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`, severity HIGH) and absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-8932"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -125,13 +125,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- same curl finding group as CVE-2026-12064 above (see that entry for the full background). CVE-2026-8932 is a security-feature-bypass issue caused by improper mTLS connection reuse. This ID was initially, incorrectly, planned for removal earlier in this same checkpoint pass, because the first real Trivy scan of `tools/build-tools` used `--severity HIGH,CRITICAL` only and found no match; a follow-up **full-severity-range** scan (`--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL`, same image, same runner, 2026-08-14) found this ID IS present, at `Severity: MEDIUM` (reclassified down from its originally-tracked HIGH), `Status: affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`. Restored, not removed -- a HIGH,CRITICAL-only scan is not sufficient evidence that a previously-HIGH finding is gone; it may only have been reclassified. Absent from both real-scanned Alpine-based images at any severity. Same `tools/build-tools`-only scope and narrow non-triggering usage as CVE-2026-12064 above, disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-8932 (an mTLS-connection-reuse security-feature-bypass issue) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Same curl finding group as CVE-2026-12064 above (see that entry for the full background). CVE-2026-8932 is a security-feature-bypass issue caused by improper mTLS connection reuse. This ID was initially, incorrectly, planned for removal earlier in this same checkpoint pass, because the first real Trivy scan of `tools/build-tools` used `--severity HIGH,CRITICAL` only and found no match; a follow-up **full-severity-range** scan (`--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL`, same image, same runner, 2026-08-14) found this ID IS present, at `Severity: MEDIUM` (reclassified down from its originally-tracked HIGH), `Status: affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`. Restored, not removed -- a HIGH,CRITICAL-only scan is not sufficient evidence that a previously-HIGH finding is gone; it may only have been reclassified. Absent from both real-scanned Alpine-based images at any severity. Same `tools/build-tools`-only scope and narrow non-triggering usage as CVE-2026-12064 above, disclosed 2026-07-03. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-9079"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -139,13 +139,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- same curl finding group as CVE-2026-12064 above (see that entry for the full background, and CVE-2026-8932 above for why this ID was restored after an initial incorrect HIGH,CRITICAL-only removal in this same pass). CVE-2026-9079 is an information-disclosure issue caused by failure to clear proxy authentication credentials. Full-severity-range real Trivy scan (2026-08-14, lancache-240) confirms this ID present at `Severity: MEDIUM` (reclassified down from HIGH), `Status: affected`, `FixedVersion: None`, on `tools/build-tools`'s `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-9079 (a proxy-authentication-credential information-disclosure issue) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Same curl finding group as CVE-2026-12064 above (see that entry for the full background, and CVE-2026-8932 above for why this ID was restored after an initial incorrect HIGH,CRITICAL-only removal in this same pass). CVE-2026-9079 is an information-disclosure issue caused by failure to clear proxy authentication credentials. Full-severity-range real Trivy scan (2026-08-14, lancache-240) confirms this ID present at `Severity: MEDIUM` (reclassified down from HIGH), `Status: affected`, `FixedVersion: None`, on `tools/build-tools`'s `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-9080"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -153,13 +153,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- same curl finding group as CVE-2026-12064 above (see that entry for the full background, and CVE-2026-8932 above for why this ID was restored after an initial incorrect HIGH,CRITICAL-only removal in this same pass). CVE-2026-9080 is a use-after-free reachable via `curl_easy_pause()` inside a `CURLMOPT_SOCKETFUNCTION` callback -- a libcurl multi-interface callback API `tools/build-tools`'s own `curl` invocations never use (each is a plain `curl -fsSL` CLI call against a pinned URL, not code linking against libcurl's callback API directly). Full-severity-range real Trivy scan (2026-08-14, lancache-240) confirms this ID present at `Severity: MEDIUM` (reclassified down from HIGH), `Status: affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-9080 (a `curl_easy_pause()` use-after-free reachable via a libcurl multi-interface callback) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Same curl finding group as CVE-2026-12064 above (see that entry for the full background, and CVE-2026-8932 above for why this ID was restored after an initial incorrect HIGH,CRITICAL-only removal in this same pass). CVE-2026-9080 is a use-after-free reachable via `curl_easy_pause()` inside a `CURLMOPT_SOCKETFUNCTION` callback -- a libcurl multi-interface callback API `tools/build-tools`'s own `curl` invocations never use (each is a plain `curl -fsSL` CLI call against a pinned URL, not code linking against libcurl's callback API directly). Full-severity-range real Trivy scan (2026-08-14, lancache-240) confirms this ID present at `Severity: MEDIUM` (reclassified down from HIGH), `Status: affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-9545"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -167,13 +167,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "Accepted, tracked risk -- same curl finding group as CVE-2026-12064 above (see that entry for the full background, and CVE-2026-8932 above for why this ID was restored after an initial incorrect HIGH,CRITICAL-only removal in this same pass). CVE-2026-9545 is an information-disclosure issue via a cached SSL session and early data -- reachable only across a long-lived process reusing a session, which does not describe `tools/build-tools`'s own `curl` invocations: each is a short-lived, one-shot-per-invocation `curl -fsSL` CLI call during the image build, not a long-lived process. Full-severity-range real Trivy scan (2026-08-14, lancache-240) confirms this ID present at `Severity: MEDIUM` (reclassified down from HIGH), `Status: affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-9545 (a cached-SSL-session-and-early-data information-disclosure issue) as tracked risk for `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Why: Same curl finding group as CVE-2026-12064 above (see that entry for the full background, and CVE-2026-8932 above for why this ID was restored after an initial incorrect HIGH,CRITICAL-only removal in this same pass). CVE-2026-9545 is an information-disclosure issue via a cached SSL session and early data -- reachable only across a long-lived process reusing a session, which does not describe `tools/build-tools`'s own `curl` invocations: each is a short-lived, one-shot-per-invocation `curl -fsSL` CLI call during the image build, not a long-lived process. Full-severity-range real Trivy scan (2026-08-14, lancache-240) confirms this ID present at `Severity: MEDIUM` (reclassified down from HIGH), `Status: affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/ `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both real-scanned Alpine-based images at any severity, disclosed 2026-07-03. From: Issue #1304, PR #1548 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-28 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2011-4116"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -188,7 +188,7 @@
       "vulnerability": {
         "name": "CVE-2025-15649"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -203,7 +203,7 @@
       "vulnerability": {
         "name": "CVE-2026-12087"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -218,7 +218,7 @@
       "vulnerability": {
         "name": "CVE-2026-13221"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -233,7 +233,7 @@
       "vulnerability": {
         "name": "CVE-2026-42496"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -248,7 +248,7 @@
       "vulnerability": {
         "name": "CVE-2026-42497"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -263,7 +263,7 @@
       "vulnerability": {
         "name": "CVE-2026-48959"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -278,7 +278,7 @@
       "vulnerability": {
         "name": "CVE-2026-48961"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -293,7 +293,7 @@
       "vulnerability": {
         "name": "CVE-2026-48962"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -308,7 +308,7 @@
       "vulnerability": {
         "name": "CVE-2026-57432"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -323,7 +323,7 @@
       "vulnerability": {
         "name": "CVE-2026-57433"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -338,7 +338,7 @@
       "vulnerability": {
         "name": "CVE-2026-7010"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -353,7 +353,7 @@
       "vulnerability": {
         "name": "CVE-2026-7017"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -368,7 +368,7 @@
       "vulnerability": {
         "name": "CVE-2026-8376"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -383,7 +383,7 @@
       "vulnerability": {
         "name": "CVE-2026-9538"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -398,7 +398,7 @@
       "vulnerability": {
         "name": "CVE-2022-0563"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -413,7 +413,7 @@
       "vulnerability": {
         "name": "CVE-2025-14104"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -428,7 +428,7 @@
       "vulnerability": {
         "name": "CVE-2026-13595"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -443,7 +443,7 @@
       "vulnerability": {
         "name": "CVE-2026-27456"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -458,7 +458,7 @@
       "vulnerability": {
         "name": "CVE-2026-3184"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -473,7 +473,7 @@
       "vulnerability": {
         "name": "CVE-2026-53612"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -488,7 +488,7 @@
       "vulnerability": {
         "name": "CVE-2026-53613"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -503,7 +503,7 @@
       "vulnerability": {
         "name": "CVE-2026-53614"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -518,7 +518,7 @@
       "vulnerability": {
         "name": "CVE-2026-53615"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -533,7 +533,7 @@
       "vulnerability": {
         "name": "CVE-2025-6141"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -548,7 +548,7 @@
       "vulnerability": {
         "name": "CVE-2025-69720"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -563,7 +563,7 @@
       "vulnerability": {
         "name": "CVE-2026-54369"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -578,7 +578,7 @@
       "vulnerability": {
         "name": "CVE-2026-54370"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -593,7 +593,7 @@
       "vulnerability": {
         "name": "CVE-2026-41991"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -607,7 +607,7 @@
       "vulnerability": {
         "name": "CVE-2026-41992"
       },
-      "timestamp": "2026-08-14T05:49:23Z",
+      "timestamp": "2026-08-14T08:44:10Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
