@@ -219,7 +219,13 @@ jobs:
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -426,7 +432,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -520,7 +532,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -546,7 +564,13 @@ jobs:
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -880,7 +904,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
