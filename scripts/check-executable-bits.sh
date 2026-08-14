@@ -68,6 +68,12 @@
 #   - A path passed as a data *argument* to another command (`cat
 #     scripts/x.sh`, `grep ... scripts/x.sh`) is correctly NOT flagged,
 #     because only the command *word* of each simple command is examined.
+#   - is_block_scalar_header() recognizes an explicit YAML indentation
+#     indicator (e.g. `|2-`) but the block-body loop below still ends the
+#     block on `indent > run_key_indent` rather than the indicator's own
+#     stated column. No `run:` value in this repo's real workflow files uses
+#     one today (grep-verified), so this is an untested, not a proven-safe,
+#     axis of the format. From: PR #1501.
 #
 # Accepts an optional repo_root argument (defaults to this script's own repo)
 # so tests/bats/check_executable_bits.bats can point it at a fixture git tree
@@ -206,22 +212,13 @@ split_into_segments() {
 # Keeping this separate from YAML extraction prevents configuration data that
 # happens to contain script-looking paths from reaching the command scanner.
 #
-# Why the early candidate-substring return: command_word_script() can only
-# ever match a path under scripts/, services/, tests/, or .githooks/ (see
-# script_path_re), so a line containing none of those four substrings can
-# never produce a hit. Skipping split_into_segments/command_word_script for
-# such a line is not a scope narrowing -- it is a pure no-op-equivalent
-# short-circuit -- but it matters a great deal in practice: those two calls
-# fork a subshell/process-substitution per segment, and this repo's own real
-# `build-push.yml` (8000+ lines, 100+ `run:` blocks) drove that path from a
-# single-digit-second scan (the pre-rewrite whole-file `grep -E` pre-filter)
-# to a 60s+ timeout on Windows Git Bash once every physical run-block line
-# started reaching the subshell machinery unconditionally -- measured directly
-# (real timed runs of both versions against the same file), not reasoned
-# about, per Rule-Ref: AG-VAL-024. This restores that same pre-filter
-# discipline at the logical-shell-line level (post YAML-extraction) instead
-# of the old raw-file-line level, so it no longer reintroduces the `paths:`
-# false-positive class this rewrite exists to fix.
+# What: skips the segment-split/subshell path for a line matching none of
+# script_path_re's four directory prefixes.
+# Why: command_word_script() can never match such a line anyway, so this is
+# a no-op-equivalent short-circuit that avoids an expensive per-segment
+# subshell fork on every line -- a real, measured cost on this repo's own
+# largest workflow file, not a narrowing of what gets classified.
+# From: PR #1501.
 inspect_shell_line() {
   local shell_line="$1" context="$2" segment found
   shell_line="${shell_line#"${shell_line%%[![:space:]]*}"}"
@@ -337,17 +334,12 @@ for file in "${scan_files[@]}"; do
       # fall through and test whether it begins another `run:` scalar.
     fi
 
-    # Why this pre-check: yaml_run_value() can only ever match a line whose
-    # trimmed body literally starts with `run:` (plain or quoted), so a line
-    # with no `run:` substring at all can never match -- but calling it via
-    # `$(...)` still forks a subshell regardless of the outcome. Without this
-    # cheap case-based guard, every single line of every scanned workflow
-    # file forks once just to learn "not a run: line," which is exactly the
-    # per-line subprocess cost this project's own build-push.yml (8000+
-    # lines) makes expensive on Windows Git Bash (measured directly: this
-    # loop alone took the whole scan from single-digit seconds to a 60s+
-    # timeout against that one real file, per Rule-Ref: AG-VAL-024). This is
-    # a pure short-circuit, not a narrowing of what gets classified as shell.
+    # What: skips the $(yaml_run_value ...) subshell for a raw line with no
+    # `run:` substring.
+    # Why: yaml_run_value() can never match such a line anyway, so this
+    # avoids forking a subshell on every line of the file just to learn
+    # "not a run: line" -- a real, measured cost on a large workflow file.
+    # From: PR #1501.
     case "$line" in
       *run:*) ;;
       *) continue ;;
