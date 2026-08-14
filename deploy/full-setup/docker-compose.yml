@@ -55,18 +55,16 @@ services:
       retries: 2
       start_period: 10s
 
-  # What: a socat shim reproducing prod's Docker-port-published
-  # IP_STANDARD:443 -> proxy:8443 forward as a separately dialable address.
-  # Why: this bridge-network validation harness has no per-host-IP publish
-  # mechanism; without it dns-standard and dns-ssl resolved to the same
-  # endpoint, so nothing could tell a miswired dns-ssl apart from correct.
+  # What: a socat shim reproducing prod's IP_STANDARD:443 -> proxy:8443
+  # forward as a separately dialable address.
+  # Why: this harness has no per-host-IP publish mechanism; without it
+  # dns-standard and dns-ssl resolved to the same endpoint.
   # From: Issue #668 | PR #795
   #
   # What: gated behind a Compose profile, started only by
   # scripts/ssl-mitm-cache-simulation.sh's own explicit service name.
-  # Why: every other job brings the stack up unrestricted and has no use
-  # for this shim; an un-threaded default IP would land outside whatever
-  # subnet those jobs reserved and break their unrelated `compose up -d`.
+  # Why: every other job brings the stack up unrestricted with no use for
+  # this shim; an un-threaded default IP could land outside a reserved subnet.
   # From: Issue #668 | PR #795
   standard-passthrough-shim:
     profiles: [ssl-mitm-proof]

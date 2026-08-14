@@ -8,22 +8,19 @@
 # independent-restart trade-offs for one image instead of two.
 # From: Issue #1428 | PR #1431
 #
-# What: copies the pinned fluent-bit binary + its glibc shared-library
-# closure into a private prefix, execed via an explicit ld-linux
-# interpreter argument (never the kernel's own embedded-interpreter path).
+# What: copies the pinned fluent-bit binary + glibc closure into a
+# private prefix, execed via an explicit ld-linux interpreter argument.
 # Why: Alpine stable never packages fluent-bit (only edge's unpinnable
-# "testing" repo); an isolated glibc closure avoids gcompat's known
-# coverage gaps for a binary this large, with no Alpine-musl ABI mixing.
+# repo); an isolated closure avoids gcompat's known gaps for this binary.
 # From: Issue #1428 | PR #1431
 FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562 AS fluent-bit-src
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# What: pins the Alpine base to 3.24 (was 3.20); syslog-ng stays on Alpine's
-# stable main repo (4.11.0-r0 on 3.24). bash provides `wait -n` for
-# entrypoint.sh's fail-fast multi-child supervision.
-# Why: 3.20 was an unintentional scaffold-commit inconsistency, not a
-# deliberate choice -- every other first-party service already pins 3.24.
+# What: pins the Alpine base to 3.24 (was 3.20); syslog-ng stays on
+# Alpine's stable main repo. bash provides `wait -n` for entrypoint.sh.
+# Why: 3.20 was an unintentional scaffold-commit inconsistency -- every
+# other first-party service already pins 3.24.
 # From: Issue #1554 | PR #1555
 RUN apk add --no-cache \
         syslog-ng \
@@ -41,17 +38,15 @@ RUN apk add --no-cache \
     && mkdir -p /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache \
     && chown -R lancache:lancache /var/log/lancache-syslog-ng /var/lib/lancache-syslog-data /etc/syslog-ng /etc/fluent-bit /data /var/log/lancache
 # What: pre-creates+chowns `/data`, `/var/log/lancache` (named volumes) and
-# `/var/log/lancache-syslog-ng` (a real bind mount, SYSLOG_NG_LOG_DIR).
-# Why: an image-absent path becomes an unwritable root:root dir for the
-# non-root `lancache` uid -- the bind-mount case is the real bug
-# data-loss-detector.sh guards against.
+# `/var/log/lancache-syslog-ng` (bind mount, SYSLOG_NG_LOG_DIR).
+# Why: an image-absent path becomes an unwritable root:root dir for uid
+# 10001 -- the bind-mount case is the bug data-loss-detector.sh guards.
 # From: Issue #1428 | PR #1431
 
 # What: globs the `*-linux-gnu` triplet directory instead of hardcoding
-# either arch's name, so this COPY matches both amd64 and arm64 unmodified.
-# Why: an earlier hardcoded x86_64-linux-gnu path failed closed on arm64
-# ("not found") -- Docker's COPY --from pattern is matched via Go's
-# filepath.Match per path segment, so a glob needs no ARG TARGETARCH branch.
+# either arch's name, matching both amd64 and arm64 unmodified.
+# Why: an earlier hardcoded x86_64-linux-gnu path failed closed on arm64;
+# Docker's COPY --from pattern matches via Go's filepath.Match per segment.
 # From: Issue #1428 | PR #1431
 COPY --from=fluent-bit-src /fluent-bit/bin/fluent-bit /opt/fluent-bit-glibc/bin/fluent-bit
 COPY --from=fluent-bit-src /lib/*-linux-gnu/. /opt/fluent-bit-glibc/lib/
@@ -73,18 +68,16 @@ RUN chmod 755 /entrypoint.sh /usr/local/bin/healthcheck.sh /usr/local/bin/data-l
     && echo "$ld_interp" > /opt/fluent-bit-glibc/ld-interp-name \
     && chmod +x "/opt/fluent-bit-glibc/lib/$ld_interp" /opt/fluent-bit-glibc/bin/fluent-bit \
     && chown -R lancache:lancache /opt/fluent-bit-glibc \
-    # What: this container runs entirely as fixed non-root uid 10001, not a
-    # root PID 1 that drops privilege for one child (su-exec, rejected).
+    # What: runs entirely as fixed non-root uid 10001 (su-exec rejected).
     # Why: su-exec's setgroups() needs CAP_SETGID, and a root supervisor
     # without CAP_KILL cannot signal a different-uid child -- three added
     # capabilities this single-uid design avoids needing at all.
     # From: Issue #1428 | PR #1431
     #
-    # What: setcap goes on $ld_interp (the dynamic-linker interpreter),
-    # never on the fluent-bit binary itself.
-    # Why: fluent-bit is invoked via an explicit ld-linux interpreter
-    # argument, so the kernel's real execve() target -- and the only place
-    # a FILE capability reaches a non-root process -- is the interpreter.
+    # What: setcap goes on $ld_interp, never the fluent-bit binary itself.
+    # Why: fluent-bit execs via an explicit ld-linux interpreter argument,
+    # so the kernel's real execve() target -- the only place a FILE
+    # capability reaches a non-root process -- is the interpreter.
     # From: Issue #1428 | PR #1431
     #
     # What: grants CAP_DAC_READ_SEARCH only (not the broader DAC_OVERRIDE).

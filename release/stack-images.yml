@@ -1,18 +1,16 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: release manifest -- first-party runtime/tooling/metadata images,
-# supported platforms/source Dockerfiles, external images, mutable/
-# immutable tag channels, and the image retention policy.
+# What: release manifest -- first-party/external images, tag channels,
+# and the image retention policy.
 # Why: consumed by the release/promotion CI workflow and
 # scripts/validate-stack-images.sh as the single source of release state.
 # From: PR #432
 #
 # What: master publishes `latest` continuously; current_dev publishes
-# `nightly` once daily plus on-demand, gated on a full green build+scan
-# (not on every push); archived vY.X.Z branches publish no live channel.
-# Why: see docs/release-versioning.md's "Branch/channel model" section and
-# nightly-refresh.yml for the full current mechanism.
+# `nightly` once daily plus on-demand, gated on a green build+scan.
+# Why: see docs/release-versioning.md's "Branch/channel model" section
+# and nightly-refresh.yml for the full current mechanism.
 # From: PR #1142 | PR #1251
 schema: stack-images/v1
 generated_from: origin/master
