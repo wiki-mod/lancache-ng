@@ -9,7 +9,7 @@ This file is the fixed, mandatory **minimum standard** baseline for every `Agent
 ## Do
 
 1. **Governance read, every dispatch, every continuation.** (AG-GOV-001)
-2. **Explicit-by-name acceptance report**, spot-checked by asking for a quoted rule ID.
+2. **Explicit-by-name acceptance report**, spot-checked by asking for a quoted rule ID. This report must also remind the coordinator to send back this agent's own task/session ID (via `SendMessage`, or whichever equivalent applies) — an agent cannot determine that ID on its own, so it must be relayed before the marker commit in item 5 below can include it.
 3. **Worktree binding, named and absolute**, verified before every commit via `git rev-parse --show-toplevel`/`git branch --show-current`. (AG-WF-002, AG-WF-024)
 4. **Rebase-first** onto the current base before any work begins — AND re-verify the rebase is still current immediately before declaring the task finished, not only at the start. (AG-WF-002)
 5. **Empty marker commit, first action, before any code change.** The commit message must state the task/issue binding, that this checklist was read and accepted, AND your own task/session ID — the confirmation lives as a durable, git-anchored artifact tied to the worktree, not only as a chat statement, and must remain reachable/resumable independent of worktree naming or surviving chat history. (AG-WF-002, AG-WF-017)
