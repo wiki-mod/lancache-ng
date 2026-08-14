@@ -100,9 +100,20 @@ check_bare_issue_ref_duplicates_from() {
         [ -n "$num" ] || continue
         # What: Word-boundary-equivalent match so "#887" doesn't also match
         #   "#8871"; From: lines are excluded (that's where the number is
-        #   supposed to live) -- every other line citing it is the
-        #   redundant duplicate this check exists to catch.
-        grep -EnI "(^|[^0-9])#${num}([^0-9]|$)" "$path" 2>/dev/null | grep -vE 'From:' || true
+        #   supposed to live).
+        # Why: A plain grep also matched "#887" inside an echo/print string
+        #   literal (runtime output text, not a comment); an odd count of
+        #   `"` before the match means it sits inside an open double-quoted
+        #   string, so only an even count (a real comment, not string data)
+        #   is kept.
+        while IFS=: read -r lineno content; do
+            [ -n "$lineno" ] || continue
+            prefix="${content%%#"${num}"*}"
+            quote_count=$(printf '%s' "$prefix" | tr -dc '"' | wc -c)
+            if [ $(( quote_count % 2 )) -eq 0 ]; then
+                printf '%s:%s:%s\n' "$path" "$lineno" "$content"
+            fi
+        done < <(grep -nEI "(^|[^0-9])#${num}([^0-9]|$)" "$path" 2>/dev/null | grep -vE 'From:')
     done <<< "$from_nums"
 }
 
