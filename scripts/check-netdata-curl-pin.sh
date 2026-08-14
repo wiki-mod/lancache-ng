@@ -55,16 +55,39 @@
 # `expired_at` fields and `PR_TITLE_LINT_MODE`'s warn-then-block transition.
 # Once ACCEPTED_UNTIL passes, a still-affected pin becomes a hard failure --
 # this is a deliberate escalation, not a bug: the point of a checkpoint
-# date is that silence past it is no longer acceptable, and whoever re-
-# reviews issue #1304's accept-and-VEX decision at its own 2026-08-15
-# checkpoint should update this date (and re-verify CURL_SAFE_THRESHOLD)
-# together with that review, not treat them as unrelated.
+# date is that silence past it is no longer acceptable.
+#
+# 2026-08-15 checkpoint re-review (performed 2026-08-14): checked netdata's
+# own latest upstream release (v2.11.0, published 2026-08-12, confirmed via
+# a real GitHub API fetch) and its real
+# packaging/makeself/bundled-packages.version file at that tag (real
+# raw.githubusercontent.com fetch, not assumed) -- it still pins
+# `CURL_VERSION="curl-8_20_0"`, still below the 8.21.0 safe threshold (this
+# repo's own pinned `NETDATA_VERSION=v2.10.4` vendors an even older curl
+# 8.17.0, so bumping to v2.11.0 would not resolve this either -- not
+# attempted here, since it would not fix the underlying risk and is a
+# separate, larger change of its own). No newer netdata release fixes this
+# as of today. Separately, this same checkpoint's real Trivy scans (see
+# .trivyignore.yaml's CVE-2026-12064/-8286/-8927/-8458 entries) found the
+# curl-fixed-at-8.21.0 assumption behind CURL_SAFE_THRESHOLD is not fully
+# uniform across every one of the originally tracked 7 CVE IDs once tested
+# for real against an actual 8.21.0 build (3 of 7 plus one newly-found ID
+# still showed as affected on a real trixie-backports 8.21.0-2~bpo13+1
+# `curl` package) -- CURL_SAFE_THRESHOLD is NOT re-derived from that finding
+# in this pass, since netdata's own vendored curl (8.20.0) is below 8.21.0
+# either way and the gate's actual pass/fail here is unaffected regardless
+# of that per-CVE nuance; flagged so a future re-review does not treat
+# "netdata ships >= 8.21.0" as automatically sufficient without checking
+# the specific CVE set again at that time. ACCEPTED_UNTIL therefore extends
+# to 2026-08-28, matching the `.trivyignore.yaml` curl-group entries' own
+# extended checkpoint from the same re-review pass -- re-verify both
+# together again at that date, per this comment's own original instruction.
 set -euo pipefail
 
 CURL_SAFE_THRESHOLD="8.21.0"
 TRACKED_CVES=(CVE-2026-12064 CVE-2026-8286 CVE-2026-8927 CVE-2026-8932 CVE-2026-9079 CVE-2026-9080 CVE-2026-9545)
 TRACKED_CVES_SOURCE_DATE="2026-07-31"
-ACCEPTED_UNTIL="2026-08-15"
+ACCEPTED_UNTIL="2026-08-28"
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "${script_dir}/.." && pwd)"
