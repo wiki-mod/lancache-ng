@@ -9,6 +9,7 @@
 # parallel deploy/dev stack); deploy/quickstart/ and deploy/full-setup/ are
 # this project's other two real profiles, for quickstart and CI-validation
 # use respectively.
+# From: Issue #1391
 
 name: lancache-ng
 
@@ -16,6 +17,7 @@ name: lancache-ng
 # place, scripts/docker-socket-proxy.sh (mounted read-only below).
 # Why: docs/naming-conventions.md names this the canonical source -- do not
 # duplicate the allowlist as a YAML anchor in this file.
+# From: PR #635
 
 services:
 
@@ -360,52 +362,22 @@ services:
         max-file: "2"
 
   # ── Retention (file-retention daemon) ─────────────────────────────────────
-  # What: dedicated sidecar for services/watchdog/retention.sh (cache-age
-  # purge, syslog-ng storage-budget retention, fluent-bit self-log rotation),
-  # split into its own compose service, separate from `watchdog` above.
-  # Why: a bug or compromise in this destructive find/rm-driven logic must be
-  # contained by real container-level boundaries (capabilities, filesystem,
-  # mounts), not merely by running in a separate OS process inside the same
-  # container.
-  # From: Issue #842
+  # What: dedicated sidecar for services/watchdog/retention.sh, isolated
+  # from `watchdog` above by real container-level boundaries.
+  # Why: a bug in this destructive find/rm-driven logic needs containment by
+  # capabilities/filesystem/mounts, not just a separate OS process.
+  # From: Issue #842 | PR #1360
   #
-  # `cap_drop: [ALL]` then adding back only what's proven necessary on a real
-  # runner, not assumed:
-  #   - DAC_OVERRIDE: retention.sh deletes proxy-cache entries nginx creates
-  #     as `nginx:nginx`, mode 0700/0600 (no group/other bits, hardcoded by
-  #     nginx itself, unaffected by any process umask) -- the sole remaining
-  #     reason this capability is kept.
-  #   - SETUID, SETGID, SETPCAP: needed ONLY transiently, for
-  #     retention-entrypoint.sh's own root-to-`lancache`(10001) privilege
-  #     drop via `setpriv` -- confirmed via `/proc/self/status` before/after
-  #     that the long-running retention.sh process retains NONE of these
-  #     three; only DAC_OVERRIDE survives in its capability sets. See
-  #     retention-entrypoint.sh's own header for why a bare
-  #     `user: "10001:10001"` cannot deliver this instead (`cap_add` alone
-  #     does not reach a non-root process's effective set without the drop
-  #     sequence).
-  #   - CHOWN: also needed only transiently, by retention-entrypoint.sh's own
-  #     root-phase `chown` of the retention-state/watchdog-logs paths, since
-  #     a fresh or pre-existing named volume may not already be owned by
-  #     `lancache` and `cap_drop: ALL` removes CHOWN from root too, not just
-  #     the eventual non-root user; stripped back out by the same
-  #     `--bounding-set` call that already removes SETUID/SETGID/SETPCAP.
-  #
-  # What: CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks
-  # on every path this container can see.
-  # Why: the blast radius is bounded by the mount set below (only the four
-  # paths retention.sh's own functions and stamp file need, no Docker
-  # socket, no other service's volumes), `read_only: true` (the capability
-  # bypasses permission checks but exposes no additional path), and
-  # `network_mode: none` (retention.sh never makes or accepts a network
-  # connection) -- verified live that a full purge/prune/rotate cycle still
-  # completes with networking removed entirely.
-  #
-  # STATUS: as of 2026-08-14, DAC_OVERRIDE stays scoped to the nginx
-  # cache-entries case above; narrowing it (e.g. to the already-narrower
-  # DAC_READ_SEARCH the `syslog` service below uses) needs the same
-  # live-verified methodology already applied there, not a re-derivation
-  # from this comment alone.
+  # What: `cap_drop: [ALL]`, adding back only DAC_OVERRIDE (deletes
+  # nginx-owned proxy-cache entries), and SETUID/SETGID/SETPCAP/CHOWN
+  # (transient, for the entrypoint's own root-to-`lancache` privilege drop).
+  # Why: each grant is empirically proven necessary, not assumed -- see
+  # retention-entrypoint.sh's own header for the full per-capability
+  # methodology (Alpine/nginx ownership basis, the `setpriv` drop sequence,
+  # why a bare `user:` directive alone cannot deliver this) and the blast
+  # radius already bounded by the mount set below, `read_only: true`, and
+  # `network_mode: none`.
+  # From: Issue #842 | PR #1360
   retention:
     container_name: lancache-retention
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
@@ -432,6 +404,7 @@ services:
     # Why: watchdog.env is static and cannot interpolate per-install values;
     # retention.sh, not watchdog.sh, is the process that actually acts on
     # every one of these SYSLOG_* variables.
+    # From: Issue #842 | PR #1360
     environment:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
@@ -1109,7 +1082,7 @@ services:
   # ntp/dhcp-kea/dhcp-proxy's sibling profile-gating convention: on by
   # default for setup.sh-managed installs, off for a from-scratch manual
   # deploy/prod install.
-  # From: Issue #453 | Issue #633 | Issue #1343
+  # From: Issue #453 | Issue #633 | Issue #1343 | Issue #1428 | PR #1431
   #
   # What: this short-lived least-privilege initializer chowns the `logs`
   # volume and any old proxy-log copies before the non-root syslog service
@@ -1117,6 +1090,7 @@ services:
   # Why: named volumes keep their existing ownership across image upgrades,
   # so the image-layer chown alone cannot migrate an already-populated
   # volume.
+  # From: Issue #1428 | PR #1431
   syslog-logs-permissions:
     container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
@@ -1145,21 +1119,20 @@ services:
     # `lancache-syslog-ng` is no longer a separate monitored target since
     # that container no longer exists (see resolve_alert_only_targets() in
     # services/watchdog/src/main.rs).
-    # From: Issue #842 | Issue #849
+    # From: Issue #842 | Issue #849 | Issue #1420
     container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # What: the whole container runs as fixed non-root uid 10001 (Dockerfile
-    # USER), with exactly ONE added capability (DAC_READ_SEARCH, a read-only
-    # bypass) so fluent-bit can read today's root:root 0640 producer logs it
-    # doesn't own.
-    # Why: empirically determined the narrowest sufficient grant -- see
-    # Dockerfile's own comment for the full methodology. HARD INVARIANT
-    # (verified live): the fluent-bit interpreter binary carries a matching
-    # `setcap` file capability baked into the image, so running this exact
-    # image WITHOUT `cap_add: [DAC_READ_SEARCH]` fails closed at exec, not a
-    # silent capability downgrade -- never remove one side of this pair
-    # without the other.
+    # What: runs as fixed non-root uid 10001 (Dockerfile USER) with exactly
+    # ONE added capability (DAC_READ_SEARCH) so fluent-bit can read
+    # root:root 0640 producer logs it doesn't own.
+    # Why: the narrowest sufficient grant -- two other designs (a runtime
+    # su-exec drop, plain DAC_READ_SEARCH with no `setcap` binary) were
+    # tried and disproved first; see Dockerfile's own comment for the full
+    # methodology. HARD INVARIANT: the image's `setcap`-marked fluent-bit
+    # binary fails closed at exec without `cap_add: [DAC_READ_SEARCH]` --
+    # never remove one side of this pair without the other.
+    # From: Issue #1428 | PR #1431
     cap_drop:
       - ALL
     cap_add:
@@ -1198,6 +1171,7 @@ services:
       # setup.sh's own comment), and the data-loss detector above is the
       # defense-in-depth backstop for an install that predates that fix or
       # has its permissions changed later.
+      # From: Issue #1428 | PR #1431
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
     # Real dual-process check (services/syslog/healthcheck.sh): verifies
     # fluent-bit AND syslog-ng independently and only reports healthy when
