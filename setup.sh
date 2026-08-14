@@ -6444,7 +6444,20 @@ EOF
     # store it and later run an active health probe against it. Harmless if the
     # primary is older and ignores the field; the primary validates it as a
     # private IPv4 before storing, so a blank/odd value is simply dropped.
-    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token" "$name" "$listen_ip" \
+    #
+    # What: escapes each value's backslashes then double-quotes before JSON
+    # interpolation, mirroring kea_ctrl_post's identical curl -K escaping.
+    # Why: $token is an unconstrained operator-supplied string whose raw
+    # '"'/'\' would otherwise corrupt the JSON body, the same bug class
+    # already fixed for kea_ctrl_post's Basic-Auth token ($name/$listen_ip
+    # are already constrained by the checks above and escaped only for
+    # uniformity).
+    # From: Issue #1558
+    local token_escaped name_escaped listen_ip_escaped
+    token_escaped=$(printf '%s' "$token" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    name_escaped=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    listen_ip_escaped=$(printf '%s' "$listen_ip" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token_escaped" "$name_escaped" "$listen_ip_escaped" \
         | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d @- \
