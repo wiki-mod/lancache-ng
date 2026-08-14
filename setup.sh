@@ -5711,19 +5711,17 @@ kea_ctrl_post() {
     local result_code_lines result_text_lines
 
     response_file=$(mktemp)
-    # The Basic-Auth credential is passed to curl via -K (config read from
-    # stdin), not -u/--user on the command line: a -u value is a plain argv
-    # secret, visible to any other process on the host for curl's whole
-    # lifetime (e.g. `ps aux`, /proc/<pid>/cmdline). KEA_CTRL_TOKEN is
-    # generated as a hex string by default (see ensure_secret_env_key's
-    # hex32 kind), but ensure_secret_env_key never rewrites an already-usable
-    # operator-supplied value, so a manually-set token isn't actually
-    # guaranteed hex-only; curl's -K value is itself a quoted string with
-    # \\/\" escape sequences (verified against curl's own --manual text), so
-    # the token is escaped the same way deploy/*/docker-compose.yml's Kea
-    # healthcheck and this file's own JSON-body construction elsewhere
-    # already escape untrusted values, rather than relying on the generator's
-    # charset as an unstated precondition.
+    # What: the Basic-Auth credential is passed to curl via -K (config read
+    # from stdin) with the token escaped for curl's own quoted-value syntax,
+    # not via -u/--user on the command line -- kept identical to
+    # deploy/*/docker-compose.yml's Kea healthcheck.
+    # Why: -u puts the secret in plain argv, visible to any other host
+    # process for curl's whole lifetime (ps aux, /proc/<pid>/cmdline), and a
+    # manually-set KEA_CTRL_TOKEN isn't guaranteed hex-only the way the
+    # auto-generated default is (ensure_secret_env_key never rewrites an
+    # already-usable operator-supplied value), so an unescaped token could
+    # still corrupt curl's -K quoted-value parsing on a literal '"' or '\'.
+    # From: Issue #1304 | PR #1550
     local kea_ctrl_token_escaped
     kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
     if ! http_status=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token_escaped" | curl -sS -o "$response_file" -w "%{http_code}" -X POST \

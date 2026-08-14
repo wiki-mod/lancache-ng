@@ -565,19 +565,13 @@ services:
     # so the equivalent pattern is inlined here instead.
     #
     # What: Basic-Auth credential is passed to curl via -K (config read from
-    # stdin), not -u/--user on the command line, and the token is escaped
-    # before being embedded in that quoted config value. Why: an unquoted -u
-    # admin:$$token was real argument-injection into curl's argv (a
-    # whitespace-split, dash-leading word in $$token would be parsed as an
-    # additional curl flag), and even quoted, -u puts the secret in plain
-    # argv, visible to any other host process for curl's whole lifetime (ps
-    # aux, /proc/<pid>/cmdline); curl's -K value is itself a quoted string
-    # with \\/\" escape sequences (verified against curl's own --manual
-    # text), so an operator-supplied token containing a literal '"' or '\'
-    # would otherwise silently truncate or corrupt the credential -- the same
-    # \\/\" escape this file's own _lancache_json_escape() helper already
-    # applies before embedding a string in JSON is reused here for curl's
-    # config-quoting instead. From: Issue #1304
+    # stdin, escaped with the same \\/\" idiom _lancache_json_escape() below
+    # uses for JSON), not -u/--user on the command line.
+    # Why: an unquoted -u admin:$$token let a leading-dash word in the token
+    # inject extra curl flags, quoted -u still exposed the secret in plain
+    # argv for curl's whole process lifetime, and an unescaped token could
+    # also corrupt curl's own -K quoted-value parsing on a literal '"' or '\'.
+    # From: Issue #1304 | PR #1550
     healthcheck:
       test:
         - CMD-SHELL
