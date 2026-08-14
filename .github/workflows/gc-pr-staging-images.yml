@@ -2,26 +2,22 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: reaps per-PR GHCR staging tags (pr-<N>-sha-<short>[-amd64/-arm64])
-# build-push.yml pushes on pull_request events, plus orphaned untagged
-# package versions via scripts/lib/gc-pr-staging-images.sh's manifest-graph
-# classification.
-# Why: nothing else removes them; ~55% of this project's GHCR versions were
-# untagged and unreachable by a tagged-only check alone.
+# What: reaps per-PR GHCR staging tags build-push.yml pushes, plus orphaned
+# untagged package versions (manifest-graph classification).
+# Why: nothing else removes them; ~55% of GHCR versions were untagged,
+# unreachable by a tagged-only check alone.
 # From: PR #627 | PR #1443
 #
 # What: two triggers -- pull_request(closed) reaps promptly; a weekly
 # schedule is the safety net for a run that never fired.
-# Why: `schedule:` only ever evaluates from the default branch's own file
-# copy (AG-CI-018), independent of what triggered a given PR's own branch.
+# Why: `schedule:` only ever evaluates from the default branch's own copy
+# (AG-CI-018), independent of what triggered a given PR's own branch.
 # From: PR #627 | PR #1443
 #
-# What: this job's own step definitions evaluate from whichever branch
-# triggered the run, but Checkout (below) pins `ref:` to the default
-# branch, which can lack scripts a PR branch already has.
-# Why: confirmed live 2026-08-13 -- every pull_request run since issue
-# #1095's script extraction (7b03f99b) failed a non-cone sparse checkout
-# this way; "Verify required scripts exist" below turns that into a skip.
+# What: this job's steps evaluate from whichever branch triggered the run,
+# but Checkout below pins `ref:` to the default branch, which can lack
+# scripts a PR branch already has -- confirmed live 2026-08-13.
+# Why: "Verify required scripts exist" below turns that into an accurate skip.
 # From: Issue #1095 | PR #1528
 name: GC PR Staging Images
 
@@ -46,11 +42,10 @@ on:
 # From: PR #627
 permissions: {}
 
-# What: one shared concurrency group (no per-PR/per-ref suffix) serializes
-# every run; `cancel-in-progress: false`, not the more common `true`.
-# Why: two concurrent full sweeps exhausted GHCR_PACKAGE_DELETE_PAT's shared
-# rate limit and both failed; every run does a full 8-service sweep (never
-# "just PR <N>"), so a running sweep must finish, not be killed mid-delete.
+# What: one shared concurrency group serializes every run;
+# `cancel-in-progress: false`, not the more common `true`.
+# Why: two concurrent sweeps exhausted the shared PAT rate limit; every run
+# is a full sweep (never "just PR <N>"), so a running one must finish.
 # From: PR #1443
 concurrency:
   group: gc-pr-staging-images
@@ -62,9 +57,8 @@ jobs:
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: 60-minute job timeout, replacing an earlier temporary bump to
     # 150 that was never revisited.
-    # Why: double the observed 20-30 minute full-sweep baseline, leaving
-    # headroom for the added per-version registry GETs without reopening a
-    # multi-hour silent-hang window.
+    # Why: double the observed 20-30 minute full-sweep baseline -- headroom
+    # without reopening a multi-hour silent-hang window.
     # From: PR #1443
     timeout-minutes: 60
     steps:
@@ -85,12 +79,10 @@ jobs:
             echo "have-pat=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: preflight-checks that the required scripts exist on the
-      # default branch before the sparse checkout below attempts them.
-      # Why: the job definition evaluates from the triggering branch, but
-      # Checkout pins `ref:` to the default branch, which can still lack a
-      # script an active branch already has -- a guaranteed sparse-checkout
-      # failure this turns into an accurate skip instead.
+      # What: preflight-checks the required scripts exist on the default
+      # branch before the sparse checkout below attempts them.
+      # Why: Checkout pins `ref:` there, which can lack a script the
+      # triggering branch has -- a guaranteed failure this turns into a skip.
       # From: Issue #1095 | PR #1528
       - name: Verify required scripts exist on the default branch
         id: script-check
@@ -151,19 +143,15 @@ jobs:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
         run: bash scripts/gc-pr-staging-images.sh
 
-      # What: restores a full (non-sparse) working tree, verifying the real
-      # index state rather than trusting `disable`'s exit code.
-      # Why: `actions/checkout`'s non-cone sparse-checkout does not reliably
-      # clear on a later `disable` call (reproduced live, git 2.47.3); a
-      # narrowed tree silently corrupts the next unrelated job on this
-      # reused self-hosted runner instance (confirmed 2026-08-07 incident).
+      # What: restores a full working tree, verifying the real index state
+      # rather than trusting `disable`'s exit code.
+      # Why: non-cone sparse-checkout doesn't reliably clear on `disable`;
+      # a narrowed tree corrupts the next job reusing this runner instance.
       # From: PR #1492
       #
-      # What: runs unconditionally on every `have-pat` run (not gated on
-      # `scripts-present`).
+      # What: runs unconditionally, not gated on `scripts-present`.
       # Why: when the preflight above skips Checkout, this step's commands
-      # are trivial no-ops against an already-unsparse tree -- still a real
-      # safety net for narrowing left over from a run predating this fix.
+      # are trivial no-ops -- still a safety net for pre-existing narrowing.
       # From: Issue #1095 | PR #1528
       - name: Restore full working tree for the next job on this runner
         if: always() && steps.creds.outputs.have-pat == 'true'
@@ -174,11 +162,10 @@ jobs:
           git config --local --unset-all core.sparseCheckout || true
           rm -f .git/info/sparse-checkout
 
-          # What: sweeps any remaining skip-worktree bits `disable` above
-          # did not clear, capturing `git ls-files -v` into a variable
-          # before piping to awk rather than piping directly.
+          # What: sweeps remaining skip-worktree bits, capturing `git
+          # ls-files -v` into a variable before piping to awk.
           # Why: a direct pipe would hide a real git failure behind awk's
-          # own unrelated exit code instead of tripping `set -e`.
+          # own exit code instead of tripping `set -e`.
           # From: PR #1492
           ls_files_before="$(git ls-files -v)"
           mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
@@ -187,11 +174,10 @@ jobs:
           fi
           git checkout --progress --force HEAD -- .
 
-          # What: verifies the restore actually worked, failing loudly if
-          # any path is still excluded, using awk's count (not `grep -c`).
+          # What: verifies the restore worked, failing loudly if any path
+          # is still excluded, using awk's count (not `grep -c`).
           # Why: awk's exit code is always 0 regardless of match count, so
-          # a zero-match result needs no `|| true` that could otherwise
-          # leave the `-ne 0` check silently skipped under `set -e`.
+          # a `|| true` fallback could silently skip the `-ne 0` check.
           # From: PR #1492
           ls_files_after="$(git ls-files -v)"
           remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
