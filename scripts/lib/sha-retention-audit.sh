@@ -104,12 +104,27 @@ sra_commit_is_on_history_ref() {
   git -C "$git_dir" merge-base --is-ancestor "$commit" "$history_ref"
 }
 
+sra_validate_created_at_string() {
+  # What: checks an already-extracted string against the expected GHCR
+  # created_at shape (YYYY-MM-DDTHH:MM:SSZ), with no jq call of its own.
+  # Why: split out from sra_version_created_at so the orchestrator's hot loop
+  # can validate a value it already extracted via one combined jq call per
+  # version instead of paying a second per-version jq subprocess just for
+  # this field (a real live-audit timeout, run 31774741729, was traced to
+  # exactly this kind of avoidable per-version subprocess overhead).
+  local created_at="${1?sra_validate_created_at_string: value argument is required}"
+  [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
+}
+
 sra_version_created_at() {
   # What: extracts the GHCR-reported build timestamp for one package version.
   # Why: display-only -- the dry-run report shows a real build date per
   # candidate, but ranking must stay 100% git-history-derived (see the
   # created_at-reuse defect this audit was rebuilt to avoid), so this helper
-  # is never called from the ranking path.
+  # is never called from the ranking path. Kept for direct unit testing and
+  # for any future caller that only has the raw JSON, not already-extracted
+  # fields; the orchestrator's own hot loop calls
+  # sra_validate_created_at_string directly instead (see that function's Why).
   local version_json="${1:?sra_version_created_at: version JSON is required}"
   local created_at
 
@@ -119,7 +134,7 @@ sra_version_created_at() {
   else
     return 1
   fi
-  [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || return 1
+  sra_validate_created_at_string "$created_at" || return 1
   printf '%s\n' "$created_at"
 }
 

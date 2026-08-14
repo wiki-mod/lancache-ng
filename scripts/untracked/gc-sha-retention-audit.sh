@@ -181,11 +181,29 @@ audit_package() {
   declare -A seen_id_digest=()
   declare -A seen_digest_id=()
 
+  local version_fields created_at_raw
   while IFS= read -r version_json; do
     [[ -n "$version_json" ]] || continue
-    id="$(jq -r '.id' <<<"$version_json")"
-    digest="$(jq -r '.name' <<<"$version_json")"
-    tags="$(jq -r '.metadata.container.tags | join(",")' <<<"$version_json")"
+    # Why: id/digest/tags/created_at come from one combined jq call instead
+    # of four separate ones -- a real live audit run against the full GHCR
+    # inventory (thousands of versions per package) timed out at exactly the
+    # 25-minute budget (run 31774741729) once this pass added a per-version
+    # created_at lookup on top of the pre-existing per-version jq calls;
+    # spawning one fewer jq subprocess per version is a real, measurable fix
+    # for that, not a timeout bump. "|" is used instead of jq's built-in
+    # @tsv/actual tab: bash's `read` treats a literal tab as IFS "whitespace"
+    # regardless of what IFS is set to, silently collapsing/losing an empty
+    # middle field (a real, verified-live bug an untagged version's empty
+    # tags field would have hit here) -- "|" is not IFS whitespace, so an
+    # empty field between two delimiters is preserved correctly. None of
+    # id/digest/tags/created_at can legitimately contain "|".
+    if version_fields="$(jq -r '[.id, .name, (.metadata.container.tags | join(",")), (.created_at // "")] | join("|")' <<<"$version_json")"; then
+      :
+    else
+      echo "::error::Cannot extract identity/tag/date fields for a package version in ${repository_name}/${package}." >&2
+      return 1
+    fi
+    IFS='|' read -r id digest tags created_at_raw <<<"$version_fields"
 
     if [[ -n "${seen_id_digest[$id]+x}" && "${seen_id_digest[$id]}" != "$digest" ]]; then
       echo "::error::Package version id $id mapped to more than one digest in ${repository_name}/${package}." >&2
@@ -205,8 +223,8 @@ audit_package() {
     # the image-publish pipeline (e.g. a dropped OCI created label), not an
     # absence to fold silently into an unrelated classification -- it is
     # named here as its own finding rather than left out of the report.
-    if built="$(sra_version_created_at "$version_json")"; then
-      :
+    if sra_validate_created_at_string "$created_at_raw"; then
+      built="$created_at_raw"
     else
       built="unknown"
       (( missing_build_date_count += 1 ))

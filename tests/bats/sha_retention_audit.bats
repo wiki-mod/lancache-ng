@@ -210,6 +210,21 @@ EOF
   [ "$status" -ne 0 ]
 }
 
+# Split out so the orchestrator's per-version hot loop can validate a value
+# it already extracted via one combined jq call, without a second jq
+# subprocess per version just for this field (see gc-sha-retention-audit.sh's
+# own Why comment on the timeout this avoids).
+@test "created_at string validator accepts only the exact GHCR shape" {
+  run sra_validate_created_at_string "2026-08-01T12:00:00Z"
+  [ "$status" -eq 0 ]
+
+  run sra_validate_created_at_string ""
+  [ "$status" -ne 0 ]
+
+  run sra_validate_created_at_string "2026-08-01 12:00:00"
+  [ "$status" -ne 0 ]
+}
+
 # The dry-run report shows a real build date per candidate; created_at must
 # never feed ranking (see docs/release-versioning.md's Retention section).
 @test "version created_at is extracted for display when well-formed" {
