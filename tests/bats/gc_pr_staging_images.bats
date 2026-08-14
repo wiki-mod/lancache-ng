@@ -19,16 +19,26 @@ bats_require_minimum_version 1.5.0
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # What: sources scripts/gc-pr-staging-images.sh, pulling in every gcps_* function, process_service(), and its config variables without running main().
-    # Why: the script's own BASH_SOURCE guard only calls main() when executed, never when sourced -- safe here without a real GH_TOKEN or gh/jq/curl/date. The former separate scripts/lib/ file existed only to provide this same guarantee and was merged in once that became clear.
+    # What: sources scripts/gc-pr-staging-images.sh, pulling in every gcps_*
+    #   function, process_service(), and its config variables without running
+    #   main().
+    # Why: the script's own BASH_SOURCE guard only calls main() when executed,
+    #   never when sourced -- safe here without a real GH_TOKEN or
+    #   gh/jq/curl/date. The former separate scripts/lib/ file existed only to
+    #   provide this same guarantee and was merged in once that became clear.
     # From: Issue #1557 | PR #1559
     # shellcheck source=scripts/gc-pr-staging-images.sh
     source "$repo_root/scripts/gc-pr-staging-images.sh"
 }
 
 teardown() {
-    # What: runs unconditionally for every test in this file, not just the sparse-checkout-restore group below; test_repo/restore_script are only ever set by setup_sparse_checkout_fixture(), so both guards no-op for other tests.
-    # Why: the trailing `return 0` is load-bearing -- bats treats a non-zero teardown as a test failure, and a short-circuited `[[ ... ]]` guard's own exit status would otherwise be 1.
+    # What: runs unconditionally for every test in this file, not just the
+    #   sparse-checkout-restore group below; test_repo/restore_script are only
+    #   ever set by setup_sparse_checkout_fixture(), so both guards no-op for
+    #   other tests.
+    # Why: the trailing `return 0` is load-bearing -- bats treats a non-zero
+    #   teardown as a test failure, and a short-circuited `[[ ... ]]` guard's
+    #   own exit status would otherwise be 1.
     # From: Issue #1557 | PR #1559
     [[ -n "${test_repo:-}" ]] && rm -rf "$test_repo"
     [[ -n "${restore_script:-}" ]] && rm -f "$restore_script"
@@ -104,9 +114,11 @@ teardown() {
 }
 
 @test "gcps_extract_manifest_children collects a single manifest's own subject.digest" {
-    # What: the referrers-API attestation shape -- a single manifest declaring which other digest it is "about" via a top-level `subject` field.
-    # Why: this is the shape gcps_fetch_manifest's caller checks when evaluating an about-to-delete orphan candidate for a live attestation.
-    # From: Issue #1095
+    # What: the referrers-API attestation shape -- a single manifest declaring
+    #   which other digest it is "about" via a top-level `subject` field.
+    # Why: this is the shape gcps_fetch_manifest's caller checks when
+    #   evaluating an about-to-delete orphan candidate for a live attestation.
+    # From: Issue #1095 | PR #1443
     local manifest='{
       "mediaType": "application/vnd.oci.image.manifest.v1+json",
       "subject": {"digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}
@@ -124,9 +136,11 @@ teardown() {
 }
 
 @test "gcps_extract_manifest_children fails closed (non-zero, no output) on genuinely malformed JSON" {
-    # What: distinguishes "jq itself could not parse this" from "jq parsed it fine and found no children".
-    # Why: the caller treats a non-zero return the same as an outright manifest-fetch failure (abort orphan classification).
-    # From: Issue #1095
+    # What: distinguishes "jq itself could not parse this" from "jq parsed it
+    #   fine and found no children".
+    # Why: the caller treats a non-zero return the same as an outright
+    #   manifest-fetch failure (abort orphan classification).
+    # From: Issue #1095 | PR #1443
     run gcps_extract_manifest_children 'not json at all'
     [ "$status" -ne 0 ]
     [ -z "$output" ]
@@ -200,9 +214,13 @@ teardown() {
 }
 
 @test "gcps_pr_lookup_state reports LOOKUP_FAILED (not CLOSED) for a non-404 API failure" {
-    # What: a rate limit, auth hiccup, or network blip must never be treated the same as a confirmed-closed PR (the exact bug gcps_pr_lookup_state's own header documents fixing once already).
-    # Why: `run --separate-stderr` -- this branch also writes a "::warning::" line to stderr; without separating streams, bats' merged $output would break a plain equality check.
-    # From: Issue #1095
+    # What: a rate limit, auth hiccup, or network blip must never be treated
+    #   the same as a confirmed-closed PR (the exact bug gcps_pr_lookup_state's
+    #   own header documents fixing once already).
+    # Why: `run --separate-stderr` -- this branch also writes a "::warning::"
+    #   line to stderr; without separating streams, bats' merged $output would
+    #   break a plain equality check.
+    # From: Issue #1095 | PR #1443
     gh() { echo "gh: HTTP 403: API rate limit exceeded" >&2; return 1; }
     export -f gh
     declare -A cache=()
@@ -253,8 +271,13 @@ teardown() {
 }
 
 @test "process_service: caching a PR's state actually works through the real caller call site (issue #1557 item 74)" {
-    # What: exercises the real process_service() call site (two versions tagged for the same PR, matching build-push.yml's amd64/arm64 per-arch-leg shape) and asserts the pulls API is only invoked once.
-    # Why: gcps_pr_lookup_state's own direct-invocation caching test above passed even while this real call site was broken -- it used to wrap the lookup in `$(...)`, discarding the nameref cache mutation the instant that subshell exits.
+    # What: exercises the real process_service() call site (two versions tagged
+    #   for the same PR, matching build-push.yml's amd64/arm64 per-arch-leg
+    #   shape) and asserts the pulls API is only invoked once.
+    # Why: gcps_pr_lookup_state's own direct-invocation caching test above
+    #   passed even while this real call site was broken -- it used to wrap the
+    #   lookup in `$(...)`, discarding the nameref cache mutation the instant
+    #   that subshell exits.
     # From: Issue #1557 | PR #1559
     call_log="$BATS_TEST_TMPDIR/pulls_calls"
     : > "$call_log"
@@ -314,9 +337,12 @@ VERSIONS_JSON
 }
 
 @test "gcps_fetch_manifest requests all four Buildx-relevant media types in one Accept header" {
-    # What: regresses the specific misconfiguration of asking for only one media type, not just "curl was called".
-    # Why: a single-media-type request risks the registry silently converting an index into a single-platform manifest with no manifests[] at all (see gcps_fetch_manifest's own header).
-    # From: Issue #1095
+    # What: regresses the specific misconfiguration of asking for only one
+    #   media type, not just "curl was called".
+    # Why: a single-media-type request risks the registry silently converting
+    #   an index into a single-platform manifest with no manifests[] at all
+    #   (see gcps_fetch_manifest's own header).
+    # From: Issue #1095 | PR #1443
     args_log="$BATS_TEST_TMPDIR/curl_args"
     curl() {
         printf '%s\n' "$*" > "$args_log"
@@ -335,15 +361,21 @@ VERSIONS_JSON
 }
 
 # ---------------------------------------------------------------------------
-# What: end-to-end -- process_service() itself against mocked gh/curl, the case that actually proves the classification-gap fix, exercised under this file's own `set -euo pipefail` (inherited from setup()).
-# Why: AG-VAL-030 requires a construct depending on the caller's shell options to be proven under those exact options, not a looser test environment.
-# From: Issue #1095
+# What: end-to-end -- process_service() itself against mocked gh/curl, the case
+#   that actually proves the classification-gap fix, exercised under this
+#   file's own `set -euo pipefail` (inherited from setup()).
+# Why: AG-VAL-030 requires a construct depending on the caller's shell options
+#   to be proven under those exact options, not a looser test environment.
+# From: Issue #1095 | PR #1443
 # ---------------------------------------------------------------------------
 
 @test "process_service: an index's own platform+attestation children are protected, not deleted" {
-    # What: index_digest/plat_a/plat_b/attest are declared and assigned on separate lines (shellcheck SC2155).
-    # Why: a combined `local x="$(cmd)"` masks cmd's own exit status behind `local`'s always-0 one; kept uniform here so a later, fallible substitution copy-pasted from this pattern inherits the safe form.
-    # From: Issue #1095
+    # What: index_digest/plat_a/plat_b/attest are declared and assigned on
+    #   separate lines (shellcheck SC2155).
+    # Why: a combined `local x="$(cmd)"` masks cmd's own exit status behind
+    #   `local`'s always-0 one; kept uniform here so a later, fallible
+    #   substitution copy-pasted from this pattern inherits the safe form.
+    # From: Issue #1095 | PR #1443
     local index_digest plat_a plat_b attest
     index_digest="sha256:$(printf '1%.0s' {1..64})"
     plat_a="sha256:$(printf '2%.0s' {1..64})"
@@ -354,9 +386,13 @@ VERSIONS_JSON
     : > "$delete_log"
     export delete_log
 
-    # What: one tagged image index (a real, non-pr-* source tag) plus its three untagged children (two platform manifests, one Buildx-embedded attestation), the shape a real multi-arch push produces.
-    # Why: proves the manifest-graph logic reaches "keep" deliberately, by tracing the reference, not by accident (the pre-fix logic never looked at untagged children at all).
-    # From: Issue #1095
+    # What: one tagged image index (a real, non-pr-* source tag) plus its three
+    #   untagged children (two platform manifests, one Buildx-embedded
+    #   attestation), the shape a real multi-arch push produces.
+    # Why: proves the manifest-graph logic reaches "keep" deliberately, by
+    #   tracing the reference, not by accident (the pre-fix logic never looked
+    #   at untagged children at all).
+    # From: Issue #1095 | PR #1443
     gh() {
         if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
             cat <<VERSIONS_JSON
@@ -406,9 +442,13 @@ VERSIONS_JSON
     [ ! -s "$delete_log" ]
 }
 
-# What: a 404 listing a service's own package (this test's mock reproduces `gh api`'s real stderr/stdout split for a genuinely nonexistent package) means "nothing to reap yet", not a listing failure.
-# Why: a service can appear in build-push.yml's matrix before its first image is pushed; conflating the two would set had_errors=1 and fail the whole run for any freshly-scaffolded service.
-# From: Issue #1095
+# What: a 404 listing a service's own package (this test's mock reproduces `gh
+#   api`'s real stderr/stdout split for a genuinely nonexistent package) means
+#   "nothing to reap yet", not a listing failure.
+# Why: a service can appear in build-push.yml's matrix before its first image
+#   is pushed; conflating the two would set had_errors=1 and fail the whole run
+#   for any freshly-scaffolded service.
+# From: Issue #1095 | PR #1443
 @test "process_service: a 404 listing a service's own package (no images published yet) is not an error" {
     gh() {
         if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
@@ -447,7 +487,8 @@ VERSIONS_JSON
     export -f gh
 
     # What: `run` forks a subshell to catch main()'s own `exit 1`.
-    # Why: same pattern as the pervasive-PR-lookup-failure main() test further down this file.
+    # Why: same pattern as the pervasive-PR-lookup-failure main() test further
+    #   down this file.
     # From: Issue #1557 | PR #1559
     run --separate-stderr main
     [ "$status" -eq 1 ]
@@ -458,14 +499,15 @@ VERSIONS_JSON
 @test "process_service: a manifest-fetch failure disables orphan classification for that service (fails closed)" {
     # What: index_digest/plat_a declared/assigned separately (SC2155).
     # Why: same reasoning as the earlier test in this file.
-    # From: Issue #1095
+    # From: Issue #1095 | PR #1443
     local index_digest plat_a
     index_digest="sha256:$(printf '5%.0s' {1..64})"
     plat_a="sha256:$(printf '6%.0s' {1..64})"
 
     # What: GHCR_RETRY_BACKOFF_SECONDS=0 forces instant retries.
-    # Why: this test asserts on ghcr_retry exhausting its attempts, not on the real backoff delay.
-    # From: Issue #1095
+    # Why: this test asserts on ghcr_retry exhausting its attempts, not on the
+    #   real backoff delay.
+    # From: Issue #1095 | PR #1443
     # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
     GHCR_RETRY_BACKOFF_SECONDS=0
     # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
@@ -500,9 +542,11 @@ VERSIONS_JSON
             printf '{"token":"faketoken"}\n'
             return 0
         fi
-        # What: every manifest fetch fails, simulating a registry outage/rate limit.
-        # Why: exercises the had_errors fail-closed path for a Pass-1 manifest-fetch failure.
-        # From: Issue #1095
+        # What: every manifest fetch fails, simulating a registry outage/rate
+        #   limit.
+        # Why: exercises the had_errors fail-closed path for a Pass-1
+        #   manifest-fetch failure.
+        # From: Issue #1095 | PR #1443
         echo "simulated registry failure" >&2
         return 1
     }
@@ -510,16 +554,23 @@ VERSIONS_JSON
 
     process_service proxy
 
-    # What: zero deletions -- specifically zero orphan deletions, since Pass 2 never runs once orphan_phase_ok is disabled.
-    # Why: the tagged index itself is kept for the pre-existing "protected" (real source tag) reason, not anything this test exercises.
-    # From: Issue #1095
+    # What: zero deletions -- specifically zero orphan deletions, since Pass 2
+    #   never runs once orphan_phase_ok is disabled.
+    # Why: the tagged index itself is kept for the pre-existing "protected"
+    #   (real source tag) reason, not anything this test exercises.
+    # From: Issue #1095 | PR #1443
     [ "$deleted" -eq 0 ]
     [ ! -s "$delete_log" ]
     [ "$had_errors" -eq 1 ]
 }
 
-# What: the next three tests cover cases that used to be `::warning::`-only with no had_errors=1, unlike the sibling failure modes above (jq read failure, manifest fetch failure).
-# Why: all are the same AG-VAL-001 class -- required classification/deletion-safety evidence was unavailable, so the run must not report a clean exit code, though the fail-closed keep behavior itself is unchanged.
+# What: the next three tests cover cases that used to be `::warning::`-only
+#   with no had_errors=1, unlike the sibling failure modes above (jq read
+#   failure, manifest fetch failure).
+# Why: all are the same AG-VAL-001 class -- required
+#   classification/deletion-safety evidence was unavailable, so the run must
+#   not report a clean exit code, though the fail-closed keep behavior itself
+#   is unchanged.
 # From: Issue #1557 | PR #1559
 
 @test "process_service: a malformed digest-shape .name sets had_errors (issue #1557 item 79)" {
@@ -609,8 +660,10 @@ VERSIONS_JSON
             printf '{"token":"faketoken"}\n'
             return 0
         fi
-        # What: the candidate-manifest fetch fails here (simulated registry outage).
-        # Why: the untagged candidate has no Pass-1 children, so it must reach Pass 2's own candidate-manifest fetch to be classified at all.
+        # What: the candidate-manifest fetch fails here (simulated registry
+        #   outage).
+        # Why: the untagged candidate has no Pass-1 children, so it must reach
+        #   Pass 2's own candidate-manifest fetch to be classified at all.
         # From: Issue #1557 | PR #1559
         echo "simulated registry failure" >&2
         return 1
@@ -624,9 +677,16 @@ VERSIONS_JSON
     [ "$had_errors" -eq 1 ]
 }
 
-# What: reproduces GHCR/Buildx's tag-based attestation convention -- $attested_orphan is untagged, old enough to clear the age gate, and NOT listed in $tagged_index's `.manifests[]`; its only protection is $attestation's `sha256-<hex of $attested_orphan>` tag.
-# Why: gcps_extract_manifest_children() only reads a manifest BODY, so it can never discover this convention on its own; live-verified against the real lancache-ng/proxy package that 1107 of 3522 versions carry exactly this tag shape, some pointing at ordinary untagged single-platform manifests Pass 2 would otherwise misclassify as orphans.
-# From: Issue #1095
+# What: reproduces GHCR/Buildx's tag-based attestation convention --
+#   $attested_orphan is untagged, old enough to clear the age gate, and NOT
+#   listed in $tagged_index's `.manifests[]`; its only protection is
+#   $attestation's `sha256-<hex of $attested_orphan>` tag.
+# Why: gcps_extract_manifest_children() only reads a manifest BODY, so it can
+#   never discover this convention on its own; live-verified against the real
+#   lancache-ng/proxy package that 1107 of 3522 versions carry exactly this tag
+#   shape, some pointing at ordinary untagged single-platform manifests Pass 2
+#   would otherwise misclassify as orphans.
+# From: Issue #1095 | PR #1443
 @test "process_service: an untagged version named only by another version's sha256-<hex> attestation TAG (not its manifest body) is protected" {
     local tagged_index attestation attested_orphan
     tagged_index="sha256:$(printf '7%.0s' {1..64})"
@@ -665,9 +725,13 @@ VERSIONS_JSON
             printf '{"token":"faketoken"}\n'
             return 0
         fi
-        # What: tagged_index's and attestation's own manifest bodies are plain, childless manifests, deliberately -- neither mentions $attested_orphan.
-        # Why: isolates this test to the tag-string-based association only, so a pass proves the tag-string parsing, not the pre-existing `.manifests[]`/`.subject` extraction.
-        # From: Issue #1095
+        # What: tagged_index's and attestation's own manifest bodies are plain,
+        #   childless manifests, deliberately -- neither mentions
+        #   $attested_orphan.
+        # Why: isolates this test to the tag-string-based association only, so
+        #   a pass proves the tag-string parsing, not the pre-existing
+        #   `.manifests[]`/`.subject` extraction.
+        # From: Issue #1095 | PR #1443
         printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
         return 0
     }
@@ -682,15 +746,23 @@ VERSIONS_JSON
 }
 
 # ---------------------------------------------------------------------------
-# What: pr_lookup_failures threshold coverage -- a systemic PR-lookup failure must not produce a healthy-looking "GC complete" summary.
-# Why: added while investigating whether this project's one real historical scheduled run (2026-08-02, 10 deleted/21919 kept) was caused by GHCR_PACKAGE_DELETE_PAT failing pulls-API calls en masse; its own real Actions log showed zero actual LOOKUP_FAILED occurrences, ruling that specific run out, but the threshold guards a future occurrence of the same failure shape.
-# From: Issue #1095
+# What: pr_lookup_failures threshold coverage -- a systemic PR-lookup failure
+#   must not produce a healthy-looking "GC complete" summary.
+# Why: added while investigating whether this project's one real historical
+#   scheduled run (2026-08-02, 10 deleted/21919 kept) was caused by
+#   GHCR_PACKAGE_DELETE_PAT failing pulls-API calls en masse; its own real
+#   Actions log showed zero actual LOOKUP_FAILED occurrences, ruling that
+#   specific run out, but the threshold guards a future occurrence of the same
+#   failure shape.
+# From: Issue #1095 | PR #1443
 # ---------------------------------------------------------------------------
 
 @test "process_service: pervasive PR-lookup failures are counted and cross the threshold into a hard failure" {
-    # What: max_pr_lookup_failures is reassigned directly as a plain script variable, not via GC_MAX_PR_LOOKUP_FAILURES.
-    # Why: setup() already sourced the script, evaluating the env-var default once at source time -- overriding the env var now would have no effect.
-    # From: Issue #1095
+    # What: max_pr_lookup_failures is reassigned directly as a plain script
+    #   variable, not via GC_MAX_PR_LOOKUP_FAILURES.
+    # Why: setup() already sourced the script, evaluating the env-var default
+    #   once at source time -- overriding the env var now would have no effect.
+    # From: Issue #1095 | PR #1443
     max_pr_lookup_failures=2
 
     gh() {
@@ -704,9 +776,11 @@ VERSIONS_JSON
 VERSIONS_JSON
             return 0
         fi
-        # What: simulates GHCR_PACKAGE_DELETE_PAT lacking the `repo`/`public_repo` scope its pulls lookups need (a real HTTP 403, never a 404).
+        # What: simulates GHCR_PACKAGE_DELETE_PAT lacking the
+        #   `repo`/`public_repo` scope its pulls lookups need (a real HTTP 403,
+        #   never a 404).
         # Why: every single tagged version's PR-state lookup fails this way.
-        # From: Issue #1095
+        # From: Issue #1095 | PR #1443
         if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
             echo "gh: HTTP 403: API rate limit exceeded" >&2
             return 1
@@ -723,8 +797,9 @@ VERSIONS_JSON
             return 0
         fi
         # What: a plain single-platform manifest for every fetch.
-        # Why: this test is about the PR-lookup threshold, not manifest-graph classification.
-        # From: Issue #1095
+        # Why: this test is about the PR-lookup threshold, not manifest-graph
+        #   classification.
+        # From: Issue #1095 | PR #1443
         printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
         return 0
     }
@@ -732,9 +807,11 @@ VERSIONS_JSON
 
     process_service proxy
 
-    # What: all 3 versions kept (an ambiguous PR-state lookup is always safe on its own).
-    # Why: this is exactly the shape that must not read as a healthy, unremarkable run once it happens this pervasively.
-    # From: Issue #1095
+    # What: all 3 versions kept (an ambiguous PR-state lookup is always safe on
+    #   its own).
+    # Why: this is exactly the shape that must not read as a healthy,
+    #   unremarkable run once it happens this pervasively.
+    # From: Issue #1095 | PR #1443
     [ "$deleted" -eq 0 ]
     [ "$kept" -eq 3 ]
     # shellcheck disable=SC2154 # set as a global by the sourced
@@ -744,9 +821,12 @@ VERSIONS_JSON
 }
 
 @test "main(): the same pervasive PR-lookup-failure scenario actually fails the whole run, not just the counter" {
-    # What: restricts the sweep to one service so the expected count (3) is exact and the test stays fast.
-    # Why: main()'s own `for service in "${services[@]}"` loop would otherwise process all 8 real services against the same mocked gh(), inflating the count to 24 for no additional coverage value.
-    # From: Issue #1095
+    # What: restricts the sweep to one service so the expected count (3) is
+    #   exact and the test stays fast.
+    # Why: main()'s own `for service in "${services[@]}"` loop would otherwise
+    #   process all 8 real services against the same mocked gh(), inflating the
+    #   count to 24 for no additional coverage value.
+    # From: Issue #1095 | PR #1443
     # shellcheck disable=SC2034 # read by main() in the sourced script
     services=(proxy)
     max_pr_lookup_failures=2
@@ -785,9 +865,11 @@ VERSIONS_JSON
     }
     export -f curl
 
-    # What: `run` forks a subshell, so main()'s own internal `exit 1` terminates only that subshell.
-    # Why: this test's own process survives to assert on the captured status/output.
-    # From: Issue #1095
+    # What: `run` forks a subshell, so main()'s own internal `exit 1`
+    #   terminates only that subshell.
+    # Why: this test's own process survives to assert on the captured
+    #   status/output.
+    # From: Issue #1095 | PR #1443
     run --separate-stderr main
     [ "$status" -eq 1 ]
     [[ "$output" == *"PR-state lookups failed this run (threshold: 2)"* ]]
@@ -798,14 +880,24 @@ VERSIONS_JSON
 # Sparse-checkout restore step (merged in from the former
 # tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats, issue #1557)
 # ---------------------------------------------------------------------------
-# What: regresses gc-pr-staging-images.yml's sparse-checkout-restore step -- actions/checkout's non-cone sparse-checkout doesn't reliably clear on a plain `disable` call, so the fix sweeps remaining index skip-worktree bits directly and verifies the result instead of trusting exit codes.
-# Why: self-hosted runners reuse one working directory across unrelated jobs, so a leftover narrow state corrupts whichever job runs next (root-caused live via runner `_diag` logs after real build-push.yml failures). A throwaway local `git init` repository reproduces the same git plumbing behavior with no network or real clone needed.
-# From: Issue #1095
+# What: regresses gc-pr-staging-images.yml's sparse-checkout-restore step --
+#   actions/checkout's non-cone sparse-checkout doesn't reliably clear on a
+#   plain `disable` call, so the fix sweeps remaining index skip-worktree bits
+#   directly and verifies the result instead of trusting exit codes.
+# Why: self-hosted runners reuse one working directory across unrelated jobs,
+#   so a leftover narrow state corrupts whichever job runs next (root-caused
+#   live via runner `_diag` logs after real build-push.yml failures). A
+#   throwaway local `git init` repository reproduces the same git plumbing
+#   behavior with no network or real clone needed.
+# From: Issue #1095 | PR #1492
 # See docs/release-validation-plan.md's sparse-checkout-restore section for the full incident.
 
 # setup_sparse_checkout_fixture
-# What: called explicitly as the first line of every test in this group, not via the file-wide setup() above; populates test_repo/restore_script, which the file-wide teardown() already cleans up.
-# Why: this suite's fixture is kept separate from the classification suite's setup() -- see this file's own header for why.
+# What: called explicitly as the first line of every test in this group, not
+#   via the file-wide setup() above; populates test_repo/restore_script, which
+#   the file-wide teardown() already cleans up.
+# Why: this suite's fixture is kept separate from the classification suite's
+#   setup() -- see this file's own header for why.
 # From: Issue #1557 | PR #1559
 setup_sparse_checkout_fixture() {
     if ! command -v git >/dev/null 2>&1; then
@@ -817,9 +909,13 @@ setup_sparse_checkout_fixture() {
     git -C "$test_repo" config user.email "test@example.invalid"
     git -C "$test_repo" config user.name "Test"
 
-    # What: a handful of tracked files standing in for the real repo's tree -- two inside gc-pr-staging-images.yml's actual narrow checkout set, two representing everything else (e.g. a workflow-referenced composite action).
-    # Why: a later, unrelated job's checkout step needs the "everything else" files to still be reachable after the restore.
-    # From: Issue #1095
+    # What: a handful of tracked files standing in for the real repo's tree --
+    #   two inside gc-pr-staging-images.yml's actual narrow checkout set, two
+    #   representing everything else (e.g. a workflow-referenced composite
+    #   action).
+    # Why: a later, unrelated job's checkout step needs the "everything else"
+    #   files to still be reachable after the restore.
+    # From: Issue #1095 | PR #1492
     mkdir -p "$test_repo/scripts/lib" "$test_repo/.github/actions/some-action"
     echo "narrow-a" >"$test_repo/scripts/narrow-a.sh"
     echo "narrow-b" >"$test_repo/scripts/lib/narrow-b.sh"
@@ -828,8 +924,13 @@ setup_sparse_checkout_fixture() {
     git -C "$test_repo" add -A
     git -C "$test_repo" commit --quiet -m "seed"
 
-    # What: gc-pr-staging-images.yml's restore step verbatim, extracted into its own external script file rather than a bash function in this test file.
-    # Why: bats' `run` doesn't reliably preserve `set -e` semantics for an in-file function (confirmed: it masked a real fail-closed bug during development) and a real external script is also a closer match to how the workflow itself executes it.
+    # What: gc-pr-staging-images.yml's restore step verbatim, extracted into
+    #   its own external script file rather than a bash function in this test
+    #   file.
+    # Why: bats' `run` doesn't reliably preserve `set -e` semantics for an
+    #   in-file function (confirmed: it masked a real fail-closed bug during
+    #   development) and a real external script is also a closer match to how
+    #   the workflow itself executes it.
     # From: Issue #1557 | PR #1559
     restore_script="$(mktemp)"
     cat >"$restore_script" <<'RESTORE_SCRIPT'
@@ -841,9 +942,11 @@ git sparse-checkout disable || true
 git config --local --unset-all core.sparseCheckout || true
 rm -f .git/info/sparse-checkout
 
-# What: sweeps remaining skip-worktree bits directly; captures `git ls-files -v` into a variable before piping to awk.
-# Why: a direct pipe into awk would hide a real git failure behind awk's own unrelated exit code, defeating `set -e`.
-# From: Issue #1095
+# What: sweeps remaining skip-worktree bits directly; captures `git ls-files
+#   -v` into a variable before piping to awk.
+# Why: a direct pipe into awk would hide a real git failure behind awk's own
+#   unrelated exit code, defeating `set -e`.
+# From: Issue #1095 | PR #1492
 ls_files_before="$(git ls-files -v)"
 mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
 if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
@@ -851,9 +954,12 @@ if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
 fi
 git checkout --progress --force HEAD -- .
 
-# What: verifies the restore actually worked (fails loudly if any path is still excluded) instead of trusting the commands above.
-# Why: counts with awk rather than `grep -c` so a zero-match result needs no `|| true` fallback -- an empty count would otherwise make the `-ne 0` check a silent non-fatal runtime error under `set -e` instead of failing closed.
-# From: Issue #1095
+# What: verifies the restore actually worked (fails loudly if any path is still
+#   excluded) instead of trusting the commands above.
+# Why: counts with awk rather than `grep -c` so a zero-match result needs no
+#   `|| true` fallback -- an empty count would otherwise make the `-ne 0` check
+#   a silent non-fatal runtime error under `set -e` instead of failing closed.
+# From: Issue #1095 | PR #1492
 ls_files_after="$(git ls-files -v)"
 remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
 if [ "$remaining_after" -ne 0 ]; then
@@ -897,9 +1003,14 @@ run_workflow_restore_step() {
     run git -C "$test_repo" checkout --progress --force HEAD
     [ "$status" -eq 0 ]
 
-    # What: `disable` reports success, but core.sparseCheckout was never actually cleared.
-    # Why: confirmed as the one consistently-reproducible part of this failure across every repetition (against both this fixture and the real repository); whether files outside the narrow set are also still missing varied between repetitions and is deliberately not asserted here.
-    # From: Issue #1095
+    # What: `disable` reports success, but core.sparseCheckout was never
+    #   actually cleared.
+    # Why: confirmed as the one consistently-reproducible part of this failure
+    #   across every repetition (against both this fixture and the real
+    #   repository); whether files outside the narrow set are also still
+    #   missing varied between repetitions and is deliberately not asserted
+    #   here.
+    # From: Issue #1095 | PR #1492
     run git -C "$test_repo" config --local --get core.sparseCheckout
     [ "$status" -eq 0 ]
     [ "$output" = "true" ]
@@ -917,9 +1028,11 @@ run_workflow_restore_step() {
     [ -f "$test_repo/scripts/narrow-a.sh" ]
     [ -f "$test_repo/scripts/lib/narrow-b.sh" ]
 
-    # What: core.sparseCheckout must genuinely be gone, not just report success.
-    # Why: a later job's checkout step never re-sets it, so a lingering true would keep re-narrowing every future tree-changing operation.
-    # From: Issue #1095
+    # What: core.sparseCheckout must genuinely be gone, not just report
+    #   success.
+    # Why: a later job's checkout step never re-sets it, so a lingering true
+    #   would keep re-narrowing every future tree-changing operation.
+    # From: Issue #1095 | PR #1492
     run git -C "$test_repo" config --local --get core.sparseCheckout
     [ "$status" -eq 1 ]
 
@@ -931,9 +1044,12 @@ run_workflow_restore_step() {
 
 @test "the workflow's restore step's own sweep recovers a skip-worktree bit regardless of how it was set" {
     setup_sparse_checkout_fixture
-    # What: sets a skip-worktree bit directly, not via the flaky legacy-setup reproduction above.
-    # Why: proves the step's own sweep+assert logic (the part not relying on `disable`/`init` succeeding) is sound without depending on that flakiness.
-    # From: Issue #1095
+    # What: sets a skip-worktree bit directly, not via the flaky legacy-setup
+    #   reproduction above.
+    # Why: proves the step's own sweep+assert logic (the part not relying on
+    #   `disable`/`init` succeeding) is sound without depending on that
+    #   flakiness.
+    # From: Issue #1095 | PR #1492
     git -C "$test_repo" update-index --skip-worktree README.md
     rm -f "$test_repo/README.md"
 
@@ -948,9 +1064,13 @@ run_workflow_restore_step() {
 
 @test "the workflow's restore step fails closed (non-zero exit) instead of silently succeeding when git itself is broken" {
     setup_sparse_checkout_fixture
-    # What: proves the shipped fail-closed behavior against a directory that isn't a git repository at all, rather than reasoning about it.
-    # Why: a `grep -c ... || true` count instead of awk could leave the count variable empty on a genuine git failure, making `[ "$x" -ne 0 ]` a silently-skipped runtime error under `set -e` instead of a fatal one -- this test regresses that subtler hazard.
-    # From: Issue #1095
+    # What: proves the shipped fail-closed behavior against a directory that
+    #   isn't a git repository at all, rather than reasoning about it.
+    # Why: a `grep -c ... || true` count instead of awk could leave the count
+    #   variable empty on a genuine git failure, making `[ "$x" -ne 0 ]` a
+    #   silently-skipped runtime error under `set -e` instead of a fatal one --
+    #   this test regresses that subtler hazard.
+    # From: Issue #1095 | PR #1492
     not_a_repo="$(mktemp -d)"
     run run_workflow_restore_step "$not_a_repo"
     [ "$status" -ne 0 ]
