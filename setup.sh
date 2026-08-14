@@ -6439,25 +6439,13 @@ EOF
     # primary is older and ignores the field; the primary validates it as a
     # private IPv4 before storing, so a blank/odd value is simply dropped.
     #
-    # What: each value has its backslashes and double-quotes escaped (in
-    # that order -- escaping the quote first would double-escape a
-    # backslash the quote-escaping step itself introduces) before
+    # What: escapes each value's backslashes then double-quotes before JSON
     # interpolation, mirroring kea_ctrl_post's identical curl -K escaping.
-    # Why: $name and $listen_ip are already constrained (alphanumeric/dash,
-    # and a validated IPv4, respectively, confirmed on every return path of
-    # detect_secondary_listen_ip/secondary_choose_listen_ip above) by the
-    # checks above, but $token is an operator-supplied free-form string
-    # with no character restriction -- a literal '"' or '\' in it would
-    # otherwise corrupt the JSON body's structure, the same bug class
-    # already fixed for kea_ctrl_post's Basic-Auth token. Escaping all
-    # three uniformly, rather than relying on upstream validation to keep
-    # two of them safe, avoids a silent regression if that validation is
-    # ever loosened. This covers the two characters that break JSON's
-    # quoted-string syntax structurally (unescaped `"` ends the string
-    # early, a lone `\` starts an invalid escape sequence); it does not
-    # escape other JSON-invalid raw control characters (e.g. a literal
-    # newline), which none of these three values can realistically contain
-    # in practice (operator-typed/pasted single-line CLI arguments).
+    # Why: $token is an unconstrained operator-supplied string whose raw
+    # '"'/'\' would otherwise corrupt the JSON body, the same bug class
+    # already fixed for kea_ctrl_post's Basic-Auth token ($name/$listen_ip
+    # are already constrained by the checks above and escaped only for
+    # uniformity).
     # From: Issue #1558
     local token_escaped name_escaped listen_ip_escaped
     token_escaped=$(printf '%s' "$token" | sed 's/\\/\\\\/g; s/"/\\"/g')
