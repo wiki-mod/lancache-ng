@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc) configuration and connectivity
+# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc, and services/dns's ccache-over-distcc layer) configuration and connectivity
 name: Rust acceleration infrastructure preflight
 description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.
 
@@ -31,7 +31,7 @@ inputs:
     default: ""
   build-tools-image:
     description: |
-      Build tools image that provides rustc, sccache, distcc, and distcc-pump.
+      Build tools image that provides rustc, sccache, distcc, distcc-pump, and ccache.
       Primary CI workflows (build-push.yml) pass an explicit pinned digest via
       scripts/select-build-tools-image.sh; this `:latest` default is a fallback
       for local developer usage and other callers that do not override it.
@@ -414,13 +414,27 @@ runs:
                 export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"
                 export CCACHE_PREFIX=distcc
                 export CCACHE_COMPILERCHECK=content
+                # What: pins CCACHE_BASEDIR to this probe's own directory, and compiles
+                # using a relative filename from inside it (both below).
+                # Why: ccache's default hash_dir behavior folds the compile's absolute
+                # source path and CWD into the remote cache key; preflight_dir is a fresh
+                # mktemp path every run, so without this every CI run would leak a
+                # brand-new, never-reused Redis entry with no TTL. Verified empirically
+                # (2026-08-14, real Redis on lancache-240): CCACHE_BASEDIR alone, with an
+                # absolute compile argument, still produced a remote miss on a second run
+                # from a different mktemp dir; combining it with `cd` into that dir and a
+                # relative filename produced a genuine remote_storage_hit from the first
+                # run's entry.
+                # From: Issue #887
+                export CCACHE_BASEDIR="$preflight_dir"
                 printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/ccache-probe.c"
+                cd "$preflight_dir"
 
                 ccache_dir_cold="$preflight_dir/ccache-dir-cold"
                 mkdir -p "$ccache_dir_cold"
                 CCACHE_DIR="$ccache_dir_cold" ccache --zero-stats >/dev/null
                 cold_log="$preflight_dir/ccache-cold.log"
-                run_logged "$cold_log" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c "$preflight_dir/ccache-probe.c" -o "$preflight_dir/ccache-cold.o"
+                run_logged "$cold_log" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c ccache-probe.c -o ccache-cold.o
                 cold_stats="$preflight_dir/ccache-cold-stats.log"
                 CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
                 if ! grep -qE '^remote_storage_write[[:space:]]+[1-9]' "$cold_stats"; then
@@ -433,7 +447,7 @@ runs:
                 mkdir -p "$ccache_dir_warm"
                 CCACHE_DIR="$ccache_dir_warm" ccache --zero-stats >/dev/null
                 warm_log="$preflight_dir/ccache-warm.log"
-                run_logged "$warm_log" env CCACHE_DIR="$ccache_dir_warm" ccache "$real_cc" -c "$preflight_dir/ccache-probe.c" -o "$preflight_dir/ccache-warm.o"
+                run_logged "$warm_log" env CCACHE_DIR="$ccache_dir_warm" ccache "$real_cc" -c ccache-probe.c -o ccache-warm.o
                 warm_stats="$preflight_dir/ccache-warm-stats.log"
                 CCACHE_DIR="$ccache_dir_warm" ccache --print-stats > "$warm_stats"
                 if ! grep -qE '^remote_storage_hit[[:space:]]+[1-9]' "$warm_stats"; then

@@ -72,6 +72,12 @@ RUN set -eu; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
 ARG CARGO_BUILD_JOBS=
+# What: redeclares BUILD_TOOLS_IMAGE (already set pre-FROM above) so it is visible as a
+# shell variable inside this stage's RUN block, not just usable in the FROM line itself.
+# Why: configure_ccache() below folds this value into the ccache remote-storage cache key
+# (Docker ARG scoping requires a bare post-FROM redeclaration for that).
+# From: Issue #887
+ARG BUILD_TOOLS_IMAGE
 
 WORKDIR /build
 COPY nats-subscriber/ .
@@ -106,6 +112,20 @@ COPY nats-subscriber/ .
 #     distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance, and
 #     ccache's manual requires an explicit scheme -- an unscoped `host:port` value
 #     fails with "Cannot parse URL ... Scheme ... is invalid".
+#   `CCACHE_EXTRAFILES=/tmp/ccache-toolchain-id` (containing `$BUILD_TOOLS_IMAGE`) and
+#     `CCACHE_BASEDIR="$ccache_probe_dir"` plus a `cd`+relative-path probe compile.
+#     Why: `CCACHE_COMPILERCHECK=content` only hashes the local `cc` binary, never the
+#     remote distcc host's own compiler, so a farm toolchain upgrade could otherwise
+#     still serve a stale remote hit -- EXTRAFILES ties the key to the resolved
+#     build-tools image instead. BASEDIR+relative-path keeps the probe's own key stable
+#     across builds despite `$ccache_probe_dir` being a fresh mktemp path every time;
+#     without it, every build would leak a new, never-reused Redis entry. Consequently the
+#     probe's own success check accepts either a remote write OR a remote hit as proof of
+#     a healthy round trip (a second build against the same generation legitimately hits
+#     instead of writing -- verified empirically, real Redis, 2026-08-14, lancache-240:
+#     without this the probe misclassified a genuine cache hit as "write failed" and
+#     disabled ccache for the whole build).
+#     From: Issue #887
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
 #                            plain distcc first on failure, then a normal local compiler
@@ -189,7 +209,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
     }; \
     disable_ccache() { \
       ccache_enabled=0; \
-      unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX; \
+      unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR; \
+      rm -f /tmp/ccache-toolchain-id; \
       export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     }; \
     configure_ccache() { \
@@ -205,10 +226,13 @@ RUN --mount=type=secret,id=sccache_redis_url \
         export CCACHE_DIR=/tmp/ccache-dns; \
         export CCACHE_PREFIX=distcc; \
         export CCACHE_COMPILERCHECK=content; \
+        printf '%s' "$BUILD_TOOLS_IMAGE" > /tmp/ccache-toolchain-id; \
+        export CCACHE_EXTRAFILES=/tmp/ccache-toolchain-id; \
+        export CCACHE_BASEDIR="$ccache_probe_dir"; \
         export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
         ccache_enabled=1; \
         printf '%s\n' 'int main(void) { return 0; }' > "$ccache_probe_dir/ccache-probe.c"; \
-        if ! $CC -c "$ccache_probe_dir/ccache-probe.c" -o "$ccache_probe_dir/ccache-probe.o" >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
+        if ! (cd "$ccache_probe_dir" && $CC -c ccache-probe.c -o ccache-probe.o) >"$ccache_probe_dir/ccache-probe.log" 2>&1; then \
           cat "$ccache_probe_dir/ccache-probe.log" >&2; \
           disable_ccache; \
           rm -rf "$ccache_probe_dir"; \
@@ -218,11 +242,11 @@ RUN --mount=type=secret,id=sccache_redis_url \
         ccache_probe_stats="$ccache_probe_dir/ccache-probe-stats.log"; \
         ccache --print-stats > "$ccache_probe_stats"; \
         if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_probe_stats" \
-          || ! grep -qE '^remote_storage_write[[:space:]]+[1-9]' "$ccache_probe_stats"; then \
+          || ! grep -qE '^remote_storage_(write|hit)[[:space:]]+[1-9]' "$ccache_probe_stats"; then \
           cat "$ccache_probe_stats" >&2; \
           disable_ccache; \
           rm -rf "$ccache_probe_dir"; \
-          echo "[INFO] ccache probe compiled but its Redis remote-storage write failed; continuing with plain distcc (no cache layer)." >&2; \
+          echo "[INFO] ccache probe's Redis remote-storage round trip failed (neither a write nor a hit was recorded); continuing with plain distcc (no cache layer)." >&2; \
           return 0; \
         fi; \
         rm -rf "$ccache_probe_dir"; \
@@ -295,16 +319,18 @@ RUN --mount=type=secret,id=sccache_redis_url \
     # errors), then inspects `ccache --print-stats` for a nonzero
     # remote_storage_error recorded during the real Cargo build, not just
     # configure_ccache's own pre-build probe.
-    # Why: a mid-build Redis outage is nonfatal to ccache and the compile already
-    # succeeded correctly, so this warns rather than failing a build whose only
-    # defect is a missed future cache reuse.
+    # Why: a mid-build Redis outage is nonfatal to ccache, and the compile already
+    # succeeded correctly using its local disk cache -- AG-VAL-001 (AGENTS.md) forbids
+    # reporting a successful check after emitting a warning, so this is deliberately an
+    # `[INFO]` diagnostic about an optional accelerator's degraded state, never a
+    # `[WARN]`/failure signal paired with build success.
     # From: Issue #887
     if [ "${ccache_enabled:-0}" = "1" ]; then \
       ccache -s; \
       ccache_final_stats="$(mktemp)"; \
       ccache --print-stats > "$ccache_final_stats"; \
       if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$ccache_final_stats"; then \
-        echo "[WARN] ccache recorded a Redis remote-storage error during the real Cargo build; this build's binary is unaffected, but later builds may miss cache reuse until Redis recovers." >&2; \
+        echo "[INFO] ccache recorded a Redis remote-storage error during the real Cargo build; this build's binary is already correct and unaffected, but the optional Redis cache layer degraded mid-build -- later builds may miss cache reuse until Redis recovers." >&2; \
         cat "$ccache_final_stats" >&2; \
       fi; \
       rm -f "$ccache_final_stats"; \

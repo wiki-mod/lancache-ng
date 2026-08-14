@@ -234,9 +234,12 @@ reuses the same `SCCACHE_REDIS_URL` value already configured for `sccache`
 above, on the same Redis instance, whenever `DISTCC_POTENTIAL_HOSTS` is also
 set — `ccache`'s own fixed `ccache:` key namespace never collides with
 `sccache`'s distinct `SCCACHE_REDIS_KEY_PREFIX`-based one. There is no
-separate `CCACHE_REDIS_MODE` toggle; every ccache failure path falls back to
-plain distcc (no cache layer) instead of hard-failing the build. Unlike every
-other Rust service builder, `services/dns/Dockerfile` exports
+separate `CCACHE_REDIS_MODE` toggle; every ccache failure detected before the
+real Cargo build falls back to plain distcc (no cache layer) instead of
+hard-failing the build. A Redis error surfacing only during the real build
+cannot fall back after the fact (the compile already succeeded) and is
+reported as an `[INFO]` diagnostic instead. Unlike every other Rust service
+builder, `services/dns/Dockerfile` exports
 `CC="ccache <real compiler>"` (not the plain `CC=distcc` documented under
 [Rust builds and distcc/pump](local-runner-docker-performance.md#rust-builds-and-distccpump))
 once both distcc and ccache are enabled. See that Dockerfile's own

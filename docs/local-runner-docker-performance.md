@@ -200,9 +200,13 @@ Important rules:
 - use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
   since a build-tools image rebuild changes the compiler's mtime but not
   necessarily its output
-- every ccache failure path (a failed probe compile, a Redis write/read
-  error) falls back to plain distcc with no cache layer, rather than
-  hard-failing the build
+- every ccache failure detected *before* the real Cargo build (a failed
+  probe compile, or the probe's own Redis write/read check) falls back to
+  plain distcc with no cache layer, rather than hard-failing the build; a
+  Redis error that only surfaces *during* the real build itself cannot fall
+  back after the fact, since the compile already succeeded -- that case is
+  reported as an `[INFO]` diagnostic instead (see
+  `services/dns/Dockerfile`'s post-build stats check)
 
 See issue #887 for the full mechanism and `services/dns/Dockerfile`'s own
 `configure_ccache()`/`disable_ccache()` comments for the implementation.
