@@ -178,9 +178,11 @@ legacy:
     note: >-
       The previously separate, third-party-pinned syslog-ng image
       (balabit/syslog-ng:latest) is replaced by Alpine's own stable-repo
-      syslog-ng package (4.7.1-r1 on Alpine 3.20), bundled into this
-      project's own first-party syslog image (services/syslog/Dockerfile)
-      alongside fluent-bit. No external pull of this image happens anymore.
+      syslog-ng package (4.7.1-r1 on Alpine 3.20 at the original migration,
+      now 4.11.0-r0 on Alpine 3.24 following issue #1554's base-image pin
+      sync), bundled into this project's own first-party syslog image
+      (services/syslog/Dockerfile) alongside fluent-bit. No external pull of
+      this image happens anymore.
 external:
   - name: docker-socket-proxy
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476

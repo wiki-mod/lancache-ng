@@ -37,6 +37,13 @@
 # and reported `bytes_delta=71` with exit 0 -- proving both a true positive
 # and no false positive on the healthy path, not just the alerting logic in
 # isolation.
+#
+# Re-verified live on the 3.24 base (issue #1554, syslog-ng 4.11.0-r0): a
+# real end-to-end run (nginx-style tail input -> fluent-bit -> syslog-ng
+# RFC5424 delivery, `--cap-drop ALL`/`--cap-add DAC_READ_SEARCH`) produced no
+# false alert -- `data_loss_alert_active: false` in health-status.json with
+# bytes actually landing on disk -- confirming this script's control-path
+# behavior held across the base-image bump.
 set -euo pipefail
 
 CTL_SOCKET="${1:?usage: data-loss-detector.sh <ctl-socket-path> <log-root>}"

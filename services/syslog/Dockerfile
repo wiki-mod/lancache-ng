@@ -13,7 +13,7 @@
 # data-loss hardening the POC surfaced as a real, separate finding.
 #
 # ── Problem 1: no unpinnable edge/testing package for fluent-bit ──────────
-# Alpine's stable repos (any numbered release, e.g. 3.20 below) do not
+# Alpine's stable repos (any numbered release, e.g. 3.24 below) do not
 # package fluent-bit at all -- it exists only in Alpine edge's "testing"
 # repo (5.0.9-r0 at the time the POC checked), which carries no stability
 # guarantee and floats with edge itself. The POC's own Dockerfile documents
@@ -43,12 +43,15 @@
 # output delivered actual RFC5424 bytes to a listener.
 FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c708f6e99800d7ddc82efd6aa4f45f3a20b562 AS fluent-bit-src
 
-FROM alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
+FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# syslog-ng ships in Alpine's STABLE main repo (confirmed live: 4.7.1-r1 on
-# 3.20, the version this Dockerfile actually pins) -- the POC's own
-# Dockerfile comment already established this; only fluent-bit needed the
-# edge/testing repo, which this image never touches. bash is this project's
+# syslog-ng ships in Alpine's STABLE main repo (confirmed live: 4.11.0-r0 on
+# 3.24, the version this Dockerfile actually pins) -- the POC's own
+# Dockerfile comment already established this for the 3.20 base this image
+# originally shipped on (issue #1554 moved the pin to 3.24, the same
+# mirror.gcr.io-sourced digest every other first-party service already uses;
+# syslog-ng stayed available, and newer, on 3.24 too). Only fluent-bit needed
+# the edge/testing repo, which this image never touches. bash is this project's
 # default shell (AG-REL-006) and provides `wait -n` for entrypoint.sh's
 # fail-fast multi-child supervision; su-exec is NOT used here (see the
 # capability-posture comment on the fluent-bit interpreter's setcap step
