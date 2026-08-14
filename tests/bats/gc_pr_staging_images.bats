@@ -85,8 +85,9 @@ teardown() {
 # ---------------------------------------------------------------------------
 
 @test "gcps_extract_manifest_children collects every manifests[] child of an image index" {
-    # Two platform manifests plus one Buildx-embedded attestation manifest,
-    # the real shape a multi-arch push with default provenance produces.
+    # What: two platform manifests plus one Buildx-embedded attestation
+    # manifest -- the real shape a multi-arch push produces.
+    # From: Issue #1095 | PR #1443
     local manifest='{
       "mediaType": "application/vnd.oci.image.index.v1+json",
       "manifests": [
@@ -100,8 +101,10 @@ teardown() {
     [[ "$output" == *"sha256:1111111111111111111111111111111111111111111111111111111111111111"* ]]
     [[ "$output" == *"sha256:2222222222222222222222222222222222222222222222222222222222222222"* ]]
     [[ "$output" == *"sha256:3333333333333333333333333333333333333333333333333333333333333333"* ]]
-    # Exactly 3 children -- no extra/duplicate lines from the subject.digest
-    # extraction, since this index has no top-level subject field.
+    # What: exactly 3 children expected -- no extra lines from the
+    # subject.digest extraction.
+    # Why: this index has no top-level subject field.
+    # From: Issue #1095 | PR #1443
     [ "$(printf '%s\n' "$output" | grep -c '^sha256:')" -eq 3 ]
 }
 
@@ -220,7 +223,9 @@ teardown() {
 }
 
 @test "gcps_pr_lookup_state reports LOOKUP_FAILED when gh succeeds but jq cannot parse the response" {
-    # Same "::warning::" stderr caveat as the test above.
+    # What: same "::warning::" stderr caveat as the test above.
+    # Why: `run --separate-stderr` keeps it out of a plain $output check.
+    # From: Issue #1095 | PR #1443
     gh() { printf 'this is not json'; }
     export -f gh
     declare -A cache=()
@@ -254,8 +259,10 @@ teardown() {
     local result
     gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >/dev/null
     [ "$result" = "OPEN" ]
-    # Second call is a cache hit -- the early-return branch must populate the
-    # 4th-arg output too, not just the post-lookup branch.
+    # What: second call is a cache hit.
+    # Why: the early-return branch must populate the 4th-arg output too,
+    # not just the post-lookup branch.
+    # From: Issue #1557 | PR #1559
     gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >/dev/null
     [ "$result" = "OPEN" ]
 }
