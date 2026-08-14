@@ -563,6 +563,15 @@ services:
     # legacy shipped defaults) so both sides agree on which value is
     # authoritative -- this shell has no access to the sourced helper function,
     # so the equivalent pattern is inlined here instead.
+    #
+    # What: Basic-Auth credential is passed to curl via -K (config read from
+    # stdin), not -u/--user on the command line. Why: an unquoted -u
+    # admin:$$token was real argument-injection into curl's argv (a
+    # whitespace-split, dash-leading word in $$token would be parsed as an
+    # additional curl flag), and even quoted, -u puts the secret in plain
+    # argv, visible to any other host process for curl's whole lifetime
+    # (ps aux, /proc/<pid>/cmdline) -- setup.sh's kea_ctrl_post() already
+    # solved this exact problem the same way. From: Issue #1304
     healthcheck:
       test:
         - CMD-SHELL
@@ -574,7 +583,7 @@ services:
           case "$$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac;
           case "$$token" in lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) token="" ;; esac;
           [ -n "$$token" ] || token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)";
-          curl -sf -u admin:$$token
+          printf 'user = "admin:%s"\n' "$$token" | curl -sf -K -
           -H 'Content-Type: application/json'
           -d '{"command":"config-get","service":["dhcp4"]}'
           "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
