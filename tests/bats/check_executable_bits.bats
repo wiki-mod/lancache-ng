@@ -2,20 +2,15 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-executable-bits.sh (issue #1019 / #822
-# Pattern B): the CI guard that fails a build when a repo script is invoked
-# by a bare path in a workflow/composite-action file (or is a .githooks/
-# hook) but is committed with a non-executable git mode.
-#
-# Every scenario builds a throwaway git fixture repo under $BATS_TEST_TMPDIR
-# and commits files at deterministic modes (`git update-index --chmod=+x/-x`,
-# independent of the fixture filesystem's own mode handling), then points the
-# guard at it -- so the suite runs fully offline and never depends on or
-# mutates the real repository. The guard is invoked as `bash "$script"`, not
-# bare `run "$script"`, precisely so this exec-bit guard's own test cannot
-# trip over the exec-bit bug it exists to catch (Rule-Ref: AG-VAL-024, "test
-# harnesses included"; the same irony PR #804 hit and #822's Pattern H note
-# calls out).
+# What: coverage for scripts/check-executable-bits.sh, the CI guard that
+# fails a build when a repo script is invoked by a bare path (or is a
+# .githooks/ hook) but is committed with a non-executable git mode.
+# Why: every scenario builds a throwaway git fixture repo, commits files at
+# deterministic modes via `git update-index --chmod`, and invokes the guard
+# as `bash "$script"` rather than bare `run "$script"`, so this exec-bit
+# guard's own test cannot trip over the exec-bit bug it exists to catch
+# (Rule-Ref: AG-VAL-024).
+# From: Issue #1019 | Issue #1095 | PR #1501.
 
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-executable-bits.sh"
@@ -29,10 +24,11 @@ setup() {
 }
 
 # add_script <relpath> <yes|no>
-# Creates a script under the fixture and stages it as executable (yes) or
-# non-executable (no) in git, deterministically via update-index --chmod so
-# the committed mode does not depend on the fixture filesystem's umask or the
-# host's core.filemode setting.
+# What: creates a script under the fixture, staged executable (yes) or
+# non-executable (no).
+# Why: `update-index --chmod` sets the committed mode deterministically,
+# independent of the fixture filesystem's umask or the host's core.filemode.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 add_script() {
     local rel="$1" want_exec="$2"
     mkdir -p "$fixture/$(dirname "$rel")"
@@ -46,8 +42,9 @@ add_script() {
 }
 
 # write_workflow <shell-body-line>
-# Writes a minimal single-step workflow whose run: block contains the given
-# shell line, and stages it.
+# What: writes a minimal single-step workflow whose run: block contains the
+# given shell line, and stages it.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 write_workflow() {
     local body="$1"
     cat > "$fixture/.github/workflows/ci.yml" <<EOF
@@ -247,7 +244,8 @@ EOF
     [[ "$output" == *"ui-nats-dns-integration-simulation.sh"* ]]
 }
 
-# The four tests below cover the YAML `run:` block-scalar parser rewrite.
+# What: the four tests below cover the YAML `run:` block-scalar parser
+# rewrite.
 # From: Issue #1095 | PR #1501.
 @test "does not treat a workflow paths filter entry as a script invocation" {
     # `on.*.paths` is YAML configuration data, not shell content. A path that

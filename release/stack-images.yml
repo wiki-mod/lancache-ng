@@ -1,26 +1,16 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Release manifest: declares the first-party runtime/tooling/metadata images,
-# their supported platforms and source Dockerfiles, the external
-# (third-party) images used by supported deploy profiles, the mutable/
-# immutable tag channels (sha, nightly, release candidate, stable, latest),
-# and the image retention policy. Consumed by the release/promotion CI
-# workflow and validated by scripts/validate-stack-images.sh.
-#
-# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23; current_dev's own
-# nightly publishing model changed again in #1254/#1255, 2026-07-25): master
-# publishes `latest` continuously from its own tip; current_dev (the
-# permanent active-development branch) publishes `nightly` once a day
-# (01:00 UTC) plus on-demand, gated on a full green build+scan -- NOT
-# continuously on every push anymore, see docs/release-versioning.md's
-# "Branch/channel model" section and nightly-refresh.yml; archived vY.X.Z
-# release branches take deliberate backports but publish no live channel at
-# all. The `dev` channel that used to be published from a vX.Y.Z branch is
-# retired -- see docs/release-versioning.md's "Retired: the dev channel" note
-# for the full history and setup.sh's validate_lancache_image_channel for the
-# operator-facing hard cut (mirrors the earlier edge -> nightly rename
-# precedent).
+# What: release manifest -- first-party runtime/tooling/metadata images with
+# their platforms/source Dockerfiles, external (third-party) images, the
+# mutable/immutable tag channels (per the master->latest/current_dev->
+# nightly branch-channel model, issue #825/#1141/#1254/#1255), and the image
+# retention policy.
+# Why: consumed by the release/promotion CI workflow and validated by
+# scripts/validate-stack-images.sh; full channel/branch model detail lives
+# in docs/release-versioning.md's "Branch/channel model" section, not
+# duplicated here.
+# From: Issue #1095 | PR #1501.
 schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io
@@ -97,11 +87,11 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # deploy/quickstart/docker-compose.yml defines a `dhcp` service too
-      # (confirmed 2026-08-06, issue #849 dhcp-proxy.md finding #12) --
-      # this entry was never updated when the quickstart profile grew a
-      # Kea/dnsmasq-proxy DHCP path of its own, so scripts/validate-stack-
-      # images.sh had nothing to check it against.
+      # What: lists deploy/quickstart/docker-compose.yml here too.
+      # Why: that profile defines a `dhcp` service too, but this entry was
+      # never updated when quickstart grew its own Kea/dnsmasq-proxy DHCP
+      # path (issue #849 dhcp-proxy.md finding #12).
+      # From: Issue #1095 | PR #1501.
       - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
@@ -111,7 +101,9 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # Same gap as dhcp above (issue #849 dhcp-proxy.md finding #12).
+      # What: lists deploy/quickstart/docker-compose.yml here too.
+      # Why: same gap as dhcp above (issue #849 dhcp-proxy.md finding #12).
+      # From: Issue #1095 | PR #1501.
       - deploy/quickstart/docker-compose.yml
   - name: ntp
     image: ghcr.io/wiki-mod/lancache-ng/ntp
@@ -121,9 +113,10 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # Same gap as dhcp/dhcp-proxy above, found while fixing those two
-      # (AG-WF-011: same failure class, same file) -- deploy/quickstart/
-      # docker-compose.yml defines an `ntp` service too.
+      # What: lists deploy/quickstart/docker-compose.yml here too.
+      # Why: same gap as dhcp/dhcp-proxy above (AG-WF-011: same failure
+      # class, same file).
+      # From: Issue #1095 | PR #1501.
       - deploy/quickstart/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
