@@ -2,21 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-netdata-curl-pin.sh: the maintainer-approved
-# tracking mechanism from PR #1352 (issue #1304's "option (c)" decision) --
-# since Trivy cannot see netdata's statically-linked, vendored curl at all,
-# this script instead reads netdata's own upstream build recipe directly and
-# compares the pinned CURL_VERSION against the fixed-version threshold
-# curl's own advisories give for the 7 CVE IDs #1304 tracks.
-#
-# All tests run fully offline: the script's own BUNDLED_PACKAGES_CONTENT_FILE
-# test hook substitutes a local fixture for the real network fetch, so this
-# suite never depends on GitHub's raw content host being reachable. The
-# specific case the maintainer asked to see proven -- "simulate an older/
-# vulnerable version pinned, confirm the check catches it" -- is the
-# "still-vulnerable pinned version fails with the CVE list" test below,
-# using the EXACT real value (curl-8_17_0) PR #1352 found netdata v2.10.4
-# actually vendors.
+# What: coverage for scripts/check-netdata-curl-pin.sh's version-parsing,
+# comparison, and grace-period logic.
+# Why: all tests run fully offline via the script's own
+# BUNDLED_PACKAGES_CONTENT_FILE test hook, so this suite never depends on
+# GitHub's raw content host being reachable.
+# From: Issue #1304
 
 setup() {
     script="$BATS_TEST_DIRNAME/../../scripts/check-netdata-curl-pin.sh"
@@ -97,12 +88,10 @@ EOF
 
 # --- main(): end-to-end via the BUNDLED_PACKAGES_CONTENT_FILE test hook -----
 #
-# ACCEPTED_UNTIL="2026-08-29" is a hardcoded time-boxed acceptance window
-# (see the script's own header comment): a still-affected pin only WARNS
-# (exit 0) before that date, and FAILS (exit 1) on or after it. Tests below
-# use the NETDATA_CURL_PIN_TODAY test hook to exercise both sides of that
-# boundary deterministically, rather than depending on (or waiting for) the
-# real wall-clock date.
+# What: tests below use NETDATA_CURL_PIN_TODAY to exercise both sides of
+# the ACCEPTED_UNTIL grace-period boundary deterministically.
+# Why: avoids depending on (or waiting for) the real wall-clock date.
+# From: Issue #1304
 
 @test "main: a still-vulnerable pinned curl version WARNS (non-blocking) before the grace-period deadline" {
     write_dockerfile_fixture "v2.10.4"
@@ -156,12 +145,8 @@ EOF
 }
 
 @test "main: the real services/netdata/Dockerfile currently pins a still-affected curl (documents current, known state)" {
-    # Not a fixture -- this reads the REAL Dockerfile shipped in this PR,
-    # combined with a fixture bundled-packages.version carrying the exact
-    # real value PR #1352 found upstream (curl-8_17_0 at netdata v2.10.4).
-    # Today's real date is inside the ACCEPTED_UNTIL grace period, so this
-    # currently warns rather than fails -- documents the actual current
-    # state without depending on the injected-date hook.
+    # What: reads the real Dockerfile, not a fixture, without the date hook.
+    # From: Issue #1304
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_17_0"
     BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" run bash "$script" "$real_dockerfile"
@@ -170,10 +155,8 @@ EOF
 }
 
 @test "main: the real services/netdata/Dockerfile's pin would hard-fail once the grace period passes" {
-    # Same real Dockerfile as above, but with the injected-date hook pushed
-    # past ACCEPTED_UNTIL -- proves this project's actual current pin is
-    # exactly the state the escalation-to-failure branch is meant to catch,
-    # not just a synthetic fixture value.
+    # What: same real Dockerfile as above, with the date hook past ACCEPTED_UNTIL.
+    # From: Issue #1304
     real_dockerfile="$BATS_TEST_DIRNAME/../../services/netdata/Dockerfile"
     write_bundled_fixture "8_17_0"
     BUNDLED_PACKAGES_CONTENT_FILE="$bundled_fixture" NETDATA_CURL_PIN_TODAY="2026-08-30" \
