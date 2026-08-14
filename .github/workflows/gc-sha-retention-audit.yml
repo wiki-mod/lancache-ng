@@ -42,11 +42,6 @@ jobs:
       packages: read
     env:
       AUDIT_CHECKOUT: ${{ github.workspace }}/f17-sha-retention-audit
-      # Why: kept outside AUDIT_CHECKOUT (which is bind-mounted read-only into
-      # the container and is fully removed at the end of every run) so cached
-      # GHCR API responses can survive across runs via actions/cache while
-      # the isolated checkout itself stays disposable.
-      AUDIT_API_CACHE_DIR: ${{ runner.temp }}/f17-sha-retention-api-cache
 
     steps:
       - name: Prepare dedicated audit checkout directory
@@ -135,9 +130,18 @@ jobs:
             '
 
       - name: Prepare rate-limit-aware API response cache directory
+        # Why: runner.temp is only valid in step-level context (unlike
+        # github/vars/secrets, it is NOT available in a job-level env: block,
+        # which a prior version of this workflow got wrong and which broke
+        # GitHub's own workflow-file validation entirely). Computing it here
+        # and exporting via GITHUB_ENV makes it a normal env var for every
+        # later step in this job, including the cache actions' with: blocks.
+        env:
+          AUDIT_API_CACHE_DIR: ${{ runner.temp }}/f17-sha-retention-api-cache
         run: |
           set -euo pipefail
           mkdir -p -- "$AUDIT_API_CACHE_DIR"
+          echo "AUDIT_API_CACHE_DIR=$AUDIT_API_CACHE_DIR" >> "$GITHUB_ENV"
 
       # Why: a rolling cache (unique save key, prefix-matched restore key) so
       # a re-run shortly after another one reuses recent GHCR package-version
