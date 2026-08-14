@@ -96,9 +96,13 @@ teardown() {
     # sparse-checkout-restore group below: test_repo/restore_script are only
     # ever set by setup_sparse_checkout_fixture(), so for every other test in
     # this file both expansions below are empty and both guards short-circuit
-    # to a no-op.
+    # to a no-op. The trailing `return 0` is load-bearing: when both guards
+    # short-circuit, the function's own exit status is the status of the last
+    # `[[ ... ]]` test (1, since it was false) -- and bats treats a non-zero
+    # teardown as a test failure, which would fail every test in this file.
     [[ -n "${test_repo:-}" ]] && rm -rf "$test_repo"
     [[ -n "${restore_script:-}" ]] && rm -f "$restore_script"
+    return 0
 }
 
 # ---------------------------------------------------------------------------

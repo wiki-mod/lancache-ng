@@ -916,8 +916,10 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   skip the check instead of failing it); confirmed with a real run against a
   non-git directory that the step now exits non-zero rather than silently
   succeeding. New standing check:
-  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
-  failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
+  `tests/bats/gc_pr_staging_images.bats` (sparse-checkout-restore test group,
+  merged in from the former standalone
+  `gc_pr_staging_images_sparse_checkout_restore.bats` as part of issue #1557)
+  regresses the failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
   the fix including the always-reproducible case of a skip-worktree bit that
   `disable` alone does not clear, and the fail-closed behavior itself, against
   a throwaway local git repository — no network or real clone needed. A
@@ -1167,8 +1169,10 @@ omitted):**
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
 - **No repo-wide guard against a future workflow reintroducing an unrestored
   narrow `sparse-checkout` on a self-hosted job** (2026-08-07, issue #1095) —
-  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
-  specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
+  `tests/bats/gc_pr_staging_images.bats` (sparse-checkout-restore test group,
+  merged in from the former standalone
+  `gc_pr_staging_images_sparse_checkout_restore.bats` as part of issue #1557)
+  regresses the specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
   this repo that currently sets a `sparse-checkout` input), but nothing checks
   the repo's workflow files themselves for a *new* `sparse-checkout` input added
   to some other self-hosted job without an equivalent restore step. A grep-based
