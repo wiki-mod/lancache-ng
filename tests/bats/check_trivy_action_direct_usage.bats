@@ -210,6 +210,133 @@ EOF
     [[ "$output" == *"has no with: block"* ]] || fail "missing expected message: $output"
 }
 
+@test "fails when a double-quoted trivy-scan-retry call site is missing dockerhub wiring" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: "./.github/actions/trivy-scan-retry"
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *"missing dockerhub-username and dockerhub-password"* ]] || fail "quoted uses: call site was not scanned: $output"
+}
+
+@test "passes when a single-quoted trivy-scan-retry call site sets both dockerhub keys" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: './.github/actions/trivy-scan-retry'
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ] || fail "expected pass, got status $status: $output"
+}
+
+@test "fails when a trivy-scan-retry call site sets dockerhub-username to an empty literal" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ""
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *"dockerhub-username empty value"* ]] || fail "missing expected message: $output"
+}
+
+@test "fails when a trivy-scan-retry call site references the wrong secret name" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USER }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *"references the wrong secret (expected secrets.DOCKERHUB_USERNAME)"* ]] || fail "missing expected message: $output"
+}
+
+@test "passes when a trivy-scan-retry call site forwards a caller-owned inputs.* value" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ inputs.dockerhub-username }}
+          dockerhub-password: ${{ inputs.dockerhub-password }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ] || fail "expected pass, got status $status: $output"
+}
+
+@test "fails when a nested composite action (not a workflow) calls trivy-scan-retry without dockerhub wiring" {
+    write_wrapper_fixture
+    mkdir -p "$fixture_root/.github/actions/some-wrapper-action"
+    cat > "$fixture_root/.github/actions/some-wrapper-action/action.yml" <<'EOF'
+name: Some wrapper action
+runs:
+  using: composite
+  steps:
+    - name: Scan image with Trivy
+      uses: ./.github/actions/trivy-scan-retry
+      with:
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *"some-wrapper-action/action.yml"* ]] || fail "nested .github/actions call site was not scanned: $output"
+    [[ "$output" == *"missing dockerhub-username and dockerhub-password"* ]] || fail "missing expected message: $output"
+}
+
 @test "passes when multiple trivy-scan-retry call sites in one file are all fully wired, at different indentation" {
     write_wrapper_fixture
     cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'

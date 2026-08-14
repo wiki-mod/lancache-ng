@@ -576,8 +576,15 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          # Empty (not the real secret) on pull_request: this step runs on
+          # every same-repo PR, which also checks out and executes its own
+          # trivy-scan-retry action -- a PR branch could otherwise read a
+          # long-lived Docker Hub credential GITHUB_TOKEN's automatic
+          # per-run scoping doesn't apply to. Matches this file's own
+          # existing github.event_name != 'pull_request' gating convention
+          # (see e.g. line 290/318 below).
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -946,8 +953,10 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
-          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+          # Empty on pull_request -- same PR-branch credential-exfiltration
+          # gate as the amd64 leg above (see its comment).
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL

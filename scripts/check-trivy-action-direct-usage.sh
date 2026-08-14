@@ -60,7 +60,7 @@ check_direct_usage() {
         fi
         echo "::error::check-trivy-action-direct-usage: $file calls aquasecurity/trivy-action directly -- use ./.github/actions/trivy-scan-retry instead (issue #1535, AG-CI-013)" >&2
         violations=$((violations + 1))
-    done < <(grep -rn --include='*.yml' --include='*.yaml' 'uses: *aquasecurity/trivy-action@' .github/workflows .github/actions 2>/dev/null || true)
+    done < <(grep -rn --include='*.yml' --include='*.yaml' -E "uses: *[\"']?aquasecurity/trivy-action@" .github/workflows .github/actions 2>/dev/null || true)
     return "$violations"
 }
 
@@ -94,7 +94,10 @@ check_dockerhub_wiring() {
         # cover this case) makes the intended behavior the actual,
         # executed behavior rather than an assumption (AG-VAL-030).
         set +e
-        out=$(awk '
+        # SQ carries a real single-quote character into the awk program via
+        # -v: the program text itself is bash-single-quoted, so a literal
+        # `'` cannot appear inside it directly.
+        out=$(awk -v SQ="'" '
             function indent(line,    t) { t = line; sub(/[^ ].*$/, "", t); return length(t) }
             function trimmed(line,    t) { t = line; gsub(/^[ \t]+/, "", t); return t }
             # Column where `key` (e.g. "uses:", "with:") actually starts in
@@ -120,13 +123,53 @@ check_dockerhub_wiring() {
                 useline = FNR
                 usesindent = keycol(line, "uses:")
             }
+            function is_uses_line(t) { return t ~ USES_RE }
+            function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+            function unquote(s) { gsub("^[\"" SQ "]|[\"" SQ "]$", "", s); return s }
+            function value_of(t,    v) {
+                v = t
+                sub(/^[^:]*:/, "", v)
+                sub(/[ \t]+#.*$/, "", v)
+                return unquote(trim(v))
+            }
+            # A value is acceptable either as a direct pointer to its own
+            # expected secret, or as a forwarded ${{ inputs.* }} pass-through
+            # (e.g. trivy-scan-with-cache/action.yml relaying a caller-owned
+            # value one level down) -- this check only reasons about the one
+            # call site it is looking at, same scope as every other check in
+            # this file, so a pass-through value is trusted rather than
+            # chased through further call layers.
+            function bad_value_reason(v, expected_secret) {
+                if (v == "") return "empty value"
+                if (v ~ /inputs\./) return ""
+                if (v ~ ("secrets\\." expected_secret)) return ""
+                if (v ~ /secrets\./) return "references the wrong secret (expected secrets." expected_secret ")"
+                return "does not reference secrets." expected_secret " or a forwarded inputs.* value"
+            }
+            function evaluate_block() {
+                if (!(hasuser && haspass)) {
+                    missing = (!hasuser && !haspass) ? "dockerhub-username and dockerhub-password" : (!hasuser ? "dockerhub-username" : "dockerhub-password")
+                    report("with: block is missing " missing)
+                    return
+                }
+                if (userbad != "" || passbad != "") {
+                    reasons = (userbad != "" ? "dockerhub-username " userbad : "") (userbad != "" && passbad != "" ? "; " : "") (passbad != "" ? "dockerhub-password " passbad : "")
+                    report("with: block has invalid values: " reasons)
+                }
+            }
+            BEGIN {
+                # Optional single OR double quote around the wrapper path,
+                # covering both `uses: ./path` and `uses: "./path"` -- a
+                # bare unquoted-only pattern silently skips a valid quoted
+                # call site (AG-VAL-036: enumerate the format axes, not just
+                # the first-seen shape).
+                USES_RE = "^-?[ \t]*uses:[ \t]*[\"" SQ "]?\\./\\.github/actions/trivy-scan-retry[\"" SQ "]?[ \t]*(#.*)?$"
+            }
             FNR == 1 { state = 0; useline = 0; usesindent = 0 }
             {
                 t = trimmed($0)
                 if (state == 0) {
-                    if (t ~ /^-?[ \t]*uses:[ \t]*\.\/\.github\/actions\/trivy-scan-retry[ \t]*(#.*)?$/) {
-                        start_uses($0)
-                    }
+                    if (is_uses_line(t)) start_uses($0)
                     next
                 }
                 if (state == 1) {
@@ -134,34 +177,30 @@ check_dockerhub_wiring() {
                     if (t ~ /^with:[ \t]*(#.*)?$/ && keycol($0, "with:") == usesindent) {
                         state = 2
                         withindent = indent($0)
-                        hasuser = 0; haspass = 0
+                        hasuser = 0; haspass = 0; userbad = ""; passbad = ""
                         next
                     }
                     report("has no with: block (missing dockerhub-username/dockerhub-password wiring)")
                     state = 0
-                    if (t ~ /^-?[ \t]*uses:[ \t]*\.\/\.github\/actions\/trivy-scan-retry[ \t]*(#.*)?$/) start_uses($0)
+                    if (is_uses_line(t)) start_uses($0)
                     next
                 }
                 if (state == 2) {
                     if (t == "" || t ~ /^#/) next
                     if (indent($0) <= withindent) {
-                        if (!(hasuser && haspass)) {
-                            missing = (!hasuser && !haspass) ? "dockerhub-username and dockerhub-password" : (!hasuser ? "dockerhub-username" : "dockerhub-password")
-                            report("with: block is missing " missing)
-                        }
+                        evaluate_block()
                         state = 0
-                        if (t ~ /^-?[ \t]*uses:[ \t]*\.\/\.github\/actions\/trivy-scan-retry[ \t]*(#.*)?$/) start_uses($0)
+                        if (is_uses_line(t)) start_uses($0)
                         next
                     }
-                    if (t ~ /^dockerhub-username:/) hasuser = 1
-                    if (t ~ /^dockerhub-password:/) haspass = 1
+                    if (t ~ /^dockerhub-username:/) { hasuser = 1; userbad = bad_value_reason(value_of(t), "DOCKERHUB_USERNAME") }
+                    if (t ~ /^dockerhub-password:/) { haspass = 1; passbad = bad_value_reason(value_of(t), "DOCKERHUB_TOKEN") }
                     next
                 }
             }
             END {
-                if (state == 2 && !(hasuser && haspass)) {
-                    missing = (!hasuser && !haspass) ? "dockerhub-username and dockerhub-password" : (!hasuser ? "dockerhub-username" : "dockerhub-password")
-                    report("with: block is missing " missing)
+                if (state == 2) {
+                    evaluate_block()
                 } else if (state == 1) {
                     report("has no with: block (missing dockerhub-username/dockerhub-password wiring)")
                 }
@@ -172,11 +211,11 @@ check_dockerhub_wiring() {
         set -e
         if [ -n "$out" ]; then
             echo "$out" | while IFS= read -r line; do
-                echo "::error::check-trivy-action-direct-usage: $line -- both dockerhub-username and dockerhub-password must be set (issue #1535 follow-up)" >&2
+                echo "::error::check-trivy-action-direct-usage: $line -- both dockerhub-username and dockerhub-password must be set to a real secrets./inputs.* reference (issue #1535 follow-up)" >&2
             done
         fi
         violations=$((violations + rc))
-    done < <(grep -rl --include='*.yml' --include='*.yaml' 'uses: *\./\.github/actions/trivy-scan-retry' .github/workflows .github/actions 2>/dev/null || true)
+    done < <(grep -rlE --include='*.yml' --include='*.yaml' "uses: *[\"']?\./\.github/actions/trivy-scan-retry" .github/workflows .github/actions 2>/dev/null || true)
     return "$violations"
 }
 
