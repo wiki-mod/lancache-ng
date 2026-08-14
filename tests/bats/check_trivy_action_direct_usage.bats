@@ -117,6 +117,35 @@ EOF
     [[ "$output" == *"some-other-action/action.yml"* ]] || fail "missing offending file in output: $output"
 }
 
+# Regression proof for check_direct_usage()'s own quoted-form fix: a
+# double-quoted `uses: "aquasecurity/trivy-action@..."` scalar must be
+# caught too, not just the unquoted form the two tests above use.
+@test "fails when a workflow calls aquasecurity/trivy-action directly with a quoted uses: scalar" {
+    cat > "$fixture_root/.github/actions/trivy-scan-retry/action.yml" <<'EOF'
+name: Trivy scan with retry
+runs:
+  using: composite
+  steps:
+    - id: attempt1
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+EOF
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25"
+        with:
+          image-ref: example
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *".github/workflows/build.yml"* ]] || fail "quoted uses: call site was not scanned: $output"
+}
+
 # Every dockerhub-wiring fixture below needs the wrapper action.yml present
 # too (check_direct_usage() also scans .github/actions, and an empty/
 # missing wrapper file is not what these fixtures are testing).
@@ -312,6 +341,31 @@ EOF
     run bash "$script" "$fixture_root"
     [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
     [[ "$output" == *"references the wrong secret (expected secrets.DOCKERHUB_USERNAME)"* ]] || fail "missing expected message: $output"
+}
+
+# bad_value_reason()'s last branch: a value that is neither a secrets.*
+# nor an inputs.* reference at all (a hardcoded literal), distinct from
+# the wrong-secret-name case above.
+@test "fails when a trivy-scan-retry call site sets dockerhub-username to a hardcoded literal" {
+    write_wrapper_fixture
+    cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
+name: build
+on: push
+jobs:
+  scan:
+    steps:
+      - name: Scan image with Trivy
+        uses: ./.github/actions/trivy-scan-retry
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: some-hardcoded-user
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ] || fail "expected failure, got status $status: $output"
+    [[ "$output" == *"does not reference secrets.DOCKERHUB_USERNAME or a forwarded inputs.* value"* ]] || fail "missing expected message: $output"
 }
 
 # Value validation must not false-positive on trivy-scan-with-cache's own
