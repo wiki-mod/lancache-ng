@@ -415,6 +415,7 @@ jobs:
             cargo
             cargo-audit
             cargo-tarpaulin
+            ccache
             clippy-driver
             dig
             distcc
@@ -438,6 +439,7 @@ jobs:
           cargo-audit --version
           cargo tarpaulin --version
           cargo-tarpaulin --version
+          ccache --version
           sccache --version
           actionlint --version
           bats --version
@@ -561,10 +563,19 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): this exact step is where PR #1503/#1500 both hit
+      # "failed to download artifact from mirror.gcr.io/aquasec/trivy-db:2"
+      # / "Unable to initialize the Java DB" with zero retry anywhere -- see
+      # .github/actions/trivy-scan-retry's own header comment for the full
+      # root cause and fix.
       - name: Scan local build-tools amd64 image with Trivy
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -673,11 +684,16 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -881,6 +897,7 @@ jobs:
             cargo
             cargo-audit
             cargo-tarpaulin
+            ccache
             clippy-driver
             dig
             distcc
@@ -904,6 +921,7 @@ jobs:
           cargo-audit --version
           cargo tarpaulin --version
           cargo-tarpaulin --version
+          ccache --version
           sccache --version
           actionlint --version
           bats --version
@@ -915,10 +933,15 @@ jobs:
           docker compose version
           '
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan local build-tools arm64 image with Trivy
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -961,11 +984,16 @@ jobs:
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL

@@ -320,9 +320,17 @@ jobs:
             -t lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} \
             ${{ matrix.context }}
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
+      # Explicit timeout-minutes (none before): the wrapper can now run up
+      # to 4 scan attempts instead of one, so this step needs its own bound
+      # rather than only relying on this job's overall timeout-minutes.
       - name: Scan image with Trivy
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -508,9 +516,15 @@ jobs:
         # should-build gating in this fallback workflow, unlike
         # build-push.yml), so no `steps.build.outcome == 'success'` guard is
         # needed here the way build-push.yml's equivalent step has one.
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper below can run up to 4 scan
+        # attempts (issue #1535) instead of one, so the step-level bound
+        # must cover the worst case (4 x the 10m trivy timeout below + 3 x
+        # backoff), not just a single attempt.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
