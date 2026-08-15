@@ -189,7 +189,7 @@ repo="wiki-mod/lancache-ng"
 # Why: check-workflow-service-lists.sh requires this to equal the full
 # canonical service set, so it must track build-push.yml's own matrix.
 # From: Issue #626 | PR #627
-services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
 
 # What: a PER-SERVICE (not global) deletion cap -- up to 360 deletions
 # per run across 9 services.
