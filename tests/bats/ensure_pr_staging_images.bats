@@ -295,6 +295,40 @@ STUB
     ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
 }
 
+# Issue #1581: the two tests above (and their staging_image_freshness.bats
+# counterparts) only prove the classifier itself recognizes the real
+# wording -- they don't prove wait_for_touched_image()'s own fail-fast
+# branch (added by PR #1538) now correctly takes the confirmed-absence path
+# instead of hard-failing at ~95s for THIS exact wording, end to end through
+# the real ensure-pr-staging-images.sh script. This closes that gap.
+@test "image_exists real docker path: buildx's real GHCR \"not found\" wording is reported as confirmed absent, not a hard fail (Issue #1581)" {
+    unset STAGING_IMAGE_EXISTS_CMD
+    fake_docker_returning_stderr "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"
+    export PATH
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_INTERVAL_SECONDS=0
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    # Confirmed-absence branch reached (poll continued to the hard ceiling,
+    # the same outcome the "manifest unknown" test above asserts) --
+    # pre-fix, this wording hit the exists_status!=2 fail-fast branch
+    # instead and never reached this wording at all.
+    printf '%s\n' "$output" | grep -q "confirmed no such manifest"
+    ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
+}
+
 # What: fake `docker` yields an unrecognized/transient error, not a
 # confirmed-absence one, for image_exists()'s other branch.
 # Why: exercises the exists_status==1 path (registry call failed,
