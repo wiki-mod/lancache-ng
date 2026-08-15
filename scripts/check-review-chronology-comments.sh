@@ -141,7 +141,7 @@ check_bare_issue_ref_duplicates_from() {
                 }
                 if (matched) print FILENAME ":" FNR ":" line
             }
-        ' "$path" 2>/dev/null
+        ' "$path"
     done <<< "$from_nums"
 }
 
