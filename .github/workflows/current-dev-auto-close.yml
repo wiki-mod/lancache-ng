@@ -124,7 +124,11 @@ jobs:
             // From: Issue #1496
             const bodyLines = prBody.split(/\r\n|\r|\n/);
             const linkedIssuesHeadingRe = /^## Linked Issues\s*$/;
-            const anyLevel2HeadingRe = /^## /;
+            // What: Matches any ATX heading level (1-6), not only level 2.
+            // Why: `/^## /` alone does not match `### `/`# ` and would let
+            // the section run past a deeper sub-heading into later content.
+            // From: Issue #1496
+            const anyAtxHeadingRe = /^#{1,6} /;
             const headingLineIndexes = [];
             bodyLines.forEach((line, idx) => {
               if (linkedIssuesHeadingRe.test(line)) {
@@ -149,7 +153,7 @@ jobs:
               const sectionStart = headingLineIndexes[0] + 1;
               let sectionEnd = bodyLines.length;
               for (let i = sectionStart; i < bodyLines.length; i++) {
-                if (anyLevel2HeadingRe.test(bodyLines[i])) {
+                if (anyAtxHeadingRe.test(bodyLines[i])) {
                   sectionEnd = i;
                   break;
                 }
