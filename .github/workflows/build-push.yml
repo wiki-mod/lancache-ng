@@ -740,20 +740,17 @@ jobs:
         run: bash scripts/check-line-endings.sh
 
   language-policy:
-    # Enforces AG-REL-001 (project language: Rust and shell) by asserting the ABSENCE of
-    # banned-language source files, rather than scanning code IN a banned language for
-    # vulnerabilities the way CodeQL's per-language analysis does. That distinction
-    # matters: after issue #1158's Rust rewrite of the last Python file
-    # (tools/pxe-client-probe), this repo has zero Python files, which makes CodeQL's
-    # separate, GitHub-managed Python "default setup" analysis fail every real run with
-    # "could not process any code" -- a scan that can never pass again is not a useful
-    # gate. This job instead fails the moment a banned-language file reappears, the actual
-    # property AG-REL-001 wants enforced.
+    # What: Enforces AG-REL-001 by asserting the ABSENCE of banned-language source files, not scanning
+    # code IN a banned language the way CodeQL's per-language analysis does.
+    # Why: After issue #1158's Rust rewrite left zero Python files, CodeQL's separate Python "default setup"
+    # analysis fails every run with "could not process any code" -- a check that can never pass again.
+    # From: Issue #1158
     name: language policy
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: a few seconds (pure git ls-files + case-statement scan).
-    # Same 15-minute floor as detect-changes above.
+    # What: 15-minute timeout, same floor as detect-changes above; real runs are a few seconds.
+    # Why: A round, generous bound so a future hang still fails fast.
+    # From: PR #1218
     timeout-minutes: 15
     concurrency:
       group: >-
@@ -789,38 +786,26 @@ jobs:
       - name: Check for banned-language source files (AG-REL-001)
         run: bash scripts/check-language-policy.sh
 
-  # What: GitHub-hosted fallbacks limited to cheap lint jobs (file-headers, compose-healthchecks, line-endings,
-  # language-policy, shellcheck, pr-template-check, pr-tracking-metadata-check, pr-title-convention-check,
-  # and watchdog_test).
-  # Why: Rust builds/scans need build-tools/sccache/distcc/credentials with no safe hosted equivalent yet, and
-  # a ci_scope_policy-hosted fallback isn't feasible either since it would just queue indefinitely waiting on
-  # those same self-hosted-only Rust job dependencies.
-  # From: Issue #1095 | PR #1532, docs/ci-github-hosted-fallback-decision.md
+  # What: GitHub-hosted fallbacks are limited to cheap lint jobs (file-headers, compose-healthchecks,
+  # line-endings, language-policy, shellcheck, the pr-* checks, and watchdog_test).
+  # Why: Rust builds/scans need build-tools/sccache/distcc/credentials with no safe hosted equivalent; a
+  # ci_scope_policy-hosted fallback would just queue indefinitely on those same self-hosted-only dependencies.
+  # From: docs/ci-github-hosted-fallback-decision.md
   shellcheck:
-    # ShellCheck and ActionLint run inside the same build-tools image selected by
-    # validate-compose, keeping linting independent from whatever happens to be installed
-    # on the runner host.
+    # What: ShellCheck/ActionLint run inside the same build-tools image validate-compose selected.
+    # Why: Keeps linting independent from whatever happens to be installed on the runner host.
+    # From: PR #1383
     #
-    # DO NOT RENAME this job's `name:`/key (it has none, so the job key `shellcheck` IS
-    # the required-status-check context string) -- current_dev's classic branch protection
-    # names it literally (confirmed via the GitHub API). Renaming it would silently create
-    # a brand-new, never-satisfied required check with the old name still expected,
-    # reproducing issue #1245's exact bug class.
+    # What: DO NOT RENAME this job's key (it has no `name:`, so `shellcheck` IS the required-status-check
+    # context string current_dev's branch protection names literally).
+    # Why: Renaming it would silently create a new, never-satisfied required check with the old name still
+    # expected forever, reproducing issue #1245's own bug class.
+    # From: Issue #1245
     needs: [validate-compose, detect-changes]
-    # Issue #1245: this is the load-bearing self-skip in this workflow. On a pull_request
-    # event whose ENTIRE diff is docs-only (detect-changes' `docs_only` output), none of
-    # this job's remaining steps (ShellCheck/ActionLint plus setup-migration-semantics/
-    # action-node-version/validation-subnet-wrapper/executable-bits/
-    # build-tools-smoke-coverage) have anything new to check. Skipping cleanly is what
-    # matters: build/build-arm64 hard-require `needs.shellcheck.result == 'success'` with
-    # no path tolerance of their own, so this is the ONE place that stops the entire heavy
-    # pipeline from scheduling for a trivial doc-only PR. Two steps that DO need to run
-    # regardless of docs-only-ness (governance guardrails, the CHANGELOG direct-edit warn)
-    # were moved out into `line-endings` specifically so this skip does not drop them.
-    # `validate-compose` deliberately does NOT get the same self-skip -- see
-    # `container-scan`'s comment for why it must stay a root job. `github.event_name !=
-    # 'pull_request' ||` keeps this unconditional on push, so a docs-only merge commit
-    # still publishes its sha-<commit> images instead of starving the channel.
+    # What: Self-skips on a pull_request whose entire diff is docs-only; stays unconditional on push.
+    # Why: build/build-arm64 hard-require this job's success with no path tolerance, so this is the one
+    # gate stopping the heavy pipeline on a trivial doc PR; the 2 always-needed steps moved to line-endings.
+    # From: PR #1325
     if: >-
       ${{
         always() &&
@@ -831,20 +816,15 @@ jobs:
         )
       }}
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real full-job runs: 30-85s. Must exceed the "Run ShellCheck and
-    # ActionLint" step's own 15-minute timeout below (a job-level bound
-    # tighter than a step it contains would fail the job before that step's
-    # own deliberate 15-minute allowance ever gets to run out) -- 25 minutes
-    # covers that step's 15-minute budget plus this job's other steps with
-    # real headroom.
+    # What: 25-minute job timeout; real full-job runs are 30-85s.
+    # Why: Must exceed the "Run ShellCheck and ActionLint" step's own 15-minute timeout below -- a tighter
+    # job-level bound would fail the job before that step's own allowance ever runs out.
+    # From: PR #1218
     timeout-minutes: 25
-    # Job-level concurrency (#891): cancel-in-progress is pull_request-only -- see
-    # `build`'s group comment for the full #979 rationale. build/build-arm64 require
-    # `needs.shellcheck.result == 'success'` unconditionally, so on push this is a hard
-    # gate on the channel publish path: a cancelled shellcheck makes build skip and
-    # publishes no channel image, starving the channel. It must survive to completion on
-    # push; on a PR that cancelled result cleanly skips build/build-arm64, so cancelling a
-    # superseded run there just reclaims a lancache-light slot.
+    # What: Job-level concurrency, cancel-in-progress is pull_request-only.
+    # Why: build/build-arm64 require this job's success unconditionally, so on push a cancelled run would
+    # starve the channel; on a PR a cancelled result cleanly skips them, so cancelling just reclaims a slot.
+    # From: PR #891
     concurrency:
       group: >-
         ${{
@@ -853,12 +833,10 @@ jobs:
           format('{0}-shellcheck-{1}', github.workflow, github.ref)
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # contents: read is restated here matching the pr-template-check
-    # convention (#903) -- job-level permissions replace rather than extend
-    # the workflow-level defaults, and this job still needs contents: read
-    # for actions/checkout. pull-requests: read was dropped (#1245): the only
-    # step that needed it (governance guardrails' live `gh pr view` calls)
-    # moved to `line-endings` -- see this job's own top comment.
+    # What: contents:read restated (job-level permissions replace, not extend, the workflow default);
+    # pull-requests:read dropped.
+    # Why: The only step that needed it (governance guardrails' live `gh pr view`) moved to line-endings.
+    # From: Issue #1245
     permissions:
       contents: read
     env:
