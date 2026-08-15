@@ -119,27 +119,41 @@
 # inside a real consumer, not fabricated here against an image with no live
 # consumer yet.
 #
-# COREUTILS/FINDUTILS NARROWING: `coreutils` alone ships 100+ programs, and
-# `findutils`'s own real usage across every current consumer needs exactly
-# `find`/`xargs` (confirmed: `apk info -a findutils` lists only these two
-# commands, so no narrowing is needed or attempted for it -- the package is
-# already minimal). `coreutils` is different: Alpine does not offer a way to
-# install a subset of it via apk (it is one all-or-nothing package, per the
-# real, already-documented finding in services/dhcp-proxy/Dockerfile), so
-# this Dockerfile installs the whole package (to get real apk-db
-# registration, see above) and then deletes every coreutils-owned file
-# EXCEPT the real, grep-confirmed set this project's own service Dockerfiles
-# already document needing GNU (not BusyBox) behavior for: `basename`,
-# `cp`, `date`, `dirname`, `install`, `mktemp`, `mv`, `rm`, `sort`,
-# `realpath` (services/dhcp-proxy, services/dns, services/proxy,
-# services/watchdog Dockerfiles' own coreutils rationale comments), plus
-# `base64`/`od` (services/ui/Dockerfile's own coreutils rationale comment).
-# Confirmed empirically on a real runner, before this Dockerfile was
-# written, that deleting the unwanted files does NOT remove the apk
-# database's own record of the package (`apk info -e coreutils` still
-# reports it installed afterward) -- Trivy's os-pkg scanner reads that same
-# database, not the filesystem, so this narrowing does not reopen the
-# visibility gap it is paired with.
+# COREUTILS/FINDUTILS, real usage inventory (kept for the future per-service
+# COPY --from= migration this issue deliberately defers to a separate Step
+# 2, see below): `findutils`'s own real usage across every current consumer
+# needs exactly `find`/`xargs` (confirmed: `apk info -a findutils` lists
+# only these two commands -- the package is already minimal, nothing to
+# narrow). `coreutils`'s real, grep-confirmed usage across this project's
+# own service Dockerfiles is `basename`, `cp`, `date`, `dirname`, `install`,
+# `mktemp`, `mv`, `rm`, `sort`, `realpath` (services/dhcp-proxy,
+# services/dns, services/proxy, services/watchdog Dockerfiles' own coreutils
+# rationale comments), plus `base64`/`od` (services/ui/Dockerfile's own
+# coreutils rationale comment).
+#
+# This Dockerfile does NOT narrow the installed `coreutils` package down to
+# only that list, despite an earlier version of this file attempting
+# exactly that. Reversed after a real functional regression was found by
+# this Dockerfile's own pre-completion verification, not assumed: Alpine's
+# `coreutils-9.11-r0` package is not ~100 separate binaries but a single
+# ~773 KiB multi-call binary (`/bin/coreutils`, 1125 KiB installed total per
+# `apk info coreutils -s`, the remainder being symlink/directory metadata)
+# with every command name a symlink to it -- the same design BusyBox itself
+# uses. Deleting the unwanted symlinks therefore saves an amount of space
+# indistinguishable from zero, while actively breaking the image: installing
+# `coreutils` overwrites several of the base `alpine:3.24` image's own
+# pre-existing BusyBox symlinks (`cat`, `cp`, `date`, `echo`, `ls`, `sleep`,
+# `stat`, `touch`, `true`, `uname`, `head`, `tail`, `cut`, `tr`, `wc`,
+# `sha256sum`, among others) with symlinks to `/bin/coreutils` instead, and
+# deleting those (because they were outside the narrow keep list above)
+# left NEITHER the coreutils symlink NOR the original BusyBox symlink at
+# those paths -- commands the base image could serve before `coreutils` was
+# ever installed, silently gone. See the RUN step below for the full,
+# corrected rationale and the real command that first exposed this
+# (`docker run --rm <image> true` failing with "executable file not
+# found"). Trivy visibility (this section's whole point) is unaffected
+# either way: apk registration happens at install time regardless of what
+# happens to individual files afterward.
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b AS curl-builder
 
 # Pinned upstream curl release + a checksum this build verifies against
@@ -299,74 +313,60 @@ RUN apk upgrade --no-cache && \
       zstd \
       ca-certificates
 
-# Narrow `coreutils` (Alpine ships it as one all-or-nothing ~100+-program
-# package, confirmed no per-binary apk install exists) down to the real,
-# grep-confirmed set this project's own service Dockerfiles document
-# actually needing GNU behavior for -- see the COREUTILS/FINDUTILS
-# NARROWING section above for the full citation of which service needed
-# which binary and why. Deletes every other coreutils-owned file while
-# leaving the apk database's own package record untouched (confirmed
-# empirically before this Dockerfile was written: `apk info -e coreutils`
-# still reports the package installed afterward), so Trivy visibility for
-# this package is unaffected by the narrowing.
-#
-# `apk info -L coreutils`'s own output is captured into a variable first
-# and iterated via a shell `while read` loop, not piped live into a
-# filtering command under `set -o pipefail` (Rule-Ref: AG-VAL-032) -- this
-# `RUN` runs under `set -euo pipefail`, and an early-exiting consumer in
-# that live pipe shape is exactly what that rule requires avoiding.
-#
-# Three real, empirically-confirmed gotchas found building this exact block
-# (not reasoned from memory -- an earlier version of this file got each of
-# these wrong on a first attempt and was corrected against a real build):
-#   1. This Alpine coreutils build (9.11-r0) splits its OWN files across
-#      BOTH `/bin/*` AND `/usr/bin/*`, inconsistently, not one or the other
-#      -- confirmed live via the package's full real file listing: `cp`,
-#      `date`, `mv`, `rm`, etc. live under `bin/`, while `basename`,
-#      `dirname`, `install`, `od`, `realpath`, `sort` (all needed by this
-#      project's own consumers, see above) live under `usr/bin/`. A first
-#      attempt at this filter matched only `^usr/bin/` (missing every real
-#      `bin/`-rooted file), a second attempt matched only `^bin/` (missing
-#      `basename`/`dirname`/`install`/`od`/`realpath`/`sort` entirely,
-#      caught by this same RUN's own post-narrowing existence check
-#      failing on `basename`) -- both real failures, not hypothetical, is
-#      why this now matches both prefixes explicitly. `findutils` happens
-#      to install entirely under `/usr/bin/*` with no `/bin/*` split at
-#      all -- the two packages are NOT consistent with each other, so
-#      neither prefix convention can be assumed for any other package
-#      without checking it directly.
-#   2. Every individual coreutils command name, under EITHER prefix, is a
-#      symlink to a single real multi-call binary, `/bin/coreutils` itself
-#      (the same design BusyBox itself uses) -- confirmed live via
-#      `ls -la /usr/bin/basename` showing `-> ../../bin/coreutils`.
-#      `coreutils` itself is therefore hard-excluded from deletion below
-#      regardless of the keep list: deleting it would silently break every
-#      symlink this step is trying to KEEP, not just the ones being pruned.
-#   3. The post-narrowing existence check below uses `command -v`, not a
-#      hardcoded `/bin/$kept` or `/usr/bin/$kept` path, precisely because
-#      gotcha 1 shows the real path is not the same for every kept binary
-#      -- `command -v` resolves via `$PATH` (which already contains both
-#      `/bin` and `/usr/bin`) exactly the way any real caller invoking the
-#      bare command name would.
+# `coreutils` is installed WITHOUT narrowing its shipped binary set, despite
+# the original plan (see the COREUTILS/FINDUTILS NARROWING section above)
+# to delete every file outside the real, grep-confirmed keep list. That plan
+# was reversed after a real, empirically-confirmed finding contradicted its
+# own premise, caught by this Dockerfile's own functional verification
+# (`docker run --rm <image> true` failing with "executable file not found")
+# during a pre-completion review, not assumed or reasoned around:
+#   1. This Alpine coreutils build (9.11-r0) is NOT ~100 separate binaries --
+#      it is one real multi-call binary, `/bin/coreutils` (773 KiB;
+#      `apk info coreutils -s` reports 1125 KiB installed total, the
+#      difference being ~350 KiB of directory/symlink metadata), with every
+#      individual command name a symlink to it -- the identical design
+#      BusyBox itself uses (confirmed live: `ls -la /usr/bin/basename` shows
+#      `-> ../../bin/coreutils`). Deleting the unwanted symlinks therefore
+#      saves nothing close to "not shipping ~90 unneeded programs worth of
+#      bytes" -- the actual, measured saving is effectively zero (a few
+#      dozen bytes of symlink inodes), because the code they all point to
+#      stays in the image regardless of which names may call it.
+#   2. Alpine's `alpine:3.24` base image pre-populates `/bin/cat`, `/bin/cp`,
+#      `/bin/date`, `/bin/echo`, `/bin/ls`, `/bin/sleep`, `/bin/stat`,
+#      `/bin/touch`, `/bin/true`, `/bin/uname`, `/usr/bin/head`,
+#      `/usr/bin/tail`, `/usr/bin/cut`, `/usr/bin/tr`, `/usr/bin/wc`,
+#      `/usr/bin/sha256sum` (among others) as symlinks to BusyBox. Installing
+#      the `coreutils` apk package OVERWRITES those same paths with symlinks
+#      to `/bin/coreutils` instead (apk package installation replaces
+#      conflicting paths, it does not coexist alongside them) -- so an
+#      earlier version of this Dockerfile that then deleted every coreutils-
+#      owned file outside its ~12-name keep list left NEITHER the coreutils
+#      symlink NOR the original BusyBox symlink at dozens of paths the base
+#      image itself could serve before `coreutils` was ever installed. That
+#      is a real functional regression (this image would ship without
+#      working `cat`/`ls`/`head`/`tail`/`cut`/`tr`/`wc`/`stat`/`chmod`/
+#      `touch`/`sha256sum`/`true`, none of which this Dockerfile's own
+#      original functional test suite happened to exercise, since it only
+#      checked tools ADDED, never tools potentially REMOVED from the base
+#      image's own prior capability), not a size optimization worth that
+#      cost -- confirmed by measuring, not assumed.
+# Trivy visibility for this package is unaffected either way (apk
+# registration happens at install time regardless of what happens
+# afterward) -- narrowing was never actually necessary for that goal, only
+# for the separately-stated "don't ship ~100 unneeded programs" concern,
+# which point 1 above shows does not actually apply to this specific
+# package's real on-disk shape. The real, grep-confirmed set of coreutils/
+# findutils commands this project's own consumers actually call --
+# `basename`, `cp`, `date`, `dirname`, `install`, `mktemp`, `mv`, `rm`,
+# `sort`, `realpath`, `base64`, `od` (coreutils) and `find`/`xargs`
+# (findutils, already minimal, see above) -- remains valuable as the input
+# to a future per-service `COPY --from=` migration (issue #1556's own
+# deliberately separate Step 2), which is why it stays documented above
+# even though this Dockerfile itself no longer acts on it by deleting
+# anything.
 RUN set -euo pipefail; \
-    coreutils_files="$(apk info -L coreutils | grep -E '^(bin|usr/bin)/')"; \
-    keep_list=" basename cp date dirname install mktemp mv rm sort realpath base64 od "; \
-    printf '%s\n' "$coreutils_files" | while IFS= read -r rel_path; do \
-      bin_name="$(basename "$rel_path")"; \
-      case "$bin_name" in \
-        coreutils) ;; \
-        *) \
-          case "$keep_list" in \
-            *" $bin_name "*) ;; \
-            *) rm -f "/$rel_path" ;; \
-          esac \
-        ;; \
-      esac; \
-    done; \
-    apk info -e coreutils; \
-    [ -x /bin/coreutils ] || { echo "ERROR: /bin/coreutils multi-call binary itself is missing after narrowing" >&2; exit 1; }; \
-    for kept in basename cp date dirname install mktemp mv rm sort realpath base64 od; do \
-      command -v "$kept" >/dev/null 2>&1 || { echo "ERROR: expected coreutils binary missing after narrowing: $kept" >&2; exit 1; }; \
+    for expected in basename cp date dirname install mktemp mv rm sort realpath base64 od find xargs; do \
+      command -v "$expected" >/dev/null 2>&1 || { echo "ERROR: expected coreutils/findutils binary missing: $expected" >&2; exit 1; }; \
     done
 
 COPY --from=curl-builder /out/usr/local/bin/curl /usr/local/bin/curl
