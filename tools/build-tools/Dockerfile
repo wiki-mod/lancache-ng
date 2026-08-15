@@ -185,7 +185,7 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # while ccache preprocesses locally by default; re-verify against the
 # sccache version pinned below before relying on this if sccache's
 # preprocessing behavior is ever reconsidered for this job.
-# From: Issue #887 | PR #1571
+# From: Issue #887
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
