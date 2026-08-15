@@ -2,25 +2,21 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Production stack: proxy, DNS, DHCP, Admin UI, and supporting services
-# (NATS, docker-socket-proxy) wired up with production-sized defaults
+# What: production stack -- proxy, DNS, DHCP, Admin UI, and supporting
+# services (NATS, docker-socket-proxy) with production-sized defaults
 # (large host-mounted cache volume, standard DNS ports, query logging off).
-# This is the only *production* deployment profile -- see AGENTS.md's AG-KD-008
-# for why there is no parallel deploy/dev stack (corrected 2026-08-05, issue #1391
-# doc-sweep audit: this used to cite CLAUDE.md's "No Separate Dev Environment"
-# section, which moved to AGENTS.md on 2026-07-31; deploy/quickstart/ and
-# deploy/full-setup/ are the other two real profiles that exist today, for
-# quickstart and CI-validation use respectively).
+# Why: the only production deployment profile (AGENTS.md AG-KD-008 -- no
+# parallel deploy/dev stack); deploy/quickstart/ and deploy/full-setup/ are
+# this project's other two real profiles, for quickstart and CI-validation
+# use respectively.
 
 name: lancache-ng
 
-# The Docker socket proxy's HAProxy allowlist lives in exactly one place,
-# scripts/docker-socket-proxy.sh (mounted read-only below), which is the
-# canonical source per docs/naming-conventions.md. This file used to also
-# carry an unreferenced x-docker-socket-proxy-command YAML anchor with a
-# near-duplicate copy of that same config -- it was never aliased anywhere
-# (dead weight that could silently drift from the real script with no
-# functional effect) and has been removed.
+# What: the Docker socket proxy's HAProxy allowlist lives in exactly one
+# place, scripts/docker-socket-proxy.sh (mounted read-only below).
+# Why: docs/naming-conventions.md names this the canonical source -- do not
+# duplicate the allowlist as a YAML anchor in this file.
+# From: PR #635
 
 services:
 
@@ -299,25 +295,18 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # DHCP_MODE/SYSLOG_ENABLED/NTP_ENABLED (issue #842/#849/#1296):
-    # watchdog.env is a static, non-templated file (see its own header), so
-    # these top-level .env values -- which do vary per install -- are
-    # passed the same way the `retention` service below already passes
-    # SYSLOG_ENABLED for its own syslog-ng retention gate.
-    # DHCP_MODE/SYSLOG_ENABLED are still NOT read by watchdog.sh (the bash
-    # entrypoint this ENTRYPOINT actually runs) -- only the Rust crate's
-    # own resolve_alert_only_targets() reads them, currently unused until
-    # that crate becomes this service's actual ENTRYPOINT (see
-    # services/watchdog/src/lib.rs's module doc comment). NTP_ENABLED is
-    # DIFFERENT (issue #1296): watchdog.sh itself now reads it directly
-    # (see that script's own C_NTP/check_alert_only() comments) to decide
-    # whether to alert-only-monitor `ntp` at all -- this is the first of
-    # issue #842's originally-proposed alert-only services to actually take
-    # effect in the live bash entrypoint, not just the not-yet-wired-up
-    # Rust scaffold.
+    # watchdog.env is static and cannot interpolate per-install top-level
+    # values. Pass the runtime presence gates here so watchdog.sh and the
+    # prepared Rust implementation see the same deployment state.
+    # LOGGING_ENABLED controls whether the combined syslog container exists
+    # for alert-only monitoring; SYSLOG_ENABLED remains the narrower
+    # retention/pruning opt-in. DHCP_MODE is consumed by the prepared Rust
+    # alert-only target resolver, while NTP_ENABLED gates the live Bash NTP
+    # alert-only target.
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
+      - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
       - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
       # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
@@ -340,8 +329,27 @@ services:
       timeout: 5s
       retries: 2
       start_period: 15s
+    # Every Docker health read and restart call goes through this proxy.
+    # `service_started`, not `service_healthy` -- watchdog's own dashboard
+    # and alert-only monitoring must stay available even when the Docker API
+    # channel itself is degraded, the same reasoning the Admin UI's
+    # identical dependency below already documents. A `service_healthy` gate
+    # here means Compose refuses to create watchdog at all if
+    # docker-socket-proxy fails its own startup healthcheck -- total
+    # monitoring silence for exactly the failure mode watchdog exists to
+    # surface, worse than the brief, self-correcting "unreachable" readings
+    # a `service_started` startup race can produce instead (get_health() and
+    # probe_docker_socket_proxy() both already treat an unreachable proxy as
+    # a normal, non-fatal failure state that clears itself once the proxy
+    # becomes reachable -- confirmed live, 2026-08-12: with
+    # `service_healthy`, watchdog only started ~5s after docker-socket-proxy
+    # itself reached Healthy; RESTART_AFTER=3 consecutive
+    # ~CHECK_INTERVAL-second cycles means one transient unreachable reading
+    # at startup is nowhere near enough to trigger a false restart on any of
+    # this file's restart-capable services).
     depends_on:
-      - docker-socket-proxy
+      docker-socket-proxy:
+        condition: service_started
     networks:
       - default
       - docker-api
@@ -352,91 +360,23 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── Retention (file-retention daemon, #842 Teil 2) ────────────────────────
-  # Dedicated sidecar for services/watchdog/retention.sh (cache-age purge,
-  # syslog-ng storage-budget retention, fluent-bit self-log rotation) --
-  # split into its own compose service, separate from `watchdog` above, on
-  # the maintainer's explicit architecture decision (issue #842 comment
-  # thread, 2026-08-01): a bug or compromise in this destructive
-  # find/rm-driven logic must be contained by real container-level
-  # boundaries (capabilities, filesystem, mounts), not merely by running in
-  # a different OS process inside the same container (Teil 1's own
-  # process-split, still true and still valuable, but not a Docker-level
-  # containment boundary by itself).
+  # ── Retention (file-retention daemon) ─────────────────────────────────────
+  # What: dedicated sidecar for services/watchdog/retention.sh, isolated
+  # from `watchdog` above by real container-level boundaries.
+  # Why: a bug in this destructive find/rm-driven logic needs containment by
+  # capabilities/filesystem/mounts, not just a separate OS process.
+  # From: Issue #842 | PR #1360
   #
-  # `cap_drop: [ALL]` then adding back only what's proven necessary (not
-  # assumed):
-  #   - DAC_OVERRIDE: retention.sh deletes files it does not own, in
-  #     directories it does not control the permissions of -- confirmed live
-  #     on a real runner: nginx creates proxy-cache entries as
-  #     `nginx:nginx` (re-confirmed 2026-08-06 on services/proxy's Alpine
-  #     base, issue #815 -- the owning username changed from Debian's
-  #     `www-data` to Alpine's `nginx`, but the underlying mode bits and
-  #     reasoning below are unchanged), mode 0700/0600 (no group/other bits
-  #     at all, hardcoded by nginx itself -- confirmed even a process umask
-  #     set before nginx starts has zero effect on this). This is still the
-  #     binding reason DAC_OVERRIDE is kept, unchanged by the syslog
-  #     consolidation below.
-  #
-  #     CORRECTED (syslog+fluent-bit consolidation PR, 2026-08): this
-  #     comment previously also named syslog-ng's own output tree (then
-  #     root-owned, `dir-perm(0750)`, `chgrp`'d to gid 10001 for the Admin
-  #     UI's read-only access) and fluent-bit's self-log (then root-owned by
-  #     the separate pinned third-party fluent-bit image's own default) as
-  #     two more targets DAC_OVERRIDE was needed for. Both are now natively
-  #     owned by uid 10001 instead: the combined `syslog` service below runs
-  #     entirely as that fixed non-root uid (see its own Dockerfile), so
-  #     everything it writes -- the syslog-ng output tree AND its own
-  #     fluent-bit self-log -- is already uid-10001-owned by construction,
-  #     with no root-then-chgrp step needed at all. retention.sh's own
-  #     uid-10001 identity (after its setpriv drop, see below) can now
-  #     delete/truncate both without DAC_OVERRIDE -- only the nginx
-  #     cache-entries case above still requires it. Narrowing retention.sh's
-  #     own `cap_add` list to drop DAC_OVERRIDE (replacing it with the
-  #     already-narrower DAC_READ_SEARCH the syslog consolidation itself
-  #     uses, or another equally-scoped grant, whichever proves sufficient
-  #     for the deletion side too) is real follow-up work this PR does not
-  #     attempt -- it touches a different service's own entrypoint/
-  #     capability posture and needs the same live-verified methodology this
-  #     PR applied to `syslog`, not a re-derivation from this comment alone.
-  #   - SETUID, SETGID, SETPCAP: needed ONLY transiently, for
-  #     retention-entrypoint.sh's own root-to-`lancache`(10001) privilege
-  #     drop via `setpriv` -- confirmed empirically (`/proc/self/status`
-  #     before/after) that the final long-running retention.sh process
-  #     retains NONE of these three; only DAC_OVERRIDE survives in its
-  #     Effective/Permitted/Bounding/Ambient capability sets. See
-  #     retention-entrypoint.sh's own header for the full mechanism and why
-  #     a bare `user: "10001:10001"` here could not deliver both "non-root"
-  #     and "can still do its job" at once (a capability added via
-  #     `cap_add` does not reach a non-root process's effective set without
-  #     this drop sequence -- confirmed the naive way first, then fixed).
-  #   - CHOWN: also needed only transiently, by retention-entrypoint.sh's own
-  #     root-phase `chown` of the retention-state/watchdog-logs paths before
-  #     the privilege drop (a fresh named volume or one that predates this
-  #     change may not already be owned by `lancache`) -- found the hard way
-  #     (not assumed): the first real end-to-end container run failed with
-  #     "chown: changing ownership ... Operation not permitted" without it,
-  #     since `cap_drop: ALL` removes CHOWN from root itself, not just from
-  #     the eventual non-root user. Stripped back out of the final process's
-  #     capability set by the same `--bounding-set=-all,+dac_override` call
-  #     that already removes SETUID/SETGID/SETPCAP -- retention.sh itself
-  #     never needs to change any file's ownership, only delete/truncate.
-  #
-  # CAP_DAC_OVERRIDE is a real, broad bypass of file-permission checks on
-  # every path this container can see -- not a small residual detail, and
-  # not oversold as one here. What actually bounds this container's blast
-  # radius is the mount set below (only the four paths retention.sh's own
-  # three functions and stamp file genuinely need, nothing else, no Docker
-  # socket, no other service's volumes) plus `read_only: true` (the
-  # capability bypasses permission CHECKS on paths the mount namespace
-  # already exposes; it does not expose any additional path, and does not
-  # defeat the read-only root filesystem itself). `network_mode: none`
-  # since retention.sh never makes or accepts a network connection (date,
-  # find, du, stat, rm, cp, zstd, mktemp, realpath only) -- verified this
-  # container still starts and completes a full purge/prune/rotate cycle
-  # with networking removed entirely, so this is real containment, not a
-  # theoretical one; note this replaces `networks:`, which is mutually
-  # exclusive with `network_mode`.
+  # What: `cap_drop: [ALL]`, adding back only DAC_OVERRIDE (deletes
+  # nginx-owned proxy-cache entries), and SETUID/SETGID/SETPCAP/CHOWN
+  # (transient, for the entrypoint's own root-to-`lancache` privilege drop).
+  # Why: each grant is empirically proven necessary, not assumed -- see
+  # retention-entrypoint.sh's own header for the full per-capability
+  # methodology (Alpine/nginx ownership basis, the `setpriv` drop sequence,
+  # why a bare `user:` directive alone cannot deliver this) and the blast
+  # radius already bounded by the mount set below, `read_only: true`, and
+  # `network_mode: none`.
+  # From: Issue #842 | PR #1360
   retention:
     container_name: lancache-retention
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
@@ -458,19 +398,19 @@ services:
       - /tmp
     env_file:
       - ../../config/prod/watchdog.env
-    # Same rationale as watchdog's own identical block before this split --
-    # see git history for that comment; unchanged here since retention.sh is
-    # the process that actually acts on every one of these variables now.
+    # What: passes the same runtime presence-gate variables as watchdog's own
+    # environment block above.
+    # Why: watchdog.env is static and cannot interpolate per-install values;
+    # retention.sh, not watchdog.sh, is the process that actually acts on
+    # every one of these SYSLOG_* variables.
+    # From: Issue #842 | PR #1360
     environment:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
-      # #849 bug-hunt finding observability.md#21: without this entry,
-      # retention.sh's own "${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}" default
-      # would be the only value the container ever sees -- Compose does not
-      # pass an arbitrary host/`.env` variable into a container unless it is
-      # named here, so an operator setting this in their `.env` would
-      # silently have no effect without this line.
+      # Compose only passes explicitly listed host/.env variables into this
+      # container. Keep the retry cooldown listed here so an operator override
+      # reaches retention.sh instead of silently falling back to its 3600s default.
       - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
@@ -554,6 +494,15 @@ services:
     # legacy shipped defaults) so both sides agree on which value is
     # authoritative -- this shell has no access to the sourced helper function,
     # so the equivalent pattern is inlined here instead.
+    #
+    # What: Basic-Auth credential is passed to curl via -K (config read from
+    # stdin, escaped with the same \\/\" idiom _lancache_json_escape() below
+    # uses for JSON), not -u/--user on the command line.
+    # Why: an unquoted -u admin:$$token let a leading-dash word in the token
+    # inject extra curl flags, quoted -u still exposed the secret in plain
+    # argv for curl's whole process lifetime, and an unescaped token could
+    # also corrupt curl's own -K quoted-value parsing on a literal '"' or '\'.
+    # From: Issue #1304 | PR #1550
     healthcheck:
       test:
         - CMD-SHELL
@@ -565,7 +514,8 @@ services:
           case "$$norm" in ""|change_me*|changeme*|your_*|*_here) token="" ;; esac;
           case "$$token" in lancache-dhcp-secret|lancache-dhcp-dev-secret|lancache-dhcp-prod-secret) token="" ;; esac;
           [ -n "$$token" ] || token="$$(cat /var/lib/lancache-secrets/kea-ctrl-token 2>/dev/null)";
-          curl -sf -u admin:$$token
+          esc_token="$$(printf '%s' "$$token" | sed 's/\\/\\\\/g; s/"/\\"/g')";
+          printf 'user = "admin:%s"\n' "$$esc_token" | curl -sf -K -
           -H 'Content-Type: application/json'
           -d '{"command":"config-get","service":["dhcp4"]}'
           "http://$$host:8000/" | jq -e '.[0].result == 0' >/dev/null
@@ -667,26 +617,20 @@ services:
       # genuine LAN traffic without needing network_mode: host. Bound to all
       # interfaces, matching how `dhcp`'s port 67/udp is published above.
       - "123:123/udp"
-    # Least-privilege hardening (issue #1358): before this, `ntp` had only
-    # `cap_add: [SYS_TIME]` layered on top of Docker's full default
-    # capability set (14 capabilities, including e.g. CAP_SYS_CHROOT), never
-    # `cap_drop`. `cap_drop: [ALL]` first, then adding back only what's
-    # proven necessary (same pattern as PR #1360's `retention` service, see
-    # its own comment in this file), removes every one of those unused
-    # defaults instead of relying on chronyd's own good behavior to not
-    # misuse them. This set was NOT guessed -- determined empirically on a
-    # real runner via `strace` against the real chronyd binary, starting
-    # from `cap_drop: ALL` and adding capabilities one at a time until each
-    # specific "Operation not permitted" error (each one tied to a specific
-    # syscall in the strace output) went away, INCLUDING a negative check
-    # (re-removing a capability that was added and confirming its specific
-    # failure comes back, not just adding until things looked fine) -- see
-    # the PR implementing this issue for the full session. Real end-to-end
-    # clock-stepping under this exact capability set is additionally
+    # What: `cap_drop: [ALL]` first (removing Docker's full default set,
+    # e.g. CAP_SYS_CHROOT), then only these capabilities are added back,
+    # matching the same least-privilege pattern as the `retention` service's
+    # own capability posture above.
+    # Why: each capability here was determined empirically via `strace`
+    # against the real chronyd binary -- starting from `cap_drop: ALL` and
+    # adding capabilities one at a time until each specific "Operation not
+    # permitted" error went away, including a negative check (re-removing a
+    # capability and confirming its specific failure returns). Real
+    # end-to-end clock-stepping under this exact set is additionally
     # verified on every PR by `scripts/ntp-cap-sys-time-simulation.sh`'s
-    # GitHub-hosted CI job, the only environment in this project's CI that
-    # runs on a real, non-LXC-nested kernel (see that script's own header) --
-    # kept in sync with this cap_add list; update both together.
+    # GitHub-hosted CI job (the only CI environment on a real, non-LXC-nested
+    # kernel) -- keep both in sync.
+    # From: Issue #1358
     cap_drop:
       - ALL
     cap_add:
@@ -891,16 +835,11 @@ services:
         jetstream {
           store_dir: /data
         }
-        # Monitor endpoint: nats-server shipped with no HTTP monitor
-        # listening (no http_port set), so the Docker healthcheck below and
-        # Netdata's go.d NATS collector both saw a hard connection refused
-        # against :8222 on every attempt -- not a timing issue, the port
-        # simply never opened. Verified live against this pinned image
-        # (nats-server 2.14.3): once set, /healthz and /varz answer
-        # immediately after "Server is ready". Only reachable from other
-        # containers on this compose network -- not published to the host --
-        # and carries no secrets of its own (nats-server's monitor endpoint
-        # has no built-in auth).
+        # Monitor endpoint: nats-server ships with no HTTP monitor listening
+        # unless http_port is configured. The Docker healthcheck therefore
+        # needs this internal-only port so /healthz can prove the server is
+        # answering. No active Netdata NATS collector consumes this endpoint
+        # in this stack.
         http_port: 8222
         # Central logging pipeline (#633): nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
@@ -1113,6 +1052,14 @@ services:
       timeout: 5s
       retries: 3
       start_period: 20s
+    # NATS stays on the shared application network only. The pinned Netdata
+    # image has no active NATS go.d job, and its shipped default targets
+    # 127.0.0.1:8222 rather than the `nats` Compose name. This stack does not
+    # install a NATS collector override, so joining netdata-net would add no
+    # collector path and would unnecessarily expose Netdata's unauthenticated
+    # API to the NATS container.
+    networks:
+      - default
     restart: always
     logging:
       driver: json-file
@@ -1120,69 +1067,87 @@ services:
         max-size: "5m"
         max-file: "2"
 
-  # ── Central logging: syslog + fluent-bit combined container (issue #453/#633
-  # baseline superseded here; see this PR for the full rationale) ───────────
-  # Replaces the previous two separate services (`syslog` = fluent-bit
-  # collector/forwarder, `syslog-ng` = central receiver) with ONE container
-  # running both -- a deliberate maintainer decision to accept crash-coupling
-  # and a single Docker HEALTHCHECK slot (mitigated below by a real
-  # dual-process check + structured status file) in exchange for one image
-  # to build/scan/patch instead of two. See services/syslog/Dockerfile's own
-  # header for the full real-vs-POC comparison this PR ran on a self-hosted
-  # runner: the exact pinned fluent-bit binary bundled with its glibc closure
-  # into a stable (non-edge) Alpine base, the two privileged-port/capability
-  # findings that contradicted the original POC's assumptions, and the
-  # `set -eu`/`wait -n` errexit bug this PR's own verification caught and
-  # fixed. `profiles: [logging]` is unchanged from before (issue #1343:
-  # on by default for setup.sh-managed installs, still off by default for a
-  # from-scratch manual deploy/prod install, matching ntp/dhcp-kea/
-  # dhcp-proxy's sibling profile-gating convention).
+  # ── Central logging: syslog + fluent-bit combined container ───────────────
+  # What: ONE container running both fluent-bit (collector/forwarder) and
+  # syslog-ng (central receiver), replacing the previous two separate
+  # services. See services/syslog/Dockerfile's own header for the full
+  # real-vs-POC comparison (pinned fluent-bit binary + glibc closure on a
+  # stable Alpine base, the privileged-port/capability findings, the
+  # `set -eu`/`wait -n` errexit fix).
+  # Why: a deliberate maintainer decision to accept crash-coupling and a
+  # single Docker HEALTHCHECK slot (mitigated below by a real dual-process
+  # check + structured status file) in exchange for one image to
+  # build/scan/patch instead of two. `profiles: [logging]` matches
+  # ntp/dhcp-kea/dhcp-proxy's sibling profile-gating convention: on by
+  # default for setup.sh-managed installs, off for a from-scratch manual
+  # deploy/prod install.
+  # From: Issue #453 | Issue #633 | Issue #1343 | Issue #1428 | PR #1431
+  #
+  # What: this short-lived least-privilege initializer chowns the `logs`
+  # volume and any old proxy-log copies before the non-root syslog service
+  # opens them.
+  # Why: named volumes keep their existing ownership across image upgrades,
+  # so the image-layer chown alone cannot migrate an already-populated
+  # volume.
+  # From: Issue #1428 | PR #1431
+  syslog-logs-permissions:
+    container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
+    image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
+    profiles: [logging]
+    user: "0:0"
+    entrypoint: ["/bin/chown"]
+    command: ["-R", "10001:10001", "/var/log/lancache"]
+    network_mode: none
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+    read_only: true
+    volumes:
+      - logs:/var/log/lancache
+    restart: "no"
+
   syslog:
-    # container_name (issue #842/#849, merged from current_dev's #1420):
-    # watchdog's Rust rewrite needs a stable, predictable Docker API path
-    # (/containers/<name>/json) to add this service to its alert-only
-    # monitored set -- without a fixed name, Compose's auto-generated one
-    # (<project>-syslog-1) would depend on the project name/directory and
-    # break the moment either changes. #1420 added this same fixed name to
-    # BOTH the old separate `syslog` (fluent-bit) and `syslog-ng` services;
-    # this consolidation PR's single combined service keeps exactly one of
-    # those two names (`lancache-syslog`) -- see this PR's report/services/
-    # watchdog/src/main.rs's updated resolve_alert_only_targets() for why
-    # `lancache-syslog-ng` is no longer a separate monitored target at all
-    # (that container no longer exists once these two services become one).
+    # What: a fixed container_name (`lancache-syslog`), the one this combined
+    # service keeps of the two names the former separate `syslog`/`syslog-ng`
+    # services used.
+    # Why: watchdog's Rust rewrite needs a stable, predictable Docker API
+    # path (/containers/<name>/json) to add this service to its alert-only
+    # monitored set -- Compose's auto-generated name would depend on the
+    # project name/directory and break the moment either changes.
+    # `lancache-syslog-ng` is no longer a separate monitored target since
+    # that container no longer exists (see resolve_alert_only_targets() in
+    # services/watchdog/src/main.rs).
+    # From: Issue #842 | Issue #849 | Issue #1420
     container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # Least-privilege posture, empirically determined (see Dockerfile's own
-    # extensive comment for the full methodology and the two dead-end
-    # designs -- a runtime su-exec privilege drop, and plain
-    # `cap_add: DAC_READ_SEARCH` alone -- this PR tried and disproved before
-    # arriving here): the whole container runs as fixed non-root uid 10001
-    # (Dockerfile USER), with exactly ONE added capability so fluent-bit can
-    # read today's root:root 0640 producer logs it doesn't own.
-    # DAC_READ_SEARCH (read-only bypass) is narrower than the POC's own
-    # proposed CAP_DAC_OVERRIDE (read+write bypass) -- verified live that the
-    # narrower capability is sufficient for fluent-bit's actual access
-    # pattern. HARD INVARIANT (verified live): the fluent-bit interpreter
-    # binary carries a matching `setcap` file capability baked into the
-    # image, so running this exact image WITHOUT `cap_add: [DAC_READ_SEARCH]`
-    # fails closed at exec (not a silent capability downgrade) -- never
-    # remove one side of this pair without the other.
+    # What: runs as fixed non-root uid 10001 (Dockerfile USER) with exactly
+    # ONE added capability (DAC_READ_SEARCH) so fluent-bit can read
+    # root:root 0640 producer logs it doesn't own.
+    # Why: the narrowest sufficient grant -- two other designs (a runtime
+    # su-exec drop, plain DAC_READ_SEARCH with no `setcap` binary) were
+    # tried and disproved first; see Dockerfile's own comment for the full
+    # methodology. HARD INVARIANT: the image's `setcap`-marked fluent-bit
+    # binary fails closed at exec without `cap_add: [DAC_READ_SEARCH]` --
+    # never remove one side of this pair without the other.
+    # From: Issue #1428 | PR #1431
     cap_drop:
       - ALL
     cap_add:
       - DAC_READ_SEARCH
+    depends_on:
+      syslog-logs-permissions:
+        condition: service_completed_successfully
     environment:
       - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
       - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
       - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
-      # Mandatory silent-data-loss hardening (this PR's task requirement,
-      # not optional): entrypoint.sh's detector loop compares syslog-ng's own
-      # "processed" stats counter against real bytes landing under
-      # SYSLOG_NG_LOG_DIR every this-many seconds -- see
-      # services/syslog/data-loss-detector.sh's header for the real,
-      # reproduced bug this guards against and the live verification that it
-      # both fires on the broken case and stays silent on the healthy one.
+      # Mandatory silent-data-loss hardening: entrypoint.sh's detector loop
+      # compares syslog-ng's own "processed" stats counter against real bytes
+      # landing under SYSLOG_NG_LOG_DIR every this-many seconds. The detector
+      # must remain active because forwarding can otherwise fail silently while
+      # both processes continue reporting healthy.
       - DATA_LOSS_CHECK_INTERVAL_SECONDS=${DATA_LOSS_CHECK_INTERVAL_SECONDS:-60}
     volumes:
       - proxy-logs:/var/log/nginx:ro
@@ -1196,19 +1161,16 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
-      # Central log receiver destination (previously the separate
-      # `syslog-ng` service's own mount, and briefly ALSO a second,
-      # independent mount on a different balabit/syslog-ng container in
-      # current_dev's #1420, merged concurrently with this PR -- that whole
-      # second service is superseded by this one combined container, not
-      # merged alongside it). Bind-mounted, not a named volume -- Docker
-      # auto-creates a missing host directory as root:root 0755, which the
-      # non-root (uid 10001) syslog-ng process in this container cannot
-      # write its own per-host subdirectories into. setup.sh pre-creates and
-      # chowns this path on fresh install specifically to avoid that (see
-      # setup.sh's own comment); the data-loss detector above is the
+      # What: central log receiver destination, bind-mounted rather than a
+      # named volume.
+      # Why: Docker auto-creates a missing host directory as root:root 0755,
+      # which the non-root (uid 10001) syslog-ng process in this container
+      # cannot write its own per-host subdirectories into; setup.sh
+      # pre-creates and chowns this path on fresh install to avoid that (see
+      # setup.sh's own comment), and the data-loss detector above is the
       # defense-in-depth backstop for an install that predates that fix or
       # has its permissions changed later.
+      # From: Issue #1428 | PR #1431
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
     # Real dual-process check (services/syslog/healthcheck.sh): verifies
     # fluent-bit AND syslog-ng independently and only reports healthy when
@@ -1284,11 +1246,9 @@ services:
       - SSL_LOG=/var/log/nginx/access.log
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
-      # Shared-secret bootstrap (#858): the ui entrypoint resolves this from
-      # /var/lib/lancache-secrets/netdata-alarm-token to match the netdata
-      # service's own resolution above -- see routes/netdata_alarms.rs for
-      # what this token gates (POST /api/netdata-alarms, the forward channel
-      # for Netdata's health.d alarms, bug hunt #849 finding #3).
+      # Netdata and the UI independently resolve the same shared token. Passing
+      # the variable here preserves an operator-provided value while the shared
+      # secret volume keeps generated values convergent between both services.
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
       - STANDARD_IP=${IP_STANDARD}
@@ -1375,11 +1335,23 @@ services:
     networks:
       - default
       - docker-api
+      # NETDATA_URL points at the isolated Netdata service, so the UI must
+      # join the dedicated metrics network in addition to its existing
+      # application and Docker API networks.
+      - netdata-net
+    # The dashboard and recovery surface must remain startable even if the
+    # Docker API proxy is unhealthy. Only container creation is required for
+    # UI startup; Docker-backed actions can surface their own degraded state.
+    # The other dependencies retain the same ordering-only behavior.
     depends_on:
-      - docker-socket-proxy
-      - proxy
-      - netdata
-      - nats
+      docker-socket-proxy:
+        condition: service_started
+      proxy:
+        condition: service_started
+      netdata:
+        condition: service_started
+      nats:
+        condition: service_started
     restart: always
     logging:
       driver: json-file
@@ -1416,9 +1388,9 @@ services:
     # repo checkout), netdata still needs its config generated inline here
     # rather than bind-mounted, since its image is third-party and has no
     # equivalent baked-in config of its own. This entrypoint override writes
-    # a netdata.conf that
-    # redirects daemon/health to real files under
-    # /var/log/netdata/*.file.log, then execs the image's own entrypoint.
+    # a netdata.conf that redirects daemon/health to real files under
+    # /var/log/netdata/*.file.log, then writes the alarm notification override
+    # before execing the image's own entrypoint.
     # netdata-logs shares that path with fluent-bit, which tails those real
     # files read-only. collector/access/debug stay on their stdout defaults
     # and are NOT collected: collector is extremely high-rate internal
@@ -1436,20 +1408,11 @@ services:
         daemon = /var/log/netdata/daemon.file.log
         health = /var/log/netdata/health.file.log
         CONF
-        # Netdata alarm -> Admin UI forwarding (bug hunt #849, observability.md
-        # finding #3: Netdata's own health.d alarms had no notification
-        # integration or Admin UI surface). Netdata's alarm-notify.sh sources
-        # this repo's stock, huge health_alarm_notify.conf FIRST, then this
-        # user-config-dir override SECOND (verified against
-        # /usr/libexec/netdata/plugins.d/alarm-notify.sh's own sourcing order,
-        # ~line 519, against the pinned image below) -- a bash function
-        # definition simply gets replaced on the second `source`, so this
-        # override only has to define the SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM/
-        # custom_sender() integration point, not replicate the ~1362-line stock
-        # file. Shared-secret bootstrap (#858) resolves NETDATA_ALARM_TOKEN the
-        # same first-writer-wins way the nats service above resolves its own
-        # passwords, so this container and the ui container agree on one value
-        # without either side hardcoding it.
+        # Netdata sources the user notification override after its stock
+        # health_alarm_notify.conf. Defining only the custom integration point
+        # here keeps the stock notification logic intact while forwarding health
+        # alarms to the Admin UI. The shared token bootstrap keeps both services
+        # on the same credential without hardcoding it.
         . /usr/local/lib/shared-secret-bootstrap.sh
         if secret_is_placeholder "$$NETDATA_ALARM_TOKEN"; then NETDATA_ALARM_TOKEN=""; fi
         if ! NETDATA_ALARM_TOKEN="$$(resolve_shared_secret netdata-alarm-token "$$NETDATA_ALARM_TOKEN" lancache_gen_hex32)"; then
@@ -1457,72 +1420,32 @@ services:
           echo "[lancache-netdata] Mount the shared-secrets volume, or set NETDATA_ALARM_TOKEN to a real value (openssl rand -hex 32)." >&2
           exit 1
         fi
-        # The resolved token is written to its own file, read back by
-        # custom_sender() at alarm-fire time, rather than interpolated
-        # directly into the health_alarm_notify.conf heredoc below: this
-        # heredoc already needs every literal dollar sign doubled for
-        # Compose's own YAML-level interpolation (see this file's other
-        # heredocs for the same pattern), and embedding a live secret value
-        # into that heredoc would also leak it into `docker inspect`'s
-        # recorded command.
+        # Keep the resolved secret out of the command recorded by docker inspect.
+        # The runtime sender reads it from a mode-0600 file instead.
         umask 077
         printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
         chmod 0600 /etc/netdata/.netdata-alarm-token
-        # Live-verified 2026-08-06 (PR #1444 real-alarm check, keep this
-        # block byte-identical to deploy/quickstart/docker-compose.yml's
-        # matching fragment): netdata's own daemon -- and therefore
-        # alarm-notify.sh and this file's custom_sender() -- runs as the
-        # image's unprivileged `netdata` user (uid 201), never as root,
-        # once past this root-context setup script. Without this chown,
-        # the token file stays root:root/0600 from the printf above, so the
-        # real health-engine-triggered alarm-notify.sh process gets
-        # "Permission denied" reading it, `cat ... 2>/dev/null` silently
-        # swallows that into an empty string, and every real
-        # (non-manually-triggered) alarm silently fails Admin UI auth with
-        # 401 -- confirmed by instrumenting this exact custom_sender() body
-        # and observing token_len=0 on a real health.d-fired alarm, versus
-        # a correct non-empty token when the same file is read via a root
-        # shell (e.g. `docker exec`), which is why naive manual testing as
-        # root does not catch this.
+        # alarm-notify.sh executes as the unprivileged netdata user after setup,
+        # so ownership must follow the daemon or real health-triggered alarms
+        # cannot read the otherwise correctly protected token file.
         chown netdata:netdata /etc/netdata/.netdata-alarm-token
         cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
-        # Minimal override -- sourced AFTER Netdata's own stock
-        # health_alarm_notify.conf (see the entrypoint comment above for the
-        # verified sourcing order). Only defines the custom_sender()
-        # integration point plus the two variables that activate it.
-        #
+        # Minimal override sourced after Netdata's stock notification config.
         # shellcheck disable=SC2154
-        # name/chart/host/status/old_status/value_string/units/info/
-        # unique_id/alarm_id/event_id/when/duration below are populated by
-        # Netdata's own alarm-notify.sh before it sources this file's
-        # custom_sender() -- never assigned in this fragment itself. This
-        # whole heredoc is opaque to a shellcheck run against the compose
-        # file it lives in (a quoted heredoc body is not parsed as shell),
-        # so these directives only take effect if this content is ever
-        # extracted and linted standalone -- verified against a real
-        # extracted copy during this change's own validation, not assumed.
+        # Netdata populates these alarm fields before custom_sender() is called.
         # shellcheck disable=SC2034
-        # SEND_CUSTOM/DEFAULT_RECIPIENT_CUSTOM are read by Netdata's own
-        # alarm-notify.sh AFTER sourcing this file, not used within it.
+        # Netdata reads these activation variables after sourcing the override.
         SEND_CUSTOM="YES"
         DEFAULT_RECIPIENT_CUSTOM="lancache-ui"
-        # Escapes a value for safe embedding inside a JSON string: backslash
-        # first (so a later-escaped quote isn't double-escaped), then double
-        # quote, then strips newlines. Netdata's alarm fields (name/chart/
-        # host/value_string/units/info) are operator/collector-controlled
-        # strings, not guaranteed free of characters that would otherwise
-        # break this hand-built JSON payload.
+        # Escape collector/operator supplied strings before embedding them in JSON.
         _lancache_json_escape() {
           printf '%s' "$$1" | tr -d '\n' | sed 's/\\/\\\\/g; s/"/\\"/g'
         }
         custom_sender() {
           local token
           token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
-          # docurl is Netdata's own curl/wget-compatible HTTP helper, already
-          # available in the environment alarm-notify.sh runs custom_sender()
-          # in. Best-effort fire-and-forget: a failed/timed-out POST here must
-          # never make Netdata's own health engine misbehave, so stderr/stdout
-          # are discarded and the exit code is not checked.
+          # Forwarding is best effort: an unavailable UI must not interfere with
+          # Netdata's own health engine or notification processing.
           docurl -s --max-time 15 \
             -X POST \
             -H "Content-Type: application/json" \
@@ -1535,15 +1458,8 @@ services:
     environment:
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
     volumes:
-      # Shared-secret bootstrap (#858): same two mounts as the nats service
-      # above, needed here for the identical reason -- this service runs the
-      # pinned upstream `netdata/netdata` image (see the `image:` line
-      # below), which has no entrypoint.sh of its own to embed a byte-
-      # identical copy into, so the canonical library is sourced inline from
-      # the command block above instead. `services/netdata/entrypoint.sh` is
-      # a separate, evaluated-but-not-adopted first-party build (issue
-      # #1304/#815, PR #1352) -- no deploy profile actually runs that image
-      # today, so it is not a byte-identical-copy target here either.
+      # This upstream image has no first-party entrypoint in which to embed the
+      # shared-secret helper, so mount and source the repository's canonical copy.
       - shared-secrets:/var/lib/lancache-secrets
       - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       - netdataconfig:/etc/netdata
@@ -1577,6 +1493,13 @@ services:
       retries: 3
       start_period: 20s
     restart: always
+    # Netdata exposes an unauthenticated HTTP API internally and publishes no
+    # host port. Keep it off the shared default bridge so arbitrary sibling
+    # containers cannot reach that API directly; only the UI joins netdata-net.
+    # The network is not internal because the upstream Netdata image may need
+    # outbound access for its own operation.
+    networks:
+      - netdata-net
     logging:
       driver: json-file
       options:
@@ -1586,6 +1509,9 @@ services:
 networks:
   docker-api:
     internal: true
+  # Dedicated to Netdata and the Admin UI, the only bridge-networked caller
+  # of NETDATA_URL.
+  netdata-net: {}
 
 volumes:
   # Shared handshake secrets (#858): persistent volume mounted into every

@@ -5492,13 +5492,17 @@ cmd_create_logs_for_issue() {
     # version number for a short interactive message; a diagnostic bundle
     # benefits from the fuller string instead). Disk space has no prior
     # helper to reuse — nothing in this script gathers it today — so `df -h`
-    # is added fresh.
+    # is added fresh. Distro (ID/VERSION_ID/PRETTY_NAME) is likewise new here:
+    # `uname -srm` alone reports kernel, not distro, and this script's own
+    # Debian/Ubuntu/RHEL-family install paths (install_docker_apt_repo() and
+    # its siblings above) already source /etc/os-release the same way.
     {
         printf 'Generated: %s UTC\n' "$stamp"
         printf 'Install directory: %s\n' "$install_dir"
         printf 'Docker: %s\n' "$(docker --version 2>/dev/null || printf 'not found')"
         printf 'Docker Compose: %s\n' "$(docker compose version 2>/dev/null || printf 'not found')"
         printf 'Kernel: %s\n' "$(uname -srm 2>/dev/null || printf 'unknown')"
+        printf 'OS: %s\n' "$(if [[ -r /etc/os-release ]]; then (. /etc/os-release; printf '%s' "${PRETTY_NAME:-$ID $VERSION_ID}"); else printf 'unknown'; fi)"
         printf '\nDisk usage:\n'
         df -h 2>/dev/null || true
     } | logbundle_redact_stream "$secrets_file" > "$dest/host-facts.txt"
@@ -5707,15 +5711,20 @@ kea_ctrl_post() {
     local result_code_lines result_text_lines
 
     response_file=$(mktemp)
-    # The Basic-Auth credential is passed to curl via -K (config read from
-    # stdin), not -u/--user on the command line: a -u value is a plain argv
-    # secret, visible to any other process on the host for curl's whole
-    # lifetime (e.g. `ps aux`, /proc/<pid>/cmdline). KEA_CTRL_TOKEN is
-    # generated as a hex string by default (see ensure_secret_env_key's
-    # hex32 kind), so it never contains the '"' that would break the quoted
-    # config value below; this is unchanged from the previous -u form, which
-    # had no such validation either.
-    if ! http_status=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token" | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
+    # What: the Basic-Auth credential is passed to curl via -K (config read
+    # from stdin) with the token escaped for curl's own quoted-value syntax,
+    # not via -u/--user on the command line -- kept identical to
+    # deploy/*/docker-compose.yml's Kea healthcheck.
+    # Why: -u puts the secret in plain argv, visible to any other host
+    # process for curl's whole lifetime (ps aux, /proc/<pid>/cmdline), and a
+    # manually-set KEA_CTRL_TOKEN isn't guaranteed hex-only the way the
+    # auto-generated default is (ensure_secret_env_key never rewrites an
+    # already-usable operator-supplied value), so an unescaped token could
+    # still corrupt curl's -K quoted-value parsing on a literal '"' or '\'.
+    # From: Issue #1304 | PR #1550
+    local kea_ctrl_token_escaped
+    kea_ctrl_token_escaped=$(printf '%s' "$kea_ctrl_token" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    if ! http_status=$(printf 'user = "admin:%s"\n' "$kea_ctrl_token_escaped" | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -K - \
         -d "$body" \
@@ -6434,7 +6443,20 @@ EOF
     # store it and later run an active health probe against it. Harmless if the
     # primary is older and ignores the field; the primary validates it as a
     # private IPv4 before storing, so a blank/odd value is simply dropped.
-    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token" "$name" "$listen_ip" \
+    #
+    # What: escapes each value's backslashes then double-quotes before JSON
+    # interpolation, mirroring kea_ctrl_post's identical curl -K escaping.
+    # Why: $token is an unconstrained operator-supplied string whose raw
+    # '"'/'\' would otherwise corrupt the JSON body, the same bug class
+    # already fixed for kea_ctrl_post's Basic-Auth token ($name/$listen_ip
+    # are already constrained by the checks above and escaped only for
+    # uniformity).
+    # From: Issue #1558
+    local token_escaped name_escaped listen_ip_escaped
+    token_escaped=$(printf '%s' "$token" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    name_escaped=$(printf '%s' "$name" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    listen_ip_escaped=$(printf '%s' "$listen_ip" | sed 's/\\/\\\\/g; s/"/\\"/g')
+    if ! http_status=$(printf '{"token":"%s","name":"%s","address":"%s"}' "$token_escaped" "$name_escaped" "$listen_ip_escaped" \
         | curl -sS -o "$response_file" -w "%{http_code}" -X POST \
         -H "Content-Type: application/json" \
         -d @- \
@@ -6857,18 +6879,16 @@ if [[ "$WIZARD_INTROSPECT_MODE" != "1" ]]; then
         exec /opt/lancache-ng/setup.sh "$@"
     fi
 
-    # `docker --version` itself is always one line, but grep -oP can still
-    # find more than one digit-run on that line (e.g. a build-hash fragment
-    # after the version proper) -- captured into a variable first, then
-    # `head -1` reads it via a here-string instead of a live pipe from grep
-    # (issue #1377's repo-wide pipefail/SIGPIPE audit).
-    # `|| true` matters here under `set -e`: this used to be an argument
-    # expression (`print_ok "Docker $(...)"`), where a failing substitution
-    # cannot itself abort the script -- only print_ok's own exit status can.
-    # As a bare assignment it can, so the same fail-soft behavior (an
-    # unparseable `docker --version` degrades this line, it does not abort
-    # setup.sh) needs to be restored explicitly (issue #1377 follow-up,
-    # caught by advisor review after the initial conversion).
+    # What: `docker --version`'s output is captured into a variable first,
+    # then `head -1` reads it via a here-string instead of a live pipe from
+    # grep; the trailing `|| true` on the assignment restores fail-soft
+    # behavior under `set -e`.
+    # Why: grep -oP can find more than one digit-run on the line (e.g. a
+    # build-hash fragment); as an argument expression this failure could
+    # never abort the script (only print_ok's own exit status could), but a
+    # bare assignment can, so the original degrade-not-abort behavior needs
+    # restoring explicitly.
+    # From: Issue #1377
     docker_version_numbers="$(docker --version | grep -oP '[\d.]+' || true)"
     print_ok "Docker $(head -1 <<<"$docker_version_numbers")"
     print_ok "Docker Compose $(docker compose version --short 2>/dev/null || true)"
@@ -6877,19 +6897,17 @@ fi
 # ── 2. Network IPs ────────────────────────────────────────────────────────────
 print_step "Network configuration"
 
-# `ip` output captured into a variable first: a host can have several
-# interfaces/addresses, and a live `ip ... | grep ... | head -1` pipe can
-# SIGPIPE the `ip`/`grep` processes still writing once `head -1` already
-# has its one line (issue #1377's repo-wide pipefail/SIGPIPE audit -- this
-# is the production installer, so converted rather than merely reasoned
-# about as low-risk). `|| true` on each bare assignment restores this
-# section's original fail-soft behavior under `set -e`: the prior one-line
-# pipelines ended in `|| true` covering `ip` itself failing too (e.g. no
-# `iproute2` on a minimal host), which a bare `var=$(...)` assignment does
-# not inherit on its own -- without it, a host missing `ip` would abort
-# setup.sh here instead of falling through to `ask`'s own `${detected_ip:-
-# 192.168.1.10}` default below (caught by advisor review, not the original
-# conversion pass).
+# What: `ip` output is captured into a variable first, not a live
+# `ip ... | grep ... | head -1` pipe; `|| true` on each bare assignment
+# restores this section's original fail-soft behavior under `set -e`.
+# Why: a host can have several interfaces/addresses, and the live pipe form
+# can SIGPIPE the `ip`/`grep` processes still writing once `head -1` already
+# has its one line. A bare `var=$(...)` assignment does not inherit the
+# prior one-line pipelines' own `|| true` (covering `ip` itself failing,
+# e.g. no `iproute2` on a minimal host) -- without restoring it explicitly,
+# a host missing `ip` would abort setup.sh here instead of falling through
+# to `ask`'s own `${detected_ip:-192.168.1.10}` default below.
+# From: Issue #1377
 ip_addr_output="$(ip -4 addr show || true)"
 candidate_ips="$(grep -oP '(?<=inet )[\d.]+' <<<"$ip_addr_output" \
     | grep -v '^127\.' | grep -v '^172\.' || true)"
@@ -6927,15 +6945,15 @@ if [[ "${REPLY,,}" = "y" ]]; then
     done
     [[ "$IP_STANDARD" != "$IP_SSL" ]] \
         || die "Standard IP and SSL IP must be different."
-    # Captured into a variable first, not a live `ip ... | grep -q` pipe --
-    # a host can have several interfaces/addresses (issue #1377's
-    # repo-wide pipefail/SIGPIPE audit). `|| true` matters here under
-    # `set -e`: the original `ip -4 addr show | grep -q ...` sat directly in
-    # an `if` condition, where a failing command cannot abort the script --
-    # only the if's own branch selection is affected. Pulled out into its
-    # own bare assignment, that exemption no longer applies unless restored
-    # explicitly (caught by advisor review, not the original conversion
-    # pass).
+    # What: captured into a variable first, not a live `ip ... | grep -q`
+    # pipe; `|| true` restores the original fail-soft behavior under
+    # `set -e`.
+    # Why: a host can have several interfaces/addresses. The original
+    # `ip -4 addr show | grep -q ...` sat directly in an `if` condition,
+    # where a failing command cannot abort the script -- only the if's own
+    # branch selection is affected; pulled out into a bare assignment, that
+    # exemption no longer applies unless restored explicitly.
+    # From: Issue #1377
     ip_ssl_check_output="$(ip -4 addr show || true)"
     if grep -q "inet ${IP_SSL}/" <<<"$ip_ssl_check_output"; then
         print_ok "$IP_SSL already assigned"

@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI and developer validation toolchain with Rust, sccache, distcc, and build utilities.
+# CI and developer validation toolchain with Rust, sccache, ccache, distcc, and build utilities.
 #
 # Intentional build-tools default: use rust:latest so developer and CI
 # validation sees current Rust tooling early. Production service Dockerfiles
@@ -239,6 +239,14 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     && apt-get full-upgrade -y \
     && rm -rf /var/lib/apt/lists/*
 
+# What: installs ccache from Debian's own package (not source-built).
+# Why: caches the C-dependency compile step (`-sys` crates, e.g. `ring`) that
+# distcc alone only distributes, never caches; sccache was ruled out for this
+# same job because it always shells its own `-E` pass through `CC`,
+# which crashes against a `,cpp`-tagged distcc host list, while ccache
+# preprocesses locally by default; no per-feature trimming reason exists to
+# source-build it the way sccache's own install below does.
+# From: Issue #887
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -247,6 +255,7 @@ RUN set -euo pipefail; \
       bc \
       build-essential \
       ca-certificates \
+      ccache \
       clang \
       cmake \
       curl \
@@ -583,6 +592,7 @@ RUN set -euo pipefail; \
       chown \
       clang \
       c++ \
+      ccache \
       cp \
       curl \
       dhclient \
@@ -634,6 +644,7 @@ RUN set -euo pipefail; \
     cargo fmt --version; \
     cargo clippy --version; \
     sccache --version; \
+    ccache --version; \
     cargo audit --version; \
     cargo tarpaulin --version; \
     actionlint --version; \

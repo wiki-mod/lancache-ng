@@ -40,6 +40,21 @@ extract_detection() {
     ' "$1"
 }
 
+# extract_auth_call <compose-file>
+# What: prints the dhcp healthcheck's shared-secret-file fallback through
+# its final curl/jq invocation -- the part extract_detection() excludes.
+# Why: closes a blind spot where the two compose files' credential-handling
+# code, not just their placeholder-detection code, could silently diverge
+# undetected by the existing detection-fragment test alone.
+# From: Issue #1304 | PR #1550
+extract_auth_call() {
+    awk '
+        /kea-ctrl-token 2>\/dev\/null/ { capture = 1 }
+        capture { sub(/^[[:space:]]+/, ""); gsub(/\$\$/, "$"); print }
+        /jq -e/ { capture = 0 }
+    ' "$1"
+}
+
 # classify <detection-snippet> <token-value>
 # Runs the extracted detection with KEA_CTRL_TOKEN set to the given value and
 # reports whether it emptied $token ("placeholder") or left it intact ("real").
@@ -56,6 +71,21 @@ classify() {
     [ -n "$reference" ]
     for f in "${compose_files[@]}"; do
         run extract_detection "$f"
+        [ "$output" = "$reference" ]
+    done
+}
+
+# Companion to the test above: covers the part of the healthcheck the
+# placeholder-detection fragment does not (see extract_auth_call's own
+# comment for why this test exists as a separate assertion, not a wider
+# extract_detection window -- the two fragments serve different purposes and
+# a future intentional divergence in one should not require touching the
+# other's capture logic).
+@test "both dhcp healthchecks share an identical curl/auth-credential-handling fragment" {
+    reference="$(extract_auth_call "${compose_files[0]}")"
+    [ -n "$reference" ]
+    for f in "${compose_files[@]}"; do
+        run extract_auth_call "$f"
         [ "$output" = "$reference" ]
     done
 }

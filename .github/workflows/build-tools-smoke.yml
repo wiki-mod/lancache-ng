@@ -76,6 +76,7 @@ on:
       - "scripts/check-workflow-line-limit.sh"
       - "scripts/check-review-chronology-comments.sh"
       - "scripts/check-dependabot-docker-base-consistency.sh"
+      - "scripts/check-trivy-action-direct-usage.sh"
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
@@ -254,6 +255,11 @@ on:
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
+      # tests/bats/watchdog_docker_socket_proxy_startup_dependency.bats reads
+      # deploy/full-setup/docker-compose.yml directly. Keep that path in the
+      # trigger so a change to the validation-stack dependency contract runs
+      # the Bats suite that guards it.
+      - "deploy/full-setup/docker-compose.yml"
   pull_request:
     # Mirrors build-tools.yml's own branches list (#709).
     branches: [master, current_dev, v0.2.0]
@@ -295,6 +301,7 @@ on:
       - "scripts/check-workflow-line-limit.sh"
       - "scripts/check-review-chronology-comments.sh"
       - "scripts/check-dependabot-docker-base-consistency.sh"
+      - "scripts/check-trivy-action-direct-usage.sh"
       - "scripts/generate-vex.sh"
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
@@ -382,6 +389,11 @@ on:
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
       - "deploy/secondary/docker-compose.yml"
+      # tests/bats/watchdog_docker_socket_proxy_startup_dependency.bats reads
+      # deploy/full-setup/docker-compose.yml directly. Keep that path in the
+      # trigger so a change to the validation-stack dependency contract runs
+      # the Bats suite that guards it.
+      - "deploy/full-setup/docker-compose.yml"
 
 permissions:
   contents: read

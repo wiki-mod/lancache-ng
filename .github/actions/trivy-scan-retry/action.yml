@@ -1,0 +1,404 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# What: Retries aquasecurity/trivy-action up to 4 times, re-authenticating
+# before each retry, only when a DB-download attempt failed.
+# Why: trivy's own fallback only advances on a transient-classified
+# failure; a non-transient one aborts with zero retry (PR #1503/#1500).
+# From: PR #1542, Issue #1535
+name: Trivy scan with GHCR-first DB mirror, authenticated pull, and retry
+description: >-
+  Wraps aquasecurity/trivy-action with a 4-attempt retry and a GHCR-first,
+  mirror.gcr.io-second, Docker-Hub-third DB-source order (see
+  trivy-config.yaml), retrying only a DB-download failure, never a genuine
+  vulnerability/secret finding.
+inputs:
+  registry:
+    description: Registry hostname to log in to (and to prefer for DB downloads).
+    required: false
+    default: ghcr.io
+  username:
+    description: Registry username to authenticate with (initially, and again before each retry).
+    required: true
+  password:
+    description: Registry password/token to authenticate with (initially, and again before each retry).
+    required: true
+  dockerhub-username:
+    description: >-
+      Docker Hub username for the optional third, last-resort DB-source
+      tier. Left blank (default), the Docker Hub login step is skipped and
+      this action behaves exactly as before this input existed.
+    required: false
+    default: ""
+  dockerhub-password:
+    description: Docker Hub password/access token to pair with dockerhub-username (initially, and again before each retry).
+    required: false
+    default: ""
+  backoff-seconds:
+    description: Seconds to wait before each retry, before re-authenticating.
+    required: false
+    default: "30"
+  scan-type:
+    required: false
+    default: image
+  image-ref:
+    required: false
+    default: ""
+  format:
+    required: false
+    default: table
+  output:
+    description: Report output file. Left blank, this action still forces one internally (a fixed path under runner.temp) to drive the retry discriminator, and restores stdout visibility via its own final step.
+    required: false
+    default: ""
+  scanners:
+    required: false
+    default: ""
+  severity:
+    required: false
+    default: UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL
+  ignore-unfixed:
+    required: false
+    default: "false"
+  trivyignores:
+    required: false
+    default: ""
+  skip-dirs:
+    required: false
+    default: ""
+  hide-progress:
+    required: false
+    default: ""
+  cache:
+    required: false
+    default: "true"
+  cache-dir:
+    required: false
+    default: ${{ github.workspace }}/.cache/trivy
+  timeout:
+    required: false
+    default: ""
+  exit-code:
+    required: false
+    default: ""
+runs:
+  using: composite
+  steps:
+    # What: Resolves one output path used by every attempt + classify step
+    # below, defaulting to a fixed runner.temp file when unset.
+    # Why: the retry discriminator needs one stable path to check across
+    # all 4 attempts, not a caller-supplied one that might change.
+    # From: PR #1542, Issue #1535
+    - name: Resolve effective Trivy output path
+      id: outpath
+      shell: bash
+      run: |
+        set -euo pipefail
+        if [ -n "${{ inputs.output }}" ]; then
+          echo "path=${{ inputs.output }}" >> "$GITHUB_OUTPUT"
+        else
+          echo "path=${{ runner.temp }}/trivy-scan-retry-output.txt" >> "$GITHUB_OUTPUT"
+        fi
+
+    # What: Deletes any leftover report file from an earlier invocation of
+    # this action within the same job.
+    # Why: a stale file would let the first classify step misread an old
+    # result as this attempt's own.
+    # From: PR #1542, Issue #1535
+    - name: Clear any stale Trivy report file
+      shell: bash
+      run: rm -f "${{ steps.outpath.outputs.path }}"
+
+    # What: Authenticates to GHCR before the Trivy DB pull; continue-on-error
+    # so a login failure never blocks an otherwise-working anonymous pull.
+    # Why: self-hosted runners share a small egress-IP pool across
+    # concurrent scans -- authenticating is real defense-in-depth.
+    # From: PR #1542, Issue #1535
+    - name: Log in to GHCR for authenticated Trivy DB pull
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    # What: Authenticates to Docker Hub for the optional third DB-source
+    # tier; skipped entirely when dockerhub-username is unset.
+    # Why: no registry: input -- docker/login-action defaults to Docker
+    # Hub, confirmed identical to `docker login docker.io` on a live runner.
+    # From: PR #1543, Issue #1535
+    - name: Log in to Docker Hub for the third DB-source tier
+      if: inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
+
+    - id: attempt1
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        image-ref: ${{ inputs.image-ref }}
+        format: ${{ inputs.format }}
+        output: ${{ steps.outpath.outputs.path }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+        trivy-config: ${{ github.action_path }}/trivy-config.yaml
+
+    # What: Checks whether trivy's report file exists and is non-empty
+    # after a failed attempt (AG-CI-013 retryable-vs-genuine discriminator).
+    # Why: trivy only writes a report once scanning completes -- an empty
+    # file means the DB download failed (retry); a written one is real.
+    # From: PR #1542, Issue #1535
+    - name: Classify attempt 1 failure
+      id: classify1
+      if: steps.attempt1.outcome == 'failure'
+      shell: bash
+      run: |
+        set -euo pipefail
+        report="${{ steps.outpath.outputs.path }}"
+        if [ -s "$report" ]; then
+          echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt 1 failed but its report ('$report') was written -- a genuine finding or non-download error, not retrying." >&2
+        else
+          echo "retryable=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt 1 failed with no report written to '$report' -- treating as a retryable DB-download failure." >&2
+        fi
+
+    - name: Wait before retry 1
+      if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 1
+      if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    # What: Re-authenticates to Docker Hub before retry 1, same condition
+    # as the GHCR re-auth above plus the dockerhub-username guard.
+    # Why: kept condition-identical to its GHCR twin so an edit to one
+    # retry gate cannot silently diverge from the other.
+    # From: PR #1543, Issue #1535
+    - name: Re-authenticate to Docker Hub before retry 1
+      if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' && inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
+
+    - id: attempt2
+      if: steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        image-ref: ${{ inputs.image-ref }}
+        format: ${{ inputs.format }}
+        output: ${{ steps.outpath.outputs.path }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+        trivy-config: ${{ github.action_path }}/trivy-config.yaml
+
+    - name: Classify attempt 2 failure
+      id: classify2
+      if: steps.attempt2.outcome == 'failure'
+      shell: bash
+      run: |
+        set -euo pipefail
+        report="${{ steps.outpath.outputs.path }}"
+        if [ -s "$report" ]; then
+          echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt 2 failed but its report ('$report') was written -- a genuine finding or non-download error, not retrying." >&2
+        else
+          echo "retryable=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt 2 failed with no report written to '$report' -- treating as a retryable DB-download failure." >&2
+        fi
+
+    - name: Wait before retry 2
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 2
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    # What: Same Docker Hub re-auth as retry 1 above, for retry 2's
+    # compound condition.
+    # From: PR #1543, Issue #1535
+    - name: Re-authenticate to Docker Hub before retry 2
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
+
+    - id: attempt3
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        image-ref: ${{ inputs.image-ref }}
+        format: ${{ inputs.format }}
+        output: ${{ steps.outpath.outputs.path }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+        trivy-config: ${{ github.action_path }}/trivy-config.yaml
+
+    - name: Classify attempt 3 failure
+      id: classify3
+      if: steps.attempt3.outcome == 'failure'
+      shell: bash
+      run: |
+        set -euo pipefail
+        report="${{ steps.outpath.outputs.path }}"
+        if [ -s "$report" ]; then
+          echo "retryable=false" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt 3 failed but its report ('$report') was written -- a genuine finding or non-download error, not retrying." >&2
+        else
+          echo "retryable=true" >> "$GITHUB_OUTPUT"
+          echo "::warning::Trivy attempt 3 failed with no report written to '$report' -- treating as a retryable DB-download failure." >&2
+        fi
+
+    - name: Wait before retry 3
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
+      shell: bash
+      run: sleep "${{ inputs.backoff-seconds }}"
+
+    - name: Re-authenticate to GHCR before retry 3
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ${{ inputs.registry }}
+        username: ${{ inputs.username }}
+        password: ${{ inputs.password }}
+
+    # What: Same Docker Hub re-auth as retry 1 above, for retry 3's
+    # compound condition.
+    # From: PR #1543, Issue #1535
+    - name: Re-authenticate to Docker Hub before retry 3
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true' &&
+        inputs.dockerhub-username != ''
+      continue-on-error: true
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        username: ${{ inputs.dockerhub-username }}
+        password: ${{ inputs.dockerhub-password }}
+
+    - id: attempt4
+      if: >-
+        steps.attempt1.outcome == 'failure' && steps.classify1.outputs.retryable == 'true' &&
+        steps.attempt2.outcome == 'failure' && steps.classify2.outputs.retryable == 'true' &&
+        steps.attempt3.outcome == 'failure' && steps.classify3.outputs.retryable == 'true'
+      uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+      continue-on-error: true
+      with:
+        scan-type: ${{ inputs.scan-type }}
+        image-ref: ${{ inputs.image-ref }}
+        format: ${{ inputs.format }}
+        output: ${{ steps.outpath.outputs.path }}
+        scanners: ${{ inputs.scanners }}
+        severity: ${{ inputs.severity }}
+        ignore-unfixed: ${{ inputs.ignore-unfixed }}
+        trivyignores: ${{ inputs.trivyignores }}
+        skip-dirs: ${{ inputs.skip-dirs }}
+        hide-progress: ${{ inputs.hide-progress }}
+        cache: ${{ inputs.cache }}
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: ${{ inputs.timeout }}
+        exit-code: ${{ inputs.exit-code }}
+        trivy-config: ${{ github.action_path }}/trivy-config.yaml
+
+    # What: Prints the report file's content to the job log, table format
+    # only.
+    # Why: writing to a file suppresses table output from stdout; a
+    # non-table caller already writes its own final artifact separately.
+    # From: PR #1542, Issue #1535
+    - name: Show Trivy report
+      if: always() && inputs.format == 'table'
+      shell: bash
+      run: |
+        set -euo pipefail
+        report="${{ steps.outpath.outputs.path }}"
+        if [ -s "$report" ]; then
+          cat "$report"
+        else
+          echo "No Trivy report file was produced (every attempt failed before reaching report generation)."
+        fi
+
+    # What: Surfaces overall pass/fail to the calling job across all 4
+    # attempts (continue-on-error hides each individual attempt's failure).
+    # Why: a skipped attempt (ruled non-retryable earlier) must also count
+    # as failure here, same as an exhausted-retries failure.
+    # From: PR #1542, Issue #1535
+    - name: Resolve outcome across all attempts
+      if: always()
+      shell: bash
+      run: |
+        set -euo pipefail
+        for outcome in "${{ steps.attempt1.outcome }}" "${{ steps.attempt2.outcome }}" "${{ steps.attempt3.outcome }}" "${{ steps.attempt4.outcome }}"; do
+          if [[ "$outcome" == "success" ]]; then
+            exit 0
+          fi
+        done
+        echo "::error::All Trivy scan attempts for image-ref '${{ inputs.image-ref }}' failed." >&2
+        exit 1

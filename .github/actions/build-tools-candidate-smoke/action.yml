@@ -38,7 +38,7 @@ runs:
           timeout --kill-after=30s --signal=TERM 14m bash -c '
         set -euo pipefail
         required_tools=(
-          actionlint bash bats cargo cargo-audit cargo-tarpaulin clippy-driver
+          actionlint bash bats cargo cargo-audit cargo-tarpaulin ccache clippy-driver
           dig distcc distcc-pump docker envsubst jq rustc rustfmt sccache
           shellspec shellcheck timeout
         )
@@ -48,6 +48,7 @@ runs:
         cargo-audit --version
         cargo tarpaulin --version
         cargo-tarpaulin --version
+        ccache --version
         sccache --version
         actionlint --version
         bats --version

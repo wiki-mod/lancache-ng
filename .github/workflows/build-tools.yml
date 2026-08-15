@@ -51,11 +51,54 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+    outputs:
+      should-publish: ${{ steps.should-publish.outputs.should-publish }}
     steps:
       - name: Confirm standalone route
         run: |
           set -euo pipefail
           echo "Standalone build-tools route admitted for event '$GITHUB_EVENT_NAME'."
+
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # What: computes should-publish once, shared by build-tools/build-tools-arm64 (AG-CI-010).
+      # Why: skips a redundant rebuild/republish when neither tools/build-tools/** nor this
+      # workflow file actually changed in the push's commit range; workflow_dispatch/schedule
+      # always publish, and every no-usable-diff-base case fails safe by publishing.
+      # From: Issue #1253 | PR #1255
+      - name: Determine whether build-tools inputs actually changed
+        id: should-publish
+        run: |
+          set -euo pipefail
+
+          if [ "${{ github.event_name }}" != "push" ]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          before_sha="${{ github.event.before }}"
+          if [ -z "$before_sha" ] || [ "$before_sha" = "0000000000000000000000000000000000000000" ]; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            git fetch --quiet --depth=1 origin "$before_sha" 2>/dev/null || true
+          fi
+
+          if ! git cat-file -e "${before_sha}^{commit}" 2>/dev/null; then
+            echo "::notice::Could not fetch base commit $before_sha to diff against; publishing to be safe."
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
+            echo "should-publish=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::notice::No tools/build-tools/** or workflow-file change found in this push's commit range; skipping build-tools image rebuild/publish."
+            echo "should-publish=false" >> "$GITHUB_OUTPUT"
+          fi
 
   build-tools:
     name: build amd64 build-tools image
@@ -172,7 +215,7 @@ jobs:
       # and the later manifest merge.
       - name: Build and push amd64 build-tools image
         id: build
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         timeout-minutes: 90
         uses: ./.github/actions/ghcr-build-push-retry
         with:
@@ -204,13 +247,19 @@ jobs:
           run-fixtures: "true"
 
       - name: Smoke-test exact pushed amd64 candidate digest
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/amd64
           run-fixtures: "true"
 
+      # What: keys the Trivy cache directory by sanitized ref, ephemeral (self-cleaned) for
+      # pull_request/workflow_dispatch/rerun events, persistent for a real branch/schedule run.
+      # Why: a fixed shared directory let two concurrent runs on the same runner host race on
+      # Trivy's single-writer BoltDB cache backend; an unmanaged per-PR/per-dispatch directory
+      # would otherwise accumulate without bound as PRs/dispatches accrue.
+      # From: Issue #912 | PR #925
       - name: Prepare candidate Trivy cache
         id: trivy-cache
         run: |
@@ -227,11 +276,25 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
+      # What: Scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
+      # Why: this exact step is where PR #1503/#1500 hit a DB-download
+      # failure with zero retry anywhere.
+      # From: PR #1542, Issue #1535
       - name: Scan local build-tools amd64 image with Trivy
         if: github.event_name == 'pull_request'
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Empty (not the real secret) on pull_request.
+          # Why: this step runs on every same-repo PR, which also executes
+          # its own trivy-scan-retry copy -- unlike GITHUB_TOKEN, the
+          # long-lived Docker Hub credential has no automatic per-run scope.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -245,10 +308,16 @@ jobs:
           exit-code: "1"
 
       - name: Scan pushed amd64 build-tools digest with Trivy
-        if: github.event_name != 'pull_request'
-        timeout-minutes: 20
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
+        # attempts, so the bound must cover the worst case.
+        timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
 
@@ -264,7 +333,7 @@ jobs:
           esac
 
       - name: Attest amd64 build-tools image provenance
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/ghcr-attest-retry
         with:
           username: ${{ github.actor }}
@@ -363,7 +432,7 @@ jobs:
 
       - name: Build and push arm64 build-tools image
         id: build
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         timeout-minutes: 90
         uses: ./.github/actions/ghcr-build-push-retry
         with:
@@ -391,17 +460,26 @@ jobs:
           platform: linux/arm64
 
       - name: Smoke-test exact pushed arm64 candidate digest
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/build-tools-candidate-smoke
         with:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/arm64
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan local build-tools arm64 image with Trivy
         if: github.event_name == 'pull_request'
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          # Empty on pull_request -- same PR-branch credential-exfiltration
+          # gate as the amd64 leg above (see its comment).
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -414,16 +492,22 @@ jobs:
           exit-code: "1"
 
       - name: Scan pushed arm64 build-tools digest with Trivy
-        if: github.event_name != 'pull_request'
-        timeout-minutes: 20
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
+        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
+        # attempts, so the bound must cover the worst case.
+        timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           cache-dir: ${{ runner.temp }}/trivy-build-tools-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           cleanup-cache: "true"
 
       - name: Attest arm64 build-tools image provenance
-        if: github.event_name != 'pull_request'
+        if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         uses: ./.github/actions/ghcr-attest-retry
         with:
           username: ${{ github.actor }}
@@ -539,6 +623,8 @@ jobs:
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
+          elif [ "$REF_NAME" = "current_dev" ]; then
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:nightly" "$source_ref"
           fi
 
       - name: Remove buildx builder

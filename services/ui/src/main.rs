@@ -689,7 +689,7 @@ async fn connect_nats_with_retry(cfg: &config::Config) -> async_nats::Client {
                 );
 
                 tokio::time::sleep(delay).await;
-                delay = std::cmp::min(delay * 2, max_delay);
+                delay = nats_auth_callout::grow_backoff(delay, max_delay);
             }
         }
     }
@@ -1052,18 +1052,45 @@ async fn main() -> Result<()> {
     // time, silently missing this run's actual secondary auth tokens,
     // with zero operator-visible signal beyond one log line easy to miss
     // among normal startup noise. Retries a bounded number of times with a
-    // short backoff before giving up -- long enough to ride out the
+    // growing backoff before giving up -- long enough to ride out the
     // transient startup-ordering failures this is actually meant to catch,
-    // short enough not to meaningfully delay the rest of this process's own
-    // startup if NATS is genuinely unreachable for a real reason. Not
-    // escalated to a fatal exit: NATS itself continuing to run with a
-    // stale-but-still-functional config is a real (if degraded) outcome,
-    // not the same class of "must not silently limp on" failure the DNS
-    // container's supervised-process exit (services/dns/entrypoint.sh)
-    // guards -- but the final failure is now logged at `error`, not `warn`,
-    // since exhausting every retry is a genuine operator-actionable event.
-    const NATS_CONF_RELOAD_MAX_ATTEMPTS: u32 = 3;
-    const NATS_CONF_RELOAD_RETRY_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+    // bounded so as not to block this process's own startup indefinitely if
+    // NATS is genuinely unreachable for a real reason. Not escalated to a
+    // fatal exit: NATS itself continuing to run with a stale-but-still-
+    // functional config is a real (if degraded) outcome, not the same class
+    // of "must not silently limp on" failure the DNS container's
+    // supervised-process exit (services/dns/entrypoint.sh) guards -- but the
+    // final failure is now logged at `error`, not `warn`, since exhausting
+    // every retry is a genuine operator-actionable event.
+    //
+    // This restart call goes through docker-socket-proxy (see
+    // docker_client::connect_from_env's DOCKER_PROXY_URL preference), whose
+    // own Compose healthcheck (interval 30s, start_period 15s) means it can
+    // take several real seconds after container start before it is actually
+    // ready to serve a restart request -- and this process starts issuing
+    // reload attempts as soon as it itself boots, with no dependency on that
+    // readiness (the Admin UI deliberately keeps `depends_on: docker-socket-
+    // proxy: condition: service_started`, not `service_healthy`, in every
+    // real deploy/*/docker-compose.yml, so its own dashboard and recovery
+    // surface stay reachable even when Docker access is degraded -- watchdog
+    // uses the identical dependency and reasoning, see
+    // deploy/prod/docker-compose.yml's own watchdog `depends_on:` comment).
+    // A flat
+    // 3-attempt/2s-interval budget (~6s total) was provably too short for
+    // this: a real CI run (2026-08-12) showed the UI container starting at
+    // 11:13:06.10, its first reload attempt firing at 11:13:06.17, its third
+    // and final attempt exhausting at 11:13:10.18, and docker-socket-proxy
+    // only reaching Healthy at 11:13:11.27 -- missing by 1.1s. Growing the
+    // backoff (shared
+    // `grow_backoff` helper, Rule-Ref: AG-CODE-011) instead of a flat
+    // interval, over more attempts, gives a total budget on the order of the
+    // real startup delay actually observed plus a real margin for CI-load
+    // variance, while still giving up (and logging loudly) if
+    // docker-socket-proxy is genuinely never becoming healthy, rather than
+    // retrying forever.
+    const NATS_CONF_RELOAD_MAX_ATTEMPTS: u32 = 8;
+    let nats_conf_reload_max_delay = std::time::Duration::from_secs(8);
+    let mut nats_conf_reload_delay = std::time::Duration::from_secs(1);
     let mut last_err = None;
     for attempt in 1..=NATS_CONF_RELOAD_MAX_ATTEMPTS {
         match routes::secondaries::reload_nats_conf(&state).await {
@@ -1073,14 +1100,19 @@ async fn main() -> Result<()> {
             }
             Err(e) => {
                 tracing::warn!(
-                    "Could not reload initial nats.conf (attempt {}/{}): {}",
+                    "Could not reload initial nats.conf (attempt {}/{}): {}. Retrying in {:?}",
                     attempt,
                     NATS_CONF_RELOAD_MAX_ATTEMPTS,
-                    e
+                    e,
+                    nats_conf_reload_delay
                 );
                 last_err = Some(e);
                 if attempt < NATS_CONF_RELOAD_MAX_ATTEMPTS {
-                    tokio::time::sleep(NATS_CONF_RELOAD_RETRY_DELAY).await;
+                    tokio::time::sleep(nats_conf_reload_delay).await;
+                    nats_conf_reload_delay = nats_auth_callout::grow_backoff(
+                        nats_conf_reload_delay,
+                        nats_conf_reload_max_delay,
+                    );
                 }
             }
         }
