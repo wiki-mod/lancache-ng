@@ -119,7 +119,7 @@ services:
       # plain Docker-managed volume, not part of the LANCACHE_STATE_DIR
       # bind-mount/backup contract -- see docs/known-good-config-snapshots.md.
       - pdns-config-snapshots-standard:/var/lib/lancache-dns
-      # Central logging pipeline (#633): PowerDNS has no native file-log
+      # Central logging pipeline: PowerDNS has no native file-log
       # directive (see services/dns/entrypoint.sh's run_auth/run_recursor,
       # which `tee` each daemon's stdout here instead).
       - dns-logs-standard:/var/log/lancache-dns
@@ -190,7 +190,7 @@ services:
       - ${PDNS_SSL_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-ssl}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - pdns-config-snapshots-ssl:/var/lib/lancache-dns
-      # Central logging pipeline (#633): PowerDNS has no native file-log
+      # Central logging pipeline: PowerDNS has no native file-log
       # directive (see services/dns/entrypoint.sh's run_auth/run_recursor,
       # which `tee` each daemon's stdout here instead).
       - dns-logs-ssl:/var/log/lancache-dns
@@ -267,7 +267,7 @@ services:
   watchdog:
     container_name: lancache-watchdog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
-    # Central logging pipeline (#633): watchdog.sh writes only to stdout
+    # Central logging pipeline: watchdog.sh writes only to stdout
     # (its log() function, see services/watchdog/watchdog.sh) and is never
     # itself changed -- this entrypoint override tees that stdout into a
     # file in addition to the container's normal stdout, so `docker logs`
@@ -277,7 +277,7 @@ services:
     # /watchdog.sh directly, which becomes PID 1, so signal handling
     # (restart/stop) is unaffected.
     #
-    # Calls /watchdog.sh directly again (#842 Teil 2, 2026-08-01): the
+    # Calls /watchdog.sh directly again (Teil 2, 2026-08-01): the
     # earlier /entrypoint.sh wrapper that also launched retention.sh as a
     # backgrounded process inside THIS container is gone -- retention.sh now
     # runs as its own dedicated `retention` compose service below, with its
@@ -309,7 +309,7 @@ services:
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
       - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
-      # Read-only (#842 Teil 2): watchdog.sh only ever reads this tree now
+      # Read-only (Teil 2): watchdog.sh only ever reads this tree now
       # (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
       # card) -- the destructive maybe_purge() that used to need read-write
       # access here moved to the `retention` service below when it became
@@ -428,7 +428,7 @@ services:
       # surface, so sharing this one volume with the watchdog container is
       # fine (fluent-bit already expects both files at this same path).
       - watchdog-logs:/var/log/lancache-watchdog
-      # Dedicated state volume (#842 Teil 2 architecture decision): holds
+      # Dedicated state volume (Teil 2 architecture decision): holds
       # ONLY PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately separate from
       # watchdog-status (watchdog.sh's status.json, read by the Admin UI) --
       # the two containers no longer share any state now that they don't
@@ -474,7 +474,7 @@ services:
       # Kea follows the same state-root contract as PowerDNS/NATS; leave
       # KEA_DATA_DIR unset unless this service truly lives off the shared root.
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
-      # Central logging pipeline (#633): Kea's loggers dual-write here (see
+      # Central logging pipeline: Kea's loggers dual-write here (see
       # kea-dhcp4.conf.template's "output-options") in addition to stdout.
       - dhcp-logs:/var/log/kea
     network_mode: host
@@ -544,7 +544,7 @@ services:
       # Known-good dnsmasq config snapshots (#415): persistent, service-owned
       # volume so rollback survives container restarts/recreates.
       - dhcp-proxy-config-snapshots:/var/lib/lancache-dhcp-proxy
-      # Central logging pipeline (#633): dnsmasq's own `log-facility=`
+      # Central logging pipeline: dnsmasq's own `log-facility=`
       # directive (see dnsmasq.conf.template) writes here.
       - dhcp-proxy-logs:/var/log/lancache-dhcp-proxy
     network_mode: host
@@ -604,7 +604,7 @@ services:
     volumes:
       - ui-data:/data:ro
       - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:/var/lib/chrony
-      # Central logging pipeline (#633): chronyd's `log` directive (see
+      # Central logging pipeline: chronyd's `log` directive (see
       # chrony.conf) writes here in addition to the process's own stdout.
       # A plain Docker-managed volume, not a LANCACHE_STATE_DIR bind mount --
       # rotated log output, not operational state, matching dhcp-logs/
@@ -658,7 +658,7 @@ services:
       # "Operation not permitted" in turn until its corresponding capability
       # was present) -- root itself loses these under `cap_drop: ALL`, the
       # same "CHOWN removed from root, not just the eventual non-root user"
-      # reasoning as PR #1360's `retention` service. Deliberately does NOT
+      # reasoning as the `retention` service. Deliberately does NOT
       # include SETPCAP: unlike `retention` (which uses `setpriv
       # --bounding-set` to manually narrow its own capability bounding set,
       # an operation that itself needs CAP_SETPCAP), chronyd's own capset()
@@ -841,7 +841,7 @@ services:
         # answering. No active Netdata NATS collector consumes this endpoint
         # in this stack.
         http_port: 8222
-        # Central logging pipeline (#633): nats-server logs to exactly one
+        # Central logging pipeline: nats-server logs to exactly one
         # destination -- setting this disables stdout for the process
         # lifetime (no dual-output mode exists, unlike Kea's
         # "output-options" array), so `docker logs` on this container goes
@@ -1017,7 +1017,7 @@ services:
       # it outside the checkout while still allowing an explicit override.
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/data
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
-      # Central logging pipeline (#633): this entrypoint's nats.conf sets
+      # Central logging pipeline: this entrypoint's nats.conf sets
       # `log_file: /var/log/lancache-nats/nats.log` (the UI's auth_callout.conf
       # fragment carries no log_file since issue #811); fluent-bit tails it.
       - nats-logs:/var/log/lancache-nats
@@ -1212,10 +1212,10 @@ services:
       # snapshots into config-snapshots/ here (#614), never touching Kea's
       # own kea-dhcp4.conf/kea-leases4.csv/etc. in the same directory.
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
-      # Central logging pipeline (#633): main.rs's init_tracing() writes
+      # Central logging pipeline: main.rs's init_tracing() writes
       # UI_LOG_FILE (default matches this path) alongside stdout.
       - ui-logs:/var/log/lancache-ui
-      # Central syslog store reader (#633 PR4): read-only, same bind-mount
+      # Central syslog store reader (PR4): read-only, same bind-mount
       # source as syslog-ng/watchdog (SYSLOG_NG_LOG_DIR) so an
       # operator-overridden host path is honored consistently by all three.
       # A missing mount here would make syslog_client's SYSLOG_LOG_ROOT reads
@@ -1311,7 +1311,7 @@ services:
       - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
-      # Central syslog store reader (#633 PR4): same 4 vars/defaults as the
+      # Central syslog store reader (PR4): same 4 vars/defaults as the
       # watchdog retention engine (PR3/#757), so the UI's "enabled" toggle
       # and its actual budget display always agree with what watchdog is
       # enforcing.
@@ -1378,7 +1378,7 @@ services:
       - SYS_PTRACE
     security_opt:
       - apparmor:unconfined
-    # Central logging pipeline (#633, #847): this netdata build's own log
+    # Central logging pipeline (#847): this netdata build's own log
     # paths under /var/log/netdata (access/collector/daemon/health/...) are
     # symlinks to /dev/stdout|stderr, not real files -- nothing for
     # fluent-bit to tail. quickstart's install_dir has no services/
@@ -1547,7 +1547,7 @@ volumes:
   pdns-config-snapshots-standard:
   pdns-config-snapshots-ssl:
   watchdog-status:
-  # #842 Teil 2: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately
+  # Teil 2: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, deliberately
   # separate from watchdog-status above -- see the `retention:` service's own
   # comment for the architecture decision behind this split.
   retention-state:
@@ -1555,13 +1555,13 @@ volumes:
   netdatalib:
   netdatacache:
   ui-data:
-  # fluent-bit's local file-output target (#453) and its own storage buffer.
+  # fluent-bit's local file-output target and its own storage buffer.
   # Deliberately plain Docker-managed volumes, not bind-mounted under
   # LANCACHE_STATE_DIR: rotated/compressed log output, not operational state
   # (see docs/backup-restore.md).
   logs:
   syslog-data:
-  # Per-service source logs (#633): each service writes here (dual-output
+  # Per-service source logs: each service writes here (dual-output
   # alongside stdout where the underlying daemon supports it, single-
   # destination where it doesn't -- see docs/architecture-ng.md's logging
   # matrix for which), and the `syslog` (fluent-bit) service tails these
@@ -1576,6 +1576,6 @@ volumes:
   nats-logs:
   netdata-logs:
   # LanCache-NG-NTP (chrony) log output. Not yet wired into the `syslog`
-  # (fluent-bit) central logging pipeline (#633) -- a known, deliberately
+  # (fluent-bit) central logging pipeline -- a known, deliberately
   # deferred follow-up (see docs/architecture-ng.md's logging matrix).
   ntp-logs:
