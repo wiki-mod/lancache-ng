@@ -563,12 +563,10 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
-      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
-      # #1535): this exact step is where PR #1503/#1500 both hit
-      # "failed to download artifact from mirror.gcr.io/aquasec/trivy-db:2"
-      # / "Unable to initialize the Java DB" with zero retry anywhere -- see
-      # .github/actions/trivy-scan-retry's own header comment for the full
-      # root cause and fix.
+      # What: Scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
+      # Why: this exact step is where PR #1503/#1500 hit a DB-download
+      # failure with zero retry anywhere.
+      # From: PR #1542, Issue #1535
       - name: Scan local build-tools amd64 image with Trivy
         # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
         timeout-minutes: 50
@@ -576,6 +574,13 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Empty (not the real secret) on pull_request.
+          # Why: this step runs on every same-repo PR, which also executes
+          # its own trivy-scan-retry copy -- unlike GITHUB_TOKEN, the
+          # long-lived Docker Hub credential has no automatic per-run scope.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -694,6 +699,8 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -942,6 +949,10 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          # Empty on pull_request -- same PR-branch credential-exfiltration
+          # gate as the amd64 leg above (see its comment).
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -994,6 +1005,8 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
