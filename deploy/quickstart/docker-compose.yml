@@ -463,7 +463,7 @@ services:
   # ntp/dhcp-kea/dhcp-proxy's sibling profile-gating convention: on by
   # default for setup.sh-managed installs, off for a from-scratch manual
   # deploy/quickstart install.
-  # From: Issue #453 | Issue #633 | Issue #1343 | Issue #1428 | PR #1431
+  # From: Issue #1428 | PR #1431
   #
   # What: `logs-syslog-ng` below is a NAMED volume, unlike prod's
   # bind-mounted SYSLOG_NG_LOG_DIR.

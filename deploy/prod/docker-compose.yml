@@ -1081,7 +1081,7 @@ services:
   # ntp/dhcp-kea/dhcp-proxy's sibling profile-gating convention: on by
   # default for setup.sh-managed installs, off for a from-scratch manual
   # deploy/prod install.
-  # From: Issue #453 | Issue #633 | Issue #1343 | Issue #1428 | PR #1431
+  # From: Issue #1428 | PR #1431
   #
   # What: this short-lived least-privilege initializer chowns the `logs`
   # volume and any old proxy-log copies before the non-root syslog service
@@ -1118,7 +1118,7 @@ services:
     # `lancache-syslog-ng` is no longer a separate monitored target since
     # that container no longer exists (see resolve_alert_only_targets() in
     # services/watchdog/src/main.rs).
-    # From: Issue #842 | Issue #849 | Issue #1420
+    # From: Issue #1428 | PR #1431
     container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
