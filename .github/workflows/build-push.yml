@@ -2,10 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
-# crates and shell scripts, validates the docker-compose files, scans
-# container images, then builds, pushes, promotes, and releases the stack
-# images on the relevant triggers.
+# What: main CI/CD pipeline -- detects changed paths, lints/tests the Rust
+# crates and shell scripts, validates compose, scans images, then builds,
+# pushes, promotes, and releases the stack images on the relevant triggers.
+# From: PR #1523
 
 name: Build & Push
 
@@ -18,41 +18,50 @@ on:
         options: [none, nightly]
         default: none
   schedule:
-    # Daily default-branch refresh keeps the stable `latest` channel from going stale.
-    # `nightly` is refreshed separately by nightly-refresh.yml; 01:00 UTC is intentional across DST.
+    # What: daily default-branch refresh of the stable `latest` channel at 01:00 UTC.
+    # Why: `nightly` has its own separate schedule in nightly-refresh.yml.
+    # From: PR #1523
     - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
-    # Skip a push only when every changed path is documentation-only; mixed changes still run.
-    # Release tags are unaffected, and CHANGELOG.md remains included for the direct-edit guard.
+    # What: skips a push only when every changed path is documentation-only.
+    # Why: release tags bypass paths-ignore entirely; CHANGELOG.md stays included for the
+    # direct-edit guard.
+    # From: PR #1523
     paths-ignore:
       - "**/*.md"
       - "docs/**"
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # Do not use PR-level paths-ignore: required checks must exist even for docs-only PRs.
-    # Job-level gates post real skipped conclusions; metadata events rerun metadata policy without rebuilding unchanged content.
-    # Keep this event set aligned with the content-event gates below.
+    # What: no PR-level paths-ignore; job-level gates post real skipped conclusions instead.
+    # Why: required checks must still exist for docs-only PRs; metadata events (labeled,
+    # milestoned, ...) rerun metadata policy without rebuilding unchanged content.
+    # From: PR #1523
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
-  # Job-level permissions can only narrow this workflow-level grant; PR-reading jobs need this floor.
+  # What: workflow-level pull-requests: read floor.
+  # Why: a job's own permissions: block can only narrow this, never widen it -- PR-reading
+  # jobs (live `gh pr view` fetches) need this grant present here to use it at all.
+  # From: PR #1523
   pull-requests: read
 
 concurrency:
-  # Push/tag runs use unique groups so publication runs cannot cancel each other mid-promotion.
-  # PR runs share a ref group but do not cancel: metadata events may race for the same commit.
-  # Heavy per-job groups below reclaim superseded PR work without cancelling the whole run.
+  # What: push/tag runs use unique per-run groups; PR runs share a ref group but never cancel.
+  # Why: publication runs must not cancel each other mid-promotion; heavy per-job groups
+  # below still reclaim superseded PR work without cancelling the whole run.
+  # From: PR #1523
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
-  # One runtime list for manifest assembly, promotion, and release loops.
-  # scripts/check-workflow-service-lists.sh keeps it equal to the build matrix.
+  # What: one runtime service list for manifest assembly, promotion, and release loops.
+  # Why: scripts/check-workflow-service-lists.sh fails CI if this drifts from the build matrix.
+  # From: PR #1523
   CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools"
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
@@ -63,9 +72,10 @@ defaults:
     shell: bash
 
 jobs:
-  # Classify PR and push diffs once; uncertain push ancestry fails safe to all-changed.
-  # Build-affecting workflow/action changes count as runtime changes; build-tools stays tied to its own inputs.
-  # Per-service push reuse is decided separately by determine-push-reuse-scope using image revision, ancestry, and content diff.
+  # What: classifies PR and push diffs once; workflow/action changes count as runtime changes.
+  # Why: uncertain push ancestry must fail safe to all-changed; per-service push reuse is a
+  # separate decision (determine-push-reuse-scope: image revision, ancestry, content diff).
+  # From: PR #1523
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
@@ -233,8 +243,10 @@ jobs:
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # AG-HDR-008 is hard-failed only for files changed by this PR; the repository-wide backfill remains soft.
-        # Run inside the pinned build-tools image and fetch the exact base SHA so long-lived PRs remain deterministic.
+        # What: hard-fails AG-HDR-008 only for files this PR changed; the repo-wide backfill stays soft.
+        # Why: runs in the pinned build-tools image and fetches the exact base SHA so
+        # long-lived PRs get a deterministic result.
+        # From: PR #1523
         if: github.event_name == 'pull_request'
         env:
           SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -384,8 +396,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
-        # Dependabot cannot set its own milestone, so assign the catch-all milestone before the authoritative metadata check.
-        # The write is idempotent and uses PROJECT_AUTOMATION_PAT; missing credentials leave the later gate to fail clearly.
+        # What: assigns the catch-all milestone before the authoritative metadata check runs.
+        # Why: Dependabot cannot set its own milestone; the write is idempotent and uses
+        # PROJECT_AUTOMATION_PAT, so missing credentials just leave the later gate to fail clearly.
+        # From: PR #1523
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
@@ -633,9 +647,11 @@ jobs:
       - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
-    # Required `line endings` check also hosts content-agnostic governance and CHANGELOG guards.
-    # Do not rename this required-check context; docs-only PRs must still execute these guards.
-    # Verification runs in the selected build-tools image rather than host-local tooling.
+    # What: this required `line endings` check also hosts content-agnostic governance and
+    # CHANGELOG guards, verified in the selected build-tools image, not host-local tooling.
+    # Why: docs-only PRs must still execute these guards; the job key is the required-status-
+    # check context string and must never be renamed (Issue #1245's exact bug class).
+    # From: Issue #1245
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -853,21 +869,20 @@ jobs:
       - name: Check for banned-language source files (AG-REL-001)
         run: bash scripts/check-language-policy.sh
 
-  # Hosted fallback covers only checks that do not depend on LAN/self-hosted build infrastructure.
-  # ci_scope_policy cannot have a meaningful hosted fallback until its Rust dependencies do.
+  # What: hosted fallback covers only checks not dependent on LAN/self-hosted infrastructure.
+  # Why: ci_scope_policy has no meaningful hosted fallback until its Rust dependencies do.
+  # From: PR #1523
   shellcheck:
-    # ShellCheck and ActionLint run inside the same build-tools image selected by
-    # validate-compose, keeping linting independent from whatever happens to be installed
-    # on the runner host.
-    #
-    # DO NOT RENAME this job's `name:`/key (it has none, so the job key `shellcheck` IS
-    # the required-status-check context string) -- current_dev's classic branch protection
-    # names it literally (confirmed via the GitHub API). Renaming it would silently create
-    # a brand-new, never-satisfied required check with the old name still expected,
-    # reproducing issue #1245's exact bug class.
+    # What: lints inside the build-tools image selected by validate-compose; the job key
+    # (`shellcheck`, no `name:`) must never be renamed.
+    # Why: current_dev's branch protection names this required check by that literal key;
+    # renaming would silently create a new, unsatisfied check (Issue #1245's exact bug class).
+    # From: Issue #1245
     needs: [validate-compose, detect-changes]
-    # Docs-only PRs skip this heavy lint bundle at job level so required checks still exist.
-    # Governance and CHANGELOG checks live in line-endings because they must run for every PR.
+    # What: skips this heavy lint bundle at job level for docs-only PRs.
+    # Why: required checks must still exist; governance/CHANGELOG checks that must run for
+    # every PR live in line-endings instead, unaffected by this skip.
+    # From: PR #1523
     if: >-
       ${{
         always() &&
@@ -979,8 +994,10 @@ jobs:
     # real work this job's own comment below explicitly calls out -- and
     # that fallback build is not represented in the fast-path samples above.
     timeout-minutes: 30
-    # validate-compose is a hard publish-path gate, so only superseded PR copies may be cancelled.
-    # Push copies must finish because downstream publication requires its successful build-tools output.
+    # What: only superseded PR copies of this concurrency group may be cancelled.
+    # Why: validate-compose is a hard publish-path gate; a push copy must finish because
+    # downstream publication requires its successful build-tools output.
+    # From: PR #1523
     concurrency:
       group: >-
         ${{
