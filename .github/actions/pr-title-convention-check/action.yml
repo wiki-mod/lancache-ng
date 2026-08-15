@@ -13,9 +13,10 @@ inputs:
     description: >-
       Caller's PR_TITLE_LINT_MODE repository variable, passed in as a plain input
       because `vars.*`/`secrets.*` only resolve in the calling workflow, not inside
-      a composite action. Do not add `${{ }}` syntax to this description string
-      (even as an example): GitHub's schema validator evaluates it here too and
-      fails the whole action to load on an unresolvable name (From: PR #1467).
+      a composite action. Do not add GitHub Actions expression-interpolation syntax
+      to this description string (even as an example): GitHub's schema validator
+      evaluates it here too and fails the whole action to load on an unresolvable
+      name (From: PR #1467).
     required: false
     default: ""
 runs:
