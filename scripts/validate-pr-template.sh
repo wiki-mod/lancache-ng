@@ -22,13 +22,11 @@
 #                     (see the exemption below for why)
 set -euo pipefail
 
-# Dependabot only ever writes its own fixed dependency-bump description, and
-# has no way to fill in this repo's custom .github/pull_request_template.md
-# sections -- this check could never pass on one of its PRs regardless of
-# content. Exiting 0 here (an explicit pass) rather than skipping the whole
-# CI job keeps this a real reported success for the branch-protection
-# required-status-check gate, instead of relying on a skipped job being
-# treated as passing.
+# What: Exits 0 (explicit pass) for a dependabot[bot]-authored PR.
+# Why: Dependabot only writes its own fixed dependency-bump description and
+# can never fill in this repo's custom template sections; an explicit pass
+# keeps this a real reported success for the required-status-check gate.
+# From: PR #1064
 if [ "${PR_AUTHOR:-}" = "dependabot[bot]" ]; then
     echo "PR template validation skipped: PR authored by dependabot[bot], which cannot fill in this repo's custom template body."
     exit 0
@@ -51,16 +49,11 @@ else
     exit 1
 fi
 
-# `gh pr view --json body` (and GitHub's API generally) returns issue/PR
-# body text with CRLF line endings. Left in place, the trailing `\r` stays
-# part of awk's `$0` for every line, so section_exists_with_content()'s
-# end-anchored pattern (`$0 ~ ("^## " sec "$")`) never matches any section
-# heading on an awk build that doesn't itself normalize CRLF (e.g. `mawk`,
-# the default `/usr/bin/awk` on both this project's Debian self-hosted
-# runners and GitHub-hosted Ubuntu runners) -- confirmed live on PR #881:
-# a correctly fetched, fully-filled 9833-byte body was reported as missing
-# all 10 required sections. Stripping `\r` here fixes it at the source
-# instead of depending on a specific awk implementation's behavior.
+# What: Strips CRLF line endings from the fetched PR body before parsing.
+# Why: A trailing `\r` breaks section_exists_with_content()'s end-anchored
+# awk pattern on an awk build that doesn't normalize CRLF itself (e.g.
+# `mawk`, this project's runner default) -- confirmed live on PR #881.
+# From: PR #909
 pr_body="${pr_body//$'\r'/}"
 
 # Determine if PR is a draft (default to false/non-draft for CI if not specified).
@@ -69,8 +62,14 @@ pr_draft="${PR_DRAFT:-false}"
 # Extract required sections from the PR template.
 # These are the exact section headings (starting with ##) that CONTRIBUTING.md requires to be present.
 # Derived from .github/pull_request_template.md sections.
+#
+# What: "Linked Issues" is required and non-empty for non-draft PRs.
+# Why: current-dev-auto-close.yml now scans only this exact section for
+# closing keywords, so it must be structurally mandatory, not assumed.
+# From: Issue #1496
 declare -a required_sections=(
     "Summary"
+    "Linked Issues"
     "What This Actually Changes"
     "What This PR Fixes / Adds"
     "What Changed In Code"
@@ -94,15 +93,11 @@ section_exists_with_content() {
     local section="$1"
     local body="$2"
 
-    # Look for the section heading "## <Section>".
-    # Here-string, not `echo "$body" | grep`: with `set -o pipefail`, a large
-    # $body plus awk's `exit` below closing its stdin early can make the
-    # `echo` on the left side of a pipe receive SIGPIPE before it finishes
-    # writing, failing the whole pipeline non-deterministically depending on
-    # body size and where the target section falls -- confirmed this exact
-    # failure live in CI (PR #627) as a false "missing section" report. A
-    # here-string has no such race: the shell writes it out before awk/grep
-    # ever start reading.
+    # What: Searches via a here-string, not `echo "$body" | grep`.
+    # Why: Under `set -o pipefail`, a large `$body` plus awk's `exit` below
+    # can SIGPIPE the echo mid-write, non-deterministically failing the
+    # pipeline -- confirmed live (PR #627). A here-string has no such race.
+    # From: PR #627
     if ! grep -qF "## $section" <<<"$body"; then
         return 1
     fi

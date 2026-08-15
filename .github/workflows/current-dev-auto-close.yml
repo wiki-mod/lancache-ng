@@ -14,8 +14,9 @@
 #   1. Fires only when a PR merges into `current_dev` (never master/vX.Y.Z --
 #      GitHub's native mechanism already covers those; this must not
 #      duplicate or interfere with it).
-#   2. Parses the PR body for `Closes #N` / `Fixes #N` (and the rest of
-#      GitHub's own accepted keyword set), case-insensitive, same-repo only.
+#   2. Reads only the PR body's exact `## Linked Issues` section (issue
+#      #1496) and parses `Closes #N` / `Fixes #N` (and the rest of GitHub's
+#      own accepted keyword set) within it, case-insensitive, same-repo only.
 #   3. For each referenced issue: posts a comment containing the PR's own
 #      body verbatim (mechanical relay, not an AI-generated summary), then
 #      closes the issue.
@@ -30,16 +31,19 @@
 # the number actually belongs to a pull request) is logged as a warning and
 # skipped -- it must never fail the whole job just because one of several
 # referenced issues among many is no longer valid.
+#
+# What: Only the PR body's exact `## Linked Issues` section is scanned for
+# closing keywords; text elsewhere in the body has zero effect.
+# Why: Free-form prose elsewhere cannot be reliably told apart from a real
+# closing instruction (confirmed false-closes: PR #1443, PR #1491).
+# From: Issue #1496
 name: current_dev Auto-Close Linked Issues
 
 on:
-  # pull_request_target (not pull_request), matching this repo's other
-  # issue/PR-writing workflows (first-interaction.yml, labeler.yml): it runs
-  # with the base repo's token/permissions and, for a `closed` event, always
-  # evaluates the workflow file already merged into the base branch, which
-  # is what we want here. This job never checks out PR code and only reads
-  # `github.event.pull_request` fields already present in the trigger
-  # payload, so pull_request_target's usual fork-code risk does not apply.
+  # What: Uses pull_request_target (matching first-interaction.yml/labeler.yml).
+  # Why: Runs with the base repo's token; evaluates the workflow already
+  # merged into the base branch. No fork-code risk: never checks out PR code.
+  # From: Issue #1137 | PR #1157
   pull_request_target:
     types: [closed]
     branches: [current_dev]
@@ -60,11 +64,10 @@ jobs:
   auto-close:
     name: Relay PR body and close linked issues
     runs-on: ubuntu-latest
-    # `branches: [current_dev]` above already restricts the pull_request
-    # trigger to PRs targeting current_dev, but `types: [closed]` still
-    # fires for PRs that were closed WITHOUT merging -- guard on
-    # `merged == true` too so a closed-unmerged PR never triggers this.
-    # workflow_dispatch always runs (it is dry-run only, see the script).
+    # What: Guards on `merged == true` in addition to `types: [closed]`.
+    # Why: `types: [closed]` alone also fires for a PR closed without
+    # merging; workflow_dispatch always runs since it is dry-run only.
+    # From: Issue #1137 | PR #1157
     if: >-
       github.event_name == 'workflow_dispatch' ||
       github.event.pull_request.merged == true
@@ -84,9 +87,10 @@ jobs:
             // the rest for real.
             let pr;
             if (isDryRun) {
-              // workflow_dispatch inputs arrive as strings on
-              // `context.payload.inputs`, even when the input is declared
-              // `type: number` in the workflow file -- convert explicitly.
+              // What: Converts the dispatch input to a Number explicitly.
+              // Why: `context.payload.inputs` values arrive as strings even
+              // when declared `type: number` in the workflow file.
+              // From: Issue #1137 | PR #1157
               const prNumber = Number(context.payload.inputs?.pr_number);
               if (!prNumber || Number.isNaN(prNumber)) {
                 core.setFailed('workflow_dispatch requires a numeric pr_number input.');
@@ -113,71 +117,70 @@ jobs:
             const mergedAt = pr.merged_at || 'unknown time';
             const mergeSha = pr.merge_commit_sha || 'unknown commit';
 
-            // Step 2: Parse the PR body for closing keywords. Matches
-            // GitHub's own accepted keyword set (close/closes/closed,
-            // fix/fixes/fixed, resolve/resolves/resolved), case-insensitive,
-            // an optional colon, then a same-repo `#123` reference. `Refs
-            // #N` is intentionally NOT matched -- those are non-closing
-            // references the PR author left open on purpose (see #1137).
-            //
-            // Negative lookbehind rejects a match preceded by a negation
-            // marker (not/never/cannot/n't) within a bounded, SAME-SENTENCE
-            // window before the keyword (up to 20 characters, never crossing
-            // '.', '!', '?', or a newline) -- e.g. "does not close #N",
-            // "won't fix #N", "This PR does not close #N". `n't` deliberately
-            // has no `\b` in front of it: it sits mid-word in a contraction
-            // ("doesn't", "won't"), and the word-character 's' immediately
-            // followed by word-character 'n' is not a `\b` position at all,
-            // so requiring one there would silently never match a real
-            // contraction. Confirmed live incident (2026-08-07): this
-            // workflow auto-closed issue #1095 when PR #1443 merged into
-            // current_dev, solely because its body's sentence "This PR does
-            // not close #1095" contains the substring "close #1095" -- an
-            // unbounded keyword match with no negation awareness matches
-            // that substring exactly like a real `Closes #1095`. Verified
-            // against the real PR #1443 body (produces zero matches with
-            // this pattern, one false match without the negative lookbehind)
-            // and a battery of synthetic positive/negative cases (still
-            // matches every real closing-keyword shape; does not match
-            // "does not close", "won't fix", "never closes", "cannot
-            // resolve", "doesn't close", "isn't going to fix").
-            //
-            // The sentence-boundary cap is deliberate, not incidental: a
-            // negation-detection gap that matches ANY whitespace including
-            // newlines (e.g. `(?:\w+\s+){0,2}`) crosses sentence and
-            // paragraph boundaries -- "This is not ideal.\n\nCloses #123"
-            // would then silently suppress a real, unrelated Closes
-            // reference several sentences later. That failure direction is
-            // worse than an unbounded false-positive match: a false close is
-            // loud and reversible (a comment + closed issue, easy to spot
-            // and undo); an over-wide negation match produces a silent
-            // non-close -- nothing fires, nothing looks wrong, and nobody
-            // notices an issue that should have closed just... didn't. The
-            // 20-character same-sentence bound avoids that failure
-            // direction while still catching the common negation phrasings
-            // above.
-            //
-            // This is a heuristic, not full NLP negation detection: a
-            // negation separated from the keyword by more than ~20
-            // characters within the same sentence (e.g. "does not currently
-            // intend to fix #N") still matches, same residual gap the
-            // pattern always had for every other unanticipated phrasing --
-            // PR authors should keep using the project's own `Refs #N`
-            // convention (see #1137) for any non-closing reference rather
-            // than relying on this heuristic to catch every possible way of
-            // saying "not this one."
+            // What: Locates every line matching the exact "## Linked
+            // Issues" heading, to isolate that section's text below.
+            // Why: A near-miss heading (case, extra text) must be treated
+            // as missing, never fuzzy-matched into an unintended section.
+            // From: Issue #1496
+            const bodyLines = prBody.split(/\r\n|\r|\n/);
+            const linkedIssuesHeadingRe = /^## Linked Issues\s*$/;
+            const anyLevel2HeadingRe = /^## /;
+            const headingLineIndexes = [];
+            bodyLines.forEach((line, idx) => {
+              if (linkedIssuesHeadingRe.test(line)) {
+                headingLineIndexes.push(idx);
+              }
+            });
+
+            let linkedIssuesText = null;
+            if (headingLineIndexes.length === 0) {
+              // What: Warns when no "## Linked Issues" heading is found.
+              // Why: The section is the sole authoritative input; a
+              // missing section must fail closed, not fall back to the body.
+              // From: Issue #1496
+              core.warning(`PR #${prNumber}'s body has no exact "## Linked Issues" section. Failing closed to "close nothing" (issue #1496).`);
+            } else if (headingLineIndexes.length > 1) {
+              // What: Warns when the heading appears more than once.
+              // Why: Which occurrence is authoritative is ambiguous;
+              // guessing would reopen the false-positive surface being closed.
+              // From: Issue #1496
+              core.warning(`PR #${prNumber}'s body has ${headingLineIndexes.length} exact "## Linked Issues" headings (duplicated/ambiguous). Failing closed to "close nothing" (issue #1496).`);
+            } else {
+              const sectionStart = headingLineIndexes[0] + 1;
+              let sectionEnd = bodyLines.length;
+              for (let i = sectionStart; i < bodyLines.length; i++) {
+                if (anyLevel2HeadingRe.test(bodyLines[i])) {
+                  sectionEnd = i;
+                  break;
+                }
+              }
+              linkedIssuesText = bodyLines.slice(sectionStart, sectionEnd).join('\n');
+            }
+
+            // What: Normalizes a null extraction result to an empty string.
+            // Why: Missing, duplicated, and genuinely empty sections must
+            // all converge on zero keyword matches ("close nothing").
+            // From: Issue #1496
+            const linkedIssuesSectionText = linkedIssuesText || '';
+
+            // Step 3: Parse the Linked Issues section text for closing keywords.
+            // What: Matches closing keywords, skipping a same-sentence
+            // negated mention (e.g. "does not close #N"); never matches `Refs`.
+            // Why: Without the lookbehind, that prose matched like a real
+            // close (PR #1443 incident).
+            // From: PR #1491
             const keywordPattern = /(?<!\b(?:not|never|cannot)\b[^.!?\n]{0,20}|n't\b[^.!?\n]{0,20})\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
             const issueNumbers = new Set();
             let match;
-            while ((match = keywordPattern.exec(prBody)) !== null) {
+            while ((match = keywordPattern.exec(linkedIssuesSectionText)) !== null) {
               issueNumbers.add(Number(match[1]));
             }
 
             if (issueNumbers.size === 0) {
-              core.info(`No closing-keyword issue references found in PR #${prNumber}'s body. Nothing to do.`);
+              core.info(`No closing-keyword issue references found in PR #${prNumber}'s "## Linked Issues" section. Nothing to do.`);
               return;
             }
-            core.info(`Found ${issueNumbers.size} closing-keyword reference(s) in PR #${prNumber}: ${[...issueNumbers].join(', ')}`);
+            core.info(`Found ${issueNumbers.size} closing-keyword reference(s) in PR #${prNumber}'s "## Linked Issues" section: ${[...issueNumbers].join(', ')}`);
 
             const commentBody = [
               '## Closed via merge to `current_dev` (not the default branch -- see #1137)',
@@ -191,7 +194,7 @@ jobs:
               prBody,
             ].join('\n');
 
-            // Step 3: Resolve each referenced number and act on it
+            // Step 4: Resolve each referenced number and act on it
             // independently -- one bad reference (missing issue, already
             // closed, or actually a PR number) must not abort the others.
             for (const issueNumber of issueNumbers) {
@@ -208,10 +211,10 @@ jobs:
                   throw err;
                 }
 
-                // The Issues API returns pull requests too (a PR is a
-                // superset of an issue in GitHub's data model); a
-                // `pull_request` key present means the referenced number is
-                // actually a PR, not an issue, and must be skipped.
+                // What: Skips a referenced number when it is a PR.
+                // Why: The Issues API returns pull requests too (a PR is a
+                // superset of an issue in GitHub's data model).
+                // From: Issue #1137 | PR #1157
                 if (issue.pull_request) {
                   core.warning(`Skipping #${issueNumber}: it is a pull request, not an issue.`);
                   continue;
@@ -242,9 +245,10 @@ jobs:
                 });
                 core.info(`Closed #${issueNumber} with a relayed comment from PR #${prNumber}.`);
               } catch (err) {
-                // A single unexpected failure (rate limit, permissions,
-                // transient API error) for one issue number must not stop
-                // the loop from processing the remaining references.
+                // What: Warns and continues the loop on an unexpected error.
+                // Why: A single failure (rate limit, permissions, transient
+                // API error) for one issue must not abort the remaining ones.
+                // From: Issue #1137 | PR #1157
                 core.warning(`Failed to process #${issueNumber}: ${err.message}`);
               }
             }
