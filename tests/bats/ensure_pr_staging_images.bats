@@ -1134,7 +1134,14 @@ STUB
     # shellcheck source=scripts/lib/staging-poll-defaults.sh
     source "$repo_root/scripts/lib/staging-poll-defaults.sh"
     staging_poll_set_defaults_for_workflow_changed "false"
+    # What: default_poll_timeout_seconds/default_poll_hard_ceiling_seconds
+    # are set by the function called above, in the sourced file.
+    # Why: shellcheck's per-file analysis does not trace an assignment made
+    # inside a sourced function's own body back to this call site.
+    # From: PR #1538, Issue #1449
+    # shellcheck disable=SC2154
     [ "$default_poll_timeout_seconds" -eq 1500 ]
+    # shellcheck disable=SC2154
     [ "$default_poll_hard_ceiling_seconds" -eq 1200 ]
 }
 
@@ -1142,6 +1149,8 @@ STUB
     # shellcheck source=scripts/lib/staging-poll-defaults.sh
     source "$repo_root/scripts/lib/staging-poll-defaults.sh"
     staging_poll_set_defaults_for_workflow_changed "true"
+    # shellcheck disable=SC2154
     [ "$default_poll_timeout_seconds" -eq 3600 ]
+    # shellcheck disable=SC2154
     [ "$default_poll_hard_ceiling_seconds" -eq 3600 ]
 }
