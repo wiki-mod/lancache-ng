@@ -2,28 +2,23 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Trivy config file (not a GitHub Actions file, but part of this action's own
-# fixed contract) read via aquasecurity/trivy-action's `trivy-config` INPUT
-# (never an env var -- see action.yml's own header comment for why: an env
-# var set on the `uses: aquasecurity/trivy-action` step would depend on
-# whether GitHub Actions actually propagates step-level `env:` into a
-# *nested* composite action's own internal `run:` steps, which is not a
-# reliably documented guarantee; an input, by contrast, is a normal `with:`
-# value passed at actual invocation time -- the same mechanism already used
-# for every other input this action forwards (image-ref, scanners, ...),
-# proven to work in production before this action existed).
-#
-# Reorders trivy's own two default DB mirrors (aquasecurity/trivy's
-# pkg/db/db.go / pkg/javadb/client.go) so GHCR -- this project's own
-# already-used, already-authenticated (see action.yml's login step)
-# registry -- is tried first, falling back to trivy's normal Docker
-# Hub-backed GCR mirror second rather than dropping it. See action.yml's
-# header comment for the full issue #1535 root cause and the schema-version
-# coupling these two tags carry.
+# What: Read via trivy-action's `trivy-config` input, not an env var.
+# Why: an env var is not reliably propagated into a nested composite
+# action's own steps; an input is a normal with: value at invocation time,
+# same as every other input this action forwards.
+# From: PR #1542, Issue #1535
+
+# What: Orders trivy's DB-source repos -- GHCR first, mirror.gcr.io second,
+# a third directly-authenticated Docker Hub entry last.
+# Why: Docker Hub sits last (not second) -- live measurement (8 pulls,
+# delta 0) showed mirror.gcr.io does not draw from Docker Hub's own quota.
+# From: PR #1543, Issue #1535
 db:
   repository:
     - ghcr.io/aquasecurity/trivy-db:2
     - mirror.gcr.io/aquasec/trivy-db:2
+    - docker.io/aquasec/trivy-db:2
   java-repository:
     - ghcr.io/aquasecurity/trivy-java-db:1
     - mirror.gcr.io/aquasec/trivy-java-db:1
+    - docker.io/aquasec/trivy-java-db:1
