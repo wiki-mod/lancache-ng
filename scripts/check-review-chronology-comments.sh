@@ -60,15 +60,19 @@ DISCOVERY_VERBS='(caught|found|flagged|spotted|identified|discovered|noticed)'
 # Why: Only whitespace and a small filler-word set allowed before "review",
 #   so an unrelated clause breaks the match instead of being silently
 #   absorbed.
+# From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN="(\\b${DISCOVERY_VERBS}\\b[[:space:]]+(in|during)[[:space:]]+((a|the|this)[[:space:]]+)?(code[[:space:]]+|pr[[:space:]]+|peer[[:space:]]+)?(self-)?review\\b)"
 # What: "review ... <verb>" (e.g. "a PR review (#765) found ...").
 # Why: Gap restricted to non-letter chars so it can span a short
 #   parenthetical without crossing into a new sentence.
+# From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN+="|(\\breview\\b[^a-zA-Z.]{0,20}\\b${DISCOVERY_VERBS}\\b)"
 # What: "before/prior to/until this fix/change/commit/patch" self-reference.
+# From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN+="|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
 
 # What: Matches "(line N)"/"(see line ~N)", case-insensitive.
+# From: PR #1546
 FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
 
 # What: Checks each line of $1 against $REVIEW_CHRONOLOGY_PATTERN.
@@ -79,6 +83,7 @@ check_review_chronology() {
 }
 
 # What: Checks each line of $1 against $FRAGILE_LINE_REF_PATTERN.
+# From: PR #1546
 check_fragile_line_references() {
     grep -EinIH "$FRAGILE_LINE_REF_PATTERN" "$1" || true
 }
@@ -92,23 +97,21 @@ check_bare_issue_ref_duplicates_from() {
     local path="$1" from_nums num
     # What: Skips files with no From: pointer (the common case).
     # Why: -I avoids treating a binary file as a text match.
+    # From: PR #1546
     grep -qEI 'From:' "$path" 2>/dev/null || return 0
     from_nums=$(grep -EI 'From:' "$path" 2>/dev/null | grep -oEI '#[0-9]+' | tr -d '#' | sort -u || true)
     [ -z "$from_nums" ] && return 0
 
     while IFS= read -r num; do
         [ -n "$num" ] || continue
-        # What: Word-boundary-equivalent match so "#887" doesn't also match
-        #   "#8871"; From: lines are excluded (that's where the number is
-        #   supposed to live). Scans every "#N" occurrence on a line (not
-        #   only the first) and tracks both quote kinds char-by-char.
-        # Why: A plain grep also matched "#887" inside an echo/print string
-        #   literal (runtime output text, not a comment). Checking only the
-        #   first occurrence missed a real duplicate on a line that also has
-        #   an earlier string-literal mention; counting only `"` missed a
-        #   single-quoted string literal entirely -- both fixed by tracking
-        #   which quote kind (if any) is open at each "#N" position and
-        #   requiring "outside any open quote" rather than "even `"` count".
+        # What: Scans every "#N" on a line (word-boundary-safe, so "#8871"
+        #   never matches a From: #887), tracking quote state; a `'` only
+        #   opens a string when not preceded by a word character.
+        # Why: Distinguishes a real string delimiter from an English
+        #   contraction's apostrophe (e.g. "it's") while still catching a
+        #   real duplicate comment that follows a string-literal mention of
+        #   the same number on the same line.
+        # From: PR #1546
         awk -v n="$num" '
             $0 ~ /From:/ { next }
             {
@@ -118,8 +121,15 @@ check_bare_issue_ref_duplicates_from() {
                 len = length(line)
                 for (i = 1; i <= len; i++) {
                     c = substr(line, i, 1)
-                    if (in_q == "" && (c == "\x27" || c == "\"")) { in_q = c; continue }
-                    if (in_q == c) { in_q = ""; continue }
+                    if (in_q == "") {
+                        if (c == "\"") { in_q = c; continue }
+                        if (c == "\x27") {
+                            prevc = (i > 1) ? substr(line, i - 1, 1) : ""
+                            if (prevc !~ /[A-Za-z0-9_]/) { in_q = c; continue }
+                        }
+                    } else if (c == in_q) {
+                        in_q = ""; continue
+                    }
                     if (in_q == "" && c == "#") {
                         rest = substr(line, i + 1, length(n))
                         if (rest == n) {
@@ -155,6 +165,7 @@ for path in "${files[@]}"; do
 
     # What/Why: -I keeps a binary file's grep "Binary file ... matches" line
     #   from being wrongly recorded as a violation below.
+    # From: PR #1546
     while IFS= read -r match; do
         [ -n "$match" ] || continue
         chronology_violations+=("$match")

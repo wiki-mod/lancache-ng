@@ -285,15 +285,70 @@ EOF
     [ "$status" -eq 0 ]
 }
 
-@test "checks 1 and 2 stay clean against the real repository tree (check 3 has known pre-existing findings, tracked in PR #1546's body, not fixed by this PR)" {
-    # What: Runs the real guard against the real repo and asserts checks 1/2
-    #   (review-chronology, fragile line-refs) still report clean.
-    # Why: Check 3 (issue/PR duplicate-of-From:) has genuine pre-existing
-    #   repo-wide findings this PR intentionally does not fix (see PR body);
-    #   asserting a blanket exit 0 here would either mask that or force
-    #   fixing unrelated files out of this PR's scope, so this only guards
-    #   against a checks-1/2 regression, not check 3's known open state.
+@test "passes when the only mention of the number is inside a double-quoted string literal, not a real comment" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+#!/usr/bin/env bash
+# From: Issue #887
+echo "checking issue #887's tracked state again here"
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "fails when a line has both a string-literal mention AND a real trailing comment repeating the number" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+#!/usr/bin/env bash
+# From: Issue #887
+echo "some string with #887 inside" # duplicate real comment ref to issue #887
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.sh:3"* ]] || fail "did not name the offending line (first occurrence in a string must not swallow a later real comment on the same line): $output"
+}
+
+@test "passes when the only mention of the number is inside a single-quoted string literal" {
+    cat > "$fixture_root/example.sh" <<'EOF'
+#!/usr/bin/env bash
+# From: Issue #887
+echo 'some string with #887 inside single quotes'
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "fails on a real comment duplicate even when an earlier English contraction/possessive apostrophe appears on the same line" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+volumes:
+  # From: Issue #453
+  ui-data:
+  # fluent-bit's local file-output target (#453) and its own storage buffer.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:4"* ]] || fail "a contraction apostrophe ('fluent-bit's') must not be misread as an unterminated string that swallows the real duplicate later on the line: $output"
+}
+
+@test "passes on a comment with a contraction apostrophe and no real duplicate reference" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+volumes:
+  # From: Issue #453
+  # it's a plain comment with no other issue number mentioned here at all.
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 0 ]
+}
+
+@test "the guard also passes when pointed at the real repository tree" {
+    # What: Runs the real guard against the real repo tree.
+    # Why: All 46 pre-existing check-3 findings this PR's own fixed detection
+    #   logic surfaced were fixed in the same PR (see body); a substring-only
+    #   assertion here previously masked exactly this kind of regression.
+    # From: PR #1546
     run bash "$script" "$repo_root"
-    [[ "$output" != *"Review-chronology comment(s) found"* ]] || fail "check 1 regressed against the real repo: $output"
-    [[ "$output" != *"Fragile line-number self-reference(s) found"* ]] || fail "check 2 regressed against the real repo: $output"
+    [ "$status" -eq 0 ] || fail "real repo tree is not clean per this guard: $output"
 }
