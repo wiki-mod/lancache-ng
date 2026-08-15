@@ -373,7 +373,7 @@ jobs:
     name: build arm64 build-tools image (native)
     needs: determine-publish-scope
     runs-on: ubuntu-24.04-arm
-    timeout-minutes: 120
+    timeout-minutes: 150
     outputs:
       candidate-digest: ${{ steps.build.outputs.digest }}
     steps:
@@ -404,6 +404,23 @@ jobs:
         id: source-tag
         if: github.event_name != 'pull_request'
         run: printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+      - name: Resolve build-tools base image digests
+        id: build-tools-base-digests
+        if: github.event_name != 'pull_request'
+        run: |
+          set -euo pipefail
+          digest_for_image() {
+            local image=$1 digest
+            digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}')"
+            digest="${digest%\"}"; digest="${digest#\"}"
+            [[ -n "$digest" && "$digest" != "null" ]] || { echo "::error::Could not read digest for $image."; exit 1; }
+            printf '%s\n' "$digest"
+          }
+          {
+            printf 'rust=%s\n' "$(digest_for_image rust:latest)"
+            printf 'golang=%s\n' "$(digest_for_image golang:latest)"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Compute apt cache-bust value
         id: apt-cache-bust
@@ -441,7 +458,10 @@ jobs:
           context: tools/build-tools
           push: true
           tags: ${{ steps.source-tag.outputs.image }}
-          labels: ${{ steps.meta.outputs.labels }}
+          labels: |
+            ${{ steps.meta.outputs.labels }}
+            org.opencontainers.image.base.rust.digest=${{ steps.build-tools-base-digests.outputs.rust }}
+            org.opencontainers.image.base.golang.digest=${{ steps.build-tools-base-digests.outputs.golang }}
           build-args: |
             APT_CACHE_BUST=${{ steps.apt-cache-bust.outputs.value }}
           outputs: type=image,oci-mediatypes=true
