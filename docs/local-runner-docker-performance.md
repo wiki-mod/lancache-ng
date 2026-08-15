@@ -200,19 +200,27 @@ Important rules:
 - use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
   since a build-tools image rebuild changes the compiler's mtime but not
   necessarily its output
-- `CCACHE_EXTRAFILES` folds the resolved `$BUILD_TOOLS_IMAGE` reference into
-  every cache key, so a client-side toolchain upgrade (a new build-tools
-  image) always produces a fresh remote key instead of reusing an object
-  built by an older client compiler
-- **known limitation:** that namespacing only covers the client side. The
-  actual `192.168.1.229`/`192.168.1.240` distcc hosts run a natively
-  installed `distccd`/`gcc`, provisioned by hand and independent of the
-  build-tools image lifecycle -- there is no repository script or workflow
-  that pins or upgrades them together. If a farm host's compiler is upgraded
-  without a matching build-tools image change, a remote cache hit can still
-  serve an object built by the old remote toolchain. Keep farm host compiler
-  upgrades infrequent and deliberate until a stronger remote-identity check
-  exists
+- `CCACHE_EXTRAFILES` folds two files into every cache key: the resolved
+  `$BUILD_TOOLS_IMAGE` reference (so a client-side toolchain upgrade always
+  produces a fresh key instead of reusing an object built by an older client
+  compiler), and a verified remote toolchain identity read back from
+  `configure_distcc()`'s own probe compile -- the `.comment` ELF section
+  GCC/Clang embed in every object, extracted from an object that a real farm
+  host actually produced, not assumed. If a farm host's compiler is upgraded
+  between builds, the next build's probe reads a different `.comment` string
+  and the cache key changes, so a stale remote object from the old toolchain
+  cannot be served as a hit. `configure_ccache()` fails closed (plain distcc,
+  no cache layer) if that identity cannot be read for any reason
+- **known limitation:** this samples whichever single farm host answered one
+  probe compile at the start of a build. It catches a farm upgraded *between*
+  builds, but not a farm that is heterogeneous *within* one build -- e.g. if
+  `192.168.1.229` and `192.168.1.240` (both natively installed, provisioned
+  by hand, with no repository script that keeps them in lockstep) end up on
+  different compiler versions from each other at the same moment, only the
+  probe's own host is reflected in the cache key, not every host distcc might
+  route individual `ring` C files to during the real build. Keep farm host
+  compiler upgrades infrequent, deliberate, and applied to the whole pool at
+  once until a per-object remote-identity check exists
 - every ccache failure detected *before* the real Cargo build (a failed
   probe compile, or the probe's own Redis write/read check) falls back to
   plain distcc with no cache layer, rather than hard-failing the build; a

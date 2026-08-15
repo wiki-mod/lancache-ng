@@ -88,6 +88,9 @@ COPY nats-subscriber/ .
 #   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
 #                            shuts down distcc-pump and restores the pre-distcc PATH/env.
 #   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.
+#   extract_remote_toolchain_id - reads back whichever real farm host answered
+#                            configure_distcc's own probe compile, recording that host's
+#                            actual compiler identity for configure_ccache to hash.
 #   configure_ccache/disable_ccache - opt-in cache layer in front of distcc, only once
 #                            distcc is already enabled and a ccache Redis secret was
 #                            mounted; probes with a trivial compile first, same as
@@ -112,24 +115,39 @@ COPY nats-subscriber/ .
 #     distinct `SCCACHE_REDIS_KEY_PREFIX`-based one on the same Redis instance, and
 #     ccache's manual requires an explicit scheme -- an unscoped `host:port` value
 #     fails with "Cannot parse URL ... Scheme ... is invalid".
-#   `CCACHE_EXTRAFILES=/tmp/ccache-toolchain-id` (containing `$BUILD_TOOLS_IMAGE`) and
-#     `CCACHE_BASEDIR="$ccache_probe_dir"` plus a `cd`+relative-path probe compile.
+#   `CCACHE_EXTRAFILES="/tmp/ccache-toolchain-id:/tmp/ccache-remote-toolchain-id"`
+#     (colon-separated, per ccache's own manual) and `CCACHE_BASEDIR="$ccache_probe_dir"`
+#     plus a `cd`+relative-path probe compile.
 #     Why: `CCACHE_COMPILERCHECK=content` only hashes the local `cc` binary, so without
 #     EXTRAFILES a client-side build-tools image upgrade would keep reusing a Redis
-#     object built by the old client compiler. EXTRAFILES closes that gap by tying the
-#     key to the resolved build-tools image. It does NOT cover the remote distcc host's
-#     own compiler: `192.168.1.229`/`192.168.1.240` run a natively installed
-#     `distccd`/`gcc`, provisioned by hand and independent of this image's lifecycle, so
-#     an out-of-band farm host compiler upgrade is not reflected in the cache key (see
-#     docs/local-runner-docker-performance.md's "known limitation" note). BASEDIR+
-#     relative-path keeps the probe's own key stable
-#     across builds despite `$ccache_probe_dir` being a fresh mktemp path every time;
-#     without it, every build would leak a new, never-reused Redis entry. Consequently the
-#     probe's own success check accepts either a remote write OR a remote hit as proof of
-#     a healthy round trip (a second build against the same generation legitimately hits
-#     instead of writing -- verified empirically, real Redis, 2026-08-14, lancache-240:
-#     without this the probe misclassified a genuine cache hit as "write failed" and
-#     disabled ccache for the whole build).
+#     object built by the old client compiler; the first file closes that gap by tying the
+#     key to the resolved build-tools image. The second file closes the matching remote-side
+#     gap: `192.168.1.229`/`192.168.1.240` run a natively installed `distccd`/`gcc`,
+#     provisioned by hand and independent of this image's lifecycle, so a farm host upgrade
+#     alone would otherwise go unreflected in the cache key and let a stale/incompatible
+#     remote toolchain's object serve as a "hit". `extract_remote_toolchain_id()` reads the
+#     `.comment` ELF section GCC/Clang embed in every object they produce -- including one
+#     compiled remotely through distcc -- out of `configure_distcc()`'s own already-real
+#     probe compile, so the recorded identity reflects whichever farm host actually answered
+#     that probe, not an assumption. `configure_ccache()` fails closed (falls back to plain
+#     distcc, no cache layer) if that identity file ends up empty, rather than caching
+#     without it. Verified empirically (2026-08-15, lancache-240, real distcc dispatch to
+#     two differently-configured hosts): without this file, identical local
+#     compiler/source/flags against two different real remote compilers produced a
+#     byte-identical, wrongly-reused cached object; adding the differing `.comment` content
+#     to `CCACHE_EXTRAFILES` correctly turned the second build into a fresh cache miss
+#     instead. Known remaining gap: this samples whichever single host answered one probe at
+#     the start of a build, so it catches a farm upgraded *between* builds (the scenario
+#     above) but not a farm that is heterogeneous *within* one build (two pool members on
+#     different compiler versions at the same moment) -- see
+#     docs/local-runner-docker-performance.md's note. BASEDIR+relative-path keeps the
+#     probe's own key stable across builds despite `$ccache_probe_dir` being a fresh mktemp
+#     path every time; without it, every build would leak a new, never-reused Redis entry.
+#     Consequently the probe's own success check accepts either a remote write OR a remote
+#     hit as proof of a healthy round trip (a second build against the same generation
+#     legitimately hits instead of writing -- verified empirically, real Redis, 2026-08-14,
+#     lancache-240: without this the probe misclassified a genuine cache hit as "write
+#     failed" and disabled ccache for the whole build).
 #     From: Issue #887
 #   resolve_cargo_jobs     - CARGO_BUILD_JOBS if set, else nproc-2 floored at 4.
 #   run_cargo_build        - builds with ccache+distcc if both enabled, retrying with
@@ -183,6 +201,12 @@ RUN --mount=type=secret,id=sccache_redis_url \
       echo "distcc wrapper directory not found" >&2; \
       exit 1; \
     }; \
+    extract_remote_toolchain_id() { \
+      rm -f /tmp/ccache-remote-toolchain-id; \
+      if command -v readelf >/dev/null 2>&1; then \
+        readelf -p .comment "$1" 2>/dev/null | sed -n 's/^ *\[[^]]*\] *//p' > /tmp/ccache-remote-toolchain-id; \
+      fi; \
+    }; \
     configure_distcc() { \
       if [ -s /run/secrets/distcc_potential_hosts ]; then \
         distcc_probe_dir="$(mktemp -d)"; \
@@ -209,17 +233,22 @@ RUN --mount=type=secret,id=sccache_redis_url \
           echo "[INFO] distcc probe unavailable; continuing with normal local C compiler." >&2; \
           return 0; \
         fi; \
+        extract_remote_toolchain_id "$distcc_probe_dir/distcc-probe.o"; \
         rm -rf "$distcc_probe_dir"; \
       fi; \
     }; \
     disable_ccache() { \
       ccache_enabled=0; \
       unset CCACHE_REMOTE_STORAGE CCACHE_DIR CCACHE_COMPILERCHECK CCACHE_PREFIX CCACHE_EXTRAFILES CCACHE_BASEDIR; \
-      rm -f /tmp/ccache-toolchain-id; \
+      rm -f /tmp/ccache-toolchain-id /tmp/ccache-remote-toolchain-id; \
       export CC=cc GCC=gcc CXX=c++ GXX=g++; \
     }; \
     configure_ccache() { \
       if [ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]; then \
+        if [ ! -s /tmp/ccache-remote-toolchain-id ]; then \
+          echo "[INFO] no verified remote distcc toolchain identity available (the distcc probe's compiled object carried no readable .comment identity, or readelf is missing); continuing with plain distcc (no cache layer) rather than risk a stale cross-toolchain cache hit." >&2; \
+          return 0; \
+        fi; \
         ccache_probe_dir="$(mktemp -d)"; \
         echo "[INFO] wrapping distcc with ccache (Redis remote storage)." >&2; \
         ccache_redis_endpoint="$(cat /run/secrets/ccache_redis_url)"; \
@@ -232,7 +261,7 @@ RUN --mount=type=secret,id=sccache_redis_url \
         export CCACHE_PREFIX=distcc; \
         export CCACHE_COMPILERCHECK=content; \
         printf '%s' "$BUILD_TOOLS_IMAGE" > /tmp/ccache-toolchain-id; \
-        export CCACHE_EXTRAFILES=/tmp/ccache-toolchain-id; \
+        export CCACHE_EXTRAFILES="/tmp/ccache-toolchain-id:/tmp/ccache-remote-toolchain-id"; \
         export CCACHE_BASEDIR="$ccache_probe_dir"; \
         export CC="ccache $real_cc" GCC="ccache $real_gcc" CXX="ccache $real_cxx" GXX="ccache $real_gxx"; \
         ccache_enabled=1; \
