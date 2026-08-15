@@ -340,8 +340,8 @@ sra_other_tags_from_csv() {
 sra_protected_reference_reason() {
   # What: given a version's "other" tags and supported releases, returns a
   # "+"-joined reason covering every protected channel that applies.
-  # Why: a digest can match several channels at once; picking one would
-  # hide information. Failure means no protected channel matched.
+  # Why: a digest can match several channels at once, so picking one would
+  # hide information; failure means none matched.
   # From: Issue #1095 | PR #1501.
   local other_tags="${1?sra_protected_reference_reason: other tags argument is required}"
   local supported_releases="${2?sra_protected_reference_reason: supported releases argument is required}"

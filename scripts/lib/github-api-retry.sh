@@ -18,10 +18,10 @@ GITHUB_API_RETRY_SH_LOADED=1
 GITHUB_API_RETRY_ATTEMPTS="${GITHUB_API_RETRY_ATTEMPTS:-4}"
 GITHUB_API_RETRY_DELAY_SECONDS="${GITHUB_API_RETRY_DELAY_SECONDS:-5}"
 GITHUB_API_HTTP_STATUS=""
-# What: optional TTL file cache for successful GET responses, keyed by URL.
-# Why: repeated report runs close together (e.g. two PRs' synchronize-
-# triggered audits) would otherwise re-fetch identical, unchanged GHCR pages
-# and burn shared rate-limit budget. Disabled (empty dir) by default.
+# What: optional TTL file cache for successful GET responses, keyed by URL,
+# disabled (empty dir) by default.
+# Why: repeated nearby report runs would otherwise re-fetch identical
+# pages and burn shared rate-limit budget.
 # From: Issue #1095 | PR #1501.
 GITHUB_API_CACHE_DIR="${GITHUB_API_CACHE_DIR:-}"
 GITHUB_API_CACHE_TTL_SECONDS="${GITHUB_API_CACHE_TTL_SECONDS:-600}"

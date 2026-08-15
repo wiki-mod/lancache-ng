@@ -52,8 +52,8 @@ warn() {
 
 # What: matches a repo script path anchored to the four top-level dirs this
 # repo keeps executable scripts under, plus `.bats`.
-# Why: repo-root-relative only; `.bats` is included since a bats suite
-# invoked by bare path also needs the exec bit.
+# Why: repo-root-relative only -- a `../`-relative or `$VAR`-interpolated
+# path is not resolved; `.bats` covers a bare-path bats suite too.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 script_path_re='^(scripts|services|tests|\.githooks)/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*\.(sh|bats)$'
 
@@ -123,8 +123,8 @@ command_word_script() {
 
 # What: splits a shell line into segments at &&, ||, ;, | (plain bash
 # string matching, not a YAML library or PCRE grep).
-# Why: PCRE grep is known to misbehave on this project's self-hosted
-# runners (see check-idempotence-test-coverage.sh's own header).
+# Why: a YAML library is a dependency this project avoids (AG-REL-001);
+# PCRE grep is known to misbehave on this project's self-hosted runners.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 split_into_segments() {
   local s="$1" nl=$'\n'
