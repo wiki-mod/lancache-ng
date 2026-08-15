@@ -143,22 +143,10 @@
 # that alternative in the pattern below), keeps the match specific to an
 # actual registry response instead of any shell-level "not found" text.
 #
-# What: Added a 4th alternative, `^ERROR:.*: not found$`, anchored to the
-# line-start "ERROR: " prefix that only buildx's own CLI error wrapper
-# produces (never a raw shell "command not found").
-# Why: `docker buildx imagetools inspect` against GHCR for a genuinely
-# missing tag does not actually emit "manifest unknown"/"no such manifest" --
-# verified live (2026-08-15) on two real buildx builds (local v0.36.0 and
-# runner host lancache-243's v0.35.0, both close to the affected job's
-# v0.32.2): both print exactly `ERROR: <ref>: not found`, which matched none
-# of the original three alternatives. Since a brand-new PR staging tag is
-# always missing at the moment wait_for_touched_image() starts polling, this
-# made every touched-service wait fail almost immediately (~95s, the shared
-# ghcr_retry budget) instead of polling up to its intended ~3600s budget.
-# Also verified the anchor does not over-match a real auth failure
-# (`ERROR: failed to authorize: ...: 403 Forbidden`) or DNS failure
-# (`ERROR: failed to do request: ...: no such host`) from the same command --
-# neither ends in ": not found".
+# What: Added a 4th alternative, `^ERROR:.*: not found$`.
+# Why: buildx's real wording for a missing GHCR tag is `ERROR: <ref>: not
+# found`, not "manifest unknown" -- verified live on two real buildx builds;
+# this misclassification made every touched-service wait hard-fail at ~95s.
 # From: Issue #1581
 #
 # Deliberately conservative in the other direction too: text this hasn't
@@ -218,18 +206,12 @@ _sif_inspect_attempt() {
   if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
     return "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
   fi
-  # What: Echoes the real docker/buildx stderr to this function's own
-  # stderr on the non-confirmed-absence path, instead of only returning 1.
-  # Why: Issue #1581 -- this text used to be captured purely for internal
-  # classification and then discarded, so a misclassification (like that
-  # issue's own root cause) was undiagnosable from the job log alone and
-  # needed live reproduction against a real runner to find. ghcr_retry
-  # passes a wrapped command's stderr through untouched on every attempt, so
-  # this now surfaces in the job log the same way ghcr_retry's own
-  # ::warning:: lines already do.
+  # What: Echoes the real stderr instead of only returning 1 (discarding it).
+  # Why: previously undiagnosable from the job log alone -- Issue #1581's own
+  # root cause needed live reproduction against a real runner to find.
   # From: Issue #1581
   if [[ -n "$err_text" ]]; then
-    echo "::warning::docker buildx imagetools inspect failed with stderr not recognized as a confirmed absence (see _sif_inspect_failure_is_confirmed_absence): $err_text" >&2
+    echo "docker buildx imagetools inspect failed with stderr not recognized as a confirmed absence: $err_text" >&2
   fi
   return 1
 }
