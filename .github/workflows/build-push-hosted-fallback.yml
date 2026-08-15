@@ -2,12 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Opt-in GitHub-hosted overflow path for the amd64 image build/scan/publish
-# lane. It is intentionally workflow_dispatch-only and never replaces the
-# normal self-hosted pipeline. Every selected service is built exactly once:
-# the pushed immutable digest is the artifact that Trivy scans and that the
-# optional manifest merge later consumes. The native arm64 leg remains owned
-# by build-push.yml's GitHub-hosted build-arm64 job.
+# What: opt-in, workflow_dispatch-only GitHub-hosted overflow path for the
+# amd64 build/scan/publish lane; never replaces the self-hosted pipeline.
+# Why: build-push.yml's build-arm64 job already covers arm64 natively.
+# From: Issue #686 | docs/ci-github-hosted-fallback-decision.md
 name: Build & Push (GitHub-hosted overflow fallback)
 
 on:
@@ -274,16 +272,17 @@ jobs:
           run-fixtures: "true"
 
       - name: Scan the exact pushed candidate digest
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: allows 50 minutes (was 20) for this scan step.
+        # Why: trivy-scan-retry can run up to 4 attempts; the bound must cover the worst case.
+        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-          # What: Same unconditional Docker Hub secret as the amd64 scan
-          # step above.
-          # From: PR #1543, Issue #1535
+          # What: same unconditional Docker Hub secret as the amd64 scan step above.
+          # Why: an unauthenticated first-choice DB mirror caused real CI failures.
+          # From: Issue #1535
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
