@@ -118,10 +118,8 @@ jobs:
           fi
 
       # What: sparse checkout of only the two script paths this job runs.
-      # Why: the reap logic lives in one script file now (the former
-      # scripts/lib/gc-pr-staging-images.sh was merged in, issue #1557);
-      # sparse-checkout keeps this light-tier job's checkout minimal.
-      # From: PR #1443 | PR #1559
+      # Why: a narrow checkout keeps this light-tier job's clone minimal.
+      # From: Issue #1557 | PR #1559
       #
       # What: `ref:` is pinned to the default branch, not left to default.
       # Why: `github.ref` for a closed-unmerged PR is a ref GitHub drops;
