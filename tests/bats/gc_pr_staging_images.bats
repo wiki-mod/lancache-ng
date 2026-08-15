@@ -40,6 +40,13 @@
 #     ruling this out as ITS cause, but the failure mode itself is real and
 #     was previously completely unguarded against for any future run.
 
+# What: declares the minimum bats-core version this file requires.
+# Why: several tests below use `run --separate-stderr` (bats-core >=1.5.0);
+# without this, bats prints a BW02 warning per occurrence, and this repo
+# treats any warning as a failure (AG-VAL-001).
+# From: Issue #1568
+bats_require_minimum_version 1.5.0
+
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
