@@ -2,13 +2,12 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Enforces AGENTS.md's AG-GH-008: a pull request must carry at least one
-# label and a milestone, and (when a project-read token is configured)
-# must be on the repository's Project board, before it counts as properly
-# filed. See AGENTS.md's "Issue And PR Tracking" section for the rule text
-# and its Enforcement Notes for why this exists as CI, not just a written
-# rule -- a 2026-07-13 backlog sweep found nearly the entire open PR
-# backlog missing all three fields despite otherwise-correct content.
+# Enforces AGENTS.md's AG-GH-023/024/025: a pull request must carry at
+# least one label and a milestone, and (when a project-read token is
+# configured) must be on the repository's Project board, before it counts
+# as properly filed. See AGENTS.md's "Issue And PR Tracking" section for
+# the rule text -- a 2026-07-13 backlog sweep found nearly the entire open
+# PR backlog missing all three fields despite otherwise-correct content.
 #
 # For draft PRs: prints warnings but exits 0 (non-blocking), matching
 # validate-pr-template.sh's draft handling -- metadata is expected to
@@ -68,12 +67,12 @@ warnings=()
 # --- Labels ---------------------------------------------------------------
 label_count=$(printf '%s' "${PR_LABELS_JSON:-[]}" | python3 -c "import json,sys; print(len(json.load(sys.stdin)))")
 if [ "$label_count" -eq 0 ]; then
-    errors+=("No labels set. Add at least one component/type label (see AG-GH-008).")
+    errors+=("No labels set. Add at least one component/type label (see AG-GH-023).")
 fi
 
 # --- Milestone --------------------------------------------------------------
 if [ -z "${PR_MILESTONE_TITLE:-}" ]; then
-    errors+=("No milestone set. Set a milestone (see AG-GH-008).")
+    errors+=("No milestone set. Set a milestone (see AG-GH-023).")
 fi
 
 # --- Project board ----------------------------------------------------------
@@ -90,9 +89,9 @@ if [ -z "${GH_TOKEN:-}" ]; then
         # explicitly instead of implying the secret is simply missing;
         # labels and milestone above are unaffected since those come from
         # the webhook payload, not a secret.
-        warnings+=("Project-board membership not checked: PROJECT_AUTOMATION_PAT (even if configured) is not passed to pull_request runs from forked repositories -- this is a GitHub Actions security restriction, not a missing secret. Labels and milestone are still fully enforced. A maintainer must add this PR to the project board manually: gh project item-add $project_number --owner $project_owner --url <pr-url>. See AGENTS.md AG-GH-008 enforcement notes.")
+        warnings+=("Project-board membership not checked: PROJECT_AUTOMATION_PAT (even if configured) is not passed to pull_request runs from forked repositories -- this is a GitHub Actions security restriction, not a missing secret. Labels and milestone are still fully enforced. A maintainer must add this PR to the project board manually: gh project item-add $project_number --owner $project_owner --url <pr-url>. See AGENTS.md AG-GH-025.")
     else
-        warnings+=("Project-board membership not checked: no read:project-scoped token configured (GH_TOKEN unset). See AGENTS.md AG-GH-008 enforcement notes.")
+        warnings+=("Project-board membership not checked: no read:project-scoped token configured (GH_TOKEN unset). See AGENTS.md AG-GH-025.")
     fi
 else
     repo_name="${repo#*/}"
@@ -126,7 +125,7 @@ print(json.dumps({"query": q, "variables": {"owner": "'"$project_owner"'", "pr":
         # about above. Failing loudly here is what actually catches a broken
         # PROJECT_AUTOMATION_PAT instead of silently disabling the
         # project-board gate for every PR until someone notices the warning.
-        errors+=("Project-board lookup rejected (HTTP $status): the configured token (PROJECT_AUTOMATION_PAT) was rejected or lacks the required read:project scope. A token was supplied, so this is a configuration problem, not the absent-token gap documented in AG-GH-008's enforcement notes -- fix or rotate the secret.")
+        errors+=("Project-board lookup rejected (HTTP $status): the configured token (PROJECT_AUTOMATION_PAT) was rejected or lacks the required read:project scope. A token was supplied, so this is a configuration problem, not the absent-token gap documented in AG-GH-025 -- fix or rotate the secret.")
     elif [ "$status" != "200" ]; then
         warnings+=("Could not query project-board membership (HTTP $status) -- not failing the check on an infrastructure issue, but this should be investigated.")
     else
@@ -156,11 +155,11 @@ except Exception:
     print('')
 " < "$response_file")
         if [ "$project_item_count" = "TOKEN_ERROR" ]; then
-            errors+=("Project-board lookup failed: the GraphQL response contained an error (commonly an invalid/expired token or a token missing read:project scope). A token was supplied, so this is a configuration problem -- fix or rotate PROJECT_AUTOMATION_PAT (see AG-GH-008 enforcement notes).")
+            errors+=("Project-board lookup failed: the GraphQL response contained an error (commonly an invalid/expired token or a token missing read:project scope). A token was supplied, so this is a configuration problem -- fix or rotate PROJECT_AUTOMATION_PAT (see AG-GH-025).")
         elif [ -z "$project_item_count" ]; then
             warnings+=("Could not parse project-board membership response -- not failing the check on an infrastructure issue, but this should be investigated.")
         elif [ "$project_item_count" -eq 0 ]; then
-            errors+=("Not on project board #$project_number ($project_owner). Add it with: gh project item-add $project_number --owner $project_owner --url <pr-url> (see AG-GH-008).")
+            errors+=("Not on project board #$project_number ($project_owner). Add it with: gh project item-add $project_number --owner $project_owner --url <pr-url> (see AG-GH-023).")
         fi
     fi
     rm -f "$response_file"
@@ -175,7 +174,7 @@ if [ "${#errors[@]}" -eq 0 ]; then
     exit 0
 fi
 
-error_message="PR tracking metadata check failed (AG-GH-008):"
+error_message="PR tracking metadata check failed (AG-GH-023/024/025):"
 for e in "${errors[@]}"; do
     error_message="$error_message"$'\n'"  - $e"
 done
