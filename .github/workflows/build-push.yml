@@ -868,11 +868,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
-        # Always resolve through the digest-pinned, smoke-tested selector -- never fall back
-        # to a bare :latest tag here. This job exists so ShellCheck/ActionLint still run when
-        # self-hosted runners are down; it should not trade the self-hosted job's verified
-        # image for an unpinned, unverified one. BUILD_TOOLS_REQUIRE_PUBLISHED=true matches
-        # validate-compose's own resolution (no local-build fallback for a lint-only job).
+        # What: Always resolves through the digest-pinned, smoke-tested selector, never a bare :latest tag.
+        # Why: This job exists so linting still runs when self-hosted runners are down; it must not trade
+        # the self-hosted job's verified image for an unpinned one.
+        # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
@@ -882,33 +881,32 @@ jobs:
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
 
-      # Same composite action as the self-hosted shellcheck job above -- see
-      # .github/actions/shellcheck-and-standing-guards for the full rationale on every
-      # step it runs. This fallback job has no `needs:`/concurrency/permissions of its
-      # own (it must still run when self-hosted runners, and therefore validate-compose,
-      # are unavailable), so BUILD_TOOLS_IMAGE comes from "Select build-tools image"
-      # above instead of a shared job needs-output.
-      # timeout-minutes here, not inside the composite action: a composite-action step
-      # cannot carry timeout-minutes at all (see that action's own comment on its "Run
-      # ShellCheck and ActionLint" step) -- this restores the finer-grained per-step
-      # backstop the original inline step had, in the one place it can actually work.
+      # What: Same composite action as the self-hosted shellcheck job; has no needs:/concurrency/permissions
+      # of its own.
+      # Why: Must still run when self-hosted runners (and validate-compose) are unavailable, so
+      # BUILD_TOOLS_IMAGE comes from "Select build-tools image" above instead of a needs-output.
+      # From: docs/ci-github-hosted-fallback-decision.md
       - uses: ./.github/actions/shellcheck-and-standing-guards
         timeout-minutes: 15
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
 
   validate-compose:
-    # This job is the lightweight project-wide gate. It validates compose/setup
-    # contracts and exports one smoke-tested build-tools image reference for all
-    # downstream jobs, so later jobs do not independently select mutable tags.
+    # What: Lightweight project-wide gate; validates compose/setup contracts and exports one smoke-tested
+    # build-tools image reference for all downstream jobs.
+    # Why: So later jobs do not independently select mutable tags.
+    # From: PR #19
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 30-minute timeout, above the other light script jobs' 15-minute floor, though real runs finish in 20-72s.
-    # Why: select-build-tools-image.sh's resolution step can fall back to a local Docker build of the (large) build-tools image if the published one is unavailable or fails its smoke test, and that fallback build is not represented in the fast-path timing above.
-    # From: Issue #1095 | PR #1532
+    # What: 30-minute timeout, above the other light script jobs' 15-minute floor; real runs finish in 20-72s.
+    # Why: The resolution step can fall back to a local Docker build of the (large) build-tools image, not
+    # represented in the fast-path timing, if the published one fails its smoke test.
+    # From: PR #1218
     timeout-minutes: 30
     # What: Job-level concurrency; cancel-in-progress is pull_request-only, never on push/tag.
-    # Why: validate-compose is the shared `needs:` root that exports the smoke-tested build-tools image and is an unconditional success gate for build/build-arm64, so on push it is the sharpest gate on the channel publish path and must survive to completion (cancelling it in a merge cascade would make the entire build path skip and starve the channel); on a PR every consumer cleanly skips a cancelled result, so reclaiming a superseded run is pure benefit. dns_test/ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/watchdog_cargo_audit keep their own separate cancel-on-push groups since they are not on the publish path, so ci_scope_policy still needs its direct-cancellation tolerance for those specifically (see its own comment).
-    # From: Issue #1095 | PR #1532
+    # Why: This job is an unconditional success gate for build/build-arm64, so on push it is the sharpest
+    # gate on the channel publish path and must survive to completion; on a PR every consumer cleanly skips
+    # a cancelled result, so reclaiming a superseded run is pure benefit.
+    # From: PR #926
     concurrency:
       group: >-
         ${{
@@ -939,9 +937,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Resolve the required published image FIRST. If it's unavailable or fails
-          # smoke checks, this exits before the permissive selector below ever builds
-          # the (large) local fallback image, so there's nothing left to clean up.
+          # What: Resolves the required published image FIRST, before any local-build fallback.
+          # Why: If it's unavailable or fails smoke checks, this exits before the permissive selector below
+          # ever builds the (large) local fallback image, so there's nothing left to clean up.
+          # From: PR #365
           downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
 
           case "$downstream_build_tools_image" in
@@ -953,9 +952,10 @@ jobs:
               ;;
           esac
 
-          # validate-compose runs on the light tier, so it must not trigger the
-          # selector's trusted-ref fallback Docker build. Reuse the already
-          # smoke-tested published digest for this job and for downstream jobs.
+          # What: Reuses the already smoke-tested published digest for this job and downstream jobs.
+          # Why: This job runs on the light tier, so it must not trigger the selector's trusted-ref
+          # fallback Docker build.
+          # From: PR #575
           validation_build_tools_image="$downstream_build_tools_image"
 
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$validation_build_tools_image" >> "$GITHUB_ENV"
@@ -1008,13 +1008,10 @@ jobs:
           fi
 
           # What: Validates the state-root migration contract: one LANCACHE_STATE_DIR plus optional legacy
-          # per-service override keys, preserved only for real legacy/custom paths, and a bare /srv/lancache
-          # directory alone never counts as active legacy state.
-          # Why: CACHE_DIR_STANDARD/CACHE_DIR_SSL are deliberately excluded and unconditionally removed instead,
-          # since keeping them "preservable" would recreate the exact cache-path split-brain this migration
-          # to a single shared CACHE_DIR exists to eliminate; the bare-directory exclusion is why
+          # per-service override keys, preserved only for real legacy/custom paths.
+          # Why: A bare /srv/lancache directory alone must never count as active legacy state, which is why
           # legacy_state_root_or_default() below only selects the legacy root when known child state exists.
-          # From: Issue #1095 | PR #1532
+          # From: PR #447
           for key in PDNS_STANDARD_DIR PDNS_SSL_DIR PDNS_FILTER_STATE_DIR NATS_DATA_DIR NATS_CONF_DIR; do
             grep -F "set_optional_env_path_override_if_needed ${key}" setup.sh >/dev/null \
               || { echo "::error::setup.sh update must preserve ${key} only when legacy/custom state would otherwise move away from the one-root contract."; exit 1; }
@@ -1038,6 +1035,7 @@ jobs:
             || { echo "::error::setup.sh update must normalize install_dir before cd so deploy/prod backups are path-stable."; exit 1; }
           # What: Snapshot repo-root inputs reached via ../../ and remap on restore.
           # Why: Manual deploy/prod rollback must preserve arbitrary install paths.
+          # From: PR #447
           grep -F 'deploy_prod_repo_input_paths()' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must snapshot repo-root runtime inputs reached via ../../ paths."; exit 1; }
           grep -F 'config/prod' setup.sh >/dev/null \
@@ -1085,7 +1083,7 @@ jobs:
         env:
           # What: CACHE_DIR_STANDARD/CACHE_DIR_SSL omitted (no compose file reads them).
           # Why: SSL/STANDARD_CACHE_MAX_GB stay for deploys without setup.sh update yet.
-          # From: Issue #1095 | PR #1532
+          # From: PR #446
           CACHE_INACTIVE: 365d
           CACHE_MAX_SIZE: 10g
           CACHE_MEM_MB: "256"
