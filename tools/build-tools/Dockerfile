@@ -364,18 +364,12 @@ RUN set -euo pipefail; \
     # From: Issue #1570 | PR #1571
     apt-get dist-upgrade -y; \
     apt-get full-upgrade -y; \
-    # What: force-upgrades linux-libc-dev, jq, and libjq1 explicitly,
-    # beyond the generic dist-upgrade/full-upgrade above.
-    # Why: linux-libc-dev is pulled in by the toolchain layer and can lag
-    # behind the base image even after a generic upgrade, failing Trivy on
-    # stale headers. jq/libjq1 are installed by an earlier, non-cache-busted
-    # RUN step above, so once that layer is cached it never re-resolves
-    # against a newer mirror on its own (confirmed live: CVE-2026-32316,
-    # fixed in trixie-security's 1.7.1-6+deb13u3); naming both here forces
-    # this build to pick up a mid-week fix immediately rather than waiting
-    # for the next weekly rotation.
+    # What: force-upgrades linux-libc-dev, jq, libjq1, libpq-dev, and libpq5 explicitly, beyond dist-upgrade/full-upgrade above.
+    # Why: each arrives transitively via an earlier, non-cache-busted apt-get
+    #   install, so a cached layer never re-resolves on its own; confirmed live
+    #   for CVE-2026-32316 (jq/libjq1) and CVE-2026-6473 (libpq-dev/libpq5).
     # From: Issue #1570 | PR #1571
-    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1; \
+    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     # What: chowns the download temp dir to _apt:root before `apt-get
