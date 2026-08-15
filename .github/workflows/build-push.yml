@@ -143,9 +143,10 @@ jobs:
             fi
           fi
 
-  # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote.
-  # Why: `cancel-in-progress` on an already-running job starves the channel, so this is a start-gate-only
-  # self-skip for a push already provably superseded.
+  # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote; carries
+  # no `if:`/`needs:` of its own, so its output can never resolve to skipped, only success/failure/cancelled.
+  # Why: `cancel-in-progress` on an already-running job starves the channel; an implicit-success() check that
+  # treats a skipped dependency as passing was issue #532's own root cause, so this must never be skippable.
   # From: PR #1334
   push-supersession-check:
     name: check for a newer push already superseding this one
@@ -597,8 +598,8 @@ jobs:
   line-endings:
     # What: Checks Unix line-endings; also runs governance guardrails and the CHANGELOG.md direct-edit
     # warning, relocated here so they run on every PR regardless of diff scope.
-    # Why: DO NOT RENAME this job -- `name: line endings` is the required-status-check string in branch
-    # protection; the same caution applies if `full-setup-validate` is ever decomposed.
+    # Why: DO NOT RENAME -- `name: line endings` is the required-status-check string in branch protection;
+    # renaming it silently creates a new, never-satisfied check while the old name stays expected forever.
     # From: PR #602
     name: line endings
     needs: validate-compose
