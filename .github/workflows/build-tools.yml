@@ -259,7 +259,7 @@ jobs:
       # Why: a fixed shared directory let two concurrent runs on the same runner host race on
       # Trivy's single-writer BoltDB cache backend; an unmanaged per-PR/per-dispatch directory
       # would otherwise accumulate without bound as PRs/dispatches accrue.
-      # From: Issue #912 | PR #925
+      # From: Issue #912 | PR #927
       - name: Prepare candidate Trivy cache
         id: trivy-cache
         run: |
