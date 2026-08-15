@@ -4,16 +4,18 @@
 # What: single source for the reserve-lock/start-stack step shared by every
 # full-setup validation caller; writes VALIDATION_*/COMPOSE_PROJECT_NAME/
 # VALIDATION_UI_PORT/VALIDATION_LOCK_HOLDER_PID to $GITHUB_ENV.
-# Why: the callers' copies of this step had silently drifted before extraction;
-# the caller MUST NOT also set any of those keys as job-level `env:` -- a
-# job-level entry is re-applied on top of every step's $GITHUB_ENV state and
-# would silently override this action's per-attempt writes, reintroducing a
-# concurrent-run collision on the compose-project name / host UI port.
+# Why: the callers' copies of this step had silently drifted before extraction.
 # From: Issue #1014 | PR #1112
 name: Reserve validation subnet and start the stack
 description: >-
   Reserve a host-locked, collision-checked /27 validation subnet and start the
   full-setup validation stack inside it, retrying on a genuine subnet collision.
+  Writes VALIDATION_*/COMPOSE_PROJECT_NAME/VALIDATION_UI_PORT/
+  VALIDATION_LOCK_HOLDER_PID to $GITHUB_ENV; callers must not also set any of
+  those keys as job-level `env:` -- a job-level entry is re-applied on top of
+  every step's $GITHUB_ENV state and would silently override this action's
+  per-attempt writes, reintroducing a concurrent-run collision on the
+  compose-project name or host UI port.
 
 inputs:
   image-tag:
@@ -125,20 +127,14 @@ runs:
           candidate_pid="$(printf '%s\n' "$reservation" | sed -n 's/^holder_pid=//p')"
 
           # What: re-derives the full VALIDATION_* set from THIS attempt's own slot every loop.
-          # Why: a value derived only once, from attempt 1, would stay wrong on any retry --
-          # both for this attempt's own leftover-vs-foreign network conflict check below, and
-          # for a genuinely concurrent run that loses the lock race and retries onto a
-          # different slot while still sharing the original project name/UI port.
+          # Why: a value derived only once, from attempt 1, would stay wrong on a retry
+          # that loses the lock race and lands on a different slot.
           # From: PR #1112
           validation_subnet_export_env "$slot"
 
-          # What: writes this attempt's identifiers to $GITHUB_ENV on every loop pass, not
-          # only once after the retry loop succeeds.
-          # Why: a non-retryable `docker compose up` failure exits this step before reaching
-          # a post-loop write, which used to leave COMPOSE_PROJECT_NAME unset for the
-          # always()-teardown step and strand that attempt's network for a later run reusing
-          # the same slot; $GITHUB_ENV keeps only the last value per key, so this is a no-op
-          # on the successful path.
+          # What: writes this attempt's identifiers on every loop pass, not just after success.
+          # Why: a non-retryable `docker compose up` failure used to leave COMPOSE_PROJECT_NAME
+          # unset for the always()-teardown step, stranding that attempt's network.
           # From: Issue #932 | PR #933
           {
             echo "COMPOSE_PROJECT_NAME=$COMPOSE_PROJECT_NAME"

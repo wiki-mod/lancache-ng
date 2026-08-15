@@ -24,10 +24,9 @@ runs:
   steps:
     - name: Fetch current PR title live
       # What: fetches the PR title via `gh pr view` instead of using the event payload.
-      # Why: github.event.pull_request.title is a snapshot from when the triggering
-      # event fired and goes stale on a title-only edit (no new commit re-triggers this
-      # workflow); `github.token` is used because a composite action cannot resolve
-      # `secrets.*` directly and it is functionally equivalent for this read-only call.
+      # Why: the event payload is a snapshot from trigger time and goes stale on a
+      # title-only edit; `github.token` covers this read-only call since a composite
+      # action cannot resolve `secrets.*` directly.
       # From: PR #1467
       id: live-title
       shell: bash

@@ -69,10 +69,9 @@ runs:
         set -euo pipefail
 
         # What: raises the open-file ulimit and runs with an init process as container PID 1.
-        # Why: `--init` (tini) reaps the lock-holder subprocess tests/bats/reserve_validation_subnet.bats
-        # spawns and kills; without a PID-1 reaper it becomes a permanent zombie that a plain
-        # `kill -0` still reports as alive -- confirmed live on the runner host (10/10 reproductions
-        # failed without `--init`, 0/10 failed with it), not a bats-internal count/pipe race.
+        # Why: `--init` (tini) reaps the lock-holder subprocess
+        # tests/bats/reserve_validation_subnet.bats spawns and kills; without a
+        # PID-1 reaper it becomes a permanent zombie that `kill -0` still reports as alive.
         # From: Issue #1522 | PR #1523
         docker run --rm --init \
           --user "$(id -u):$(id -g)" \

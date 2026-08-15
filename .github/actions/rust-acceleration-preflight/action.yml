@@ -76,9 +76,8 @@ runs:
         fi
 
         # What: pulls and runs the tools image outside BuildKit, via the shared retry wrapper.
-        # Why: a BuildKit cache layer could mask an acceleration-infrastructure failure; the
-        # pull itself is a real ghcr.io call this preflight repeats per matrix leg (up to 14x
-        # per run) and has hit transient 401s live -- optional credentials only add relogin.
+        # Why: a BuildKit cache layer could mask an acceleration-infrastructure failure, and
+        # this repeats per matrix leg -- optional credentials only add a relogin.
         # From: Issue #822 | PR #833
         # shellcheck source=scripts/lib/ghcr-retry.sh
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -297,11 +296,9 @@ runs:
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
-              # What: checks for a real host token after distcc-pump's own leading
+              # What: checks for a real host token after distcc-pump's leading
               # "--randomize" option, not just a non-empty DISTCC_HOSTS.
-              # Why: distcc-pump exports that option token even when its lsdistcc
-              # probe found zero live hosts, so a plain non-empty-string test can't
-              # tell "published real hosts" apart from "published nothing."
+              # Why: distcc-pump exports that option token even with zero live hosts found.
               # From: PR #613
               distcc_pump_published_hosts() {
                 for distcc_host_token in $1; do
@@ -343,11 +340,9 @@ runs:
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
-                # What: uses distcc_hosts_without_pump (computed before any pump handling), not
-                # the pump-published host list, for this post-shutdown probe.
+                # What: uses distcc_hosts_without_pump, not the pump-published host list.
                 # Why: the pump list's ",cpp"/",lzo" suffix only means anything to a running
-                # include server; reusing it here made a successful pump resolution trigger
-                # "INCLUDE_SERVER_PORT not set" on this probe instead of proving plain distcc.
+                # include server, which this post-shutdown probe no longer has.
                 # From: PR #613
                 final_distcc_hosts="$distcc_hosts_without_pump"
                 if [ -z "$final_distcc_hosts" ]; then

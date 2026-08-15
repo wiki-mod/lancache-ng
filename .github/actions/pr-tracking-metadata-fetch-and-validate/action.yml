@@ -23,10 +23,9 @@ runs:
   steps:
     - name: Fetch current labels/milestone live
       # What: fetches labels/milestone via `gh pr view` instead of using the event payload.
-      # Why: github.event.pull_request.labels/.milestone is a snapshot from when the
-      # triggering event fired and goes stale (confirmed live: a PR with real labels and
-      # a milestone was reported as having neither); `github.token` covers this read-only
-      # call since a composite action cannot resolve `secrets.*` directly.
+      # Why: the event payload is a snapshot from trigger time and goes stale;
+      # `github.token` covers this read-only call since a composite action
+      # cannot resolve `secrets.*` directly.
       # From: PR #1467
       id: live-metadata
       shell: bash
@@ -53,9 +52,8 @@ runs:
         GH_TOKEN: ${{ inputs.project-automation-pat }}
         # What: tells check-pr-tracking-metadata.sh whether this run is from a fork PR.
         # Why: GitHub never passes repository secrets to fork pull_request runs, so
-        # GH_TOKEN above is empty there regardless of PROJECT_AUTOMATION_PAT configuration;
-        # the script needs this flag to warn with the right explanation instead of implying
-        # the secret is simply unconfigured.
+        # GH_TOKEN is empty there regardless of PROJECT_AUTOMATION_PAT configuration;
+        # the script needs this flag to give the right explanation for that.
         # From: PR #1467
         PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}

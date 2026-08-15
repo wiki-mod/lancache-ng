@@ -14,11 +14,8 @@ runs:
   using: composite
   steps:
     # What: wraps actionlint in an in-container `timeout --kill-after=30 300`.
-    # Why: actionlint's embedded shellcheck integration can hang indefinitely in a
-    # Go-runtime deadlock; a composite-action step cannot declare `timeout-minutes`
-    # (GitHub's schema validator rejects it), so this inner kill boundary is the
-    # only hang-protection here -- the calling job's own `timeout-minutes: 15`
-    # only reaches the `docker run` client, not a deadlocked process inside it.
+    # Why: actionlint's embedded shellcheck integration can hang in a Go-runtime
+    # deadlock, and a composite-action step cannot declare `timeout-minutes`.
     # From: PR #1383
     - name: Run ShellCheck and ActionLint
       shell: bash
@@ -85,8 +82,7 @@ runs:
       # What: scans every workflow/composite-action file and .githooks/ hook for a bare-path
       # script invocation and asserts each such file is committed with mode 100755.
       # Why: a script committed 100644 but invoked by bare path fails in CI with exit 126, a
-      # defect invisible from a Windows/core.filemode=false author host (AG-VAL-024) that had
-      # recurred with only one hardcoded `test -x` guarding a single file.
+      # defect invisible from a Windows/core.filemode=false author host (AG-VAL-024).
       # From: Issue #1019 | PR #1021
       shell: bash
       run: |
@@ -117,9 +113,8 @@ runs:
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
       # What: scans scripts/**, tools/**, services/**, and setup.sh for a live producer
       # piped into an early-exiting consumer (`grep -q`, `head`, ...) under `set -o pipefail`.
-      # Why: exactly this shape failed tools/build-tools/Dockerfile's musl/host verification
-      # with exit 141 -- the consumer matched and exited, closing the pipe while the still-
-      # writing producer received SIGPIPE, which pipefail then reported as the failure.
+      # Why: the consumer exiting early closes the pipe while the producer is still
+      # writing, so the producer's SIGPIPE gets reported as a pipefail failure.
       # From: Issue #815 | PR #1374
       shell: bash
       run: |
@@ -133,10 +128,9 @@ runs:
 
     - name: Check pipefail guard's own scope coverage
       # What: verifies the pipefail-early-exit bats fixture covers every path prefix
-      # check-pipefail-early-exit-grep.sh's own scan_files scans, and that scan_files has
+      # check-pipefail-early-exit-grep.sh's scan_files scans, and that scan_files has
       # not narrowed below this project's pinned required minimum.
-      # Why: an earlier scan_files narrower than its own documented scope survived
-      # undetected in services/dns/entrypoint.sh because no fixture proved the gap.
+      # Why: a scan_files narrower than its documented scope can hide a real gap.
       # From: PR #1500
       shell: bash
       run: |
