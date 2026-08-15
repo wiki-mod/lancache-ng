@@ -32,9 +32,9 @@
 # bleiben").
 #
 # MAX_RUN_BLOCK_BYTES adds a third, independent dimension (issue #1535,
-# 2026-08-13): a single oversized `run:` block can hang actionlint's embedded
-# shellcheck even while the whole file sits comfortably under the two limits
-# above -- confirmed live via real bisection: build-push.yml's single largest
+# 2026-08-13): a single oversized `run:` block can hang the shellcheck engine
+# actionlint embeds, even while the whole file sits comfortably under the two
+# limits above -- confirmed live via real bisection: build-push.yml's single largest
 # `run:` block (1016 lines) passed at 74695 bytes but hung indefinitely
 # (requiring a hard kill) once padded past a threshold pinned down to a
 # 25-byte window between 75440 bytes (confirmed clean, 8/8 real runs) and
