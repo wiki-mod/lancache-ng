@@ -102,7 +102,6 @@ jobs:
           required_paths=(
             "scripts/gc-pr-staging-images.sh"
             "scripts/lib/ghcr-retry.sh"
-            "scripts/lib/gc-pr-staging-images.sh"
           )
           missing=()
           for path in "${required_paths[@]}"; do
@@ -118,17 +117,16 @@ jobs:
             echo "scripts-present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: sparse checkout of only the three script paths this job runs.
-      # Why: the reap logic lives in real script files now, not inline YAML;
-      # sparse-checkout keeps this light-tier job's checkout minimal.
-      # From: PR #1443
+      # What: sparse checkout of only the two script paths this job runs.
+      # Why: a narrow checkout keeps this light-tier job's clone minimal.
+      # From: Issue #1557 | PR #1559
       #
       # What: `ref:` is pinned to the default branch, not left to default.
       # Why: `github.ref` for a closed-unmerged PR is a ref GitHub drops;
       # pinning also ensures this GHCR_PACKAGE_DELETE_PAT-wielding script
       # only ever runs the reviewed, merged version, never a PR-edited one.
       # From: PR #1443
-      - name: Checkout gc-pr-staging-images.sh and its lib
+      - name: Checkout gc-pr-staging-images.sh and its ghcr-retry.sh dependency
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -136,7 +134,6 @@ jobs:
           sparse-checkout: |
             scripts/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
-            scripts/lib/gc-pr-staging-images.sh
           sparse-checkout-cone-mode: false
 
       - name: Reap staging tags and orphaned versions
