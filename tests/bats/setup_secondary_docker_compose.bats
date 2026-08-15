@@ -16,7 +16,7 @@
 # heredoc body and the checked-in reference ever diverge again, regardless
 # of which specific field drifts.
 #
-# register_secondary JSON-body coverage guards against issue #1558:
+# register_secondary JSON-body coverage guards against a real JSON-injection bug:
 # cmd_secondary()'s "Registering secondary" step builds its JSON body via
 # printf, so a literal '"' or '\' in $token/$name/$listen_ip previously
 # corrupted the body's JSON structure before it ever reached curl -- the

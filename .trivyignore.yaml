@@ -43,7 +43,7 @@ vulnerabilities:
       affected/action_statement shape used for entries genuinely awaiting an
       upstream fix).
 
-      DISACK follow-up, live re-verified 2026-08-14 (PR #1548 review, this
+      DISACK follow-up, live re-verified 2026-08-14 (this
       entry's own `expired_at` was 2026-11-15, well past the file's 14-day
       convention -- maintainer DISACK, "i never agreed such a long termin
       date"): re-checked at the exact pinned tags this project actually
@@ -154,8 +154,8 @@ vulnerabilities:
       installed package (see below); whether that reflects a genuinely
       unfixed condition or a Debian-tracker/Trivy-DB mapping gap on a
       package that is nominally at curl's own stated fixed version is NOT
-      resolved by this review -- issue #1304's own 2026-07-31 comment
-      already raised exactly this question ("could be Trivy's vulnerability
+      resolved by this review -- a 2026-07-31 comment on this same tracked
+      issue already raised exactly this question ("could be Trivy's vulnerability
       DB... not yet having the fixed-at-8.21.0 mapping recorded") and it
       remains open. CVE-2026-12064 itself is an SSH host-verification
       bypass triggered by schemeless URLs used with SFTP/SCP.
@@ -230,8 +230,8 @@ vulnerabilities:
       been reclassified to MEDIUM, see CVE-2026-8932 below); if
       trixie/backports/sid has shipped a fix for this CVE ID by then, drop
       this entry; if not, revisit (extend, or investigate a narrower `curl`
-      footprint for `tools/build-tools`). See issue #1304 for the complete
-      historical Trivy evidence per image and the maintainer's original
+      footprint for `tools/build-tools`). See this entry's linked issue (From:
+      below) for the complete historical Trivy evidence per image and the maintainer's original
       recorded decision, and this checkpoint's own real-execution findings
       above.
 

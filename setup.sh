@@ -495,10 +495,10 @@ run_kea_dhcp_activation_preflight() {
     # Anchors at the start of the line (after stripping nmap's leading |/_
     # prefixes and whitespace) instead of a bare substring match, and takes
     # the first match rather than assuming there is exactly one.
-    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit) -- both sed stages here already lack an explicit q/Q and read
-    # to EOF regardless, but converting keeps this consistent with the rest
-    # of the fix and needs no further reasoning about $output's size.
+    # Here-string, not a live pipe -- both sed stages here already lack an
+    # explicit q/Q and read to EOF regardless, but converting keeps this
+    # consistent with the rest of the fix and needs no further reasoning
+    # about $output's size.
     server_identifier="$(sed -n '1p' <<<"$(sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' <<<"$output")")"
 
     if [[ -n "$server_identifier" ]]; then
@@ -2029,7 +2029,7 @@ assert_resolved_image_tag_platform_supported() {
         || { die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."; return 1; }
 
     # Here-string, not a live pipe into grep -q -- $discovered_platforms can
-    # list several platforms (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    # list several platforms.
     grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
 }
@@ -3378,8 +3378,7 @@ compose_project_name() {
         # sed's own matches captured into a variable first, then `head -1`
         # reads them via a here-string instead of a live pipe from sed --
         # avoids a SIGPIPE if the compose file ever has more than one
-        # unindented top-level `name:` key (issue #1377's repo-wide
-        # pipefail/SIGPIPE audit).
+        # unindented top-level `name:` key.
         local compose_name_lines
         compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml")
         name=$(head -1 <<<"$compose_name_lines")
@@ -3755,9 +3754,8 @@ cmd_restore() {
     # `-print -quit` makes find itself stop after the first match instead of
     # relying on `head -1` to force an early pipe close, which could
     # otherwise SIGPIPE find if a backup archive's layout ever nests more
-    # than one `rootfs` directory (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit -- this is a real, restore-path-critical script, so this is
-    # fixed rather than merely marked safe).
+    # than one `rootfs` directory -- fixed rather than merely marked safe,
+    # since this is a real, restore-path-critical script.
     root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs -print -quit)
     [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
     backup_dir=$(dirname "$root")
@@ -4990,8 +4988,7 @@ lancache_read_ui_settings_override() {
     docker volume inspect "$volume" >/dev/null 2>&1 || return 0
     raw=$(docker run --rm -v "${volume}:/volume:ro" alpine \
         sh -c 'cat /volume/lancache-ui-settings.env 2>/dev/null') 2>/dev/null || return 0
-    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit).
+    # Here-string, not a live pipe.
     sed -n "s/^${key}=//p" <<<"$raw" | tail -1
 }
 
@@ -5741,8 +5738,7 @@ kea_ctrl_post() {
     # Here-strings feed grep, and grep's own matches (Kea's JSON response can
     # be a batched array with more than one "result"/"text" key) are
     # captured into variables before `head -1` reads them -- avoids a live
-    # `grep | head -1` pipe that could SIGPIPE grep (issue #1377's
-    # repo-wide pipefail/SIGPIPE audit).
+    # `grep | head -1` pipe that could SIGPIPE grep.
     result_code_lines=$(grep -oP '"result"\s*:\s*\K-?[0-9]+' <<<"$response")
     result_code=$(head -1 <<<"$result_code_lines")
     result_text_lines=$(grep -oP '"text"\s*:\s*"\K[^"]*' <<<"$response")
@@ -5898,8 +5894,7 @@ dns_zone_snapshot_entries() {
     zone_escaped="${zone//./\\.}"
     # grep's own matches captured into a variable first, then `head -1`
     # reads them via a here-string -- avoids a live `grep | head -1` pipe
-    # that could SIGPIPE grep if $body ever repeats the zone key (issue
-    # #1377's repo-wide pipefail/SIGPIPE audit).
+    # that could SIGPIPE grep if $body ever repeats the zone key.
     zone_array_matches=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]")
     zone_array=$(head -1 <<<"$zone_array_matches")
     [[ -n "$zone_array" ]] || return 0
@@ -6665,7 +6660,7 @@ services:
       # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
       # so this check does not depend on NATS reconciliation and has the
       # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line (issue #1377)
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line
       interval: 30s
       timeout: 5s
       retries: 3
