@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: read-only GHCR retention audit -- inventories first-party package
-# versions, ranks legacy ordinary roots from Git history, and reports
-# protection reasons.
-# Why: never issues a DELETE call; roots beyond the accepted budget are
-# labeled would-delete with a real build date, dry-run only.
+# What: read-only GHCR retention audit -- inventories package versions,
+# ranks legacy ordinary roots from Git history, reports protection reasons.
+# Why: never issues a DELETE call; over-budget roots are labeled
+# would-delete with a real build date, dry-run only.
 # From: Issue #1095 | PR #1501.
 set -euo pipefail
 
@@ -73,6 +72,10 @@ else
 fi
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-sha-retention-audit.XXXXXX")"
+# What: removes work_dir on exit, guarded by an own-prefix path check.
+# Why: the guard keeps this rm -rf from ever touching anything but this
+# script's own mktemp path, even if work_dir were somehow reassigned.
+# From: Issue #1095 | PR #1501.
 cleanup() {
   if [[ -n "${work_dir:-}" && -d "$work_dir" && "$work_dir" == */lancache-ng-sha-retention-audit.* ]]; then
     rm -rf -- "$work_dir"
@@ -129,6 +132,11 @@ while IFS= read -r history_commit; do
   history_rank["$history_commit"]="$history_position"
 done <"$history_file"
 
+# What: audits one package's versions -- fetches pages, classifies each
+# version protect/would-delete, and prints AUDIT + SUMMARY report lines.
+# Why: the single per-package entry point; everything else in this file
+# only sets up its inputs (manifest, history, credentials) or loops over it.
+# From: Issue #1095 | PR #1501.
 audit_package() {
   local class="${1:?audit_package: class is required}"
   local package="${2:?audit_package: package is required}"
@@ -217,13 +225,10 @@ audit_package() {
   local version_fields created_at_raw
   while IFS= read -r version_json; do
     [[ -n "$version_json" ]] || continue
-    # What: extracts id/digest/tags/created_at via one combined jq call,
-    # "|"-joined rather than jq's @tsv.
-    # Why: one call instead of four avoided the per-version subprocess cost
-    # that caused run 31774741729 to time out; "|" is used because bash's
-    # `read` treats a literal tab as IFS whitespace regardless of the IFS
-    # setting, silently collapsing an empty middle field that @tsv would
-    # produce for an untagged version.
+    # What: extracts id/digest/tags/created_at via one combined jq call.
+    # Why: one call instead of four avoids the per-version subprocess cost;
+    # "|"-joined (not @tsv) since bash `read` treats a literal tab as IFS
+    # whitespace, silently collapsing an empty middle field.
     # From: Issue #1095 | PR #1501.
     if version_fields="$(jq -r '[.id, .name, (.metadata.container.tags | join(",")), (.created_at // "")] | join("|")' <<<"$version_json")"; then
       :
@@ -280,11 +285,10 @@ audit_package() {
       continue
     fi
     if (( root_count == 0 )); then
-      # What: classifies a rootless version by its specific channel/release
-      # when possible, skipping the scan entirely when it has no extra tag.
-      # Why: no sha-<commit> alias means no git-history root to rank by, so
-      # it always stays protect regardless of tags; the other_count==0 skip
-      # avoids a no-op scan for the common untagged-attestation case.
+      # What: classifies a rootless version by its specific channel/release,
+      # skipping the scan when it has no extra tag.
+      # Why: no sha-<commit> alias means no history root to rank by, so it
+      # always stays protect; the other_count==0 skip avoids a no-op scan.
       # From: Issue #1095 | PR #1501.
       if (( other_count > 0 )); then
         reason="$(sra_extra_tag_protect_reason "$tags" "$supported_releases" "non-ordinary-version")" || {
@@ -302,15 +306,10 @@ audit_package() {
       continue
     fi
     if (( other_count > 0 )); then
-      # What: classifies a root tag's extra tags; protects only when a
-      # specific channel/release actually matches, else falls through to
-      # ordinary root-candidate ranking below.
-      # Why: the promote job retags an existing digest rather than
-      # rebuilding (build-push.yml's `docker buildx imagetools create
-      # --prefer-index=false`), so a currently active channel/release always
-      # lands on its originating sha-<commit> version object; an
-      # unrecognized extra tag (rc/staging, or a release past
-      # minimum_stable_releases) must not blanket-protect.
+      # What: classifies a root tag's extra tags; protects only on a
+      # specific channel/release match, else falls to root-candidate ranking.
+      # Why: promote retags an existing digest rather than rebuilding, so
+      # only a recognized active channel/release may protect here.
       # From: Issue #1095 | PR #1501.
       other_tags="$(sra_other_tags_from_csv "$tags")" || {
         echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
@@ -384,11 +383,9 @@ audit_package() {
   while IFS=$'\t' read -r rank id digest tags built; do
     [[ -n "$id" ]] || continue
     (( legacy_position += 1 ))
-    # What: reports beyond-budget ordinary roots as dry-run "would-delete",
-    # never actually deleted.
-    # Why: a version already protected by a specific channel/release reason
-    # never reaches this loop; only a plain root or one with an unrecognized
-    # extra tag does, so "acceptance-evidence-unavailable" stays correct here.
+    # What: reports beyond-budget ordinary roots as dry-run "would-delete".
+    # Why: only a plain root or one with an unrecognized extra tag reaches
+    # this loop, so "acceptance-evidence-unavailable" stays correct here.
     # From: Issue #1095 | PR #1501.
     if (( legacy_position <= retention_keep )); then
       budget="within-${retention_keep}"

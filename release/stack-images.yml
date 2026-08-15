@@ -1,15 +1,10 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: release manifest -- first-party runtime/tooling/metadata images with
-# their platforms/source Dockerfiles, external (third-party) images, the
-# mutable/immutable tag channels (per the master->latest/current_dev->
-# nightly branch-channel model, issue #825/#1141/#1254/#1255), and the image
-# retention policy.
-# Why: consumed by the release/promotion CI workflow and validated by
-# scripts/validate-stack-images.sh; full channel/branch model detail lives
-# in docs/release-versioning.md's "Branch/channel model" section, not
-# duplicated here.
+# What: release manifest -- first-party images, external images, tag
+# channels, and the retention policy.
+# Why: consumed by release/promotion CI and validated by
+# scripts/validate-stack-images.sh; full model detail is in docs/release-versioning.md.
 # From: Issue #1095 | PR #1501.
 schema: stack-images/v1
 generated_from: origin/master

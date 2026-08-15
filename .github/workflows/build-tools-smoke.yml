@@ -1,20 +1,10 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: runs the tests/bats and tests/shellspec fixture suites against the
-# already-published build-tools image (pulled via
-# scripts/select-build-tools-image.sh) -- never builds or publishes
-# anything itself.
-# Why: split out of build-tools.yml so a test/script-only change gets full
-# regression coverage without forcing a full multi-arch image rebuild on
-# scarce lancache-heavy capacity; scripts/check-bats-path-filter-coverage.sh
-# targets this file's own path filters as the workflow that actually
-# executes both suites against a real dependency change (issue #1253/#1255,
-# #879). build-tools.yml still runs the same two suites too, but only
-# against the local image it just built on its own now-narrow trigger --
-# that is a smoke test of the freshly built image itself, not a
-# regression gate for test/script changes, so it is not a duplicate of
-# this workflow.
+# What: runs tests/bats + tests/shellspec against the already-published
+# build-tools image; never builds or publishes anything itself.
+# Why: split from build-tools.yml for full regression coverage without a
+# rebuild; build-tools.yml's own run only smokes the image it just built.
 # From: PR #1501.
 name: Build Tools Smoke Tests
 
@@ -73,10 +63,8 @@ on:
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       # What: lists scripts/gc-pr-staging-images.sh.
-      # Why: tests/bats/gc_pr_staging_images.bats sources it directly, and
-      # it is not under scripts/lib/, which is already covered; without
-      # this entry that suite would never run for a change to only this
-      # script (issue #1095).
+      # Why: tests/bats/gc_pr_staging_images.bats sources it directly and it
+      # is not under scripts/lib/, which is already covered above.
       # From: PR #1501.
       - "scripts/gc-pr-staging-images.sh"
       - "scripts/untracked/gc-sha-retention-audit.sh"
@@ -90,45 +78,10 @@ on:
       - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
       - ".github/actions/wait-validation-stack-health/action.yml"
-      # What: lists individual files under services/, not
-      # "services/<name>/**" wildcards.
-      # Why: each service directory also holds a Dockerfile and other
-      # non-bats-relevant assets; scripts/check-bats-path-filter-coverage.sh
-      # (#879) is the source of truth for which files below are real bats
-      # dependencies and keeps this list in sync automatically -- re-run it
-      # after touching this list (issue #1198, #873).
-      # From: PR #1501.
-      #
-      # What: lists check-idempotence-test-coverage.sh,
-      # check-validation-subnet-wrapper-coverage.sh, and
-      # check-bats-path-filter-coverage.sh individually.
-      # Why: each guard's own fixture suite is what proves that specific
-      # guard catches a real regression, not just that it currently passes
-      # against today's tree; without the entry, a PR touching only the
-      # guard script would not match tests/bats/** (#732).
-      # From: PR #1501.
-      #
-      # What: lists build-push.yml, full-setup-validate.yml,
-      # full-setup-deep-validate.yml, and derive-validation-network's
-      # action.yml.
-      # Why: three bats suites assert cross-file content agreement between
-      # these files (healthcheck service lists, validation-image-tag reuse,
-      # reserve-validation-subnet reuse) that shellcheck cannot catch, since
-      # it only validates shell syntax (#879).
-      # From: PR #1501.
-      #
-      # What: lists full-setup-sims.yml and wait-validation-stack-health's
-      # action.yml.
-      # Why: issue #1112 moved shared full-setup jobs into this reusable
-      # workflow/composite action without updating this filter, so two bats
-      # suites failed deterministically against current_dev until issue
-      # #1171 fixed both the tests and this list together.
-      # From: PR #1501.
-      #
-      # What: lists tools/runner-host/lancache-ci-docker-daemon-config.sh.
-      # Why: its own fixture suite sources this script directly; without
-      # the entry, a PR touching only this script would not match any
-      # other path above (issue #1255).
+      # What: lists services/ files individually (not wildcards) plus several
+      # guard/workflow files (coverage guards, build-push.yml,
+      # full-setup-sims.yml, docker-daemon-config.sh).
+      # Why: each has its own bats dependency not covered by a wildcard match.
       # From: PR #1501.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
       - "services/dns/cdn-domains.txt"
@@ -161,9 +114,8 @@ on:
       - "services/watchdog/retention.sh"
       # What: lists services/proxy/public_suffix_list.dat.
       # Why: tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file, so a PSL
-      # update without this entry would not trigger the suite that
-      # validates against it.
+      # PUBLIC_SUFFIX_LIST_FILE at this vendored file; a PSL update needs
+      # this entry to trigger that suite.
       # From: PR #1501.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
@@ -241,10 +193,8 @@ on:
       - "scripts/setup-cli-simulation.sh"
       - "scripts/syslog-forwarding-simulation.sh"
       # What: lists scripts/gc-pr-staging-images.sh.
-      # Why: tests/bats/gc_pr_staging_images.bats sources it directly, and
-      # it is not under scripts/lib/, which is already covered; without
-      # this entry that suite would never run for a change to only this
-      # script (issue #1095).
+      # Why: tests/bats/gc_pr_staging_images.bats sources it directly and it
+      # is not under scripts/lib/, which is already covered above.
       # From: PR #1501.
       - "scripts/gc-pr-staging-images.sh"
       - "scripts/untracked/gc-sha-retention-audit.sh"
@@ -258,6 +208,11 @@ on:
       - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
       - ".github/actions/wait-validation-stack-health/action.yml"
+      # What: lists services/ files individually (not wildcards) plus several
+      # guard/workflow files (coverage guards, build-push.yml,
+      # full-setup-sims.yml, docker-daemon-config.sh).
+      # Why: each has its own bats dependency not covered by a wildcard match.
+      # From: PR #1501.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
@@ -289,9 +244,8 @@ on:
       - "services/watchdog/retention.sh"
       # What: lists services/proxy/public_suffix_list.dat.
       # Why: tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this real vendored data file, so a PSL
-      # update without this entry would not trigger the suite that
-      # validates against it.
+      # PUBLIC_SUFFIX_LIST_FILE at this vendored file; a PSL update needs
+      # this entry to trigger that suite.
       # From: PR #1501.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
@@ -316,14 +270,16 @@ on:
       # From: PR #1501.
       - "deploy/full-setup/docker-compose.yml"
 
+# What: grants only read access to repository contents.
+# Why: this job never writes to the repo or registry, so no broader scope
+# is requested (least privilege).
+# From: PR #1501.
 permissions:
   contents: read
 
 # What: cancels a superseded run for the same workflow+ref.
-# Why: unlike build-tools.yml, which must survive to completion once it
-# starts publishing mutable/immutable tags, this cheap read-only job has
-# written nothing shareable yet, so reclaiming its runner slot is pure
-# benefit.
+# Why: unlike build-tools.yml (which must finish once it starts publishing
+# tags), this read-only job has published nothing yet, so canceling is safe.
 # From: PR #1501.
 concurrency:
   group: ${{ format('{0}-{1}', github.workflow, github.ref) }}
@@ -336,11 +292,8 @@ defaults:
 jobs:
   bats-shellspec-smoke:
     # What: runs on the light tier, not heavy.
-    # Why: this job never builds an image -- it pulls an already-published,
-    # already-smoke-tested digest and runs two bats/shellspec suites inside
-    # it, pure shell-script execution with no compilation or BuildKit/Trivy
-    # work, fitting the light tier's contract (AG-CI-002) rather than the
-    # heavy tier's.
+    # Why: pulls an already-built, already-smoke-tested digest and runs two
+    # suites -- pure shell execution, fitting the light tier's contract (AG-CI-002).
     # From: PR #1501.
     name: run bats/shellspec suites against the published build-tools image
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -355,10 +308,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       # What: sets up Docker Buildx for manifest inspection.
-      # Why: select-build-tools-image.sh's published_image_reference()
-      # resolves the channel tag to its immutable digest via `docker buildx
-      # imagetools inspect`, the same requirement as build-push.yml's
-      # validate-compose job.
+      # Why: the image selector resolves a channel tag to its digest via
+      # `docker buildx imagetools inspect`, same as build-push.yml's validate-compose.
       # From: PR #1501.
       - name: Set up Docker Buildx for manifest inspection
         id: buildx

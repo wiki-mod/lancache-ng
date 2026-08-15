@@ -48,6 +48,10 @@ jobs:
       AUDIT_CHECKOUT: ${{ github.workspace }}/f17-sha-retention-audit
 
     steps:
+      # What: guards then removes the dedicated audit checkout path.
+      # Why: the hardcoded expected-path check keeps this rm -rf from ever
+      # running against an unexpected value if AUDIT_CHECKOUT is misconfigured.
+      # From: Issue #1095 | PR #1501.
       - name: Prepare dedicated audit checkout directory
         run: |
           set -euo pipefail
@@ -58,6 +62,11 @@ jobs:
           fi
           rm -rf -- "$AUDIT_CHECKOUT"
 
+      # What: full-history, credential-less checkout into a dedicated subpath.
+      # Why: sra_resolve_commit_prefix needs the whole Git history to rank
+      # sha-<commit> tags by ancestry; persist-credentials:false keeps this
+      # read-only job's checkout free of any push-capable token.
+      # From: Issue #1095 | PR #1501.
       - name: Checkout full repository history for read-only audit
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,6 +74,11 @@ jobs:
           persist-credentials: false
           path: f17-sha-retention-audit
 
+      # What: confirms checkout identity, current_dev availability, required
+      # files, and no stale skip-worktree entries.
+      # Why: a self-hosted runner can reuse a stale/incomplete working
+      # directory; this catches that before classification trusts it.
+      # From: Issue #1095 | PR #1501.
       - name: Verify isolated checkout identity and completeness
         working-directory: f17-sha-retention-audit
         env:
@@ -95,6 +109,10 @@ jobs:
             exit 1
           fi
 
+      # What: resolves the pinned build-tools image via the shared selector.
+      # Why: GHCR_RETRY_USERNAME/PASSWORD authenticate the pull against
+      # GHCR's much lower anonymous rate limit under concurrent CI load.
+      # From: Issue #1095 | PR #1501.
       - name: Select immutable build-tools image
         id: build_tools
         working-directory: f17-sha-retention-audit
@@ -112,6 +130,11 @@ jobs:
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
 
+      # What: runs syntax/lint/unit checks for the audit scripts inside the
+      # pinned build-tools container, never on the runner host directly.
+      # Why: AG-VAL-016 requires verification through build-tools since host
+      # tools are not guaranteed present or current.
+      # From: Issue #1095 | PR #1501.
       - name: Validate audit implementation in build-tools
         working-directory: f17-sha-retention-audit
         env:
@@ -133,11 +156,8 @@ jobs:
               bash scripts/check-workflow-line-limit.sh
             '
 
-      # What: computes the cache directory path here and exports it via
-      # GITHUB_ENV for every later step, including the cache actions' with:
-      # blocks.
-      # Why: runner.temp is valid only in step-level context, not in a
-      # job-level env: block.
+      # What: exports the runner.temp cache dir via GITHUB_ENV for later steps.
+      # Why: runner.temp is valid only in step context, not a job-level env: block.
       # From: Issue #1095 | PR #1501.
       - name: Prepare rate-limit-aware API response cache directory
         env:
@@ -147,11 +167,9 @@ jobs:
           mkdir -p -- "$AUDIT_API_CACHE_DIR"
           echo "AUDIT_API_CACHE_DIR=$AUDIT_API_CACHE_DIR" >> "$GITHUB_ENV"
 
-      # What: restores a rolling GHCR API cache via a unique save key and a
-      # prefix-matched restore key.
-      # Why: lets a re-run shortly after another one reuse recent pages
-      # instead of re-spending shared rate-limit budget; the audit script's
-      # own TTL check still governs whether a restored entry counts as fresh.
+      # What: restores the GHCR API cache via a run-scoped key with prefix fallback.
+      # Why: lets a nearby re-run reuse recent pages instead of spending fresh
+      # rate-limit budget; the script's own TTL check still gates freshness.
       # From: Issue #1095 | PR #1501.
       - name: Restore GHCR API response cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -161,6 +179,11 @@ jobs:
           restore-keys: |
             sha-retention-api-cache-
 
+      # What: runs the real audit script against live GHCR data, read-only
+      # bind mount, with the API response cache mounted read-write.
+      # Why: only a live run against real package data (not bats fixtures)
+      # proves the classifier's ancestry/tag logic against the real registry.
+      # From: Issue #1095 | PR #1501.
       - name: Run live protect-only GHCR audit
         working-directory: f17-sha-retention-audit
         env:
@@ -192,6 +215,10 @@ jobs:
           path: ${{ env.AUDIT_API_CACHE_DIR }}
           key: sha-retention-api-cache-${{ github.run_id }}-${{ github.run_attempt }}
 
+      # What: removes the dedicated checkout path and verifies it is gone.
+      # Why: if: always() so a failed run still frees the runner's disk
+      # instead of accumulating stale checkouts across repeated failures.
+      # From: Issue #1095 | PR #1501.
       - name: Remove dedicated audit checkout directory
         if: always()
         run: |

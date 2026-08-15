@@ -3,9 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: regression coverage for the protect-only SHA retention audit and
 # its read-only GitHub REST helper.
-# Why: each test below carries its own short purpose comment (AG-CODE-010);
-# this file-level pointer covers all of them rather than repeating it once
-# per test.
+# Why: each test carries its own AG-CODE-010 purpose comment; this
+# file-level note covers all of them rather than repeating it per test.
 # From: Issue #1095 | PR #1501.
 
 setup() {
@@ -439,14 +438,11 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# A totally unrecognized extra tag (not nightly/latest/a supported release)
-# must not be mislabeled as one of the specific protected channels. This
-# matters beyond the root_count==0 fallback case: per the maintainer's
-# protected-reference scope clarification (Issue #1501), a root tag carrying
-# only an unrecognized extra tag must NOT be blanket-protected either -- the
-# orchestrator's other_count>0 branch relies on this exact failure to decide
-# whether to fall through into ordinary root-candidate ranking instead of
-# short-circuiting to protect.
+# What: an unrecognized extra tag (not nightly/latest/a supported release)
+# must not be mislabeled as a protected channel.
+# Why: the orchestrator's other_count>0 branch relies on this exact failure
+# to fall through to ordinary root-candidate ranking instead of protecting.
+# From: Issue #1095 | PR #1501.
 @test "protected reference reason fails for an unrecognized tag" {
   run sra_protected_reference_reason "pr-1501-staging" ""
   [ "$status" -ne 0 ]

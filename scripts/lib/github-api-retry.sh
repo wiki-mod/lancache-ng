@@ -1,11 +1,10 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: bounded retry support for authenticated read-only GitHub REST GETs,
-# with an optional TTL file cache in front of the retry loop.
-# Why: separate from the registry retry helper because API GETs have no
-# registry-login recovery step; the token goes to curl over stdin so it
-# never appears in argv or in retry diagnostics.
+# What: bounded retry for authenticated read-only GitHub REST GETs, with an
+# optional TTL file cache in front of the retry loop.
+# Why: separate from the registry helper since API GETs need no login
+# recovery; the token goes to curl via stdin, never argv or diagnostics.
 # From: Issue #1095 | PR #1501.
 
 if [[ -n "${GITHUB_API_RETRY_SH_LOADED:-}" ]]; then

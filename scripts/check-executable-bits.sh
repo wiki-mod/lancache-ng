@@ -1,22 +1,18 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# What: standing guard against a repo script committed with git mode 100644
-# but invoked as a bare path, which fails at runtime with Permission denied
-# (exit 126); parses `run:` shell content only (never YAML data such as
-# `paths:`) for a bare-path script invocation and requires committed git
-# mode 100755, plus every `.githooks/` file unconditionally.
-# Why: invisible from a Windows/core.filemode=false authoring host --
-# `chmod +x` is a no-op there and no local check reveals the committed mode
-# (AG-VAL-024).
+# What: standing guard requiring every bare-path-invoked script (and every
+# .githooks/ file) to be committed as git mode 100755, not 100644.
+# Why: invisible from a Windows/core.filemode=false host -- `chmod +x` is a
+# no-op there and no local check reveals the committed mode (AG-VAL-024).
 # From: Issue #1019 | Issue #1095 | PR #1501.
-#
-# Accepts an optional repo_root argument (defaults to this script's own repo)
-# so tests/bats/check_executable_bits.bats can point it at a fixture git tree
-# instead of depending on the real repository.
 set -euo pipefail
 
+# What: accepts an optional repo_root argument, defaulting to this script's
+# own repo.
+# Why: lets tests/bats/check_executable_bits.bats point this at a fixture
+# git tree instead of the real repository.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}"
 cd "$repo_root"
 
@@ -54,32 +50,25 @@ warn() {
   printf '::warning::%s\n' "$1" >&2
 }
 
-# What: matches a repo script path (optional leading ./) anchored to the
-# four top-level directories this repo keeps executable scripts under, plus
-# `.bats`.
-# Why: repo-root-relative only -- a `../`-relative or `$VAR`-interpolated
-# script path is not resolved (matches how the sibling workflow-parsing
-# guards scope themselves); `.bats` is included because a bats suite
-# executed by bare path (rather than `bats <file>`) needs the bit too.
+# What: matches a repo script path anchored to the four top-level dirs this
+# repo keeps executable scripts under, plus `.bats`.
+# Why: repo-root-relative only; `.bats` is included since a bats suite
+# invoked by bare path also needs the exec bit.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 script_path_re='^(scripts|services|tests|\.githooks)/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*\.(sh|bats)$'
 
-# committed_mode <path>
-# What: prints the git tree mode (e.g. 100644 or 100755) recorded for a
-# tracked path at HEAD, or nothing if untracked.
-# Why: reads the committed tree, not the index or filesystem, so the result
-# is independent of the checkout's core.filemode and reflects exactly what a
-# bare invocation in CI will execute.
+# What: committed_mode() prints the git tree mode for a tracked path at HEAD.
+# Why: reads the committed tree, not the filesystem, independent of the
+# checkout's core.filemode.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 committed_mode() {
   git ls-tree HEAD -- "$1" 2>/dev/null | awk 'NR == 1 {print $1}'
 }
 
-# require_executable <path> <context>
-# What: fails the check if <path> is tracked but not committed as mode
-# 100755.
-# Why: bare-path invocation execs the file directly, so a non-executable
-# committed mode fails at runtime.
+# What: require_executable() fails the check if <path> is tracked but not
+# committed as mode 100755.
+# Why: a bare-path invocation execs the file directly, so a non-executable
+# mode fails at runtime.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 require_executable() {
   local path="$1" context="$2" mode
@@ -98,13 +87,10 @@ require_executable() {
   fi
 }
 
-# command_word_script <shell-segment>
-# What: given one already-split shell command segment, prints the repo
-# script path it executes by bare path, or nothing.
-# Why: strips a leading exec-wrapper/`./`, then only returns the first token
-# if it is itself a script path being run as the command, not a data
-# argument (`cat scripts/x.sh`) or the target of an interpreter/reader
-# (`bash`/`source`/etc, which makes the executable bit irrelevant).
+# What: command_word_script() prints the repo script path a segment
+# executes by bare path.
+# Why: only the first token counts as the command, not a data argument or
+# an interpreter/reader (`bash`/`source`/etc).
 # From: Issue #1019 | Issue #1095 | PR #1501.
 command_word_script() {
   local seg="$1" first candidate
@@ -135,16 +121,10 @@ command_word_script() {
   fi
 }
 
-# split_into_segments <line>
-# What: splits a shell line into command segments at &&, ||, ;, | using
-# plain bash string/glob matching, not a YAML library or PCRE grep.
-# Why: stays a lightweight command-word scanner, not a full Bash parser --
-# the workflow's real shell syntax is validated separately by bash and
-# ShellCheck; a YAML library would add a runtime dependency this project
-# deliberately avoids for its own guards (Rule-Ref: AG-REL-001), and both
-# PCRE grep and a POSIX-awk rewrite are known to misbehave on this
-# project's actual self-hosted runners (see
-# check-idempotence-test-coverage.sh's own header).
+# What: splits a shell line into segments at &&, ||, ;, | (plain bash
+# string matching, not a YAML library or PCRE grep).
+# Why: PCRE grep is known to misbehave on this project's self-hosted
+# runners (see check-idempotence-test-coverage.sh's own header).
 # From: Issue #1019 | Issue #1095 | PR #1501.
 split_into_segments() {
   local s="$1" nl=$'\n'
@@ -160,15 +140,10 @@ split_into_segments() {
   printf '%s\n' "$s"
 }
 
-# inspect_shell_line <logical-shell-line> <context>
-# What: classifies only shell text already extracted from a `run:` scalar,
-# skipping the segment-split/subshell path entirely for a line matching
-# none of script_path_re's four directory prefixes.
-# Why: keeping classification separate from YAML extraction prevents
-# configuration data that merely contains script-looking text from reaching
-# the command scanner; the prefix pre-check avoids an expensive per-segment
-# subshell fork on every line, a real, measured cost on this repo's largest
-# workflow file.
+# What: classifies shell text from a `run:` scalar, skipping segments when
+# no script_path_re prefix appears in the line at all.
+# Why: keeps classification separate from YAML extraction; the prefix
+# pre-check avoids an expensive per-segment subshell fork on every line.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 inspect_shell_line() {
   local shell_line="$1" context="$2" segment found
@@ -189,14 +164,10 @@ inspect_shell_line() {
   done < <(split_into_segments "$shell_line")
 }
 
-# is_block_scalar_header <run-value>
-# What: recognizes the full `|`/`>` block-scalar indicator shape (chomping
-# +/-, indentation 1-9, either order, optional comment).
-# Why: prevents a legitimate `run: >-`/`run: |2-` form from being mistaken
-# for an inline shell command; the block-body loop below still ends a block
-# on `indent > run_key_indent` rather than an explicit indentation
-# indicator's own stated column, an untested (not proven-unsafe) axis since
-# no `run:` value in this repo's real workflow files uses one today.
+# What: is_block_scalar_header() recognizes the `|`/`>` block-scalar
+# indicator shape (chomping +/-, indentation 1-9, either order).
+# Why: prevents `run: >-`/`run: |2-` from being mistaken for inline shell;
+# an explicit indentation-indicator column is untested but unused today.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 is_block_scalar_header() {
   local value="$1"
@@ -204,10 +175,8 @@ is_block_scalar_header() {
     [[ "$value" =~ ^[\|\>][1-9](\+|-)?[[:space:]]*(#.*)?$ ]]
 }
 
-# yaml_run_value <yaml-line>
-# What: prints "<key-indent><TAB><value>" only when the line defines a `run`
-# mapping key (plain, single-quoted, or double-quoted; a leading `- ` marker
-# is stripped), else fails.
+# What: yaml_run_value() prints "<key-indent><TAB><value>" only when the
+# line defines a `run` mapping key, else fails.
 # Why: unrelated YAML values must never be mistaken for shell content.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 yaml_run_value() {
@@ -231,12 +200,10 @@ yaml_run_value() {
   printf '%s\t%s\n' "$key_indent" "$value"
 }
 
-# inspect_run_physical_line <line> <context>
-# What: joins shell physical lines ending in a backslash before
-# classification.
+# What: inspect_run_physical_line() joins shell physical lines ending in a
+# backslash before classification.
 # Why: mirrors the shell's own logical-line behavior, so a multiline
-# `for ... in` word list stays one statement whose command word is `for`,
-# not one fake command per data item.
+# `for ... in` word list stays one statement, not one fake command per item.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 pending_shell_line=""
 inspect_run_physical_line() {
@@ -282,10 +249,9 @@ for file in "${scan_files[@]}"; do
       fi
 
       # What: inspects a dangling continued logical line before clearing it,
-      # then falls through to test whether the current line begins another
-      # `run:` scalar (it belongs to YAML again once the block ends).
-      # Why: this repo's separate shell syntax checks reject malformed Bash,
-      # so a dangling line is inspected rather than silently discarded.
+      # then falls through to test whether the current line starts another `run:`.
+      # Why: separate shell syntax checks reject malformed Bash, so a
+      # dangling line is inspected here rather than silently discarded.
       # From: Issue #1019 | Issue #1095 | PR #1501.
       if [ -n "$pending_shell_line" ]; then
         inspect_shell_line "$pending_shell_line" "in $file"
@@ -294,11 +260,9 @@ for file in "${scan_files[@]}"; do
       in_run_block=0
     fi
 
-    # What: skips the $(yaml_run_value ...) subshell for a raw line with no
-    # `run:` substring.
-    # Why: yaml_run_value() can never match such a line anyway, so this
-    # avoids forking a subshell on every line of the file just to learn
-    # "not a run: line" -- a real, measured cost on a large workflow file.
+    # What: skips the yaml_run_value subshell for a line with no `run:` substring.
+    # Why: yaml_run_value() can never match such a line; this avoids forking
+    # a subshell on every line of a large workflow file.
     # From: Issue #1095 | PR #1501.
     case "$line" in
       *run:*) ;;
@@ -312,11 +276,9 @@ for file in "${scan_files[@]}"; do
         in_run_block=1
         pending_shell_line=""
       elif [ -n "$run_value" ]; then
-        # What: strips one simple outer quote pair from an inline `run:`
-        # value before treating it as shell text.
-        # Why: YAML permits a quoted scalar, and a quoted scalar still
-        # becomes the identical command string when Actions invokes the
-        # shell.
+        # What: strips one outer quote pair from an inline `run:` value.
+        # Why: YAML permits a quoted scalar, which becomes the identical
+        # command string once Actions invokes the shell.
         # From: Issue #1019 | Issue #1095 | PR #1501.
         if [[ "$run_value" == \'*\' && "$run_value" == *\' ]]; then
           run_value="${run_value:1:${#run_value}-2}"
@@ -334,14 +296,10 @@ for file in "${scan_files[@]}"; do
   fi
 done
 
-# What: requires every tracked file under .githooks/ to be executable,
-# regardless of whether any workflow references it.
-# Why: git execs a hook by bare path unconditionally; a non-executable hook
-# is silently skipped or errors. This guard does not separately need to
-# check that a bats suite invokes its script-under-test bare via
-# `run "$script"`: that case is already self-guarding, since CI runs those
-# suites via `bats tests/bats`, where a non-executable script-under-test
-# fails with exit 126 on its own (issue #1019 / #822 Pattern B).
+# What: requires every tracked .githooks/ file to be executable, regardless
+# of whether any workflow references it.
+# Why: git execs a hook by bare path unconditionally; a bats
+# script-under-test is already self-guarded via `bats tests/bats` instead.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 while IFS=$'\t' read -r meta path; do
   [ -n "${path:-}" ] || continue

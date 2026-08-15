@@ -16,12 +16,9 @@ fi
 SHA_RETENTION_AUDIT_LIB_LOADED=1
 
 _sra_read_manifest_positive_integer() {
-  # What: reads exactly one "  <key>: <positive-integer>" top-level-indented
-  # scalar line from the manifest and returns its integer value.
-  # Why: sra_read_retention_keep and sra_read_minimum_stable_releases both
-  # parse the identical two-space-indented top-level-scalar shape, just
-  # under different keys; sharing the exactly-one-match/positive-integer
-  # parsing rule here avoids a second, driftable copy of it (AG-CODE-011).
+  # What: reads one "  <key>: <positive-integer>" line from the manifest.
+  # Why: sra_read_retention_keep and sra_read_minimum_stable_releases share
+  # this exact parsing rule to avoid a driftable second copy (AG-CODE-011).
   # From: Issue #1095 | PR #1501.
   local manifest="${1:?_sra_read_manifest_positive_integer: manifest is required}"
   local key="${2:?_sra_read_manifest_positive_integer: key is required}"
@@ -55,6 +52,11 @@ sra_read_minimum_stable_releases() {
   _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
 
+# What: lists every "class<TAB>name" package under the manifest's
+# runtime/tooling/metadata top-level sections.
+# Why: a top-level-key state machine, since the manifest has no per-package
+# class field of its own to filter on directly.
+# From: Issue #1095 | PR #1501.
 sra_manifest_packages() {
   local manifest="${1:?sra_manifest_packages: manifest is required}"
 
@@ -75,6 +77,11 @@ sra_manifest_packages() {
   ' "$manifest"
 }
 
+# What: validates a fetched GHCR versions page against the exact shape the
+# orchestrator's classification loop below assumes.
+# Why: refusing a malformed page here, before classification runs, avoids
+# misclassifying partial or unexpected data as a real audit result.
+# From: Issue #1095 | PR #1501.
 sra_validate_version_page() {
   local page_file="${1:?sra_validate_version_page: page file is required}"
   command -v jq >/dev/null 2>&1 || return 1
@@ -97,6 +104,11 @@ sra_validate_version_page() {
   ' "$page_file" >/dev/null
 }
 
+# What: classifies one tag as a root sha-<commit>, a per-platform
+# sha-<commit>-<arch> child, or any other tag shape.
+# Why: root vs. child vs. other drives every downstream protect/would-delete
+# decision, so this classification is centralized in one place.
+# From: Issue #1095 | PR #1501.
 sra_tag_kind() {
   local tag="${1:?sra_tag_kind: tag is required}"
   if [[ "$tag" =~ ^sha-([0-9a-f]{7,40})$ ]]; then
@@ -108,6 +120,11 @@ sra_tag_kind() {
   fi
 }
 
+# What: resolves a sha-<commit> tag's short/full hex prefix to a real,
+# existing full 40-char commit object in the given repository.
+# Why: an unresolvable prefix must fail closed, not be silently treated as
+# an unknown/unranked commit that could then rank as newest.
+# From: Issue #1095 | PR #1501.
 sra_resolve_commit_prefix() {
   local git_dir="${1:?sra_resolve_commit_prefix: git directory is required}"
   local prefix="${2:?sra_resolve_commit_prefix: prefix is required}"
@@ -123,6 +140,11 @@ sra_resolve_commit_prefix() {
   printf '%s\n' "$resolved"
 }
 
+# What: checks whether a resolved commit is an ancestor of history_ref.
+# Why: a root tag pointing at a commit outside the audited history (e.g. a
+# rebased-away or force-pushed commit) cannot be ranked and must not be
+# treated as deletable.
+# From: Issue #1095 | PR #1501.
 sra_commit_is_on_history_ref() {
   local git_dir="${1:?sra_commit_is_on_history_ref: git directory is required}"
   local commit="${2:?sra_commit_is_on_history_ref: commit is required}"
@@ -131,12 +153,9 @@ sra_commit_is_on_history_ref() {
 }
 
 sra_validate_created_at_string() {
-  # What: checks an already-extracted string against the expected GHCR
-  # created_at shape (YYYY-MM-DDTHH:MM:SSZ), with no jq call of its own.
-  # Why: split out from sra_version_created_at so the orchestrator's hot loop
-  # validates an already-extracted value instead of paying a second
-  # per-version jq subprocess (the class of cost that caused run 31774741729
-  # to time out).
+  # What: checks a string against the GHCR created_at shape (YYYY-MM-DDTHH:MM:SSZ).
+  # Why: split from sra_version_created_at so the hot loop validates an
+  # already-extracted value instead of paying a second per-version jq call.
   # From: Issue #1095 | PR #1501.
   local created_at="${1?sra_validate_created_at_string: value argument is required}"
   [[ "$created_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]]
@@ -185,6 +204,10 @@ sra_emit_record() {
     "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_rank" "$budget" "$decision" "$reason"
 }
 
+# What: counts a version's tags by sra_tag_kind (root/child/other).
+# Why: the orchestrator's classification branches on these three counts
+# together, so computing them once here keeps that branching logic simple.
+# From: Issue #1095 | PR #1501.
 sra_version_tag_facts() {
   local version_json="${1:?sra_version_tag_facts: version JSON is required}"
   local encoded_tags encoded_tag tag kind root_count=0 child_count=0 other_count=0
@@ -265,11 +288,9 @@ sra_select_supported_release_tags() {
   done
 
   (( ${#keyed[@]} > 0 )) || return 0
-  # What: captures the sorted list into a variable before head/cut, instead
-  # of piping sort directly into them.
-  # Why: a live pipe into an early-exiting consumer under `set -o pipefail`
-  # can report SIGPIPE failure even when the result is correct (AG-VAL-032,
-  # enforced repo-wide by scripts/check-pipefail-early-exit-grep.sh).
+  # What: captures the sorted list into a variable before head/cut.
+  # Why: piping sort directly into an early-exiting consumer under
+  # `set -o pipefail` can misreport SIGPIPE as failure (AG-VAL-032).
   # From: Issue #1095 | PR #1501.
   local sorted selected
   sorted="$(printf '%s\n' "${keyed[@]}" | sort -r)"
@@ -300,12 +321,8 @@ sra_classify_channel_tag() {
 sra_other_tags_from_csv() {
   # What: extracts every "other"-kind tag (per sra_tag_kind) from an
   # already comma-joined tag list, one per line.
-  # Why: derives this in pure bash from the orchestrator's already-fetched
-  # comma-joined value instead of a second jq/base64 round-trip per version,
-  # avoiding the per-version subprocess overhead that caused run 31774741729
-  # to time out; splitting on a literal comma is safe only because the OCI
-  # distribution spec's tag grammar ([a-zA-Z0-9_][a-zA-Z0-9._-]{0,127})
-  # forbids commas in a real tag.
+  # Why: pure-bash split avoids a second per-version jq/base64 round-trip;
+  # a literal comma split is safe since OCI's tag grammar forbids commas.
   # From: Issue #1095 | PR #1501.
   local tags_csv="${1?sra_other_tags_from_csv: tags CSV argument is required}"
   local tag kind
@@ -321,13 +338,10 @@ sra_other_tags_from_csv() {
 }
 
 sra_protected_reference_reason() {
-  # What: given a version's "other"-kind tags and a package's supported
-  # stable-release set, returns a "+"-joined, specific protection reason
-  # covering every protected channel that applies, or fails when none apply.
-  # Why: a digest can legitimately be nightly AND latest AND a just-cut
-  # release at once; collapsing that into one picked reason would hide real
-  # information. Failure (not a string) lets the caller fall back to its own
-  # generic reason.
+  # What: given a version's "other" tags and supported releases, returns a
+  # "+"-joined reason covering every protected channel that applies.
+  # Why: a digest can match several channels at once; picking one would
+  # hide information. Failure means no protected channel matched.
   # From: Issue #1095 | PR #1501.
   local other_tags="${1?sra_protected_reference_reason: other tags argument is required}"
   local supported_releases="${2?sra_protected_reference_reason: supported releases argument is required}"
@@ -360,14 +374,9 @@ sra_protected_reference_reason() {
 
 sra_extra_tag_protect_reason() {
   # What: combines sra_other_tags_from_csv + sra_protected_reference_reason
-  # into one always-succeeding call, falling back to a caller-supplied
-  # generic reason when no specific protected channel matches.
-  # Why: only the orchestrator's root_count==0 branch may use this -- a
-  # version with no sha-<commit> alias always stays protect regardless of
-  # reason. A version WITH a root tag must instead call
-  # sra_protected_reference_reason directly and fall through to ranking on
-  # failure, so this always-succeeding wrapper is deliberately not reused
-  # there.
+  # into one always-succeeding call with a caller-supplied fallback reason.
+  # Why: only the root_count==0 branch uses this; a version with a root tag
+  # must call sra_protected_reference_reason directly instead.
   # From: Issue #1095 | PR #1501.
   local tags_csv="${1?sra_extra_tag_protect_reason: tags CSV argument is required}"
   local supported_releases="${2?sra_extra_tag_protect_reason: supported releases argument is required}"

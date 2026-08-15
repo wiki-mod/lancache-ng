@@ -1,15 +1,10 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# What: coverage for scripts/check-executable-bits.sh, the CI guard that
-# fails a build when a repo script is invoked by a bare path (or is a
-# .githooks/ hook) but is committed with a non-executable git mode.
-# Why: every scenario builds a throwaway git fixture repo, commits files at
-# deterministic modes via `git update-index --chmod`, and invokes the guard
-# as `bash "$script"` rather than bare `run "$script"`, so this exec-bit
-# guard's own test cannot trip over the exec-bit bug it exists to catch
-# (Rule-Ref: AG-VAL-024).
+# What: coverage for scripts/check-executable-bits.sh, the CI guard for a
+# bare-path/non-executable script or .githooks/ hook.
+# Why: every scenario commits fixture files at deterministic modes and
+# invokes the guard via `bash "$script"`, never bare `run` (AG-VAL-024).
 # From: Issue #1019 | Issue #1095 | PR #1501.
 
 setup() {
@@ -23,11 +18,10 @@ setup() {
     git -C "$fixture" config commit.gpgsign false
 }
 
-# add_script <relpath> <yes|no>
-# What: creates a script under the fixture, staged executable (yes) or
-# non-executable (no).
+# What: add_script() creates a script under the fixture, staged executable
+# or not.
 # Why: `update-index --chmod` sets the committed mode deterministically,
-# independent of the fixture filesystem's umask or the host's core.filemode.
+# independent of the fixture's umask or host's core.filemode.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 add_script() {
     local rel="$1" want_exec="$2"
@@ -41,9 +35,10 @@ add_script() {
     fi
 }
 
-# write_workflow <shell-body-line>
-# What: writes a minimal single-step workflow whose run: block contains the
-# given shell line, and stages it.
+# What: write_workflow() writes a minimal single-step workflow whose run:
+# block contains the given shell line, and stages it.
+# Why: a real workflow file, not a synthetic string, exercises the guard's
+# actual YAML `run:` parsing path end to end.
 # From: Issue #1019 | Issue #1095 | PR #1501.
 write_workflow() {
     local body="$1"
