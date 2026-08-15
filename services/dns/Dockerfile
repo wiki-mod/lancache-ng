@@ -118,29 +118,17 @@ COPY nats-subscriber/ .
 #   `CCACHE_EXTRAFILES="/tmp/ccache-toolchain-id:/tmp/ccache-remote-toolchain-id"`
 #     (colon-separated, per ccache's own manual) and `CCACHE_BASEDIR="$ccache_probe_dir"`
 #     plus a `cd`+relative-path probe compile.
-#     Why: `CCACHE_COMPILERCHECK=content` only hashes the local `cc` binary, so without
-#     EXTRAFILES a client-side build-tools image upgrade would keep reusing a Redis
-#     object built by the old client compiler; the first file closes that gap by tying the
-#     key to the resolved build-tools image. The second file closes the matching remote-side
-#     gap: `192.168.1.229`/`192.168.1.240` run a natively installed `distccd`/`gcc`,
-#     provisioned by hand and independent of this image's lifecycle, so a farm host upgrade
-#     alone would otherwise go unreflected in the cache key and let a stale/incompatible
-#     remote toolchain's object serve as a "hit". `extract_remote_toolchain_id()` reads the
-#     `.comment` ELF section GCC/Clang embed in every object they produce -- including one
-#     compiled remotely through distcc -- out of `configure_distcc()`'s own already-real
-#     probe compile, so the recorded identity reflects whichever farm host actually answered
-#     that probe, not an assumption. `configure_ccache()` fails closed (falls back to plain
-#     distcc, no cache layer) if that identity file ends up empty, rather than caching
-#     without it. Verified empirically (2026-08-15, lancache-240, real distcc dispatch to
-#     two differently-configured hosts): without this file, identical local
-#     compiler/source/flags against two different real remote compilers produced a
-#     byte-identical, wrongly-reused cached object; adding the differing `.comment` content
-#     to `CCACHE_EXTRAFILES` correctly turned the second build into a fresh cache miss
-#     instead. Known remaining gap: this samples whichever single host answered one probe at
-#     the start of a build, so it catches a farm upgraded *between* builds (the scenario
-#     above) but not a farm that is heterogeneous *within* one build (two pool members on
-#     different compiler versions at the same moment) -- see
-#     docs/local-runner-docker-performance.md's note. BASEDIR+relative-path keeps the
+#     Why: `CCACHE_COMPILERCHECK=content` only hashes the local `cc` binary, never the
+#     `192.168.1.229`/`192.168.1.240` farm host's own (hand-provisioned, no repo-owned
+#     upgrade lockstep), so a farm host upgrade alone could otherwise let a stale remote
+#     toolchain's object serve as a "hit". `extract_remote_toolchain_id()` closes that gap by
+#     reading the `.comment` ELF identity GCC/Clang embed in every object back out of
+#     `configure_distcc()`'s own real probe compile -- a verified sample of whichever farm
+#     host actually answered, not an assumption -- and `configure_ccache()` fails closed to
+#     plain distcc if that identity file ends up empty. This samples one probe's host as a
+#     proxy for the farm's current toolchain generation: it catches a farm upgraded between
+#     builds, not one that is heterogeneous within a single build (see
+#     docs/local-runner-docker-performance.md's known-limitation note). BASEDIR+relative-path keeps the
 #     probe's own key stable across builds despite `$ccache_probe_dir` being a fresh mktemp
 #     path every time; without it, every build would leak a new, never-reused Redis entry.
 #     Consequently the probe's own success check accepts either a remote write OR a remote

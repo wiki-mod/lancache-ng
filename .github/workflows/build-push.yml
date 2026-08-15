@@ -2473,6 +2473,12 @@ jobs:
             || { echo "::error::$dns_dockerfile must wire ccache through distcc via CCACHE_PREFIX, not a plain CC swap."; exit 1; }
           grep -F 'CCACHE_COMPILERCHECK=content' "$dns_dockerfile" >/dev/null \
             || { echo "::error::$dns_dockerfile must use content-based ccache compiler checking, not the mtime default, for a cache shared across build-tools image versions."; exit 1; }
+          grep -F 'extract_remote_toolchain_id() { \' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must extract a verified remote distcc toolchain identity for the ccache cache key."; exit 1; }
+          grep -F 'CCACHE_EXTRAFILES="/tmp/ccache-toolchain-id:/tmp/ccache-remote-toolchain-id"' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must namespace ccache by both the client build-tools image and the verified remote toolchain identity."; exit 1; }
+          grep -F 'if [ ! -s /tmp/ccache-remote-toolchain-id ]; then \' "$dns_dockerfile" >/dev/null \
+            || { echo "::error::$dns_dockerfile must fail closed to plain distcc when no verified remote toolchain identity is available."; exit 1; }
           grep -F '[ "${distcc_enabled:-0}" = "1" ] && [ -s /run/secrets/ccache_redis_url ]' "$dns_dockerfile" >/dev/null \
             || { echo "::error::$dns_dockerfile must only enable ccache once distcc itself is already enabled."; exit 1; }
           grep -F 'command -v ccache >/dev/null' "$dns_dockerfile" >/dev/null \
