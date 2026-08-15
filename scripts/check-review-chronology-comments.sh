@@ -100,20 +100,38 @@ check_bare_issue_ref_duplicates_from() {
         [ -n "$num" ] || continue
         # What: Word-boundary-equivalent match so "#887" doesn't also match
         #   "#8871"; From: lines are excluded (that's where the number is
-        #   supposed to live).
+        #   supposed to live). Scans every "#N" occurrence on a line (not
+        #   only the first) and tracks both quote kinds char-by-char.
         # Why: A plain grep also matched "#887" inside an echo/print string
-        #   literal (runtime output text, not a comment); an odd count of
-        #   `"` before the match means it sits inside an open double-quoted
-        #   string, so only an even count (a real comment, not string data)
-        #   is kept.
-        while IFS=: read -r lineno content; do
-            [ -n "$lineno" ] || continue
-            prefix="${content%%#"${num}"*}"
-            quote_count=$(printf '%s' "$prefix" | tr -dc '"' | wc -c)
-            if [ $(( quote_count % 2 )) -eq 0 ]; then
-                printf '%s:%s:%s\n' "$path" "$lineno" "$content"
-            fi
-        done < <(grep -nEI "(^|[^0-9])#${num}([^0-9]|$)" "$path" 2>/dev/null | grep -vE 'From:')
+        #   literal (runtime output text, not a comment). Checking only the
+        #   first occurrence missed a real duplicate on a line that also has
+        #   an earlier string-literal mention; counting only `"` missed a
+        #   single-quoted string literal entirely -- both fixed by tracking
+        #   which quote kind (if any) is open at each "#N" position and
+        #   requiring "outside any open quote" rather than "even `"` count".
+        awk -v n="$num" '
+            $0 ~ /From:/ { next }
+            {
+                line = $0
+                in_q = ""
+                matched = 0
+                len = length(line)
+                for (i = 1; i <= len; i++) {
+                    c = substr(line, i, 1)
+                    if (in_q == "" && (c == "\x27" || c == "\"")) { in_q = c; continue }
+                    if (in_q == c) { in_q = ""; continue }
+                    if (in_q == "" && c == "#") {
+                        rest = substr(line, i + 1, length(n))
+                        if (rest == n) {
+                            after = substr(line, i + 1 + length(n), 1)
+                            before = (i > 1) ? substr(line, i - 1, 1) : ""
+                            if (after !~ /[0-9]/ && before !~ /[0-9]/) { matched = 1 }
+                        }
+                    }
+                }
+                if (matched) print FILENAME ":" FNR ":" line
+            }
+        ' "$path" 2>/dev/null
     done <<< "$from_nums"
 }
 
