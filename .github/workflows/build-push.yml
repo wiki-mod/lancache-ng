@@ -4040,13 +4040,17 @@ jobs:
           fi
 
   container-scan:
-    # What: Never runs on pull_request (PRs get their own Trivy scan via build's "Scan pushed service digest" step); on push/tag it Trivy-scans either a changed service's just-pushed digest or an unchanged service's already-published channel image, whichever build/determine-push-reuse-scope decided.
-    # Why: An earlier version rebuilt each changed service in a second, throwaway `docker buildx build --load` just to scan it, but a fresh build always stamps a new `created` timestamp, so that scan's digest never matched what build/build-arm64 actually pushed -- removed, since build/build-arm64's own pushed-digest Trivy step already covers the real shipped artifact; the unchanged-service digest-scan branch is untouched.
-    # From: Issue #1095 | PR #1532
+    # What: Never runs on pull_request (PRs get their own Trivy scan via build's step); on push/tag scans
+    # either a changed service's just-pushed digest or an unchanged service's already-published channel image.
+    # Why: An earlier throwaway rebuild-then-scan stamped a fresh `created` timestamp so its digest never
+    # matched what was actually pushed; removed once build/build-arm64's own pushed-digest scan covered it.
+    # From: PR #1339
     #
-    # What: Requires validate-compose/push-supersession-check to show plain `success` but tolerates determine-push-reuse-scope showing `success` or `skipped`.
-    # Why: determine-push-reuse-scope's own `if:` only fires on a push to a branch ref, so it legitimately skips on pull_request/schedule/workflow_dispatch/tag-push -- GitHub's implicit success() treats a skipped need like a failed one, which would silently skip container-scan on those events; validate-compose/push-supersession-check remain plain root jobs with no `if:`/`needs:` of their own, so they can never legitimately skip and stay on the stricter check -- if either ever gains a conditional `if:`, this check must widen to match.
-    # From: Issue #1095 | PR #1532
+    # What: Requires validate-compose/push-supersession-check to show plain `success`, but tolerates
+    # determine-push-reuse-scope showing `success` or `skipped`.
+    # Why: determine-push-reuse-scope only runs on a branch push, so GitHub's implicit success() would
+    # otherwise treat its legitimate skip on other events as a failure, silently skipping this job too.
+    # From: Issue #532
     if: >-
       ${{
         always() &&
@@ -4056,17 +4060,11 @@ jobs:
         (needs['determine-push-reuse-scope'].result == 'success' || needs['determine-push-reuse-scope'].result == 'skipped')
       }}
     needs: [validate-compose, push-supersession-check, determine-push-reuse-scope]
-    # Job-level concurrency (#888): keyed per matrix row (service + platform) and per
-    # ref. cancel-in-progress is pull_request-only -- see `build`'s group comment for the
-    # full #979 rationale. On push, `build`'s `if:` requires
-    # `needs['container-scan'].result == 'success'`, so this scan is a hard gate on the
-    # channel publish path: cancelling it in a merge cascade starves the channel. On a PR
-    # it is safe to cancel a superseded scan -- it never builds locally (G8 fix) and at
-    # most reads a remote image (never pushes), so `build` cleanly skips it via `needs`.
-    #
-    # `workflow_dispatch` runs and reruns (`github.run_attempt != '1'`) keep their own
-    # run_id-suffixed key so a manual retrigger or rerun cannot be confused with a
-    # genuinely superseded push; on push/tag the flag is false anyway.
+    # What: Job-level concurrency, keyed per matrix row (service + platform) and per ref; cancel-in-progress
+    # is pull_request-only.
+    # Why: On push, `build` requires this job's success, so cancelling it would starve the channel; on a PR
+    # it's safe since this job never builds locally (G8 fix) and only ever reads a remote image.
+    # From: PR #888
     concurrency:
       group: >-
         ${{
@@ -4075,18 +4073,16 @@ jobs:
           format('{0}-container-scan-{1}-{2}-{3}', github.workflow, matrix.service, matrix.platform_tag, github.ref)
         }}
       cancel-in-progress: ${{ github.event_name == 'pull_request' }}
-    # Runner selector kept aligned with build/build-arm64's own per-arch split even
-    # though this job no longer builds anything (G8 fix): the surviving "should-scan ==
-    # false" branch's registry pull + Trivy scan still benefits from the same split, and
-    # one shared convention beats a second, independently-tuned selector.
+    # What: Runner selector kept aligned with build/build-arm64's own per-arch split, though this job no
+    # longer builds anything (G8 fix).
+    # Why: The surviving "should-scan == false" branch's registry pull + Trivy scan still benefits from the
+    # same split; one shared convention beats a second, independently-tuned selector.
+    # From: PR #1482
     runs-on: ${{ fromJSON(matrix.runner) }}
-    # Post-G8-fix timing: a changed service ("should-scan == true") only runs the cheap
-    # reuse-eligibility check and finishes in seconds; an unchanged service ("should-scan
-    # == false") pulls the channel image and Trivy-scans it, same cost as always. 60
-    # minutes gives headroom for a cold layer cache or vuln-DB refresh on that branch,
-    # neither of which
-    # shows up in the warm-cache samples above; still far under build's own
-    # 150-minute bound for the same class of work at full multi-arch scale.
+    # What: 60-minute timeout; a changed service finishes in seconds (cheap reuse check only), an unchanged
+    # one pulls + Trivy-scans at the usual cost.
+    # Why: Headroom for a cold layer cache or vuln-DB refresh not reflected in the warm-cache samples above.
+    # From: PR #1482
     timeout-minutes: 60
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
@@ -4094,15 +4090,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # G8 fix (issue #1095): this job no longer builds anything, so `context`,
-          # `build_contexts`, `description`, and `platform` (only ever consumed by the
-          # now-removed throwaway-build step) are dropped from this matrix entirely --
-          # only `service`/`platform_tag`/`runner` are still read below. Runner tiers are
-          # kept in sync manually with `build`'s own matrix (see that job's comment for
-          # the full light/heavy measured-cost rationale, AG-CI-002): the surviving
-          # "should-scan == false" branch's registry pull + Trivy scan still benefits
-          # from the same split as the real build, even though this job itself no longer
-          # builds anything to measure a compile cost for.
+          # What: `context`/`build_contexts`/`description`/`platform` dropped from this matrix; only
+          # `service`/`platform_tag`/`runner` are still read below.
+          # Why: This job no longer builds anything (G8 fix), so those build-only keys have no consumer left.
+          # From: PR #1482
           - service: proxy
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
@@ -4179,10 +4170,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Mirrors build/build-arm64's own "Determine whether this service
-          # needs building" case mapping exactly -- single source for which
-          # reuse_* output belongs to which matrix.service, not a second copy
+          # What: Mirrors build/build-arm64's own "Determine whether this service needs building" case mapping.
+          # Why: Single source for which reuse_* output belongs to which matrix.service, not a second copy
           # that could drift out of sync with it.
+          # From: PR #1344
           case "$MATRIX_SERVICE" in
             proxy) reuse="$REUSE_PROXY" ;;
             dns) reuse="$REUSE_DNS" ;;
@@ -4204,22 +4195,16 @@ jobs:
           fi
           echo "should-scan=$should_scan" >> "$GITHUB_OUTPUT"
 
-      # A changed service ("should-scan == true") does nothing further in this job (G8
-      # fix, issue #1095): no local build, no local scan. build/build-arm64's own "Scan
-      # pushed service digest with Trivy" step is the sole scan for that case.
+      # What: A changed service does nothing further in this job (G8 fix): no local build, no local scan.
+      # Why: build/build-arm64's own "Scan pushed service digest with Trivy" step is the sole scan for that case.
+      # From: PR #1482
 
       - name: Self-heal Trivy's own default cache directory ownership
-        # Real incident (2026-08-03): trivy-action's own default cache dir
-        # (~/.cache/trivy) was found owned by root:root on a self-hosted
-        # runner, causing "permission denied" opening trivy.db and failing
-        # container-scan for that matrix row.
-        # Host-level ownership/setgid was fixed directly on all runner hosts
-        # (2026-08-03), but that alone does not survive the directory itself
-        # being wiped and recreated from scratch by some future root-run
-        # process, which would not inherit the setgid bit from a directory
-        # that no longer exists. This step makes the job itself self-healing
-        # regardless of host history: tolerant of the directory not existing
-        # yet (first-ever run on a host), safe to run every time.
+        # What: Chowns/setgids `~/.cache/trivy` if it exists, tolerant of it not existing yet.
+        # Why: A self-hosted runner was found with this dir owned by root:root, failing container-scan with
+        # a permission error; host-level ownership was fixed directly, but that doesn't survive the
+        # directory being wiped and recreated by a future root-run process, so this step self-heals it.
+        # From: PR #1405
         run: |
           set -euo pipefail
           trivy_home_cache="${HOME}/.cache/trivy"
@@ -4228,31 +4213,25 @@ jobs:
             find "$trivy_home_cache" -type d -exec chmod g+s {} +
           fi
 
-      # Companion to "Determine per-service publish scan reuse" above (originally issue
-      # #1290, build-tools-only; generalized to every service by Step 3, issue #1095):
-      # when a service is unchanged this run, no local image was built to scan, but the
-      # point of scanning at all is to catch a newly disclosed CVE in the already-published
-      # channel image -- skipping the scan entirely would defeat that, so this scans the
-      # same digest build/build-arm64's own "Retag unchanged service image" steps retag
-      # from. No registry write happens here -- this job never gained `packages:`
-      # permissions and doesn't need them for a read-only scan.
+      # What: Companion to "Determine per-service publish scan reuse" above; when a service is unchanged
+      # this run, scans the same digest build/build-arm64's own retag step used, read-only, no registry write.
+      # Why: No local image was built to scan, but skipping the scan entirely would defeat catching a newly
+      # disclosed CVE in the already-published channel image.
+      # From: PR #1344
       - name: Resolve channel image for unchanged-scan retag
         id: channel-image
-        # push-supersession-check gate (issue #1095 Part 1): a push that is
-        # already superseded before this job started has no reason to pay
-        # for a Trivy scan either -- the newer push that supersedes it runs
-        # this same step for real.
+        # What: Also gated on push-supersession-check's `superseded` output.
+        # Why: A push already superseded before this job started has no reason to pay for a Trivy scan
+        # either -- the newer push that supersedes it runs this same step for real.
+        # From: PR #1334
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
-          # #1095 F-21: consume determine-push-reuse-scope's own already-pinned,
-          # already-verified digest instead of independently re-resolving the mutable
-          # channel tag a second time here -- the digest TOCTOU race two Codex review
-          # threads on PR #1378 found (a channel refresh between that job's verification
-          # and this job's own later, independent re-resolution could scan a different
-          # image than what was proven safe/than build/build-arm64 end up retagging). No
-          # registry call is needed here anymore: the digest is already immutable and
-          # already verified.
+          # What: Consumes determine-push-reuse-scope's own already-pinned, already-verified digest instead
+          # of independently re-resolving the mutable channel tag a second time here.
+          # Why: Closes a digest TOCTOU race (a channel refresh between that job's verification and this
+          # job's own re-resolution could scan a different image than what build/build-arm64 retag).
+          # From: PR #1499
           DIGEST_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.digest_proxy }}
           DIGEST_DNS: ${{ needs['determine-push-reuse-scope'].outputs.digest_dns }}
           DIGEST_WATCHDOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_watchdog }}
@@ -4264,8 +4243,9 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Mirrors "Determine per-service publish scan reuse" above's own case mapping --
-          # single source for which digest_* output belongs to which matrix.service.
+          # What: Mirrors "Determine per-service publish scan reuse" above's own case mapping.
+          # Why: Single source for which digest_* output belongs to which matrix.service.
+          # From: PR #1499
           case "$MATRIX_SERVICE" in
             proxy) digest="$DIGEST_PROXY" ;;
             dns) digest="$DIGEST_DNS" ;;
@@ -4287,19 +4267,19 @@ jobs:
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
-      # UTC-day bucket for the scan-result cache below (issue #1095, G11): bounds how
-      # long an unchanged digest can skip a real Trivy re-scan, so a newly disclosed
-      # CVE against it is still caught within a day instead of never. Computed once
-      # here (not inside the composite action) so the freshness policy stays a plain,
-      # reviewable line in this workflow rather than hidden inside a reusable action.
+      # What: UTC-day bucket for the scan-result cache below (G11), computed here rather than inside the
+      # composite action.
+      # Why: Bounds how long an unchanged digest can skip a real Trivy re-scan, and keeps the freshness
+      # policy a plain, reviewable line in this workflow rather than hidden inside a reusable action.
+      # From: PR #1467
       - name: Compute scan-result cache freshness bucket
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         id: scan-cache-bucket
         run: echo "value=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
 
-      # A multi-platform image-ref: Trivy/Docker resolve it to the runner's own native
-      # platform automatically. G11 fix: skips the scan below entirely when this exact
-      # digest already scanned clean today (see .github/actions/trivy-scan-with-cache).
+      # What: image-ref is a multi-platform ref; Trivy/Docker resolve it to the runner's own native platform.
+      # Why: G11 fix skips the scan below entirely when this exact digest already scanned clean today.
+      # From: PR #1467
       - name: Scan channel image with Trivy (no rebuild)
         if: steps.push-scan-changes.outputs.should-scan == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         uses: ./.github/actions/trivy-scan-with-cache
