@@ -19,7 +19,9 @@ ARG DOCKER_BUILDX_VERSION=0.36.1
 # (no v29.x module tags exist at all, so that one genuinely cannot be bumped),
 # containerd/containerd/v2 does publish a newer, non-breaking 2.2.x tag, so
 # `go get` this exact module up to the fixed version before building instead
-# of carrying the vulnerability forward.
+# of carrying the vulnerability forward. (Update, Issue #1570: buildx has
+# since moved its own go.mod floor past the 2.2.x line entirely -- see the
+# What/Why block immediately below for the current target and reasoning.)
 # What: keeps this override current with buildx's own upstream go.mod floor.
 # Why: buildx v0.36.1 itself already requires containerd/containerd/v2
 # v2.3.3 as its go.mod floor (checked directly against that tag's go.mod),
@@ -36,9 +38,11 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # vulnerabilities) fixed in 1.82.1 -- confirmed via Trivy scanning this image
 # (CI run 29926535995 on PR #1070; tracked as issue #1080, the third
 # confirmed instance of this CVE class per AGENTS.md's AG-KD-003). Same
-# reasoning as the containerd override above: neither project has cut a
-# release that resolves this on its own yet, so `go get` the fixed version
-# directly before building.
+# reasoning as the containerd override above: neither project had cut a
+# release that resolved this on its own at the time. (Update, Issue #1570:
+# buildx v0.36.1/compose v5.4.0/cli v29.7.2 now floor at v1.82.1 themselves,
+# so this override today only carries the pin one further patch ahead --
+# see the What/Why block immediately below.)
 # What: keeps this override one patch ahead of buildx/compose/cli's own
 # go.mod floor, which has itself already moved to v1.82.1 by the versions
 # bumped in this same change (checked directly against their go.mod/
@@ -57,12 +61,14 @@ ARG GRPC_GO_VERSION=1.83.0
 # (the fourth confirmed instance of this CVE class per AGENTS.md's
 # AG-KD-003). actionlint has no golang.org/x/text dependency at
 # all (checked directly), so it needs no override. Same reasoning as the
-# containerd/grpc overrides above: neither upstream project has cut a
-# release that resolves this on its own yet, so `go get` the fixed version
-# directly before building. Pinned to v0.40.0 (the actual latest tag as of
-# this fix, one past the v0.39.0 minimum fix version) rather than the bare
-# minimum, since there is no indication of a regression between the two and
-# staying on latest needs no extra reasoning to re-justify later.
+# containerd/grpc overrides above: neither upstream project had cut a
+# release that resolved this on its own at the time. Pinned to v0.40.0 (the
+# actual latest tag as of this fix, one past the v0.39.0 minimum fix
+# version) rather than the bare minimum, since there is no indication of a
+# regression between the two and staying on latest needs no extra reasoning
+# to re-justify later. (Update, Issue #1570: buildx v0.36.1/compose
+# v5.4.0/cli v29.7.2 now floor at v0.40.0 themselves -- see the What/Why
+# block immediately below for the current target.)
 # What: same routine latest-tag bump as the grpc-go override above.
 # Why: golang.org/x/text v0.41.0 is the current upstream release; no new
 # CVE motivates this step specifically.
