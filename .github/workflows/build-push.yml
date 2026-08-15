@@ -2001,8 +2001,16 @@ jobs:
           # unconditionally, forever, regardless of the real code below.
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
+          # AG-CODE-013 (PR #1523): published_image_reference() no longer calls
+          # `docker buildx imagetools inspect` inline -- it delegates to the
+          # shared resolve_manifest_digest() helper in
+          # scripts/lib/ghcr-retry.sh (deduplicated against
+          # scripts/render-full-setup-digest-override.sh's now-removed
+          # identical copy), so this check verifies both ends of that
+          # delegation instead of the old inline call.
           grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'docker buildx imagetools inspect "$image"' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'resolve_manifest_digest "$image"' scripts/select-build-tools-image.sh >/dev/null \
+            && grep -F 'docker buildx imagetools inspect "$image"' scripts/lib/ghcr-retry.sh >/dev/null \
             && grep -F 'published_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Build-tools selector must export the smoke-validated published image by multi-arch manifest digest."; exit 1; }
           if awk '
