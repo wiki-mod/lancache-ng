@@ -927,6 +927,40 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `sparse-checkout` input without a matching restore step does not exist yet;
   recorded as an open gap in Coverage Assessment below.
 
+### Additions dated 2026-08-15 (real incident since the 2026-08-07 survey above)
+
+- **`current-dev-auto-close.yml` closing-keyword scanner reading the whole PR
+  body** (issue #1496, fixed) — the scanner matched `keyword #N` phrases
+  anywhere in a merged PR's body, with no way to distinguish a real closing
+  instruction from a worked example, quotation, or incident description
+  elsewhere in the body. This class of bug produced two confirmed real
+  false auto-closes of issue #1095: once via PR #1443's own negated-sentence
+  prose (before a same-sentence negation lookbehind existed), and again via
+  PR #1491's own worked-examples section (the PR that *added* that negation
+  lookbehind), which still matched nine unrelated `#N` references purely
+  from illustrative prose. Fix (this PR): the scanner now reads only the
+  exact `## Linked Issues` heading's section (line-based match, up to the
+  next level-2 heading), failing closed to "close nothing" when that
+  section is missing or duplicated; `scripts/validate-pr-template.sh` makes
+  the section required/validated for non-draft PRs. Proven via four real
+  `workflow_dispatch` dry-run executions against this branch's pushed code
+  (commit `97f26d1d`, byte-identical to the runs' actual commit `c51bac87`
+  for both touched files — confirmed via `git diff c51bac87 97f26d1d --
+  .github/workflows/current-dev-auto-close.yml
+  scripts/validate-pr-template.sh`, empty output): real run `31904977220`
+  replays PR #1491 itself and now finds zero matches; real run `31905211266`
+  proves multiple legitimate `Closes`/`Fixes` references and a non-closing
+  `Refs` reference all resolve correctly; real runs `31905524192` and
+  `31905565459` prove the duplicated- and missing-heading fail-closed paths
+  respectively, against a disposable scratch PR opened and deleted
+  immediately after (see PR #1580's Validation section for the full
+  transcript). **New standing check: none yet** — this workflow's scanning
+  logic is inline `actions/github-script` JS with no local Node tooling in
+  this project's build-tools image, and `scripts/validate-pr-template.sh`
+  has no existing bats coverage at all to extend (pre-existing gap, not
+  introduced by this fix); recorded as an open gap in Coverage Assessment
+  below rather than left unautomated silently.
+
 ## Coverage Assessment (from this survey — be honest about gaps)
 
 **Well-covered, reusable, real proofs already exist for:**
@@ -1108,6 +1142,24 @@ explicit pass:**
   cross-check. Not built in this pass; a future PR should add it as its own standing
   check rather than relying on the fifth migration's agent to re-derive this list from
   scratch again.
+
+- **`current-dev-auto-close.yml`'s `## Linked Issues`-only scanner (issue
+  #1496) and `scripts/validate-pr-template.sh`'s new required-section check
+  for it have no standing automated regression test.** The scanner's
+  extraction/fail-closed logic is inline `actions/github-script` JS with no
+  local Node tooling in this project's build-tools image, so it cannot be
+  unit-tested the way a standalone shell script can; `validate-pr-template.sh`
+  itself has zero bats coverage today for any of its required sections, not
+  only the new one, a pre-existing gap this fix did not introduce or close.
+  The four real `workflow_dispatch` dry-run executions recorded in this
+  document's 2026-08-15 addition above and in PR #1580's own Validation
+  section are a one-time manual proof, not a repeatable CI guard — a future
+  regression in this scanner would not be caught automatically. A future PR
+  should add bats coverage for `validate-pr-template.sh` (extending it into
+  the existing `tests/bats/check_pr_tracking_metadata.bats`-style sibling
+  pattern, per `AG-CODE-013`) and, separately, evaluate whether the
+  `current-dev-auto-close.yml` extraction logic is worth factoring out of
+  the inline script into a testable shell/script form.
 
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
