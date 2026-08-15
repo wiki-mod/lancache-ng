@@ -363,8 +363,8 @@ jobs:
 
   proxy-ssl-mode-two-relay-dispatch-simulation:
     # What: end-to-end test for the SSL-mode SNI depth-dispatch and two-relay client-IP fix.
-    # Why: no "pre-fix" image is rebuilt from git history (a real merge-base attempt gave
-    # unpredictable results); chained after the sibling job for AG-CI-017 contention reasons.
+    # Why: no "pre-fix" image is rebuilt from git history; the base branch already contains
+    # the fix. Chained after the sibling job for the same AG-CI-017 contention reasons.
     # From: Issue #1276
     name: Proxy SSL-mode two-relay dispatch simulation
     needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
