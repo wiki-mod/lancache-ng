@@ -8,7 +8,7 @@
 # Why: developer and CI validation should see current Rust/Go tooling
 # early; production service Dockerfiles stay separately pinned instead,
 # for reproducible runtime image builds.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
@@ -21,7 +21,7 @@ ARG DOCKER_BUILDX_VERSION=0.36.1
 # before catching up on their own (AGENTS.md AG-KD-003); buildx v0.36.1
 # itself already floors at v2.3.3 (checked against that tag's go.mod), so
 # 2.3.4 keeps this override one real patch ahead on the same line.
-# From: Issue #1080 | PR #1571
+# From: Issue #1570 | PR #1571
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # What: pins buildx/compose/cli's vendored google.golang.org/grpc dependency
 # at or above their own go.mod/vendor.mod floor.
@@ -29,7 +29,7 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # lagged a fixed grpc-go CVE before catching up on their own (AGENTS.md
 # AG-KD-003); all three now floor at v1.82.1 themselves, so 1.83.0 -- the
 # current upstream release -- keeps this override current.
-# From: Issue #1080 | PR #1571
+# From: Issue #1570 | PR #1571
 ARG GRPC_GO_VERSION=1.83.0
 # What: pins buildx/compose/cli's vendored golang.org/x/text dependency at
 # or above their own go.mod/vendor.mod floor (actionlint has no x/text
@@ -37,7 +37,7 @@ ARG GRPC_GO_VERSION=1.83.0
 # Why: same recurring lagged-CVE pattern as the grpc-go override above
 # (AGENTS.md AG-KD-003); all three now floor at v0.40.0 themselves, so
 # 0.41.0 -- the current upstream release -- keeps this override current.
-# From: Issue #1080 | PR #1571
+# From: Issue #1570 | PR #1571
 ARG GOLANG_X_TEXT_VERSION=0.41.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -50,7 +50,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # `golang:latest` resolves to at build time gets a patched stdlib without
 # waiting on upstream. cargo-audit/cargo-tarpaulin below are Rust binaries
 # and have no equivalent statically-embedded runtime to go stale.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 
 # What: builds the Docker CLI by cloning its tagged release and running its
 # own `scripts/build/binary`, not `go install`.
@@ -62,14 +62,14 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # root before it honors which file to read/write -- so `go.mod`/`go.sum`
 # are symlinked to `vendor.mod`/`vendor.sum` for the duration of the
 # bump, then removed before the build runs.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 
 # What: builds docker-compose by cloning its tagged release and running a
 # local `go build`, not `go install pkg@version`.
 # Why: its go.mod carries `exclude` directives, which `go install
 # pkg@version` rejects outright (it treats the target as the main module,
 # where `exclude` is invalid).
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 
 # What: builds buildx the same clone-and-`go build` way, with its cmd
 # package explicitly renamed from `buildx` to `docker-buildx` on output.
@@ -80,7 +80,7 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # that Go auto-selects, so `go mod vendor` must re-sync it after `go get`
 # or the build fails with "inconsistent vendoring" instead of silently
 # using the old version.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
     /out/actionlint --version; \
@@ -168,7 +168,7 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # once before without a package-version change (residual risk tracked in
 # issue #1314) -- re-verify with a fresh Trivy scan before asserting its
 # CVE status rather than trusting a comment's snapshot of it.
-# From: Issue #1314 | PR #1571
+# From: Issue #1570 | PR #1571
 RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
     && apt-get update \
@@ -185,7 +185,7 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # while ccache preprocesses locally by default; re-verify against the
 # sccache version pinned below before relying on this if sccache's
 # preprocessing behavior is ever reconsidered for this job.
-# From: Issue #887 | PR #1571
+# From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -215,7 +215,7 @@ RUN set -euo pipefail; \
 # s3/memcached/gcs/azure/gha/webdav/oss/cos backends this project never
 # uses; building only what's needed keeps the binary smaller and its
 # dependency surface narrower.
-# From: Issue #887 | PR #1571
+# From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     rustup component add rustfmt clippy; \
     cargo install sccache --version "${SCCACHE_VERSION}" --no-default-features --features redis,dist-client --root /usr/local; \
@@ -230,7 +230,7 @@ RUN set -euo pipefail; \
 # source build would only add build time for no behavioral difference;
 # actionlint/docker/docker-compose/buildx are built from source instead --
 # see the actionlint-builder stage above for why.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) \
@@ -274,7 +274,7 @@ RUN set -euo pipefail; \
 # actionlint-builder stage above.
 # Why: see that stage's own comments for why these are built from source
 # rather than using official release binaries.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 RUN install -d /usr/local/lib/docker/cli-plugins
 COPY --from=actionlint-builder /out/docker /usr/local/bin/docker
 COPY --from=actionlint-builder /out/docker-compose /usr/local/lib/docker/cli-plugins/docker-compose
@@ -293,7 +293,7 @@ RUN docker --version; \
 # dependency, so isc-dhcp-client is kept in this image solely for the two
 # CI simulation scripts above, which test Kea's own server behavior and
 # are a separate concern from the Admin UI's probe.
-# From: Issue #1288 | PR #1571
+# From: Issue #1570 | PR #1571
 
 # What: tcpdump supports scripts/dhcp-proxy-pxe-simulation.sh, capturing
 # dnsmasq's real DHCPOFFER reply to a synthetic PXE DHCPDISCOVER
@@ -305,7 +305,7 @@ RUN docker --version; \
 # reading the same reply from a tcpdump-written pcap file is unaffected by
 # that gap. python3 below is unrelated to this script -- it is required
 # by distcc-pump.
-# From: Issue #705 | PR #1571
+# From: Issue #1570 | PR #1571
 
 # What: declares `APT_CACHE_BUST` immediately before the one RUN step that
 # references it (not with this stage's other ARGs near the top), forcing
@@ -319,7 +319,7 @@ RUN docker --version; \
 # in the same stage, so declaring it earlier (confirmed empirically, across
 # real builds) needlessly busts unrelated, unchanged earlier layers on
 # every rotation too.
-# From: Issue #1147 | PR #1571
+# From: Issue #1570 | PR #1571
 ARG APT_CACHE_BUST=""
 RUN set -euo pipefail; \
     : "apt-cache-bust=${APT_CACHE_BUST}"; \
@@ -337,7 +337,7 @@ RUN set -euo pipefail; \
     # inside this container and would otherwise fail/hang `dpkg
     # --configure`; the original binary is restored so later RUN steps see
     # normal behavior.
-    # From: PR #1571
+    # From: Issue #1570 | PR #1571
     if [ -x /usr/sbin/invoke-rc.d ]; then mv /usr/sbin/invoke-rc.d /usr/sbin/invoke-rc.d.real; fi; \
     printf '%s\n' '#!/bin/sh' 'exit 0' > /usr/sbin/invoke-rc.d; \
     chmod +x /usr/sbin/invoke-rc.d; \
@@ -361,7 +361,7 @@ RUN set -euo pipefail; \
     # kept explicit, matching the backports-pin RUN step above, even
     # though modern apt treats `full-upgrade` as the same operation
     # `dist-upgrade` performs.
-    # From: PR #1571
+    # From: Issue #1570 | PR #1571
     apt-get dist-upgrade -y; \
     apt-get full-upgrade -y; \
     # What: force-upgrades linux-libc-dev, jq, and libjq1 explicitly,
@@ -374,7 +374,7 @@ RUN set -euo pipefail; \
     # fixed in trixie-security's 1.7.1-6+deb13u3); naming both here forces
     # this build to pick up a mid-week fix immediately rather than waiting
     # for the next weekly rotation.
-    # From: PR #1571
+    # From: Issue #1570 | PR #1571
     apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
@@ -383,7 +383,7 @@ RUN set -euo pipefail; \
     # Why: `apt-get download` runs its actual fetch as the unprivileged
     # `_apt` user; a dir left owned by the build user would leave `_apt`
     # unable to write the downloaded .deb into it.
-    # From: PR #1571
+    # From: Issue #1570 | PR #1571
     chown _apt:root "${distcc_pump_tmp}"; \
     (cd "${distcc_pump_tmp}" && apt-get download "distcc-pump=${DISTCC_PUMP_PACKAGE_VERSION}"); \
     dpkg --unpack "${distcc_pump_tmp}"/distcc-pump_*.deb; \
@@ -396,7 +396,7 @@ RUN set -euo pipefail; \
     # Why: Debian's distcc-pump 3.4+really3.4-12 package ships these
     # escapes as-is; compiling with `-Werror::SyntaxWarning` below would
     # otherwise fail package configuration on the unpatched file.
-    # From: PR #1571
+    # From: Issue #1570 | PR #1571
     sed -i \
       -e 's/%s\\.s/%s\\\\.s/g' \
       -e 's/-Wa,\\\[/-Wa,\\\\[/g' \
@@ -424,7 +424,7 @@ RUN set -euo pipefail; \
 # staying the `-gnu` triple) and is native-arch only -- cross-compiling to
 # the *other* architecture's musl target would additionally need a
 # cross-linker this image does not carry.
-# From: Issue #815 | PR #1571
+# From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) musl_target="x86_64-unknown-linux-musl" ;; \
@@ -449,7 +449,7 @@ RUN set -euo pipefail; \
 # live pipe an early exit could break; the distcc-pump-parser checks above
 # sidestep the same class differently, by grepping a file rather than a
 # live process's stdout.
-# From: PR #1571
+# From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     required_tools=( \
       bash \
