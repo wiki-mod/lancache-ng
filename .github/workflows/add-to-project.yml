@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Automatically adds newly opened issues and pull requests to the
-# KANBAN-Lancache-NG project board (AGENTS.md AG-GH-002/AG-GH-008). The
+# KANBAN-Lancache-NG project board (AGENTS.md AG-GH-002/AG-GH-023). The
 # default Actions GITHUB_TOKEN cannot write to an org-owned Projects v2
 # board (same constraint documented in gc-pr-staging-images.yml for
 # GHCR_PACKAGE_DELETE_PAT), so this requires PROJECT_AUTOMATION_PAT -- a

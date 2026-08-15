@@ -77,7 +77,7 @@ on:
     # (see that job's `if:`). `validate-compose` deliberately did NOT get the same
     # treatment -- see `container-scan`'s comment for the invariant that it stays root.
     #
-    # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-008's
+    # Default GitHub activity set is opened/synchronize/reopened only. AG-GH-023/024/025's
     # pr-tracking-metadata-check reads labels/milestone/draft state from the webhook
     # snapshot, so with only the defaults a label/milestone change or ready-for-review
     # would never re-trigger this workflow. Added labeled/unlabeled/milestoned/
@@ -95,7 +95,7 @@ on:
     # additionally requires the pull_request event's `action` to be one of
     # opened/synchronize/reopened/ready_for_review before it will run at all (see
     # each job's own comment) -- this list and that inline per-job condition must be
-    # kept in sync if either ever changes. AG-GH-008's metadata check itself
+    # kept in sync if either ever changes. AG-GH-023/024/025's metadata check itself
     # (pr-tracking-metadata-check/-hosted) is deliberately NOT scoped this way: it
     # only reads the webhook snapshot and depends solely on validate-compose (which
     # has no such gate), so it still re-evaluates on every type below, keeping its
@@ -133,7 +133,7 @@ concurrency:
   # `cancel-in-progress` stays false for BOTH branches of the group key: for push/tag it no
   # longer matters (run-id-scoped, never collides); for pull_request it matters a lot.
   # Live-tested flipping it to true (#888) and it backfired immediately: opening a PR with
-  # labels/milestone already set (AG-GH-008) fires `opened` plus a `labeled`/`milestoned`
+  # labels/milestone already set (AG-GH-023) fires `opened` plus a `labeled`/`milestoned`
   # event within the same second, each spawning a competing run for the same per-PR-ref
   # group -- with cancel-in-progress:true, the first run's `detect-changes` job was killed
   # mid-execution by the very next event, producing a spurious "got 'cancelled'" failure on
@@ -489,7 +489,7 @@ jobs:
           bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
-    # Enforces AGENTS.md AG-GH-008: a PR must carry labels, a milestone, and (when
+    # Enforces AGENTS.md AG-GH-023/024/025: a PR must carry labels, a milestone, and (when
     # PROJECT_AUTOMATION_PAT is configured) project-board placement. Same
     # zero-LAN-dependency shape as pr-template-check -- reads webhook context plus one call
     # to api.github.com -- but kept on the self-hosted pool as primary with a hosted
@@ -514,7 +514,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Auto-assign Dependabot PR milestone
-        # AG-GH-008 requires every PR to carry a milestone. Dependabot cannot set its own
+        # AG-GH-023 requires every PR to carry a milestone. Dependabot cannot set its own
         # milestone or add itself to a project board -- this used to be handled by exempting
         # dependabot[bot] from this whole check (#1061-#1064), but the maintainer decided
         # (#1278) that auto-tagging real metadata is the right fix instead of skipping the

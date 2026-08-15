@@ -4,7 +4,7 @@
 #
 # Path-based auto-labeling config for actions/labeler (see
 # .github/workflows/labeler.yml). Reduces, but does not replace, the
-# AG-GH-008 requirement that a PR carry at least one label -- this can
+# AG-GH-023 requirement that a PR carry at least one label -- this can
 # only infer which service/area changed from file paths, it has no way to
 # know the correct issue Type or Milestone. Keep this in sync with the
 # label list in the repository settings and with services/*'s actual

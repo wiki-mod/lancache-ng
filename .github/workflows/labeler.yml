@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Auto-labels pull requests by changed file paths, using .github/labeler.yml.
-# Reduces the manual labeling burden from AG-GH-008 but does not eliminate
+# Reduces the manual labeling burden from AG-GH-023 but does not eliminate
 # it -- this can only infer area/component labels from paths, not an issue
 # Type or Milestone.
 name: "Pull Request Labeler"
