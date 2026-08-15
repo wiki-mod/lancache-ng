@@ -85,8 +85,7 @@ RUN set -euo pipefail; \
 # From: Issue #1556
 FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# What: upgrades base packages, then installs the 9 non-curl tools as
-# ordinary apk packages.
+# What: upgrades base packages, installs the 9 non-curl tools via apk.
 # Why: apk-installed packages register in this image's own package
 # database, keeping them Trivy-visible.
 # From: Issue #1556
@@ -102,8 +101,7 @@ RUN apk upgrade --no-cache && \
       zstd \
       ca-certificates
 
-# What: verifies the base image's expected commands still resolve after
-# installing coreutils/findutils.
+# What: verifies expected coreutils/findutils commands still resolve.
 # Why: installing coreutils overwrites some of Alpine's own BusyBox
 # symlinks; this catches a regression if any expected command breaks.
 # From: Issue #1556
