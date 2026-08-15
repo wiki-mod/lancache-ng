@@ -1262,6 +1262,7 @@ omitted):**
 | `scripts/check-workflow-service-lists.sh` | Hardcoded service arrays stay in sync across workflow files |
 | `scripts/check-naming-consistency.sh` | Container-name/allowlist/env-var naming contract (`docs/naming-conventions.md`) |
 | `scripts/check-file-headers.sh` | File-header contract (`AG-HDR-*`) |
+| `scripts/check-trivy-action-direct-usage.sh` | `aquasecurity/trivy-action` is only ever invoked through `.github/actions/trivy-scan-retry` (issue #1535, AG-CI-013, quoted or unquoted `uses:` scalars alike), and every real call site (`.github/workflows` and `.github/actions`) sets both `dockerhub-username`/`dockerhub-password` to a real, non-empty `secrets.*`/`inputs.*` reference, not merely present (issue #1535 follow-up) |
 | `scripts/classify-image-impact.sh` | The single source of truth for "which subsystem does this diff touch" — reused by this document's own staleness reasoning, `detect-changes`, and the `promote` job's version-bump logic |
 | `scripts/validate-stack-images.sh` | Release-notes/workflow status-line consistency |
 | `scripts/select-build-tools-image.sh` | Resolves the pinned build-tools image/digest for every container-based check above |
