@@ -365,9 +365,9 @@ RUN set -euo pipefail; \
     apt-get dist-upgrade -y; \
     apt-get full-upgrade -y; \
     # What: force-upgrades linux-libc-dev, jq, libjq1, libpq-dev, and libpq5 explicitly, beyond dist-upgrade/full-upgrade above.
-    # Why: each arrives transitively via an earlier, non-cache-busted apt-get
-    #   install, so a cached layer never re-resolves on its own; confirmed live
-    #   for CVE-2026-32316 (jq/libjq1) and CVE-2026-6473 (libpq-dev/libpq5).
+    # Why: jq/libjq1 are confirmed transitively pulled in by an earlier, non-cache-busted
+    #   apt-get install (CVE-2026-32316); libpq-dev/libpq5 hit the identical
+    #   still-outdated-after-dist-upgrade symptom for CVE-2026-6473, though their own origin is not established here -- the same proven fix applies regardless.
     # From: Issue #1570 | PR #1571
     apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
     distcc_pump_tmp="$(mktemp -d)"; \
