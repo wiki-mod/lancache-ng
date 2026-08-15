@@ -95,6 +95,7 @@ jobs:
       dhcp_proxy: ${{ steps.filter.outputs.dhcp_proxy }}
       ntp: ${{ steps.filter.outputs.ntp }}
       syslog: ${{ steps.filter.outputs.syslog }}
+      utilities: ${{ steps.filter.outputs.utilities }}
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       workflow: ${{ steps.filter.outputs.workflow }}
@@ -4253,6 +4254,9 @@ jobs:
           - service: build-tools
             platform_tag: amd64
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: utilities
+            platform_tag: amd64
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: proxy
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
@@ -4278,6 +4282,9 @@ jobs:
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
           - service: build-tools
+            platform_tag: arm64
+            runner: '"ubuntu-24.04-arm"'
+          - service: utilities
             platform_tag: arm64
             runner: '"ubuntu-24.04-arm"'
     steps:
@@ -4753,6 +4760,21 @@ jobs:
             build_contexts: ""
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
+          - service: utilities
+            context: services/utilities
+            build_contexts: ""
+            description: Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556).
+            # Heavy, not light, despite being a small/fast build in practice
+            # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
+            # requires "no real compile/link step of its own AT ALL", verified
+            # by inspecting the Dockerfile's own build graph, not assumed --
+            # services/utilities/Dockerfile's curl-builder stage genuinely
+            # compiles/links curl from source (gcc/make), so it does not meet
+            # that carve-out's literal precondition the way proxy/dhcp-proxy/
+            # watchdog/dhcp/syslog/ntp (pure package-install or COPY --from,
+            # no compiler invoked at all) do. Revisit if a future change
+            # removes the from-source curl build.
+            runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
 
     steps:
       - name: Checkout
@@ -4795,6 +4817,7 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
+              utilities) should_build="${{ needs['detect-changes'].outputs.utilities }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -5623,6 +5646,10 @@ jobs:
             context: tools/build-tools
             build_contexts: ""
             description: Prebuilt lancache-ng CI and developer validation toolchain image.
+          - service: utilities
+            context: services/utilities
+            build_contexts: ""
+            description: Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556).
 
     steps:
       - name: Checkout
@@ -5660,6 +5687,7 @@ jobs:
               dhcp-proxy) should_build="${{ needs['detect-changes'].outputs.dhcp_proxy }}" ;;
               ntp) should_build="${{ needs['detect-changes'].outputs.ntp }}" ;;
               syslog) should_build="${{ needs['detect-changes'].outputs.syslog }}" ;;
+              utilities) should_build="${{ needs['detect-changes'].outputs.utilities }}" ;;
               ui) should_build="${{ needs['detect-changes'].outputs.ui }}" ;;
               build-tools) should_build="${{ needs['detect-changes'].outputs.build_tools }}" ;;
               *)
@@ -6108,7 +6136,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
 
@@ -6131,6 +6159,7 @@ jobs:
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
           )
 
           # Duplicated rather than factored into a shared script/action: GitHub Actions
@@ -6217,7 +6246,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           short_sha="${BUILD_SHA::7}"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
@@ -6536,7 +6565,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
@@ -6999,7 +7028,7 @@ jobs:
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           short_sha="${COMMIT_SHA::7}"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
@@ -7276,7 +7305,14 @@ jobs:
         # The Trivy-scanned first-party image set (container-scan's matrix).
         # `stack` is intentionally excluded: it is a busybox channel-pointer
         # image, not a compiled software asset, and is not vuln-scanned either.
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools]
+        # `utilities` (issue #1556) added per this same stated criterion, now
+        # that it is part of container-scan's own matrix too. Note, not fixed
+        # here (separate, pre-existing, unrelated to #1556): `syslog` (#1428)
+        # is already part of container-scan's matrix but was never added
+        # here, a real gap against this array's own documented criterion --
+        # flagged rather than silently carried forward or silently expanded
+        # into this PR's own scope.
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools, utilities]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
