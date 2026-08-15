@@ -580,38 +580,37 @@ jobs:
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
     runs-on: ubuntu-latest
-    # Real runs: same order of magnitude as file-headers-hosted. Same
-    # 15-minute floor as detect-changes above.
+    # What: 15-minute timeout, same floor as detect-changes above; real runs are the same order of
+    # magnitude as file-headers-hosted.
+    # Why: A round, generous bound so a future hang still fails fast.
+    # From: PR #1218
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Same composite action as the self-hosted compose-healthchecks job above.
+      # What: Same composite action as the self-hosted compose-healthchecks job above.
+      # From: PR #1249
       - uses: ./.github/actions/compose-healthchecks-check
 
   line-endings:
-    # What: Checks Unix line-endings, plus governance guardrails and the CHANGELOG.md warn relocated from
-    # shellcheck so they still run on every PR regardless of diff scope.
-    # Why: DO NOT RENAME this job -- `name: line endings` is the required-status-check string in current_dev's
-    # branch protection, and renaming it would silently create a new, never-satisfied required check while the
-    # old name stays expected forever, the same bug class from a different cause; the same caution applies if
-    # `full-setup-validate` is ever decomposed -- its exact required-check name and `if:` condition must be
-    # preserved too.
-    # From: Issue #1095 | PR #1532, AG-VAL-016
+    # What: Checks Unix line-endings; also runs governance guardrails and the CHANGELOG.md direct-edit
+    # warning, relocated here so they run on every PR regardless of diff scope.
+    # Why: DO NOT RENAME this job -- `name: line endings` is the required-status-check string in branch
+    # protection; the same caution applies if `full-setup-validate` is ever decomposed.
+    # From: PR #602
     name: line endings
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: Timeout increased from 15 to 25 minutes to budget for relocated governance/changelog steps.
-    # Why: Live gh pr view + git fetches add overhead beyond 7-11s line-ending-only time.
-    # From: Issue #1095 | PR #1532
+    # What: Timeout increased from 15 to 25 minutes to budget for the relocated governance/changelog steps.
+    # Why: Live `gh pr view` calls plus git fetches add overhead beyond the 7-11s line-ending-only time.
+    # From: PR #1325
     timeout-minutes: 25
     # What: Job-level concurrency with cancel-in-progress: pull_request-only.
-    # Why: On push, line-endings is a hard gate on the channel publish path, so a cancelled run would make
-    # build/build-arm64 skip and starve the channel; on a PR, a cancelled result cleanly skips them instead,
-    # so cancelling a superseded run there just reclaims a runner slot.
-    # From: Issue #1095 | PR #1532
+    # Why: On push this job is a hard gate on the channel publish path, so cancelling it would starve the
+    # channel; on a PR, a cancelled result cleanly skips the downstream build jobs instead.
+    # From: PR #915
     concurrency:
       group: >-
         ${{
@@ -623,9 +622,9 @@ jobs:
     env:
       BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
     # What: Declares pull-requests:read for governance guardrails (PR title/body fetch via gh pr view).
-    # Why: Moved here from shellcheck along with the step itself; contents:read is restated too, since
-    # job-level permissions replace rather than extend the workflow-level defaults.
-    # From: Issue #1095 | PR #1532
+    # Why: contents:read is restated too, since job-level permissions replace rather than extend the
+    # workflow-level defaults.
+    # From: PR #1325
     permissions:
       contents: read
       pull-requests: read
@@ -642,8 +641,8 @@ jobs:
             bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
 
       # What: Governance guardrails step relocated from shellcheck.
-      # Why: Shellcheck gained docs-only self-skip; this check must run on every PR regardless.
-      # From: Issue #1095 | PR #1532
+      # Why: shellcheck gained a docs-only self-skip, but this check must run on every PR regardless.
+      # From: PR #1325
       - name: Run governance guardrails
         if: github.event_name == 'pull_request'
         env:
@@ -659,34 +658,26 @@ jobs:
           trap 'rm -f "$changed_files"' EXIT
           git fetch --no-tags --depth=1 origin \
             "+refs/heads/${GOVERNANCE_BASE_REF}:refs/remotes/origin/${GOVERNANCE_BASE_REF}"
-          # GOVERNANCE_BASE_SHA is github.event.pull_request.base.sha -- a webhook-payload
-          # snapshot frozen when the triggering event fired, NOT necessarily the base branch's
-          # current tip. On a long-lived PR whose base has advanced past that snapshot, the
-          # --depth=1 branch-tip fetch above does not include it, so `git cat-file -e` below
-          # would hard-crash (fatal: Not a valid object name, exit 128) instead of scanning the
-          # PR's own diff. Fetch the exact commit by SHA on demand instead: GitHub serves any
-          # commit reachable from a ref by exact SHA even once it is no longer a branch tip --
-          # the same direct-SHA-fetch idiom build-tools.yml uses. The two-dot `git diff base.sha
-          # GITHUB_SHA` below stays correct and shallow-safe: base.sha is this merge commit's
-          # base parent, so the diff needs only the two commit objects, never the connected
-          # history a merge-base/three-dot diff would require.
+          # What: Fetches GOVERNANCE_BASE_SHA (a webhook snapshot) by exact SHA, not just the branch-tip
+          # fetch above; the two-dot diff below stays shallow-safe since base.sha is a direct parent.
+          # Why: On a long-lived PR whose base has advanced past that snapshot, the branch-tip fetch alone
+          # would leave `git cat-file -e` below hard-crashing instead of scanning the PR's real diff.
+          # From: PR #1325
           git fetch --no-tags --depth=1 origin "$GOVERNANCE_BASE_SHA"
           git cat-file -e "${GOVERNANCE_BASE_SHA}^{commit}"
           git cat-file -e "${GITHUB_SHA}^{commit}"
           git diff --name-only --diff-filter=ACMRTUXB "$GOVERNANCE_BASE_SHA" "$GITHUB_SHA" > "$changed_files"
 
-          # github.event.pull_request.title/.body are webhook-payload snapshots taken when the
-          # triggering event fired, not the PR's current title/body (issue #805): editing either
-          # after a failed check and re-running with a plain `gh run rerun` replayed the stale
-          # snapshot and failed identically, even once the content was actually fixed. Fetched
-          # live instead, via the same `gh pr view` pattern #903/#905 established for
-          # pr-template-check's PR-body fetch.
+          # What: Fetches PR title/body live via `gh pr view`, same pattern as pr-template-check's own fetch.
+          # Why: `github.event.pull_request.title/.body` is a webhook snapshot; a plain `gh run rerun`
+          # replays it, so an edited title/body would fail identically even once actually fixed.
+          # From: PR #903
           governance_pr_title="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json title -q .title)"
           governance_pr_body="$(gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body)"
 
-          # Passed to check-governance-guards.sh only as `-e KEY=VALUE`
-          # docker arguments below -- never interpolated into a run: string
-          # -- so PR title/body content can never be executed as shell code.
+          # What: PR title/body passed as `-e KEY=VALUE` docker arguments below.
+          # Why: Never interpolated into a run: string, so PR-controlled content can never execute as shell code.
+          # From: PR #1325
           docker run --rm \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
@@ -697,17 +688,11 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
-      # Warn-only guard (#893): flags a PR that edits CHANGELOG.md directly, since #899 that
-      # file is normally written by an automated bot commit on release publish, never
-      # through a PR (see CONTRIBUTING.md's "Releasing Changes to CHANGELOG.md"). Kept
-      # independent of the governance-guardrails step above rather than extending it: that
-      # step's own $changed_files tempfile is already deleted by its EXIT trap before this
-      # step starts (each `run:` block is its own shell process), so a self-contained fetch
-      # here is simpler than threading state between steps. This can NEVER fail the job: the
-      # script always exits 0, and `|| true` below is a deliberate, documented fallback (not
-      # a hidden failure per AG-VAL-004) covering the unlikely case the docker run itself
-      # errors for an infra reason. Relocated from `shellcheck` (#1245); otherwise
-      # unchanged.
+      # What: Warn-only guard flagging a PR that edits CHANGELOG.md directly (normally written only by an
+      # automated release-publish bot commit, see CONTRIBUTING.md).
+      # Why: This step can NEVER fail the job -- the script always exits 0, and the `|| true` below is a
+      # documented AG-VAL-004 fallback for a docker infra error only, not a hidden failure.
+      # From: PR #1325
       - name: Warn on direct CHANGELOG.md edits outside a release PR
         if: github.event_name == 'pull_request'
         env:
