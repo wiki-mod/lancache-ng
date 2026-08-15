@@ -9,9 +9,9 @@
 FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
-ARG DOCKER_CLI_VERSION=29.6.1
-ARG DOCKER_COMPOSE_VERSION=5.2.0
-ARG DOCKER_BUILDX_VERSION=0.35.0
+ARG DOCKER_CLI_VERSION=29.7.2
+ARG DOCKER_COMPOSE_VERSION=5.4.0
+ARG DOCKER_BUILDX_VERSION=0.36.1
 # buildx v0.35.0's go.mod pins github.com/containerd/containerd/v2 at v2.2.4,
 # which carries three HIGH-severity CVEs (CVE-2026-53488/53489/53492) fixed in
 # 2.2.5+ -- confirmed directly via Trivy scanning this image's first buildx
@@ -20,7 +20,14 @@ ARG DOCKER_BUILDX_VERSION=0.35.0
 # containerd/containerd/v2 does publish a newer, non-breaking 2.2.x tag, so
 # `go get` this exact module up to the fixed version before building instead
 # of carrying the vulnerability forward.
-ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
+# What: keeps this override current with buildx's own upstream go.mod floor.
+# Why: buildx v0.36.1 itself already requires containerd/containerd/v2
+# v2.3.3 as its go.mod floor (checked directly against that tag's go.mod),
+# so the v2.2.x line this override used to target no longer applies -- 2.3.4
+# is the next real patch tag on the SAME minor line buildx itself now
+# uses, not a jump past what upstream already adopted.
+# From: Issue #1570
+ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # docker-buildx v0.35.0, docker-compose v5.2.0, AND the Docker CLI v29.6.1
 # (its own vendor.mod pins the same version -- checked when auditing all
 # four source-built tools for this same CVE class, not just the two CI
@@ -32,7 +39,15 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.2.6
 # reasoning as the containerd override above: neither project has cut a
 # release that resolves this on its own yet, so `go get` the fixed version
 # directly before building.
-ARG GRPC_GO_VERSION=1.82.1
+# What: keeps this override one patch ahead of buildx/compose/cli's own
+# go.mod floor, which has itself already moved to v1.82.1 by the versions
+# bumped in this same change (checked directly against their go.mod/
+# vendor.mod at the new tags) -- 1.83.0 is the current upstream release.
+# Why: no new CVE motivates this specific step; staying on the latest
+# grpc-go tag needs no extra reasoning to re-justify later than the
+# override mechanism itself already established (see the block above).
+# From: Issue #1570
+ARG GRPC_GO_VERSION=1.83.0
 # docker-buildx v0.35.0 (go.mod: v0.37.0) and docker-compose v5.2.0 / the
 # Docker CLI v29.6.1 (both: v0.38.0, checked when auditing all three
 # source-built Go tools with a go.mod/vendor.mod for this same CVE class,
@@ -48,7 +63,11 @@ ARG GRPC_GO_VERSION=1.82.1
 # this fix, one past the v0.39.0 minimum fix version) rather than the bare
 # minimum, since there is no indication of a regression between the two and
 # staying on latest needs no extra reasoning to re-justify later.
-ARG GOLANG_X_TEXT_VERSION=0.40.0
+# What: same routine latest-tag bump as the grpc-go override above.
+# Why: golang.org/x/text v0.41.0 is the current upstream release; no new
+# CVE motivates this step specifically.
+# From: Issue #1570
+ARG GOLANG_X_TEXT_VERSION=0.41.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
@@ -147,16 +166,27 @@ FROM rust:latest
 
 LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
-ARG SCCACHE_VERSION=0.16.0
+# What: bumps the source-built sccache pin to its current upstream release.
+# Why: 0.17.0 adds an opt-in client-side architecture change that stays off
+# by default (confirmed via upstream release notes); no config here enables
+# it, so this is a routine version-currency bump only.
+# From: Issue #1570
+ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
 ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f9670b0fd599dd
 # Verified against the live crates.io index during development of the coverage
 # CI job (a plain `cargo install cargo-tarpaulin` resolved to this exact
 # version); re-verify before bumping if this drifts from the latest release.
-ARG CARGO_TARPAULIN_VERSION=0.37.0
-ARG CARGO_TARPAULIN_SHA256_AMD64=398ca437e9f2b2baee46ef9d3d03966112f03f2cce8b1655a8ba0b61cef08bff
-ARG CARGO_TARPAULIN_SHA256_ARM64=d6ae06b7126fb44414dd65165f9aec9e330146513f709af69e6a7927093f277a
+# What: bumps to the current upstream release and its real checksums.
+# Why: both SHA256 values below were recomputed against the actual
+# 0.37.1 release assets (not carried forward from 0.37.0) -- an
+# unchanged checksum next to a bumped version number would silently
+# break the build's own verification step.
+# From: Issue #1570
+ARG CARGO_TARPAULIN_VERSION=0.37.1
+ARG CARGO_TARPAULIN_SHA256_AMD64=897731f07696af16ff725f90e718ac3fce4c5c3ca513945e4bc035ad2b7a89e0
+ARG CARGO_TARPAULIN_SHA256_ARM64=3571a002bfc15c08e667523d7c97680f7e8281480029ee0cf739a0e8fef12343
 ARG DISTCC_PUMP_PACKAGE_VERSION=3.4+really3.4-12
 ARG SHELLSPEC_VERSION=0.28.1
 ARG SHELLSPEC_SHA256=350d3de04ba61505c54eda31a3c2ee912700f1758b1a80a284bc08fd8b6c5992
