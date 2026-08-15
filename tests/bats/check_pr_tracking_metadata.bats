@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-pr-tracking-metadata.sh (AG-GH-008): the CI
+# Coverage for scripts/check-pr-tracking-metadata.sh (AG-GH-023/024/025): the CI
 # guard that validates a pull request carries labels, a milestone, and (when
 # a project-read token is configured) Project-board placement.
 #
@@ -40,7 +40,7 @@ setup() {
         PR_NUMBER=1 REPO='wiki-mod/lancache-ng' PR_IS_FORK=false \
         run bash "$script"
     [ "$status" -ne 0 ]
-    [[ "$output" == *"AG-GH-008"* ]]
+    [[ "$output" == *"AG-GH-023"* ]]
     [[ "$output" == *"No labels set"* ]]
 }
 
