@@ -3,9 +3,12 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # CI and developer validation toolchain with Rust, sccache, ccache, distcc, and build utilities.
 #
-# Intentional build-tools default: use rust:latest so developer and CI
-# validation sees current Rust tooling early. Production service Dockerfiles
-# stay separately pinned for reproducible runtime image builds.
+# What: uses `rust:latest`/`golang:latest` as this image's base, unlike
+# production service Dockerfiles.
+# Why: developer and CI validation should see current Rust/Go tooling
+# early; production service Dockerfiles stay separately pinned instead,
+# for reproducible runtime image builds.
+# From: Issue #1570 | PR #1571
 FROM golang:latest AS actionlint-builder
 
 ARG ACTIONLINT_VERSION=1.7.12
@@ -54,9 +57,11 @@ SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 # Why: docker/cli ships a `vendor.mod`, not a `go.mod` (deliberately, so it
 # cannot be imported as a library), so `go install` has no module file to
 # resolve against; bumping its vendored grpc-go/x-text needs a real
-# `go.mod` to establish the module root, so `go.mod`/`go.sum` are
-# symlinked to `vendor.mod`/`vendor.sum` for the duration of the bump, then
-# removed before the build runs.
+# `go.mod` to establish the module root -- `-modfile=vendor.mod` alone is
+# not enough, since Go still looks for a literal `go.mod` to find the
+# root before it honors which file to read/write -- so `go.mod`/`go.sum`
+# are symlinked to `vendor.mod`/`vendor.sum` for the duration of the
+# bump, then removed before the build runs.
 # From: Issue #1570 | PR #1571
 
 # What: builds docker-compose by cloning its tagged release and running a
@@ -158,15 +163,11 @@ ENV PATH="/usr/local/cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin
 # matches the Release file's `Suite:` field, which trixie-backports
 # declares as `stable-backports`; the codename alone silently matches
 # nothing, leaving every "backports-sourced" package on its vulnerable
-# plain-trixie version despite the pin file being present. As of
-# 2026-08-15, both a live Trivy scan (CI run 31872346196, 0 HIGH/CRITICAL
-# findings on the debian 13.6 base, both architectures) and the Debian
-# Security Tracker (CVE-2025-59375, CVE-2026-25210, CVE-2026-45186,
-# CVE-2026-56131, CVE-2026-56408 all shown fixed at the resolved
-# 2.8.2-1~deb13u1) confirm the libexpat CVEs are resolved; this tracker
-# data has flipped once before without a package-version change (residual
-# risk tracked in issue #1314), so re-verify with a fresh scan before
-# repeating this claim rather than assuming it holds indefinitely.
+# plain-trixie version despite the pin file being present. Debian Security
+# Tracker data for libexpat has flipped between "fixed" and "affected"
+# once before without a package-version change (residual risk tracked in
+# issue #1314) -- re-verify with a fresh Trivy scan before asserting its
+# CVE status rather than trusting a comment's snapshot of it.
 # From: Issue #1570 | PR #1571
 RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sources.list.d/backports.list \
     && printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' > /etc/apt/preferences.d/backports \
@@ -176,13 +177,15 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
     && rm -rf /var/lib/apt/lists/*
 
 # What: installs ccache from Debian's own package (not source-built).
-# Why: caches the C-dependency compile step (`-sys` crates, e.g. `ring`) that
-# distcc alone only distributes, never caches; sccache was ruled out for this
-# same job because it always shells its own `-E` pass through `CC`,
-# which crashes against a `,cpp`-tagged distcc host list, while ccache
-# preprocesses locally by default; no per-feature trimming reason exists to
-# source-build it the way sccache's own install below does.
-# From: Issue #887
+# Why: caches the C-dependency compile step (`-sys` crates, e.g. `ring`)
+# that distcc alone only distributes, never caches. sccache (installed
+# separately below) was ruled out for this specific job at the time this
+# was written, because it shelled its own `-E` preprocessing pass through
+# `CC` in a way that crashed against a `,cpp`-tagged distcc host list,
+# while ccache preprocesses locally by default; re-verify against the
+# sccache version pinned below before relying on this if sccache's
+# preprocessing behavior is ever reconsidered for this job.
+# From: Issue #887 | PR #1571
 RUN set -euo pipefail; \
     apt-get update; \
     apt-get install -y --no-install-recommends \
@@ -290,8 +293,8 @@ RUN docker --version; \
 # dependency, so isc-dhcp-client is kept in this image solely for the two
 # CI simulation scripts above, which test Kea's own server behavior and
 # are a separate concern from the Admin UI's probe.
-# From: Issue #1570 | PR #1571
-#
+# From: Issue #1288 | PR #1571
+
 # What: tcpdump supports scripts/dhcp-proxy-pxe-simulation.sh, capturing
 # dnsmasq's real DHCPOFFER reply to a synthetic PXE DHCPDISCOVER
 # (tools/pxe-client-probe, a Rust binary built from source by that script)
@@ -302,8 +305,8 @@ RUN docker --version; \
 # reading the same reply from a tcpdump-written pcap file is unaffected by
 # that gap. python3 below is unrelated to this script -- it is required
 # by distcc-pump.
-# From: Issue #1570 | PR #1571
-#
+# From: Issue #705 | PR #1571
+
 # What: forces this RUN's BuildKit layer-cache key to change on a weekly
 # cadence (CI passes a value that rotates once per ISO week).
 # Why: BuildKit's cache has no wall-clock expiry, only cache-key (text)
@@ -311,8 +314,8 @@ RUN docker --version; \
 # `full-upgrade` below replay a stale layer forever regardless of new
 # Debian security fixes; referencing the ARG here forces a real re-run
 # against the then-current archive on that same cadence.
-# From: Issue #1570 | PR #1571
-#
+# From: Issue #1147 | PR #1571
+
 # What: declared immediately before the one RUN step that uses it, not up
 # with the image's other ARGs near the top of this stage.
 # Why: an ARG's declaration point, not just the instructions that expand
@@ -322,7 +325,7 @@ RUN docker --version; \
 # unchanged earlier layers on every cache-bust rotation. Keeping the
 # declaration adjacent to its only use confines the weekly cache-key
 # change to this RUN step, leaving every earlier layer cache-stable.
-# From: Issue #1570 | PR #1571
+# From: Issue #1147 | PR #1571
 ARG APT_CACHE_BUST=""
 RUN set -euo pipefail; \
     : "apt-cache-bust=${APT_CACHE_BUST}"; \
@@ -374,9 +377,9 @@ RUN set -euo pipefail; \
     # stale headers. jq/libjq1 are installed by an earlier, non-cache-busted
     # RUN step above, so once that layer is cached it never re-resolves
     # against a newer mirror on its own (confirmed live: CVE-2026-32316,
-    # fixed in trixie-security's 1.7.1-6+deb13u3, still current as of
-    # 2026-08-15); naming both here forces this build to pick up a mid-week
-    # fix immediately rather than waiting for the next weekly rotation.
+    # fixed in trixie-security's 1.7.1-6+deb13u3); naming both here forces
+    # this build to pick up a mid-week fix immediately rather than waiting
+    # for the next weekly rotation.
     # From: Issue #1570 | PR #1571
     apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1; \
     distcc_pump_tmp="$(mktemp -d)"; \
@@ -393,8 +396,13 @@ RUN set -euo pipefail; \
     distcc_pump_parser="/usr/lib/python3/dist-packages/include_server/parse_command.py"; \
     grep -F "'-Wa,(%s\\.s)'" "${distcc_pump_parser}" >/dev/null; \
     grep -F "'-Wa,\\[(%s\\.s)\\]'" "${distcc_pump_parser}" >/dev/null; \
-    # Debian distcc-pump 3.4+really3.4-12 ships invalid Python regex escapes.
-    # Patch them before package configuration and compile with warnings as errors.
+    # What: patches two invalid Python regex escapes in distcc-pump's own
+    # parser before `dpkg --configure`, then compiles with warnings as
+    # errors.
+    # Why: Debian's distcc-pump 3.4+really3.4-12 package ships these
+    # escapes as-is; compiling with `-Werror::SyntaxWarning` below would
+    # otherwise fail package configuration on the unpatched file.
+    # From: Issue #1570 | PR #1571
     sed -i \
       -e 's/%s\\.s/%s\\\\.s/g' \
       -e 's/-Wa,\\\[/-Wa,\\\\[/g' \
@@ -415,8 +423,8 @@ RUN set -euo pipefail; \
 # research; added once here so every consumer needing musl (services/ui,
 # and separately services/dns's nats-subscriber) can use it without
 # repeating the same apt-get/rustup steps per crate.
-# From: Issue #1570 | PR #1571
-#
+# From: Issue #815 | PR #1571
+
 # What: this only registers a second target's prebuilt std library
 # alongside the default; it does not run `rustup default` or pass
 # `--target` anywhere else in this Dockerfile.
@@ -425,8 +433,8 @@ RUN set -euo pipefail; \
 # (confirmed via `rustc -vV`'s `host:` line staying the `-gnu` triple;
 # `rustup target list` has no `(default)` marker, only `(installed)`, so
 # the verification block below checks `rustc -vV` instead).
-# From: Issue #1570 | PR #1571
-#
+# From: Issue #815 | PR #1571
+
 # What: registers only the musl target matching this build's own host
 # architecture, mirroring the cargo-audit/cargo-tarpaulin `case` block
 # earlier in this stage.
@@ -435,7 +443,7 @@ RUN set -euo pipefail; \
 # additionally need a cross-linker this image does not carry, so it is not
 # silently assumed to work -- a future consumer needing that would add the
 # cross-linker explicitly first.
-# From: Issue #1570 | PR #1571
+# From: Issue #815 | PR #1571
 RUN set -euo pipefail; \
     case "$(dpkg --print-architecture)" in \
       amd64) musl_target="x86_64-unknown-linux-musl" ;; \
