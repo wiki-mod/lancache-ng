@@ -182,12 +182,25 @@ while IFS= read -r -d '' file; do
     if [ "$bytes" -gt "$MAX_WORKFLOW_BYTES" ]; then
         byte_offenders+=("$file:$bytes")
     fi
+    # What: captures measure_run_blocks's output into a variable first, then
+    # reads it via a here-string, instead of piping straight into the while
+    # loop's process substitution.
+    # Why: a process-substitution/pipe failure is invisible to `set -e`
+    # (AG-VAL-032's same class of bug) -- an awk crash would otherwise print
+    # nothing, the while loop would just see zero lines, and the script
+    # would silently report "all within limits" on a real analysis failure
+    # instead of failing closed (AG-INT-002).
+    # From: Issue #1535
+    if ! block_report=$(measure_run_blocks "$file"); then
+        echo "check-workflow-line-limit: failed to analyze run: blocks in $file (awk exited non-zero)" >&2
+        exit 1
+    fi
     while IFS=$'\t' read -r block_line block_bytes; do
         [ -n "$block_line" ] || continue
         if [ "$block_bytes" -gt "$MAX_RUN_BLOCK_BYTES" ]; then
             run_block_offenders+=("$file:$block_line:$block_bytes")
         fi
-    done < <(measure_run_blocks "$file")
+    done <<< "$block_report"
 done < <(find .github/workflows -maxdepth 1 -name '*.yml' -print0)
 
 if [ "${#line_offenders[@]}" -gt 0 ] || [ "${#byte_offenders[@]}" -gt 0 ] || [ "${#run_block_offenders[@]}" -gt 0 ]; then
