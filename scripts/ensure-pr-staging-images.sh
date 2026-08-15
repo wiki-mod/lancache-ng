@@ -353,22 +353,54 @@ declare -A classify_key_map=(
 # own _sif_inspect() helper (already sourced above) instead of a second,
 # independent `docker buildx imagetools inspect ... 2>/dev/null`, and
 # returns its tri-state contract on failure: 1 = registry call failed, not
-# confirmed absent (network/timeout/rate-limit/auth/unrecognized); 2 =
-# registry positively confirmed no such manifest/tag/digest exists. The
-# STAGING_IMAGE_EXISTS_CMD stub path is unaffected and keeps its existing
-# plain-boolean contract.
+# confirmed absent, after _sif_inspect's own ghcr_retry wrapper already
+# exhausted its shared retry budget (network/timeout/rate-limit/auth/
+# unrecognized); 2 = registry positively confirmed no such manifest/tag/
+# digest exists. Captures and forwards _sif_inspect's stderr only for status
+# 1 (a real, budget-exhausted failure); a status-2 confirmed absence has its
+# stderr discarded instead of forwarded, since that case's own single
+# "::error::" line (ghcr_retry's permanent-failure annotation) is a false
+# alarm here, not a real registry problem.
 # Why: Discarding stderr made a confirmed "not published yet" indistinguishable
 # from a transient registry failure, letting wait_for_touched_image() below
 # silently poll for up to an hour past when the image had actually already
-# been published.
+# been published (Codex P1, PR #1538). Forwarding it unconditionally instead
+# turned every expected "not published yet" probe into a misleading GitHub
+# error annotation (Codex P2, PR #1538).
 # From: PR #1538, Issue #1449
 image_exists() {
     local image="$1"
     if [[ -n "${STAGING_IMAGE_EXISTS_CMD:-}" ]]; then
-        "$STAGING_IMAGE_EXISTS_CMD" "$image"
-    else
-        _sif_inspect "$image" >/dev/null
+        "$STAGING_IMAGE_EXISTS_CMD" "$image" && return 0
+        # What: Stub path keeps its pre-existing plain-boolean contract: a
+        # nonzero exit here always means "not found yet, keep polling" --
+        # the same meaning tri-state status 2 (confirmed absence) has below,
+        # never status 1's "the shared registry retry budget is already
+        # exhausted" meaning, which only a real ghcr_retry-wrapped call can
+        # produce.
+        # Why: Without this translation, wait_for_touched_image()'s new
+        # status-1 fail-fast branch would misfire on every stub-driven test's
+        # ordinary "not present yet" result, stopping the poll loop after a
+        # single check instead of the many pre-existing tests' expected
+        # continued polling.
+        # From: PR #1538, Issue #1449
+        return 2
     fi
+    local err_capture status
+    err_capture="$(mktemp 2>/dev/null)" || err_capture=""
+    if [[ -n "$err_capture" ]]; then
+        _sif_inspect "$image" >/dev/null 2>"$err_capture"
+        status=$?
+        if (( status != 2 )); then
+            cat "$err_capture" >&2
+        fi
+        rm -f "$err_capture"
+        return "$status"
+    fi
+    # mktemp unavailable: fall back to the original unconditional passthrough
+    # rather than silently dropping diagnostics in an environment this
+    # helper cannot capture stderr in at all.
+    _sif_inspect "$image" >/dev/null
 }
 
 # #822 ("Pattern D"): this real `imagetools create` write is the exact
@@ -474,12 +506,27 @@ wait_for_touched_image() {
         # From: PR #1538, Issue #1449
         local exists_status=$?
 
+        # What: Status 1 means image_exists()'s own ghcr_retry-wrapped call
+        # already exhausted the shared registry retry budget without the
+        # registry confirming absence -- fails this wait immediately instead
+        # of falling through to the unconditional poll/sleep below. Only
+        # status 2 (registry positively confirmed no such manifest/tag yet)
+        # continues past this point to the normal/hard-ceiling polling.
+        # Why: Codex P1 (PR #1538) -- the previous code only changed this
+        # branch's log message and then repeated the entire retry wrapper on
+        # the next loop iteration, so a persistent registry error (e.g. an
+        # auth failure) kept polling all the way to the 25-/60-minute hard
+        # ceiling even once the image was already published, leaving the
+        # confirmed 2026-08-01 incident (PR #1354) behaviorally unfixed for
+        # this failure shape.
+        # From: PR #1538, Issue #1449
+        if (( exists_status != 2 )); then
+            echo "::error::$service staging image ($pr_image) registry check failed (elapsed $((SECONDS - start_time))s) -- the last registry check did NOT positively confirm absence (network/timeout/rate-limit/auth, or an unrecognized error shape), and the shared GHCR retry budget is already exhausted for this check. Refusing to keep polling on an error that budget could not resolve; if this tag is later found to have existed all along, that is evidence of a registry-call failure being misread as absence, not a real missing build."
+            return 1
+        fi
+
         if (( SECONDS >= hard_deadline )); then
-            if (( exists_status == 2 )); then
-                echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. The registry's last response confirmed no such manifest/tag exists (not a connection/timeout/auth failure) -- this is not a detection blind spot, build-push genuinely never published this tag."
-            else
-                echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. The last registry check did NOT positively confirm absence (network/timeout/rate-limit/auth, or an error shape this check does not yet recognize) -- if this tag is later found to have existed all along, that is evidence of a registry-call failure being misread as absence, not a real missing build."
-            fi
+            echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. The registry's last response confirmed no such manifest/tag exists (not a connection/timeout/auth failure) -- this is not a detection blind spot, build-push genuinely never published this tag."
             echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. Even if build-push's run for this PR's head ($pr_head_sha) is still active, this gate refuses to wait any longer -- a run this slow needs its own investigation rather than an ever-longer poll."
             return 1
         fi
@@ -497,11 +544,10 @@ wait_for_touched_image() {
             fi
         fi
 
-        if (( exists_status == 2 )); then
-            echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- registry confirms no such manifest/tag yet (not a connection/timeout/auth failure)..."
-        else
-            echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- last registry check did not positively confirm absence (network/timeout/rate-limit/auth, or an unrecognized error shape); retrying..."
-        fi
+        # Only reached with exists_status == 2 (see the fail-fast branch
+        # above): status 1 always returns before this point now, so this
+        # line no longer needs its own "not confirmed absence" wording.
+        echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- registry confirms no such manifest/tag yet (not a connection/timeout/auth failure)..."
         sleep "$poll_interval_seconds"
     done
 }

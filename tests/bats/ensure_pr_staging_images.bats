@@ -305,6 +305,20 @@ STUB
     unset STAGING_IMAGE_EXISTS_CMD
     fake_docker_returning_stderr "dial tcp: lookup ghcr.io: connection refused"
     export PATH
+    # What: pins ghcr_retry to a single attempt (no 30s backoff sleep)
+    # instead of inheriting its production default of 4 attempts.
+    # Why: this test's fake `docker` fails identically every attempt, so
+    # without this override _sif_inspect's ghcr_retry wrapper would burn its
+    # full default retry budget (4 attempts, 30s backoff between each) on
+    # every run, adding ~90s to this single test -- the analogous real-docker
+    # transient-error test in staging_image_freshness.bats
+    # (sif_image_revision, "an unrecognized/transient registry error returns
+    # status 1") already pins the same override for the identical reason,
+    # here exported (not a plain assignment) because this test drives the
+    # script via `run bash "$script"`, a separate subprocess that only
+    # inherits exported variables.
+    # From: PR #1538, Issue #1449
+    export GHCR_RETRY_MAX_ATTEMPTS=1
     export WORKFLOW_CHANGED="false"
     export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
     export STAGING_POLL_TIMEOUT_SECONDS=0
