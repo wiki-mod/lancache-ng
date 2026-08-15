@@ -331,6 +331,13 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Real Docker Hub secret, unconditional (no pull_request
+          # gate like build-tools.yml's).
+          # Why: this workflow's only trigger is workflow_dispatch, never
+          # pull_request, so there is no same-repo-PR exposure to gate.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -525,6 +532,11 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Same unconditional Docker Hub secret as the amd64 scan
+          # step above.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
