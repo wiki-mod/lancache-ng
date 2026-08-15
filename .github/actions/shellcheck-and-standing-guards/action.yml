@@ -3,14 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 name: ShellCheck/ActionLint plus standing text/YAML guards
 description: >-
-  The exact check sequence build-push.yml's self-hosted `shellcheck` job and
-  its `shellcheck-hosted` GitHub-hosted fallback both ran as byte-identical
-  duplicated steps (the previous duplication finding identified 9 light+hosted-fallback
-  job pairs share their real step content and only differ in job-level
-  scheduling metadata -- needs/if/concurrency/permissions -- which a
-  composite action cannot express, so those stay on the two calling jobs).
-  Every check here runs inside the build-tools image (AG-VAL-016) so host
-  tools are never trusted.
+  Shared step logic for the self-hosted `shellcheck` job and its `shellcheck-hosted`
+  fallback. Every check runs inside the build-tools image (AG-VAL-016) so host tools
+  are never trusted (From: PR #1467).
 inputs:
   build-tools-image:
     description: Resolved BUILD_TOOLS_IMAGE reference (already smoke-tested by the caller).
@@ -18,31 +13,13 @@ inputs:
 runs:
   using: composite
   steps:
-    # Real incident (2026-07-24/25): actionlint's default invocation embeds its own
-    # shellcheck integration, which intermittently hangs INDEFINITELY in a Go-runtime
-    # deadlock (observed on-host: STAT Ssl, WCHAN futex_do_wait, no child processes,
-    # signal-deaf) -- a normal run finishes in ~1-2s. `timeout-minutes: 15` alone is NOT
-    # sufficient: GitHub cancels a timed-out step by sending SIGTERM to the `docker run`
-    # client, which forwards it into the container, and a deadlocked actionlint ignores
-    # it -- so both the client and container keep running, the runner slot stays occupied,
-    # and `--rm` never fires (verified on-host). That is exactly how accumulated hung lint
-    # containers exhausted the entire lancache-light tier for hours on 2026-07-25
-    # (containers seen alive 5-14h). The real guard is the INNER `timeout --kill-after=30
-    # 300` around actionlint below: SIGTERM at 300s, then an UNIGNORABLE SIGKILL 30s later,
-    # so even a deadlocked actionlint is force-killed from inside the container and the
-    # slot is freed fast (verified on-host: exit 137, container removed).
-    #
-    # A real CI run confirmed that a composite action step does NOT
-    # support `timeout-minutes` at all -- GitHub's real schema validator rejects it
-    # outright ("Unexpected value 'timeout-minutes'"), failing the whole action to load.
-    # An earlier version of this comment claimed the opposite ("composite-action steps
-    # support timeout-minutes like any other step"); that was wrong and unverified when
-    # written, caught only by a real run neither `yaml.safe_load` nor a hand-written
-    # schema check could catch (actionlint doesn't scan .github/actions/**/action.yml
-    # in this project's CI either). The INNER `timeout --kill-after=30 300` guard inside
-    # the run: script below is therefore the ONLY hang-protection this step has; both
-    # calling jobs' own step-level `timeout-minutes: 15` (set where this action is
-    # invoked, a real job step, not a composite-action step) remains the coarse backstop.
+    # What: wraps actionlint in an in-container `timeout --kill-after=30 300`.
+    # Why: actionlint's embedded shellcheck integration can hang indefinitely in a
+    # Go-runtime deadlock; a composite-action step cannot declare `timeout-minutes`
+    # (GitHub's schema validator rejects it), so this inner kill boundary is the
+    # only hang-protection here -- the calling job's own `timeout-minutes: 15`
+    # only reaches the `docker run` client, not a deadlocked process inside it.
+    # From: PR #1383
     - name: Run ShellCheck and ActionLint
       shell: bash
       run: |
@@ -58,8 +35,10 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        # tests/setup-migration-semantics.sh only reads setup.sh and writes to
-        # mktemp -d (container /tmp), so the read-only repo mount is sufficient.
+        # What: mounts the repo read-only for this test.
+        # Why: tests/setup-migration-semantics.sh only reads setup.sh and writes to mktemp -d
+        # (container /tmp), so a read-only mount is sufficient.
+        # From: PR #1467
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
@@ -68,15 +47,11 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
 
     - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
-      # check-action-node-versions.sh calls curl against api.github.com to
-      # resolve each pinned action's own action.yml -- runs inside the
-      # build-tools container per AG-VAL-016 (curl must not be a host-local
-      # tool). GH_TOKEN just raises the API rate limit; this also works fine
-      # unauthenticated at this repo's current pin count. Uses `github.token`
-      # here, not `secrets.GITHUB_TOKEN` as both original jobs had it: a
-      # composite action cannot resolve `secrets.*` directly, and GitHub's own
-      # docs state `github.token` is "functionally equivalent to the
-      # GITHUB_TOKEN secret" -- a documented equivalence, not an approximation.
+      # What: runs check-action-node-versions.sh inside the build-tools container with GH_TOKEN.
+      # Why: the script calls curl against api.github.com (must not rely on a host-local tool,
+      # AG-VAL-016); GH_TOKEN only raises the rate limit and also works fine unauthenticated
+      # at this repo's current pin count.
+      # From: Issue #801 | PR #804
       shell: bash
       env:
         GH_TOKEN: ${{ github.token }}
@@ -91,14 +66,11 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage (#896)
-      # Standing guard: every full-setup-validate.yml/
-      # full-setup-deep-validate.yml job that starts its own compose stack from
-      # compute-validation-network's raw per-run subnet in
-      # scripts/lib/run-in-validation-subnet.sh's collision-safe reservation, but only for
-      # the jobs that existed at the time. Two jobs added later never got
-      # wired through it and hit a real "Pool overlaps" collision under concurrent CI load;
-      # wired through it. This check stops another job from silently repeating the same
-      # gap -- a pure text/YAML-structure check, no Docker/LAN dependency of its own.
+      # What: asserts every full-setup-validate.yml/full-setup-deep-validate.yml job that
+      # starts its own compose stack is wired through the collision-safe subnet reservation.
+      # Why: two jobs added after the original wiring pass were never connected to it and hit
+      # a real "Pool overlaps" collision under concurrent CI load.
+      # From: Issue #896 | PR #917
       shell: bash
       run: |
         set -euo pipefail
@@ -110,15 +82,12 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/check-validation-subnet-wrapper-coverage.sh
 
     - name: Check executable bits on bare-path script invocations (#1019)
-      # Standing guard for the executable-bit failure pattern: a repo script
-      # committed 100644 but invoked by a bare path fails in CI with exit 126,
-      # a defect invisible from a Windows/
-      # core.filemode=false author host (AG-VAL-024). The class recurred four times
-      # repeatedly with only a single hardcoded test -x watchdog.sh guarding it.
-      # This scans every workflow + composite-action file for bare-path invocations and every
-      # .githooks/ hook, asserting each is committed 100755 -- a pure git-metadata/YAML
-      # check. Runs in the build-tools container because it reads committed modes via git
-      # (AG-VAL-016).
+      # What: scans every workflow/composite-action file and .githooks/ hook for a bare-path
+      # script invocation and asserts each such file is committed with mode 100755.
+      # Why: a script committed 100644 but invoked by bare path fails in CI with exit 126, a
+      # defect invisible from a Windows/core.filemode=false author host (AG-VAL-024) that had
+      # recurred with only one hardcoded `test -x` guarding a single file.
+      # From: Issue #1019 | PR #1021
       shell: bash
       run: |
         set -euo pipefail
@@ -130,12 +99,11 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/check-executable-bits.sh
 
     - name: Check build-tools smoke-test coverage (#790/#791)
-      # Standing guard for build-tool coverage: keeps select-build-tools-image.sh's
-      # smoke_test_image() required-tools list from drifting behind
-      # tools/build-tools/Dockerfile's own verification list, so a tool the
-      # image installs and a consumer needs can never again be silently
-      # unverified by the smoke test. Pure text
-      # comparison of two files, no Docker/LAN dependency of its own.
+      # What: compares select-build-tools-image.sh's smoke_test_image() required-tools list
+      # against tools/build-tools/Dockerfile's own verification list.
+      # Why: a tool the Dockerfile installs and a consumer needs had repeatedly gone silently
+      # unverified by the smoke test after drifting behind the Dockerfile's list.
+      # From: Issue #790 | PR #1022
       shell: bash
       run: |
         set -euo pipefail
@@ -147,16 +115,12 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/check-build-tools-smoke-coverage.sh
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
-      # Standing guard for a confirmed real CI failure:
-      # tools/build-tools/Dockerfile's musl/host
-      # verification RUN failed with exit 141 (SIGPIPE) because `grep -q`
-      # exits as soon as it matches, closing the pipe while a still-writing
-      # producer (`rustc -vV`, `rustup target list --installed`) receives
-      # SIGPIPE -- `pipefail` then reports that as the pipeline's failure
-      # even though the consumer itself matched. The scan is repo-wide
-      # (scripts/**, tools/**, services/**, and setup.sh -- see the
-      # script's own header comment for the full scope history). Pure
-      # text scan, no Docker/LAN dependency of its own.
+      # What: scans scripts/**, tools/**, services/**, and setup.sh for a live producer
+      # piped into an early-exiting consumer (`grep -q`, `head`, ...) under `set -o pipefail`.
+      # Why: exactly this shape failed tools/build-tools/Dockerfile's musl/host verification
+      # with exit 141 -- the consumer matched and exited, closing the pipe while the still-
+      # writing producer received SIGPIPE, which pipefail then reported as the failure.
+      # From: Issue #815 | PR #1374
       shell: bash
       run: |
         set -euo pipefail
@@ -168,22 +132,12 @@ runs:
           timeout --kill-after=30 --signal=KILL 300 bash scripts/check-pipefail-early-exit-grep.sh
 
     - name: Check pipefail guard's own scope coverage
-      # Standing guard on the guard above: verifies
-      # tests/bats/check_pipefail_early_exit_grep.bats has a fixture
-      # exercising every top-level path prefix check-pipefail-early-exit-
-      # grep.sh's own scan_files currently scans, AND that scan_files itself
-      # has not narrowed below this project's independently-pinned required
-      # minimum -- see scripts/check-pipefail-scope-coverage.sh's own header
-      # for why (a real instance of scan_files being narrower than its scope
-      # claim survived undetected in services/dns/entrypoint.sh because no
-      # fixture proved the missing prefix was ever
-      # covered). Pure text scan, no Docker/LAN dependency of its own, but
-      # still wrapped in an unignorable kill-timeout (AG-CI-016): a
-      # signal-deaf or deadlocked process in this container would otherwise
-      # only be reachable by the job's outer `timeout-minutes`, which sends
-      # SIGTERM to the `docker run` client rather than into the container
-      # itself and cannot reliably reap it -- the same reasoning the
-      # ShellCheck/ActionLint step above already documents in full.
+      # What: verifies the pipefail-early-exit bats fixture covers every path prefix
+      # check-pipefail-early-exit-grep.sh's own scan_files scans, and that scan_files has
+      # not narrowed below this project's pinned required minimum.
+      # Why: an earlier scan_files narrower than its own documented scope survived
+      # undetected in services/dns/entrypoint.sh because no fixture proved the gap.
+      # From: PR #1500
       shell: bash
       run: |
         set -euo pipefail

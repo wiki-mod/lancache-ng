@@ -31,8 +31,9 @@ runs:
         : "${IMAGE_REF:?image-ref is required}"
         : "${PLATFORM:?platform is required}"
 
-        # The timeout runs inside the candidate container so a signal-deaf
-        # tool cannot outlive the docker client and keep a runner slot wedged.
+        # What: runs the timeout inside the candidate container, around the tool-version checks.
+        # Why: a signal-deaf tool would otherwise outlive the docker client and leave the runner slot wedged.
+        # From: Issue #1522 | PR #1523
         docker run --rm --platform "$PLATFORM" "$IMAGE_REF" \
           timeout --kill-after=30s --signal=TERM 14m bash -c '
         set -euo pipefail
@@ -66,45 +67,20 @@ runs:
       run: |
         set -euo pipefail
 
-        # Keep the kill boundary inside the candidate for the same runner-leak
-        # reason as the executable smoke step above. The full aggregate Bats
-        # suite now runs well over a thousand cases in one process; Docker's
-        # default 1024-file open-file ulimit is tight enough that the run can
-        # fail right at the tail end (the final planned test never gets a
-        # result line, no matching "not ok" either) even though every
-        # individual test before it passed -- confirmed by reproducing the
-        # failure with the default ulimit and clearing it with a higher one.
-        #
-        # AG-CI-013: even with the raised ulimit, bats' own default pipeline
-        # (bats-exec-suite | bats_test_count_validator | formatter, under
-        # `set -o pipefail`, confirmed by reading /usr/libexec/bats-core/bats
-        # and /usr/lib/bats-core/validator.bash directly) can still exit
-        # nonzero when the declared TAP plan count and the actual counted
-        # ok/not-ok line count momentarily disagree under heavy concurrent
-        # host load, even when every counted test genuinely passed -- this is
-        # bats' own unconditional built-in behavior, not something this
-        # project's workflow can disable. A small bounded retry survives that
-        # class of transient pipe-count race the same way this project
-        # already retries every other flaky external/host-shared operation.
-        bats_attempts=3
-        for bats_attempt in $(seq 1 "$bats_attempts"); do
-          if docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            --ulimit nofile=8192:8192 \
-            -v "$GITHUB_WORKSPACE:/work:ro" \
-            -w /work \
-            "$IMAGE_REF" \
-            timeout --kill-after=30s --signal=TERM 19m \
-            bash -lc 'set -euo pipefail; bats tests/bats'; then
-            break
-          fi
-          if [[ "$bats_attempt" -eq "$bats_attempts" ]]; then
-            echo "::error::Bats setup fixtures failed after ${bats_attempts} attempts." >&2
-            exit 1
-          fi
-          echo "::warning::Bats setup fixtures failed (attempt ${bats_attempt}/${bats_attempts}); retrying after 30s." >&2
-          sleep 30
-        done
+        # What: raises the open-file ulimit and runs with an init process as container PID 1.
+        # Why: `--init` (tini) reaps the lock-holder subprocess tests/bats/reserve_validation_subnet.bats
+        # spawns and kills; without a PID-1 reaper it becomes a permanent zombie that a plain
+        # `kill -0` still reports as alive -- confirmed live on the runner host (10/10 reproductions
+        # failed without `--init`, 0/10 failed with it), not a bats-internal count/pipe race.
+        # From: Issue #1522 | PR #1523
+        docker run --rm --init \
+          --user "$(id -u):$(id -g)" \
+          --ulimit nofile=8192:8192 \
+          -v "$GITHUB_WORKSPACE:/work:ro" \
+          -w /work \
+          "$IMAGE_REF" \
+          timeout --kill-after=30s --signal=TERM 19m \
+          bash -lc 'set -euo pipefail; bats tests/bats'
 
     - name: Run ShellSpec setup fixtures
       if: inputs.run-fixtures == 'true'
@@ -114,27 +90,14 @@ runs:
       run: |
         set -euo pipefail
 
-        # ShellSpec gets the identical in-container hard-stop contract so all
-        # candidate fixture runners have the same resource-lifecycle behavior,
-        # including the same raised open-file ceiling and the same bounded
-        # retry as the Bats step above, for the same large-aggregate-suite
-        # concurrent-host-load reason (AG-CI-013).
-        shellspec_attempts=3
-        for shellspec_attempt in $(seq 1 "$shellspec_attempts"); do
-          if docker run --rm \
-            --user "$(id -u):$(id -g)" \
-            --ulimit nofile=8192:8192 \
-            -v "$GITHUB_WORKSPACE:/work:ro" \
-            -w /work \
-            "$IMAGE_REF" \
-            timeout --kill-after=30s --signal=TERM 19m \
-            bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'; then
-            break
-          fi
-          if [[ "$shellspec_attempt" -eq "$shellspec_attempts" ]]; then
-            echo "::error::ShellSpec setup fixtures failed after ${shellspec_attempts} attempts." >&2
-            exit 1
-          fi
-          echo "::warning::ShellSpec setup fixtures failed (attempt ${shellspec_attempt}/${shellspec_attempts}); retrying after 30s." >&2
-          sleep 30
-        done
+        # What: uses the same ulimit/init container settings as the Bats step above.
+        # Why: keeps both candidate fixture runners on one resource-lifecycle contract.
+        # From: Issue #1522 | PR #1523
+        docker run --rm --init \
+          --user "$(id -u):$(id -g)" \
+          --ulimit nofile=8192:8192 \
+          -v "$GITHUB_WORKSPACE:/work:ro" \
+          -w /work \
+          "$IMAGE_REF" \
+          timeout --kill-after=30s --signal=TERM 19m \
+          bash -lc 'set -euo pipefail; shellspec --shell bash tests/shellspec'

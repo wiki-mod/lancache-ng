@@ -3,19 +3,10 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 name: PR tracking metadata fetch and validate
 description: >-
-  Two of pr-tracking-metadata-check's three steps, extracted into a composite action
-  (issue #1095 duplication finding): this job and pr-tracking-metadata-check-hosted below
-  used to carry these two steps as byte-identical duplicated text. The job's first step,
-  "Auto-assign Dependabot PR milestone", deliberately stays duplicated on both calling
-  jobs instead of moving here -- its warning-path `run:` text genuinely differs between
-  the two jobs (references its own job name, and the self-hosted copy carries an extra
-  trailing clause), so unifying it would either lose that per-job detail or require
-  parameterizing two independent string edits for a step that only ever prints a
-  human-facing warning. Not worth forcing; see build-push.yml's own two calling jobs for
-  that step's real content. `secrets.PROJECT_AUTOMATION_PAT` is passed in as an input
-  rather than read directly here because `secrets.*` (beyond the always-available
-  `github.token`) is only guaranteed to resolve in the calling workflow, not inside a
-  composite action.
+  Two of pr-tracking-metadata-check's three steps, shared with its hosted-fallback
+  counterpart. The remaining step ("Auto-assign Dependabot PR milestone") stays
+  duplicated on both callers since its warning text genuinely differs per job
+  (From: PR #1467).
 inputs:
   build-tools-image:
     description: Resolved BUILD_TOOLS_IMAGE reference (already smoke-tested by the caller).
@@ -31,17 +22,12 @@ runs:
   using: composite
   steps:
     - name: Fetch current labels/milestone live
-      # Same class of bug found and fixed in pr-template-check (2026-07-16):
-      # github.event.pull_request.labels/.milestone is a snapshot taken when
-      # THIS event fired, and can go stale (confirmed live: a PR that
-      # genuinely had labels and a milestone set was reported as having
-      # neither). Fetched live via `gh pr view` on the runner instead, then
-      # threaded into the container the same way the event-derived values
-      # used to be. Uses `github.token`, not `secrets.GITHUB_TOKEN` as both original jobs
-      # had it: a composite action cannot resolve `secrets.*` directly, and GitHub's own
-      # docs state `github.token` is "functionally equivalent to the GITHUB_TOKEN secret"
-      # -- read-only access to the PR is all this call needs, which the default scope
-      # covers either way.
+      # What: fetches labels/milestone via `gh pr view` instead of using the event payload.
+      # Why: github.event.pull_request.labels/.milestone is a snapshot from when the
+      # triggering event fired and goes stale (confirmed live: a PR with real labels and
+      # a milestone was reported as having neither); `github.token` covers this read-only
+      # call since a composite action cannot resolve `secrets.*` directly.
+      # From: PR #1467
       id: live-metadata
       shell: bash
       env:
@@ -65,21 +51,19 @@ runs:
         PR_NUMBER: ${{ github.event.pull_request.number }}
         REPO: ${{ github.repository }}
         GH_TOKEN: ${{ inputs.project-automation-pat }}
-        # GitHub does not pass repository secrets (other than the
-        # read-only GITHUB_TOKEN) to pull_request-triggered runs from a
-        # forked repository, so GH_TOKEN above is empty for every external
-        # contributor's PR even once PROJECT_AUTOMATION_PAT is configured.
-        # Telling the script whether this run is from a fork lets it warn
-        # with the right explanation instead of implying the secret is
-        # simply unconfigured -- see check-pr-tracking-metadata.sh.
+        # What: tells check-pr-tracking-metadata.sh whether this run is from a fork PR.
+        # Why: GitHub never passes repository secrets to fork pull_request runs, so
+        # GH_TOKEN above is empty there regardless of PROJECT_AUTOMATION_PAT configuration;
+        # the script needs this flag to warn with the right explanation instead of implying
+        # the secret is simply unconfigured.
+        # From: PR #1467
         PR_IS_FORK: ${{ github.event.pull_request.head.repo.full_name != github.repository }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
       run: |
         set -euo pipefail
-        # PR_LABELS_JSON now names a live-fetched file (mounted below),
-        # not an inline JSON string -- read its content before handing it
-        # to the container as an env var, same shape the script always
-        # expected.
+        # What: reads PR_LABELS_JSON's file content before passing it to the container.
+        # Why: PR_LABELS_JSON names a live-fetched file, not an inline JSON string.
+        # From: PR #1467
         labels_json="$(cat "$PR_LABELS_JSON")"
         docker run --rm \
           --user "$(id -u):$(id -g)" \
