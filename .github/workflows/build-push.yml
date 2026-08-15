@@ -19,58 +19,45 @@ on:
         default: none
   schedule:
     # What: Daily 01:00 UTC stable-channel refresh of `latest` on master (nightly has its own separate schedule).
-    # Why: `promote` only moves `latest` on push, so cron prevents drift between master pushes; GitHub only
-    # evaluates `schedule:` from the workflow file on the default branch (master), so `nightly-refresh.yml`'s
-    # own copy of this cron stays inert until it merges there; the resulting 03:00 CEST summer landing is a
-    # deliberately accepted one-hour drift, not a bug.
-    # From: Issue #1095 | PR #1532
+    # Why: GitHub evaluates `schedule:` only from the default branch, so `nightly-refresh.yml`'s own cron copy
+    # stays inert until it is merged to master.
+    # From: PR #1056
     - cron: "0 1 * * *"
   push:
     branches: [master, current_dev, "v[0-9]*"]
     tags: ["v*"]
-    # What: Push-only paths-ignore (`pull_request` below has none); an all-docs push suppresses the entire
-    # run, not just heavy jobs.
-    # Why: Doc-only merge commits (the only push type on master per AG-WF-004) used to unconditionally rerun
-    # the 8-service build/scan pipeline on the scarce lancache-heavy pool, and a push run not existing is
-    # safe here since nothing is waiting on it to merge, unlike a PR's required checks (which is why
-    # `pull_request`'s own trigger-level paths-ignore was removed instead); tags never hit paths-ignore
-    # (GitHub doesn't evaluate path filters for tags:) and `!CHANGELOG.md` stays un-ignored so
-    # check-changelog-direct-edit.sh still sees CHANGELOG-only pushes.
-    # From: Issue #1095 | PR #1532
+    # What: Push-only paths-ignore (`pull_request` below intentionally has none); `!CHANGELOG.md` stays
+    # un-ignored for check-changelog-direct-edit.sh.
+    # Why: A trigger-level paths-ignore on `pull_request` would silently block required checks forever, but
+    # suppressing an all-docs push run is safe since nothing waits on it to merge.
+    # From: PR #1334
     paths-ignore:
       - "**/*.md"
       - "docs/**"
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) on top
-    # of opened/synchronize/reopened; every downstream job whose own `if:` also filters on event `action`
-    # (build/build-arm64, the Rust quality/test/audit jobs, and rust_coverage) must be kept in sync with this
-    # list.
-    # Why: Trigger-level paths-ignore broke required checks on docs-only PRs by making the whole run not
-    # exist; metadata events carry no code change, so per-job action filters skip redundant Rust reruns
-    # while pr-tracking-metadata-check stays unconditional to validate AG-GH-008 freshness.
-    # From: Issue #1095 | PR #1532, AG-GH-008
+    # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) alongside
+    # opened/synchronize/reopened.
+    # Why: Every downstream job filtering on event `action` (build/build-arm64, the Rust quality/test/audit
+    # jobs, rust_coverage) must stay in sync with this list, or a metadata-only event silently skips a required check.
+    # From: AG-GH-008
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
   contents: read
-  # What: Declares workflow-level default permissions; a job-level `permissions:` block replaces (not
-  # merely narrows) this default for that job, and can grant less, more, or different scopes.
-  # Why: Every job here that reads live PR content already declares its own `pull-requests: read`, so this
-  # floor is not load-bearing for them (this file's own job-level `contents: write` grants, absent from this
-  # default, prove job blocks can widen); it exists as the safe default for a future job that omits its own
-  # permissions block.
-  # From: Issue #1095 | PR #1532
+  # What: Declares workflow-level default permissions; a job-level `permissions:` block replaces (not merely
+  # narrows) this default for that job.
+  # Why: This floor is a safety net for a future job that omits its own permissions block, not something the
+  # current jobs depend on -- they already declare their own scopes.
   pull-requests: read
 
 concurrency:
-  # What: Push/tag use run_id-scoped key (never collides); PR uses per-ref key; cancel-in-progress: false.
-  # Why: Run-id scoping eliminates push serialization; cancel-in-progress broke immediately for PRs opened
-  # with labels/milestone, killing detect-changes mid-run, so PR-level cancellation stays off here and
-  # `build` instead reclaims a superseded PR run via its own safe per-job cancellation group; `container-scan`
-  # never runs on `pull_request`, so its own cancel-in-progress (`pull_request`-only) never actually fires.
-  # From: Issue #1095 | PR #1532
+  # What: Push/tag use a run_id-scoped key (never collides); PR uses a per-ref key; cancel-in-progress is
+  # false at this workflow level.
+  # Why: PR-level cancellation broke `detect-changes` mid-run when a label/milestone event retriggered it, so
+  # `build` reclaims a superseded PR run via its own safe per-job cancellation group instead.
+  # From: PR #892
   group: ${{ github.event_name == 'pull_request' && format('{0}-{1}', github.workflow, github.ref) || format('{0}-publish-{1}', github.workflow, github.run_id) }}
   cancel-in-progress: false
 
@@ -85,23 +72,19 @@ defaults:
     shell: bash
 
 jobs:
-  # What: Classifies changed paths for PR/push event scoping of the six Rust test/audit jobs, `build`/
-  # `build-arm64`'s PR-time image scoping, and `determine-push-reuse-scope`'s push-time reuse decision.
-  # Why: PR/push diffs degrade gracefully to --all-changed on missing bases; the six Rust jobs' own `if:` fail
-  # safe to running whenever this job did not produce a successful classification, and `container-scan` (which
-  # never runs on pull_request) depends on `determine-push-reuse-scope` for its push-time re-tagging decision,
-  # not on this job directly.
-  # From: Issue #1095 | PR #1532
+  # What: Classifies changed paths for PR/push event scoping of the six Rust test/audit jobs and
+  # `build`/`build-arm64`'s PR-time image scoping.
+  # Why: A PR/push diff degrades gracefully to `--all-changed` on a missing base, so the six Rust jobs' own
+  # `if:` fails safe to running whenever this job did not produce a successful classification.
+  # From: PR #397
   detect-changes:
     name: detect changed paths
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real recent runs (30+ samples across pull_request/push events, 2026-07):
-    # this job's own git-diff/classify-image-impact.sh work completes in
-    # 6-17s. 15 minutes is a generous, round floor (not derived by scaling
-    # that tiny number -- see the shared job-timeout rollout PR for why every
-    # cheap self-hosted script job in this file uses the same 15-minute
-    # floor) that still turns any future hang into a fast, bounded failure.
+    # What: 15-minute timeout, the same floor every cheap self-hosted script job in this file uses.
+    # Why: Real runs complete in 6-17s; the floor is a round, generous bound (not scaled from that number) so
+    # a future hang still fails fast and bounded.
+    # From: PR #1218
     timeout-minutes: 15
     outputs:
       dns_rust: ${{ steps.filter.outputs.dns_rust }}
@@ -137,21 +120,19 @@ jobs:
 
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
-          # The per-path classification -- and the merge-base #536 fix that keeps an unrelated
-          # already-merged PR from being misattributed to this branch -- now lives in
-          # scripts/classify-image-impact.sh so the promote job's version-bump logic (#819)
-          # reuses the exact same rules instead of a drifting inline copy. The script writes the
-          # "Changed files:" listing to stderr and the key=value booleans to stdout. checkout
-          # above runs with fetch-depth: 0, which merge-base needs.
+          # What: Classification logic lives in scripts/classify-image-impact.sh (shared with `promote`'s
+          # own version-bump logic); it writes "Changed files:" to stderr and key=value booleans to stdout.
+          # Why: A merge-base diff needs the full history `fetch-depth: 0` above provides.
+          # From: PR #1129
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
             bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
-            # push (branch or tag): diff exactly the commits this push introduced
-            # (github.event.before..github.sha). Fail safe to --all-changed when that base is
-            # unusable (all-zeros first push, or a base not present even under fetch-depth: 0) so
-            # an undeterminable diff runs the full set. Mirrors build-tools.yml's own before-diff
-            # fallback (determine-publish-scope).
+            # What: Push (branch/tag) diffs exactly the commits this push introduced (`before`..`sha`);
+            # falls back to `--all-changed` when `before` is unusable.
+            # Why: An undeterminable diff base must run the full classification rather than silently
+            # under-scope, mirroring build-tools.yml's own before-diff fallback.
+            # From: PR #1129
             if [ -z "$BEFORE_SHA" ] \
               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
               || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
@@ -164,9 +145,8 @@ jobs:
 
   # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote.
   # Why: `cancel-in-progress` on an already-running job starves the channel, so this is a start-gate-only
-  # self-skip for a push already provably superseded; no `if:`/`needs:` keeps its output resolving only to
-  # success/failure/cancelled, never skipped, avoiding the implicit-success-over-skippable hazard.
-  # From: Issue #1095 | PR #1532
+  # self-skip for a push already provably superseded.
+  # From: PR #1334
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -186,22 +166,20 @@ jobs:
 
           superseded=false
 
-          # Only meaningful for a push to a mutable branch ref -- a tag ref
-          # can never be superseded by a later push to the SAME ref (tags
-          # are immutable and pushed exactly once), and every other event
-          # this workflow handles (pull_request, schedule, workflow_dispatch)
-          # has no "a newer push already landed" concept at all. Those cases
-          # all fall through to the `superseded=false` default below, which
-          # is the correct, safe answer for them (never skip).
+          # What: Only meaningful for a push to a mutable branch ref; a tag ref (immutable, pushed once) and
+          # every non-push event fall through to the `superseded=false` default below.
+          # Why: Those other cases have no "a newer push already landed" concept, so `false` is always the
+          # correct, safe answer for them.
+          # From: PR #1334
           if [ "$CHECK_EVENT_NAME" = "push" ]; then
             case "$CHECK_GITHUB_REF" in
               refs/heads/*)
-                # Deliberately fails OPEN, not closed, unlike promote's own copy of this check (which
-                # fails closed with `exit 1`): promote refusing to guess blind only risks delaying a
-                # channel move by one run, but here the asymmetric risk runs the other way -- wrongly
-                # reporting `superseded=true` for a build/scan that is NOT actually superseded would
-                # skip the only job that ever builds that commit's image, with no other retry path. An
-                # unresolvable ls-remote here must never cause a skip.
+                # What: An unresolvable `git ls-remote` here fails OPEN (treats the push as not superseded),
+                # unlike `promote`'s own copy of this check, which fails closed.
+                # Why: Wrongly reporting `superseded=true` would skip the only job that ever builds this
+                # commit's image with no retry path, unlike `promote` where failing closed only delays one
+                # channel move.
+                # From: PR #1334
                 current_tip="$(git ls-remote origin "$CHECK_GITHUB_REF" | cut -f1 || true)"
                 if [ -z "$current_tip" ]; then
                   echo "::warning::Could not resolve the current remote tip of ${CHECK_GITHUB_REF}; failing open (treating this push as NOT superseded, so build/container-scan still run)."
@@ -216,17 +194,16 @@ jobs:
           echo "superseded=$superseded" >> "$GITHUB_OUTPUT"
 
   file-headers:
-    # Cheap repository hygiene gate. It runs before expensive Rust/image work so
-    # generated files and hand-written scripts keep the expected project header.
+    # What: Repository-wide file-purpose-header gate (AG-HDR-001); 15-minute timeout, real runs 8-10s.
+    # Why: Runs before the expensive Rust/image work so a missing/malformed header is caught cheaply.
+    # From: PR #432
     name: file purpose headers
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 8-10s. Same 15-minute floor as detect-changes above (see its
-    # comment) -- generous relative to real observed duration, not tight.
     timeout-minutes: 15
-    # What: Job-level concurrency with cancel-in-progress: true; reclaims superseded runs.
-    # Why: Safe to cancel (no hard-failing script consumes result); build/build-arm64's `if:` gates
-    # cleanly skip on cancelled result.
-    # From: Issue #1095 | PR #1532
+    # What: Job-level concurrency with cancel-in-progress: true; reclaims a superseded run.
+    # Why: Safe to cancel here since no hard-failing script consumes the result before build/build-arm64's
+    # own `if:` gate, which cleanly skips on a cancelled result.
+    # From: PR #915
     concurrency:
       group: >-
         ${{
@@ -245,12 +222,10 @@ jobs:
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # What: Diff-scoped SPDX header check on this PR's changed files (not repo-wide).
-        # Why: The repo-wide check above is already a hard gate too (AG-HDR-008's backfill is complete, no
-        # soft exception remains); this step exists for PR-specific error attribution instead, and fetches
-        # base.sha by exact SHA (not the branch tip) since that can lag on a long-lived PR, running inside
-        # the pinned build-tools image so a self-hosted runner with stale host tooling can't diverge from
-        # the project's own toolchain.
+        # What: Diff-scoped SPDX header check (AG-HDR-008) on this PR's changed files only, run inside the
+        # pinned build-tools image.
+        # Why: The repo-wide check above is already a hard gate; this step exists for PR-specific error
+        # attribution and to keep a self-hosted runner's stale host tooling from diverging from the toolchain.
         # From: AG-HDR-008
         if: github.event_name == 'pull_request'
         env:
@@ -271,10 +246,8 @@ jobs:
 
   compose-healthchecks:
     # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration.
-    # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier; its
-    # job-level concurrency group safely cancels mid-flight since only build/build-arm64's own PR-only
-    # `if:` gate consumes the result, and that gate cleanly skips rather than errors on cancelled.
-    # From: Issue #1095 | PR #1532
+    # Why: Plain bash/grep script with no Docker/build-tools dependency, so it runs on the light tier.
+    # From: PR #1249
     name: compose healthchecks
     runs-on: [self-hosted, linux, lancache, lancache-light]
     timeout-minutes: 15
@@ -288,16 +261,18 @@ jobs:
       cancel-in-progress: true
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      # Extracted into a composite action (issue #1095 dedup finding): this job and
-      # compose-healthchecks-hosted below used to carry the identical step twice.
+      # What: Composite action shared with compose-healthchecks-hosted below.
+      # Why: The two jobs used to carry the identical step twice.
+      # From: Issue #1095
       - uses: ./.github/actions/compose-healthchecks-check
 
   pr-template-check:
     name: PR template validation
     if: github.event_name == 'pull_request'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 8-12s (one live `gh pr view` call + a bash script). Same
-    # 15-minute floor as detect-changes above.
+    # What: 15-minute timeout, the same floor detect-changes above uses; real runs are 8-12s.
+    # Why: A round, generous bound so a future hang still fails fast rather than a tight, scaled value.
+    # From: PR #1218
     timeout-minutes: 15
     permissions:
       contents: read
@@ -306,24 +281,19 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Validate PR template completeness
         env:
-          # Fetched live via `gh pr view` instead of trusting github.event.pull_request.body:
-          # that field is a snapshot taken when THIS event fired, and a rerun/retrigger of an
-          # older event (or a 2026-07-16 incident where the payload lagged the PR's actual body)
-          # can carry a stale value -- causing this check to report sections "missing" that a
-          # live look shows are genuinely present. A live fetch is always current.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
-          # Dependabot's own PR author identity -- see
-          # validate-pr-template.sh's dependabot[bot] exemption.
+          # What: PR author, used for the dependabot[bot] exemption.
+          # Why: validate-pr-template.sh skips template-section checks for Dependabot's own auto-PRs.
+          # From: PR #903
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
-          # What: Fetch PR body live via gh pr view (not webhook payload snapshot); the stderr capture and
-          # byte-count notice below are TEMPORARY diagnostics, to be removed once root-caused.
-          # Why: Webhook snapshot can lag actual PR body; the diagnostics were added after two 2026-07-16
-          # fetches returned an empty body with no visible gh CLI error despite earlier fixes to this fetch.
-          # From: Issue #1095 | PR #1532
+          # What: Fetch PR body live via `gh pr view` (not the webhook payload, which can lag); the stderr
+          # capture and byte-count notice below are TEMPORARY diagnostics.
+          # Why: To be removed once the 2026-07-16 empty-body-with-no-gh-error incident is fully root-caused.
+          # From: PR #903
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt 2> /tmp/pr-body-live.stderr || {
             echo "::error::gh pr view failed, exit code $?"
             cat /tmp/pr-body-live.stderr
@@ -333,17 +303,17 @@ jobs:
           bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-template-check-hosted:
-    # What: GitHub-hosted fallback for pr-template-check; LAN-independent (no needs: dependency), but its
-    # validation step below still fetches the PR body live via `gh pr view` (GH_TOKEN, pull-requests:read).
-    # Why: No needs: dependency lets the fallback work when self-hosted runners are unavailable; that is
-    # unrelated to the live API call, so do not strip GH_TOKEN/pull-requests:read assuming this job reads
-    # only the webhook snapshot.
+    # What: GitHub-hosted fallback for pr-template-check; LAN-independent, but its validation step still
+    # fetches the PR body live via `gh pr view` (needs GH_TOKEN, pull-requests:read).
+    # Why: LAN-independence is unrelated to the live API call, so don't strip that access assuming this job
+    # reads only the webhook snapshot.
     # From: docs/ci-github-hosted-fallback-decision.md
     name: PR template validation (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Real runs: 5-7s on ubuntu-latest. Same 15-minute floor as
-    # detect-changes' self-hosted equivalent above.
+    # What: 15-minute timeout, same floor as the self-hosted equivalent above; real runs are 5-7s.
+    # Why: A round, generous bound so a future hang still fails fast.
+    # From: PR #1218
     timeout-minutes: 15
     permissions:
       contents: read
@@ -354,15 +324,16 @@ jobs:
         run: |
           echo "::notice::Running PR template validation on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Validate PR template completeness
+        # What: Same live `gh pr view` fetch as the primary pr-template-check job's identical step.
+        # Why: See that job's own comment for why a live fetch is used instead of the webhook payload.
+        # From: PR #903
         env:
-          # See the primary pr-template-check job's identical step for why
-          # this fetches the body live via `gh pr view` instead of trusting
-          # github.event.pull_request.body.
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           PR_DRAFT: ${{ github.event.pull_request.draft }}
-          # Dependabot's own PR author identity -- see
-          # validate-pr-template.sh's dependabot[bot] exemption.
+          # What: PR author, used for the dependabot[bot] exemption.
+          # Why: validate-pr-template.sh skips template-section checks for Dependabot's own auto-PRs.
+          # From: PR #903
           PR_AUTHOR: ${{ github.event.pull_request.user.login }}
         run: |
           set -euo pipefail
