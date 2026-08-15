@@ -268,7 +268,7 @@ STUB
     PATH="$fake_bin_dir:$PATH"
 }
 
-@test "image_exists real docker path: a confirmed-absence registry error is reported as confirmed absent, not the old ambiguous wording" {
+@test "image_exists real docker path: a confirmed-absence registry error is reported as confirmed absent" {
     unset STAGING_IMAGE_EXISTS_CMD
     fake_docker_returning_stderr "Error response from daemon: manifest unknown"
     export PATH
