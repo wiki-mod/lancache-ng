@@ -689,8 +689,8 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
-      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
-      # #1535): see .github/actions/trivy-scan-retry's own header comment.
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper: see
+      # .github/actions/trivy-scan-retry's own header comment.
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
@@ -940,8 +940,8 @@ jobs:
           docker compose version
           '
 
-      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
-      # #1535): see .github/actions/trivy-scan-retry's own header comment.
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper: see
+      # .github/actions/trivy-scan-retry's own header comment.
       - name: Scan local build-tools arm64 image with Trivy
         # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
         timeout-minutes: 50
@@ -995,8 +995,8 @@ jobs:
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
 
-      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
-      # #1535): see .github/actions/trivy-scan-retry's own header comment.
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper: see
+      # .github/actions/trivy-scan-retry's own header comment.
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
         # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.

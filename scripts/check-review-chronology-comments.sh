@@ -2,12 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Three related, mechanically-detectable comment-content checks --
-#   review-chronology narration, fragile "(line ~N)" self-references, and
-#   a #NNN reference duplicated outside its own From: pointer.
-# Why: One file, three functions, per the maintainer's "more monolith,
-#   more functions per script" direction rather than one script per
-#   pattern; full audit evidence and worked examples live in the PR.
+# What: three comment-content checks, one per function, in one script.
+# Why: the maintainer's monolith-first direction; full evidence lives in
+#   the PR body.
 # From: PR #1546
 set -euo pipefail
 
@@ -68,10 +65,12 @@ REVIEW_CHRONOLOGY_PATTERN="(\\b${DISCOVERY_VERBS}\\b[[:space:]]+(in|during)[[:sp
 # From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN+="|(\\breview\\b[^a-zA-Z.]{0,20}\\b${DISCOVERY_VERBS}\\b)"
 # What: "before/prior to/until this fix/change/commit/patch" self-reference.
+# Why: catches the deictic half of review-chronology narration.
 # From: PR #1546
 REVIEW_CHRONOLOGY_PATTERN+="|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
 
 # What: Matches "(line N)"/"(see line ~N)", case-insensitive.
+# Why: this shape goes stale the moment the target line moves.
 # From: PR #1546
 FRAGILE_LINE_REF_PATTERN='\(([Ss]ee[[:space:]]+)?\bline\b[[:space:]]*~?[0-9]+'
 
@@ -83,6 +82,7 @@ check_review_chronology() {
 }
 
 # What: Checks each line of $1 against $FRAGILE_LINE_REF_PATTERN.
+# Why: -H forces the filename prefix even for a single-file invocation.
 # From: PR #1546
 check_fragile_line_references() {
     grep -EinIH "$FRAGILE_LINE_REF_PATTERN" "$1" || true
@@ -104,13 +104,10 @@ check_bare_issue_ref_duplicates_from() {
 
     while IFS= read -r num; do
         [ -n "$num" ] || continue
-        # What: Scans every "#N" on a line (word-boundary-safe, so "#8871"
-        #   never matches a From: #887), tracking quote state; a `'` only
-        #   opens a string when not preceded by a word character.
-        # Why: Distinguishes a real string delimiter from an English
-        #   contraction's apostrophe (e.g. "it's") while still catching a
-        #   real duplicate comment that follows a string-literal mention of
-        #   the same number on the same line.
+        # What: scans every #N on a line, skipping matches inside a string.
+        # Why: a #N inside a string (e.g. an echo message) is not a
+        #   governed comment; a `'` opens a string only when not preceded
+        #   by a word char, so contractions like "it's" aren't misread.
         # From: PR #1546
         awk -v n="$num" '
             $0 ~ /From:/ { next }
@@ -163,8 +160,9 @@ for path in "${files[@]}"; do
     is_self_reference "$path" && continue
     is_excluded "$path" && continue
 
-    # What/Why: -I keeps a binary file's grep "Binary file ... matches" line
-    #   from being wrongly recorded as a violation below.
+    # What: -I skips binary files during the match loop.
+    # Why: without it, grep's own "Binary file ... matches" line would be
+    #   wrongly recorded as a violation.
     # From: PR #1546
     while IFS= read -r match; do
         [ -n "$match" ] || continue

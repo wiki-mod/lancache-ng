@@ -43,8 +43,8 @@ runs:
 EOF
     # with: block is fully wired (both dockerhub keys) so this fixture tests
     # only the direct-usage concern its own name describes -- the separate
-    # dockerhub-wiring concern (issue #1535 follow-up) has its own dedicated
-    # pass/fail fixtures further below.
+    # dockerhub-wiring concern has its own dedicated pass/fail fixtures
+    # further below.
     cat > "$fixture_root/.github/workflows/build.yml" <<'EOF'
 name: build
 on: push

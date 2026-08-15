@@ -1,24 +1,24 @@
 #!/bin/bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: Verifies existing non-empty .env values are preserved by default,
-#   not overwritten during migrations/updates.
-# Why: Validates the AGENTS.md guarantee "Existing non-empty local values
-#   must be preserved by default."
+# What: verifies .env migration/update value-preservation semantics.
+# Why: validates the AGENTS.md guarantee "existing non-empty local
+#   values must be preserved by default."
 # From: PR #1546
 set -euo pipefail
 
-# What: Would extract setup.sh's .env helper functions by hardcoded line range.
-# Why: STATUS as of 2026-08-13: unused (nothing calls it) and its range no
-#   longer matches env_key_exists()/write_env_file()'s real current location
-#   -- left unfixed pending a maintainer decision on removing this helper
-#   vs. a non-line-number extraction mechanism.
+# What: would extract setup.sh's .env helpers by hardcoded line range.
+# Why: STATUS 2026-08-13 -- dead code (unused) with a stale range; left
+#   for a maintainer decision on removal vs. a real extraction mechanism.
+# From: PR #1546
 setup_sh_helpers() {
     local setup_sh="$1"
     sed -n '446,628p' "$setup_sh"
 }
 
-# What: Runs a single test function against its own scratch env file.
+# What: runs a single test function against its own scratch env file.
+# Why: gives each test a fresh, isolated .env fixture and a PASS/FAIL line.
+# From: PR #1546
 run_test() {
     local test_name="$1"
     local test_func="$2"
@@ -33,8 +33,9 @@ run_test() {
     fi
 }
 
-# What: Existing non-empty value is preserved when append_env_key_if_missing is called.
-# Why: Validates the same AGENTS.md guarantee cited in the file header.
+# What: an existing non-empty value is preserved, not overwritten.
+# Why: validates the same AGENTS.md guarantee cited in the file header.
+# From: PR #1546
 test_existing_value_preserved() {
     local env_file="$1"
 
@@ -56,9 +57,10 @@ test_existing_value_preserved() {
     [ "$count" = "1" ] || return 1
 }
 
-# What: Missing keys are added on first run (install).
-# Why: AGENTS.md guarantee: setup logic must converge old/incomplete
-#   installations toward the current expected state.
+# What: a missing key is added on first run (install).
+# Why: setup logic must converge old/incomplete installations toward
+#   the current expected state.
+# From: PR #1546
 test_missing_key_added() {
     local env_file="$1"
 
@@ -75,10 +77,10 @@ test_missing_key_added() {
     [ "$actual" = "50.0" ] || return 1
 }
 
-# What: Empty optional values remain empty (not replaced) -- extends the
-#   preserve-by-default guarantee to intentionally-empty values too.
+# What: an intentionally-empty value stays empty, not replaced.
 # Why: e.g. UI_BIND_IP= deliberately triggers the
 #   ${UI_BIND_IP:-${IP_STANDARD}} compose fallback to IP_STANDARD.
+# From: PR #1546
 test_empty_value_preserved() {
     local env_file="$1"
 

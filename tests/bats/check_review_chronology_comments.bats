@@ -2,11 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Exercises the script's three checks (AG-CODE-002/003/012) against
-#   throwaway fixture trees, both the passing and failing path.
-# Why: A `mktemp -d` tree (not BATS_TEST_TMPDIR) keeps the fixture root
-#   unambiguously outside this repo's own .git, since the script switches
-#   its file-listing strategy on that.
+# What: exercises the script's three checks against fixture trees.
+# Why: `mktemp -d` (not BATS_TEST_TMPDIR) keeps the fixture root
+#   unambiguously outside this repo's own .git, since the script
+#   switches its file-listing strategy on that.
 # From: PR #1546
 
 setup() {
@@ -19,6 +18,9 @@ teardown() {
     rm -rf "$fixture_root"
 }
 
+# What: prints $1 to stderr and fails the current test.
+# Why: gives a real diagnostic instead of bats' bare assertion failure.
+# From: PR #1546
 fail() {
     echo "$1" >&2
     return 1
@@ -154,9 +156,10 @@ EOF
 }
 
 @test "does not flag itself: the script's own file and its bats test are excluded from the scan" {
-    # What: Copies the script and this test file into the fixture and scans it.
-    # Why: Both quote the banned phrasing verbatim; without the self-
+    # What: copies the script and this test file into the fixture, scans it.
+    # Why: both quote the banned phrasing verbatim; without the self-
     #   reference exclusion, the guard would fail against its own repo.
+    # From: PR #1546
     mkdir -p "$fixture_root/scripts" "$fixture_root/tests/bats"
     cp "$script" "$fixture_root/scripts/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \

@@ -320,8 +320,8 @@ jobs:
             -t lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }} \
             ${{ matrix.context }}
 
-      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
-      # #1535): see .github/actions/trivy-scan-retry's own header comment.
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper: see
+      # .github/actions/trivy-scan-retry's own header comment.
       # Explicit timeout-minutes (none before): the wrapper can now run up
       # to 4 scan attempts instead of one, so this step needs its own bound
       # rather than only relying on this job's overall timeout-minutes.
@@ -524,9 +524,8 @@ jobs:
         # build-push.yml), so no `steps.build.outcome == 'success'` guard is
         # needed here the way build-push.yml's equivalent step has one.
         # 50 min (was 20): the retry wrapper below can run up to 4 scan
-        # attempts (issue #1535) instead of one, so the step-level bound
-        # must cover the worst case (4 x the 10m trivy timeout below + 3 x
-        # backoff), not just a single attempt.
+        # attempts instead of one, so the step-level bound must cover the
+        # worst case (4 x the 10m trivy timeout below + 3 x backoff).
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-retry
         with:

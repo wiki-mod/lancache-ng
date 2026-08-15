@@ -2,13 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: Repeat-run idempotence tests for migrate_env_for_update(), driving
-#   the real function (not a re-implementation) against realistic .env
-#   fixtures and asserting a second run changes nothing.
+# What: repeat-run idempotence tests for migrate_env_for_update().
 # Why: AG-OP-011/AG-OP-006 (no rewrite/no secret rotation on repeat runs)
-#   only had "Manual review" as their verification method; no existing
-#   suite called the update-migration path twice in a row to prove a
-#   stable fixed point.
+#   only had "Manual review" as verification; no suite called the update-
+#   migration path twice in a row to prove a stable fixed point.
 # From: PR #1546
 
 bats_require_minimum_version 1.5.0
@@ -23,14 +20,10 @@ setup() {
     load_setup_update_helpers "$repo_root" "$helper_file"
 }
 
-# What: A fresh, fully-converged install's .env -- every key
-#   migrate_env_for_update() unconditionally backfills already present with
-#   a valid, non-placeholder value, and a pinned image tag.
-# Why: A fixture missing any such key would fail the no-op test on its
-#   first run, not just its second; this has recurred three times as new
-#   keys were added. The guard test below mechanically enforces that this
-#   fixture stays in sync with migrate_env_for_update()'s real key set,
-#   extracted from source rather than hand-maintained (AG-WF-025).
+# What: a fresh, fully-converged install's .env, every backfilled key present.
+# Why: a missing key would fail the no-op test on its first run, not just
+#   its second; recurred three times as new keys were added -- the guard
+#   test below mechanically keeps this fixture in sync (AG-WF-025).
 # From: PR #1546
 write_converged_env_fixture() {
     printf '%s\n' \
@@ -101,10 +94,10 @@ write_converged_env_fixture() {
         > "$env_file"
 }
 
-# What: An old install .env -- split cache keys, legacy strict security
-#   mode with no allowlist, missing DHCP/NATS/secret/image-channel keys.
+# What: an old install .env -- split cache keys, strict mode, missing keys.
 # Why: ui_auth_user defaults to empty (insecure UI, the common legacy
 #   case); pass a value to exercise the "generate a password" branch.
+# From: PR #1546
 write_legacy_env_fixture() {
     local ui_auth_user="${1:-}"
     printf '%s\n' \
@@ -121,11 +114,11 @@ write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update()'s unconditionally-written .env keys are all present in write_converged_env_fixture()" {
-    # What: Extracts both key sets from real source (never hand-maintained)
-    #   and fails naming any key write_converged_env_fixture() is missing.
+    # What: extracts both key sets from real source, names any key missing.
     # Why: bats runs @test blocks in file order, so this runs before the
-    #   no-op test below and gives a diagnostic message instead of a bare
-    #   hash mismatch on the next recurrence of this failure class.
+    #   no-op test below and gives a diagnostic instead of a bare hash
+    #   mismatch on the next recurrence of this failure class.
+    # From: PR #1546
     local setup_sh="$repo_root/setup.sh"
     local this_file="$BATS_TEST_DIRNAME/setup_update_idempotence.bats"
     local func_body_file="$BATS_TEST_TMPDIR/migrate_func_body.txt"
@@ -135,9 +128,10 @@ write_legacy_env_fixture() {
     local fixture_keys_file="$BATS_TEST_TMPDIR/fixture_keys.txt"
     local missing_file="$BATS_TEST_TMPDIR/missing_keys.txt"
 
-    # What: Isolates each function's own body (definition line to closing
-    #   brace at column 0), so extraction can't pick up an unrelated
-    #   function's keys from these large files.
+    # What: isolates each function's own body (def line to closing brace).
+    # Why: prevents extraction from picking up an unrelated function's
+    #   keys from these large files.
+    # From: PR #1546
     awk '/^migrate_env_for_update\(\) \{/,/^}/' "$setup_sh" > "$func_body_file"
     if [ ! -s "$func_body_file" ]; then
         echo "Could not locate migrate_env_for_update() in $setup_sh -- has it been renamed or restructured? Update this guard's extraction pattern to match." >&2
@@ -150,9 +144,9 @@ write_legacy_env_fixture() {
         return 1
     fi
 
-    # What: Collects keys written by all five "write unconditionally"
-    #   helpers (missing-only for four of them, every call for set_env_key).
-    # Why: Each is a "must already exist in a fully converged fixture" case.
+    # What: collects keys written by the five "write unconditionally" helpers.
+    # Why: each is a "must already exist in a fully converged fixture" case.
+    # From: PR #1546
     {
         grep -oE 'append_env_key_if_missing +[A-Za-z_][A-Za-z0-9_]*' "$func_body_file" | awk '{print $2}'
         grep -oE 'set_env_key_if_empty_or_missing +[A-Za-z_][A-Za-z0-9_]*' "$func_body_file" | awk '{print $2}'
@@ -161,11 +155,10 @@ write_legacy_env_fixture() {
         grep -oE 'append_env_migrated_assignment_if_missing +[A-Za-z_][A-Za-z0-9_]*' "$func_body_file" | awk '{print $2}'
     } | sort -u > "$required_file"
 
-    # What: Excludes set_optional_env_path_override_if_needed's keys.
-    # Why: It is a documented no-op whenever the fixture's desired path
-    #   already equals the derived default -- this fixture's case for
-    #   every key it manages (NTP_DATA_DIR, KEA_DATA_DIR, PDNS_* dirs,
-    #   NATS_DATA_DIR, NATS_CONF_DIR).
+    # What: excludes set_optional_env_path_override_if_needed's keys.
+    # Why: a documented no-op whenever the fixture's desired path already
+    #   equals the derived default -- true here for every key it manages.
+    # From: PR #1546
     grep -oE 'set_optional_env_path_override_if_needed +[A-Za-z_][A-Za-z0-9_]*' "$func_body_file" \
         | awk '{print $2}' | sort -u > "$excluded_file"
 
@@ -193,7 +186,9 @@ write_legacy_env_fixture() {
     [ "$status" -eq 0 ]
     first_run_hash=$(sha256sum "$env_file" | awk '{print $1}')
 
-    # What: Fixture is already fully converged; even the first run must not touch it.
+    # What: fixture is already converged; even the first run must not touch it.
+    # Why: proves write_converged_env_fixture() is a true no-op fixed point.
+    # From: PR #1546
     [ "$original_hash" = "$first_run_hash" ]
 
     run migrate_env_for_update "$(dirname "$env_file")"
@@ -204,12 +199,11 @@ write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update on a quickstart (non-deploy/prod) install runs cleanly under set -u" {
-    # What: Enables `set -u` explicitly for this test.
-    # Why: load_setup_update_helpers extracts starting after setup.sh's own
-    #   `set -euo pipefail`, so other tests run without nounset. On this
-    #   quickstart fixture, prodsync_default_* locals stay unset (their
-    #   is_deploy_prod_install_dir branch never runs) -- only real nounset
-    #   would catch an unconditional expansion of one aborting (AG-VAL-030).
+    # What: enables `set -u` explicitly for this test.
+    # Why: other tests run without nounset; on this quickstart fixture,
+    #   prodsync_default_* locals stay unset (their branch never runs) --
+    #   only real nounset catches an unconditional expansion aborting.
+    # From: PR #1546
     set -u
     write_converged_env_fixture
 
@@ -220,8 +214,9 @@ write_legacy_env_fixture() {
 @test "migrate_env_for_update on a legacy .env converges once and is stable on the second run" {
     write_legacy_env_fixture
 
-    # What: First run performs the actual migration (cache keys collapse,
-    #   strict-without-allowlist reverts to lazy, secrets/DHCP keys filled in).
+    # What: first run performs the actual migration (cache/security/secrets).
+    # Why: establishes the converged state the second run must not disturb.
+    # From: PR #1546
     run migrate_env_for_update "$(dirname "$env_file")"
     [ "$status" -eq 0 ]
 
@@ -233,8 +228,9 @@ write_legacy_env_fixture() {
     after_first_run=$(cat "$env_file")
     secrets_after_first_run=$(grep -E '^(KEA_CTRL_TOKEN|DDNS_TSIG_KEY|PDNS_API_KEY|NETDATA_ALARM_TOKEN|NATS_UI_PASSWORD|NATS_DNS_WRITER_PASSWORD|NATS_DNS_REPLICA_PASSWORD|NATS_CALLOUT_PASSWORD|NATS_SYS_PASSWORD|SECONDARY_REGISTRATION_TOKEN)=' "$env_file" | sort)
 
-    # What: Second run against the now-converged file.
-    # Why: Must not change anything, in particular must not rotate secrets.
+    # What: second run against the now-converged file.
+    # Why: must not change anything, in particular must not rotate secrets.
+    # From: PR #1546
     run migrate_env_for_update "$(dirname "$env_file")"
     [ "$status" -eq 0 ]
 
@@ -246,10 +242,10 @@ write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update generates a UI password once and does not rotate it on the second run" {
-    # What: The one conditional secret-generation branch (UI_AUTH_USER set,
-    #   UI_AUTH_PASSWORD empty), gated on env_key_has_usable_secret.
-    # Why: Neither fixture hits it by default; this is the shape a rotation
+    # What: the one conditional secret-generation branch, UI_AUTH_PASSWORD.
+    # Why: neither fixture hits it by default; this is the shape a rotation
     #   bug would take, unlike ensure_secret_env_key's always-running path.
+    # From: PR #1546
     write_legacy_env_fixture admin
 
     run migrate_env_for_update "$(dirname "$env_file")"
@@ -280,12 +276,11 @@ write_legacy_env_fixture() {
 }
 
 @test "migrate_env_for_update on a deploy/prod install with no PXE keys in .env yet preserves an existing config/prod/dhcp-proxy.env PXE value across two runs (the confirmed real bug)" {
-    # What: A pre-existing deploy/prod install with PXE support hand-edited
-    #   directly into config/prod/dhcp-proxy.env, .env never having these keys.
-    # Why: Seeding the backfill from $env_file's own prior state (instead of
-    #   config/prod's real value) would defer the bug by one run, since the
-    #   second run's .env already carries the first run's placeholder.
-    #   Running twice is the actual discriminating check.
+    # What: a deploy/prod install with PXE hand-edited only into config/prod.
+    # Why: seeding the backfill from $env_file's own prior state (instead of
+    #   config/prod's real value) would defer the bug by one run, since run
+    #   two's .env already carries run one's placeholder.
+    # From: PR #1546
     prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
     config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
     mkdir -p "$prod_install_dir" "$config_prod_dir"
@@ -302,8 +297,9 @@ EOF
     run migrate_env_for_update "$prod_install_dir"
     [ "$status" -eq 0 ]
 
-    # What: Backfill converged to config/prod's real value, not a placeholder.
-    # Why: Proves this test exercises the real seeding path, not skipping it.
+    # What: backfill converged to config/prod's real value, not a placeholder.
+    # Why: proves this test exercises the real seeding path, not skipping it.
+    # From: PR #1546
     grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9' "$env_file"
     grep -qx 'DHCP_PROXY_PXE_BOOT_FILENAME_BIOS=real-pxelinux.0' "$env_file"
 
@@ -312,9 +308,10 @@ EOF
     run get_env_var DHCP_PROXY_PXE_BOOT_FILENAME_BIOS "$config_prod_env"
     [ "$output" = "real-pxelinux.0" ]
 
-    # What: Second run; .env already carries these keys from run one.
-    # Why: Exactly the state that would fool a fix relying on $env_file's
+    # What: second run; .env already carries these keys from run one.
+    # Why: exactly the state that would fool a fix relying on $env_file's
     #   own prior existence instead of config/prod's real value.
+    # From: PR #1546
     run migrate_env_for_update "$prod_install_dir"
     [ "$status" -eq 0 ]
 
@@ -341,8 +338,9 @@ EOF
     [ "$status" -eq 0 ]
     grep -qx 'DHCP_PROXY_PXE_BOOT_SERVER=10.0.0.1' "$env_file"
 
-    # What: Operator edits config/prod directly after the first migration.
-    # Why: The now-stale duplicate .env value must never overwrite this edit.
+    # What: operator edits config/prod directly after the first migration.
+    # Why: the now-stale duplicate .env value must never overwrite this edit.
+    # From: PR #1546
     set_env_key DHCP_PROXY_PXE_BOOT_SERVER "10.0.0.2" "$config_prod_env"
     run migrate_env_for_update "$prod_install_dir"
     [ "$status" -eq 0 ]
@@ -352,11 +350,10 @@ EOF
 }
 
 @test "migrate_env_for_update in dnsmasq-proxy mode does not die on an incomplete hand-edited PXE pair in config/prod/dhcp-proxy.env" {
-    # What: A hand-edited config/prod/dhcp-proxy.env with a PXE server but no
-    #   filename -- entrypoint.sh tolerates this (warning, not fatal).
+    # What: a hand-edited PXE server value with no filename (incomplete pair).
     # Why: pxe_boot_pointer_answers_are_complete() requires the pair
-    #   together; confirms seeding this unvalidated cannot turn a working
-    #   install into a failing update.
+    #   together; confirms seeding this unvalidated cannot break an update.
+    # From: PR #1546
     prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
     config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
     mkdir -p "$prod_install_dir" "$config_prod_dir"
@@ -371,7 +368,9 @@ EOF
         'UPSTREAM_DHCP_IP=192.0.2.1' \
         >> "$env_file"
 
-    # What: Incomplete on purpose -- a server with no filename.
+    # What: incomplete on purpose -- a server with no filename.
+    # Why: exercises the tolerated-incomplete-pair path, not a crash.
+    # From: PR #1546
     cat > "$config_prod_env" <<'EOF'
 DHCP_PROXY_PXE_BOOT_SERVER=10.9.9.9
 EOF
@@ -379,17 +378,19 @@ EOF
     run migrate_env_for_update "$prod_install_dir"
     [ "$status" -eq 0 ]
 
-    # What: The authoritative runtime file is not rewritten.
-    # Why: entrypoint.sh retains its warning/no-directive behavior for this
-    #   hand-edited state.
+    # What: the authoritative runtime file is not rewritten.
+    # Why: entrypoint.sh retains its warning/no-directive behavior for
+    #   this hand-edited state.
+    # From: PR #1546
     run get_env_var DHCP_PROXY_PXE_BOOT_SERVER "$config_prod_env"
     [ "$output" = "10.9.9.9" ]
 }
 
 @test "migrate_env_for_update in dnsmasq-proxy mode does not die on an invalid hand-edited value in config/prod/dhcp-proxy.env" {
-    # What: A malformed IPv4 hand-edited into config/prod/dhcp-proxy.env.
-    # Why: A hand-edited file is never guaranteed to satisfy $env_file's
-    #   own stricter validation; this must not abort a previously-working update.
+    # What: a malformed IPv4 hand-edited into config/prod/dhcp-proxy.env.
+    # Why: a hand-edited file is never guaranteed to satisfy $env_file's
+    #   own stricter validation; must not abort a previously-working update.
+    # From: PR #1546
     prod_install_dir="$BATS_TEST_TMPDIR/scratch/deploy/prod"
     config_prod_dir="$BATS_TEST_TMPDIR/scratch/config/prod"
     mkdir -p "$prod_install_dir" "$config_prod_dir"
