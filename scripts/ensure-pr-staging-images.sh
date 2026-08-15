@@ -397,9 +397,12 @@ image_exists() {
         rm -f "$err_capture"
         return "$status"
     fi
-    # mktemp unavailable: fall back to the original unconditional passthrough
-    # rather than silently dropping diagnostics in an environment this
-    # helper cannot capture stderr in at all.
+    # What: mktemp unavailable -- falls back to the original unconditional
+    # stderr passthrough (no capture, no status-2 suppression).
+    # Why: silently dropping diagnostics in an environment this helper
+    # cannot even capture stderr in would be worse than the pre-existing,
+    # unfiltered behavior.
+    # From: PR #1538, Issue #1449
     _sif_inspect "$image" >/dev/null
 }
 
@@ -544,9 +547,12 @@ wait_for_touched_image() {
             fi
         fi
 
-        # Only reached with exists_status == 2 (see the fail-fast branch
-        # above): status 1 always returns before this point now, so this
-        # line no longer needs its own "not confirmed absence" wording.
+        # What: Single log line, no longer branching on exists_status.
+        # Why: only reached with exists_status == 2 (the fail-fast branch
+        # above now returns before this point for every other status), so
+        # the "did not positively confirm absence" wording this line used to
+        # carry for status 1 no longer applies here.
+        # From: PR #1538, Issue #1449
         echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- registry confirms no such manifest/tag yet (not a connection/timeout/auth failure)..."
         sleep "$poll_interval_seconds"
     done
