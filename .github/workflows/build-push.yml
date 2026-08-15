@@ -1188,7 +1188,7 @@ jobs:
 
           # What: Profile-less renders skip inactive profiles; DHCP/logging need explicit activation.
           # Why: Compose omits services behind inactive profiles, skipping their validation.
-          # From: Issue #1095 | PR #1532
+          # From: PR #343
           for compose_file in \
             deploy/prod/docker-compose.yml \
             deploy/quickstart/docker-compose.yml; do
@@ -1254,9 +1254,10 @@ jobs:
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
-          # What: Validates the single real HAProxy allowlist script (scripts/docker-socket-proxy.sh, documented in docs/naming-conventions.md).
-          # Why: The allowlist used to also be duplicated into a dead, unreferenced x-docker-socket-proxy-command anchor per Compose file; that duplicate has been removed, so only the real script is checked now.
-          # From: Issue #1095 | PR #1532
+          # What: Validates the single real HAProxy allowlist script (scripts/docker-socket-proxy.sh).
+          # Why: The allowlist used to also be duplicated into a dead, unreferenced per-Compose-file anchor;
+          # that duplicate is removed, so only the real script is checked now.
+          # From: PR #635
           socket_proxy_script="scripts/docker-socket-proxy.sh"
           grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
             && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
@@ -1283,9 +1284,10 @@ jobs:
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
                 exit 1
               }
-            # What: Matches only the real top-level YAML key/anchor syntax for x-docker-socket-proxy-command, not any occurrence of the string.
-            # Why: The explanatory comment above (and docs/naming-conventions.md) legitimately mentions this name as prose; a substring match would misfire on that prose every run.
-            # From: Issue #1095 | PR #1532
+            # What: Matches only the real top-level YAML key/anchor syntax, not any occurrence of the string.
+            # Why: The explanatory comment above legitimately mentions this name as prose; a substring
+            # match would misfire on that prose every run.
+            # From: PR #635
             grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
               && {
                 echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/docker-socket-proxy.sh without ever being referenced."
@@ -1380,14 +1382,15 @@ jobs:
             ' "$compose_file"
           }
 
-          # What: Runs the env_file-contract check only for prod dhcp-proxy; quickstart uses its own separate .env directly.
-          # Why: Compose interpolation does not read env_file values, so explicit environment entries in prod would silently erase setup-managed proxy DHCP settings.
-          # From: Issue #1095 | PR #1532
+          # What: Runs the env_file-contract check only for prod dhcp-proxy; quickstart uses its own .env directly.
+          # Why: Compose interpolation does not read env_file values, so explicit environment entries in prod
+          # would silently erase setup-managed proxy DHCP settings.
+          # From: PR #472
           validate_dhcp_proxy_env_file_contract deploy/prod/docker-compose.yml ../../config/prod/dhcp-proxy.env
 
-          # What: Guards the dnsmasq relay/proxy optional-option surface across the env-file -> entrypoint -> template pipeline.
+          # What: Guards the dnsmasq relay/proxy optional-option surface across env-file -> entrypoint -> template.
           # Why: Prevents any layer from silently dropping these keys.
-          # From: Issue #1095 | PR #1532
+          # From: PR #643
           dhcp_proxy_optional_keys=(
             DHCP_PROXY_INTERFACE
             DHCP_PROXY_ROUTER
@@ -1408,9 +1411,11 @@ jobs:
           grep -F 'DHCP_PROXY_CUSTOM_OPTIONS=${DHCP_PROXY_CUSTOM_OPTIONS:-}' deploy/quickstart/docker-compose.yml >/dev/null \
             || { echo "::error::deploy/quickstart/docker-compose.yml's dhcp-proxy service must pass through DHCP_PROXY_CUSTOM_OPTIONS like the other optional dnsmasq relay/proxy keys."; exit 1; }
 
-          # What: Guards the PXE boot-pointer opt-in surface, same shape as the optional-option guard above, including explicit Compose passthrough (not just env-file presence).
-          # Why: The quickstart Compose environment allowlist can stop short of new keys, leaving a feature unreachable even when set in .env; checking passthrough catches that regression class mechanically.
-          # From: Issue #1095 | PR #1532
+          # What: Guards the PXE boot-pointer opt-in surface, same shape as the optional-option guard above,
+          # including explicit Compose passthrough (not just env-file presence).
+          # Why: A quickstart Compose allowlist that stops short of a new key leaves a feature unreachable
+          # even when set in .env; checking passthrough catches that regression class mechanically.
+          # From: PR #765
           dhcp_proxy_pxe_keys=(
             DHCP_PROXY_PXE_BOOT_SERVER
             DHCP_PROXY_PXE_BOOT_FILENAME_BIOS
