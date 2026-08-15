@@ -28,7 +28,7 @@ ARG DOCKER_BUILDX_VERSION=0.36.1
 # so the v2.2.x line this override used to target no longer applies -- 2.3.4
 # is the next real patch tag on the SAME minor line buildx itself now
 # uses, not a jump past what upstream already adopted.
-# From: Issue #1570
+# From: Issue #1570 | PR #1571
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # docker-buildx v0.35.0, docker-compose v5.2.0, AND the Docker CLI v29.6.1
 # (its own vendor.mod pins the same version -- checked when auditing all
@@ -50,7 +50,7 @@ ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # Why: no new CVE motivates this specific step; staying on the latest
 # grpc-go tag needs no extra reasoning to re-justify later than the
 # override mechanism itself already established (see the block above).
-# From: Issue #1570
+# From: Issue #1570 | PR #1571
 ARG GRPC_GO_VERSION=1.83.0
 # docker-buildx v0.35.0 (go.mod: v0.37.0) and docker-compose v5.2.0 / the
 # Docker CLI v29.6.1 (both: v0.38.0, checked when auditing all three
@@ -72,7 +72,7 @@ ARG GRPC_GO_VERSION=1.83.0
 # What: same routine latest-tag bump as the grpc-go override above.
 # Why: golang.org/x/text v0.41.0 is the current upstream release; no new
 # CVE motivates this step specifically.
-# From: Issue #1570
+# From: Issue #1570 | PR #1571
 ARG GOLANG_X_TEXT_VERSION=0.41.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
@@ -176,7 +176,7 @@ LABEL org.opencontainers.image.description="Prebuilt lancache-ng CI and develope
 # Why: 0.17.0 adds an opt-in client-side architecture change that stays off
 # by default (confirmed via upstream release notes); no config here enables
 # it, so this is a routine version-currency bump only.
-# From: Issue #1570
+# From: Issue #1570 | PR #1571
 ARG SCCACHE_VERSION=0.17.0
 ARG CARGO_AUDIT_VERSION=0.22.2
 ARG CARGO_AUDIT_SHA256_AMD64=ab28a1bdb54db4d5d8ad5981cf1f959410370b3d28250dbd35f6a44248620e39
@@ -189,7 +189,7 @@ ARG CARGO_AUDIT_SHA256_ARM64=c6603814ddaa45e51263dafd31c0ac98808f688d26f7395804f
 # 0.37.1 release assets (not carried forward from 0.37.0) -- an
 # unchanged checksum next to a bumped version number would silently
 # break the build's own verification step.
-# From: Issue #1570
+# From: Issue #1570 | PR #1571
 ARG CARGO_TARPAULIN_VERSION=0.37.1
 ARG CARGO_TARPAULIN_SHA256_AMD64=897731f07696af16ff725f90e718ac3fce4c5c3ca513945e4bc035ad2b7a89e0
 ARG CARGO_TARPAULIN_SHA256_ARM64=3571a002bfc15c08e667523d7c97680f7e8281480029ee0cf739a0e8fef12343
