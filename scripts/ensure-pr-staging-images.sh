@@ -348,24 +348,60 @@ declare -A classify_key_map=(
     [syslog]="syslog"
 )
 
-# Indirection so tests can stub the registry probe without a real daemon.
+# What: Indirection so tests can stub the registry probe without a real
+# daemon; the real path delegates to staging-image-freshness.sh's
+# _sif_inspect() and returns its tri-state contract: 1 = registry call
+# failed without confirming absence (shared retry budget exhausted), 2 =
+# registry positively confirmed no such manifest/tag/digest exists. Only
+# status 1's stderr is forwarded; a status-2 confirmed absence discards its
+# stderr, since _sif_inspect's own "::error::" annotation for that case is a
+# false alarm here, not a real registry problem.
+# Why: A confirmed absence must stay distinguishable from a real registry
+# failure so wait_for_touched_image() can fail fast on the latter instead of
+# silently polling it for up to an hour.
+# From: PR #1538, Issue #1449
 image_exists() {
     local image="$1"
     if [[ -n "${STAGING_IMAGE_EXISTS_CMD:-}" ]]; then
-        "$STAGING_IMAGE_EXISTS_CMD" "$image"
-    else
-        docker buildx imagetools inspect "$image" >/dev/null 2>&1
+        "$STAGING_IMAGE_EXISTS_CMD" "$image" && return 0
+        # What: Stub path preserves its plain-boolean contract: nonzero
+        # always means "not found yet, keep polling," mapped onto tri-state
+        # status 2 (confirmed absence), never status 1's "retry budget
+        # exhausted" meaning.
+        # Why: The stub never exercises a real ghcr_retry call, so it cannot
+        # produce a genuine status-1 result; mapping it to status 2 keeps
+        # every stub-driven test's continued-polling expectation intact.
+        # From: PR #1538, Issue #1449
+        return 2
     fi
+    local err_capture status
+    err_capture="$(mktemp 2>/dev/null)" || err_capture=""
+    if [[ -n "$err_capture" ]]; then
+        _sif_inspect "$image" >/dev/null 2>"$err_capture"
+        status=$?
+        if (( status != 2 )); then
+            cat "$err_capture" >&2
+        fi
+        rm -f "$err_capture"
+        return "$status"
+    fi
+    # What: mktemp unavailable -- falls back to the original unconditional
+    # stderr passthrough (no capture, no status-2 suppression).
+    # Why: silently dropping diagnostics in an environment this helper
+    # cannot even capture stderr in would be worse than the pre-existing,
+    # unfiltered behavior.
+    # From: PR #1538, Issue #1449
+    _sif_inspect "$image" >/dev/null
 }
 
-# #822 ("Pattern D"): this real `imagetools create` write is the exact
-# operation observed failing live three times in one day with
-# "401 Unauthorized: unauthenticated" (PRs #804/#817/#824, "ensure PR staging
-# images" job) -- it previously ran once with no retry at all. GHCR_RETRY_
-# USERNAME/PASSWORD are optional (ghcr_retry backs off and retries even
-# without them, just without a fresh relogin -- see that function's own
-# comment), so this still works if a caller runs the script without setting
-# them, same as scripts/require-image-platforms.sh.
+# What: Retries the imagetools-create registry write via ghcr_retry instead
+# of a single unretried attempt; GHCR_RETRY_USERNAME/PASSWORD are optional,
+# since ghcr_retry backs off and retries even without them (just without a
+# fresh relogin -- see that function's own comment), same as
+# scripts/require-image-platforms.sh.
+# Why: An authentication or other transient GHCR write failure must not fail
+# the whole gate on a single unretried attempt.
+# From: PR #1538, Issue #1449
 backfill_from_base() {
     local pr_image="$1" base_image="$2"
     if [[ -n "${STAGING_BACKFILL_CMD:-}" ]]; then
@@ -376,45 +412,19 @@ backfill_from_base() {
     fi
 }
 
-# #895 congestion probe: reports whether build-push.yml's own run for this
-# PR's current push is still active (any status other than "completed" --
-# verified live against this repo's real Actions API that an in-flight run
-# can report "pending", not only "queued"/"in_progress", so this
-# deliberately checks for the one terminal state rather than enumerating
-# non-terminal ones). Indirection so tests can stub the GitHub API call.
-# Intentionally fail-safe: if PR_HEAD_SHA is unset or the API query cannot be
-# completed for any reason (no token, no `curl`, an error after retries), this
-# returns non-zero (treated as "not active") so the caller falls back to the
-# original pre-#895 fail-at-baseline behavior instead of ever hanging on a
-# broken probe.
-#
-# #975: queries by pr_head_sha (the PR's real branch head), NOT build_sha
-# (the synthetic merge commit) -- the Actions "list workflow runs" API's
-# `head_sha` field/filter for a pull_request-triggered run is always the real
-# branch head, so querying by the merge commit (the pre-#975 bug) matched
-# zero runs, always, making this probe permanently report "not active"
-# regardless of whether build-push was genuinely still running.
-#
-# Delegates the actual query to scripts/lib/staging-ancestor-fallback.sh's
-# saf_event_has_incomplete_run() rather than issuing its own. That function
-# asks the identical question against the identical endpoint (including the
-# "check EVERY returned run, not just the newest" rule #975 established here
-# first), so keeping a second implementation alive here meant one shared
-# question with two bodies that could drift. It also removes this file's last
-# dependency on the `gh` CLI and its bundled `jq`: AG-CI-001 requires assuming
-# self-hosted runners do not provide project tooling, and this script runs
-# directly on a bare `lancache-light` runner (AG-CI-002), not inside the
-# pinned build-tools image -- so a missing `gh` silently downgraded this probe
-# to a permanent "not active" on exactly the runner tier it has to work on.
-# `saf_event_has_incomplete_run` uses `curl` + `GH_TOKEN` with an explicit
-# capability check instead, the same way every other API query in this
-# mechanism already does.
-#
-# Its tri-state answer is deliberately flattened to this function's existing
-# boolean contract: 0 stays "active", and BOTH 1 (positively confirmed: no
-# incomplete run) and 2 (inconclusive) become "not active", preserving the
-# fail-safe posture this probe already documented above -- an unprovable
-# answer must not let the caller extend its wait indefinitely.
+# What: Reports whether build-push.yml's own run for this PR's real branch
+# head commit (pr_head_sha, not the synthetic merge commit build_sha) is
+# still active, delegating the query to saf_event_has_incomplete_run() over
+# curl+GH_TOKEN rather than the `gh` CLI, which a bare self-hosted
+# `lancache-light` runner is not guaranteed to have. Its tri-state answer is
+# flattened to this function's boolean contract: only status 0 (active)
+# reports "active"; both status 1 (confirmed no incomplete run) and status 2
+# (inconclusive) report "not active".
+# Why: An unprovable answer must not let the caller extend its wait
+# indefinitely, and this repo's Actions API only ever reports a
+# pull_request-triggered run's real branch head under `head_sha` -- querying
+# by the merge commit instead would always match zero runs.
+# From: PR #1538, Issue #1449
 build_push_run_active() {
     if [[ -n "${STAGING_BUILD_RUN_STATUS_CMD:-}" ]]; then
         "$STAGING_BUILD_RUN_STATUS_CMD"
@@ -439,12 +449,41 @@ wait_for_touched_image() {
     local last_congestion_check=$((start_time - congestion_check_interval_seconds))
 
     while true; do
-        if image_exists "$pr_image"; then
+        # What: Uses `image_exists ... && { ...; return 0; }` instead of
+        # `if image_exists ...; then ...; fi` so `$?` right after is
+        # guaranteed to be image_exists()'s own real exit status.
+        # Why: A POSIX `if` with no matching branch (false condition, no
+        # `else`) exits the whole if-statement with status 0 unconditionally,
+        # silently discarding the 1-vs-2 classification (confirmed live:
+        # `f() { return 2; }; if f; then :; fi; echo $?` prints 0, not 2).
+        # From: PR #1538, Issue #1449
+        image_exists "$pr_image" && {
             echo "::notice::$service staging image is present at $pr_image (waited $((SECONDS - start_time))s)."
             return 0
+        }
+        # What: Captures image_exists()'s real exit status on the fallthrough
+        # path (see the comment above for why this control-flow shape is
+        # required for that to hold).
+        # Why: The fail-fast check immediately below needs the real 1-vs-2
+        # status to decide whether to keep polling.
+        # From: PR #1538, Issue #1449
+        local exists_status=$?
+
+        # What: Status 1 means image_exists()'s own ghcr_retry-wrapped call
+        # already exhausted the shared registry retry budget without the
+        # registry confirming absence; only status 2 (confirmed absence)
+        # continues to the normal/hard-ceiling polling below.
+        # Why: A persistent registry error must fail this wait immediately
+        # once the shared retry budget is exhausted, not keep polling on an
+        # error that budget could not resolve.
+        # From: PR #1538, Issue #1449
+        if (( exists_status != 2 )); then
+            echo "::error::$service staging image ($pr_image) registry check failed (elapsed $((SECONDS - start_time))s) -- the last registry check did NOT positively confirm absence (network/timeout/rate-limit/auth, or an unrecognized error shape), and the shared GHCR retry budget is already exhausted for this check. Refusing to keep polling on an error that budget could not resolve; if this tag is later found to have existed all along, that is evidence of a registry-call failure being misread as absence, not a real missing build."
+            return 1
         fi
 
         if (( SECONDS >= hard_deadline )); then
+            echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. The registry's last response confirmed no such manifest/tag exists (not a connection/timeout/auth failure) -- this is not a detection blind spot, build-push genuinely never published this tag."
             echo "::error::$service staging image ($pr_image) hit the hard ${poll_hard_ceiling_seconds}s ceiling. Even if build-push's run for this PR's head ($pr_head_sha) is still active, this gate refuses to wait any longer -- a run this slow needs its own investigation rather than an ever-longer poll."
             return 1
         fi
@@ -462,7 +501,12 @@ wait_for_touched_image() {
             fi
         fi
 
-        echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s)..."
+        # What: Single log line; only reached with exists_status == 2, since
+        # the fail-fast branch above returns for every other status.
+        # Why: Confirmed absence is the only case that reaches this line, so
+        # the message states that positively rather than hedging.
+        # From: PR #1538, Issue #1449
+        echo "Waiting for $service staging image ($pr_image) from build-push (elapsed $((SECONDS - start_time))s, normal budget ${poll_timeout_seconds}s, hard ceiling ${poll_hard_ceiling_seconds}s) -- registry confirms no such manifest/tag yet (not a connection/timeout/auth failure)..."
         sleep "$poll_interval_seconds"
     done
 }
