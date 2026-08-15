@@ -271,7 +271,7 @@ This precedence order exists because this project touches DNS, DHCP, TLS interce
 
 A PR is not complete if it leaves any of these documents objectively wrong or describing behavior that contradicts the change. Stale documentation is not a follow-up item — it is a blocker. If a code change invalidates a documented behavior, statement, or threat model characterization, the PR must update the documentation or explicitly explain why the documentation statement is still correct despite the code change.
 
-This rule exists because real drift was discovered and fixed in issue #529: `docs/threat-model.md` contained a stale reference to BIND9 (the system now uses PowerDNS), and described Admin UI authentication as "no authentication by default" when the current code actually fails closed and requires either explicit `UI_AUTH_USER`/`UI_AUTH_PASSWORD` configuration or an explicit `ALLOW_INSECURE_UI=true` opt-out. Both of these drifts were operational risks — operators following the threat model would make incorrect security assumptions, and future developers would misunderstand the current authentication behavior.
+Bad Example: issue #529 found `docs/threat-model.md` with a stale BIND9 reference (the system uses PowerDNS) and a description of Admin UI authentication as "no authentication by default" when the code actually fails closed — both real operational risks, since operators/developers following the doc would make incorrect security assumptions.
 
 ## Issue And PR Tracking
 
