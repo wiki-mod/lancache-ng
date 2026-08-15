@@ -646,10 +646,8 @@ by configuring which DNS server IP they point to:
   `deploy/prod/docker-compose.yml` directly (`docker compose -f deploy/prod/docker-compose.yml up -d`);
   the difference between "developing" and "deploying" is which git ref is checked out
   (`current_dev` vs. a `vX.Y.Z` release branch vs. `master`), not which compose file or
-  config directory is used. In practice, most real validation for this project happens via
-  SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
-  builds and full-stack `docker compose up` runs are not exercised on the Windows
-  authoring host — see AG-IPV6-001 for one concrete Docker-Desktop-on-Windows limitation).
+  config directory is used. Real validation for this project happens via SSH against Linux
+  self-hosted runners, not a local Windows Docker Desktop install (Rule-Ref: AG-VAL-016).
 - **[AG-KD-009]** **`build-tools` stays Debian, on purpose, with `trixie-backports` pinned in for
   currency**: #815's own research explicitly excluded `tools/build-tools` from the project's
   Alpine-migration push (unlike `dhcp`, `dhcp-proxy`, `dns`, `proxy`, `ntp`, and `ui`'s runtime
