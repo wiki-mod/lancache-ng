@@ -1160,7 +1160,7 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -s <<'VALIDATE_COMPOSE'
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE'
           set -euo pipefail
 
           validate_compose() {
@@ -1196,6 +1196,21 @@ jobs:
             validate_compose -f "$compose_file" --profile dhcp-proxy
             validate_compose -f "$compose_file" --profile logging
           done
+          VALIDATE_COMPOSE
+
+      - name: Validate NATS/atomic-write and Docker socket proxy contracts
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_NATS_SOCKETPROXY'
+          set -euo pipefail
 
           validate_nats_config_ownership() {
             local path
@@ -1310,6 +1325,22 @@ jobs:
           if [[ "$missing_required" = "1" ]]; then
             exit 1
           fi
+
+          VALIDATE_COMPOSE_NATS_SOCKETPROXY
+
+      - name: Validate DHCP proxy env-file and PXE contracts
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_DHCP_PROXY_ENV'
+          set -euo pipefail
 
           validate_dhcp_proxy_env_file_contract() {
             local compose_file="$1"
@@ -1441,6 +1472,22 @@ jobs:
             exit 1
           fi
 
+          VALIDATE_COMPOSE_DHCP_PROXY_ENV
+
+      - name: Validate setup.sh required keys and Kea DHCP preflight
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_SETUP_KEYS_KEA'
+          set -euo pipefail
+
           if grep -RInE '^(NATS_LOCAL_TOKEN|NATS_TOKEN)=' deploy/quickstart/.env deploy/prod/.env 2>/dev/null; then
             echo "::error::Quickstart/prod env templates must not use deprecated NATS token keys; use role credentials instead."
             exit 1
@@ -1482,6 +1529,21 @@ jobs:
             || { echo "::error::services/dhcp/Dockerfile must install nmap for the Kea discovery preflight."; exit 1; }
           grep -F 'nmap|/usr/bin/nmap|/bin/nmap)' services/dhcp/entrypoint.sh >/dev/null \
             || { echo "::error::services/dhcp/entrypoint.sh must pass through the nmap preflight command without starting Kea."; exit 1; }
+          VALIDATE_COMPOSE_SETUP_KEYS_KEA
+
+      - name: Validate setup.sh update-migration safety
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_SETUP_UPDATE_MIGRATION'
+          set -euo pipefail
 
           setup_update_required_repairs=(
             CACHE_INACTIVE
@@ -1637,6 +1699,22 @@ jobs:
             echo "::error::setup.sh update-ip must check prebuilt platform support before mutating local configuration."
             exit 1
           fi
+          VALIDATE_COMPOSE_SETUP_UPDATE_MIGRATION
+
+      - name: Validate shellcheck container hygiene and Rust acceleration policy
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_SHELLCHECK_ACCEL_POLICY'
+          set -euo pipefail
+
           if awk '
             /^  shellcheck:/ { in_shellcheck=1; next }
             /^  [[:alnum:]_-]+:/ { in_shellcheck=0 }
@@ -1766,8 +1844,27 @@ jobs:
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
             || { echo "::error::Acceleration infrastructure must use the same network mode as the preflight."; exit 1; }
-          # What: No check remains here for container-scan's old local scan-build networking entitlement (`allow_args+=(--allow network.host)` and its explicit docker-container Buildx builder).
-          # Why: container-scan no longer runs any local `docker buildx build` for a changed service, so there is no code path left to check; a plain `grep -F '<literal>'` check embedded in this same file would always self-match its own quoted source line regardless of whether the real code still exists, unlike the anchored `grep -E '^...$'` checks above (e.g. the network:/allow: pair) which do not self-match -- that broader self-matching defect class is tracked separately, not audited here.
+          VALIDATE_COMPOSE_SHELLCHECK_ACCEL_POLICY
+
+      - name: Validate Rust acceleration preflight and build-tools image chain
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_RUST_PREFLIGHT_BUILDTOOLS'
+          set -euo pipefail
+
+          # What: no check remains for container-scan's old local scan-build
+          #   networking entitlement.
+          # Why: container-scan no longer runs a local `docker buildx build`
+          #   for a changed service, so there is no code path left to check;
+          #   a self-matching `grep -F` check here would be meaningless.
           # From: Issue #1095 | PR #1532
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -1864,8 +1961,28 @@ jobs:
           grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
-          # What: Extracts build-tools.yml's actual "Promote mutable tags" run script and executes those exact lines under real and adversarial ref names (including "v0.2.0"), failing if any come out shaped like a real release tag.
-          # Why: This repo has a branch literally named "v0.2.0"; without the "-tc" ("test candidate") suffix, a push to it would publish build-tools:v0.2.0, the exact immutable vX.Y.Z tag promote writes for a real stable release. A pin check alone (grepping for the literal branch_tag string) would pass even if a future edit kept that literal but overwrote branch_tag again for a release-shaped ref; executing the real script text instead of retyping the derivation logic catches a bypass added anywhere in that range too.
+          VALIDATE_COMPOSE_RUST_PREFLIGHT_BUILDTOOLS
+
+      - name: Validate build-tools tag promotion and Dockerfile distcc/sccache wiring
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_PROMOTE_TAGS_DOCKERFILES'
+          set -euo pipefail
+
+          # What: extracts build-tools.yml's real "Promote mutable tags" script and
+          #   runs it under real and adversarial ref names, including "v0.2.0".
+          # Why: this repo has a branch literally named "v0.2.0"; without the "-tc"
+          #   suffix, pushing it would publish build-tools:v0.2.0, the same tag a
+          #   real vX.Y.Z release uses. Running the real script (not retyped logic)
+          #   catches a bypass added anywhere in that range too.
           # From: Issue #1095 | PR #1532
           grep -F 'branch_tag="${sanitized_ref}-tc"' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
@@ -2005,6 +2122,21 @@ jobs:
             grep -F 'cargo build -j "$cargo_jobs"' "$dockerfile" >/dev/null \
               || { echo "::error::$dockerfile must use the resolved cargo job count."; exit 1; }
           done
+          VALIDATE_COMPOSE_PROMOTE_TAGS_DOCKERFILES
+
+      - name: Validate image channel/tag resolution and stack images
+        run: |
+          set -euo pipefail
+
+          docker run --rm -i \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            --env HOME=/tmp \
+            --env DOCKER_CONFIG=/tmp/.docker \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_IMAGE_CHANNEL_RESOLUTION'
+          set -euo pipefail
 
           if awk '
             /^# .*Installing systemd watchdog/ { in_install=1; pull_seen=0 }
@@ -2085,7 +2217,7 @@ jobs:
           grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
           bash scripts/validate-stack-images.sh
-          VALIDATE_COMPOSE
+          VALIDATE_COMPOSE_IMAGE_CHANNEL_RESOLUTION
 
       # What: Deliberately its own step, not appended to "Validate compose files" above; do not merge back without re-confirming actionlint still completes.
       # Why: That step's embedded script is already large enough that actionlint's shellcheck integration deadlocks on it -- the exact same awk guards pass instantly in a small isolated script but reliably hang actionlint once embedded in the oversized one, and the unmodified pre-existing script does not hang, confirming a genuine size/threshold interaction in actionlint's own subprocess handling rather than a defect in this shell code.
