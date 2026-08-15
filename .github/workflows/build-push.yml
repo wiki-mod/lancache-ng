@@ -341,18 +341,16 @@ jobs:
           bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
-    # What: Enforces AG-GH-008: PR must carry labels and milestone; project-board placement is enforced too
-    # whenever a read:project-scoped token (PROJECT_AUTOMATION_PAT) is available to this run.
-    # Why: check-pr-tracking-metadata.sh requires python3/curl, so it runs in the build-tools image per
-    # AG-VAL-016 (treat host tools as absent/stale); without that token, or on any fork PR (secrets withheld),
-    # project-board membership only warns instead of failing.
-    # From: AG-GH-008, AG-VAL-016
+    # What: Enforces AG-GH-008 (labels + milestone required); project-board placement is enforced too only
+    # with a read:project token (PROJECT_AUTOMATION_PAT), else warns instead of failing.
+    # Why: check-pr-tracking-metadata.sh requires python3/curl, so it runs in the build-tools image per AG-VAL-016.
+    # From: PR #767
     name: PR tracking metadata (labels/milestone/project)
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 8-12s (gh pr view calls + one docker run of the build-tools
-    # image). Same 15-minute floor as detect-changes above.
+    # What: 15-minute timeout, same floor as detect-changes above; real runs are 8-12s.
+    # From: PR #1218
     timeout-minutes: 15
     permissions:
       contents: read
@@ -364,13 +362,9 @@ jobs:
       - name: Auto-assign Dependabot PR milestone
         # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs via PROJECT_AUTOMATION_PAT;
         # must run before the composite action below fetches current labels/milestone.
-        # Why: AG-GH-008 requires every PR carry a milestone but Dependabot can't set its own, so this replaced
-        # the prior blanket exemption since GITHUB_TOKEN can't write Projects v2 data; it is idempotent
-        # (AG-OP-006/AG-OP-009), only PATCHing when the live milestone is empty, and running before the fetch
-        # avoids the fetch step observing an empty milestone on a fresh Dependabot PR and failing before this
-        # step's own assignment takes effect, at the accepted one-time cost of a `milestoned` re-trigger the
-        # first time it fires on a given PR.
-        # From: Issue #1095 | PR #1532, AG-GH-008, AG-OP-006, AG-OP-009
+        # Why: Running before that fetch avoids the fetch step observing an empty milestone on a fresh
+        # Dependabot PR and failing before this step's own assignment takes effect; idempotent (AG-OP-006/009).
+        # From: PR #1279
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
@@ -390,10 +384,9 @@ jobs:
             echo "Milestone already set (#$current_milestone) -- leaving it as-is."
             exit 0
           fi
-          # What: Uses `if !` to keep set -e active; API failures degrade to warning, not abort.
-          # Why: Per AG-VAL-004, a command forming an `if` test is exempt from errexit, so a real API failure
-          # degrades to a warning instead of aborting the job, since the authoritative gate is the milestone
-          # check inside check-pr-tracking-metadata.sh a few steps below.
+          # What: Uses `if !` to keep set -e active; an API failure degrades to a warning, not an abort.
+          # Why: AG-VAL-004 exempts an `if` test from errexit; the authoritative gate is the milestone check
+          # inside check-pr-tracking-metadata.sh a few steps below, not this best-effort assignment.
           # From: AG-VAL-004
           if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
             echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
@@ -402,8 +395,8 @@ jobs:
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
 
       # What: Fetch and validate steps extracted to composite action pr-tracking-metadata-fetch-and-validate.
-      # Why: Dedup finding; "Auto-assign" step stays here since its warning-path text differs between jobs.
-      # From: Issue #1095 | PR #1532
+      # Why: "Auto-assign" stays a separate step here since its warning-path text differs between jobs.
+      # From: PR #1467
       - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -413,10 +406,9 @@ jobs:
     name: PR tracking metadata (labels/milestone/project) (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Real runs: up to ~1 min (build-tools image resolution + gh pr view
-    # calls on ubuntu-latest, slower than the self-hosted twin since it
-    # cannot reuse validate-compose's already-selected image). Same
-    # 15-minute floor as detect-changes above -- still ~15x the observed max.
+    # What: 15-minute timeout; real runs are up to ~1 min, slower than the self-hosted twin.
+    # Why: This job cannot reuse validate-compose's already-selected build-tools image.
+    # From: PR #1218
     timeout-minutes: 15
     permissions:
       contents: read
@@ -426,7 +418,7 @@ jobs:
       - name: Select build-tools image
         # What: Fallback resolves build-tools image independently, without depending on validate-compose.
         # Why: A needs: dependency on that job would defeat the fallback's purpose when self-hosted runners
-        # are unavailable; matches the shellcheck-hosted job's own resolution step.
+        # are unavailable.
         # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -467,33 +459,26 @@ jobs:
           fi
           echo "Assigned milestone #$DEPENDABOT_MILESTONE_NUMBER (LanCache-NG Roadmap) to PR #$PR_NUMBER."
 
-      # Same composite action as the self-hosted pr-tracking-metadata-check job above --
-      # see .github/actions/pr-tracking-metadata-fetch-and-validate for the full
-      # rationale on the two steps it runs (and why "Auto-assign Dependabot PR
-      # milestone" above stays duplicated instead of moving into it). This fallback job
-      # has no `needs:` of its own, so BUILD_TOOLS_IMAGE comes from "Select build-tools
-      # image" above instead of a shared job needs-output.
+      # What: Same composite action as the self-hosted pr-tracking-metadata-check job above.
+      # Why: This fallback job has no `needs:` of its own, so BUILD_TOOLS_IMAGE comes from "Select
+      # build-tools image" above instead of a shared job needs-output.
+      # From: PR #1467
       - uses: ./.github/actions/pr-tracking-metadata-fetch-and-validate
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
           project-automation-pat: ${{ secrets.PROJECT_AUTOMATION_PAT }}
 
   pr-title-convention-check:
-    # Enforces AGENTS.md AG-GH-018: a PR title must follow this repo's Conventional-Commit
-    # taxonomy (audited from real history in #850) -- this repo merges (not squashes) pull
-    # requests, so the PR title, not any commit message, is the unit a future
-    # release-please automation (#819) would read to compute the next vX.Y.Z bump. Same
-    # zero-LAN-dependency shape as pr-template-check/pr-tracking-metadata-check -- kept on
-    # the self-hosted pool as primary with a hosted fallback below.
-    #
-    # check-pr-title-convention.sh only needs bash, but still runs inside the pinned
-    # build-tools image (AG-VAL-016): project verification should not depend on whichever
-    # bash happens to be preinstalled on a given runner host.
+    # What: Enforces AG-GH-018: a PR title must follow this repo's Conventional-Commit taxonomy.
+    # Why: This repo merges (not squashes) pull requests, so the PR title, not any commit message, is the
+    # unit a future release-please automation would read to compute the next vX.Y.Z bump.
+    # From: PR #1114
     name: PR title Conventional-Commit lint
     if: github.event_name == 'pull_request'
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: 7-10s. Same 15-minute floor as detect-changes above.
+    # What: 15-minute timeout, same floor as detect-changes above; real runs are 7-10s.
+    # From: PR #1218
     timeout-minutes: 15
     permissions:
       contents: read
@@ -503,10 +488,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Step content extracted into a composite action (issue #1095 duplication
-      # finding): this job and pr-title-convention-check-hosted below used to carry
-      # the identical steps twice. Job-level scheduling (needs/if/permissions) stays
-      # here -- a composite action cannot express those.
+      # What: Step content extracted into a composite action, shared with pr-title-convention-check-hosted.
+      # Why: Job-level scheduling (needs/if/permissions) stays here since a composite action cannot express it.
+      # From: PR #1467
       - uses: ./.github/actions/pr-title-convention-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -516,8 +500,9 @@ jobs:
     name: PR title Conventional-Commit lint (GitHub-hosted fallback)
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    # Real runs: up to ~50s (build-tools image resolution on ubuntu-latest +
-    # gh pr view). Same 15-minute floor as detect-changes above.
+    # What: 15-minute timeout; real runs are up to ~50s (build-tools image resolution on ubuntu-latest).
+    # Why: A round, generous bound so a future hang still fails fast.
+    # From: PR #1218
     timeout-minutes: 15
     permissions:
       contents: read
@@ -525,13 +510,10 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Select build-tools image
-        # This fallback job must resolve its own image rather than depending
-        # on validate-compose's output (like the self-hosted job above does)
-        # -- it exists specifically for when self-hosted runners (and
-        # anything that depends on them, including validate-compose) are
-        # unavailable, so a needs: dependency on that job would defeat the
-        # fallback's purpose. Matches pr-tracking-metadata-check-hosted's own
-        # resolution step.
+        # What: Fallback resolves its own image rather than depending on validate-compose's output.
+        # Why: This job exists specifically for when self-hosted runners (and validate-compose, which
+        # depends on them) are unavailable, so a needs: dependency on that job would defeat its purpose.
+        # From: docs/ci-github-hosted-fallback-decision.md
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
@@ -541,11 +523,10 @@ jobs:
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
 
-      # Same composite action as the self-hosted pr-title-convention-check job above --
-      # see .github/actions/pr-title-convention-check for the full rationale. This
-      # fallback job has no `needs:`/permissions of its own beyond what's declared above,
-      # so BUILD_TOOLS_IMAGE comes from "Select build-tools image" above instead of a
-      # shared job needs-output.
+      # What: Same composite action as the self-hosted pr-title-convention-check job above.
+      # Why: This fallback job has no `needs:` of its own, so BUILD_TOOLS_IMAGE comes from "Select
+      # build-tools image" above instead of a shared job needs-output.
+      # From: PR #1467
       - uses: ./.github/actions/pr-title-convention-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -554,7 +535,9 @@ jobs:
   file-headers-hosted:
     name: file purpose headers (GitHub-hosted fallback)
     runs-on: ubuntu-latest
-    # Real runs: 5-8s. Same 15-minute floor as detect-changes above.
+    # What: 15-minute timeout, same floor as detect-changes above; real runs are 5-8s.
+    # Why: A round, generous bound so a future hang still fails fast.
+    # From: PR #1218
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -565,16 +548,18 @@ jobs:
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
-      # Use the same composite action as the self-hosted job so runner fallback cannot
-      # silently weaken repository-hygiene coverage. The action metadata is the single
-      # source of truth for its current checks, avoiding a count that can drift here.
+      # What: Same composite action as the self-hosted job, so runner fallback cannot silently weaken
+      # repository-hygiene coverage.
+      # Why: The action metadata is the single source of truth for its checks, avoiding a count that
+      # can drift here.
+      # From: PR #1467
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
-        # Mirrors the self-hosted file-headers job's own step above exactly,
-        # for parity between the two -- see that step's comment for the
-        # full rationale.
+        # What: Mirrors the self-hosted file-headers job's own step above exactly.
+        # Why: Kept in parity so a fallback run enforces the identical PR-diff header check.
+        # From: AG-HDR-008
         if: github.event_name == 'pull_request'
         env:
           SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
