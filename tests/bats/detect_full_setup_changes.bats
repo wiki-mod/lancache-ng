@@ -11,6 +11,7 @@
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     script="$repo_root/scripts/detect-full-setup-changes.sh"
+    classifier="$repo_root/scripts/classify-image-impact.sh"
     files="$BATS_TEST_TMPDIR/changed.txt"
 }
 
@@ -23,6 +24,20 @@ run_detect() {
 # Extract the value of a single output key from $output.
 val() {
     printf '%s\n' "$output" | grep -E "^$1=" | cut -d= -f2-
+}
+
+# Extract the value of a single output key from an arbitrary captured text
+# blob, not just the current $output -- needed below where two different
+# scripts' outputs must be compared against each other in the same test.
+value_from() {
+    local text="$1" wanted="$2" line
+    while IFS= read -r line; do
+        if [[ "$line" == "$wanted="* ]]; then
+            printf '%s\n' "${line#*=}"
+            return 0
+        fi
+    done <<< "$text"
+    return 1
 }
 
 @test "proxy change: proxy touched, should_run true, docs_only false" {
@@ -201,4 +216,47 @@ val() {
     [ "$(val proxy)" = "true" ]
     [ "$(val dns_image)" = "true" ]
     [ "$(val should_run)" = "true" ]
+}
+
+# --- Parity with the shared classify-image-impact.sh (AG-CODE-013
+# consolidation, PR #1523; previously
+# tests/bats/detect_full_setup_classifier_parity.bats, a separate file) ---
+#
+# Locks this detector's shared output contract to the authoritative
+# image-impact classifier so future path additions cannot silently drift.
+
+# This mixed diff exercises the special DNS-domain proxy dependency, a second
+# service, build-tools, a shared action, setup runtime, and deploy assembly in
+# one fixture. Every overlapping verdict must be byte-for-byte identical.
+@test "full-setup shared verdicts exactly match the common classifier" {
+    cat > "$files" <<'EOF'
+services/dns/cdn-domains.txt
+services/syslog/entrypoint.sh
+tools/build-tools/Dockerfile
+.github/actions/configure-rust-sccache/action.yml
+setup.sh
+deploy/full-setup/docker-compose.yml
+EOF
+
+    CHANGED_FILES="$files" GITHUB_OUTPUT="" run bash "$script"
+    [ "$status" -eq 0 ]
+    detector_output="$output"
+
+    CHANGED_FILES="$files" run bash "$classifier"
+    [ "$status" -eq 0 ]
+    classifier_output="$output"
+
+    shared_keys=(
+        proxy dns_image ui watchdog dhcp dhcp_proxy ntp syslog build_tools
+        deploy scripts setup_runtime workflow docs_only
+    )
+    for key in "${shared_keys[@]}"; do
+        detector_value="$(value_from "$detector_output" "$key")"
+        classifier_value="$(value_from "$classifier_output" "$key")"
+        [ "$detector_value" = "$classifier_value" ]
+    done
+
+    # The full-setup-only policy remains deliberately local and must still run
+    # for this runtime/build/deploy-affecting mixed diff.
+    [ "$(value_from "$detector_output" should_run)" = "true" ]
 }

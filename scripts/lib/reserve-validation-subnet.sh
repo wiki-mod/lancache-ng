@@ -597,3 +597,36 @@ validation_project_networks_teardown() {
 
     return "$failed"
 }
+
+# validation_simulation_teardown <compose_project> <work_dir> [extra_cleanup_cmd...]
+#
+# Standard EXIT-trap teardown shared by every full-setup simulation script
+# that starts deploy/full-setup/docker-compose.yml under its own
+# reserved-slot Compose project: runs [extra_cleanup_cmd...] first if given
+# (e.g. a plain `docker run` container outside the compose project that
+# needs tearing down separately), tears the compose project down (`down -v
+# --remove-orphans`), waits for its networks to actually detach
+# (validation_project_networks_teardown -- not just `down`'s own exit code,
+# see that function's own comment for the race this closes), then removes
+# <work_dir>. Does not call `exit` itself: callers keep their own `trap
+# cleanup EXIT` wrapper, which captures `$?` before calling this and exits
+# with that saved status afterward, so this function's own internal
+# `|| true` guards never mask the real exit code the trap must propagate.
+#
+# Consolidated (PR #1523, AG-CODE-013) out of a word-for-word duplicated
+# cleanup() body that had independently accumulated in
+# scripts/nats-secondary-auth-callout-simulation.sh,
+# scripts/ssl-mitm-cache-simulation.sh, and
+# scripts/ui-nats-dns-integration-simulation.sh -- all three already source
+# this file for validation_project_networks_teardown alone.
+validation_simulation_teardown() {
+    local compose_project="$1" work_dir="$2"
+    shift 2
+    if (( $# > 0 )); then
+        "$@" >/dev/null 2>&1 || true
+    fi
+    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        down -v --remove-orphans >/dev/null 2>&1 || true
+    validation_project_networks_teardown "$compose_project" || true
+    rm -rf "$work_dir"
+}
