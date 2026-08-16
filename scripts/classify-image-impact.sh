@@ -184,6 +184,15 @@ output_bool "ntp" touches_prefix "services/ntp/"
 # wired into the build matrix by #1428 itself.
 output_bool "syslog" touches_prefix "services/syslog/"
 
+# utilities (issue #1556): the shared non-compiler CLI-tools image
+# (curl/nano/lsof/ripgrep/findutils/coreutils/gettext-envsubst/jq/
+# ca-certificates/zstd), wired into the build matrix below. Path-scoped the
+# same way every other service is -- a change under services/utilities/
+# rebuilds it; a change elsewhere in the repo (including an unrelated part
+# of this workflow file) does not, beyond the existing workflow=true
+# fallback every non-build-tools service already gets.
+output_bool "utilities" touches_prefix "services/utilities/"
+
 # services/proxy/Dockerfile COPYs services/dns/cdn-domains.txt into the image at
 # build time (the dns-domains named build context), so a domain-list-only change
 # must also rebuild the proxy image or its baked-in /etc/nginx/cdn-domains.txt

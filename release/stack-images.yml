@@ -138,6 +138,21 @@ tooling:
       - .github/workflows/build-push.yml
       - docs/self-hosted-actions-runner.md
       - docs/ui-rust-dev-checks.md
+  - name: utilities
+    image: ghcr.io/wiki-mod/lancache-ng/utilities
+    source: services/utilities/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    description: >-
+      Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
+      findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
+      meant for COPY --from= consumption by other first-party images
+      instead of each one independently installing/building its own copy
+      (issue #1556). No live consumer yet -- migrating individual services
+      to COPY --from= this image is a deliberate, separate follow-up step,
+      not part of this manifest entry's own scope.
+    consumers: []
 metadata:
   - name: stack
     image: ghcr.io/wiki-mod/lancache-ng/stack
