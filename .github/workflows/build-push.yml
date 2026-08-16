@@ -2691,7 +2691,7 @@ jobs:
           # before public promotion. PRs keep their unique staging tag and
           # immediately pin every service behind it to a digest below.
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            tag="sha-${BUILD_SHA::7}"
+            tag="sha-$(dmeta_short_sha "$BUILD_SHA")"
             echo "Validating pre-promotion candidate set '$tag'."
           fi
 

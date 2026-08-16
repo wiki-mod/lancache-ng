@@ -180,7 +180,12 @@ jobs:
       - name: Compute immutable pushed source tag
         id: source-tag
         if: github.event_name != 'pull_request'
-        run: printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+          printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -434,7 +439,12 @@ jobs:
       - name: Compute immutable pushed source tag
         id: source-tag
         if: github.event_name != 'pull_request'
-        run: printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+          printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
         id: build-tools-base-digests
@@ -630,6 +640,8 @@ jobs:
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
           # CI 1.1: merges the exact candidate digests build-tools/build-tools-arm64
           # already built, scanned, and attested (needs[...].outputs.candidate-digest)
           # rather than re-resolving a mutable :sha-<short>-standalone-{amd64,arm64}
@@ -638,7 +650,8 @@ jobs:
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
           [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
 
-          source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA::7}"
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+          source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"
           amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
           arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
 
