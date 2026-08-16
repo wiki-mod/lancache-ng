@@ -1,24 +1,14 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Coverage for scripts/check-executable-bits.sh (issue #1019 / #822
-# Pattern B): the CI guard that fails a build when a repo script is invoked
-# by a bare path in a workflow/composite-action file (or is a .githooks/
-# hook) but is committed with a non-executable git mode.
-#
-# Every scenario builds a throwaway git fixture repo under $BATS_TEST_TMPDIR
-# and commits files at deterministic modes (`git update-index --chmod=+x/-x`,
-# independent of the fixture filesystem's own mode handling), then points the
-# guard at it -- so the suite runs fully offline and never depends on or
-# mutates the real repository. The guard is invoked as `bash "$script"`, not
-# bare `run "$script"`, precisely so this exec-bit guard's own test cannot
-# trip over the exec-bit bug it exists to catch (Rule-Ref: AG-VAL-024, "test
-# harnesses included"; the same irony PR #804 hit and #822's Pattern H note
-# calls out).
+# What: coverage for scripts/tracked/check-executable-bits.sh, the CI guard
+# for a bare-path/non-executable script or .githooks/ hook.
+# Why: every scenario commits fixture files at deterministic modes and
+# invokes the guard via `bash "$script"`, never bare `run` (AG-VAL-024).
+# From: Issue #1019 | Issue #1095 | PR #1501.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/check-executable-bits.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-executable-bits.sh"
     fixture="$BATS_TEST_TMPDIR/repo"
     mkdir -p "$fixture/.github/workflows"
     git -C "$fixture" init -q
@@ -28,11 +18,11 @@ setup() {
     git -C "$fixture" config commit.gpgsign false
 }
 
-# add_script <relpath> <yes|no>
-# Creates a script under the fixture and stages it as executable (yes) or
-# non-executable (no) in git, deterministically via update-index --chmod so
-# the committed mode does not depend on the fixture filesystem's umask or the
-# host's core.filemode setting.
+# What: add_script() creates a script under the fixture, staged executable
+# or not.
+# Why: `update-index --chmod` sets the committed mode deterministically,
+# independent of the fixture's umask or host's core.filemode.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 add_script() {
     local rel="$1" want_exec="$2"
     mkdir -p "$fixture/$(dirname "$rel")"
@@ -45,9 +35,11 @@ add_script() {
     fi
 }
 
-# write_workflow <shell-body-line>
-# Writes a minimal single-step workflow whose run: block contains the given
-# shell line, and stages it.
+# What: write_workflow() writes a minimal single-step workflow whose run:
+# block contains the given shell line, and stages it.
+# Why: a real workflow file, not a synthetic string, exercises the guard's
+# actual YAML `run:` parsing path end to end.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 write_workflow() {
     local body="$1"
     cat > "$fixture/.github/workflows/ci.yml" <<EOF
@@ -238,11 +230,108 @@ EOF
     # script, invoked directly from a workflow, committed non-executable) so
     # this suite is itself the evidence the guard would have caught it,
     # without a one-off manual verification that leaves no trace once merged.
-    add_script scripts/ui-nats-dns-integration-simulation.sh no
-    write_workflow 'scripts/ui-nats-dns-integration-simulation.sh'
+    add_script scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh no
+    write_workflow 'scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh'
     commit_fixture
 
     run bash "$script" "$fixture"
     [ "$status" -ne 0 ]
     [[ "$output" == *"ui-nats-dns-integration-simulation.sh"* ]]
+}
+
+# What: the four tests below cover the YAML `run:` block-scalar parser
+# rewrite.
+# From: Issue #1095 | PR #1501.
+@test "does not treat a workflow paths filter entry as a script invocation" {
+    # `on.*.paths` is YAML configuration data, not shell content. A path that
+    # happens to name a non-executable script must not be classified as a
+    # command merely because YAML represents the filter as a sequence item.
+    add_script tests/bats/filter-only.bats no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on:
+  pull_request:
+    paths:
+      - tests/bats/filter-only.bats
+jobs:
+  build:
+    steps:
+      - run: echo ok
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "does not treat a backslash-continued for word list as separate commands" {
+    # Words between `for ... in` and `; do` are iteration data. Joining the
+    # physical continuation lines before command-word classification keeps a
+    # script-looking data item attached to the `for` statement instead of
+    # inventing a bare-path command that Bash would never execute there.
+    add_script tests/bats/required-file.bats no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: |
+          set -euo pipefail
+          for required in \
+            tests/bats/required-file.bats; do
+            test -f "$required"
+          done
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "still detects a bare script in an inline run scalar" {
+    # Restricting the scanner to `run:` values must not narrow the original
+    # protection to block scalars only; a direct inline command is equally an
+    # exec-bit dependency.
+    add_script scripts/inline.sh no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: scripts/inline.sh
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scripts/inline.sh"* ]]
+}
+
+@test "still detects a bare script in a folded run block" {
+    # YAML permits folded (`>`) as well as literal (`|`) block scalars for a
+    # `run` value. A simple one-command folded block must retain the same
+    # direct-exec protection as the established literal-block fixtures.
+    add_script scripts/folded.sh no
+    cat > "$fixture/.github/workflows/ci.yml" <<'EOF'
+name: CI
+on: push
+jobs:
+  build:
+    steps:
+      - run: >-
+          scripts/folded.sh
+EOF
+    git -C "$fixture" add .github/workflows/ci.yml
+    commit_fixture
+
+    run bash "$script" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"scripts/folded.sh"* ]]
 }

@@ -13,10 +13,16 @@ inputs:
 runs:
   using: composite
   steps:
-    # What: wraps actionlint in an in-container `timeout --kill-after=30 300`.
-    # Why: actionlint's embedded shellcheck integration can hang in a Go-runtime
-    # deadlock, and a composite-action step cannot declare `timeout-minutes`.
-    # From: PR #1383
+    # What: nested in-container `timeout --kill-after` guards around
+    # ShellCheck+ActionLint -- inner 300s around actionlint, outer 600s
+    # around the whole step's docker run.
+    # Why: actionlint's embedded shellcheck can hang indefinitely in a
+    # Go-runtime deadlock (real incident 2026-07-24/25, exhausted the
+    # lancache-light runner tier for hours); a composite-action step
+    # cannot declare `timeout-minutes` (GitHub's schema validator rejects
+    # it), and a deadlocked process ignores the job-level SIGTERM anyway,
+    # so an in-container SIGKILL is the only real protection.
+    # From: PR #1383 | PR #1523
     - name: Run ShellCheck and ActionLint
       shell: bash
       run: |
@@ -26,6 +32,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 600 \
           bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
 
     - name: Run setup migration semantics tests
@@ -54,13 +61,21 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
+        # 600s, not the 300s used for this file's other (pure text-scan)
+        # steps: this script makes real curl calls to api.github.com per
+        # pinned action and has its own rate-limit retry/backoff path
+        # (tests/bats/check_action_node_versions.bats covers a transient
+        # rate-limit response that recovers on a later attempt) that can
+        # legitimately need more time than a text scan under real GitHub API
+        # backoff -- still well inside the calling step's own 900s
+        # (timeout-minutes: 15) budget for this whole composite action.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
           -w /work \
           -e GH_TOKEN \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-action-node-versions.sh
+          timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage (#896)
       # What: asserts every full-setup-validate.yml/full-setup-deep-validate.yml job that
@@ -76,7 +91,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-validation-subnet-wrapper-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
     - name: Check executable bits on bare-path script invocations (#1019)
       # What: scans every workflow/composite-action file and .githooks/ hook for a bare-path
@@ -92,7 +107,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-executable-bits.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-executable-bits.sh
 
     - name: Check build-tools smoke-test coverage (#790/#791)
       # What: compares select-build-tools-image.sh's smoke_test_image() required-tools list
@@ -108,7 +123,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-build-tools-smoke-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-build-tools-smoke-coverage.sh
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
       # What: scans scripts/**, tools/**, services/**, and setup.sh for a live producer
@@ -124,7 +139,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-pipefail-early-exit-grep.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/untracked/check-pipefail-early-exit-grep.sh
 
     - name: Check pipefail guard's own scope coverage
       # What: verifies the pipefail-early-exit bats fixture covers every path prefix
@@ -140,4 +155,4 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-pipefail-scope-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh

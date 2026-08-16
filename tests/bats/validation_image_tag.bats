@@ -90,6 +90,19 @@ setup() {
     [ "$output" = "pr-715-sha-abcdef0" ]
 }
 
+@test "resolve tag: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed instead of returning pr-<N>-sha- (AG-VAL-030)" {
+    # What: proves vit_resolve_tag itself fails closed, not just dmeta_short_sha.
+    # Why: printf's own exit status stays 0 even if a command substitution
+    #   inside its argument fails, so the caller must check dmeta_short_sha's
+    #   own exit status separately.
+    # From: Issue #1095 (G2) | PR #1503
+    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
+    run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
+        "someuser" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""
+    [ "$status" -ne 0 ]
+    [[ "$output" != "pr-715-sha-"* ]]
+}
+
 @test "resolve tag: Dependabot PR falls back to the base channel" {
     run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
         "dependabot[bot]" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""

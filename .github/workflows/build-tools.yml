@@ -33,6 +33,17 @@ concurrency:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  # What: declares the same short-SHA length as build-push.yml's own env.
+  # Why: Actions has no mechanism to share an env value across workflow
+  #   files, so both copies must be kept equal by hand.
+  # From: Issue #1095 (G2) | PR #1503
+  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
+  # run_id-run_attempt suffixed, not a fixed name: build-tools and
+  # build-tools-arm64 each load a *local* scan image onto their own runner's
+  # Docker daemon, and the self-hosted amd64 runner in particular is reused
+  # across overlapping/retried runs -- a fixed local tag could let one run's
+  # cleanup ("Remove local scan image") delete or overwrite an image a
+  # concurrently-running job on the same host is still scanning.
   BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
   BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
 
@@ -93,7 +104,15 @@ jobs:
             exit 0
           fi
 
-          if git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml | grep -q .; then
+          # Capture into a variable first, then test for non-empty output
+          # instead of piping git diff directly into `grep -q .` (AG-VAL-032):
+          # a live producer piped into an early-exiting grep -q can surface
+          # the producer's SIGPIPE (141) instead of grep's own successful
+          # match under pipefail (this workflow's default shell runs with
+          # -eo pipefail), which would silently skip a real build-tools
+          # rebuild here.
+          changed_build_tools_files="$(git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml)" || changed_build_tools_files=""
+          if [ -n "$changed_build_tools_files" ]; then
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::No tools/build-tools/** or workflow-file change found in this push's commit range; skipping build-tools image rebuild/publish."
@@ -180,6 +199,18 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: this job's local Buildx cache (see "Prepare local Buildx
+      # cache" above) has no wall-clock expiry, only cache-key expiry -- once
+      # tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN
+      # step has been built once, every later run with identical Dockerfile
+      # text reuses that same cached layer forever, so a Debian security fix
+      # published after the layer was first cached (confirmed for real:
+      # bind9-libs/bind9-dnsutils/bind9-host stayed on the vulnerable
+      # 1:9.20.23-1~deb13u1 for weeks after 1:9.20.26-1~deb13u1 shipped to
+      # trixie-security) never gets picked up. A value that changes once per
+      # ISO week, passed as the Dockerfile's APT_CACHE_BUST build-arg, forces
+      # that one layer to actually re-run against the current Debian archive
+      # on a weekly cadence without busting it on every single run.
       - name: Compute apt cache-bust value
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
@@ -422,6 +453,14 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
+      # Issue #1147: same reasoning as build-tools's own identically-named
+      # step -- this job's `type=gha` cache (see the arm64 leg's own scope
+      # comment further down) also has no wall-clock expiry, so this arm64
+      # leg needs the same periodic bust as the amd64 leg above, computed
+      # independently here since the two jobs run on separate runners with
+      # no shared state. Both derive the same ISO-week string from wall-clock
+      # time alone, so amd64 and arm64 bust in lockstep without needing to
+      # pass a value between jobs.
       - name: Compute apt cache-bust value
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
@@ -543,6 +582,12 @@ jobs:
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
   merge-build-tools-manifests:
+    # Combines build-tools's linux/amd64 tag with build-tools-arm64's
+    # linux/arm64 tag into the real sha-<commit> multi-platform tag that
+    # scripts/untracked/select-build-tools-image.sh and setup.sh consume -- same
+    # imagetools create pattern as build-push.yml's merge-manifests, no image
+    # is rebuilt here, only a manifest list assembled from two already-pushed
+    # digests.
     name: merge build-tools multi-platform manifest
     needs: [determine-publish-scope, build-tools, build-tools-arm64]
     if: >-
@@ -585,12 +630,29 @@ jobs:
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # CI 1.1: merges the exact candidate digests build-tools/build-tools-arm64
+          # already built, scanned, and attested (needs[...].outputs.candidate-digest)
+          # rather than re-resolving a mutable :sha-<short>-standalone-{amd64,arm64}
+          # tag -- the tag could in principle have moved between those jobs finishing
+          # and this merge step running.
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
           [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
 
           source_tag="${BUILD_TOOLS_IMAGE}:sha-${GITHUB_SHA::7}"
           amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
           arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
+
+          # Same description text as build-push.yml's own build-tools
+          # matrix.description entry -- kept in sync manually, not sourced
+          # from one shared place, same reasoning as that file's
+          # merge-manifests job. This is where the index-level
+          # org.opencontainers.image.description annotation actually gets
+          # attached (issue #620): the per-platform build-tools/
+          # build-tools-arm64 jobs above stay unannotated on purpose (see
+          # their "Build and push" step comments), and "Promote mutable
+          # tags" below carbon-copies this index annotation forward
+          # untouched rather than re-declaring it, same pattern as
+          # build-push.yml's promote job.
           build_tools_description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
@@ -598,11 +660,18 @@ jobs:
             --annotation "index:org.opencontainers.image.description=${build_tools_description}"
           printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
 
+      # Mirrors the guard build-push.yml's own merge-manifests job runs via
+      # scripts/untracked/require-image-platforms.sh: a manual `imagetools create` can
+      # still produce a tag missing a required platform if either staging tag
+      # silently resolved to the wrong architecture, and that would only
+      # surface later as a confusing per-runner-class failure downstream.
       - name: Verify merged manifest exposes both platforms
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
+        run: |
+          set -euo pipefail
+          bash scripts/untracked/require-image-platforms.sh "${{ steps.merge.outputs.source-tag }}" linux/amd64,linux/arm64
 
       - name: Resolve merged manifest digest
         id: merged-digest

@@ -2,9 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/generate-vex.sh's per-entry status/justification
-# handling: entries whose .trivyignore.yaml statement asserts a real
-# non-exploitability finding
+# Coverage for scripts/untracked/generate-vex.sh's per-entry status/justification
+# handling, added after a Codex review finding on PR #1286: entries whose
+# .trivyignore.yaml statement asserts a real non-exploitability finding
 # (vulnerable code confirmed absent) must produce an OpenVEX `not_affected`
 # statement with a `justification`, not the generator's long-standing
 # `affected`/`action_statement` default meant for entries genuinely awaiting
@@ -22,10 +22,10 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/generate-vex.sh"
+    script="$repo_root/scripts/untracked/generate-vex.sh"
     fixture="$BATS_TEST_TMPDIR/trivyignore.yaml"
     # Deterministic output for every test in this file, matching how
-    # scripts/check-vex-drift.sh feeds a fixed committed timestamp back in.
+    # scripts/tracked/check-vex-drift.sh feeds a fixed committed timestamp back in.
     export VEX_TIMESTAMP="2026-01-01T00:00:00Z"
 }
 

@@ -10,7 +10,7 @@ its bats test suite (`tests/bats/watchdog_idempotence.bats`,
 its CI wiring (`.github/workflows/build-push.yml`,
 `.github/workflows/build-tools.yml`, `.github/workflows/full-setup-validate.yml`,
 `.github/workflows/full-setup-deep-validate.yml`), its cross-component
-dependency `scripts/docker-socket-proxy.sh`, and `docs/architecture-ng.md`'s
+dependency `scripts/untracked/docker-socket-proxy.sh`, and `docs/architecture-ng.md`'s
 watchdog section.
 
 Methodology: exhaustive, unscoped read-through (no pre-filtering, no
@@ -66,7 +66,7 @@ All line numbers below reference `services/watchdog/watchdog.sh` at
 `build-push.yml` has a dedicated `watchdog_test` job (and a
 `watchdog_test-hosted` GitHub-hosted fallback) that correctly triggers when
 `services/watchdog/**` changes (via `detect-changes.outputs.watchdog`, which
-is computed by `scripts/classify-image-impact.sh:139`:
+is computed by `scripts/untracked/classify-image-impact.sh:139`:
 `output_bool "watchdog" touches_prefix "services/watchdog/"`). But both jobs'
 entire body is:
 
@@ -108,7 +108,7 @@ on:
       - "tests/bats/**"
       - "tests/shellspec/**"
       - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
+      - "scripts/tracked/check-idempotence-test-coverage.sh"
   pull_request:
     branches: [master, v0.2.0]
     paths: [... identical list ...]
@@ -139,7 +139,7 @@ in code comments, and in CHANGELOG history (#111, #112, #633, #757).
 
 **Evidence**: direct greps of `build-push.yml` (zero `bats` matches),
 `build-tools.yml` (the sole `bats tests/bats` invocation plus its path
-filter), and `scripts/classify-image-impact.sh:139` confirming the disjoint
+filter), and `scripts/untracked/classify-image-impact.sh:139` confirming the disjoint
 trigger sets.
 
 ---
@@ -275,7 +275,7 @@ are a supported, operator-facing customization point (and `watchdog.sh`
 itself reads them via `${CONTAINER_PROXY:-lancache-proxy}` etc., lines
 25-31).
 
-But `scripts/docker-socket-proxy.sh` -- the HAProxy config generator that
+But `scripts/untracked/docker-socket-proxy.sh` -- the HAProxy config generator that
 gates *every* Docker API call `get_health()`/`restart_container()` make --
 hardcodes the permitted container names directly into its ACL regexes and
 does not read these env vars at all:
@@ -286,7 +286,7 @@ acl safe_container_inspect path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lanc
 acl safe_service_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/(lancache-proxy|lancache-dns-standard|lancache-dns-ssl|lancache-nats)/restart$
 ```
 
-(`scripts/docker-socket-proxy.sh:44-47`).
+(`scripts/untracked/docker-socket-proxy.sh:44-47`).
 
 If an operator ever exercises the documented customization (renaming a
 monitored container via `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/

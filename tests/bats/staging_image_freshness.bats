@@ -4,10 +4,10 @@
 #
 # Docker-free coverage for scripts/lib/staging-image-freshness.sh (#808): the
 # shared "is this base-channel image actually built from a commit at or after
-# this PR's base.sha" check used by both scripts/ensure-pr-staging-images.sh
+# this PR's base.sha" check used by both scripts/untracked/ensure-pr-staging-images.sh
 # and build-push.yml's own "Ensure PR staging tags exist for full-setup
 # services" step. sif_image_revision is stubbed via STAGING_IMAGE_REVISION_CMD
-# (the same override-hook convention scripts/ensure-pr-staging-images.sh
+# (the same override-hook convention scripts/untracked/ensure-pr-staging-images.sh
 # already uses for STAGING_IMAGE_EXISTS_CMD/STAGING_BACKFILL_CMD); the git
 # ancestry check itself runs against a real, disposable git repo (via
 # STAGING_FRESHNESS_GIT_DIR) with synthetic commits, so the actual
@@ -17,7 +17,7 @@
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
     lib="$repo_root/scripts/lib/staging-image-freshness.sh"
-    # #1095 F-21: staging-image-freshness.sh's own _sif_inspect now routes
+    # Issue #1095: staging-image-freshness.sh's own _sif_inspect now routes
     # its registry reads through ghcr_retry (scripts/lib/ghcr-retry.sh) --
     # must be sourced first so the real (non-stubbed) docker branch below
     # can find it, matching every other dual script/workflow-step caller's
@@ -325,6 +325,20 @@ STUB
     [ "$status" -eq 0 ]
 }
 
+# Issue #1581: the three signatures above are the distribution-spec wording
+# this classifier originally assumed; real `docker buildx imagetools
+# inspect` against GHCR for a genuinely missing tag does not actually emit
+# any of them. Verified live (2026-08-15) against two real buildx builds
+# (local v0.36.0, runner host lancache-243's v0.35.0): both print exactly
+# this text for a nonexistent tag. Without this case, PR #1532's own
+# incident (a brand-new PR staging tag always being absent at the moment
+# wait_for_touched_image() starts polling, misclassified as an unconfirmed
+# error and failing the wait almost immediately) would regress silently.
+@test "_sif_inspect_failure_is_confirmed_absence: classifies buildx's real GHCR \"ERROR: <ref>: not found\" wording as absence" {
+    run _sif_inspect_failure_is_confirmed_absence "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"
+    [ "$status" -eq 0 ]
+}
+
 @test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a network/timeout-shaped error as absence" {
     run _sif_inspect_failure_is_confirmed_absence "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
     [ "$status" -eq 1 ]
@@ -334,10 +348,23 @@ STUB
     [ "$status" -eq 1 ]
 }
 
+# Issue #1581: the new `^ERROR:.*: not found$` alternative must stay
+# anchored to buildx's own line shape, not swallow every "ERROR: ..." line
+# buildx can produce. Both lines below are real, live-reproduced
+# (2026-08-15, against ghcr.io) buildx error text from an auth failure and a
+# DNS failure respectively -- neither ends in ": not found", so neither must
+# match.
+@test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a real buildx auth/DNS ERROR line as absence" {
+    run _sif_inspect_failure_is_confirmed_absence "ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token?scope=repository%3Awiki-mod%2Flancache-ng%2Ftotally-nonexistent-service-xyz%3Apull&service=ghcr.io: 403 Forbidden"
+    [ "$status" -eq 1 ]
+    run _sif_inspect_failure_is_confirmed_absence 'ERROR: failed to do request: Head "https://ghcr.invalid-host-xyz-does-not-exist.example/v2/foo/manifests/bar": dial tcp: lookup ghcr.invalid-host-xyz-does-not-exist.example: no such host'
+    [ "$status" -eq 1 ]
+}
+
 @test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a missing-docker-binary shell error as absence (AG-CI-001)" {
     # A bare "not found" would also match "docker: command not found" / "bash:
     # docker: command not found" -- exactly what a bare `lancache-light`
-    # runner without docker on PATH produces (scripts/ensure-pr-staging-images.sh,
+    # runner without docker on PATH produces (scripts/untracked/ensure-pr-staging-images.sh,
     # one of this file's two real callers, runs there directly, not inside the
     # pinned build-tools image). Misclassifying that as a confirmed registry
     # absence would report the registry as having confirmed something it was
@@ -351,7 +378,7 @@ STUB
 @test "sif_image_revision (real docker branch, no stub): a confirmed-absence registry error returns status 2" {
     fake_docker_returning_stderr "Error response from daemon: manifest unknown"
     # Direct `$(... 2>/dev/null)` capture, not bats' `run` (which merges
-    # stdout+stderr into $output): #1095 F-21's ghcr_retry wrapping means a
+    # stdout+stderr into $output): issue #1095's ghcr_retry wrapping means a
     # genuine failure path now legitimately logs its own ::warning::/::error::
     # diagnostics to real stderr (this project's normal, desired CI-log
     # visibility for every other ghcr_retry call site) -- `run` would fold
@@ -369,9 +396,23 @@ STUB
     [ -z "$result" ]
 }
 
+@test "sif_image_revision (real docker branch, no stub): buildx's real GHCR \"not found\" wording returns status 2 (Issue #1581)" {
+    # Same end-to-end shape as the confirmed-absence test above, but with the
+    # literal wording buildx actually emits (verified live, see Issue #1581)
+    # instead of the distribution-spec wording the classifier originally
+    # assumed -- this is the exact case that made every touched-service
+    # staging-image wait fail almost immediately, since a brand-new PR tag is
+    # always missing at the moment the wait starts polling.
+    fake_docker_returning_stderr "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"
+    status=0
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3" 2>/dev/null)" || status=$?
+    [ "$status" -eq 2 ]
+    [ -z "$result" ]
+}
+
 @test "sif_image_revision (real docker branch, no stub): an unrecognized/transient registry error returns status 1 (unchanged ambiguous case)" {
     fake_docker_returning_stderr "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
-    # #1095 F-21: sif_image_revision's registry reads now go through
+    # Issue #1095: sif_image_revision's registry reads now go through
     # ghcr_retry, which defaults to 4 attempts/30s backoff -- a caller-less
     # direct call like this one (unlike sif_wait_for_fresh_base_image, which
     # scopes this down itself) would otherwise genuinely wait up to 90s here
@@ -394,7 +435,7 @@ STUB
     [ -z "$result" ]
 }
 
-# #1095 F-21: a fake `docker` that SUCCEEDS with a real multi-platform index
+# Issue #1095: a fake `docker` that SUCCEEDS with a real multi-platform index
 # on --raw, then echoes a fixed revision label on --format, logging every
 # invocation's own argv so the test can assert exactly which image
 # reference the second (--format) call targeted.
@@ -422,7 +463,7 @@ STUB
 }
 
 @test "sif_image_revision (real docker branch): a digest-ref input (repo@sha256:...) resolves its multi-platform child correctly, not truncated mid-digest" {
-    # #1095 F-21's digest-pinning fix passes sif_image_revision a caller-
+    # Issue #1095's digest-pinning fix passes sif_image_revision a caller-
     # resolved repo@sha256:... reference (not only a mutable tag), so it can
     # verify safety against, and export, the exact same immutable digest.
     # The ORIGINAL "${image%:*}@digest" strip is only correct for a tag-ref

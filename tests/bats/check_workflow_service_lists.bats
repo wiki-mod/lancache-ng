@@ -2,11 +2,38 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-workflow-service-lists.sh: canonical matrix, runtime
-# service lists, deliberate subsets, and Hosted Fallback metadata drift. Synthetic
-# fixtures keep failure modes isolated; the final test also checks the real tree.
+# Coverage for scripts/tracked/check-workflow-service-lists.sh (#822): the CI guard
+# that fails a build if build-push.yml's several independent `services=(...)`
+# arrays (which drive manifest merge, channel promotion, and release) ever
+# diverge from the build matrix's canonical service set, or if
+# `full_setup_services=(...)` gains a service that is not a real build-matrix
+# service.
+#
+# The first 8 tests below (single-file invocation) write a small fixture
+# workflow (only the lines this guard reads: a `- service:` matrix plus the
+# array assignments) and point the script at it via its file argument, so
+# the suite runs fully offline and does not depend on the real
+# build-push.yml's current contents.
+#
+# The remaining tests cover the guard's extension (#822 pattern audit, beyond
+# issue #935's original build-push.yml-only scope) to 3 more real files that
+# duplicate the same service-list class: scripts/untracked/gc-pr-staging-images.sh,
+# backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh. These
+# invoke the script with a matrix-source fixture PLUS additional fixture
+# files, mirroring the script's own `[primary] [extra]...` argument shape.
+#
+# gc_fixture is named gc-pr-staging-images.sh, not .yml (#1095, 2026-08-06):
+# it used to model the array as it looked embedded in
+# .github/workflows/gc-pr-staging-images.yml's own `run:` block, before that
+# logic moved into scripts/untracked/gc-pr-staging-images.sh as a real, standalone
+# script. check_services_arrays() in the script under test keys
+# REQUIRES_SERVICES_ARRAY/SUBSET_SERVICES_FILES by `basename "$file"` -- a
+# fixture still named *.yml here would silently stop being treated as
+# "required" the moment the real script's own map keys moved to *.sh,
+# letting every "no services=(...) array found"/"diverges" test below pass
+# for the wrong reason (or not fail at all) without anyone noticing.
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/check-workflow-service-lists.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-workflow-service-lists.sh"
     fixture="$BATS_TEST_TMPDIR/build-push.yml"
     gc_fixture="$BATS_TEST_TMPDIR/gc-pr-staging-images.sh"
     backfill_fixture="$BATS_TEST_TMPDIR/backfill-stack-latest.yml"
@@ -15,9 +42,10 @@ setup() {
 }
 
 # Emits a matrix declaring all nine real services (#1296: ntp joined
-# proxy/dns/watchdog/dhcp/dhcp-proxy/ui/build-tools, matching the real
-# build-push.yml matrix's own service list). The leading indentation matches
-# the anchored `^\s+- service:` pattern the guard extracts from.
+# proxy/dns/watchdog/dhcp/dhcp-proxy/ui/build-tools; #1428 later added syslog,
+# matching the real build-push.yml matrix's own service list). The leading
+# indentation matches the anchored `^\s+- service:` pattern the guard
+# extracts from.
 write_canonical_matrix() {
     cat <<'EOF'
 jobs:
@@ -168,7 +196,7 @@ EOF
 }
 
 # Writes correct, in-sync content for all 3 extended-scope fixtures, modeled
-# on the real files: scripts/gc-pr-staging-images.sh equals the canonical
+# on the real files: scripts/untracked/gc-pr-staging-images.sh equals the canonical
 # set, declared at column 0 like ensure-pr-staging-images.sh below (it is a
 # plain shell script, not indented inside a YAML `run:` block -- unlike
 # before #1095, 2026-08-06, when this array still lived embedded in
@@ -211,7 +239,7 @@ write_matrix_source_with_services() {
     [[ "$output" == *"consistent"* ]]
 }
 
-# The exact #822 recurrence shape, now in scripts/gc-pr-staging-images.sh
+# The exact #822 recurrence shape, now in scripts/untracked/gc-pr-staging-images.sh
 # specifically: a service silently missing from its (must-equal-canonical)
 # services=(...) copy must fail and name the file.
 @test "multi-file: fails when gc-pr-staging-images.sh's services=() diverges from canonical" {
@@ -299,7 +327,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when ensure-pr-staging-images.sh's full_setup_services=() silently drops a real service" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo 'full_setup_services=(proxy dns watchdog dhcp ntp build-tools)' > "$ensure_fixture"
+    echo 'full_setup_services=(proxy dns watchdog dhcp ntp syslog build-tools)' > "$ensure_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -308,7 +336,7 @@ write_matrix_source_with_services() {
 }
 
 # The specific #1296-completion regression this PR's fix addresses: ntp
-# itself silently dropped (all other 7 real services present) must still
+# itself silently dropped (all other 8 real services present) must still
 # fail. FULL_SETUP_EXACT_EXCLUSIONS["ensure-pr-staging-images.sh"] is now an
 # empty-but-present exclusion set (ntp was the last member, see the script's
 # own comment) -- an earlier, buggier version of this fix kept that value
@@ -322,7 +350,7 @@ write_matrix_source_with_services() {
 @test "multi-file: fails when ensure-pr-staging-images.sh's full_setup_services=() drops ntp specifically (empty-exclusion-set regression)" {
     write_matrix_source_with_services > "$fixture"
     write_good_extra_fixtures
-    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)' > "$ensure_fixture"
+    echo 'full_setup_services=(proxy dns watchdog dhcp dhcp-proxy syslog ui build-tools)' > "$ensure_fixture"
 
     run bash "$script" "$fixture" "$gc_fixture" "$backfill_fixture" "$ensure_fixture"
     [ "$status" -ne 0 ]
@@ -330,7 +358,7 @@ write_matrix_source_with_services() {
     [[ "$output" == *"$ensure_fixture"* ]]
 }
 
-# scripts/gc-pr-staging-images.sh and backfill-stack-latest.yml are both
+# scripts/untracked/gc-pr-staging-images.sh and backfill-stack-latest.yml are both
 # "required" services=(...) files (see REQUIRES_SERVICES_ARRAY in the
 # script): if the array vanishes entirely (renamed, refactored away), the
 # guard must fail closed instead of silently no-op'ing on that file. This is
@@ -380,75 +408,104 @@ write_matrix_source_with_services() {
     [[ "$output" == *"$backfill_fixture"* ]]
 }
 
+# Hosted fallback maps are a separate service-list representation from the
+# bash services=(...) arrays above. These fixtures make the fallback drift
+# class repeatable instead of depending on a live outage to expose it.
+write_good_hosted_fixture() {
+    cat > "$hosted_fixture" <<'EOF'
+declare -A contexts=(
+  [proxy]=services/proxy
+  [dns]=services/dns
+  [watchdog]=services/watchdog
+  [dhcp]=services/dhcp
+  [dhcp-proxy]=services/dhcp-proxy
+  [ntp]=services/ntp
+  [syslog]=services/syslog
+  [ui]=services/ui
+  [build-tools]=tools/build-tools
+)
+declare -A build_contexts=(
+  [proxy]=""
+  [dns]=services/dns
+  [watchdog]=""
+  [dhcp]=""
+  [dhcp-proxy]=""
+  [ntp]=""
+  [syslog]=""
+  [ui]=services/ui
+  [build-tools]=""
+)
+declare -A descriptions=(
+  [proxy]="proxy"
+  [dns]="dns"
+  [watchdog]="watchdog"
+  [dhcp]="dhcp"
+  [dhcp-proxy]="dhcp-proxy"
+  [ntp]="ntp"
+  [syslog]="syslog"
+  [ui]="ui"
+  [build-tools]="build-tools"
+)
+declare -A is_rust=(
+  [dns]=true
+  [ui]=true
+)
+selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+EOF
+}
+
+@test "hosted fallback: passes when maps and selected set match the canonical matrix" {
+    write_matrix_source_with_services > "$fixture"
+    write_good_hosted_fixture
+
+    run bash "$script" --hosted-fallback "$hosted_fixture" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"consistent"* ]]
+}
+
+@test "hosted fallback: fails when contexts silently drops syslog" {
+    write_matrix_source_with_services > "$fixture"
+    write_good_hosted_fixture
+    sed -i '/^  \[syslog\]=services\/syslog$/d' "$hosted_fixture"
+
+    run bash "$script" --hosted-fallback "$hosted_fixture" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"contexts keys"* ]]
+}
+
+@test "hosted fallback: fails when selected silently drops syslog" {
+    write_matrix_source_with_services > "$fixture"
+    write_good_hosted_fixture
+    sed -i 's/ ntp syslog ui/ ntp ui/' "$hosted_fixture"
+
+    run bash "$script" --hosted-fallback "$hosted_fixture" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"selected=(...)"* ]]
+}
+
+@test "hosted fallback: fails closed when a required metadata map disappears" {
+    write_matrix_source_with_services > "$fixture"
+    write_good_hosted_fixture
+    sed -i '/^declare -A descriptions=(/,/^)/d' "$hosted_fixture"
+
+    run bash "$script" --hosted-fallback "$hosted_fixture" "$fixture"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"missing declare -A descriptions"* ]]
+}
+
 # Defense-in-depth: proves the guard's default zero-argument production
 # invocation -- the exact way build-push.yml's CI step calls it, covering
-# the real build-push.yml plus the real scripts/gc-pr-staging-images.sh,
-# backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh -- is
-# actually green today. Without this, a real drift in any of the 3 extended
-# files could sit undetected by this suite (which otherwise only exercises
-# synthetic fixtures) until CI's own build-push.yml step caught it.
+# the real build-push.yml plus the real scripts/untracked/gc-pr-staging-images.sh,
+# backfill-stack-latest.yml, scripts/untracked/ensure-pr-staging-images.sh, and (since
+# the hosted-fallback drift class above) the real
+# build-push-hosted-fallback.yml too, since check-workflow-service-lists.sh's
+# own zero-arg default now also passes --hosted-fallback -- is actually green
+# today. Without this, a real drift in any of these 4 extended files could sit
+# undetected by this suite (which otherwise only exercises synthetic
+# fixtures) until CI's own build-push.yml step caught it.
 @test "the guard also passes when pointed at the real repository tree (default zero-arg invocation)" {
     repo_root="$BATS_TEST_DIRNAME/../.."
     run bash -c "cd '$repo_root' && bash '$script'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"consistent"* ]]
-}
-
-
-write_metadata_matrix_source() {
-    cat <<'EOF'
-jobs:
-  build:
-    strategy:
-      matrix:
-        include: &normal-build-services
-          - service: proxy
-            context: services/proxy
-            build_contexts: dns-domains=services/dns
-            description: &ci-description-proxy "Proxy description."
-          - service: ntp
-            context: services/ntp
-            build_contexts: ""
-            description: &ci-description-ntp "NTP description."
-    steps: []
-          services=(proxy ntp)
-EOF
-}
-
-write_good_hosted_metadata() {
-    cat > "$hosted_fixture" <<'EOF'
-services=(proxy ntp)
-declare -A contexts=(
-  [proxy]=services/proxy
-  [ntp]=services/ntp
-)
-declare -A build_contexts=(
-  [proxy]="dns-domains=services/dns"
-  [ntp]=""
-)
-declare -A descriptions=(
-  [proxy]="Proxy description."
-  [ntp]="NTP description."
-)
-EOF
-}
-
-@test "hosted fallback metadata passes when it matches the anchored build matrix" {
-    write_metadata_matrix_source > "$fixture"
-    write_good_hosted_metadata
-
-    run bash "$script" "$fixture" "$hosted_fixture"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"consistent"* ]]
-}
-
-@test "hosted fallback metadata fails when a description drifts from the build matrix" {
-    write_metadata_matrix_source > "$fixture"
-    write_good_hosted_metadata
-    sed -i 's/NTP description\./Drifted NTP description./' "$hosted_fixture"
-
-    run bash "$script" "$fixture" "$hosted_fixture"
-    [ "$status" -ne 0 ]
-    [[ "$output" == *"descriptions metadata"* ]]
-    [[ "$output" == *"diverges"* ]]
 }

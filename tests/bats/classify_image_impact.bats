@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/classify-image-impact.sh
+# Docker-free, git-free unit coverage for scripts/untracked/classify-image-impact.sh
 # (#819). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
 # per-path booleans this script inherited verbatim from build-push.yml's
 # detect-changes job, plus the additive IMAGE_IMPACT verdict the promote job's
@@ -12,7 +12,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/classify-image-impact.sh"
+    script="$repo_root/scripts/untracked/classify-image-impact.sh"
     files="$BATS_TEST_TMPDIR/changed.txt"
 }
 
@@ -85,6 +85,18 @@ val() {
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
 
+# #1556: utilities is the shared non-compiler CLI-tools image
+# (curl/nano/lsof/ripgrep/findutils/coreutils/gettext-envsubst/jq/
+# ca-certificates/zstd) wired into the build matrix. Mirrors the
+# independence check above for the other per-service booleans.
+@test "utilities change: utilities true, other service flags stay false" {
+    run_classify "services/utilities/Dockerfile"
+    [ "$(val utilities)" = "true" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+}
+
 @test "build-push.yml change sets workflow true; an unrelated workflow does not" {
     run_classify ".github/workflows/build-push.yml"
     [ "$(val workflow)" = "true" ]
@@ -122,7 +134,7 @@ val() {
     [ "$(val setup_runtime)" = "true" ]
     [ "$(val scripts)" = "false" ]
 
-    run_classify "scripts/ssl-mitm-cache-simulation.sh"
+    run_classify "scripts/untracked/simulations/ssl-mitm-cache-simulation.sh"
     [ "$(val setup_runtime)" = "true" ]
     [ "$(val scripts)" = "true" ]
 }
@@ -212,6 +224,7 @@ val() {
     [ "$(val dhcp_proxy)" = "true" ]
     [ "$(val build_tools)" = "true" ]
     [ "$(val syslog)" = "true" ]
+    [ "$(val utilities)" = "true" ]
     [ "$(val workflow)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }

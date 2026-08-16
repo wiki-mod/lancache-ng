@@ -250,8 +250,8 @@ RUN docker --version; \
     docker buildx version
 
 # What: isc-dhcp-client (dhclient) supports
-# scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/syslog-forwarding-simulation.sh, which perform a real
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh, which perform a real
 # Discover/Offer/Request/Ack exchange against a Kea container on an
 # isolated Docker bridge network.
 # Why: the Admin UI's own dhcp-probe feature now uses a native Rust DHCP
@@ -261,7 +261,7 @@ RUN docker --version; \
 # are a separate concern from the Admin UI's probe.
 # From: Issue #1570 | PR #1571
 
-# What: tcpdump supports scripts/dhcp-proxy-pxe-simulation.sh, capturing
+# What: tcpdump supports scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, capturing
 # dnsmasq's real DHCPOFFER reply to a synthetic PXE DHCPDISCOVER
 # (tools/pxe-client-probe, a Rust binary built from source by that script)
 # to a pcap file rather than sniffing live in-process.
@@ -330,18 +330,12 @@ RUN set -euo pipefail; \
     # From: Issue #1570 | PR #1571
     apt-get dist-upgrade -y; \
     apt-get full-upgrade -y; \
-    # What: force-upgrades linux-libc-dev, jq, and libjq1 explicitly,
-    # beyond the generic dist-upgrade/full-upgrade above.
-    # Why: linux-libc-dev is pulled in by the toolchain layer and can lag
-    # behind the base image even after a generic upgrade, failing Trivy on
-    # stale headers. jq/libjq1 are installed by an earlier, non-cache-busted
-    # RUN step above, so once that layer is cached it never re-resolves
-    # against a newer mirror on its own (confirmed live: CVE-2026-32316,
-    # fixed in trixie-security's 1.7.1-6+deb13u3); naming both here forces
-    # this build to pick up a mid-week fix immediately rather than waiting
-    # for the next weekly rotation.
+    # What: force-upgrades linux-libc-dev, jq, libjq1, libpq-dev, and libpq5 explicitly, beyond dist-upgrade/full-upgrade above.
+    # Why: jq/libjq1 are confirmed transitively pulled in by an earlier, non-cache-busted
+    #   apt-get install (CVE-2026-32316); libpq-dev/libpq5 hit the identical
+    #   still-outdated-after-dist-upgrade symptom for CVE-2026-6473, though their own origin is not established here -- the same proven fix applies regardless.
     # From: Issue #1570 | PR #1571
-    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1; \
+    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     # What: chowns the download temp dir to _apt:root before `apt-get

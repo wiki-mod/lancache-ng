@@ -63,6 +63,13 @@ runs:
         # Why: PR_LABELS_JSON names a live-fetched file, not an inline JSON string.
         # From: PR #1467
         labels_json="$(cat "$PR_LABELS_JSON")"
+        # 600s: this script makes real GraphQL Projects v2 calls (and a
+        # milestone auto-assign write for Dependabot PRs) against
+        # api.github.com, not a pure text scan -- 300s would be tight under
+        # real API latency/retry conditions. The calling job's own
+        # timeout-minutes: 15 (900s) covers checkout plus the earlier
+        # "Fetch current labels/milestone live" step too, so 600s here still
+        # leaves real headroom.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
@@ -75,4 +82,4 @@ runs:
           -e GH_TOKEN \
           -e PR_IS_FORK \
           "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-pr-tracking-metadata.sh
+          timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-pr-tracking-metadata.sh

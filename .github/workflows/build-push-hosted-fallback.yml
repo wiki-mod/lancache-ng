@@ -2,10 +2,39 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: opt-in, workflow_dispatch-only GitHub-hosted overflow path for the
-# amd64 build/scan/publish lane; never replaces the self-hosted pipeline.
-# Why: build-push.yml's build-arm64 job already covers arm64 natively.
-# From: Issue #686 | docs/ci-github-hosted-fallback-decision.md
+# Opt-in GitHub-hosted OVERFLOW path for the amd64 build/scan/publish lane
+# build-push.yml normally runs on self-hosted `lancache-heavy` runners.
+# build-push.yml itself is completely unchanged by this file: self-hosted
+# stays the fast, default path, and this workflow only ever runs when a
+# maintainer explicitly dispatches it during a self-hosted outage. See
+# issue #686 and docs/ci-github-hosted-fallback-decision.md for the full
+# history and the credential-exposure analysis (same short-lived, repo-scoped
+# GITHUB_TOKEN build-arm64 already uses on GitHub-hosted runners, issue #592
+# -- not a new trust decision).
+#
+# Scope covered: build (amd64 leg) + scan + manifest merge, producing the
+# same `sha-<short>[-amd64]` / merged `sha-<short>` GHCR tags build-push.yml
+# would have produced for the same commit. The arm64 leg needs no fallback:
+# build-push.yml's own `build-arm64` job already runs unconditionally on
+# GitHub-hosted `ubuntu-24.04-arm` for every push/PR (issue #592), so its
+# `sha-<short>-arm64` tag is already available for this workflow's merge
+# step to combine with the amd64 tag produced here.
+#
+# Explicitly NOT covered: `promote` (channel-pointer moves) and `release`
+# (release-tag publish) -- both carry promote-lock/multi-channel rules not
+# safe to re-derive from scratch here (see docs/ci-github-hosted-fallback-decision.md).
+# Once this workflow publishes a service's merged `sha-<short>` tag,
+# promoting it to a channel still requires either self-hosted capacity to
+# return, or a manual `workflow_dispatch` of build-push.yml's own `channel`
+# input once a self-hosted runner is available to run `promote`.
+#
+# What: single build/push/scan job per service, no separate local-scan-only
+# pre-build.
+# Why: CI 1.1's single-artifact invariant (Refs #1522) removed the duplicate
+# scan-only candidate build this job used to depend on -- the digest scanned
+# below is the exact same one that gets pushed, attested, and merged into the
+# multi-platform manifest by exact digest (never a mutable tag).
+# From: Issue #1522 | PR #1523
 name: Build & Push (GitHub-hosted overflow fallback)
 
 on:
@@ -14,20 +43,21 @@ on:
       use_hosted_fallback:
         description: >-
           Must be "yes" to actually run. This is an explicit maintainer-invoked
-          overflow path for a self-hosted lancache-heavy outage.
+          overflow path for a self-hosted lancache-heavy outage, not a routine
+          CI job -- see this workflow file's header comment.
         type: choice
         options: ["no", "yes"]
         default: "no"
       services:
         description: >-
-          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools,utilities
           to build, or "all".
         required: false
         default: all
       merge_manifest:
         description: >-
           After the amd64 build, merge it with build-arm64's existing arm64
-          tag into the immutable multi-platform sha-<short> tag.
+          tag into the real multi-platform sha-<short> tag.
         type: boolean
         default: true
 
@@ -43,6 +73,13 @@ defaults:
 
 jobs:
   preflight:
+    # Gate + fan-out. Fails closed unless the operator explicitly chose "yes"
+    # -- a plain workflow_dispatch click with the default "no" left in place
+    # must not silently build and push anything. Also resolves the same
+    # digest-pinned, smoke-tested build-tools image build-push.yml's own
+    # validate-compose job resolves (AG-VAL-026: never trust a mutable
+    # channel tag inside a gate), and turns the `services` input into a JSON
+    # matrix the downstream jobs can consume via fromJSON().
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -55,13 +92,16 @@ jobs:
         run: |
           set -euo pipefail
           if [ "$USE_HOSTED_FALLBACK" != "yes" ]; then
-            echo "::error::use_hosted_fallback must be explicitly set to 'yes'."
+            echo "::error::use_hosted_fallback must be explicitly set to 'yes' to run this overflow workflow. This is not a routine CI job -- see this workflow file's header comment."
             exit 1
           fi
+          echo "::notice::Hosted overflow fallback explicitly confirmed by dispatching operator."
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
+        # Required for the imagetools inspect call inside
+        # select-build-tools-image.sh below.
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
@@ -69,9 +109,10 @@ jobs:
         id: select-image
         run: |
           set -euo pipefail
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           case "$build_tools_image" in
-            *@sha256:*) ;;
+            *@sha256:*)
+              ;;
             *)
               echo "::error::Expected a digest-qualified build-tools image, got '$build_tools_image'."
               exit 1
@@ -90,9 +131,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # This separate workflow mirrors build-specific metadata from build-push.yml.
-          # The service-list guard compares the service set and metadata against that matrix.
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+          # Keep in sync by hand with build-push.yml's own build/build-arm64
+          # matrix.include service list -- there is no shared source both
+          # workflow files can read matrix rows from (GitHub Actions has no
+          # cross-workflow YAML include mechanism).
           declare -A contexts=(
             [proxy]=services/proxy
             [dns]=services/dns
@@ -103,6 +145,7 @@ jobs:
             [syslog]=services/syslog
             [ui]=services/ui
             [build-tools]=tools/build-tools
+            [utilities]=services/utilities
           )
           declare -A build_contexts=(
             [proxy]="dns-domains=services/dns"
@@ -114,6 +157,7 @@ jobs:
             [syslog]=""
             [ui]=""
             [build-tools]=""
+            [utilities]=""
           )
           declare -A descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -125,10 +169,11 @@ jobs:
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=("${services[@]}")
+            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
@@ -138,7 +183,7 @@ jobs:
             svc="$(printf '%s' "$raw" | xargs)"
             [ -z "$svc" ] && continue
             if [ -z "${contexts[$svc]+set}" ]; then
-              echo "::error::Unknown service '$svc'. Valid services: ${services[*]}."
+              echo "::error::Unknown service '$svc'. Valid services: ${!contexts[*]}."
               exit 1
             fi
             row="$(jq -n \
@@ -151,10 +196,11 @@ jobs:
           done
 
           if [ "$(printf '%s' "$rows" | jq 'length')" -eq 0 ]; then
-            echo "::error::No valid services selected."
+            echo "::error::No valid services selected; 'services' input resolved to an empty set."
             exit 1
           fi
 
+          echo "::notice::Building services: $(printf '%s' "$rows" | jq -c '[.[].service]')"
           printf 'matrix=%s\n' "$(printf '%s' "$rows" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
 
   build-hosted-fallback:
@@ -180,7 +226,29 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      - name: Resolve short commit SHA
+        id: short-sha
+        run: |
+          set -euo pipefail
+
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: assigns the short SHA to a local before printf, instead of
+          #   embedding the call in printf's argument list.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+          printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
+
       - name: Set up Docker Buildx
+        # Retried variant (not the plain action): ubuntu-latest is also a
+        # fresh VM every run with no local image cache, the same underlying
+        # condition (issue #930) that made build-arm64's arm64 leg hit
+        # Docker Hub's anonymous-pull rate limit while bootstrapping
+        # moby/buildkit:buildx-stable-1.
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
@@ -280,7 +348,7 @@ jobs:
         with:
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-          # What: same unconditional Docker Hub secret as the amd64 scan step above.
+          # What: same unconditional Docker Hub secret as build-push.yml's own scan steps.
           # Why: an unauthenticated first-choice DB mirror caused real CI failures.
           # From: Issue #1535
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
@@ -305,25 +373,32 @@ jobs:
           SERVICE: ${{ matrix.service }}
           DESCRIPTION: ${{ matrix.description }}
           AMD64_DIGEST: ${{ steps.build.outputs.digest }}
+          SHORT_SHA: ${{ steps.short-sha.outputs.value }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
             echo "::error::Build step did not export a valid amd64 digest for $SERVICE: '$AMD64_DIGEST'."
             exit 1
           }
 
-          short_sha="${GITHUB_SHA::7}"
-          arm64_tag="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${short_sha}-arm64"
+          arm64_tag="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${SHORT_SHA}-arm64"
           lookup_log="$(mktemp)"
           cleanup_lookup_log() { rm -f "$lookup_log"; }
           trap cleanup_lookup_log EXIT
           if ! arm64_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools inspect "$arm64_tag" --format '{{json .Manifest.Digest}}' 2>"$lookup_log")"; then
-            echo "::notice::Skipping multi-platform merge for $SERVICE because no usable arm64 leg exists at $arm64_tag after the registry retry budget."
+            echo "::notice::Skipping multi-platform merge for $SERVICE because no usable arm64 leg exists at $arm64_tag after the registry retry budget. Run build-push.yml's build-arm64 job for this commit first (it runs unconditionally on every push/PR)."
             exit 0
           fi
           if [[ -s "$lookup_log" ]]; then
@@ -341,7 +416,7 @@ jobs:
 
           amd64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${AMD64_DIGEST}"
           arm64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${arm64_digest}"
-          target_image="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${short_sha}"
+          target_image="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${SHORT_SHA}"
 
           # Resolve the mutable arm64 staging tag exactly once above, then keep
           # the complete merge on immutable references so the tested amd64
@@ -350,7 +425,7 @@ jobs:
             docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref" \
             --annotation "index:org.opencontainers.image.description=${DESCRIPTION}"
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-            bash scripts/require-image-platforms.sh "$target_image" linux/amd64,linux/arm64
+            bash scripts/untracked/require-image-platforms.sh "$target_image" linux/amd64,linux/arm64
 
           merged_digest="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools inspect "$target_image" --format '{{json .Manifest.Digest}}')"

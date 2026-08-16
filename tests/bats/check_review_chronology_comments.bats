@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Exercises scripts/check-review-chronology-comments.sh (AG-CODE-003's
+# Exercises scripts/untracked/check-review-chronology-comments.sh (AG-CODE-003's
 # review-chronology sub-pattern) against small, throwaway fixture trees
 # rather than only this repo's own real tree, so both the passing and
 # failing path are proven -- per AG-VAL-024, a check that only ever runs
@@ -16,7 +16,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/check-review-chronology-comments.sh"
+    script="$repo_root/scripts/untracked/check-review-chronology-comments.sh"
     fixture_root="$(mktemp -d)"
 }
 
@@ -165,12 +165,12 @@ EOF
     # guard would fail against its own repository the moment this file (or
     # the script) were added, since both literally contain e.g. "caught in
     # review" as example text.
-    mkdir -p "$fixture_root/scripts" "$fixture_root/tests/bats"
-    cp "$script" "$fixture_root/scripts/check-review-chronology-comments.sh"
+    mkdir -p "$fixture_root/scripts/untracked" "$fixture_root/tests/bats"
+    cp "$script" "$fixture_root/scripts/untracked/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \
         "$fixture_root/tests/bats/check_review_chronology_comments.bats"
 
-    run bash "$fixture_root/scripts/check-review-chronology-comments.sh" "$fixture_root"
+    run bash "$fixture_root/scripts/untracked/check-review-chronology-comments.sh" "$fixture_root"
     [ "$status" -eq 0 ] || fail "guard flagged its own documentation/test file: $output"
 }
 
