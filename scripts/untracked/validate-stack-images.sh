@@ -242,7 +242,7 @@ require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-
 # CycloneDX SBOM) is exactly the drift shape this narrower literal check
 # exists to catch mechanically instead of relying on manual review to
 # notice a fifth recurrence.
-require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools\]' \
+require_grep 'service: \[proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities\]' \
   .github/workflows/build-push.yml \
   'release-sbom must cover every Trivy-scanned first-party image (mirrors container-scan matrix)'
 
