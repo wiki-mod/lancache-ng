@@ -36,21 +36,16 @@ services:
     volumes:
       - ../../certs:/etc/nginx/ssl/ca
       - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
-      # What: proxy-cache named volume resolves to the single host CACHE_DIR
-      #   device below; both standard and SSL proxy paths share this tree.
+      # What: proxy-cache named volume resolves to the single host CACHE_DIR device below; both standard and SSL proxy paths share this tree.
       # Why: one physical cache backs both listener modes.
       # From: docs/known-good-config-snapshots.md
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
-      # What: named volume for per-domain SSL/MITM wildcard certs
-      #   (entrypoint.sh's CERT_DIR), separate from the CA bind-mount above.
-      # Why: the Dockerfile's own VOLUME for this path is anonymous; without
-      #   a named volume, a `down && up` (not `--force-recreate`) loses every
-      #   generated cert and re-signs the whole domain list on next boot.
+      # What: named volume for per-domain SSL/MITM wildcard certs (entrypoint.sh's CERT_DIR), separate from the CA bind-mount above.
+      # Why: the Dockerfile's own VOLUME for this path is anonymous; without a named volume, a `down && up` (not `--force-recreate`) loses every generated cert and re-signs the whole domain list on next boot.
       # From: Issue #849
       - proxy-certs:/etc/nginx/ssl/certs
-      # What: persistent, service-owned volume for known-good nginx config
-      #   snapshots, not the ephemeral container layer.
+      # What: persistent, service-owned volume for known-good nginx config snapshots, not the ephemeral container layer.
       # Why: rollback must survive container restarts/recreates.
       # From: Issue #415
       - proxy-config-snapshots:/var/lib/lancache-proxy
@@ -60,11 +55,8 @@ services:
       - "${IP_SSL}:80:80"
       - "${IP_SSL}:443:443"
     healthcheck:
-      # What: probes conf.d/https.conf's dedicated, non-PROXY-protocol
-      #   healthcheck port (8445), not IP_SSL:443.
-      # Why: IP_SSL:443 reaches the stream-level SNI dispatch listener, which
-      #   has no SNI to route on for an IP-literal target and would forward
-      #   into the passthrough branch instead of the real HTTPS/MITM server.
+      # What: probes conf.d/https.conf's dedicated, non-PROXY-protocol healthcheck port (8445), not IP_SSL:443.
+      # Why: IP_SSL:443 reaches the stream-level SNI dispatch listener, which has no SNI to route on for an IP-literal target and would forward into the passthrough branch instead of the real HTTPS/MITM server.
       # From: Issue #1276 | Issue #1322
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1/healthz >/dev/null && { [ \"$${SSL_ENABLED:-0}\" != \"1\" ] || curl -ksf https://127.0.0.1:8445/healthz >/dev/null; }"]
       interval: 30s
@@ -86,56 +78,43 @@ services:
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
-      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, overriding
-      #   config/prod/dns-standard.env's empty value (env_file cannot
-      #   interpolate ${VAR}, this `environment:` block can).
-      # Why: a DDNS update from the `dhcp` container always arrives with
-      #   source = the host's primary LAN IP (IP_STANDARD); IP_SSL is a
-      #   low-cost hedge, TSIG remains the real auth control.
+      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, overriding config/prod/dns-standard.env's empty value (env_file cannot interpolate ${VAR}, this `environment:` block can).
+      # Why: a DDNS update from the `dhcp` container always arrives with source = the host's primary LAN IP (IP_STANDARD); IP_SSL is a low-cost hedge, TSIG remains the real auth control.
       # From: Issue #706
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_WRITER_USER:?NATS_DNS_WRITER_USER is required}
       - NATS_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       # What: NATS_PASSWORD_SHARED_SECRET names this role's shared-secret file.
-      # Why: resolves NATS_PASSWORD against the same value the nats server
-      #   generates.
+      # Why: resolves NATS_PASSWORD against the same value the nats server generates.
       # From: Issue #858
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-writer-password
       - NATS_CONSUMER=dns-standard
       - NATS_RECONCILER=1
     volumes:
-      # What: shared-secrets volume, first-writer-wins for
-      #   PDNS_API_KEY/DDNS_TSIG_KEY.
+      # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
-      # What: PDNS_STANDARD_DIR/PDNS_FILTER_STATE_DIR overrides left unset by
-      #   default, deriving from LANCACHE_STATE_DIR instead.
-      # Why: one LANCACHE_STATE_DIR move then retargets DNS and NATS
-      #   together; setup.sh sets an explicit key only to preserve a real
-      #   legacy/custom path during update.
+      # What: PDNS_STANDARD_DIR/PDNS_FILTER_STATE_DIR overrides left unset by default, deriving from LANCACHE_STATE_DIR instead.
+      # Why: one LANCACHE_STATE_DIR move then retargets DNS and NATS together; setup.sh sets an explicit key only to preserve a real legacy/custom path during update.
       # From: docs/known-good-config-snapshots.md
       - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
-      # What: plain Docker-managed volume for known-good pdns.conf/
-      #   recursor.conf snapshots, not part of the LANCACHE_STATE_DIR contract.
+      # What: plain Docker-managed volume for known-good pdns.conf/recursor.conf snapshots, not part of the LANCACHE_STATE_DIR contract.
       # Why: see docs/known-good-config-snapshots.md for the split rationale.
       # From: Issue #615
       - pdns-config-snapshots-standard:/var/lib/lancache-dns
       # What: dns-logs-standard volume for PowerDNS's daemon output.
-      # Why: PowerDNS has no native file-log directive; entrypoint.sh's
-      #   run_auth/run_recursor `tee` each daemon's stdout here instead.
+      # Why: PowerDNS has no native file-log directive; entrypoint.sh's run_auth/run_recursor `tee` each daemon's stdout here instead.
       # From: Issue #633
       - dns-logs-standard:/var/log/lancache-dns
     ports:
       - "${IP_STANDARD}:53:53/udp"
       - "${IP_STANDARD}:53:53/tcp"
       # What: publishes 5300/udp only, pdns_server's real DNS-protocol port.
-      # Why: lets the separate `dhcp` container's D2 daemon send real DNS
-      #   UPDATE packets, which never arrive over UDP-only 53 to the
-      #   recursor; TCP is not published since UPDATE fits one UDP datagram.
+      # Why: lets the separate `dhcp` container's D2 daemon send real DNS UPDATE packets, which never arrive over UDP-only 53 to the recursor; TCP is not published since UPDATE fits one UDP datagram.
       # From: Issue #706
       - "${IP_STANDARD}:5300:5300/udp"
     expose:
@@ -143,9 +122,7 @@ services:
       - "8082"
       - "8083"
     healthcheck:
-      # What: real dig query/response probe (AG-VAL-018), not
-      #   `rec_control ping` (liveness only, AG-VAL-019) or `ss -lnu`
-      #   (AG-VAL-020 bans `ss` outright).
+      # What: real dig query/response probe (AG-VAL-018), not `rec_control ping` (liveness only, AG-VAL-019) or `ss -lnu` (AG-VAL-020 bans `ss` outright).
       # Why: dnsutils/dig is already installed in every profile's dns image.
       # From: Issue #869, deploy/quickstart/docker-compose.yml
       test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
@@ -170,24 +147,20 @@ services:
     environment:
       - DDNS_TSIG_KEY=${DDNS_TSIG_KEY}
       - PDNS_API_KEY=${PDNS_API_KEY}
-      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, same
-      #   value as dns-standard's identical override.
-      # Why: DDNS update source is always the host's primary LAN IP
-      #   regardless of which DNS server Kea's D2 daemon targets.
+      # What: DDNS_ALLOW_FROM includes both IP_STANDARD and IP_SSL, same value as dns-standard's identical override.
+      # Why: DDNS update source is always the host's primary LAN IP regardless of which DNS server Kea's D2 daemon targets.
       # From: Issue #706, this file's dns-standard service
       - DDNS_ALLOW_FROM=${IP_STANDARD},${IP_SSL}
       - NATS_URL=nats://nats:4222
       - NATS_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
       - NATS_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       # What: NATS_PASSWORD_SHARED_SECRET names this role's shared-secret file.
-      # Why: resolves NATS_PASSWORD against the same value the nats server
-      #   generates.
+      # Why: resolves NATS_PASSWORD against the same value the nats server generates.
       # From: Issue #858
       - NATS_PASSWORD_SHARED_SECRET=nats-dns-replica-password
       - NATS_CONSUMER=dns-ssl
     volumes:
-      # What: shared-secrets volume, first-writer-wins for
-      #   PDNS_API_KEY/DDNS_TSIG_KEY.
+      # What: shared-secrets volume, first-writer-wins for PDNS_API_KEY/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets
@@ -196,15 +169,13 @@ services:
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - pdns-config-snapshots-ssl:/var/lib/lancache-dns
       # What: dns-logs-ssl volume for PowerDNS's daemon output.
-      # Why: PowerDNS has no native file-log directive; entrypoint.sh's
-      #   run_auth/run_recursor `tee` each daemon's stdout here instead.
+      # Why: PowerDNS has no native file-log directive; entrypoint.sh's run_auth/run_recursor `tee` each daemon's stdout here instead.
       # From: Issue #633
       - dns-logs-ssl:/var/log/lancache-dns
     ports:
       - "${IP_SSL}:53:53/udp"
       - "${IP_SSL}:53:53/tcp"
-      # What: publishes 5300/udp only, same reasoning as dns-standard's
-      #   identical port publish.
+      # What: publishes 5300/udp only, same reasoning as dns-standard's identical port publish.
       # Why: pdns_server's real DNS-protocol port for Kea's D2 daemon.
       # From: Issue #706, this file's dns-standard service
       - "${IP_SSL}:5300:5300/udp"
@@ -213,9 +184,7 @@ services:
       - "8082"
       - "8083"
     healthcheck:
-      # What: real dig query/response probe (AG-VAL-018), not
-      #   `rec_control ping` (liveness only, AG-VAL-019) or `ss -lnu`
-      #   (AG-VAL-020 bans `ss` outright).
+      # What: real dig query/response probe (AG-VAL-018), not `rec_control ping` (liveness only, AG-VAL-019) or `ss -lnu` (AG-VAL-020 bans `ss` outright).
       # Why: dnsutils/dig is already installed in every profile's dns image.
       # From: Issue #869, deploy/quickstart/docker-compose.yml
       test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."]
@@ -233,10 +202,8 @@ services:
         max-file: "2"
 
   # ── Watchdog (health monitor, auto-restart, purge cron) ──────────────────
-  # What: docker-socket-proxy limits Docker API access to Admin UI/watchdog
-  #   operations via scripts/docker-socket-proxy.sh's custom HAProxy config.
-  # Why: replaces Tecnativa's broad CONTAINERS/POST toggles with a
-  #   deny-by-default allowlist for named lancache-ng containers.
+  # What: docker-socket-proxy limits Docker API access to Admin UI/watchdog operations via scripts/docker-socket-proxy.sh's custom HAProxy config.
+  # Why: replaces Tecnativa's broad CONTAINERS/POST toggles with a deny-by-default allowlist for named lancache-ng containers.
   # From: PR #635
   docker-socket-proxy:
     container_name: lancache-docker-socket-proxy
@@ -250,12 +217,8 @@ services:
     networks:
       - docker-api
     healthcheck:
-      # What: real HTTP probe against the Docker API's own /_ping endpoint,
-      #   not a bare TCP connect; uses wget (BusyBox), this pinned Alpine
-      #   image ships no curl.
-      # Why: proves the HAProxy frontend actually forwards to the real
-      #   Docker socket, the same path watchdog itself depends on; /_ping is
-      #   allowlisted by scripts/docker-socket-proxy.sh's `safe_ping` ACL.
+      # What: real HTTP probe against the Docker API's own /_ping endpoint, not a bare TCP connect; uses wget (BusyBox), this pinned Alpine image ships no curl.
+      # Why: proves the HAProxy frontend actually forwards to the real Docker socket, the same path watchdog itself depends on; /_ping is allowlisted by scripts/docker-socket-proxy.sh's `safe_ping` ACL.
       # From: Issue #1169
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:2375/_ping || exit 1"]
       interval: 30s
@@ -272,19 +235,12 @@ services:
   watchdog:
     container_name: lancache-watchdog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
-    # What: entrypoint tees watchdog.sh's stdout into a file in addition to
-    #   the container's normal stdout via process substitution (bash-only;
-    #   `exec` still replaces this shell so /watchdog.sh stays PID 1).
-    # Why: watchdog.sh's log() function only writes stdout and is never
-    #   itself changed; fluent-bit needs a file to tail, `docker logs` must
-    #   keep working unchanged.
+    # What: entrypoint tees watchdog.sh's stdout into a file in addition to the container's normal stdout via process substitution (bash-only; `exec` still replaces this shell so /watchdog.sh stays PID 1).
+    # Why: watchdog.sh's log() function only writes stdout and is never itself changed; fluent-bit needs a file to tail, `docker logs` must keep working unchanged.
     # From: Issue #633
     #
-    # What: calls /watchdog.sh directly; no longer also launches retention.sh
-    #   as a backgrounded process inside this container.
-    # Why: retention.sh now runs as its own `retention` service below, with
-    #   its own cap_drop/read_only/non-root lockdown that does not belong on
-    #   this container (blast-radius separation, see that service's block).
+    # What: calls /watchdog.sh directly; no longer also launches retention.sh as a backgrounded process inside this container.
+    # Why: retention.sh now runs as its own `retention` service below, with its own cap_drop/read_only/non-root lockdown that does not belong on this container (blast-radius separation, see that service's block).
     # From: Issue #842 | PR #1360
     entrypoint: ["/bin/bash", "-c"]
     command:
@@ -293,11 +249,8 @@ services:
         exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     env_file:
       - ../../config/prod/watchdog.env
-    # What: passes LOGGING_ENABLED/SYSLOG_ENABLED/DHCP_MODE/NTP_ENABLED as
-    #   runtime presence gates.
-    # Why: watchdog.env is static and cannot interpolate per-install
-    #   top-level values; watchdog.sh and the Rust alert-only target
-    #   resolvers must see the same deployment state.
+    # What: passes LOGGING_ENABLED/SYSLOG_ENABLED/DHCP_MODE/NTP_ENABLED as runtime presence gates.
+    # Why: watchdog.env is static and cannot interpolate per-install top-level values; watchdog.sh and the Rust alert-only target resolvers must see the same deployment state.
     # From: PR #1489
     environment:
       - DHCP_MODE=${DHCP_MODE:-disabled}
@@ -305,19 +258,15 @@ services:
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
       - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
-      # What: read-only mount; watchdog.sh only reads this tree
-      #   (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage
-      #   card).
-      # Why: the destructive maybe_purge() that needed read-write access
-      #   here moved to the `retention` service below.
+      # What: read-only mount; watchdog.sh only reads this tree (disk_info()'s `df -P "$CACHE_DIR"` for the dashboard's disk-usage card).
+      # Why: the destructive maybe_purge() that needed read-write access here moved to the `retention` service below.
       # From: Issue #842 | PR #1360
       - proxy-cache:/var/cache/lancache:ro
       - watchdog-status:/var/run/watchdog
       - watchdog-logs:/var/log/lancache-watchdog
     healthcheck:
       # What: freshness-based (mtime) probe, not just file existence.
-      # Why: a stalled main loop would otherwise leave a stale-but-present
-      #   status.json reading as healthy forever.
+      # Why: a stalled main loop would otherwise leave a stale-but-present status.json reading as healthy forever.
       # From: Issue #885
       test: ["CMD", "/healthcheck.sh"]
       interval: 10s
@@ -325,11 +274,7 @@ services:
       retries: 2
       start_period: 15s
     # What: `service_started`, not `service_healthy`, on docker-socket-proxy.
-    # Why: watchdog's own dashboard and alert-only monitoring must stay
-    #   available even when the Docker API channel is degraded;
-    #   get_health()/probe_docker_socket_proxy() already treat an
-    #   unreachable proxy as a normal, self-clearing state, and
-    #   RESTART_AFTER=3 absorbs a transient startup-race reading.
+    # Why: watchdog's own dashboard and alert-only monitoring must stay available even when the Docker API channel is degraded; get_health()/probe_docker_socket_proxy() already treat an unreachable proxy as a normal, self-clearing state, and RESTART_AFTER=3 absorbs a transient startup-race reading.
     # From: commit cf312acf
     depends_on:
       docker-socket-proxy:
@@ -345,17 +290,12 @@ services:
         max-file: "2"
 
   # ── Retention (file-retention daemon) ─────────────────────────────────────
-  # What: dedicated sidecar for services/watchdog/retention.sh, isolated
-  # from `watchdog` above by real container-level boundaries.
-  # Why: a bug in this destructive find/rm-driven logic needs containment by
-  # capabilities/filesystem/mounts, not just a separate OS process.
+  # What: dedicated sidecar for services/watchdog/retention.sh, isolated from `watchdog` above by real container-level boundaries.
+  # Why: a bug in this destructive find/rm-driven logic needs containment by capabilities/filesystem/mounts, not just a separate OS process.
   # From: Issue #842 | PR #1360
   #
-  # What: `cap_drop: [ALL]`, adding back only DAC_OVERRIDE (deletes
-  #   nginx-owned proxy-cache entries) and SETUID/SETGID/SETPCAP/CHOWN
-  #   (transient, entrypoint's own root-to-`lancache` privilege drop).
-  # Why: each grant is proven necessary, not assumed -- see
-  #   retention-entrypoint.sh's header for the per-capability methodology.
+  # What: `cap_drop: [ALL]`, adding back only DAC_OVERRIDE (deletes nginx-owned proxy-cache entries) and SETUID/SETGID/SETPCAP/CHOWN (transient, entrypoint's own root-to-`lancache` privilege drop).
+  # Why: each grant is proven necessary, not assumed -- see retention-entrypoint.sh's header for the per-capability methodology.
   # From: Issue #842 | PR #1360
   retention:
     container_name: lancache-retention
@@ -378,48 +318,36 @@ services:
       - /tmp
     env_file:
       - ../../config/prod/watchdog.env
-    # What: passes the same runtime presence-gate variables as watchdog's own
-    #   environment block above.
-    # Why: watchdog.env is static and cannot interpolate per-install values;
-    #   retention.sh, not watchdog.sh, acts on these SYSLOG_* variables.
+    # What: passes the same runtime presence-gate variables as watchdog's own environment block above.
+    # Why: watchdog.env is static and cannot interpolate per-install values; retention.sh, not watchdog.sh, acts on these SYSLOG_* variables.
     # From: Issue #842 | PR #1360
     environment:
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
       - SYSLOG_RETENTION_DAYS=${SYSLOG_RETENTION_DAYS:-30}
       # What: SYSLOG_PRUNE_RETRY_COOLDOWN, explicitly listed.
-      # Why: Compose only passes explicitly listed host/.env variables into
-      #   this container; an operator override must reach retention.sh
-      #   instead of silently falling back to its 3600s default.
+      # Why: Compose only passes explicitly listed host/.env variables into this container; an operator override must reach retention.sh instead of silently falling back to its 3600s default.
       # From: Issue #842 | PR #1360
       - SYSLOG_PRUNE_RETRY_COOLDOWN=${SYSLOG_PRUNE_RETRY_COOLDOWN:-3600}
       - FLUENT_BIT_SELFLOG_MAX_MB=${FLUENT_BIT_SELFLOG_MAX_MB:-20}
       - FLUENT_BIT_SELFLOG_MAX_ROTATIONS=${FLUENT_BIT_SELFLOG_MAX_ROTATIONS:-5}
     volumes:
-      # What: the three targets retention.sh's own three functions act on,
-      #   read-write (unlike watchdog's :ro mount above).
-      # Why: deletion is this container's entire job; no Docker socket or
-      #   other service's own volumes are mounted here.
+      # What: the three targets retention.sh's own three functions act on, read-write (unlike watchdog's :ro mount above).
+      # Why: deletion is this container's entire job; no Docker socket or other service's own volumes are mounted here.
       # From: Issue #842 | PR #1360
       - proxy-cache:/var/cache/lancache
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
       - syslog-data:/var/lib/lancache-syslog-data
-      # What: retention.log, sharing the watchdog-logs volume with
-      #   watchdog.log.
-      # Why: purely observability data, not part of the destructive-operation
-      #   surface; fluent-bit already expects both files at this path.
+      # What: retention.log, sharing the watchdog-logs volume with watchdog.log.
+      # Why: purely observability data, not part of the destructive-operation surface; fluent-bit already expects both files at this path.
       # From: Issue #842 | PR #1360
       - watchdog-logs:/var/log/lancache-watchdog
-      # What: dedicated state volume holding only PURGE_STAMP/
-      #   SYSLOG_PRUNE_STAMP, separate from watchdog-status.
-      # Why: the two containers no longer share a process, so they must not
-      #   share state either.
+      # What: dedicated state volume holding only PURGE_STAMP/SYSLOG_PRUNE_STAMP, separate from watchdog-status.
+      # Why: the two containers no longer share a process, so they must not share state either.
       # From: Issue #842 | PR #1360
       - retention-state:/var/lib/lancache-retention-state
-    # What: no healthcheck; `restart: always` recovers a crashed/OOM-killed
-    #   container, the same as this file's other unmonitored services.
-    # Why: this container's liveness was deliberately kept out of the
-    #   health-check/restart state machine when it split from `watchdog`.
+    # What: no healthcheck; `restart: always` recovers a crashed/OOM-killed container, the same as this file's other unmonitored services.
+    # Why: this container's liveness was deliberately kept out of the health-check/restart state machine when it split from `watchdog`.
     # From: Issue #842 | PR #1360
     restart: always
     logging:
@@ -447,19 +375,16 @@ services:
       - KEA_CTRL_TOKEN=${KEA_CTRL_TOKEN}
       - DHCP_MODE=${DHCP_MODE:-disabled}
     volumes:
-      # What: shared-secrets volume, first-writer-wins for
-      #   KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
+      # What: shared-secrets volume, first-writer-wins for KEA_CTRL_TOKEN/DDNS_TSIG_KEY.
       # Why: every consumer of these secrets must agree on the same value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets
-      # What: KEA_DATA_DIR override left unset by default, deriving from
-      #   LANCACHE_STATE_DIR instead.
+      # What: KEA_DATA_DIR override left unset by default, deriving from LANCACHE_STATE_DIR instead.
       # Why: Kea follows the same state-root contract as PowerDNS/NATS.
       # From: docs/known-good-config-snapshots.md
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
       # What: dhcp-logs volume for Kea's daemon output.
-      # Why: Kea's loggers dual-write here (kea-dhcp4.conf.template's
-      #   "output-options") in addition to stdout.
+      # Why: Kea's loggers dual-write here (kea-dhcp4.conf.template's "output-options") in addition to stdout.
       # From: Issue #633
       - dhcp-logs:/var/log/kea
     network_mode: host
@@ -507,35 +432,26 @@ services:
       - ../../config/prod/dhcp-proxy.env
     volumes:
       - ui-data:/data:ro
-      # What: persistent, service-owned volume for known-good dnsmasq config
-      #   snapshots.
+      # What: persistent, service-owned volume for known-good dnsmasq config snapshots.
       # Why: rollback must survive container restarts/recreates.
       # From: Issue #415
       - dhcp-proxy-config-snapshots:/var/lib/lancache-dhcp-proxy
       # What: dhcp-proxy-logs volume for dnsmasq's daemon output.
-      # Why: dnsmasq's own `log-facility=` directive (dnsmasq.conf.template)
-      #   writes here.
+      # Why: dnsmasq's own `log-facility=` directive (dnsmasq.conf.template) writes here.
       # From: Issue #633
       - dhcp-proxy-logs:/var/log/lancache-dhcp-proxy
     network_mode: host
     cap_add:
       - NET_BIND_SERVICE
-      # What: NET_ADMIN, needed by dnsmasq's ProxyDHCP/PXE reply path for a
-      #   raw broadcast socket.
-      # Why: without it, dnsmasq passes its config self-test but fails to
-      #   start ("process is missing required capability NET_ADMIN");
-      #   matches the dhcp (Kea) service's identical cap_add above.
+      # What: NET_ADMIN, needed by dnsmasq's ProxyDHCP/PXE reply path for a raw broadcast socket.
+      # Why: without it, dnsmasq passes its config self-test but fails to start ("process is missing required capability NET_ADMIN"); matches the dhcp (Kea) service's identical cap_add above.
       # From: Issue #450
       - NET_ADMIN
     profiles:
       - dhcp-proxy
     healthcheck:
-      # What: liveness + config-integrity probe (PID 1 is `dnsmasq`, and
-      #   `dnsmasq --test` re-parses the on-disk config without binding
-      #   sockets), not a functional DHCP probe.
-      # Why: dnsmasq has no REST/control-socket API, DNS is disabled in this
-      #   config, and a real DHCPDISCOVER every interval would inject
-      #   genuine broadcast traffic onto the LAN.
+      # What: liveness + config-integrity probe (PID 1 is `dnsmasq`, and `dnsmasq --test` re-parses the on-disk config without binding sockets), not a functional DHCP probe.
+      # Why: dnsmasq has no REST/control-socket API, DNS is disabled in this config, and a real DHCPDISCOVER every interval would inject genuine broadcast traffic onto the LAN.
       # From: Issue #450
       test: ["CMD-SHELL", "[ \"$$(cat /proc/1/comm 2>/dev/null)\" = dnsmasq ] && dnsmasq --test -C /etc/dnsmasq.conf >/dev/null 2>&1"]
       interval: 30s
@@ -565,18 +481,13 @@ services:
     volumes:
       - ui-data:/data:ro
       - ${NTP_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/ntp}:/var/lib/chrony
-      # What: ntp-logs volume for chronyd's `log` directive output, a plain
-      #   Docker-managed volume, not a LANCACHE_STATE_DIR bind mount.
-      # Why: rotated log output, not operational state, matching
-      #   dhcp-logs/dhcp-proxy-logs/ui-logs (see docs/backup-restore.md).
+      # What: ntp-logs volume for chronyd's `log` directive output, a plain Docker-managed volume, not a LANCACHE_STATE_DIR bind mount.
+      # Why: rotated log output, not operational state, matching dhcp-logs/dhcp-proxy-logs/ui-logs (see docs/backup-restore.md).
       # From: Issue #633
       - ntp-logs:/var/log/chrony
     ports:
-      # What: published on all interfaces (no dedicated LAN IP, unlike
-      #   dns-standard/dns-ssl).
-      # Why: NTP is unicast UDP, not a broadcast protocol like DHCP, so
-      #   Docker's normal port-publish DNAT already preserves the real
-      #   client source IP without network_mode: host.
+      # What: published on all interfaces (no dedicated LAN IP, unlike dns-standard/dns-ssl).
+      # Why: NTP is unicast UDP, not a broadcast protocol like DHCP, so Docker's normal port-publish DNAT already preserves the real client source IP without network_mode: host.
       # From: Issue #1358
       - "123:123/udp"
     # What: `cap_drop: [ALL]`, then only the capabilities below are added back for chronyd.
@@ -615,12 +526,8 @@ services:
         max-file: "2"
 
   # ── DHCP conflict probe ────────────────────────────────────────────────────
-  # What: predeclared start/stop/wait helper for the Admin UI's "check for
-  #   other DHCP servers" feature; runs the UI image in `--dhcp-probe` mode
-  #   (services/ui/src/dhcp_probe_native.rs), a native DHCPv4 client.
-  # Why: the Admin UI only ever starts/stops this container and reads its
-  #   output, never creates or removes it, so docker-socket-proxy needs only
-  #   the start/restart capability class, not generic container creation.
+  # What: predeclared start/stop/wait helper for the Admin UI's "check for other DHCP servers" feature; runs the UI image in `--dhcp-probe` mode (services/ui/src/dhcp_probe_native.rs), a native DHCPv4 client.
+  # Why: the Admin UI only ever starts/stops this container and reads its output, never creates or removes it, so docker-socket-proxy needs only the start/restart capability class, not generic container creation.
   # From: Issue #1288
   dhcp-probe:
     container_name: lancache-dhcp-probe
@@ -715,8 +622,7 @@ services:
               permissions = {
                 publish = [
                   "lancache.dns.record",
-                  # What: publish permission on lancache.dns.flush for the
-                  #   dns-standard identity's zone-rollback listener.
+                  # What: publish permission on lancache.dns.flush for the dns-standard identity's zone-rollback listener.
                   # Why: needed for its post-rollback cache-flush publish.
                   # From: rollback_listener.rs
                   "lancache.dns.flush",
@@ -736,27 +642,16 @@ services:
               password: "__NATS_DNS_REPLICA_PASSWORD__"
               permissions = {
                 publish = [
-                  # What: publish permission on lancache.dns.flush, same as
-                  #   the writer identity above.
-                  # Why: dns-ssl's own nats-subscriber runs the same rollback
-                  #   listener and needs the post-rollback cache-flush too.
+                  # What: publish permission on lancache.dns.flush, same as the writer identity above.
+                  # Why: dns-ssl's own nats-subscriber runs the same rollback listener and needs the post-rollback cache-flush too.
                   # From: rollback_listener.rs
                   "lancache.dns.flush",
-                  # What: publish permission on lancache.dns.record, needed
-                  #   if publish_rollback_records ever runs under this
-                  #   identity (DNS_ROLLBACK_URL currently always targets
-                  #   dns-standard, not dns-ssl).
-                  # Why: deliberate maintainer tradeoff -- widens what a
-                  #   compromised dns-ssl credential could publish, rather
-                  #   than adding a fail-closed guard in the listener itself.
+                  # What: publish permission on lancache.dns.record, needed if publish_rollback_records ever runs under this identity (DNS_ROLLBACK_URL currently always targets dns-standard, not dns-ssl).
+                  # Why: deliberate maintainer tradeoff -- widens what a compromised dns-ssl credential could publish, rather than adding a fail-closed guard in the listener itself.
                   # From: rollback_listener.rs
                   "lancache.dns.record",
-                  # What: STREAM.CREATE.LANCACHE_DNS, matching the writer
-                  #   identity's grant of the same subject.
-                  # Why: nats-subscriber's main() falls back to
-                  #   js.create_stream() if get_stream() fails at startup, and
-                  #   exits on a denied create -- needed if this identity is
-                  #   ever first to connect, before the stream exists.
+                  # What: STREAM.CREATE.LANCACHE_DNS, matching the writer identity's grant of the same subject.
+                  # Why: nats-subscriber's main() falls back to js.create_stream() if get_stream() fails at startup, and exits on a denied create -- needed if this identity is ever first to connect, before the stream exists.
                   # From: docs/bug-hunt/nats.md (Finding D)
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
@@ -770,25 +665,15 @@ services:
               }
             }
             {
-              # What: the Admin UI's static auth-callout responder identity
-              #   (services/ui/src/nats_auth_callout.rs), no subject
-              #   permissions, only answers auth-callout requests.
-              # Why: listed in the UI's auth_users fragment, so nats-server
-              #   checks its password against this static list; must stay in
-              #   lockstep with the ui service's NATS_CALLOUT_USER/PASSWORD
-              #   or the callout silently fails.
+              # What: the Admin UI's static auth-callout responder identity (services/ui/src/nats_auth_callout.rs), no subject permissions, only answers auth-callout requests.
+              # Why: listed in the UI's auth_users fragment, so nats-server checks its password against this static list; must stay in lockstep with the ui service's NATS_CALLOUT_USER/PASSWORD or the callout silently fails.
               # From: Issue #811 | Issue #583
               user: "__NATS_CALLOUT_USER__"
               password: "__NATS_CALLOUT_PASSWORD__"
             }
           ]
-          # What: `include`s auth_callout.conf, a separate file only the
-          #   Admin UI writes, rather than embedding the stanza here.
-          # Why: the UI's runtime-generated issuer public key is unknown to
-          #   this container, and this split is what lets this entrypoint
-          #   regenerate its static subset every restart without clobbering
-          #   the UI's fragment; a missing include target is a FATAL boot
-          #   error, an empty one is valid.
+          # What: `include`s auth_callout.conf, a separate file only the Admin UI writes, rather than embedding the stanza here.
+          # Why: the UI's runtime-generated issuer public key is unknown to this container, and this split is what lets this entrypoint regenerate its static subset every restart without clobbering the UI's fragment; a missing include target is a FATAL boot error, an empty one is valid.
           # From: Issue #811
           include "auth_callout.conf"
         }
@@ -828,21 +713,18 @@ services:
         fi
         exec nats-server -c /etc/nats/nats.conf
     volumes:
-      # What: shared-secrets volume, first-writer-wins for NATS_*_PASSWORD,
-      #   plus the canonical helper sourced by the command block above.
+      # What: shared-secrets volume, first-writer-wins for NATS_*_PASSWORD, plus the canonical helper sourced by the command block above.
       # Why: every consumer of these secrets must agree on the same value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets
       - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
-      # What: NATS_DATA_DIR override left unset by default, deriving from
-      #   LANCACHE_STATE_DIR instead.
+      # What: NATS_DATA_DIR override left unset by default, deriving from LANCACHE_STATE_DIR instead.
       # Why: nats-conf is generated runtime state, kept outside the checkout.
       # From: docs/known-good-config-snapshots.md
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/data
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
       # What: nats-logs volume for nats-server's log_file output.
-      # Why: fluent-bit tails it; the UI's auth_callout.conf fragment carries
-      #   no log_file of its own.
+      # Why: fluent-bit tails it; the UI's auth_callout.conf fragment carries no log_file of its own.
       # From: Issue #811, Issue #633
       - nats-logs:/var/log/lancache-nats
     environment:
@@ -852,11 +734,8 @@ services:
       - NATS_DNS_WRITER_PASSWORD=${NATS_DNS_WRITER_PASSWORD:-}
       - NATS_DNS_REPLICA_USER=${NATS_DNS_REPLICA_USER:?NATS_DNS_REPLICA_USER is required}
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
-      # What: NATS_CALLOUT_USER/PASSWORD, the auth-callout responder's static
-      #   bypass identity.
-      # Why: MUST match the ui service's identical pair -- the ui process
-      #   connects the responder with these creds against the static user
-      #   this entrypoint writes.
+      # What: NATS_CALLOUT_USER/PASSWORD, the auth-callout responder's static bypass identity.
+      # Why: MUST match the ui service's identical pair -- the ui process connects the responder with these creds against the static user this entrypoint writes.
       # From: Issue #811 | Issue #583
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
@@ -869,10 +748,8 @@ services:
       - "4222"
       - "8222"
     healthcheck:
-      # What: real HTTP probe against the monitor endpoint (http_port: 8222),
-      #   not a bare TCP connect; uses wget (BusyBox), this image ships no curl.
-      # Why: proves nats-server's HTTP monitor is actually answering, not
-      #   merely that something is listening on the port.
+      # What: real HTTP probe against the monitor endpoint (http_port: 8222), not a bare TCP connect; uses wget (BusyBox), this image ships no curl.
+      # Why: proves nats-server's HTTP monitor is actually answering, not merely that something is listening on the port.
       # From: docs/architecture-ng.md
       test: ["CMD-SHELL", "wget -q -O /dev/null http://127.0.0.1:8222/healthz || exit 1"]
       interval: 30s
@@ -880,9 +757,7 @@ services:
       retries: 3
       start_period: 20s
     # What: NATS stays on the shared application network only, not netdata-net.
-    # Why: the pinned Netdata image has no active NATS go.d job and its
-    #   default target is 127.0.0.1:8222, not the `nats` Compose name; joining
-    #   netdata-net would add no collector path.
+    # Why: the pinned Netdata image has no active NATS go.d job and its default target is 127.0.0.1:8222, not the `nats` Compose name; joining netdata-net would add no collector path.
     # From: docs/architecture-ng.md
     networks:
       - default
@@ -898,10 +773,8 @@ services:
   # Why: a deliberate maintainer decision to accept crash-coupling and a single Docker HEALTHCHECK slot (mitigated by a real dual-process check below) in exchange for one image to build/scan/patch instead of two.
   # From: Issue #1428 | PR #1431
   #
-  # What: this short-lived least-privilege initializer chowns the `logs`
-  #   volume before the non-root syslog service opens it.
-  # Why: named volumes keep existing ownership across image upgrades, so the
-  #   image-layer chown alone cannot migrate an already-populated volume.
+  # What: this short-lived least-privilege initializer chowns the `logs` volume before the non-root syslog service opens it.
+  # Why: named volumes keep existing ownership across image upgrades, so the image-layer chown alone cannot migrate an already-populated volume.
   # From: Issue #1428 | PR #1431
   syslog-logs-permissions:
     container_name: lancache-syslog-logs-permissions${LANCACHE_CONTAINER_SUFFIX:-}
@@ -921,21 +794,14 @@ services:
     restart: "no"
 
   syslog:
-    # What: a fixed container_name (`lancache-syslog`), the one this combined
-    #   service keeps of the two names the former separate services used.
-    # Why: watchdog's Rust rewrite needs a stable, predictable Docker API
-    #   path to add this service to its alert-only monitored set --
-    #   Compose's auto-generated name would depend on the project name/dir.
+    # What: a fixed container_name (`lancache-syslog`), the one this combined service keeps of the two names the former separate services used.
+    # Why: watchdog's Rust rewrite needs a stable, predictable Docker API path to add this service to its alert-only monitored set -- Compose's auto-generated name would depend on the project name/dir.
     # From: Issue #1428 | PR #1431
     container_name: lancache-syslog
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/syslog:${LANCACHE_IMAGE_TAG:-latest}
     profiles: [logging]
-    # What: runs as fixed non-root uid 10001 with exactly ONE added
-    #   capability (DAC_READ_SEARCH), so fluent-bit can read root:root 0640
-    #   producer logs it doesn't own.
-    # Why: narrowest sufficient grant; the image's `setcap`-marked fluent-bit
-    #   binary fails closed at exec without this -- see Dockerfile's own
-    #   comment for the methodology behind ruling out other designs.
+    # What: runs as fixed non-root uid 10001 with exactly ONE added capability (DAC_READ_SEARCH), so fluent-bit can read root:root 0640 producer logs it doesn't own.
+    # Why: narrowest sufficient grant; the image's `setcap`-marked fluent-bit binary fails closed at exec without this -- see Dockerfile's own comment for the methodology behind ruling out other designs.
     # From: Issue #1428 | PR #1431
     cap_drop:
       - ALL
@@ -948,11 +814,8 @@ services:
       - SYSLOG_MAX_FILE_MB=${SYSLOG_MAX_FILE_MB:-100}
       - SYSLOG_COMPRESSION_LEVEL=${SYSLOG_COMPRESSION_LEVEL:-19}
       - SYSLOG_NG_ROTATE_INTERVAL_SECONDS=${SYSLOG_NG_ROTATE_INTERVAL_SECONDS:-300}
-      # What: interval for entrypoint.sh's detector loop, which compares
-      #   syslog-ng's own "processed" stats counter against real bytes
-      #   landing under SYSLOG_NG_LOG_DIR.
-      # Why: forwarding can otherwise fail silently while both processes
-      #   continue reporting healthy.
+      # What: interval for entrypoint.sh's detector loop, which compares syslog-ng's own "processed" stats counter against real bytes landing under SYSLOG_NG_LOG_DIR.
+      # Why: forwarding can otherwise fail silently while both processes continue reporting healthy.
       # From: Issue #1428 | PR #1431
       - DATA_LOSS_CHECK_INTERVAL_SECONDS=${DATA_LOSS_CHECK_INTERVAL_SECONDS:-60}
     volumes:
@@ -967,18 +830,12 @@ services:
       - watchdog-logs:/var/log/lancache-watchdog:ro
       - nats-logs:/var/log/lancache-nats:ro
       - netdata-logs:/var/log/lancache-netdata:ro
-      # What: central log receiver destination, bind-mounted rather than a
-      #   named volume; setup.sh pre-creates and chowns this path.
-      # Why: Docker auto-creates a missing host directory as root:root 0755,
-      #   which the non-root (uid 10001) syslog-ng process cannot write its
-      #   own per-host subdirectories into.
+      # What: central log receiver destination, bind-mounted rather than a named volume; setup.sh pre-creates and chowns this path.
+      # Why: Docker auto-creates a missing host directory as root:root 0755, which the non-root (uid 10001) syslog-ng process cannot write its own per-host subdirectories into.
       # From: Issue #1428 | PR #1431
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng
-    # What: real dual-process check (services/syslog/healthcheck.sh),
-    #   verifies fluent-bit AND syslog-ng independently, writing a
-    #   structured per-process status file.
-    # Why: a single Docker HEALTHCHECK slot for two processes needs this
-    #   granularity to report healthy correctly.
+    # What: real dual-process check (services/syslog/healthcheck.sh), verifies fluent-bit AND syslog-ng independently, writing a structured per-process status file.
+    # Why: a single Docker HEALTHCHECK slot for two processes needs this granularity to report healthy correctly.
     # From: Issue #1428 | PR #1431
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
@@ -998,8 +855,7 @@ services:
     container_name: lancache-ui
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
     volumes:
-      # What: shared-secrets volume; the UI entrypoint (root, pre
-      #   privilege-drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here.
+      # What: shared-secrets volume; the UI entrypoint (root, pre privilege-drop) resolves PDNS_API_KEY/KEA_CTRL_TOKEN from here.
       # Why: must match the server side's resolved value.
       # From: Issue #858
       - shared-secrets:/var/lib/lancache-secrets
@@ -1010,27 +866,20 @@ services:
       - proxy-cache:/var/cache/proxy:ro
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats   # shared with NATS: UI writes nats.conf here
-      # What: shared with the dhcp (Kea) service; UI writes known-good Kea
-      #   config snapshots into config-snapshots/ here.
-      # Why: never touches Kea's own kea-dhcp4.conf/kea-leases4.csv/etc. in
-      #   the same directory.
+      # What: shared with the dhcp (Kea) service; UI writes known-good Kea config snapshots into config-snapshots/ here.
+      # Why: never touches Kea's own kea-dhcp4.conf/kea-leases4.csv/etc. in the same directory.
       # From: Issue #614
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
       # What: ui-logs volume for main.rs's init_tracing() output.
       # Why: UI_LOG_FILE writes here alongside stdout.
       # From: Issue #633
       - ui-logs:/var/log/lancache-ui
-      # What: read-only central syslog store reader, same bind-mount source
-      #   as syslog-ng/watchdog (SYSLOG_NG_LOG_DIR).
-      # Why: a missing mount here silently empties syslog_client's reads
-      #   instead of failing; required for SYSLOG_ENABLED=true to show
-      #   anything on /logs or the dashboard.
+      # What: read-only central syslog store reader, same bind-mount source as syslog-ng/watchdog (SYSLOG_NG_LOG_DIR).
+      # Why: a missing mount here silently empties syslog_client's reads instead of failing; required for SYSLOG_ENABLED=true to show anything on /logs or the dashboard.
       # From: Issue #633
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
-      # What: read-only reader for watchdog's status.json (dashboard's
-      #   "Service health" card).
-      # Why: watchdog is the sole writer; a missing mount here silently
-      #   empties the health card instead of failing.
+      # What: read-only reader for watchdog's status.json (dashboard's "Service health" card).
+      # Why: watchdog is the sole writer; a missing mount here silently empties the health card instead of failing.
       # From: Issue #870
       - watchdog-status:/var/run/watchdog:ro
     ports:
@@ -1049,9 +898,7 @@ services:
       - CACHE_DIR=/var/cache/proxy
       - NETDATA_URL=http://netdata:19999
       # What: NETDATA_ALARM_TOKEN, passed through from the operator .env.
-      # Why: Netdata and the UI independently resolve the same shared token;
-      #   this preserves an operator-provided value while the shared-secrets
-      #   volume keeps generated values convergent between both services.
+      # Why: Netdata and the UI independently resolve the same shared token; this preserves an operator-provided value while the shared-secrets volume keeps generated values convergent between both services.
       # From: Issue #858
       - NETDATA_ALARM_TOKEN=${NETDATA_ALARM_TOKEN}
       - CACHE_MAX_GB=${CACHE_MAX_GB:-${STANDARD_CACHE_MAX_GB:-${SSL_CACHE_MAX_GB:-}}}
@@ -1074,18 +921,13 @@ services:
       - PDNS_AUTH_URL=http://dns-standard:8081
       - PDNS_REC_URL=http://dns-standard:8082
       # What: DNS_ROLLBACK_URL, scoped to dns-standard only.
-      # Why: same single-primary convention PDNS_AUTH_URL/PDNS_REC_URL use;
-      #   see dns_snapshots.rs's module doc comment for why dns-ssl isn't
-      #   wired up.
+      # Why: same single-primary convention PDNS_AUTH_URL/PDNS_REC_URL use; see dns_snapshots.rs's module doc comment for why dns-ssl isn't wired up.
       # From: Issue #628
       - DNS_ROLLBACK_URL=http://dns-standard:8083
       - PDNS_API_KEY=${PDNS_API_KEY}
       - NATS_URL=nats://nats:4222
-      # What: NATS_BIND_IP/NATS_ADVERTISE_URL, the address advertised to
-      #   remote secondaries via register_secondary; neither has a default.
-      # Why: NATS_URL above is only correct for this container's own
-      #   internal connection; leaving both unset makes registration fail
-      #   closed (HTTP 503) rather than hand out an unreachable address.
+      # What: NATS_BIND_IP/NATS_ADVERTISE_URL, the address advertised to remote secondaries via register_secondary; neither has a default.
+      # Why: NATS_URL above is only correct for this container's own internal connection; leaving both unset makes registration fail closed (HTTP 503) rather than hand out an unreachable address.
       # From: Issue #866
       - NATS_BIND_IP=${NATS_BIND_IP:-}
       - NATS_ADVERTISE_URL=${NATS_ADVERTISE_URL:-}
@@ -1097,16 +939,14 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
-      # What: NATS_SYS_USER/PASSWORD, lets nats_kick.rs connect as the NATS
-      #   system account to CONNZ/KICK a removed/rotated secondary.
+      # What: NATS_SYS_USER/PASSWORD, lets nats_kick.rs connect as the NATS system account to CONNZ/KICK a removed/rotated secondary.
       # Why: MUST match the nats service's identical pair.
       # From: Issue #681
       - NATS_SYS_USER=${NATS_SYS_USER:?NATS_SYS_USER is required}
       - NATS_SYS_PASSWORD=${NATS_SYS_PASSWORD:-}
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       # What: same 4 SYSLOG_* vars/defaults as the watchdog retention engine.
-      # Why: the UI's "enabled" toggle and budget display must agree with
-      #   what watchdog is enforcing.
+      # Why: the UI's "enabled" toggle and budget display must agree with what watchdog is enforcing.
       # From: Issue #633, Issue #757
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
@@ -1116,8 +956,7 @@ services:
       - "host.docker.internal:host-gateway"
     healthcheck:
       # What: shallow liveness probe against main.rs's own /health route.
-      # Why: proves the HTTP server is accepting connections, not that
-      #   NATS/Docker/DNS are reachable.
+      # Why: proves the HTTP server is accepting connections, not that NATS/Docker/DNS are reachable.
       # From: services/ui/src/main.rs
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:8080/health >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -1131,11 +970,8 @@ services:
       # Why: NETDATA_URL points at the isolated Netdata service.
       # From: docs/architecture-ng.md
       - netdata-net
-    # What: `service_started` on docker-socket-proxy/proxy/netdata/nats, not
-    #   `service_healthy`.
-    # Why: the dashboard and recovery surface must remain startable even if
-    #   the Docker API proxy is unhealthy; Docker-backed actions surface
-    #   their own degraded state instead.
+    # What: `service_started` on docker-socket-proxy/proxy/netdata/nats, not `service_healthy`.
+    # Why: the dashboard and recovery surface must remain startable even if the Docker API proxy is unhealthy; Docker-backed actions surface their own degraded state instead.
     # From: commit cf312acf
     depends_on:
       docker-socket-proxy:
@@ -1158,23 +994,16 @@ services:
     container_name: lancache-netdata
     image: netdata/netdata@sha256:a130dbbf3d6e6a5472efdebaa123797190a5822627e908106d34edae02bc8a74
     hostname: lancache-netdata
-    # What: pid: host, required by netdata's own Docker documentation for
-    #   apps.plugin to read other containers' /proc/<pid> entries.
-    # Why: without it, netdata's PID namespace is a sibling, not an
-    #   ancestor, of the host's, so ptrace_may_access fails even with
-    #   cap_add: SYS_PTRACE below.
+    # What: pid: host, required by netdata's own Docker documentation for apps.plugin to read other containers' /proc/<pid> entries.
+    # Why: without it, netdata's PID namespace is a sibling, not an ancestor, of the host's, so ptrace_may_access fails even with cap_add: SYS_PTRACE below.
     # From: docs/architecture-ng.md
     pid: host
     cap_add:
       - SYS_PTRACE
     security_opt:
       - apparmor:unconfined
-    # What: entrypoint override writes a netdata.conf redirecting
-    #   daemon/health logs to real files, then execs the image's own
-    #   entrypoint; collector/access/debug stay on stdout, uncollected.
-    # Why: this third-party image's own log paths are symlinks to
-    #   /dev/stdout|stderr, nothing for fluent-bit to tail; collector/access
-    #   are high-rate chatter that would flood the shared bounded /logs view.
+    # What: entrypoint override writes a netdata.conf redirecting daemon/health logs to real files, then execs the image's own entrypoint; collector/access/debug stay on stdout, uncollected.
+    # Why: this third-party image's own log paths are symlinks to /dev/stdout|stderr, nothing for fluent-bit to tail; collector/access are high-rate chatter that would flood the shared bounded /logs view.
     # From: Issue #847
     entrypoint: ["/usr/bin/bash", "-c"]
     command:
@@ -1185,11 +1014,8 @@ services:
         daemon = /var/log/netdata/daemon.file.log
         health = /var/log/netdata/health.file.log
         CONF
-        # What: sources the shared-secret helper before writing the alarm
-        #   notification override.
-        # Why: Netdata sources this override after its stock
-        #   health_alarm_notify.conf; the shared token bootstrap keeps both
-        #   services on the same credential without hardcoding it.
+        # What: sources the shared-secret helper before writing the alarm notification override.
+        # Why: Netdata sources this override after its stock health_alarm_notify.conf; the shared token bootstrap keeps both services on the same credential without hardcoding it.
         # From: Issue #858
         . /usr/local/lib/shared-secret-bootstrap.sh
         if secret_is_placeholder "$$NETDATA_ALARM_TOKEN"; then NETDATA_ALARM_TOKEN=""; fi
@@ -1198,17 +1024,14 @@ services:
           echo "[lancache-netdata] Mount the shared-secrets volume, or set NETDATA_ALARM_TOKEN to a real value (openssl rand -hex 32)." >&2
           exit 1
         fi
-        # What: writes the resolved token to a mode-0600 file instead of
-        #   keeping it in the command.
-        # Why: keeps the secret out of `docker inspect`; the runtime sender
-        #   reads it from this file.
+        # What: writes the resolved token to a mode-0600 file instead of keeping it in the command.
+        # Why: keeps the secret out of `docker inspect`; the runtime sender reads it from this file.
         # From: Issue #858
         umask 077
         printf '%s' "$$NETDATA_ALARM_TOKEN" > /etc/netdata/.netdata-alarm-token
         chmod 0600 /etc/netdata/.netdata-alarm-token
         # What: chowns the token file to netdata:netdata.
-        # Why: alarm-notify.sh executes as the unprivileged netdata user
-        #   after setup; ownership must follow the daemon.
+        # Why: alarm-notify.sh executes as the unprivileged netdata user after setup; ownership must follow the daemon.
         # From: Issue #858
         chown netdata:netdata /etc/netdata/.netdata-alarm-token
         cat > /etc/netdata/health_alarm_notify.conf <<'ALARMCONF'
@@ -1227,8 +1050,7 @@ services:
           local token
           token="$$(cat /etc/netdata/.netdata-alarm-token 2>/dev/null)"
           # What: fire-and-forget POST, no retry/error propagation.
-          # Why: an unavailable UI must not interfere with Netdata's own
-          #   health engine or notification processing.
+          # Why: an unavailable UI must not interfere with Netdata's own health engine or notification processing.
           # From: Issue #858
           docurl -s --max-time 15 \
             -X POST \
@@ -1254,20 +1076,14 @@ services:
       - /sys:/host/sys:ro
       - /var/run/docker.sock:/var/run/docker.sock:ro
       - netdata-logs:/var/log/netdata
-      # What: web_log (go.d.plugin) job config, bind-mounted; reads the
-      #   proxy's plain-text access-log copy (fluent-bit's `logs` volume
-      #   output) to expose live per-request nginx analytics.
-      # Why: prod has a real repo checkout at build/deploy time (same basis
-      #   as the cdn-domains.txt bind-mount on proxy/dns), so this config
-      #   can be bind-mounted directly rather than generated inline.
+      # What: web_log (go.d.plugin) job config, bind-mounted; reads the proxy's plain-text access-log copy (fluent-bit's `logs` volume output) to expose live per-request nginx analytics.
+      # Why: prod has a real repo checkout at build/deploy time (same basis as the cdn-domains.txt bind-mount on proxy/dns), so this config can be bind-mounted directly rather than generated inline.
       # From: docs/architecture-ng.md
       - logs:/var/log/lancache:ro
       - ../../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
     healthcheck:
-      # What: real HTTP probe against netdata's own REST API, matching
-      #   deploy/full-setup/docker-compose.yml's check for the same image.
-      # Why: proves the daemon is serving its API, not just that the
-      #   process exists or a port is open.
+      # What: real HTTP probe against netdata's own REST API, matching deploy/full-setup/docker-compose.yml's check for the same image.
+      # Why: proves the daemon is serving its API, not just that the process exists or a port is open.
       # From: Issue #1169
       test: ["CMD-SHELL", "curl -sf http://127.0.0.1:19999/api/v1/info >/dev/null 2>&1 || exit 1"]
       interval: 30s
@@ -1276,9 +1092,7 @@ services:
       start_period: 20s
     restart: always
     # What: joins only netdata-net, not the shared default bridge.
-    # Why: netdata exposes an unauthenticated HTTP API with no host port;
-    #   only the UI needs to reach it. Not `internal: true` since the
-    #   upstream image may need outbound access for its own operation.
+    # Why: netdata exposes an unauthenticated HTTP API with no host port; only the UI needs to reach it. Not `internal: true` since the upstream image may need outbound access for its own operation.
     # From: docs/architecture-ng.md
     networks:
       - netdata-net
@@ -1297,11 +1111,8 @@ networks:
   netdata-net: {}
 
 volumes:
-  # What: persistent volume mounted into every container that must agree on
-  #   a generated secret value (PDNS_API_KEY, KEA_CTRL_TOKEN, DDNS_TSIG_KEY).
-  # Why: an operator/setup.sh .env value always wins; an empty/placeholder
-  #   value self-heals via first-writer-wins generation instead of
-  #   crash-looping.
+  # What: persistent volume mounted into every container that must agree on a generated secret value (PDNS_API_KEY, KEA_CTRL_TOKEN, DDNS_TSIG_KEY).
+  # Why: an operator/setup.sh .env value always wins; an empty/placeholder value self-heals via first-writer-wins generation instead of crash-looping.
   # From: Issue #858
   shared-secrets:
   proxy-cache:
@@ -1313,27 +1124,20 @@ volumes:
       # normal production path is derived from the shared state root.
       device: ${CACHE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/cache}
   proxy-logs:
-  # What: generated per-domain wildcard certs, separate from the ../../certs
-  #   CA bind-mount.
-  # Why: needs to be a real named volume, not the Dockerfile's anonymous
-  #   VOLUME fallback -- see the proxy service's own volumes: comment.
+  # What: generated per-domain wildcard certs, separate from the ../../certs CA bind-mount.
+  # Why: needs to be a real named volume, not the Dockerfile's anonymous VOLUME fallback -- see the proxy service's own volumes: comment.
   # From: Issue #849
   proxy-certs:
-  # What: one persistent volume per adapter for known-good config snapshots,
-  #   deliberately plain Docker-managed, not part of the LANCACHE_STATE_DIR
-  #   bind-mount contract.
-  # Why: dns-standard and dns-ssl are separate containers with
-  #   independently-generated config, so each gets its own snapshot history.
+  # What: one persistent volume per adapter for known-good config snapshots, deliberately plain Docker-managed, not part of the LANCACHE_STATE_DIR bind-mount contract.
+  # Why: dns-standard and dns-ssl are separate containers with independently-generated config, so each gets its own snapshot history.
   # From: Issue #415, Issue #615
   proxy-config-snapshots:
   dhcp-proxy-config-snapshots:
   pdns-config-snapshots-standard:
   pdns-config-snapshots-ssl:
   watchdog-status:
-  # What: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, separate from
-  #   watchdog-status above.
-  # Why: the two containers no longer share a process, so they must not
-  #   share state either -- see the `retention:` service's own comment.
+  # What: retention.sh's own PURGE_STAMP/SYSLOG_PRUNE_STAMP, separate from watchdog-status above.
+  # Why: the two containers no longer share a process, so they must not share state either -- see the `retention:` service's own comment.
   # From: Issue #842 | PR #1360
   retention-state:
   netdataconfig:
@@ -1341,15 +1145,12 @@ volumes:
   netdatacache:
   ui-data:
   # What: fluent-bit's local file-output target and its own storage buffer.
-  # Why: rotated/compressed log output, not operational state, so these stay
-  #   plain Docker-managed volumes, not bind-mounted under LANCACHE_STATE_DIR.
+  # Why: rotated/compressed log output, not operational state, so these stay plain Docker-managed volumes, not bind-mounted under LANCACHE_STATE_DIR.
   # From: docs/backup-restore.md
   logs:
   syslog-data:
-  # What: per-service source logs; the `syslog` (fluent-bit) service tails
-  #   these read-only and forwards to syslog-ng.
-  # Why: same "rotated log output, not operational state" classification as
-  #   `logs`/`syslog-data` above.
+  # What: per-service source logs; the `syslog` (fluent-bit) service tails these read-only and forwards to syslog-ng.
+  # Why: same "rotated log output, not operational state" classification as `logs`/`syslog-data` above.
   # From: Issue #633
   dns-logs-standard:
   dns-logs-ssl:
@@ -1359,8 +1160,7 @@ volumes:
   watchdog-logs:
   nats-logs:
   netdata-logs:
-  # What: LanCache-NG-NTP (chrony) log output, not yet wired into the
-  #   `syslog` (fluent-bit) central logging pipeline.
+  # What: LanCache-NG-NTP (chrony) log output, not yet wired into the `syslog` (fluent-bit) central logging pipeline.
   # Why: a known, deliberately deferred follow-up.
   # From: docs/architecture-ng.md
   ntp-logs:
