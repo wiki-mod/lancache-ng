@@ -38,7 +38,7 @@ services:
       - ../../services/dns/cdn-domains.txt:/etc/nginx/cdn-domains.txt
       # What: proxy-cache named volume resolves to the single host CACHE_DIR device below; both standard and SSL proxy paths share this tree.
       # Why: one physical cache backs both listener modes.
-      # From: docs/known-good-config-snapshots.md
+      # From: docs/backup-restore.md
       - proxy-cache:/var/cache/nginx/lancache
       - proxy-logs:/var/log/nginx
       # What: named volume for per-domain SSL/MITM wildcard certs (entrypoint.sh's CERT_DIR), separate from the CA bind-mount above.
@@ -99,7 +99,7 @@ services:
       - ../../services/dns/cdn-domains.txt:/etc/pdns/cdn-domains.txt
       # What: PDNS_STANDARD_DIR/PDNS_FILTER_STATE_DIR overrides left unset by default, deriving from LANCACHE_STATE_DIR instead.
       # Why: one LANCACHE_STATE_DIR move then retargets DNS and NATS together; setup.sh sets an explicit key only to preserve a real legacy/custom path during update.
-      # From: docs/known-good-config-snapshots.md
+      # From: docs/backup-restore.md
       - ${PDNS_STANDARD_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-standard}:/var/lib/powerdns
       - ${PDNS_FILTER_STATE_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/pdns-filter-state}:/var/lib/powerdns-state
       # What: plain Docker-managed volume for known-good pdns.conf/recursor.conf snapshots, not part of the LANCACHE_STATE_DIR contract.
@@ -381,7 +381,7 @@ services:
       - shared-secrets:/var/lib/lancache-secrets
       # What: KEA_DATA_DIR override left unset by default, deriving from LANCACHE_STATE_DIR instead.
       # Why: Kea follows the same state-root contract as PowerDNS/NATS.
-      # From: docs/known-good-config-snapshots.md
+      # From: docs/backup-restore.md
       - ${KEA_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/kea}:/var/lib/kea
       # What: dhcp-logs volume for Kea's daemon output.
       # Why: Kea's loggers dual-write here (kea-dhcp4.conf.template's "output-options") in addition to stdout.
@@ -488,11 +488,11 @@ services:
     ports:
       # What: published on all interfaces (no dedicated LAN IP, unlike dns-standard/dns-ssl).
       # Why: NTP is unicast UDP, not a broadcast protocol like DHCP, so Docker's normal port-publish DNAT already preserves the real client source IP without network_mode: host.
-      # From: Issue #1358
+      # From: Issue #1079 | PR #1082
       - "123:123/udp"
     # What: `cap_drop: [ALL]`, then only the capabilities below are added back for chronyd.
     # Why: least-privilege posture; each grant was verified necessary via strace and is exercised in CI by scripts/ntp-cap-sys-time-simulation.sh.
-    # From: Issue #1358
+    # From: Issue #1413
     cap_drop:
       - ALL
     cap_add:
@@ -542,7 +542,7 @@ services:
     image: nats:2-alpine@sha256:c11af972c99ae542de8925e6a7d9c533aa1eb039660420d2074beed6089b3bf0
     # What: idempotently regenerates only this container's own static nats.conf subset (jetstream, log_file, the four static roles) on every boot, then execs nats-server; auth_callout.conf is a separate fragment only the Admin UI writes, `include`d here.
     # Why: nats-server refuses to hot-reload AuthCallout, so the Admin UI's restart must re-run this script; regenerating only the static subset, never the UI's fragment, keeps that restart from clobbering the callout config -- the same per-file convergence discipline pdns/kea/nginx/dhcp-proxy already follow.
-    # From: Issue #811 | Issue #583
+    # From: Issue #811 | PR #817
     entrypoint: ["/bin/sh", "-c"]
     command:
       - |
@@ -580,7 +580,7 @@ services:
         fi
         # What: NATS_SYS_PASSWORD, the Admin UI's system-account identity.
         # Why: used only to CONNZ/KICK ($$SYS.REQ.SERVER.<id>.*) a removed/rotated secondary's live connection; nats-server exposes that API only to system-account clients, so this role is the sole member of the `SYS` account below, not the default $$G account every other static role uses.
-        # From: Issue #681, nats_kick.rs
+        # From: Issue #681, services/ui/src/nats_kick.rs
         if secret_is_placeholder "$$NATS_SYS_PASSWORD"; then NATS_SYS_PASSWORD=""; fi
         if ! NATS_SYS_PASSWORD="$$(resolve_shared_secret nats-sys-password "$$NATS_SYS_PASSWORD" lancache_gen_hex32)"; then
           echo "[lancache-nats] FATAL: NATS_SYS_PASSWORD is unset/placeholder and the shared-secrets volume is not writable, so no shared password could be generated." >&2
@@ -624,7 +624,7 @@ services:
                   "lancache.dns.record",
                   # What: publish permission on lancache.dns.flush for the dns-standard identity's zone-rollback listener.
                   # Why: needed for its post-rollback cache-flush publish.
-                  # From: rollback_listener.rs
+                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
                   "lancache.dns.flush",
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
@@ -644,15 +644,15 @@ services:
                 publish = [
                   # What: publish permission on lancache.dns.flush, same as the writer identity above.
                   # Why: dns-ssl's own nats-subscriber runs the same rollback listener and needs the post-rollback cache-flush too.
-                  # From: rollback_listener.rs
+                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
                   "lancache.dns.flush",
                   # What: publish permission on lancache.dns.record, needed if publish_rollback_records ever runs under this identity (DNS_ROLLBACK_URL currently always targets dns-standard, not dns-ssl).
                   # Why: deliberate maintainer tradeoff -- widens what a compromised dns-ssl credential could publish, rather than adding a fail-closed guard in the listener itself.
-                  # From: rollback_listener.rs
+                  # From: services/dns/nats-subscriber/src/rollback_listener.rs
                   "lancache.dns.record",
                   # What: STREAM.CREATE.LANCACHE_DNS, matching the writer identity's grant of the same subject.
                   # Why: nats-subscriber's main() falls back to js.create_stream() if get_stream() fails at startup, and exits on a denied create -- needed if this identity is ever first to connect, before the stream exists.
-                  # From: docs/bug-hunt/nats.md (Finding D)
+                  # From: Issue #849
                   "$$JS.API.STREAM.INFO.LANCACHE_DNS",
                   "$$JS.API.STREAM.CREATE.LANCACHE_DNS",
                   "$$JS.API.CONSUMER.INFO.LANCACHE_DNS.>",
@@ -667,14 +667,14 @@ services:
             {
               # What: the Admin UI's static auth-callout responder identity (services/ui/src/nats_auth_callout.rs), no subject permissions, only answers auth-callout requests.
               # Why: listed in the UI's auth_users fragment, so nats-server checks its password against this static list; must stay in lockstep with the ui service's NATS_CALLOUT_USER/PASSWORD or the callout silently fails.
-              # From: Issue #811 | Issue #583
+              # From: Issue #583 | PR #621
               user: "__NATS_CALLOUT_USER__"
               password: "__NATS_CALLOUT_PASSWORD__"
             }
           ]
           # What: `include`s auth_callout.conf, a separate file only the Admin UI writes, rather than embedding the stanza here.
           # Why: the UI's runtime-generated issuer public key is unknown to this container, and this split is what lets this entrypoint regenerate its static subset every restart without clobbering the UI's fragment; a missing include target is a FATAL boot error, an empty one is valid.
-          # From: Issue #811
+          # From: Issue #811 | PR #817
           include "auth_callout.conf"
         }
         # What: a minimal `SYS` account, additive alongside the `authorization {}` block above; the only account this process is a member of, with no application subject permissions of its own.
@@ -706,7 +706,7 @@ services:
         trap - EXIT
         # What: creates an empty auth_callout.conf placeholder only when absent, never overwriting an existing one.
         # Why: a missing include target is a FATAL boot error on a fresh volume; an empty include is valid, letting nats-server boot and the UI connect to write the real fragment without this script ever clobbering it.
-        # From: Issue #811
+        # From: Issue #811 | PR #817
         if [ ! -e /etc/nats/auth_callout.conf ]; then
           : > /etc/nats/auth_callout.conf
           chown 10001:10001 /etc/nats/auth_callout.conf
@@ -720,7 +720,7 @@ services:
       - ../../scripts/lib/shared-secret-bootstrap.sh:/usr/local/lib/shared-secret-bootstrap.sh:ro
       # What: NATS_DATA_DIR override left unset by default, deriving from LANCACHE_STATE_DIR instead.
       # Why: nats-conf is generated runtime state, kept outside the checkout.
-      # From: docs/known-good-config-snapshots.md
+      # From: docs/backup-restore.md
       - ${NATS_DATA_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats}:/data
       - ${NATS_CONF_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/nats-conf}:/etc/nats
       # What: nats-logs volume for nats-server's log_file output.
@@ -736,7 +736,7 @@ services:
       - NATS_DNS_REPLICA_PASSWORD=${NATS_DNS_REPLICA_PASSWORD:-}
       # What: NATS_CALLOUT_USER/PASSWORD, the auth-callout responder's static bypass identity.
       # Why: MUST match the ui service's identical pair -- the ui process connects the responder with these creds against the static user this entrypoint writes.
-      # From: Issue #811 | Issue #583
+      # From: Issue #583 | PR #621
       - NATS_CALLOUT_USER=${NATS_CALLOUT_USER:?NATS_CALLOUT_USER is required}
       - NATS_CALLOUT_PASSWORD=${NATS_CALLOUT_PASSWORD:-}
       # What: NATS_SYS_USER/PASSWORD, the system-account identity.
@@ -880,7 +880,7 @@ services:
       - ${SYSLOG_NG_LOG_DIR:-${LANCACHE_STATE_DIR:-/opt/lancache-ng}/syslog-ng}:/var/log/lancache-syslog-ng:ro
       # What: read-only reader for watchdog's status.json (dashboard's "Service health" card).
       # Why: watchdog is the sole writer; a missing mount here silently empties the health card instead of failing.
-      # From: Issue #870
+      # From: Issue #1165
       - watchdog-status:/var/run/watchdog:ro
     ports:
       - "127.0.0.1:8080:8080"
@@ -947,7 +947,7 @@ services:
       - SECONDARY_REGISTRATION_TOKEN=${SECONDARY_REGISTRATION_TOKEN}
       # What: same 4 SYSLOG_* vars/defaults as the watchdog retention engine.
       # Why: the UI's "enabled" toggle and budget display must agree with what watchdog is enforcing.
-      # From: Issue #633, Issue #757
+      # From: Issue #633 | PR #757
       - SYSLOG_ENABLED=${SYSLOG_ENABLED:-false}
       - SYSLOG_LOG_ROOT=/var/log/lancache-syslog-ng
       - SYSLOG_MAX_GB=${SYSLOG_MAX_GB:-10}
@@ -1130,7 +1130,7 @@ volumes:
   proxy-certs:
   # What: one persistent volume per adapter for known-good config snapshots, deliberately plain Docker-managed, not part of the LANCACHE_STATE_DIR bind-mount contract.
   # Why: dns-standard and dns-ssl are separate containers with independently-generated config, so each gets its own snapshot history.
-  # From: Issue #415, Issue #615
+  # From: Issue #415 | PR #616
   proxy-config-snapshots:
   dhcp-proxy-config-snapshots:
   pdns-config-snapshots-standard:
