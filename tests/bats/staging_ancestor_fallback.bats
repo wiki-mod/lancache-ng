@@ -1998,6 +1998,46 @@ STUB
     [ "$((end_epoch - start_epoch))" -lt 2 ]
 }
 
+@test "saf_find_built_ancestor: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed at the ancestor candidate's own site, not silently truncating its tag (AG-VAL-030)" {
+    # What: calls saf_find_built_ancestor directly (not via
+    #   saf_resolve_untouched_backfill_source), so the assertion below can
+    #   only be satisfied by this function's own error message.
+    # Why: this file has no top-level set -e; an unchecked failure here
+    #   would silently truncate the tag instead of erroring.
+    # From: Issue #1095 (G2) | PR #1503
+    setup_linear_fixture
+    install_run_exists_stub
+    printf '%s\tany\n' "$ancestor2_sha" >> "$runs_file"
+    cat > "$run_exists_stub" <<STUB
+#!/usr/bin/env bash
+case "\$1" in
+    "$base_sha") exit 1 ;;
+    "$older_sha") exit 1 ;;
+    "$ancestor2_sha") exit 0 ;;
+    *) exit 1 ;;
+esac
+STUB
+    chmod +x "$run_exists_stub"
+
+    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
+    run saf_find_built_ancestor "wiki-mod/lancache-ng" "$base_sha" "proxy" "proxy" 10 3 3 1 0 0 "$git_dir"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not derive the short SHA for ancestor candidate"* ]]
+}
+
+@test "saf_resolve_untouched_backfill_source: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed at its own base_sha_short site (AG-VAL-030)" {
+    # What: proves this function's own base_sha_short site fails closed,
+    #   via an error message distinct from the ancestor-candidate test above.
+    # Why: base_sha_short is computed before any network check, so no
+    #   run_exists_stub setup is needed here.
+    # From: Issue #1095 (G2) | PR #1503
+    setup_linear_fixture
+    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
+    run saf_resolve_untouched_backfill_source "wiki-mod/lancache-ng" "proxy" "proxy" "$base_sha" 3 3 3 3 3 3 1 50 "$git_dir"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Could not derive the short SHA for base_sha"* ]]
+}
+
 @test "saf_resolve_untouched_backfill_source: fast path also fires for a real, non-doc commit that only touches a DIFFERENT service" {
     # 2026-08-02 finding: a commit that touches only ui (a real, non-doc
     # change -- saf_base_commit_paths_are_ignorable would say "not

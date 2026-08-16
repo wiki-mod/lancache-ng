@@ -101,6 +101,11 @@ concurrency:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  # What: declares the same short-SHA length as build-push.yml's own env.
+  # Why: Actions has no mechanism to share an env value across workflow
+  #   files, so both copies must be kept equal by hand.
+  # From: Issue #1095 (G2) | PR #1503
+  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   # run_id-run_attempt suffixed, not a fixed name: build-tools and
   # build-tools-arm64 each load a *local* scan image onto their own runner's
   # Docker daemon, and the self-hosted amd64 runner in particular is reused
@@ -319,7 +324,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Issue #1147: this job's local Buildx cache (see "Prepare local Buildx
@@ -852,7 +863,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Issue #1147: same reasoning as build-tools's own identically-named
@@ -1099,8 +1116,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          short_sha="${GITHUB_SHA::7}"
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-amd64"
           arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-arm64"
           source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"

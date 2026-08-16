@@ -219,7 +219,13 @@ jobs:
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -426,7 +432,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -520,7 +532,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -546,7 +564,13 @@ jobs:
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -650,7 +674,10 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          # What: no step-level GITHUB_REPOSITORY entry (the docker run flag
+          #   below still forwards it into the container).
+          # Why: GITHUB_REPOSITORY is already a default Actions env var.
+          # From: Issue #1095 (G1) | PR #1503
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -877,7 +904,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -2597,9 +2630,15 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.actor }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # Calls scripts/lib/validation-image-tag.sh's own functions instead of reimplementing
           # the same channel/pr-staging-available/tag decisions inline a second time (issue #822
@@ -2668,7 +2707,6 @@ jobs:
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
-          REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
           # #808/#1254/#1255: this PR's own base commit. Needed both to prove the back-fill
           # source image was actually built from it (or later) before backfilling an untouched
@@ -2694,6 +2732,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -2863,9 +2908,17 @@ jobs:
 
       - name: Run client simulation against the full-setup stack
         env:
-          FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ steps.channel.outputs.tag }}
+          CHANNEL_TAG: ${{ steps.channel.outputs.tag }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: builds the image ref from the single declared GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${CHANNEL_TAG}"
+          export FULL_SETUP_CLIENT_TOOLS_IMAGE
           scripts/full-setup-client-simulation.sh
 
       - name: Tear down full-setup validation stack
@@ -4388,9 +4441,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What: Mirrors "Determine per-service publish scan reuse" above's own case mapping.
-          # Why: Single source for which digest_* output belongs to which matrix.service.
-          # From: PR #1499
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          repository="$(dmeta_ghcr_repo)"
           case "$MATRIX_SERVICE" in
             proxy) digest="$DIGEST_PROXY" ;;
             dns) digest="$DIGEST_DNS" ;;
@@ -4407,7 +4464,7 @@ jobs:
             echo "::error::determine-push-reuse-scope reported reuse=true for $MATRIX_SERVICE but did not export a pinned digest -- refusing to scan an unverified reference." >&2
             exit 1
           fi
-          image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}@${digest}"
+          image="ghcr.io/${repository}/${MATRIX_SERVICE}@${digest}"
           echo "::notice::$MATRIX_SERVICE is unchanged on this push; scanning $image (the exact digest determine-push-reuse-scope already pinned and verified) instead of rebuilding it."
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -4529,7 +4586,6 @@ jobs:
       - name: Decide per-service push reuse
         id: decide
         env:
-          REPOSITORY: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
@@ -4548,6 +4604,13 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -4640,11 +4703,109 @@ jobs:
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
+  # What: computes build/build-arm64's shared should-build admission once,
+  #   exposed as a plain output both jobs read.
+  # Why: the two jobs previously each duplicated the same boolean `if:`
+  #   byte-for-byte; a fix to one copy could silently leave the other diverged.
+  # From: Issue #1095 (G7) | PR #1503
+  determine-build-admission:
+    name: determine build/build-arm64 admission (G7)
+    needs:
+      - shellcheck
+      - validate-compose
+      - ci_scope_policy
+      - line-endings
+      - container-scan
+      - file-headers
+      - compose-healthchecks
+      - pr-template-check
+      - pr-tracking-metadata-check
+      - pr-title-convention-check
+    # What: never resolves to "skipped" (if: always(), no other condition).
+    # Why: avoids the implicit-success()-over-a-skippable-dependency hazard
+    #   noted on container-scan/promote's own `if:` blocks in this file.
+    # From: Issue #1095 (G7) | PR #1503
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
+    outputs:
+      admitted: ${{ steps.decide.outputs.admitted }}
+    steps:
+      - name: Decide whether build/build-arm64 may run
+        id: decide
+        env:
+          # What: passes each dependency's result as a plain env string.
+          # Why: a malformed value fails the `case` match below loudly
+          #   instead of silently passing a raw `[[ ... ]]` expansion.
+          # From: Issue #1095 (G7) | PR #1503
+          SHELLCHECK_RESULT: ${{ needs.shellcheck.result }}
+          VALIDATE_COMPOSE_RESULT: ${{ needs['validate-compose'].result }}
+          CI_SCOPE_POLICY_RESULT: ${{ needs.ci_scope_policy.result }}
+          LINE_ENDINGS_RESULT: ${{ needs['line-endings'].result }}
+          CONTAINER_SCAN_RESULT: ${{ needs['container-scan'].result }}
+          FILE_HEADERS_RESULT: ${{ needs['file-headers'].result }}
+          COMPOSE_HEALTHCHECKS_RESULT: ${{ needs['compose-healthchecks'].result }}
+          PR_TEMPLATE_CHECK_RESULT: ${{ needs['pr-template-check'].result }}
+          PR_TRACKING_METADATA_CHECK_RESULT: ${{ needs['pr-tracking-metadata-check'].result }}
+          PR_TITLE_CONVENTION_CHECK_RESULT: ${{ needs['pr-title-convention-check'].result }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+
+          is_success() { [ "$1" = "success" ]; }
+
+          admitted=true
+
+          # What: Step 1 -- gates required regardless of event type.
+          is_success "$SHELLCHECK_RESULT" || admitted=false
+          is_success "$VALIDATE_COMPOSE_RESULT" || admitted=false
+          is_success "$CI_SCOPE_POLICY_RESULT" || admitted=false
+          is_success "$LINE_ENDINGS_RESULT" || admitted=false
+
+          # What: Step 2 -- rejects a metadata-only pull_request event.
+          # Why: labeled/unlabeled/milestoned/demilestoned never carry a new
+          #   commit, so there is no new image content to build.
+          # From: Issue #1095 (G7) | PR #1503
+          case "$EVENT_NAME" in
+            pull_request)
+              case "$EVENT_ACTION" in
+                labeled | unlabeled | milestoned | demilestoned)
+                  admitted=false
+                  ;;
+              esac
+              ;;
+          esac
+
+          # What: Step 3 -- pull_request-only gates, skipped otherwise.
+          # Why: these jobs only run on pull_request; a plain is_success check
+          #   would fail closed on any other event where they never ran.
+          # From: Issue #1095 (G7) | PR #1503
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            is_success "$FILE_HEADERS_RESULT" || admitted=false
+            is_success "$COMPOSE_HEALTHCHECKS_RESULT" || admitted=false
+            is_success "$PR_TEMPLATE_CHECK_RESULT" || admitted=false
+            is_success "$PR_TRACKING_METADATA_CHECK_RESULT" || admitted=false
+            is_success "$PR_TITLE_CONVENTION_CHECK_RESULT" || admitted=false
+          else
+            # What: container-scan gate, required only off pull_request.
+            # Why: mirrors build's own if: block (container-scan is the
+            #   inverse shape of the pull_request-only gates above).
+            # From: Issue #1095 (G7) | PR #1503
+            is_success "$CONTAINER_SCAN_RESULT" || admitted=false
+          fi
+
+          echo "admitted=$admitted" >> "$GITHUB_OUTPUT"
+
   build:
     # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
-    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push -- a prior run already published the sha-*/pr-<N>-sha-<short> tags for this exact commit, and merge-manifests/full-setup-validate downstream already tolerate a skipped build/build-arm64 cleanly via their own `needs.build.result == 'success'` gates.
-    # From: Issue #1095 | PR #1532
+    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. Issue #1095 G7: the admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
+    # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
+    # What: needs: still lists every check job below even though if: no longer reads most of their .result directly.
+    # Why: several of their outputs (e.g. validate-compose's build_tools_image) are consumed elsewhere in this job, and Actions only exposes outputs to jobs listed in needs:.
+    # From: Issue #1095 (G7) | PR #1503
     needs:
+      - determine-build-admission
       - shellcheck
       - validate-compose
       - container-scan
@@ -4658,24 +4819,7 @@ jobs:
       - pr-title-convention-check
       - line-endings
       - push-supersession-check
-    if: >-
-      ${{
-        always() &&
-        needs.shellcheck.result == 'success' &&
-        needs['validate-compose'].result == 'success' &&
-        needs.ci_scope_policy.result == 'success' &&
-        needs['line-endings'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
-      }}
+    if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
     # What: Selects the runner per matrix service via `${{ fromJSON(matrix.runner) }}`, mirroring container-scan's own pattern.
     # Why: An AG-CI-002 measured exception; see this job's matrix comment above for which services route to light vs heavy and why.
     # From: Issue #1095 | PR #1532
@@ -4947,7 +5091,6 @@ jobs:
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
-          REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -4964,6 +5107,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -4987,7 +5137,10 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-amd64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
@@ -5046,12 +5199,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${BUILD_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
-            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "$repository" "$MATRIX_SERVICE" "$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
@@ -5552,7 +5715,12 @@ jobs:
     #
     # Also skipped on a metadata-only pull_request event -- see `build`'s identical
     # comment above.
+    #
+    # What: `needs:` mirrors `build`'s own superset, for the same reason.
+    # Why: see `build`'s own `needs:` comment above.
+    # From: Issue #1095 (G7) | PR #1503
     needs:
+      - determine-build-admission
       - shellcheck
       - validate-compose
       - container-scan
@@ -5566,24 +5734,7 @@ jobs:
       - pr-title-convention-check
       - line-endings
       - push-supersession-check
-    if: >-
-      ${{
-        always() &&
-        needs.shellcheck.result == 'success' &&
-        needs['validate-compose'].result == 'success' &&
-        needs.ci_scope_policy.result == 'success' &&
-        needs['line-endings'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
-      }}
+    if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     # Job-level concurrency, mirroring `build` (the amd64 leg) exactly, and for the same
@@ -5808,7 +5959,6 @@ jobs:
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
-          REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -5825,6 +5975,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -5848,7 +6005,10 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-arm64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
@@ -5892,12 +6052,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${BUILD_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
-            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "$repository" "$MATRIX_SERVICE" "$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
@@ -6131,7 +6301,6 @@ jobs:
         id: create-trusted-manifests
         if: github.event_name != 'pull_request'
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -6141,9 +6310,19 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
 
           # Same wording as this same file's build/build-arm64 matrix.description entries --
@@ -6237,7 +6416,6 @@ jobs:
         id: create-pr-staging-manifests
         if: github.event_name == 'pull_request'
         env:
-          REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # Must match build/build-arm64's "Compute PR staging tag" exactly
           # -- see that step's comment for why this is github.sha (the
@@ -6251,9 +6429,19 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${BUILD_SHA::7}"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
           # Same helper as the trusted-ref step above (and promote's own
@@ -6558,7 +6746,6 @@ jobs:
       - name: Promote coherent stack tags
         id: promote-stack
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
@@ -6570,9 +6757,19 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
           channel_tags=()
@@ -6814,11 +7011,17 @@ jobs:
       - name: Cut an automated patch release tag for image-affecting master changes
         if: ${{ success() && github.ref == 'refs/heads/master' }}
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # This is core release machinery on the release-bearing branch, not
           # optional convenience automation, so a missing PAT fails closed
@@ -6990,7 +7193,6 @@ jobs:
       - name: Verify release image platform coverage
         shell: bash
         env:
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           # syslog (issue #1428) added here explicitly: this SERVICES scalar is a
           # plain space-separated env value, not a services=(...) bash array, so
@@ -7003,6 +7205,13 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           read -r -a services <<< "$SERVICES"
           for service in "${services[@]}"; do
@@ -7023,7 +7232,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -7033,9 +7241,19 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
           if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
@@ -7227,10 +7445,16 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           if [ ! -s vex.openvex.json ]; then
             echo "::error::vex.openvex.json is missing from the checkout." >&2
@@ -7337,13 +7561,19 @@ jobs:
       - name: Resolve released image digest
         id: digest
         env:
-          REPOSITORY: ${{ github.repository }}
           SERVICE: ${{ matrix.service }}
           TAG_NAME: ${{ github.ref_name }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -7399,11 +7629,17 @@ jobs:
         # OpenVEX upload above.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           asset="${SERVICE}.cdx.json"
           if [ ! -s "$asset" ]; then

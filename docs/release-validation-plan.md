@@ -1297,6 +1297,60 @@ omitted):**
     a future one) ever exposes an on-demand, scriptable review trigger that
     would make a real CI check practical.
 
+- **Recorded exception (2026-08-08, issue #1095 G2, `AGENTS.md`'s AG-VAL-029
+  Known-Gaps entries): two `set -e`/`$?`-dependent construct shapes stay
+  manual-review-only, no durable CI guard.** Full technical detail lives in
+  `AGENTS.md`'s Known Gaps section under `AG-VAL-029 assessment
+  (2026-08-08, ...)` (two entries); this entry exists so this document's own
+  Coverage Assessment does not silently omit them, per AG-VAL-029's own
+  requirement that an unautomatable case be recorded here, not only
+  elsewhere.
+  - **Scope**: (1) a fail-closed helper's `$(...)` call embedded directly
+    inside a larger command's argument list (`printf`/`echo` with the
+    substitution buried in an argument) instead of assigned to its own
+    variable first; (2) a `scripts/lib/*.sh` file that is sourced elsewhere
+    and sets a bare, non-`local` top-level variable whose name can collide
+    with a caller's own identically-named variable.
+  - **Reason**: both are call-site *shapes*, not fixed function/variable
+    names — a denylist would miss future instances, and a shape-based regex
+    (any `$(...)` nested in another command's arguments; any bare top-level
+    assignment in a sourced lib file) flags the overwhelming majority of
+    ordinary, harmless code in this codebase as a false positive. This is
+    the same class of judgment call AG-VAL-028 already documents as
+    resisting cheap, reliable mechanical detection for the AG-CODE-* family.
+  - **Tracking**: `AGENTS.md`'s Known Gaps section, `AG-VAL-029 assessment
+    (2026-08-08, ...)` entries (two, immediately following the sparse-checkout
+    entry above in that file's own list); issue #1095's G2 finding.
+  - **Validation**: the two real instances that prompted this (embedded-call
+    shape: `scripts/lib/validation-image-tag.sh`'s `vit_resolve_tag()` and
+    `.github/workflows/build-push-hosted-fallback.yml`'s short-SHA step;
+    top-level-variable-collision shape: `scripts/lib/validation-image-tag.sh`
+    self-sourcing `scripts/lib/docker-metadata.sh` and clobbering
+    `scripts/plan-deep-validation.sh`'s own `script_dir`) are each fixed and
+    covered by their own bats regression case. The embedded-call shape is
+    covered directly by `tests/bats/docker_metadata.bats` (the
+    `set -euo pipefail` reproduction of the hosted-fallback workflow's own
+    shell shape) and `tests/bats/validation_image_tag.bats` (`vit_resolve_tag()`
+    exercised in isolation). The `script_dir` collision specifically is
+    **not** covered by either of those two files -- both source the affected
+    libraries directly and never set a caller-owned `script_dir` first, so
+    neither can observe a clobber of it. That collision's actual regression
+    coverage is `tests/bats/plan_deep_validation.bats`, which runs
+    `scripts/plan-deep-validation.sh` end to end as a real subprocess (not a
+    sourced function call) and therefore does set `script_dir` before
+    sourcing `validation-image-tag.sh`, then still depends on that same
+    `script_dir` afterward for `detect-full-setup-changes.sh` -- a clobber
+    would make that later step resolve the wrong path and fail the test's
+    `status -eq 0` assertion. No standing CI guard exists against a *future*
+    instance of either shape; manual code review is the only current check.
+  - **Non-Expansion**: this exception covers only these two named call-site
+    shapes as they exist today. A future instance of either shape found
+    elsewhere in the repo is a new occurrence to fix on its own merits
+    (Rule-Ref: AG-WF-011), not automatically covered by this entry, and a
+    third occurrence of the same underlying pattern should prompt revisiting
+    whether a mechanical guard is worth the false-positive cost after all
+    (Rule-Ref: AG-WF-025).
+
 ---
 
 ## Appendix — Reusable Scripts/Commands Index
