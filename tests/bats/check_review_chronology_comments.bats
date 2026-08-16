@@ -29,6 +29,9 @@ fail() {
     return 1
 }
 
+# What: a comment containing 'caught in review'.
+# Why: baseline positive case for check_review_chronology()'s discovery-verb pattern.
+# From: PR #1546
 @test "fails and names the file:line when a comment says 'caught in review'" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -42,6 +45,9 @@ EOF
     [[ "$output" == *"AG-CODE-003"* ]] || fail "did not cite the governing rule: $output"
 }
 
+# What: a comment containing 'before this fix'.
+# Why: covers the deictic self-reference alternation, not just the discovery-verb one.
+# From: PR #1546
 @test "fails when a comment says 'before this fix'" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -55,6 +61,9 @@ EOF
     [[ "$output" == *"example.sh:3"* ]] || fail "did not name the offending line: $output"
 }
 
+# What: 'flagged in review' inside a Rust // comment.
+# Why: proves the pattern isn't shell-comment-specific.
+# From: PR #1546
 @test "fails when a comment says 'flagged in review on PR #743'" {
     cat > "$fixture_root/example.rs" <<'EOF'
 // register a secondary against it (flagged in review on PR #743). The
@@ -66,6 +75,9 @@ EOF
     [[ "$output" == *"example.rs:1"* ]] || fail "did not name the offending line: $output"
 }
 
+# What: the verb AFTER 'review' instead of before it.
+# Why: covers the pattern's second alternation (review ... <verb>), not just <verb> ... review.
+# From: PR #1546
 @test "fails on the reverse order 'a PR review (#765) found ...'" {
     cat > "$fixture_root/example.yml" <<'EOF'
 on:
@@ -80,6 +92,9 @@ EOF
     [[ "$output" == *"example.yml:3"* ]] || fail "did not name the offending line: $output"
 }
 
+# What: 'prior to this change' instead of 'before this fix'.
+# Why: covers the other two nouns (change/commit/patch) the deictic alternation accepts.
+# From: PR #1546
 @test "fails when a comment says 'prior to this change'" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -91,6 +106,9 @@ EOF
     [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
 }
 
+# What: 'caught during self-review'.
+# Why: covers the optional (self-)review suffix on the discovery-verb alternation.
+# From: PR #1546
 @test "fails when a comment says 'caught during self-review'" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -103,6 +121,9 @@ EOF
     [[ "$output" == *"example.sh:2"* ]] || fail "did not name the offending line: $output"
 }
 
+# What: 'manual review' with no discovery verb nearby.
+# Why: proves the pattern doesn't false-positive on any mention of the word review.
+# From: PR #1546
 @test "passes on a plain 'manual review' mention with no adjacent discovery verb" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -116,6 +137,9 @@ EOF
     [[ "$output" == *"No review-chronology comments"* ]] || fail "unexpected output: $output"
 }
 
+# What: 'remembered' next to review.
+# Why: 'remembered' is not in DISCOVERY_VERBS, so this must not match.
+# From: PR #1546
 @test "passes on 'remembered during review' (a process note, not a discovery verb)" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -127,6 +151,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: the word 'regression' with no discovery verb.
+# Why: guards against a naive substring match on 'regression'.
+# From: PR #1546
 @test "passes on 'regression pin' alone with no nearby discovery verb" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -137,6 +164,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: 'after this PR merges' and 'until this PR's own builds'.
+# Why: these describe live CI behavior, not review history -- the deictic pattern must not fire on them.
+# From: PR #1546
 @test "passes on 'after this PR merges' / 'until this PR's OWN builds' (a live-CI referent, not a historical one)" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -149,6 +179,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: a banned phrase inside a *.md file.
+# Why: is_excluded() must skip documentation files even when their prose happens to match.
+# From: PR #1546
 @test "does not scan excluded file types (e.g. *.md) even when they contain the banned phrasing" {
     cat > "$fixture_root/NOTES.md" <<'EOF'
 This bug was caught in review before merge, per the closed-issue write-up.
@@ -158,11 +191,11 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: copies the script and this test file into the fixture, scans it.
+# Why: both quote the banned phrasing verbatim; without the self-
+#   reference exclusion, the guard would fail against its own repo.
+# From: PR #1546
 @test "does not flag itself: the script's own file and its bats test are excluded from the scan" {
-    # What: copies the script and this test file into the fixture, scans it.
-    # Why: both quote the banned phrasing verbatim; without the self-
-    #   reference exclusion, the guard would fail against its own repo.
-    # From: PR #1546
     mkdir -p "$fixture_root/scripts" "$fixture_root/tests/bats"
     cp "$script" "$fixture_root/scripts/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \
@@ -172,6 +205,9 @@ EOF
     [ "$status" -eq 0 ] || fail "guard flagged its own documentation/test file: $output"
 }
 
+# What: two separate files, each with one violation.
+# Why: proves the guard doesn't stop at the first match.
+# From: PR #1546
 @test "multiple violations are all reported, each with its own file:line" {
     cat > "$fixture_root/a.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -190,6 +226,9 @@ EOF
 
 ## Check 2: check_fragile_line_references() -- "(line ~N)" self-references
 
+# What: a comment containing '(line ~890)'.
+# Why: baseline positive case for check_fragile_line_references().
+# From: PR #1546
 @test "fails and names the file:line when a comment says '(line ~890)'" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -203,6 +242,9 @@ EOF
     [[ "$output" == *"AG-CODE-002"* ]] || fail "did not cite the governing rule: $output"
 }
 
+# What: the '(see line N above)' variant.
+# Why: covers the optional 'see'/'above' wording, not just the bare '(line N)' form.
+# From: PR #1546
 @test "fails when a comment says '(see line 42 above)'" {
     cat > "$fixture_root/example.rs" <<'EOF'
 // The retry budget is already exhausted by this point (see line 42 above),
@@ -214,6 +256,9 @@ EOF
     [[ "$output" == *"example.rs:1"* ]] || fail "did not name the offending line: $output"
 }
 
+# What: 'line' used in ordinary prose, no parenthesized number.
+# Why: proves the pattern requires the specific parenthesized-number shape, not any use of the word.
+# From: PR #1546
 @test "passes on prose mentioning 'line' without an adjacent parenthesized number" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -228,6 +273,9 @@ EOF
 
 ## Check 3: check_bare_issue_ref_duplicates_from() -- redundant #NNN outside From:
 
+# What: a Why: line repeating the same #N as the file's own From: pointer.
+# Why: baseline positive case for check_bare_issue_ref_duplicates_from().
+# From: PR #1546
 @test "fails when a comment repeats a number already declared by this file's own From: pointer" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
 # What: ccache preprocesses locally instead of shelling through distcc.
@@ -243,6 +291,9 @@ EOF
     [[ "$output" == *"AG-CODE-012"* ]] || fail "did not cite the governing rule: $output"
 }
 
+# What: the From: line, which necessarily contains the number.
+# Why: the From: line itself must never count as a duplicate of itself.
+# From: PR #1546
 @test "does not flag the From: pointer line itself" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
 # What: normalizes a bare host:port to a redis:// URL before use.
@@ -255,6 +306,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: a comment citing a different issue number for historical grounding.
+# Why: citing an unrelated issue for context (e.g. a prior fix for the same bug class) stays legal.
+# From: PR #1546
 @test "passes when a comment cites a DIFFERENT number than this file's own From: pointer (historical WHY-grounding stays legal)" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
 # What: installs findutils so `find -printf` works under BusyBox.
@@ -268,6 +322,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: bare #NNN references with no From: line anywhere in the file.
+# Why: the check must no-op entirely when there's no established number to duplicate.
+# From: PR #1546
 @test "passes on bare #NNN references in a file with no From: pointer at all (repo-wide historical-citation convention stays legal)" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -279,6 +336,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: #8871 in a file whose From: is #887.
+# Why: a naive substring match would wrongly treat #8871 as containing #887.
+# From: PR #1546
 @test "passes when the duplicate-looking number is actually a different, longer number (#8871 does not match a From: #887)" {
     cat > "$fixture_root/example.dockerfile" <<'EOF'
 # What: retries the upload once on a transient failure.
@@ -291,6 +351,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: the number appearing only inside an echo string, not a real comment.
+# Why: a #N inside program output text is not a governed comment.
+# From: PR #1546
 @test "passes when the only mention of the number is inside a double-quoted string literal, not a real comment" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -302,6 +365,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: a string-literal mention followed by a real duplicate comment on the same line.
+# Why: the string match must not swallow the rest of the line and hide the real violation after it.
+# From: PR #1546
 @test "fails when a line has both a string-literal mention AND a real trailing comment repeating the number" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -314,6 +380,9 @@ EOF
     [[ "$output" == *"example.sh:3"* ]] || fail "did not name the offending line (first occurrence in a string must not swallow a later real comment on the same line): $output"
 }
 
+# What: the single-quote variant of the double-quote test above.
+# Why: single and double quotes must both be tracked as string delimiters.
+# From: PR #1546
 @test "passes when the only mention of the number is inside a single-quoted string literal" {
     cat > "$fixture_root/example.sh" <<'EOF'
 #!/usr/bin/env bash
@@ -325,6 +394,9 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: a contraction (fluent-bit's) before a real duplicate reference on the same line.
+# Why: a bare apostrophe must only open a string when not preceded by a word character, or the contraction would wrongly swallow the real duplicate after it.
+# From: PR #1546
 @test "fails on a real comment duplicate even when an earlier English contraction/possessive apostrophe appears on the same line" {
     cat > "$fixture_root/example.yml" <<'EOF'
 volumes:
@@ -338,6 +410,9 @@ EOF
     [[ "$output" == *"example.yml:4"* ]] || fail "a contraction apostrophe ('fluent-bit's') must not be misread as an unterminated string that swallows the real duplicate later on the line: $output"
 }
 
+# What: a contraction with no duplicate number anywhere on the line.
+# Why: confirms the apostrophe-adjacency rule doesn't itself cause a false positive.
+# From: PR #1546
 @test "passes on a comment with a contraction apostrophe and no real duplicate reference" {
     cat > "$fixture_root/example.yml" <<'EOF'
 volumes:
@@ -349,12 +424,11 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+# What: runs the real guard against the real repo tree, not a fixture.
+# Why: an exact-status assertion here (not substring matching) is the only
+#   thing that catches a real, repo-wide regression, not just fixture bugs.
+# From: PR #1546
 @test "the guard also passes when pointed at the real repository tree" {
-    # What: Runs the real guard against the real repo tree.
-    # Why: All 46 pre-existing check-3 findings this PR's own fixed detection
-    #   logic surfaced were fixed in the same PR (see body); a substring-only
-    #   assertion here previously masked exactly this kind of regression.
-    # From: PR #1546
     run bash "$script" "$repo_root"
     [ "$status" -eq 0 ] || fail "real repo tree is not clean per this guard: $output"
 }
