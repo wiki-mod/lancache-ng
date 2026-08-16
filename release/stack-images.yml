@@ -1,26 +1,17 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Release manifest: declares the first-party runtime/tooling/metadata images,
-# their supported platforms and source Dockerfiles, the external
-# (third-party) images used by supported deploy profiles, the mutable/
-# immutable tag channels (sha, nightly, release candidate, stable, latest),
-# and the image retention policy. Consumed by the release/promotion CI
-# workflow and validated by scripts/untracked/validate-stack-images.sh.
+# What: release manifest -- first-party/external images, tag channels,
+# and the image retention policy.
+# Why: consumed by the release/promotion CI workflow and
+# scripts/untracked/validate-stack-images.sh as the single source of release state.
+# From: PR #432
 #
-# CHANNEL/BRANCH MODEL (#825/#1141, decided 2026-07-23; current_dev's own
-# nightly publishing model changed again in #1254/#1255, 2026-07-25): master
-# publishes `latest` continuously from its own tip; current_dev (the
-# permanent active-development branch) publishes `nightly` once a day
-# (01:00 UTC) plus on-demand, gated on a full green build+scan -- NOT
-# continuously on every push anymore, see docs/release-versioning.md's
-# "Branch/channel model" section and nightly-refresh.yml; archived vY.X.Z
-# release branches take deliberate backports but publish no live channel at
-# all. The `dev` channel that used to be published from a vX.Y.Z branch is
-# retired -- see docs/release-versioning.md's "Retired: the dev channel" note
-# for the full history and setup.sh's validate_lancache_image_channel for the
-# operator-facing hard cut (mirrors the earlier edge -> nightly rename
-# precedent).
+# What: master publishes `latest` continuously; current_dev publishes
+# `nightly` once daily plus on-demand, gated on a green build+scan.
+# Why: see docs/release-versioning.md's "Branch/channel model" section
+# and nightly-refresh.yml for the full current mechanism.
+# From: PR #1142 | PR #1251
 schema: stack-images/v1
 generated_from: origin/master
 registry: ghcr.io
@@ -91,11 +82,10 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # deploy/quickstart/docker-compose.yml defines a `dhcp` service too
-      # (confirmed 2026-08-06, issue #849 dhcp-proxy.md finding #12) --
-      # this entry was never updated when the quickstart profile grew a
-      # Kea/dnsmasq-proxy DHCP path of its own, so
-      # scripts/untracked/validate-stack-images.sh had nothing to check it against.
+      # What: deploy/quickstart/docker-compose.yml defines a `dhcp` too.
+      # Why: never updated when quickstart grew its own Kea/dnsmasq-proxy
+      # DHCP path, so scripts/untracked/validate-stack-images.sh had nothing to check.
+      # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: dhcp-proxy
     image: ghcr.io/wiki-mod/lancache-ng/dhcp-proxy
@@ -105,7 +95,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # Same gap as dhcp above (issue #849 dhcp-proxy.md finding #12).
+      # What: same gap as dhcp above.
+      # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: ntp
     image: ghcr.io/wiki-mod/lancache-ng/ntp
@@ -115,9 +106,8 @@ runtime:
       - linux/arm64
     compose:
       - deploy/prod/docker-compose.yml
-      # Same gap as dhcp/dhcp-proxy above, found while fixing those two
-      # (AG-WF-011: same failure class, same file) -- deploy/quickstart/
-      # docker-compose.yml defines an `ntp` service too.
+      # What: same gap as dhcp/dhcp-proxy above (AG-WF-011 failure class).
+      # From: Issue #849
       - deploy/quickstart/docker-compose.yml
   - name: ui
     image: ghcr.io/wiki-mod/lancache-ng/ui
@@ -148,6 +138,21 @@ tooling:
       - .github/workflows/build-push.yml
       - docs/self-hosted-actions-runner.md
       - docs/ui-rust-dev-checks.md
+  - name: utilities
+    image: ghcr.io/wiki-mod/lancache-ng/utilities
+    source: services/utilities/Dockerfile
+    platforms:
+      - linux/amd64
+      - linux/arm64
+    description: >-
+      Shared non-compiler CLI-tools image (curl, nano, lsof, ripgrep,
+      findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd),
+      meant for COPY --from= consumption by other first-party images
+      instead of each one independently installing/building its own copy
+      (issue #1556). No live consumer yet -- migrating individual services
+      to COPY --from= this image is a deliberate, separate follow-up step,
+      not part of this manifest entry's own scope.
+    consumers: []
 metadata:
   - name: stack
     image: ghcr.io/wiki-mod/lancache-ng/stack
@@ -178,9 +183,11 @@ legacy:
     note: >-
       The previously separate, third-party-pinned syslog-ng image
       (balabit/syslog-ng:latest) is replaced by Alpine's own stable-repo
-      syslog-ng package (4.7.1-r1 on Alpine 3.20), bundled into this
-      project's own first-party syslog image (services/syslog/Dockerfile)
-      alongside fluent-bit. No external pull of this image happens anymore.
+      syslog-ng package (4.7.1-r1 on Alpine 3.20 at the original migration,
+      now 4.11.0-r0 on Alpine 3.24 following issue #1554's base-image pin
+      sync), bundled into this project's own first-party syslog image
+      (services/syslog/Dockerfile) alongside fluent-bit. No external pull of
+      this image happens anymore.
 external:
   - name: docker-socket-proxy
     image: tecnativa/docker-socket-proxy@sha256:1f3a6f303320723d199d2316a3e82b2e2685d86c275d5e3deeaf182573b47476

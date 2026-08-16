@@ -101,6 +101,11 @@ concurrency:
 
 env:
   BUILD_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools
+  # What: declares the same short-SHA length as build-push.yml's own env.
+  # Why: Actions has no mechanism to share an env value across workflow
+  #   files, so both copies must be kept equal by hand.
+  # From: Issue #1095 (G2) | PR #1503
+  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   # run_id-run_attempt suffixed, not a fixed name: build-tools and
   # build-tools-arm64 each load a *local* scan image onto their own runner's
   # Docker daemon, and the self-hosted amd64 runner in particular is reused
@@ -327,7 +332,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-amd64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Issue #1147: this job's local Buildx cache (see "Prepare local Buildx
@@ -423,6 +434,7 @@ jobs:
             cargo
             cargo-audit
             cargo-tarpaulin
+            ccache
             clippy-driver
             dig
             distcc
@@ -446,6 +458,7 @@ jobs:
           cargo-audit --version
           cargo tarpaulin --version
           cargo-tarpaulin --version
+          ccache --version
           sccache --version
           actionlint --version
           bats --version
@@ -569,10 +582,24 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
+      # What: Scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
+      # Why: this exact step is where PR #1503/#1500 hit a DB-download
+      # failure with zero retry anywhere.
+      # From: PR #1542, Issue #1535
       - name: Scan local build-tools amd64 image with Trivy
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Empty (not the real secret) on pull_request.
+          # Why: this step runs on every same-repo PR, which also executes
+          # its own trivy-scan-retry copy -- unlike GITHUB_TOKEN, the
+          # long-lived Docker Hub credential has no automatic per-run scope.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_AMD64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -681,11 +708,18 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -837,7 +871,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${GITHUB_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'image=%s:sha-%s-standalone-arm64\n' "$BUILD_TOOLS_IMAGE" "$short_sha" >> "$GITHUB_OUTPUT"
 
       # Issue #1147: same reasoning as build-tools's own identically-named
@@ -889,6 +929,7 @@ jobs:
             cargo
             cargo-audit
             cargo-tarpaulin
+            ccache
             clippy-driver
             dig
             distcc
@@ -912,6 +953,7 @@ jobs:
           cargo-audit --version
           cargo tarpaulin --version
           cargo-tarpaulin --version
+          ccache --version
           sccache --version
           actionlint --version
           bats --version
@@ -923,10 +965,19 @@ jobs:
           docker compose version
           '
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan local build-tools arm64 image with Trivy
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          # Empty on pull_request -- same PR-branch credential-exfiltration
+          # gate as the amd64 leg above (see its comment).
+          dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
+          dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -969,11 +1020,18 @@ jobs:
           cache-from: type=gha,scope=build-tools-arm64
           cache-to: type=gha,scope=build-tools-arm64,mode=max
 
+      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
+      # #1535): see .github/actions/trivy-scan-retry's own header comment.
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        timeout-minutes: 20
-        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        timeout-minutes: 50
+        uses: ./.github/actions/trivy-scan-retry
         with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -1066,8 +1124,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          short_sha="${GITHUB_SHA::7}"
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           amd64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-amd64"
           arm64_image="${BUILD_TOOLS_IMAGE}:sha-${short_sha}-standalone-arm64"
           source_tag="${BUILD_TOOLS_IMAGE}:sha-${short_sha}"
@@ -1220,6 +1283,8 @@ jobs:
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:${branch_tag}" "$source_ref"
           if [ "$REF_NAME" = "$DEFAULT_BRANCH" ]; then
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:latest" "$source_ref"
+          elif [ "$REF_NAME" = "current_dev" ]; then
+            ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools create --prefer-index=false -t "${BUILD_TOOLS_IMAGE}:nightly" "$source_ref"
           fi
 
       # Same leak as the other two jobs' own "Remove buildx builder" steps:

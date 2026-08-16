@@ -97,6 +97,15 @@ done
 #     script). Revisit moving musl-gcc from here into
 #     smoke_test_image()'s required_tools once a real consumer simulation
 #     script depends on it directly.
+#
+#     ccache went through this exact same chicken-and-egg window and was
+#     deliberately excluded here for the identical reason while the
+#     bootstrap gap was open. It has since been added to
+#     smoke_test_image()'s own required_tools, so it is a real,
+#     permanently-installed, consumer-verified tool now -- no longer listed
+#     here, since the direction-1 loop below already finds it covered by
+#     smoke_tools and never reaches this list.
+#     From: Issue #887
 EXCLUDED_TOOLS=(
   # Opt-in (EXTRA_REQUIRED_TOOLS)
   cargo-tarpaulin

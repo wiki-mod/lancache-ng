@@ -138,9 +138,16 @@
 # have this function tell a job log the registry positively confirmed
 # something it was never even asked, which is a worse failure than the
 # original ambiguous wording this whole classifier exists to improve on.
-# Anchoring to "manifest"/"no such manifest"/NAME_UNKNOWN keeps the match
-# specific to an actual registry response instead of any shell-level
-# "not found" text.
+# Anchoring to "manifest"/"no such manifest"/NAME_UNKNOWN, or to buildx's own
+# `^ERROR: ...: not found$` line shape (see the dedicated comment right above
+# that alternative in the pattern below), keeps the match specific to an
+# actual registry response instead of any shell-level "not found" text.
+#
+# What: Added a 4th alternative, `^ERROR:.*: not found$`.
+# Why: buildx's real wording for a missing GHCR tag is `ERROR: <ref>: not
+# found`, not "manifest unknown" -- verified live on two real buildx builds;
+# this misclassification made every touched-service wait hard-fail at ~95s.
+# From: Issue #1581
 #
 # Deliberately conservative in the other direction too: text this hasn't
 # seen before falls through to "everything else" (return 1, the original
@@ -164,7 +171,10 @@ _sif_inspect_failure_is_confirmed_absence() {
   # (underscore, all-caps), but a human-readable message wrapping it can
   # render the same words space-separated -- match both rather than only the
   # shape this project has actually observed so far.
-  grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown' <<<"$stderr_text"
+  # `^ERROR:.*: not found$`: buildx's own real wording for a missing GHCR
+  # tag/manifest (see Issue #1581 comment above) -- anchored to buildx's
+  # "ERROR: " line prefix, never matching a bare shell "command not found".
+  grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown\|^ERROR:.*: not found$' <<<"$stderr_text"
 }
 
 # _sif_inspect_attempt <err_file> <args...>
@@ -195,6 +205,13 @@ _sif_inspect_attempt() {
   err_text="$(cat "$err_file" 2>/dev/null)"
   if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
     return "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
+  fi
+  # What: Echoes the real stderr instead of only returning 1 (discarding it).
+  # Why: previously undiagnosable from the job log alone -- Issue #1581's own
+  # root cause needed live reproduction against a real runner to find.
+  # From: Issue #1581
+  if [[ -n "$err_text" ]]; then
+    echo "docker buildx imagetools inspect failed with stderr not recognized as a confirmed absence: $err_text" >&2
   fi
   return 1
 }

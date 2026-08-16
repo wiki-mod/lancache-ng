@@ -605,25 +605,38 @@ of primary-mutates-before-local-guard risk that the `--rotate` preflight
 comment above (issue #665) already documents for the `--rotate` path itself;
 this repeat-without-rotate path has no equivalent guard on the primary side.
 
-**Test coverage — the weakest in the file.** `tests/bats/setup_secondary_docker_compose.bats`
+**Test coverage — mostly text-pattern, with one real-execution exception.**
+`tests/bats/setup_secondary_docker_compose.bats`'s docker-compose.yml group
 is a REGRESSION TEST FOR A TEXT PATTERN, not a functional test: it locates
 the `write_generated_runtime_file "${secondary_dir}/docker-compose.yml"
 <<EOF` line in `setup.sh`'s own SOURCE TEXT via `grep -n`, extracts the
 following ~100 lines with `sed`, and `grep`s that extracted text for the
 literal strings `healthcheck:`, the exact `test: [...]` line, `interval:
 30s`, etc. (guards a #652 regression where the healthcheck block was
-dropped). It never invokes `cmd_secondary` as a function, never runs `setup.sh
-secondary` as a subprocess, and proves nothing about the argument parsing,
-JSON-response handling, image-tag resolution precedence chain, or the
-`--rotate` logic. `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` (#583)
-IS a real, live, multi-container integration test — but it drives the Admin
-UI's HTTP routes directly (`curl … /api/secondary/register`), deliberately
-bypassing `setup.sh secondary` entirely, to prove the NATS auth-callout
-backend property (unique per-secondary credentials, revocation on delete,
-rotation) independent of the CLI. **Net result: `cmd_secondary` itself — the
-actual bash command an operator runs — has no test that ever executes it,
-at any level**, beyond `bash -n`/shellcheck syntax checking and one grep
-against its own source text.
+dropped), and this same file's argument-validation/HTTP-503-message/argv-vs-
+stdin tests (issue #866, PR #881, #955/#956) are likewise grep-only. None of
+these invoke `cmd_secondary` as a function or run `setup.sh secondary` as a
+subprocess, and they prove nothing about the argument parsing, image-tag
+resolution precedence chain, or the `--rotate` logic.
+
+The one exception, added for issue #1558: this file's register_secondary
+JSON-body-escaping tests extract the real "Registering secondary" fragment
+(the escaping + JSON-body printf + curl call, verbatim from `cmd_secondary`'s
+own source) and execute it for real in a `bash -c` child against a mocked
+`curl`, asserting on the actual bytes the mock received. This is genuine
+execution of that one fragment, not a source-text grep — but it is still not
+`cmd_secondary` as a whole, nor `setup.sh secondary` as a subprocess; the
+argument parsing, JSON-response handling, image-tag resolution precedence
+chain, and `--rotate` logic remain untested at that level.
+`scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh` (#583) IS a real, live,
+multi-container integration test — but it drives the Admin UI's HTTP routes
+directly (`curl … /api/secondary/register`), deliberately bypassing
+`setup.sh secondary` entirely, to prove the NATS auth-callout backend
+property (unique per-secondary credentials, revocation on delete, rotation)
+independent of the CLI. **Net result: `cmd_secondary` as a whole — the
+actual bash command an operator runs — still has no test that executes it
+end-to-end**, beyond `bash -n`/shellcheck syntax checking, source-text
+greps, and the one real-execution fragment above.
 
 ---
 
@@ -758,7 +771,7 @@ its coverage claim is narrower than the file's actual test suite.
 | `create-logs-for-issue` | — | ✅ (`setup_create_logs_for_issue.bats`, real functions, mocked docker) | — | — (real Docker E2E not covered, but function coverage is strong) |
 | `backup` | ✅ (as setup step in Phase 3/4a/4b) | ✅ (`setup_backup_restore_safety.bats`) | — | — |
 | `restore` | ✅ Phase 4a, 4b, + indirectly via rollback in Phase 3 | ✅ (`setup_restore_stale_env_local.bats`, `setup_backup_restore_safety.bats`) | — | — |
-| `secondary` | — (NATS backend integration test bypasses the CLI) | — | ✅ (`setup_secondary_docker_compose.bats` greps source text only) | effectively ✅ — `cmd_secondary` itself never executes in any test |
+| `secondary` | — (NATS backend integration test bypasses the CLI) | — | ✅ (`setup_secondary_docker_compose.bats`: mostly source-text greps, plus one real-execution fragment test for #1558) | effectively ✅ — `cmd_secondary` as a whole never executes end-to-end in any test |
 | `update-ip` | — | ✅ (`setup_update_ip_install_dir.bats`, path-resolution only) | — | partial — prompt flow + restart |
 | `reset-to-last-known-good-config` | ✅ (`setup-reset-kea-config-simulation.sh`, `kea` target only) | — | — | `dns`/`pdns` target: unimplemented (not a test gap, #628/#836) |
 | `help` | N/A (static text) | N/A | N/A | N/A |

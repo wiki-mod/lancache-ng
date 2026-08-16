@@ -65,10 +65,13 @@ look. At minimum, each pull request should explain:
 - which checks were run, with the exact commands
 - any remaining risk or follow-up work
 
-The template now exposes visible `Linked issues` and `Risk / Rollback /
+The template now exposes visible `Linked Issues` and `Risk / Rollback /
 Follow-up` sections. Fill those in directly instead of relying on hidden
 comments so the rendered PR body always surfaces the tracking and risk
-context reviewers need.
+context reviewers need. `Linked Issues`' exact casing matters: both
+`current-dev-auto-close.yml`'s closing-keyword scanner and
+`scripts/validate-pr-template.sh`'s required-section check match it
+case-sensitively (issue #1496).
 - if the change touches build, CI, or release automation, whether any accelerator (`sccache`, `sccache-dist`, `distcc`, `distcc-pump`, or Buildx cache) is optional, preferred, or a gate
 - whether a GitHub-hosted fallback still works without LAN-only cache assumptions
 

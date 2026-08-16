@@ -81,6 +81,7 @@ smoke_test_image() {
       rustfmt
       clippy-driver
       sccache
+      ccache
       cargo-audit
       shellcheck
       actionlint

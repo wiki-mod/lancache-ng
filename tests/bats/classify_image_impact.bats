@@ -85,6 +85,18 @@ val() {
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
 
+# #1556: utilities is the shared non-compiler CLI-tools image
+# (curl/nano/lsof/ripgrep/findutils/coreutils/gettext-envsubst/jq/
+# ca-certificates/zstd) wired into the build matrix. Mirrors the
+# independence check above for the other per-service booleans.
+@test "utilities change: utilities true, other service flags stay false" {
+    run_classify "services/utilities/Dockerfile"
+    [ "$(val utilities)" = "true" ]
+    [ "$(val proxy)" = "false" ]
+    [ "$(val build_tools)" = "false" ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+}
+
 @test "build-push.yml change sets workflow true; an unrelated workflow does not" {
     run_classify ".github/workflows/build-push.yml"
     [ "$(val workflow)" = "true" ]
@@ -212,6 +224,7 @@ val() {
     [ "$(val dhcp_proxy)" = "true" ]
     [ "$(val build_tools)" = "true" ]
     [ "$(val syslog)" = "true" ]
+    [ "$(val utilities)" = "true" ]
     [ "$(val workflow)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }

@@ -26,6 +26,15 @@
 # follow-up that made this the single implementation. The whole point of
 # #715 is to REUSE that exact pr-<N>-sha-<short> mechanism, never invent a
 # second, divergent one.
+#
+# What: self-sources docker-metadata.sh inline, with no intermediate
+#   `script_dir`-style variable.
+# Why: this file is itself sourced by callers that already have their own
+#   `script_dir` in scope (e.g. plan-deep-validation.sh); a bare top-level
+#   assignment here would silently overwrite it.
+# From: Issue #1095 (G2) | PR #1503
+# shellcheck source=scripts/lib/docker-metadata.sh
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"
 
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
 # channel it publishes to. Mirrors build-push.yml's promote/validate mapping
@@ -104,7 +113,15 @@ vit_resolve_tag() {
     fi
 
     if [[ "$(vit_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
-        printf 'pr-%s-sha-%s\n' "$pr_number" "${build_sha:0:7}"
+        # What: assigns the short SHA to a local before printf, instead of
+        #   embedding the call in printf's argument list.
+        # Why: printf's own exit status stays 0 even if a command
+        #   substitution inside its argument fails, so `set -e` cannot catch
+        #   a failure embedded there (Rule-Ref: AG-VAL-030).
+        # From: Issue #1095 (G2) | PR #1503
+        local pr_short_sha
+        pr_short_sha="$(dmeta_short_sha "$build_sha")" || return 1
+        printf 'pr-%s-sha-%s\n' "$pr_number" "$pr_short_sha"
         return 0
     fi
 

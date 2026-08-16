@@ -918,14 +918,50 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   skip the check instead of failing it); confirmed with a real run against a
   non-git directory that the step now exits non-zero rather than silently
   succeeding. New standing check:
-  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
-  failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
+  `tests/bats/gc_pr_staging_images.bats` (sparse-checkout-restore test group,
+  merged in from the former standalone
+  `gc_pr_staging_images_sparse_checkout_restore.bats` as part of issue #1557)
+  regresses the failure (plain `disable` leaving `core.sparseCheckout` set), every stage of
   the fix including the always-reproducible case of a skip-worktree bit that
   `disable` alone does not clear, and the fail-closed behavior itself, against
   a throwaway local git repository — no network or real clone needed. A
   durable guard against a *future* self-hosted workflow reintroducing a narrow
   `sparse-checkout` input without a matching restore step does not exist yet;
   recorded as an open gap in Coverage Assessment below.
+
+### Additions dated 2026-08-15 (real incident since the 2026-08-07 survey above)
+
+- **`current-dev-auto-close.yml` closing-keyword scanner reading the whole PR
+  body** (issue #1496, fixed) — the scanner matched `keyword #N` phrases
+  anywhere in a merged PR's body, with no way to distinguish a real closing
+  instruction from a worked example, quotation, or incident description
+  elsewhere in the body. This class of bug produced two confirmed real
+  false auto-closes of issue #1095: once via PR #1443's own negated-sentence
+  prose (before a same-sentence negation lookbehind existed), and again via
+  PR #1491's own worked-examples section (the PR that *added* that negation
+  lookbehind), which still matched nine unrelated `#N` references purely
+  from illustrative prose. Fix (this PR): the scanner now reads only the
+  exact `## Linked Issues` heading's section (line-based match, up to the
+  next level-2 heading), failing closed to "close nothing" when that
+  section is missing or duplicated; `scripts/validate-pr-template.sh` makes
+  the section required/validated for non-draft PRs. Proven via four real
+  `workflow_dispatch` dry-run executions against this branch's pushed code
+  (commit `97f26d1d`, byte-identical to the runs' actual commit `c51bac87`
+  for both touched files — confirmed via `git diff c51bac87 97f26d1d --
+  .github/workflows/current-dev-auto-close.yml
+  scripts/validate-pr-template.sh`, empty output): real run `31904977220`
+  replays PR #1491 itself and now finds zero matches; real run `31905211266`
+  proves multiple legitimate `Closes`/`Fixes` references and a non-closing
+  `Refs` reference all resolve correctly; real runs `31905524192` and
+  `31905565459` prove the duplicated- and missing-heading fail-closed paths
+  respectively, against a disposable scratch PR opened and deleted
+  immediately after (see PR #1580's Validation section for the full
+  transcript). **New standing check: none yet** — this workflow's scanning
+  logic is inline `actions/github-script` JS with no local Node tooling in
+  this project's build-tools image, and `scripts/validate-pr-template.sh`
+  has no existing bats coverage at all to extend (pre-existing gap, not
+  introduced by this fix); recorded as an open gap in Coverage Assessment
+  below rather than left unautomated silently.
 
 ## Coverage Assessment (from this survey — be honest about gaps)
 
@@ -1109,6 +1145,24 @@ explicit pass:**
   check rather than relying on the fifth migration's agent to re-derive this list from
   scratch again.
 
+- **`current-dev-auto-close.yml`'s `## Linked Issues`-only scanner (issue
+  #1496) and `scripts/validate-pr-template.sh`'s new required-section check
+  for it have no standing automated regression test.** The scanner's
+  extraction/fail-closed logic is inline `actions/github-script` JS with no
+  local Node tooling in this project's build-tools image, so it cannot be
+  unit-tested the way a standalone shell script can; `validate-pr-template.sh`
+  itself has zero bats coverage today for any of its required sections, not
+  only the new one, a pre-existing gap this fix did not introduce or close.
+  The four real `workflow_dispatch` dry-run executions recorded in this
+  document's 2026-08-15 addition above and in PR #1580's own Validation
+  section are a one-time manual proof, not a repeatable CI guard — a future
+  regression in this scanner would not be caught automatically. A future PR
+  should add bats coverage for `validate-pr-template.sh` (extending it into
+  the existing `tests/bats/check_pr_tracking_metadata.bats`-style sibling
+  pattern, per `AG-CODE-013`) and, separately, evaluate whether the
+  `current-dev-auto-close.yml` extraction logic is worth factoring out of
+  the inline script into a testable shell/script form.
+
 **Known, accepted limitations (not fixable without larger rework — recorded per
 `AG-VAL-029`'s "genuinely unautomatable/impractical" carve-out, not silently
 omitted):**
@@ -1169,8 +1223,10 @@ omitted):**
   signal: a pre-fix build cannot produce that certificate for that SNI at all.
 - **No repo-wide guard against a future workflow reintroducing an unrestored
   narrow `sparse-checkout` on a self-hosted job** (2026-08-07, issue #1095) —
-  `tests/bats/gc_pr_staging_images_sparse_checkout_restore.bats` regresses the
-  specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
+  `tests/bats/gc_pr_staging_images.bats` (sparse-checkout-restore test group,
+  merged in from the former standalone
+  `gc_pr_staging_images_sparse_checkout_restore.bats` as part of issue #1557)
+  regresses the specific failure and fix in `gc-pr-staging-images.yml` (the one workflow in
   this repo that currently sets a `sparse-checkout` input), but nothing checks
   the repo's workflow files themselves for a *new* `sparse-checkout` input added
   to some other self-hosted job without an equivalent restore step. A grep-based
@@ -1243,6 +1299,60 @@ omitted):**
     a future one) ever exposes an on-demand, scriptable review trigger that
     would make a real CI check practical.
 
+- **Recorded exception (2026-08-08, issue #1095 G2, `AGENTS.md`'s AG-VAL-029
+  Known-Gaps entries): two `set -e`/`$?`-dependent construct shapes stay
+  manual-review-only, no durable CI guard.** Full technical detail lives in
+  `AGENTS.md`'s Known Gaps section under `AG-VAL-029 assessment
+  (2026-08-08, ...)` (two entries); this entry exists so this document's own
+  Coverage Assessment does not silently omit them, per AG-VAL-029's own
+  requirement that an unautomatable case be recorded here, not only
+  elsewhere.
+  - **Scope**: (1) a fail-closed helper's `$(...)` call embedded directly
+    inside a larger command's argument list (`printf`/`echo` with the
+    substitution buried in an argument) instead of assigned to its own
+    variable first; (2) a `scripts/lib/*.sh` file that is sourced elsewhere
+    and sets a bare, non-`local` top-level variable whose name can collide
+    with a caller's own identically-named variable.
+  - **Reason**: both are call-site *shapes*, not fixed function/variable
+    names — a denylist would miss future instances, and a shape-based regex
+    (any `$(...)` nested in another command's arguments; any bare top-level
+    assignment in a sourced lib file) flags the overwhelming majority of
+    ordinary, harmless code in this codebase as a false positive. This is
+    the same class of judgment call AG-VAL-028 already documents as
+    resisting cheap, reliable mechanical detection for the AG-CODE-* family.
+  - **Tracking**: `AGENTS.md`'s Known Gaps section, `AG-VAL-029 assessment
+    (2026-08-08, ...)` entries (two, immediately following the sparse-checkout
+    entry above in that file's own list); issue #1095's G2 finding.
+  - **Validation**: the two real instances that prompted this (embedded-call
+    shape: `scripts/lib/validation-image-tag.sh`'s `vit_resolve_tag()` and
+    `.github/workflows/build-push-hosted-fallback.yml`'s short-SHA step;
+    top-level-variable-collision shape: `scripts/lib/validation-image-tag.sh`
+    self-sourcing `scripts/lib/docker-metadata.sh` and clobbering
+    `scripts/plan-deep-validation.sh`'s own `script_dir`) are each fixed and
+    covered by their own bats regression case. The embedded-call shape is
+    covered directly by `tests/bats/docker_metadata.bats` (the
+    `set -euo pipefail` reproduction of the hosted-fallback workflow's own
+    shell shape) and `tests/bats/validation_image_tag.bats` (`vit_resolve_tag()`
+    exercised in isolation). The `script_dir` collision specifically is
+    **not** covered by either of those two files -- both source the affected
+    libraries directly and never set a caller-owned `script_dir` first, so
+    neither can observe a clobber of it. That collision's actual regression
+    coverage is `tests/bats/plan_deep_validation.bats`, which runs
+    `scripts/plan-deep-validation.sh` end to end as a real subprocess (not a
+    sourced function call) and therefore does set `script_dir` before
+    sourcing `validation-image-tag.sh`, then still depends on that same
+    `script_dir` afterward for `detect-full-setup-changes.sh` -- a clobber
+    would make that later step resolve the wrong path and fail the test's
+    `status -eq 0` assertion. No standing CI guard exists against a *future*
+    instance of either shape; manual code review is the only current check.
+  - **Non-Expansion**: this exception covers only these two named call-site
+    shapes as they exist today. A future instance of either shape found
+    elsewhere in the repo is a new occurrence to fix on its own merits
+    (Rule-Ref: AG-WF-011), not automatically covered by this entry, and a
+    third occurrence of the same underlying pattern should prompt revisiting
+    whether a mechanical guard is worth the false-positive cost after all
+    (Rule-Ref: AG-WF-025).
+
 ---
 
 ## Appendix — Reusable Scripts/Commands Index
@@ -1260,6 +1370,7 @@ omitted):**
 | `scripts/tracked/check-workflow-service-lists.sh` | Hardcoded service arrays stay in sync across workflow files |
 | `scripts/tracked/check-naming-consistency.sh` | Container-name/allowlist/env-var naming contract (`docs/naming-conventions.md`) |
 | `scripts/tracked/check-file-headers.sh` | File-header contract (`AG-HDR-*`) |
+| `scripts/untracked/check-trivy-action-direct-usage.sh` | `aquasecurity/trivy-action` is only ever invoked through `.github/actions/trivy-scan-retry` (issue #1535, AG-CI-013, quoted or unquoted `uses:` scalars alike), and every real call site (`.github/workflows` and `.github/actions`) sets both `dockerhub-username`/`dockerhub-password` to a real, non-empty `secrets.*`/`inputs.*` reference, not merely present (issue #1535 follow-up) |
 | `scripts/untracked/classify-image-impact.sh` | The single source of truth for "which subsystem does this diff touch" — reused by this document's own staleness reasoning, `detect-changes`, and the `promote` job's version-bump logic |
 | `scripts/untracked/validate-stack-images.sh` | Release-notes/workflow status-line consistency |
 | `scripts/untracked/select-build-tools-image.sh` | Resolves the pinned build-tools image/digest for every container-based check above |

@@ -89,6 +89,9 @@ done
 require_name "$tooling_names" build-tools tooling
 require_manifest_platform build-tools linux/amd64
 require_manifest_platform build-tools linux/arm64
+require_name "$tooling_names" utilities tooling
+require_manifest_platform utilities linux/amd64
+require_manifest_platform utilities linux/arm64
 require_name "$metadata_names" stack metadata
 require_manifest_platform stack linux/amd64
 require_manifest_platform stack linux/arm64
@@ -112,7 +115,8 @@ for dockerfile in \
   services/ntp/Dockerfile \
   services/ui/Dockerfile \
   services/syslog/Dockerfile \
-  tools/build-tools/Dockerfile
+  tools/build-tools/Dockerfile \
+  services/utilities/Dockerfile
 do
   require_file "$dockerfile"
 done
@@ -219,13 +223,13 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
 require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-tools.yml \
   'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
-# #1428: syslog joined build-push.yml's own promotion/release
-# services=(...) arrays alongside ntp -- this pattern must stay byte-for-byte
-# in sync with those arrays (see check-workflow-service-lists.sh for the
-# broader, build-matrix-derived guard that keeps every OTHER services=(...)
-# copy in this repo in sync; this one specific literal is a narrower,
-# release/promotion-scoped check that guard does not reach).
-require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools\)' \
+# #1428/#1556: syslog, then utilities, joined build-push.yml's own
+# promotion/release services=(...) arrays -- this pattern must stay
+# byte-for-byte in sync with those arrays (see check-workflow-service-lists.sh
+# for the broader, build-matrix-derived guard that keeps every OTHER
+# services=(...) copy in this repo in sync; this one specific literal is a
+# narrower, release/promotion-scoped check that guard does not reach).
+require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities\)' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 # release-sbom's own `service: [...]` flow-sequence matrix is a fourth,

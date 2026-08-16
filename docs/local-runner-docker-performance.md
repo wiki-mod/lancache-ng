@@ -178,6 +178,60 @@ Important:
 - if the remote compiler hosts are unreachable, builds should fail fast
 - keep the variable separate from the `SCCACHE_REDIS_URL` secret
 
+## Rust builds and ccache (distcc C-dependency cache)
+
+`services/dns/Dockerfile` can layer `ccache` in front of distcc for its
+C-dependency compile path (`ring`, via `rustls`), so a rebuild against
+unchanged C sources reuses a previous compile's result from Redis instead of
+recompiling and redistributing it every time. This is DNS-only today:
+`services/ui/Dockerfile`'s distcc wrapper does not understand ccache's
+`CCACHE_PREFIX` invocation convention yet.
+
+Important rules:
+
+- ccache is enabled only once distcc itself is already enabled, and only when
+  a ccache Redis endpoint (BuildKit secret `ccache_redis_url`) is present --
+  it automatically reuses the `SCCACHE_REDIS_URL` secret already documented
+  above for sccache, not a second Redis URL
+- once both are enabled, `services/dns/Dockerfile` exports
+  `CC="ccache <real compiler>"` (not the plain `CC=distcc` every other
+  distcc-enabled builder uses), with `CCACHE_PREFIX=distcc` so ccache still
+  dispatches actual cache misses through distcc
+- use `CCACHE_COMPILERCHECK=content`, not the ccache default of `mtime`,
+  since a build-tools image rebuild changes the compiler's mtime but not
+  necessarily its output
+- `CCACHE_EXTRAFILES` folds two files into every cache key: the resolved
+  `$BUILD_TOOLS_IMAGE` reference (so a client-side toolchain upgrade always
+  produces a fresh key instead of reusing an object built by an older client
+  compiler), and a verified remote toolchain identity read back from
+  `configure_distcc()`'s own probe compile -- the `.comment` ELF section
+  GCC/Clang embed in every object, extracted from an object that a real farm
+  host actually produced, not assumed. If a farm host's compiler is upgraded
+  between builds, the next build's probe reads a different `.comment` string
+  and the cache key changes, so a stale remote object from the old toolchain
+  cannot be served as a hit. `configure_ccache()` fails closed (plain distcc,
+  no cache layer) if that identity cannot be read for any reason
+- **known limitation:** this samples whichever single farm host answered one
+  probe compile at the start of a build. It catches a farm upgraded *between*
+  builds, but not a farm that is heterogeneous *within* one build -- e.g. if
+  `192.168.1.229` and `192.168.1.240` (both natively installed, provisioned
+  by hand, with no repository script that keeps them in lockstep) end up on
+  different compiler versions from each other at the same moment, only the
+  probe's own host is reflected in the cache key, not every host distcc might
+  route individual `ring` C files to during the real build. Keep farm host
+  compiler upgrades infrequent, deliberate, and applied to the whole pool at
+  once until a per-object remote-identity check exists
+- every ccache failure detected *before* the real Cargo build (a failed
+  probe compile, or the probe's own Redis write/read check) falls back to
+  plain distcc with no cache layer, rather than hard-failing the build; a
+  Redis error that only surfaces *during* the real build itself cannot fall
+  back after the fact, since the compile already succeeded -- that case is
+  reported as an `[INFO]` diagnostic instead (see
+  `services/dns/Dockerfile`'s post-build stats check)
+
+See issue #887 for the full mechanism and `services/dns/Dockerfile`'s own
+`configure_ccache()`/`disable_ccache()` comments for the implementation.
+
 ## Parallel jobs
 
 Parallel CI jobs can reduce wall-clock time, but they also increase load.

@@ -325,12 +325,39 @@ STUB
     [ "$status" -eq 0 ]
 }
 
+# Issue #1581: the three signatures above are the distribution-spec wording
+# this classifier originally assumed; real `docker buildx imagetools
+# inspect` against GHCR for a genuinely missing tag does not actually emit
+# any of them. Verified live (2026-08-15) against two real buildx builds
+# (local v0.36.0, runner host lancache-243's v0.35.0): both print exactly
+# this text for a nonexistent tag. Without this case, PR #1532's own
+# incident (a brand-new PR staging tag always being absent at the moment
+# wait_for_touched_image() starts polling, misclassified as an unconfirmed
+# error and failing the wait almost immediately) would regress silently.
+@test "_sif_inspect_failure_is_confirmed_absence: classifies buildx's real GHCR \"ERROR: <ref>: not found\" wording as absence" {
+    run _sif_inspect_failure_is_confirmed_absence "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"
+    [ "$status" -eq 0 ]
+}
+
 @test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a network/timeout-shaped error as absence" {
     run _sif_inspect_failure_is_confirmed_absence "failed to do request: Head https://ghcr.io/v2/...: context deadline exceeded"
     [ "$status" -eq 1 ]
     run _sif_inspect_failure_is_confirmed_absence "dial tcp: lookup ghcr.io: connection refused"
     [ "$status" -eq 1 ]
     run _sif_inspect_failure_is_confirmed_absence "unexpected status from HEAD request: 500 Internal Server Error"
+    [ "$status" -eq 1 ]
+}
+
+# Issue #1581: the new `^ERROR:.*: not found$` alternative must stay
+# anchored to buildx's own line shape, not swallow every "ERROR: ..." line
+# buildx can produce. Both lines below are real, live-reproduced
+# (2026-08-15, against ghcr.io) buildx error text from an auth failure and a
+# DNS failure respectively -- neither ends in ": not found", so neither must
+# match.
+@test "_sif_inspect_failure_is_confirmed_absence: does NOT classify a real buildx auth/DNS ERROR line as absence" {
+    run _sif_inspect_failure_is_confirmed_absence "ERROR: failed to authorize: failed to fetch anonymous token: unexpected status from GET request to https://ghcr.io/token?scope=repository%3Awiki-mod%2Flancache-ng%2Ftotally-nonexistent-service-xyz%3Apull&service=ghcr.io: 403 Forbidden"
+    [ "$status" -eq 1 ]
+    run _sif_inspect_failure_is_confirmed_absence 'ERROR: failed to do request: Head "https://ghcr.invalid-host-xyz-does-not-exist.example/v2/foo/manifests/bar": dial tcp: lookup ghcr.invalid-host-xyz-does-not-exist.example: no such host'
     [ "$status" -eq 1 ]
 }
 
@@ -365,6 +392,20 @@ STUB
     # so the bare form would abort the test before these assertions run.
     status=0
     result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/build-tools:sha-d2399ee" 2>/dev/null)" || status=$?
+    [ "$status" -eq 2 ]
+    [ -z "$result" ]
+}
+
+@test "sif_image_revision (real docker branch, no stub): buildx's real GHCR \"not found\" wording returns status 2 (Issue #1581)" {
+    # Same end-to-end shape as the confirmed-absence test above, but with the
+    # literal wording buildx actually emits (verified live, see Issue #1581)
+    # instead of the distribution-spec wording the classifier originally
+    # assumed -- this is the exact case that made every touched-service
+    # staging-image wait fail almost immediately, since a brand-new PR tag is
+    # always missing at the moment the wait starts polling.
+    fake_docker_returning_stderr "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"
+    status=0
+    result="$(sif_image_revision "ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3" 2>/dev/null)" || status=$?
     [ "$status" -eq 2 ]
     [ -z "$result" ]
 }
