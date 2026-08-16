@@ -6537,7 +6537,7 @@ jobs:
             --annotation "index:org.opencontainers.image.description=${stack_pointer_description}" \
             "$pointer_context"
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-            bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
+            bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
           stack_digest="$(digest_for_image "$stack_pointer_image")"
           [[ "$stack_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid stack pointer digest: $stack_digest"; exit 1; }
           printf 'stack_digest=%s\n' "$stack_digest" >> "$GITHUB_OUTPUT"
