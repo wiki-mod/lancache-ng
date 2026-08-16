@@ -13,7 +13,7 @@
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-repo_root=$(cd "$script_dir/.." && pwd)
+repo_root=$(cd "$script_dir/../.." && pwd)
 target_root="${1:-$repo_root}"
 cd "$target_root"
 
@@ -22,7 +22,7 @@ cd "$target_root"
 # From: Issue #1095 (G2) | PR #1503
 is_self_reference() {
     case "$1" in
-        scripts/check-short-sha-truncation.sh) return 0 ;;
+        scripts/untracked/check-short-sha-truncation.sh) return 0 ;;
         tests/bats/check_short_sha_truncation.bats) return 0 ;;
         *) return 1 ;;
     esac
