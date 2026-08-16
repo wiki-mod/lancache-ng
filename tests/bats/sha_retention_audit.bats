@@ -64,6 +64,101 @@ EOF
   [ "$output" = "3" ]
 }
 
+# The real manifest's steady state is an empty rollback_anchors list.
+@test "rollback_anchors reader succeeds with empty output on the real manifest" {
+  run sra_read_rollback_anchors "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+# A missing rollback_anchors header must fail closed, not be treated as an empty list.
+@test "rollback_anchors reader fails closed when the header is entirely absent" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  minimum_stable_releases: 3
+EOF
+  run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
+  [ "$status" -ne 0 ]
+}
+
+# Two competing list declarations are a malformed manifest in every case.
+@test "rollback_anchors reader rejects a duplicate list header" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  rollback_anchors:
+    - sha256:1111111111111111111111111111111111111111111111111111111111111111
+  rollback_anchors:
+EOF
+  run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
+  [ "$status" -ne 0 ]
+}
+
+# Declared entries come back one per line, in manifest order.
+@test "rollback_anchors reader returns declared digest entries" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  rollback_anchors:
+    - sha256:1111111111111111111111111111111111111111111111111111111111111111
+    - sha256:2222222222222222222222222222222222222222222222222222222222222222
+EOF
+  run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "sha256:1111111111111111111111111111111111111111111111111111111111111111" ]
+  [ "${lines[1]}" = "sha256:2222222222222222222222222222222222222222222222222222222222222222" ]
+}
+
+# A rollback anchor is deliberately digest-only -- a tag/ref must never pass.
+@test "rollback anchor digest format accepts only an exact sha256:<64-hex> value" {
+  run sra_is_rollback_anchor_digest "sha256:$(printf 'a%.0s' {1..64})"
+  [ "$status" -eq 0 ]
+
+  run sra_is_rollback_anchor_digest "nightly"
+  [ "$status" -ne 0 ]
+
+  run sra_is_rollback_anchor_digest "sha256:tooshort"
+  [ "$status" -ne 0 ]
+}
+
+# Membership must be exact equality, never a prefix/substring match.
+@test "rollback anchor membership check is exact, not a prefix match" {
+  anchor="sha256:$(printf 'a%.0s' {1..64})"
+  prefixed="sha256:$(printf 'a%.0s' {1..63})b"
+
+  run sra_digest_is_rollback_anchor "$anchor" "$anchor"
+  [ "$status" -eq 0 ]
+
+  run sra_digest_is_rollback_anchor "$prefixed" "$anchor"
+  [ "$status" -ne 0 ]
+}
+
+# The list validator is what both the CI static check and the live audit share.
+@test "rollback anchor list validator accepts a well-formed digest list" {
+  list="$(printf 'sha256:%s\nsha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})")"
+  run sra_validate_rollback_anchors_list "$list"
+  [ "$status" -eq 0 ]
+}
+
+# The empty steady state must validate cleanly too, never as an error.
+@test "rollback anchor list validator accepts an empty list" {
+  run sra_validate_rollback_anchors_list ""
+  [ "$status" -eq 0 ]
+}
+
+# A git tag/ref in place of a digest defeats the whole point of an immutable anchor.
+@test "rollback anchor list validator rejects a git tag/ref in place of a digest" {
+  run sra_validate_rollback_anchors_list "nightly"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not an exact sha256"* ]]
+}
+
+# A blank line in the list must be caught explicitly, not silently accepted.
+@test "rollback anchor list validator rejects a blank entry" {
+  list="$(printf 'sha256:%s\n\nsha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})")"
+  run sra_validate_rollback_anchors_list "$list"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"blank entry"* ]]
+}
+
 # Runtime and tooling retention must follow the same publisher inventory as build-push.
 @test "manifest runtime and tooling packages match the build matrix" {
   package_inventory="$(sra_manifest_packages "$repo_root/release/stack-images.yml")"
@@ -472,4 +567,21 @@ EOF
     "$repo_root/scripts/lib/github-api-retry.sh" \
     "$repo_root/.github/workflows/gc-sha-retention-audit.yml"
   [ "$status" -eq 1 ]
+}
+
+# The rollback_anchors membership check must run before the class==metadata
+# branch, which is itself the first classification decision in the loop --
+# an anchor must protect a digest regardless of what class it belongs to.
+@test "gc-sha-retention-audit.sh checks rollback_anchors before every other classification branch" {
+  anchor_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  metadata_line="$(grep -n 'class" == "metadata"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  [ -n "$anchor_line" ]
+  [ -n "$metadata_line" ]
+  [ "$anchor_line" -lt "$metadata_line" ]
+}
+
+# A declared-but-never-observed anchor must fail the whole run closed, not silently no-op.
+@test "gc-sha-retention-audit.sh fails closed on an unresolvable rollback_anchors entry" {
+  run grep -F 'does not exist as a real package version digest' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
 }

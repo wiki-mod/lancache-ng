@@ -11,6 +11,13 @@ set -euo pipefail
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 repo_root=$(cd "$script_dir/../.." && pwd)
 manifest=${1:-"$repo_root/release/stack-images.yml"}
+# What: sources sha-retention-audit.sh's shared retention-list parsing.
+# Why: this static check and gc-sha-retention-audit.sh's own read-time
+# re-validation must share one canonical rollback_anchors acceptance rule
+# (AG-CODE-011) instead of two independently-drifting regexes.
+# From: Issue #1095 | PR #1501.
+# shellcheck source=scripts/lib/sha-retention-audit.sh
+source "$repo_root/scripts/lib/sha-retention-audit.sh"
 
 # fail <message>
 # What: prints a prefixed error to stderr and exits 1.
@@ -90,6 +97,28 @@ require_grep '^retention:$' "${manifest#$repo_root/}" 'manifest must define rete
 require_grep '^  minimum_stable_releases: 3$' "${manifest#$repo_root/}" 'retention must keep at least current plus two previous stable releases'
 require_grep '^  accepted_ordinary_roots_per_package: 30$' "${manifest#$repo_root/}" 'retention must keep exactly thirty accepted ordinary root identities per first-party package'
 require_grep '^  protect_release_and_rollback_digests: true$' "${manifest#$repo_root/}" 'retention must protect release and rollback digests'
+require_grep '^  rollback_anchors:$' "${manifest#$repo_root/}" 'retention must define a rollback_anchors list (may be empty)'
+# What: validates the rollback_anchors list itself (well-formed header,
+# every entry an exact sha256:<64-hex> digest) via the shared library
+# helpers, not a second independently-drifting regex.
+# Why: this is a static, offline format check only -- it cannot prove a
+# listed digest actually exists in GHCR under its intended package; that
+# live existence check is gc-sha-retention-audit.sh's job alone.
+# From: Issue #1095 | PR #1501.
+require_rollback_anchors_format() {
+  local anchors_raw error_message
+  if anchors_raw="$(sra_read_rollback_anchors "$manifest")"; then
+    :
+  else
+    fail 'retention rollback_anchors must be a well-formed manifest list (no duplicate header)'
+  fi
+  if error_message="$(sra_validate_rollback_anchors_list "$anchors_raw")"; then
+    :
+  else
+    fail "retention rollback_anchors ${error_message}"
+  fi
+}
+require_rollback_anchors_format
 require_grep '^  deletion_policy: manual-or-approved-automation-only$' "${manifest#$repo_root/}" 'retention deletion policy must be explicit'
 require_grep '^concurrency:$' .github/workflows/build-push.yml 'build workflow must serialize write-capable package publishing'
 

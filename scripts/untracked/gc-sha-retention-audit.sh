@@ -71,6 +71,42 @@ else
   exit 1
 fi
 
+# rollback_anchors: a maintainer-curated list of exact sha256:<64-hex>
+# digests explicitly designated as protected rollback targets, independent
+# of git history, tags, or release status entirely (see
+# scripts/lib/sha-retention-audit.sh's sra_is_rollback_anchor_digest and
+# docs/release-versioning.md's Retention section for the full rationale).
+# Read and format-validated here, defensively, even though
+# scripts/untracked/validate-stack-images.sh already enforces the exact same
+# shape statically in CI: this script has no guarantee that check ran first
+# against the exact manifest content it is about to consume, so it fails
+# closed on its own rather than trusting an upstream check happened.
+# From: Issue #1095 | PR #1501.
+if retention_rollback_anchors_raw="$(sra_read_rollback_anchors "$manifest")"; then
+  :
+else
+  echo "::error::Cannot read a valid (possibly empty) rollback_anchors list from $manifest." >&2
+  exit 1
+fi
+if retention_rollback_anchors_error="$(sra_validate_rollback_anchors_list "$retention_rollback_anchors_raw")"; then
+  :
+else
+  echo "::error::Manifest retention.rollback_anchors ${retention_rollback_anchors_error}" >&2
+  exit 1
+fi
+declare -A retention_rollback_anchor_digests=()
+if [[ -n "$retention_rollback_anchors_raw" ]]; then
+  while IFS= read -r retention_rollback_anchor_entry; do
+    [[ -n "$retention_rollback_anchor_entry" ]] || continue
+    retention_rollback_anchor_digests["$retention_rollback_anchor_entry"]=1
+  done <<<"$retention_rollback_anchors_raw"
+fi
+# Populated per-package below as each declared anchor digest is actually
+# observed among that package's real fetched GHCR versions -- the only way
+# to prove a declared anchor is real evidence; see the post-loop existence
+# check near the bottom of this file.
+declare -A retention_rollback_anchor_found=()
+
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-sha-retention-audit.XXXXXX")"
 # What: removes work_dir on exit, guarded by an own-prefix path check.
 # Why: the guard keeps this rm -rf from ever touching anything but this
@@ -264,6 +300,23 @@ audit_package() {
       echo "::warning::Package version $id (digest $digest) in ${repository_name}/${package} has no usable GHCR build date; this is a build-pipeline defect, not audit absence." >&2
     fi
 
+    # rollback_anchors: checked first, before every other classification
+    # branch below (metadata class, root/child-tag shape, channel/release
+    # protection, ordinary-history ranking) and independent of all of them.
+    # An explicit, maintainer-curated rollback declaration is the
+    # highest-priority signal this audit has, and must protect a matching
+    # digest regardless of what tags it does or doesn't carry, what class it
+    # belongs to, or how far outside the ordinary-history budget it would
+    # otherwise fall. This is also where each declared anchor gets marked
+    # "actually observed in a real fetched GHCR version" for the post-loop
+    # existence check below.
+    # From: Issue #1095 | PR #1501.
+    if sra_digest_is_rollback_anchor "$digest" "${!retention_rollback_anchor_digests[@]}"; then
+      retention_rollback_anchor_found["$digest"]=1
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "explicit-rollback-anchor"
+      continue
+    fi
+
     if facts="$(sra_version_tag_facts "$version_json")"; then
       :
     else
@@ -419,6 +472,26 @@ while IFS=$'\t' read -r package_class package_name; do
     overall_status=1
   fi
 done <"$packages_file"
+
+# rollback_anchors existence check: a declared anchor digest that was never
+# observed as a real fetched package version across every audited
+# first-party package is a typo, an already-deleted digest, or a digest that
+# never existed -- fail the whole run closed rather than silently treating
+# an unproven declaration as harmless. If any package above already failed
+# (overall_status is already 1 from that earlier failure), a real,
+# still-valid anchor cannot have been marked found either, and would be
+# misreported here as "does not exist" even though it may simply be
+# unproven this run; the run still correctly fails closed either way, but
+# the message below calls this out so a maintainer does not conclude the
+# anchor itself is bad and remove it without first checking for an
+# unrelated fetch failure above.
+# From: Issue #1095 | PR #1501.
+for retention_rollback_anchor_entry in "${!retention_rollback_anchor_digests[@]}"; do
+  if [[ -z "${retention_rollback_anchor_found[$retention_rollback_anchor_entry]+x}" ]]; then
+    echo "::error::retention.rollback_anchors entry does not exist as a real package version digest in any audited first-party package: $retention_rollback_anchor_entry (if any package above failed to be audited this run, this may be a fetch failure rather than a genuinely missing digest -- resolve those errors before removing this entry)" >&2
+    overall_status=1
+  fi
+done
 
 if (( overall_status != 0 )); then
   echo "::error::SHA retention audit was incomplete or encountered invalid required data. No destructive conclusion is permitted." >&2

@@ -446,26 +446,65 @@ even without dedicated channel-level protection for it. See issue #1501's
 comment thread for the maintainer decision on whether to build the
 dedicated Actions-API lookup.
 
-**Rollback anchor, researched and deliberately not a separate check**: this
-project has no centrally-recorded, GHCR-queryable "rollback anchor" registry
-distinct from the categories above. `setup.sh`'s
-`reset-to-last-known-good-config` mechanism restores local Kea/PowerDNS
-*configuration* snapshots on an operator's own install — it never touches a
-GHCR image tag or digest, so it is out of scope for this audit by
-construction. The only image-level rollback mechanism that exists is
-`setup.sh update`'s own pre-update backup, which archives whatever
-`LANCACHE_IMAGE_TAG` (a `sha-<commit>` or `vX.Y.Z` value) was active on
-*that one operator's own LAN install*, restorable via `migrate_env_for_update`'s
-`preserve_image_tag` path — this data lives only in that operator's local
-backup archive, never in GHCR or this repository, so no CI-side audit can
-ever discover it. `release/stack-images.yml`'s own
-`protect_release_and_rollback_digests: true` field name reflects this: it
-treats "release" and "rollback" protection as the same thing, because a
-rollback in this project always targets an already-published, still-tagged
-stable release — which `stable-release-protected` above already covers. A
-separate `rollback-anchor-protected` reason was considered and rejected as a
-fabricated check with no real data source, rather than left as a
-silently-dropped requirement.
+**Rollback digests: `retention.rollback_anchors` (status: implemented).**
+`protect_release_and_rollback_digests` names two distinct protections: the
+*release* half (`stable-release-protected`, described above) is derived
+automatically from real Git release tags. The *rollback* half has no such
+automatic source — "this digest is a designated rollback target" is not a
+fact Git history or any existing GHCR/CI record can derive on its own, it is
+an explicit maintainer judgment call, typically made right after a
+regression is found ("the last known-good digest before this regression must
+stay available"). `release/stack-images.yml`'s `retention.rollback_anchors`
+key is exactly that judgment call, made queryable: a maintainer-curated list
+of exact `sha256:<64-hex>` digests, initially empty, that stays empty unless
+and until a maintainer deliberately adds one. Every rollback anchor digest is
+checked against every classified package version *before* any other
+classification rule (class, tag shape, release-tag status, ordinary-history
+rank) and independent of all of them — `reason=explicit-rollback-anchor` — so
+a declared anchor is protected unconditionally, even if it would otherwise
+fall far outside the ordinary-history budget.
+
+`rollback_anchors` entries are **digest-only, never a git tag or ref**: a tag
+or ref can be moved or deleted out from under an anchor, silently repointing
+or breaking the guarantee this mechanism exists to provide, without the audit
+ever noticing — a content-addressed digest cannot.
+`scripts/untracked/validate-stack-images.sh` statically rejects any entry
+that is not an exact `sha256:<64-hex>` string (reusing
+`scripts/lib/sha-retention-audit.sh`'s `sra_is_rollback_anchor_digest`, the
+single canonical definition of the accepted shape). That static check cannot
+prove a listed digest actually *exists* under its intended package, since it
+has no GHCR access — `scripts/untracked/gc-sha-retention-audit.sh` does that
+check for real, at audit time, against the package versions it fetches from
+GHCR, and marks every declared anchor digest it actually observes. **Any
+declared anchor digest never observed in any audited first-party package (a
+typo, an already-deleted digest, one that never existed) fails the entire
+audit run closed** — an unproven rollback declaration is never silently
+ignored, the same fail-closed posture used throughout this audit.
+
+`rollback_anchors` is a manually maintained list, not an automated feature:
+there is no automated expiry, no TTL, and no automated pruning of stale
+entries. A maintainer who adds an anchor after a regression is also
+responsible for removing it later once it is no longer needed, or the list
+grows without bound. This does not overlap `setup.sh`'s
+`reset-to-last-known-good-config` (which restores local Kea/PowerDNS
+*configuration* snapshots on an operator's own install and never touches a
+GHCR image tag or digest) or `setup.sh update`'s own pre-update backup (which
+archives `LANCACHE_IMAGE_TAG` only inside that one operator's own local
+backup archive, never in GHCR or this repository) — neither is a
+centrally-recorded, GHCR-queryable registry, which is exactly why
+`rollback_anchors` had to be its own declared list rather than derived from
+either.
+
+**Correction (2026-08-16):** an earlier revision of this section stated that
+a separate rollback-anchor check was "considered and rejected as a fabricated
+check with no real data source." That reasoning applied to *inferring* a
+rollback target automatically (from GHCR tag history GHCR does not expose, or
+from an operator's own local backup this repository cannot see) — it does not
+apply to a maintainer directly declaring a digest in the manifest, which
+needs no inference at all and is the same kind of manually-maintained
+declaration as every other key in this `retention:` block. The mechanism
+above was already implemented before that revision was written; this section
+now reflects the actually-shipped design.
 
 Automated cleanup must be explicitly approved and must consume the manifest
 retention contract plus canonical accepted/protected identity evidence. A

@@ -52,6 +52,112 @@ sra_read_minimum_stable_releases() {
   _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
 
+_sra_read_manifest_list() {
+  # What: reads a "  <key>:\n    - item\n    - item" block-list from the
+  # manifest, one item per output line. A duplicate header always fails
+  # closed. allow_empty (3rd arg, default "false") governs both an
+  # entirely-absent header and a header with zero items beneath it.
+  # Why: shared parsing rule for every retention list key (today only
+  # rollback_anchors), so a future second list key does not duplicate this
+  # logic (AG-CODE-011).
+  # From: Issue #1095 | PR #1501.
+  local manifest="${1:?_sra_read_manifest_list: manifest is required}"
+  local key="${2:?_sra_read_manifest_list: key is required}"
+  local allow_empty="${3:-false}"
+  local header="  ${key}:"
+  local header_count items
+
+  if header_count="$(awk -v header="$header" '$0 == header { n++ } END { print n + 0 }' "$manifest")"; then
+    :
+  else
+    return 1
+  fi
+  if [[ "$header_count" == "0" ]]; then
+    [[ "$allow_empty" == "true" ]] || return 1
+    return 0
+  fi
+  [[ "$header_count" == "1" ]] || return 1
+
+  if items="$(awk -v header="$header" '
+    $0 == header { in_list = 1; next }
+    in_list && /^    - / { line = $0; sub(/^    - /, "", line); print line; next }
+    in_list { in_list = 0 }
+  ' "$manifest")"; then
+    :
+  else
+    return 1
+  fi
+  if [[ -z "$items" ]]; then
+    [[ "$allow_empty" == "true" ]] || return 1
+    return 0
+  fi
+  printf '%s\n' "$items"
+}
+
+sra_read_rollback_anchors() {
+  # What: reads retention.rollback_anchors from the manifest, one digest per
+  # output line; succeeds with empty output when the list is absent or has
+  # zero entries.
+  # Why: the manifest's steady state is an empty list -- a maintainer only
+  # adds an entry after a real regression is found, so "no rollback anchor
+  # is currently declared" must not be an error.
+  # From: Issue #1095 | PR #1501.
+  local manifest="${1:?sra_read_rollback_anchors: manifest is required}"
+  _sra_read_manifest_list "$manifest" rollback_anchors true
+}
+
+sra_is_rollback_anchor_digest() {
+  # What: checks whether a value has the exact sha256:<64-hex> digest shape.
+  # Why: a rollback anchor is deliberately digest-only, never a git tag/ref
+  # -- a tag can be moved or deleted out from under an anchor without this
+  # audit ever noticing; a content-addressed digest cannot.
+  # From: Issue #1095 | PR #1501.
+  local value="${1:?sra_is_rollback_anchor_digest: value is required}"
+  [[ "$value" =~ ^sha256:[0-9a-f]{64}$ ]]
+}
+
+sra_digest_is_rollback_anchor() {
+  # What: exact-match membership check between a candidate digest and a set
+  # of declared anchor digests.
+  # Why: never a substring/prefix match, the same conservative-match
+  # philosophy as this file's other tag/digest comparisons.
+  # From: Issue #1095 | PR #1501.
+  local digest="${1:?sra_digest_is_rollback_anchor: digest is required}"
+  shift
+  local anchor
+  for anchor in "$@"; do
+    [[ "$digest" == "$anchor" ]] && return 0
+  done
+  return 1
+}
+
+sra_validate_rollback_anchors_list() {
+  # What: validates an already-read rollback_anchors list (the output shape
+  # of sra_read_rollback_anchors): every entry, if any, must be non-blank
+  # and pass sra_is_rollback_anchor_digest. Prints one reason on the first
+  # violation and returns 1; silent on success.
+  # Why: factored out as a pure function (no manifest path, no exit calls)
+  # so both the CI-time static check (validate-stack-images.sh) and the
+  # audit's own read-time defense-in-depth re-validation
+  # (gc-sha-retention-audit.sh) share one canonical acceptance rule
+  # (AG-CODE-011).
+  # From: Issue #1095 | PR #1501.
+  local anchors_raw="${1:-}" entry
+  [[ -z "$anchors_raw" ]] && return 0
+  while IFS= read -r entry; do
+    [[ -n "$entry" ]] || {
+      printf 'must not contain a blank entry\n'
+      return 1
+    }
+    if sra_is_rollback_anchor_digest "$entry"; then
+      :
+    else
+      printf 'entry is not an exact sha256:<64-hex> digest: %s\n' "$entry"
+      return 1
+    fi
+  done <<<"$anchors_raw"
+}
+
 # What: lists every "class<TAB>name" package under the manifest's
 # runtime/tooling/metadata top-level sections.
 # Why: a top-level-key state machine, since the manifest has no per-package
