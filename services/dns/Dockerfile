@@ -192,7 +192,8 @@ RUN --mount=type=secret,id=sccache_redis_url \
     extract_remote_toolchain_id() { \
       rm -f /tmp/ccache-remote-toolchain-id; \
       if command -v readelf >/dev/null 2>&1; then \
-        readelf -p .comment "$1" 2>/dev/null | sed -n 's/^ *\[[^]]*\] *//p' > /tmp/ccache-remote-toolchain-id; \
+        readelf_comment_section="$(readelf -p .comment "$1" 2>/dev/null)"; \
+        sed -n 's/^ *\[[^]]*\] *//p' <<<"$readelf_comment_section" > /tmp/ccache-remote-toolchain-id; \
       fi; \
     }; \
     configure_distcc() { \
