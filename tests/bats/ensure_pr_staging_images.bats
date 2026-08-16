@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free coverage for scripts/ensure-pr-staging-images.sh (#715) -- the
+# Docker-free coverage for scripts/untracked/ensure-pr-staging-images.sh (#715) -- the
 # fail-closed staging guard + untouched-service back-fill that reuses the
 # #626/#627 pr-<N>-sha-<short> mechanism. The registry probe and the
 # imagetools back-fill are stubbed via STAGING_IMAGE_EXISTS_CMD /
@@ -76,7 +76,7 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/ensure-pr-staging-images.sh"
+    script="$repo_root/scripts/untracked/ensure-pr-staging-images.sh"
     backfill_log="$BATS_TEST_TMPDIR/backfill.log"
     : > "$backfill_log"
 
@@ -682,9 +682,9 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
 }
 
-@test "#1095 F-20: BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
+@test "BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
     # Discriminating test for the two allow_reverse_ancestry=true call sites
-    # F-20 added inside saf_resolve_untouched_backfill_source() (Step 1's
+    # issue #1095 added inside saf_resolve_untouched_backfill_source() (Step 1's
     # fast path here, since every service is untouched by default per
     # setup()'s docs-only fixture -- Step 2's normal-path call site carries
     # the identical fix and reasoning, see that call site's own comment).
@@ -700,7 +700,7 @@ STUB
     # through to saf_find_built_ancestor, and that walk finds nothing usable
     # either (every ancestor's own tag is also stubbed absent) -- a hard
     # failure, not a quieter wrong-answer. Verified this test fails against
-    # the pre-F-20 baseline for exactly that reason (status non-zero, "No
+    # the earlier baseline for exactly that reason (status non-zero, "No
     # usable ancestor" error) before writing this comment.
     revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
     cat > "$revision_map_stub" <<STUB
@@ -967,7 +967,7 @@ STUB
     # would let the ordinary backfill succeed before this scenario is even
     # reached, the same reason the dedicated "confirmed run" test below needs
     # this override too. `exit 1` for every image, not "echo an older
-    # ancestor's sha" (#1095 F-20, 2026-08-07): since
+    # ancestor's sha" (issue #1095, 2026-08-07): since
     # saf_resolve_untouched_backfill_source's own BASE_SHA-level checks now
     # pass allow_reverse_ancestry=true (the same push-reuse-retag-aware
     # acceptance saf_find_built_ancestor's own candidate checks already used),
@@ -1035,7 +1035,7 @@ STUB
     # Force the exact-BASE_SHA freshness check to fail first, so the script
     # actually reaches the new fallback decision point instead of succeeding
     # earlier. `exit 1` (no such image), not "echo an older ancestor's sha"
-    # (#1095 F-20, 2026-08-07): saf_resolve_untouched_backfill_source's own
+    # (issue #1095, 2026-08-07): saf_resolve_untouched_backfill_source's own
     # BASE_SHA-level checks now pass allow_reverse_ancestry=true, so echoing
     # a genuine ancestor of base_sha here would now be legitimately accepted
     # as fresh instead of refused -- see the "#808: ... is NOT back-filled
@@ -1078,7 +1078,7 @@ STUB
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$indeterminate_stub"
 
     # Force the exact-BASE_SHA freshness check to fail first. `exit 1` (no
-    # such image), not "echo an older ancestor's sha" (#1095 F-20,
+    # such image), not "echo an older ancestor's sha" (issue #1095,
     # 2026-08-07): saf_resolve_untouched_backfill_source's own BASE_SHA-level
     # checks now pass allow_reverse_ancestry=true, so echoing a genuine
     # ancestor of base_sha here would now be legitimately accepted as fresh

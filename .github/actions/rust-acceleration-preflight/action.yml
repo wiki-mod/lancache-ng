@@ -33,7 +33,7 @@ inputs:
     description: |
       Build tools image that provides rustc, sccache, distcc, distcc-pump, and ccache.
       Primary CI workflows (build-push.yml) pass an explicit pinned digest via
-      scripts/select-build-tools-image.sh; this `:latest` default is a fallback
+      scripts/untracked/select-build-tools-image.sh; this `:latest` default is a fallback
       for local developer usage and other callers that do not override it.
     required: false
     default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
@@ -100,11 +100,41 @@ runs:
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
         ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
+        # AG-CI-016: the in-container command needs its own unignorable
+        # kill-timeout, not just this step's outer `timeout-minutes` --
+        # GitHub cancels a timed-out step by sending SIGTERM to this
+        # `docker run` client, which a signal-deaf or network-hung sccache-dist/
+        # distcc-pump call inside the container would not receive, leaving
+        # both the client and the container running and the runner slot
+        # occupied (same failure mode documented in
+        # .github/actions/shellcheck-and-standing-guards/action.yml).
+        # Verified live in the pinned build-tools container (AG-VAL-030):
+        # `timeout --kill-after` only signals its DIRECT child (the `bash -s`
+        # below), and if bash is itself blocked waiting on a hung grandchild
+        # (e.g. a stuck sccache/distcc network call), the SIGKILL at the end
+        # of the grace period kills bash without ever running its `trap
+        # cleanup EXIT` (confirmed: a `trap ...EXIT; sleep 60` heredoc under
+        # `timeout --kill-after=30 --signal=KILL 3` exits 137 with no trap
+        # output). That is still safe here specifically because every
+        # resource the trap would clean up (the mktemp -d preflight dir, the
+        # distcc-pump include server) lives entirely inside this container
+        # and is discarded when `docker run --rm` tears the container down
+        # regardless of whether the trap ran -- there is no host-shared or
+        # writable-mount state (mount_args above are all `:ro`) that could
+        # leak past a missed trap.
+        # 600s, not the 300s used for pure-text-scan checks elsewhere in this
+        # project: this preflight makes real network calls (sccache-dist
+        # --dist-status, distcc-pump --startup probing every candidate host
+        # via lsdistcc) that can legitimately take longer than a text scan
+        # under real network latency. The calling job (`build` in
+        # build-push.yml) has its own timeout-minutes: 150 covering the full
+        # Rust/Docker build that follows, so 600s here for this early step
+        # leaves the overwhelming majority of that budget intact.
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
-          bash -s <<'PREFLIGHT'
+          timeout --kill-after=30 --signal=KILL 600 bash -s <<'PREFLIGHT'
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"

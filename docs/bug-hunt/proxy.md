@@ -11,7 +11,7 @@ Scope: `services/proxy/` (nginx TLS-interception + SNI-passthrough cache
 proxy) read against `origin/v0.2.0`, plus its wiring in
 `deploy/{dev,prod}/docker-compose.yml`, `config/{dev,prod}/proxy.env`,
 `tests/bats/proxy_*.bats`, `tests/bats/known_good_snapshots_sync.bats`,
-`scripts/ssl-mitm-cache-simulation.sh`, `docs/threat-model.md`,
+`scripts/untracked/simulations/ssl-mitm-cache-simulation.sh`, `docs/threat-model.md`,
 `docs/known-good-config-snapshots.md`, `docs/install-ca-cert.md`,
 `certs/generate-ca.sh`. Starting point was
 `docs/capability-inventory/SoT-proxy.md` (branch `docs/inventory-proxy`);
@@ -190,10 +190,10 @@ security impact by itself).
 
 ---
 
-## 4. `scripts/ssl-mitm-cache-simulation.sh` — re-confirmed instance of the #841 silent-`set -e` pattern in the one real E2E test for this whole component
+## 4. `scripts/untracked/simulations/ssl-mitm-cache-simulation.sh` — re-confirmed instance of the #841 silent-`set -e` pattern in the one real E2E test for this whole component
 
 Already tracked by open issue #841 ("at least 14 instances... inside
-`scripts/ssl-mitm-cache-simulation.sh`"). Re-verified directly against the
+`scripts/untracked/simulations/ssl-mitm-cache-simulation.sh`"). Re-verified directly against the
 current `v0.2.0` copy rather than trusted from the issue description.
 Concrete unguarded instances found by direct reading:
 
@@ -651,7 +651,7 @@ structural (the geo var isn't even in scope for `stream{}`).
 bats/shellspec ever run"). That workflow's push/PR triggers
 (`build-tools.yml` lines 29-44) are limited to `tools/build-tools/**`,
 `.github/workflows/build-tools.yml`, `tests/bats/**`, `tests/shellspec/**`,
-`setup.sh`, and `scripts/check-idempotence-test-coverage.sh` — **not**
+`setup.sh`, and `scripts/tracked/check-idempotence-test-coverage.sh` — **not**
 `services/proxy/**`. `build-push.yml` builds the proxy image on
 `services/proxy/**` changes but has no `proxy_test` job (its `*_test` jobs are
 `dns_test`/`ui_test`/`watchdog_test`, all Rust) and runs no bats.
@@ -661,7 +661,7 @@ bats/shellspec ever run"). That workflow's push/PR triggers
 (`branches: [master, "v[0-9]*"]`, no `paths:` filter) and its `plan` job sets
 `should_run`/`proxy=true` via `detect-full-setup-changes.sh` whenever
 `services/proxy/` is touched (lines 116-118 of that script), then runs
-`scripts/ssl-mitm-cache-simulation.sh` — a real cert-generation + MITM-cache +
+`scripts/untracked/simulations/ssl-mitm-cache-simulation.sh` — a real cert-generation + MITM-cache +
 SNI-passthrough E2E against `deb.debian.org`. So a **broad class** of
 proxy-shell regressions (cert gen failing, config failing `nginx -t`,
 MITM/passthrough breaking) **is** gated per-PR by that E2E. What is *not*

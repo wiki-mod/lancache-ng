@@ -13,7 +13,7 @@
 # entrypoint regenerating its own file idempotently AND never overwriting the
 # UI's fragment on restart. Every sibling config-writer in this repo has a real
 # repeat-run test proving convergence (enforced by
-# scripts/check-idempotence-test-coverage.sh); the entrypoint's #811-critical
+# scripts/tracked/check-idempotence-test-coverage.sh); the entrypoint's #811-critical
 # never-overwrite branch shipped without one because the logic is inline in
 # docker-compose.yml rather than a standalone services/nats/entrypoint.sh the
 # existing suites could source. This file closes that gap by driving the REAL
@@ -195,7 +195,7 @@ nats_conf_content() {
 # unrestricted (confirmed against nats-server's own `pubAllowedFullCheck`:
 # `c.perms.pub.allow == nil && c.perms.pub.deny == nil` returns `true`, i.e.
 # no restriction), so the deep-validate E2E rollback simulation
-# (scripts/dns-zone-rollback-simulation.sh) never actually exercises the
+# (scripts/untracked/simulations/dns-zone-rollback-simulation.sh) never actually exercises the
 # restrictive allow-list prod/quickstart ship -- it would pass
 # identically with or without this fix. This test closes that gap directly
 # against the real generated config content instead.

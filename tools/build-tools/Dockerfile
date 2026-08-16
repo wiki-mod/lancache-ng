@@ -284,8 +284,8 @@ RUN docker --version; \
     docker buildx version
 
 # What: isc-dhcp-client (dhclient) supports
-# scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/syslog-forwarding-simulation.sh, which perform a real
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh, which perform a real
 # Discover/Offer/Request/Ack exchange against a Kea container on an
 # isolated Docker bridge network.
 # Why: the Admin UI's own dhcp-probe feature now uses a native Rust DHCP
@@ -295,7 +295,7 @@ RUN docker --version; \
 # are a separate concern from the Admin UI's probe.
 # From: Issue #1570 | PR #1571
 
-# What: tcpdump supports scripts/dhcp-proxy-pxe-simulation.sh, capturing
+# What: tcpdump supports scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, capturing
 # dnsmasq's real DHCPOFFER reply to a synthetic PXE DHCPDISCOVER
 # (tools/pxe-client-probe, a Rust binary built from source by that script)
 # to a pcap file rather than sniffing live in-process.

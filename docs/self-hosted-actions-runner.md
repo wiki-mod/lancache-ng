@@ -62,8 +62,9 @@ As a rule of thumb:
 
 ## Native arm64 builds on GitHub-hosted runners
 
-Prebuilt service images (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`, `ui`,
-`build-tools`) publish both `linux/amd64` and `linux/arm64` under one coherent
+Prebuilt service images (`proxy`, `dns`, `watchdog`, `dhcp`, `dhcp-proxy`,
+`ntp`, `syslog`, `ui`, `build-tools`) publish both `linux/amd64` and
+`linux/arm64` under one coherent
 multi-platform tag per service. The two platforms are built natively in
 separate lanes, never through QEMU emulation for these images:
 

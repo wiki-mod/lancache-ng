@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # CI workflow (#1253, Q1 of #1255) that runs the tests/bats and
 # tests/shellspec fixture suites against the ALREADY-PUBLISHED build-tools
-# image, pulled via scripts/select-build-tools-image.sh -- it never builds or
+# image, pulled via scripts/untracked/select-build-tools-image.sh -- it never builds or
 # publishes anything itself.
 #
 # Split out of build-tools.yml on purpose: that workflow's own trigger used
@@ -22,7 +22,7 @@
 # invocations that mirror build-tools.yml's "Run Bats setup fixtures"/
 # "Run ShellSpec setup fixtures" steps exactly.
 #
-# scripts/check-bats-path-filter-coverage.sh (#879) targets THIS file's
+# scripts/tracked/check-bats-path-filter-coverage.sh (#879) targets THIS file's
 # on.push.paths/on.pull_request.paths now (previously build-tools.yml's) --
 # it is the workflow that actually executes `bats tests/bats` and
 # `shellspec tests/shellspec` against a real bats dependency change today.
@@ -45,53 +45,54 @@ on:
       - "tests/shellspec/**"
       - "tests/fixtures/**"
       - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
-      - "scripts/check-validation-subnet-wrapper-coverage.sh"
-      - "scripts/check-bats-path-filter-coverage.sh"
-      - "scripts/check-build-tools-smoke-coverage.sh"
-      - "scripts/check-pipefail-early-exit-grep.sh"
-      - "scripts/check-file-headers.sh"
-      - "scripts/check-pipefail-scope-coverage.sh"
-      - "scripts/check-pr-diff-file-headers.sh"
+      - "scripts/tracked/check-idempotence-test-coverage.sh"
+      - "scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
+      - "scripts/tracked/check-bats-path-filter-coverage.sh"
+      - "scripts/tracked/check-build-tools-smoke-coverage.sh"
+      - "scripts/untracked/check-pipefail-early-exit-grep.sh"
+      - "scripts/tracked/check-file-headers.sh"
+      - "scripts/tracked/check-pipefail-scope-coverage.sh"
+      - "scripts/tracked/check-pr-diff-file-headers.sh"
       - "services/dhcp/**"
-      - "scripts/select-build-tools-image.sh"
-      - "scripts/resolve-remote-ref-with-retry.sh"
+      - "scripts/untracked/select-build-tools-image.sh"
+      - "scripts/untracked/require-image-platforms.sh"
+      - "scripts/tracked/resolve-remote-ref-with-retry.sh"
       - "scripts/lib/**"
-      - "scripts/classify-image-impact.sh"
-      - "scripts/compute-next-release-tag.sh"
-      - "scripts/detect-full-setup-changes.sh"
-      - "scripts/ensure-pr-staging-images.sh"
-      - "scripts/plan-deep-validation.sh"
-      - "scripts/docker-socket-proxy.sh"
-      - "scripts/check-action-node-versions.sh"
-      - "scripts/check-executable-bits.sh"
-      - "scripts/check-workflow-service-lists.sh"
-      - "scripts/check-orphaned-branches.sh"
-      - "scripts/check-changelog-direct-edit.sh"
-      - "scripts/check-pr-title-convention.sh"
-      - "scripts/check-pr-tracking-metadata.sh"
-      - "scripts/check-setup-prompt-drift.sh"
-      - "scripts/check-compose-healthchecks.sh"
-      - "scripts/check-netdata-curl-pin.sh"
-      - "scripts/check-workflow-line-limit.sh"
-      - "scripts/check-review-chronology-comments.sh"
-      - "scripts/check-dependabot-docker-base-consistency.sh"
-      - "scripts/check-trivy-action-direct-usage.sh"
-      - "scripts/check-short-sha-truncation.sh"
-      - "scripts/generate-vex.sh"
-      - "scripts/setup-cli-simulation.sh"
-      - "scripts/syslog-forwarding-simulation.sh"
-      # scripts/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
+      - "scripts/untracked/classify-image-impact.sh"
+      - "scripts/untracked/compute-next-release-tag.sh"
+      - "scripts/untracked/detect-full-setup-changes.sh"
+      - "scripts/untracked/ensure-pr-staging-images.sh"
+      - "scripts/untracked/plan-deep-validation.sh"
+      - "scripts/untracked/docker-socket-proxy.sh"
+      - "scripts/tracked/check-action-node-versions.sh"
+      - "scripts/tracked/check-executable-bits.sh"
+      - "scripts/tracked/check-workflow-service-lists.sh"
+      - "scripts/tracked/check-orphaned-branches.sh"
+      - "scripts/tracked/check-changelog-direct-edit.sh"
+      - "scripts/tracked/check-pr-title-convention.sh"
+      - "scripts/tracked/check-pr-tracking-metadata.sh"
+      - "scripts/tracked/check-setup-prompt-drift.sh"
+      - "scripts/tracked/check-compose-healthchecks.sh"
+      - "scripts/untracked/check-netdata-curl-pin.sh"
+      - "scripts/untracked/check-workflow-line-limit.sh"
+      - "scripts/untracked/check-review-chronology-comments.sh"
+      - "scripts/tracked/check-dependabot-docker-base-consistency.sh"
+      - "scripts/untracked/check-trivy-action-direct-usage.sh"
+      - "scripts/untracked/check-short-sha-truncation.sh"
+      - "scripts/untracked/generate-vex.sh"
+      - "scripts/untracked/simulations/setup-cli-simulation.sh"
+      - "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
+      # scripts/untracked/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
       # reap/orphan-classification logic that used to live entirely inline in
       # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
       # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
-      # directly (`source "$repo_root/scripts/gc-pr-staging-images.sh"`) --
+      # directly (`source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"`) --
       # without this entry, a PR touching only this script would not already
       # match any other path above (it is not under scripts/lib/, which is
       # already covered) and so would never run that suite. Found by
-      # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
+      # scripts/tracked/check-bats-path-filter-coverage.sh's own existence-filtered
       # dependency scan against the real repo tree.
-      - "scripts/gc-pr-staging-images.sh"
+      - "scripts/untracked/gc-pr-staging-images.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
       - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
@@ -104,7 +105,7 @@ on:
       # service directory also holds its own Dockerfile, nginx/lua/config
       # assets, and in services/dns's case an entire nats-subscriber Rust
       # crate -- none of which any tests/bats/*.bats or tests/shellspec/**
-      # suite actually reads. scripts/check-bats-path-filter-coverage.sh
+      # suite actually reads. scripts/tracked/check-bats-path-filter-coverage.sh
       # (#879) is the source of truth for exactly which files below are real
       # bats dependencies; re-run it after touching this list.
       #
@@ -113,23 +114,24 @@ on:
       # re-derive it):
       #
       # tests/bats/**, tests/shellspec/**, tests/fixtures/**, setup.sh, and
-      # every other test-only path below (scripts/check-idempotence-test-
-      # coverage.sh, scripts/lib/**, the individual scripts/*.sh entries, the
-      # individual services/**/*.{sh,conf,template,txt} entries) are in this
+      # every other test-only path below (scripts/tracked/check-idempotence-
+      # test-coverage.sh, scripts/lib/**, the individual scripts/tracked/**
+      # and scripts/untracked/** entries, the individual
+      # services/**/*.{sh,conf,template,txt} entries) are in this
       # workflow's path filter so the suites below actually run when one of
       # those changes -- each one is a real dependency of at least one
       # tests/bats/*.bats suite (#873: the filter previously covered only
       # setup.sh and the idempotence-coverage guard, so a PR touching any of
       # these other tested files never ran the bats suite written for it).
       # This entire list is kept in sync automatically by
-      # scripts/check-bats-path-filter-coverage.sh (#879), which fails the
+      # scripts/tracked/check-bats-path-filter-coverage.sh (#879), which fails the
       # light-tier static-check step in build-push.yml if any
       # tests/bats/*.bats or tests/bats/helpers/*.sh dependency is not
       # covered by an entry in this list (or its pull_request twin below) --
       # this comment documents WHY specific entries exist, the guard is what
       # stops the list from silently drifting out of sync again.
       #
-      # scripts/check-idempotence-test-coverage.sh specifically (#732
+      # scripts/tracked/check-idempotence-test-coverage.sh specifically (#732
       # review): its own tests/bats/check_idempotence_test_coverage.bats
       # fixture suite is what actually proves the guard *catches* a
       # regression (unlike build-push.yml's step, which only runs the guard
@@ -137,8 +139,8 @@ on:
       # detect the guard itself silently breaking). Without this entry, a PR
       # touching only the guard script would not already match
       # tests/bats/** and so would never run that suite.
-      # scripts/check-validation-subnet-wrapper-coverage.sh (#896) and
-      # scripts/check-bats-path-filter-coverage.sh itself (#879) are listed
+      # scripts/tracked/check-validation-subnet-wrapper-coverage.sh (#896) and
+      # scripts/tracked/check-bats-path-filter-coverage.sh itself (#879) are listed
       # for the identical reason -- each one's own fixture suite
       # (tests/bats/check_validation_subnet_wrapper_coverage.bats,
       # tests/bats/check_bats_path_filter_coverage.bats) is what proves THAT
@@ -157,7 +159,7 @@ on:
       # tests/bats/healthcheck_service_lists.bats (byte-for-byte parity of
       # services_with_healthcheck across build-push.yml, full-setup-
       # validate.yml, and full-setup-deep-validate.yml, and its subset check
-      # against scripts/setup-cli-simulation.sh and scripts/syslog-
+      # against scripts/untracked/simulations/setup-cli-simulation.sh and scripts/syslog-
       # forwarding-simulation.sh), tests/bats/validation_image_tag.bats
       # (build-push.yml must keep calling scripts/lib/validation-image-
       # tag.sh's functions instead of reimplementing them), or
@@ -165,10 +167,10 @@ on:
       # network/action.yml must keep sourcing scripts/lib/reserve-validation-
       # subnet.sh instead of reimplementing its formula) -- none of which
       # shellcheck can catch, since they assert cross-file content agreement,
-      # not shell syntax. scripts/check-bats-path-filter-coverage.sh's own
+      # not shell syntax. scripts/tracked/check-bats-path-filter-coverage.sh's own
       # existence-filtered dependency scan found this gap directly against
       # the real repo tree; these four files are added here to close it.
-      # scripts/setup-cli-simulation.sh and scripts/syslog-forwarding-
+      # scripts/untracked/simulations/setup-cli-simulation.sh and scripts/syslog-forwarding-
       # simulation.sh (also real healthcheck_service_lists.bats dependencies)
       # and deploy/secondary/docker-compose.yml (tests/bats/
       # setup_secondary_docker_compose.bats's checked-in reference file for
@@ -212,7 +214,7 @@ on:
       - "services/proxy/entrypoint.sh"
       # tests/bats/proxy_healthz_acl_and_hidden_headers.bats reads these
       # three real config files directly via $repo_root (per
-      # scripts/check-bats-path-filter-coverage.sh's own extraction
+      # scripts/tracked/check-bats-path-filter-coverage.sh's own extraction
       # convention) -- without these entries, a PR touching only conf.d/
       # http.conf, conf.d/https.conf, or proxy-params.conf (none of which
       # entrypoint.sh's own path entry above covers) would never run that
@@ -231,7 +233,7 @@ on:
       # the same awk-extraction pattern watchdog.sh's own helper already
       # used -- without this entry, a PR touching only retention.sh would
       # not already match any other path above and so would never run
-      # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
+      # that suite. Found by scripts/tracked/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
       # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
@@ -245,7 +247,7 @@ on:
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       # services/syslog/netdata-web_log.conf (#879 gap found by
-      # scripts/check-bats-path-filter-coverage.sh against tests/bats/
+      # scripts/tracked/check-bats-path-filter-coverage.sh against tests/bats/
       # check_logging_matrix_weblog_parity.bats, which reads this file
       # directly via $repo_root to assert its job list stays byte-parity
       # with deploy/quickstart/docker-compose.yml's inline copy): without
@@ -271,53 +273,54 @@ on:
       - "tests/shellspec/**"
       - "tests/fixtures/**"
       - "setup.sh"
-      - "scripts/check-idempotence-test-coverage.sh"
-      - "scripts/check-validation-subnet-wrapper-coverage.sh"
-      - "scripts/check-bats-path-filter-coverage.sh"
-      - "scripts/check-build-tools-smoke-coverage.sh"
-      - "scripts/check-pipefail-early-exit-grep.sh"
-      - "scripts/check-file-headers.sh"
-      - "scripts/check-pipefail-scope-coverage.sh"
-      - "scripts/check-pr-diff-file-headers.sh"
+      - "scripts/tracked/check-idempotence-test-coverage.sh"
+      - "scripts/tracked/check-validation-subnet-wrapper-coverage.sh"
+      - "scripts/tracked/check-bats-path-filter-coverage.sh"
+      - "scripts/tracked/check-build-tools-smoke-coverage.sh"
+      - "scripts/untracked/check-pipefail-early-exit-grep.sh"
+      - "scripts/tracked/check-file-headers.sh"
+      - "scripts/tracked/check-pipefail-scope-coverage.sh"
+      - "scripts/tracked/check-pr-diff-file-headers.sh"
       - "services/dhcp/**"
-      - "scripts/select-build-tools-image.sh"
-      - "scripts/resolve-remote-ref-with-retry.sh"
+      - "scripts/untracked/select-build-tools-image.sh"
+      - "scripts/untracked/require-image-platforms.sh"
+      - "scripts/tracked/resolve-remote-ref-with-retry.sh"
       - "scripts/lib/**"
-      - "scripts/classify-image-impact.sh"
-      - "scripts/compute-next-release-tag.sh"
-      - "scripts/detect-full-setup-changes.sh"
-      - "scripts/ensure-pr-staging-images.sh"
-      - "scripts/plan-deep-validation.sh"
-      - "scripts/docker-socket-proxy.sh"
-      - "scripts/check-action-node-versions.sh"
-      - "scripts/check-executable-bits.sh"
-      - "scripts/check-workflow-service-lists.sh"
-      - "scripts/check-orphaned-branches.sh"
-      - "scripts/check-changelog-direct-edit.sh"
-      - "scripts/check-pr-title-convention.sh"
-      - "scripts/check-pr-tracking-metadata.sh"
-      - "scripts/check-setup-prompt-drift.sh"
-      - "scripts/check-compose-healthchecks.sh"
-      - "scripts/check-netdata-curl-pin.sh"
-      - "scripts/check-workflow-line-limit.sh"
-      - "scripts/check-review-chronology-comments.sh"
-      - "scripts/check-dependabot-docker-base-consistency.sh"
-      - "scripts/check-trivy-action-direct-usage.sh"
-      - "scripts/check-short-sha-truncation.sh"
-      - "scripts/generate-vex.sh"
-      - "scripts/setup-cli-simulation.sh"
-      - "scripts/syslog-forwarding-simulation.sh"
-      # scripts/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
+      - "scripts/untracked/classify-image-impact.sh"
+      - "scripts/untracked/compute-next-release-tag.sh"
+      - "scripts/untracked/detect-full-setup-changes.sh"
+      - "scripts/untracked/ensure-pr-staging-images.sh"
+      - "scripts/untracked/plan-deep-validation.sh"
+      - "scripts/untracked/docker-socket-proxy.sh"
+      - "scripts/tracked/check-action-node-versions.sh"
+      - "scripts/tracked/check-executable-bits.sh"
+      - "scripts/tracked/check-workflow-service-lists.sh"
+      - "scripts/tracked/check-orphaned-branches.sh"
+      - "scripts/tracked/check-changelog-direct-edit.sh"
+      - "scripts/tracked/check-pr-title-convention.sh"
+      - "scripts/tracked/check-pr-tracking-metadata.sh"
+      - "scripts/tracked/check-setup-prompt-drift.sh"
+      - "scripts/tracked/check-compose-healthchecks.sh"
+      - "scripts/untracked/check-netdata-curl-pin.sh"
+      - "scripts/untracked/check-workflow-line-limit.sh"
+      - "scripts/untracked/check-review-chronology-comments.sh"
+      - "scripts/tracked/check-dependabot-docker-base-consistency.sh"
+      - "scripts/untracked/check-trivy-action-direct-usage.sh"
+      - "scripts/untracked/check-short-sha-truncation.sh"
+      - "scripts/untracked/generate-vex.sh"
+      - "scripts/untracked/simulations/setup-cli-simulation.sh"
+      - "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
+      # scripts/untracked/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
       # reap/orphan-classification logic that used to live entirely inline in
       # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
       # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
-      # directly (`source "$repo_root/scripts/gc-pr-staging-images.sh"`) --
+      # directly (`source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"`) --
       # without this entry, a PR touching only this script would not already
       # match any other path above (it is not under scripts/lib/, which is
       # already covered) and so would never run that suite. Found by
-      # scripts/check-bats-path-filter-coverage.sh's own existence-filtered
+      # scripts/tracked/check-bats-path-filter-coverage.sh's own existence-filtered
       # dependency scan against the real repo tree.
-      - "scripts/gc-pr-staging-images.sh"
+      - "scripts/untracked/gc-pr-staging-images.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
       - ".github/workflows/backfill-stack-latest.yml"
       - ".github/workflows/build-push.yml"
@@ -347,7 +350,7 @@ on:
       - "services/proxy/entrypoint.sh"
       # tests/bats/proxy_healthz_acl_and_hidden_headers.bats reads these
       # three real config files directly via $repo_root (per
-      # scripts/check-bats-path-filter-coverage.sh's own extraction
+      # scripts/tracked/check-bats-path-filter-coverage.sh's own extraction
       # convention) -- without these entries, a PR touching only conf.d/
       # http.conf, conf.d/https.conf, or proxy-params.conf (none of which
       # entrypoint.sh's own path entry above covers) would never run that
@@ -366,7 +369,7 @@ on:
       # the same awk-extraction pattern watchdog.sh's own helper already
       # used -- without this entry, a PR touching only retention.sh would
       # not already match any other path above and so would never run
-      # that suite. Found by scripts/check-bats-path-filter-coverage.sh's
+      # that suite. Found by scripts/tracked/check-bats-path-filter-coverage.sh's
       # own existence-filtered dependency scan against the real repo tree.
       - "services/watchdog/retention.sh"
       # services/proxy/public_suffix_list.dat: tests/bats/proxy_registrable_domain.bats
@@ -380,7 +383,7 @@ on:
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
       # services/syslog/netdata-web_log.conf (#879 gap found by
-      # scripts/check-bats-path-filter-coverage.sh against tests/bats/
+      # scripts/tracked/check-bats-path-filter-coverage.sh against tests/bats/
       # check_logging_matrix_weblog_parity.bats, which reads this file
       # directly via $repo_root to assert its job list stays byte-parity
       # with deploy/quickstart/docker-compose.yml's inline copy): without
@@ -417,7 +420,7 @@ jobs:
   bats-shellspec-smoke:
     # Light tier, not heavy (#1253 design decision): this job never builds an
     # image -- it pulls an already-published, already-smoke-tested digest
-    # (scripts/select-build-tools-image.sh with BUILD_TOOLS_REQUIRE_PUBLISHED=
+    # (scripts/untracked/select-build-tools-image.sh with BUILD_TOOLS_REQUIRE_PUBLISHED=
     # true, the same strict pull-only mode build-push.yml's validate-compose
     # job already uses on lancache-light for the identical reason: "this job
     # runs on the light tier, so it must not trigger the selector's
@@ -465,7 +468,7 @@ jobs:
           # light-tier job for the same reason validate-compose's own
           # comment states: a local fallback build would be the very
           # heavy-tier work this split exists to avoid.
-          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           case "$image" in
             *@sha256:*)
               ;;

@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-executable-bits.sh (issue #1019 / #822
+# Coverage for scripts/tracked/check-executable-bits.sh (issue #1019 / #822
 # Pattern B): the CI guard that fails a build when a repo script is invoked
 # by a bare path in a workflow/composite-action file (or is a .githooks/
 # hook) but is committed with a non-executable git mode.
@@ -18,7 +18,7 @@
 # calls out).
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/check-executable-bits.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-executable-bits.sh"
     fixture="$BATS_TEST_TMPDIR/repo"
     mkdir -p "$fixture/.github/workflows"
     git -C "$fixture" init -q
@@ -238,8 +238,8 @@ EOF
     # script, invoked directly from a workflow, committed non-executable) so
     # this suite is itself the evidence the guard would have caught it,
     # without a one-off manual verification that leaves no trace once merged.
-    add_script scripts/ui-nats-dns-integration-simulation.sh no
-    write_workflow 'scripts/ui-nats-dns-integration-simulation.sh'
+    add_script scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh no
+    write_workflow 'scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh'
     commit_fixture
 
     run bash "$script" "$fixture"

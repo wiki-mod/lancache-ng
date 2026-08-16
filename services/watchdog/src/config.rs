@@ -303,7 +303,7 @@ pub struct ContainerNames {
     pub docker_socket_proxy: &'static str,
 }
 
-/// `scripts/docker-socket-proxy.sh`'s HAProxy allowlist hardcodes these
+/// `scripts/untracked/docker-socket-proxy.sh`'s HAProxy allowlist hardcodes these
 /// exact container names (as does every compose file's `container_name:`
 /// and the Admin UI's `docker_client.rs`) -- nothing in the stack actually
 /// reads `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_DNS_SSL`/
@@ -370,7 +370,7 @@ pub fn resolve_container_names(
     let proxy = proxy_override.unwrap_or(DEFAULT_PROXY).to_string();
     if proxy != expected_proxy {
         return Err(format!(
-            "FATAL: CONTAINER_PROXY={proxy} is not supported (expected '{expected_proxy}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_proxy}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
+            "FATAL: CONTAINER_PROXY={proxy} is not supported (expected '{expected_proxy}'). scripts/untracked/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_proxy}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_PROXY to the default."
         ));
     }
 
@@ -379,7 +379,7 @@ pub fn resolve_container_names(
         .to_string();
     if dns_standard != expected_dns_standard {
         return Err(format!(
-            "FATAL: CONTAINER_DNS_STANDARD={dns_standard} is not supported (expected '{expected_dns_standard}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_dns_standard}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_STANDARD to the default."
+            "FATAL: CONTAINER_DNS_STANDARD={dns_standard} is not supported (expected '{expected_dns_standard}'). scripts/untracked/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_dns_standard}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_STANDARD to the default."
         ));
     }
 
@@ -387,7 +387,7 @@ pub fn resolve_container_names(
         let dns_ssl = dns_ssl_override.unwrap_or(DEFAULT_DNS_SSL).to_string();
         if dns_ssl != expected_dns_ssl {
             return Err(format!(
-                "FATAL: CONTAINER_DNS_SSL={dns_ssl} is not supported (expected '{expected_dns_ssl}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_dns_ssl}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
+                "FATAL: CONTAINER_DNS_SSL={dns_ssl} is not supported (expected '{expected_dns_ssl}'). scripts/untracked/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_dns_ssl}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_DNS_SSL to the default."
             ));
         }
         Some(dns_ssl)
@@ -398,7 +398,7 @@ pub fn resolve_container_names(
     let nats = nats_override.unwrap_or(DEFAULT_NATS).to_string();
     if nats != expected_nats {
         return Err(format!(
-            "FATAL: CONTAINER_NATS={nats} is not supported (expected '{expected_nats}'). scripts/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_nats}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_NATS to the default."
+            "FATAL: CONTAINER_NATS={nats} is not supported (expected '{expected_nats}'). scripts/untracked/docker-socket-proxy.sh's allowlist only permits the fixed container name '{expected_nats}'; renaming this container is not wired through the socket-proxy allowlist or the Admin UI, so it cannot work end-to-end yet. Revert CONTAINER_NATS to the default."
         ));
     }
 
@@ -464,7 +464,7 @@ pub fn resolve_cache_dir(
 /// restarted (see `main.rs`'s alert-only loop), so there is no
 /// `resolve_container_names`-style
 /// fatal-mismatch check to apply, and no compose file, the Admin UI's
-/// `docker_client.rs`, or `scripts/docker-socket-proxy.sh`'s allowlist
+/// `docker_client.rs`, or `scripts/untracked/docker-socket-proxy.sh`'s allowlist
 /// support renaming any of them either.
 ///
 /// UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged concurrently
