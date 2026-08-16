@@ -15,7 +15,10 @@ setup() {
 }
 
 teardown() {
-    rm -rf "$fixture_root"
+    # What: only removes fixture_root when it is a real, non-empty directory.
+    # Why: a silently-empty fixture_root must not turn rm -rf into a blind
+    #   delete of an unintended path.
+    [ -n "$fixture_root" ] && [ -d "$fixture_root" ] && rm -rf "$fixture_root"
 }
 
 # What: prints $1 to stderr and fails the current test.

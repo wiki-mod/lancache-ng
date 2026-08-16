@@ -8,10 +8,10 @@
 # proves its fail-closed path is reachable (AG-VAL-024).
 # From: PR #1542, Issue #1535
 
-# What: The dockerhub-wiring tests below additionally cover
-# check_dockerhub_wiring()'s variation axes (AG-VAL-036).
-# Why: a real call site's shape already varies on indentation, key order,
-# comments, and a missing with: block across this repo's real call sites.
+# What: check_dockerhub_wiring()'s tests below cover call-site YAML-shape
+#   variation (quoting, indentation, key order, comments, missing with:) in one pass.
+# Why: AG-VAL-036 -- enumerate a matcher's real variation axes up front,
+#   not one gap per review round.
 # From: PR #1543, Issue #1535
 
 setup() {
@@ -22,9 +22,18 @@ setup() {
 }
 
 teardown() {
-    rm -rf "$fixture_root"
+    # What: only removes fixture_root when it is a real, non-empty directory.
+    # Why: a silently-empty fixture_root (e.g. a failed mktemp -d in setup())
+    #   must not turn rm -rf into a blind delete of an unintended path.
+    # From: PR #1546 review, djdomi, 2026-08-16
+    [ -n "$fixture_root" ] && [ -d "$fixture_root" ] && rm -rf "$fixture_root"
 }
 
+
+# What: prints a message to stderr and fails the current bats test.
+# Why: gives assertion failures a readable message instead of bats' own
+#   generic "[ status -eq 0 ]"-style output.
+# From: PR #1542, Issue #1535
 fail() {
     echo "$1" >&2
     return 1
