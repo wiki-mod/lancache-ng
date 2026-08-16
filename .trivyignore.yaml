@@ -157,8 +157,9 @@ vulnerabilities:
       of pinned GitHub-release URLs (`cargo-audit`, `cargo-tarpaulin`,
       `shellspec`) -- no schemeless SFTP/SCP URL.
 
-      Verified: 2026-08-14, real execution on self-hosted runner
-      lancache-240 (not tracker websites alone). All 5 runtime First-Party
+      Verified: 2026-08-14 (documented as the 2026-08-15 checkpoint
+      re-review), real execution on self-hosted runner lancache-240 (not
+      tracker websites alone). All 5 runtime First-Party
       images (`services/proxy`, `services/dns`, `services/watchdog`,
       `services/ui`, `services/ntp`) share the byte-identical Alpine base
       digest
@@ -221,12 +222,12 @@ vulnerabilities:
       insecure-connection-establishment issue caused by a TLS
       configuration mismatch.
 
-      Verified: 2026-08-14, lancache-240, real Trivy scan (both
-      `HIGH,CRITICAL` and full-severity-range): reported against
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at
-      `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`,
-      severity HIGH); absent from both real-scanned Alpine-based images at
-      any severity.
+      Verified: 2026-08-14 (documented as the 2026-08-15 checkpoint
+      re-review), lancache-240, real Trivy scan (both `HIGH,CRITICAL` and
+      full-severity-range): reported against `tools/build-tools`'s
+      `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`
+      (`Status: affected`, `FixedVersion: None`, severity HIGH); absent
+      from both real-scanned Alpine-based images at any severity.
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
@@ -242,12 +243,12 @@ vulnerabilities:
       information-disclosure issue caused by proxy authentication state
       not being cleared between connections.
 
-      Verified: 2026-08-14, lancache-240, real Trivy scan (both
-      `HIGH,CRITICAL` and full-severity-range): reported against
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at
-      `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`,
-      severity HIGH); absent from both real-scanned Alpine-based images at
-      any severity.
+      Verified: 2026-08-14 (documented as the 2026-08-15 checkpoint
+      re-review), lancache-240, real Trivy scan (both `HIGH,CRITICAL` and
+      full-severity-range): reported against `tools/build-tools`'s
+      `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`
+      (`Status: affected`, `FixedVersion: None`, severity HIGH); absent
+      from both real-scanned Alpine-based images at any severity.
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
