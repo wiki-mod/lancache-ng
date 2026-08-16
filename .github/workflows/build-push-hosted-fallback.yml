@@ -74,7 +74,7 @@ on:
         default: "no"
       services:
         description: >-
-          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools,utilities
           to build, or "all".
         required: false
         default: all
@@ -181,6 +181,7 @@ jobs:
             [syslog]=services/syslog
             [ui]=services/ui
             [build-tools]=tools/build-tools
+            [utilities]=services/utilities
           )
           declare -A build_contexts=(
             [proxy]="dns-domains=services/dns"
@@ -192,6 +193,7 @@ jobs:
             [syslog]=""
             [ui]=""
             [build-tools]=""
+            [utilities]=""
           )
           declare -A descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -203,6 +205,7 @@ jobs:
             [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
           )
           declare -A is_rust=(
             [dns]=true
@@ -210,7 +213,7 @@ jobs:
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)
+            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
