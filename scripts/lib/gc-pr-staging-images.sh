@@ -240,8 +240,8 @@ gcps_pr_lookup_state() {
   if [[ -n "${cache_ref[$pr_number]:-}" ]]; then
     printf '%s\n' "${cache_ref[$pr_number]}"
     if [[ -n "$result_var_name" ]]; then
-      # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
       local -n result_ref="$result_var_name"
+      # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
       result_ref="${cache_ref[$pr_number]}"
     fi
     return
@@ -279,8 +279,8 @@ gcps_pr_lookup_state() {
   fi
 
   if [[ -n "$result_var_name" ]]; then
-    # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
     local -n result_ref="$result_var_name"
+    # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
     result_ref="${cache_ref[$pr_number]}"
   fi
   printf '%s\n' "${cache_ref[$pr_number]}"
