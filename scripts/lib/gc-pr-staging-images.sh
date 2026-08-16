@@ -224,12 +224,25 @@ gcps_is_old_enough_to_delete() {
 # time it might genuinely occur, rather than relying on another manual log
 # audit to notice it again.
 gcps_pr_lookup_state() {
-  local pr_number="$1" repository="$2" cache_array_name="$3"
+  local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
-  local api_output pr_state
+  # What: optional 4th arg is a caller variable name, populated via nameref
+  # from cache_ref (the single source of truth) in both branches below;
+  # named lookup_state below, not pr_state, so a caller passing the literal
+  # name "pr_state" (the real one does) can't collide with this function's
+  # own same-named local and silently write back into that instead.
+  # Why: a caller invoking this as a plain statement (not `$(...)`) needs
+  # cache_ref written by reference (command substitution would fork a
+  # subshell and lose it), so the result must reach it by reference too.
+  # From: Issue #1557 | PR #1559
+  local api_output lookup_state
 
   if [[ -n "${cache_ref[$pr_number]:-}" ]]; then
     printf '%s\n' "${cache_ref[$pr_number]}"
+    if [[ -n "$result_var_name" ]]; then
+      local -n result_ref="$result_var_name"
+      result_ref="${cache_ref[$pr_number]}"
+    fi
     return
   fi
 
@@ -241,8 +254,8 @@ gcps_pr_lookup_state() {
   # failure is handled by the `else` branches below instead of aborting the
   # whole GC run.
   if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
-    if pr_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
-      if [[ "$pr_state" == "open" ]]; then
+    if lookup_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
+      if [[ "$lookup_state" == "open" ]]; then
         cache_ref["$pr_number"]="OPEN"
       else
         cache_ref["$pr_number"]="CLOSED"
@@ -252,7 +265,7 @@ gcps_pr_lookup_state() {
       # parse it -- same "don't let this bare assignment trip set -e"
       # reasoning as the gh api call above, applied to every other jq call
       # in this script.
-      echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $pr_state" >&2
+      echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $lookup_state" >&2
       cache_ref["$pr_number"]="LOOKUP_FAILED"
     fi
   elif [[ "$api_output" == *"HTTP 404"* ]]; then
@@ -264,6 +277,10 @@ gcps_pr_lookup_state() {
     cache_ref["$pr_number"]="LOOKUP_FAILED"
   fi
 
+  if [[ -n "$result_var_name" ]]; then
+    local -n result_ref="$result_var_name"
+    result_ref="${cache_ref[$pr_number]}"
+  fi
   printf '%s\n' "${cache_ref[$pr_number]}"
 }
 
