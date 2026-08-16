@@ -275,7 +275,7 @@ services:
       start_period: 15s
     # What: `service_started`, not `service_healthy`, on docker-socket-proxy.
     # Why: watchdog's own dashboard and alert-only monitoring must stay available even when the Docker API channel is degraded; get_health()/probe_docker_socket_proxy() already treat an unreachable proxy as a normal, self-clearing state, and RESTART_AFTER=3 absorbs a transient startup-race reading.
-    # From: commit cf312acf
+    # From: PR #1489
     depends_on:
       docker-socket-proxy:
         condition: service_started
@@ -758,7 +758,7 @@ services:
       start_period: 20s
     # What: NATS stays on the shared application network only, not netdata-net.
     # Why: the pinned Netdata image has no active NATS go.d job and its default target is 127.0.0.1:8222, not the `nats` Compose name; joining netdata-net would add no collector path.
-    # From: docs/architecture-ng.md
+    # From: Issue #849 | PR #1462
     networks:
       - default
     restart: always
@@ -968,11 +968,11 @@ services:
       - docker-api
       # What: netdata-net, in addition to the application and Docker API networks.
       # Why: NETDATA_URL points at the isolated Netdata service.
-      # From: docs/architecture-ng.md
+      # From: Issue #849 | PR #1462
       - netdata-net
     # What: `service_started` on docker-socket-proxy/proxy/netdata/nats, not `service_healthy`.
     # Why: the dashboard and recovery surface must remain startable even if the Docker API proxy is unhealthy; Docker-backed actions surface their own degraded state instead.
-    # From: commit cf312acf
+    # From: PR #1489
     depends_on:
       docker-socket-proxy:
         condition: service_started
@@ -996,7 +996,7 @@ services:
     hostname: lancache-netdata
     # What: pid: host, required by netdata's own Docker documentation for apps.plugin to read other containers' /proc/<pid> entries.
     # Why: without it, netdata's PID namespace is a sibling, not an ancestor, of the host's, so ptrace_may_access fails even with cap_add: SYS_PTRACE below.
-    # From: docs/architecture-ng.md
+    # From: PR #1125
     pid: host
     cap_add:
       - SYS_PTRACE
@@ -1078,7 +1078,7 @@ services:
       - netdata-logs:/var/log/netdata
       # What: web_log (go.d.plugin) job config, bind-mounted; reads the proxy's plain-text access-log copy (fluent-bit's `logs` volume output) to expose live per-request nginx analytics.
       # Why: prod has a real repo checkout at build/deploy time (same basis as the cdn-domains.txt bind-mount on proxy/dns), so this config can be bind-mounted directly rather than generated inline.
-      # From: docs/architecture-ng.md
+      # From: Issue #1246
       - logs:/var/log/lancache:ro
       - ../../services/syslog/netdata-web_log.conf:/etc/netdata/go.d/web_log.conf:ro
     healthcheck:
@@ -1093,7 +1093,7 @@ services:
     restart: always
     # What: joins only netdata-net, not the shared default bridge.
     # Why: netdata exposes an unauthenticated HTTP API with no host port; only the UI needs to reach it. Not `internal: true` since the upstream image may need outbound access for its own operation.
-    # From: docs/architecture-ng.md
+    # From: Issue #849 | PR #1462
     networks:
       - netdata-net
     logging:
@@ -1107,7 +1107,7 @@ networks:
     internal: true
   # What: netdata-net, dedicated to Netdata and the Admin UI.
   # Why: the only bridge-networked caller of NETDATA_URL.
-  # From: docs/architecture-ng.md
+  # From: Issue #849 | PR #1462
   netdata-net: {}
 
 volumes:
