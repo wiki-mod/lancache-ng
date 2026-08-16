@@ -2,61 +2,31 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Opt-in GitHub-hosted OVERFLOW path for the image build/scan/publish job
-# class that build-push.yml's `container-scan`, `build`, `merge-manifests`,
-# `promote`, and `release` jobs normally run on self-hosted `lancache-heavy`
-# runners. See issue #686 for the full history: an earlier investigation
-# recommended against building this at all (self-hosted was believed to only
-# need capacity hardening, see #1065/#1095); the maintainer reversed that
-# recommendation because the self-hosted fleet is a temporary
-# development-phase measure the project wants to depend on less over time,
-# not the permanent architecture -- while an unconditional hosted-only
-# pipeline is equally rejected, since GitHub's free-tier default concurrency
-# (~1 hosted runner per repo) would recreate the multi-hour queue waits this
-# project had before self-hosted runners existed. This workflow is therefore
-# a manually-invoked OVERFLOW path, never a replacement: self-hosted stays
-# the fast, default path (build-push.yml is completely unchanged by this
-# file), and this workflow only ever runs when a maintainer explicitly
-# dispatches it during a self-hosted outage.
+# What: opt-in, maintainer-dispatched GitHub-hosted overflow path for
+#   build-push.yml's amd64 container-scan/build/merge-manifests jobs
+#   during a self-hosted-runner outage; never a replacement for self-hosted.
+# Why: self-hosted stays the default fast path; GitHub's free-tier hosted
+#   concurrency (~1 runner/repo) can't sustain it as the primary pipeline.
+# From: Issue #686, docs/ci-github-hosted-fallback-decision.md
 #
-# Scope covered: `container-scan` (amd64 only) + `build` (amd64 leg) +
-# manifest merge, producing the exact same `sha-<short>[-amd64]` / merged
-# `sha-<short>` GHCR tags build-push.yml's own jobs would have produced for
-# the same commit. The linux/arm64 leg needs no fallback: build-push.yml's
-# own `build-arm64` job already runs unconditionally on GitHub-hosted
-# `ubuntu-24.04-arm` for every push/PR regardless of self-hosted health (see
-# issue #592), so its `sha-<short>-arm64` tag is already available for this
-# workflow's merge step to combine with the amd64 tag produced here.
+# Scope covered: container-scan (amd64) + build (amd64) + manifest merge,
+# producing the same sha-<short>[-amd64]/merged sha-<short> GHCR tags
+# build-push.yml's own jobs would produce. arm64 needs no fallback --
+# build-push.yml's build-arm64 already runs on hosted ubuntu-24.04-arm
+# unconditionally (Issue #592).
 #
-# Explicitly NOT covered: `promote` (channel-pointer moves) and `release`
-# (release-tag publish). Both carry `scripts/lib/promote-lock.sh`'s git-ref
-# locking and multi-channel branch/tag rules (see build-push.yml's own
-# `promote` job comments) that are not safe to re-derive from scratch as a
-# late-night first increment -- see docs/ci-github-hosted-fallback-decision.md
-# and issue #686 for the deferral reasoning. Once this workflow publishes a
-# service's merged `sha-<short>` tag, promoting it to a channel (`dev`,
-# `nightly`) still requires either self-hosted capacity to return so
-# build-push.yml's own `promote` job can run normally, or a manual
-# `workflow_dispatch` of build-push.yml itself with its existing `channel`
-# input (see that workflow's own `on.workflow_dispatch.inputs.channel`) once
-# a self-hosted runner is available to execute `promote`'s job body -- this
-# workflow does not attempt to run `promote` on a hosted runner.
+# Scope NOT covered: promote/release. `scripts/lib/promote-lock.sh`'s
+# git-ref locking and multi-channel rules aren't safe to re-derive here --
+# see docs/ci-github-hosted-fallback-decision.md for the deferral
+# reasoning. A published sha-<short> tag still needs self-hosted capacity
+# (or a manual build-push.yml workflow_dispatch with its channel input) to
+# actually promote.
 #
-# Credential design (issue #686's central question, resolved here): every
-# job below uses the same default, short-lived, repo-scoped `GITHUB_TOKEN`
-# with `packages: write` that build-push.yml's `build-arm64` job has already
-# used on a GitHub-hosted `ubuntu-24.04-arm` runner, continuously in
-# production, since issue #592 -- this is not a new credential exposure
-# decision, it is the same one already made and shipped for the arm64 leg,
-# now extended to the amd64 leg under the same trust model (a token scoped
-# to this repository's own packages, valid only for this run's lifetime, and
-# never a long-lived PAT). Trigger design deliberately does not use a
-# pull_request-shaped event: only `workflow_dispatch` can invoke this
-# workflow, which GitHub itself restricts to users with write access to this
-# repository -- the same population that can already push to protected
-# branches or dispatch build-push.yml's own `channel` promotion input. No
-# LAN-only secret (Redis sccache, sccache-dist, distcc) is read or mounted
-# anywhere in this file; the two Rust services build uncached on
+# Credentials: every job uses the same default, short-lived GITHUB_TOKEN
+# (packages: write) build-arm64 already uses on hosted ubuntu-24.04-arm --
+# not a new exposure decision. workflow_dispatch-only trigger, restricted
+# by GitHub to users with write access. No LAN-only secret is read here;
+# both Rust services build uncached on
 # `ubuntu-latest`, the same degraded-but-correct mode build-arm64 already
 # runs in on every single push.
 name: Build & Push (GitHub-hosted overflow fallback)
