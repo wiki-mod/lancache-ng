@@ -9,26 +9,25 @@
 #   concurrency (~1 runner/repo) can't sustain it as the primary pipeline.
 # From: Issue #686, docs/ci-github-hosted-fallback-decision.md
 #
-# Scope covered: container-scan (amd64) + build (amd64) + manifest merge,
-# producing the same sha-<short>[-amd64]/merged sha-<short> GHCR tags
-# build-push.yml's own jobs would produce. arm64 needs no fallback --
-# build-push.yml's build-arm64 already runs on hosted ubuntu-24.04-arm
-# unconditionally (Issue #592).
+# What: covers container-scan (amd64) + build (amd64) + manifest merge,
+#   producing the same sha-<short>[-amd64]/merged sha-<short> GHCR tags
+#   build-push.yml's own jobs would produce.
+# Why: arm64 needs no fallback -- build-push.yml's build-arm64 already
+#   runs on hosted ubuntu-24.04-arm unconditionally.
+# From: Issue #592
 #
-# Scope NOT covered: promote/release. `scripts/lib/promote-lock.sh`'s
-# git-ref locking and multi-channel rules aren't safe to re-derive here --
-# see docs/ci-github-hosted-fallback-decision.md for the deferral
-# reasoning. A published sha-<short> tag still needs self-hosted capacity
-# (or a manual build-push.yml workflow_dispatch with its channel input) to
-# actually promote.
+# What: does not cover promote/release.
+# Why: `scripts/lib/promote-lock.sh`'s git-ref locking and multi-channel
+#   rules aren't safe to re-derive here; a published tag still needs
+#   self-hosted capacity (or a manual build-push.yml dispatch) to promote.
+# From: docs/ci-github-hosted-fallback-decision.md
 #
-# Credentials: every job uses the same default, short-lived GITHUB_TOKEN
-# (packages: write) build-arm64 already uses on hosted ubuntu-24.04-arm --
-# not a new exposure decision. workflow_dispatch-only trigger, restricted
-# by GitHub to users with write access. No LAN-only secret is read here;
-# both Rust services build uncached on
-# `ubuntu-latest`, the same degraded-but-correct mode build-arm64 already
-# runs in on every single push.
+# What: every job uses the same default, short-lived GITHUB_TOKEN
+#   (packages: write) build-arm64 already uses on hosted ubuntu-24.04-arm.
+# Why: not a new exposure decision; workflow_dispatch-only trigger is
+#   restricted by GitHub to users with write access; no LAN-only secret
+#   is read here, both Rust services build uncached like build-arm64.
+# From: Issue #686
 name: Build & Push (GitHub-hosted overflow fallback)
 
 on:

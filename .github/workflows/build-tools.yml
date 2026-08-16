@@ -7,17 +7,12 @@
 # image is CI infrastructure for acceleration checks, not a product runtime
 # dependency.
 #
-# arm64 builds natively on a GitHub-hosted ubuntu-24.04-arm runner (same
-# pattern as build-push.yml's build-arm64/merge-manifests, added by #592)
-# instead of QEMU emulation on the self-hosted amd64 pool. Confirmed directly
-# on #606: emulating tools/build-tools/Dockerfile's docker-compose source
-# build (a large dependency tree pulling in github.com/moby/moby/client) under
-# QEMU fails reproducibly with a Go compiler "bufio: buffer full" error while
-# reading export data -- not a transient flake, a genuine emulation resource
-# limit that the small pre-#606 actionlint-only arm64 build never hit. The
-# same Dockerfile change built cleanly in ~6m37s on ubuntu-24.04-arm in the
-# same PR's build-push.yml run, confirming native arm64 is the fix, not a
-# tuning knob on the emulated build.
+# What: arm64 builds natively on GitHub-hosted ubuntu-24.04-arm, not QEMU
+#   emulation on the self-hosted amd64 pool.
+# Why: QEMU-emulated docker-compose source builds hit a genuine Go compiler
+#   resource limit ("bufio: buffer full"), not a tuning knob; native arm64
+#   built the same change cleanly in ~6m37s.
+# From: Issue #606, PR #592
 name: Build Tools Image
 
 on:
