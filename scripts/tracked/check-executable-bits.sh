@@ -1,72 +1,25 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-#
-# Standing guard for issue #1019 (#822 Pattern B): a repo script committed
-# with git mode 100644 but invoked as a *bare path* (e.g. `scripts/foo.sh`,
-# not `bash scripts/foo.sh`) fails at runtime with `Permission denied` /
-# exit 126. This defect is invisible from a Windows / core.filemode=false
-# authoring host (Rule-Ref: AG-VAL-024) -- `chmod +x` is a no-op there and no
-# local check reveals the committed mode -- so it has recurred at least four
-# times (#617 ui-nats-dns-integration-simulation.sh, #711 nats-secondary-
-# auth-callout-simulation.sh, PR #804's own check-action-node-versions.sh /
-# .githooks/pre-push incident) and, until this guard, had no systemic
-# protection: only a single hardcoded `test -x services/watchdog/watchdog.sh`
-# existed in build-push.yml.
-#
-# This script parses every workflow and composite-action file for script
-# invocations, flags the ones that execute a repo script by a *bare path*
-# (no `bash`/`sh`/`.`/`source` interpreter prefix -- those read the file and
-# do not need the executable bit), and asserts each such file's *committed*
-# git mode is 100755. The committed mode (`git ls-tree HEAD`) is what matters,
-# not the checkout's filesystem mode: CI checks the repo out from git, so the
-# mode stored in the tree is exactly what a bare invocation will get, and it
-# is the only mode that is meaningful on a core.filemode=false author host.
-#
-# It additionally requires every tracked file under `.githooks/` to be
-# executable, because git runs a hook by bare path unconditionally (a
-# non-executable hook is silently skipped or errors) -- this is the
-# `.githooks/pre-push` half of PR #804's own incident, which a workflow-only
-# scan would miss. PR #804's other half -- a bats suite invoking its
-# script-under-test bare via `run "$script"` -- is already self-guarding:
-# those suites run in CI via `bats tests/bats`, where a non-executable
-# script-under-test fails with exit 126, so the regression surfaces there
-# rather than needing to be re-derived here.
-#
-# Modeled on scripts/tracked/check-action-node-versions.sh (issue #801/#804), the
-# `scripts/check-*.sh` + CI-job template #822's own Pattern H names for
-# converting a recurring whack-a-mole into an impossible-to-reintroduce class.
-#
-# Deliberately implemented in plain bash string/glob/`case` matching rather
-# than a YAML parser (this project depends on neither a YAML library nor a
-# non-shell runtime for its guards -- Rule-Ref: AG-REL-001) and rather than a
-# PCRE grep (check-idempotence-test-coverage.sh's own header documents that
-# both PCRE grep and a POSIX-awk rewrite misbehaved on this project's actual
-# self-hosted runners).
-#
-# Known, deliberate scope limits (a safety net for the common shape, not a
-# proof of universal coverage -- Rule-Ref: AG-VAL-024 still governs how new
-# scripts should be *written*, via explicit-interpreter invocation):
-#   - Only repo-root-relative paths under scripts/, services/, tests/, or
-#     .githooks/ are recognized. A `../`-relative invocation (from a step's
-#     `working-directory:`) or a `$VAR`-interpolated script path is not
-#     resolved. This matches how the sibling workflow-parsing guards scope
-#     themselves.
-#   - A path passed as a data *argument* to another command (`cat
-#     scripts/x.sh`, `grep ... scripts/x.sh`) is correctly NOT flagged,
-#     because only the command *word* of each simple command is examined.
-#
-# Accepts an optional repo_root argument (defaults to this script's own repo)
-# so tests/bats/check_executable_bits.bats can point it at a fixture git tree
-# instead of depending on the real repository.
+# What: standing guard requiring every bare-path-invoked script (and every
+# .githooks/ file) to be committed as git mode 100755, not 100644.
+# Why: invisible from a Windows/core.filemode=false host -- `chmod +x` is a
+# no-op there and no local check reveals the committed mode (AG-VAL-024).
+# From: Issue #1019 | Issue #1095 | PR #1501.
 set -euo pipefail
 
+# What: accepts an optional repo_root argument, defaulting to this script's
+# own repo.
+# Why: lets tests/bats/check_executable_bits.bats point this at a fixture
+# git tree instead of the real repository.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
 cd "$repo_root"
 
-# The committed mode is read from git, so this must be a git work tree.
-# `cd "$repo_root"` above already put us inside it, so a bare `git` call
-# (no `-C`) resolves against it.
+# What: requires a git work tree at repo_root.
+# Why: the committed mode is read from git, and `cd "$repo_root"` above
+# already put us inside it, so a bare `git` call (no `-C`) resolves against it.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 if ! git rev-parse --git-dir >/dev/null 2>&1; then
   printf '::error::check-executable-bits: %s is not a git work tree; cannot read committed file modes.\n' "$repo_root" >&2
   exit 1
@@ -97,32 +50,35 @@ warn() {
   printf '::warning::%s\n' "$1" >&2
 }
 
-# A repo script path (optionally with a leading ./), anchored to the four
-# top-level directories this repo keeps executable scripts under. `.bats` is
-# included because a bats suite executed by bare path (rather than `bats
-# <file>`) would need the bit too.
+# What: matches a repo script path anchored to the four top-level dirs this
+# repo keeps executable scripts under, plus `.bats`.
+# Why: repo-root-relative only -- a `../`-relative or `$VAR`-interpolated
+# path is not resolved; `.bats` covers a bare-path bats suite too.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 script_path_re='^(scripts|services|tests|\.githooks)/[A-Za-z0-9_.-]+(/[A-Za-z0-9_.-]+)*\.(sh|bats)$'
 
-# committed_mode <path>
-# Prints the git tree mode (e.g. 100644 or 100755) recorded for a tracked
-# path at HEAD, or nothing if the path is not tracked. Reads the committed
-# tree, not the index or the filesystem, so the result is independent of the
-# checkout's core.filemode setting and reflects exactly what a bare
-# invocation in CI will execute.
+# What: committed_mode() prints the git tree mode for a tracked path at HEAD.
+# Why: reads the committed tree, not the filesystem, independent of the
+# checkout's core.filemode.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 committed_mode() {
   git ls-tree HEAD -- "$1" 2>/dev/null | awk 'NR == 1 {print $1}'
 }
 
-# require_executable <path> <context>
-# Fails the check if <path> is tracked but not committed as mode 100755.
+# What: require_executable() fails the check if <path> is tracked but not
+# committed as mode 100755.
+# Why: a bare-path invocation execs the file directly, so a non-executable
+# mode fails at runtime.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 require_executable() {
   local path="$1" context="$2" mode
   mode="$(committed_mode "$path")"
   if [ -z "$mode" ]; then
-    # A bare invocation of an untracked path is a different bug (missing
-    # file), not a lost-exec-bit one; warn rather than fail so this guard
-    # stays scoped to the mode class and does not false-fail on a
-    # legitimately generated or intentionally .gitignored target.
+    # What: warns instead of failing when the path is not tracked at HEAD.
+    # Why: an untracked bare invocation is a different bug (missing file),
+    # not a lost-exec-bit one, and this keeps the guard scoped to the mode
+    # class rather than false-failing on a generated or gitignored target.
+    # From: Issue #1019 | Issue #1095 | PR #1501.
     warn "check-executable-bits: '$path' is invoked as a bare path ($context) but is not tracked at HEAD -- cannot verify its committed mode."
     return
   fi
@@ -131,19 +87,15 @@ require_executable() {
   fi
 }
 
-# command_word_script <shell-segment>
-# Given one shell command segment (already split off at a command
-# separator), prints the repo script path it *executes* by bare path, or
-# nothing. It strips a leading exec-wrapper (`exec`/`command`/`sudo`) and a
-# leading `./`, then returns the first token only if that token is itself a
-# repo script path -- i.e. the file is the command being run, not an argument
-# to some other command, and not the target of an interpreter/reader
-# (`bash`/`sh`/`.`/`source`/`bats`/`shellspec`/`python3`), which would make
-# the executable bit irrelevant.
+# What: command_word_script() prints the repo script path a segment
+# executes by bare path.
+# Why: only the first token counts as the command, not a data argument or
+# an interpreter/reader (`bash`/`source`/etc).
+# From: Issue #1019 | Issue #1095 | PR #1501.
 command_word_script() {
   local seg="$1" first candidate
-  # Trim leading whitespace and any leading grouping/keyword tokens that can
-  # legitimately precede a command word within a single segment.
+  # Trims leading whitespace and grouping/keyword tokens that can legitimately
+  # precede a command word within a single segment.
   while :; do
     seg="${seg#"${seg%%[![:space:]]*}"}"
     case "$seg" in
@@ -169,68 +121,186 @@ command_word_script() {
   fi
 }
 
-# split_into_segments <line>
-# Splits a shell line into command segments at command separators
-# (&& || ; |) using pure bash parameter expansion, emitting one segment per
-# line. Kept subprocess-free (no per-line `sed`) so scanning every line of a
-# multi-thousand-line workflow file stays fast on every host, including
-# Windows Git Bash where each subprocess spawn is expensive. `||` and `&&`
-# are collapsed before the single `|` so a `||` is not mis-split as two
-# empty pipes.
+# What: splits a shell line into segments at &&, ||, ;, | (plain bash
+# string matching, not a YAML library or PCRE grep).
+# Why: a YAML library is a dependency this project avoids (AG-REL-001);
+# PCRE grep is known to misbehave on this project's self-hosted runners.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 split_into_segments() {
   local s="$1" nl=$'\n'
   s="${s//&&/$nl}"
   s="${s//||/$nl}"
   s="${s//;/$nl}"
   s="${s//|/$nl}"
-  # Trailing newline is required: without it `while IFS= read -r segment`
-  # silently drops the final (and, for a separator-free line, only) segment,
-  # since `read` returns non-zero at EOF-without-newline before the loop body
-  # runs. The empty trailing segment this produces is filtered by the loop's
-  # own `[ -n "$segment" ]` guard.
+  # What: appends a trailing newline before printing.
+  # Why: without it, `while IFS= read -r segment` silently drops the final
+  # segment, since `read` returns non-zero at EOF-without-newline before the
+  # loop body runs.
+  # From: Issue #1019 | Issue #1095 | PR #1501.
   printf '%s\n' "$s"
 }
 
+# What: classifies shell text from a `run:` scalar, skipping segments when
+# no script_path_re prefix appears in the line at all.
+# Why: keeps classification separate from YAML extraction; the prefix
+# pre-check avoids an expensive per-segment subshell fork on every line.
+# From: Issue #1019 | Issue #1095 | PR #1501.
+inspect_shell_line() {
+  local shell_line="$1" context="$2" segment found
+  shell_line="${shell_line#"${shell_line%%[![:space:]]*}"}"
+  [ -n "$shell_line" ] || return 0
+  case "$shell_line" in \#*) return 0 ;; esac
+  case "$shell_line" in
+    *scripts/*|*services/*|*tests/*|*.githooks/*) ;;
+    *) return 0 ;;
+  esac
+
+  while IFS= read -r segment; do
+    [ -n "$segment" ] || continue
+    found="$(command_word_script "$segment")"
+    if [ -n "$found" ]; then
+      require_executable "$found" "$context"
+    fi
+  done < <(split_into_segments "$shell_line")
+}
+
+# What: is_block_scalar_header() recognizes the `|`/`>` block-scalar
+# indicator shape (chomping +/-, indentation 1-9, either order).
+# Why: prevents `run: >-`/`run: |2-` from being mistaken for inline shell;
+# an explicit indentation-indicator column is untested but unused today.
+# From: Issue #1019 | Issue #1095 | PR #1501.
+is_block_scalar_header() {
+  local value="$1"
+  [[ "$value" =~ ^[\|\>](\+|-)?[1-9]?[[:space:]]*(#.*)?$ ]] ||
+    [[ "$value" =~ ^[\|\>][1-9](\+|-)?[[:space:]]*(#.*)?$ ]]
+}
+
+# What: yaml_run_value() prints "<key-indent><TAB><value>" only when the
+# line defines a `run` mapping key, else fails.
+# Why: unrelated YAML values must never be mistaken for shell content.
+# From: Issue #1019 | Issue #1095 | PR #1501.
+yaml_run_value() {
+  local line="$1" leading body key_indent value
+  leading="${line%%[! ]*}"
+  body="${line#"$leading"}"
+  key_indent=${#leading}
+  if [[ "$body" == '- '* ]]; then
+    body="${body#- }"
+    key_indent=$((key_indent + 2))
+  fi
+
+  case "$body" in
+    run:*) value="${body#run:}" ;;
+    "'run':"*) value="${body#\'run\':}" ;;
+    '"run":'*) value="${body#\"run\":}" ;;
+    *) return 1 ;;
+  esac
+
+  value="${value#"${value%%[![:space:]]*}"}"
+  printf '%s\t%s\n' "$key_indent" "$value"
+}
+
+# What: inspect_run_physical_line() joins shell physical lines ending in a
+# backslash before classification.
+# Why: mirrors the shell's own logical-line behavior, so a multiline
+# `for ... in` word list stays one statement, not one fake command per item.
+# From: Issue #1019 | Issue #1095 | PR #1501.
+pending_shell_line=""
+inspect_run_physical_line() {
+  local line="$1" context="$2" right_trimmed
+  line="${line#"${line%%[![:space:]]*}"}"
+  right_trimmed="${line%"${line##*[![:space:]]}"}"
+
+  if [[ -n "$pending_shell_line" ]]; then
+    pending_shell_line+=" $right_trimmed"
+  else
+    pending_shell_line="$right_trimmed"
+  fi
+
+  if [[ "$right_trimmed" == *\\ ]]; then
+    pending_shell_line="${pending_shell_line%\\}"
+    return 0
+  fi
+
+  inspect_shell_line "$pending_shell_line" "$context"
+  pending_shell_line=""
+}
+
 for file in "${scan_files[@]}"; do
-  # Pre-filter to only the handful of lines that even mention a candidate
-  # script directory, so the per-segment parsing below never runs on the
-  # thousands of unrelated lines in a large workflow file. `|| true` keeps a
-  # file with zero candidate lines from tripping `set -e` on grep's exit 1.
-  while IFS= read -r line; do
-    # Left-trim; skip whole-line shell comments -- this is how a workflow
-    # comment that merely *mentions* a script path (e.g. full-setup-
-    # validate.yml's prose reference to full-setup-client-simulation.sh) is
-    # prevented from being read as an invocation.
-    trimmed="${line#"${line%%[![:space:]]*}"}"
-    [ -n "$trimmed" ] || continue
-    case "$trimmed" in \#*) continue ;; esac
+  in_run_block=0
+  run_key_indent=0
+  pending_shell_line=""
 
-    # Drop a leading YAML list marker and a leading `run:` key so an inline
-    # `run: scripts/foo.sh` is analyzed as shell; block-scalar `run: |`
-    # bodies arrive here already as bare indented shell lines and need no
-    # such stripping.
-    trimmed="${trimmed#- }"
-    case "$trimmed" in
-      run:*)
-        trimmed="${trimmed#run:}"
-        trimmed="${trimmed#"${trimmed%%[![:space:]]*}"}"
-        ;;
-    esac
-    [ -n "$trimmed" ] || continue
-
-    while IFS= read -r segment; do
-      [ -n "$segment" ] || continue
-      found="$(command_word_script "$segment")"
-      if [ -n "$found" ]; then
-        require_executable "$found" "in $file"
+  while IFS= read -r line || [ -n "$line" ]; do
+    if [ "$in_run_block" -eq 1 ]; then
+      # What: treats a blank line as still inside the block scalar.
+      # Why: a blank line does not terminate a YAML block scalar's
+      # indentation scope.
+      # From: Issue #1019 | Issue #1095 | PR #1501.
+      if [ -z "${line//[[:space:]]/}" ]; then
+        continue
       fi
-    done < <(split_into_segments "$trimmed")
-  done < <(grep -E '(scripts|services|tests|\.githooks)/' "$file" || true)
+
+      leading="${line%%[! ]*}"
+      line_indent=${#leading}
+      if [ "$line_indent" -gt "$run_key_indent" ]; then
+        inspect_run_physical_line "$line" "in $file"
+        continue
+      fi
+
+      # What: inspects a dangling continued logical line before clearing it,
+      # then falls through to test whether the current line starts another `run:`.
+      # Why: separate shell syntax checks reject malformed Bash, so a
+      # dangling line is inspected here rather than silently discarded.
+      # From: Issue #1019 | Issue #1095 | PR #1501.
+      if [ -n "$pending_shell_line" ]; then
+        inspect_shell_line "$pending_shell_line" "in $file"
+        pending_shell_line=""
+      fi
+      in_run_block=0
+    fi
+
+    # What: skips the yaml_run_value subshell for a line with no `run:` substring.
+    # Why: yaml_run_value() can never match such a line; this avoids forking
+    # a subshell on every line of a large workflow file.
+    # From: Issue #1095 | PR #1501.
+    case "$line" in
+      *run:*) ;;
+      *) continue ;;
+    esac
+
+    if run_record="$(yaml_run_value "$line")"; then
+      run_key_indent="${run_record%%$'\t'*}"
+      run_value="${run_record#*$'\t'}"
+      if is_block_scalar_header "$run_value"; then
+        in_run_block=1
+        pending_shell_line=""
+      elif [ -n "$run_value" ]; then
+        # What: strips one outer quote pair from an inline `run:` value.
+        # Why: YAML permits a quoted scalar, which becomes the identical
+        # command string once Actions invokes the shell.
+        # From: Issue #1019 | Issue #1095 | PR #1501.
+        if [[ "$run_value" == \'*\' && "$run_value" == *\' ]]; then
+          run_value="${run_value:1:${#run_value}-2}"
+          run_value="${run_value//\'\'/\'}"
+        elif [[ "$run_value" == \"*\" && "$run_value" == *\" ]]; then
+          run_value="${run_value:1:${#run_value}-2}"
+        fi
+        inspect_shell_line "$run_value" "in $file"
+      fi
+    fi
+  done < "$file"
+
+  if [ "$in_run_block" -eq 1 ] && [ -n "$pending_shell_line" ]; then
+    inspect_shell_line "$pending_shell_line" "in $file"
+  fi
 done
 
-# .githooks/*: git execs a hook by bare path unconditionally, so every
-# tracked file there must be executable regardless of whether any workflow
-# references it.
+# What: requires every tracked .githooks/ file to be executable, regardless
+# of whether any workflow references it.
+# Why: git execs a hook by bare path unconditionally; a bats
+# script-under-test is already self-guarded via `bats tests/bats` instead.
+# From: Issue #1019 | Issue #1095 | PR #1501.
 while IFS=$'\t' read -r meta path; do
   [ -n "${path:-}" ] || continue
   mode="${meta%% *}"

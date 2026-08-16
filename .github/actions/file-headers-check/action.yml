@@ -20,7 +20,7 @@ runs:
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/tracked/check-file-headers.sh
 
-    # What: runs scripts/check-workflow-line-limit.sh in the build-tools container.
+    # What: runs scripts/untracked/check-workflow-line-limit.sh in the build-tools container.
     # Why: enforces AG-CI-021's whole-file and per-run:-block ceilings.
     # From: Issue #1095 | Issue #1535
     - name: Check workflow files stay under the line/byte/run-block ceilings

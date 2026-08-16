@@ -929,6 +929,81 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `sparse-checkout` input without a matching restore step does not exist yet;
   recorded as an open gap in Coverage Assessment below.
 
+### Additions dated 2026-08-14 (real incident since the 2026-08-07 survey above)
+
+- **F-17 SHA retention audit** (issue #1095, PR #1501, new — protect-only, no
+  destructive path exists yet) — `release/stack-images.yml`'s retention contract
+  gained `accepted_ordinary_roots_per_package` (raised from a first draft of 10 to
+  30 during review, since a burst of concurrently open PRs that each only touch
+  YAML/governance files still produces one new build-tools `sha-<commit>` image per
+  push, and a ten-slot window could evict still-relevant recent history). A new
+  read-only GHCR audit (`.github/workflows/gc-sha-retention-audit.yml`,
+  `scripts/untracked/gc-sha-retention-audit.sh`, `scripts/lib/sha-retention-
+  audit.sh`, `scripts/lib/github-api-retry.sh`) inventories every first-party
+  package version, ranks legacy ordinary roots from first-parent Git history, and
+  reports beyond-budget candidates as a labeled dry-run `decision=would-delete`
+  line (real GHCR `created_at` build date attached for display only, never fed
+  into ranking) rather than issuing any deletion call. `tests/bats/sha_retention_
+  audit.bats` includes a structural guard
+  (`retention audit code and workflow contain no destructive package path`) that
+  greps the audit's own implementation and workflow for `-X DELETE`/
+  `delete:packages`/`GHCR_PACKAGE_DELETE_PAT` and fails if any is found. Three
+  real bugs surfaced and were fixed during live CI runs against this workflow
+  rather than only in local/synthetic testing: an invalid `runner` context
+  reference, an overly strict required-argument check that rejected a real
+  legitimately-empty tags field on an untagged package version (run
+  31773692600), and a 25-minute per-package timeout (run 31774741729) traced to
+  redundant per-version `jq` subprocess calls, fixed by consolidating id/digest/
+  tags/`created_at` extraction into one combined `jq` call per version — which
+  itself needed a `|`-delimited `read` instead of `jq`'s `@tsv`, since bash's
+  `read` treats a literal tab as IFS whitespace regardless of the configured
+  `IFS` value and would otherwise silently drop an empty middle field. Deferred,
+  not yet authorized: any destructive-activation pass (selection by date, tag
+  pattern, or explicit digest/alias) — see `docs/release-versioning.md`'s
+  Retention section for the current data-model boundary this leaves in place.
+
+  **Update, same day (protected-reference model, PR #1501):** the audit's
+  generic `non-sha-tag-attached`/`non-ordinary-version`/
+  `acceptance-evidence-unavailable` reasons are now specific
+  (`nightly-channel-protected`, `latest-channel-protected`,
+  `stable-release-protected`, `+`-joined when more than one applies)
+  whenever a version's digest is currently referenced by `nightly`, `latest`,
+  or one of a package's `minimum_stable_releases` (3) newest stable release
+  tags — derived from already-fetched GHCR tag data, no extra API call. A
+  root carrying only an *unrecognized* extra tag (a release-candidate/staging
+  tag, or a release tag past `minimum_stable_releases`) is no longer
+  blanket-protected; it now falls through into the same ordinary
+  root-candidate ranking as a plain root. 14 new `tests/bats/sha_retention_
+  audit.bats` cases cover every new helper (`sra_read_minimum_stable_releases`,
+  `sra_is_stable_release_tag`, `sra_release_sort_key`,
+  `sra_select_supported_release_tags`, `sra_classify_channel_tag`,
+  `sra_other_tags_from_csv`, `sra_protected_reference_reason`,
+  `sra_extra_tag_protect_reason`), including the combined-reason case, the
+  unsupported-old-release case, and the unrecognized-tag fallthrough case —
+  this file's own standing coverage for this subsystem, satisfying AG-VAL-029
+  for this change rather than leaving it as a point fix with no durable
+  regression net. **Not implemented, recorded as an open gap below rather
+  than silently skipped:** a "previous nightly" safety net (protecting the
+  digest `nightly` pointed at immediately before the current one) — see
+  `docs/release-versioning.md`'s Retention section for why (GHCR exposes no
+  tag history; a real implementation needs a new `actions: read` lookup
+  against `nightly-refresh.yml`'s own run history) and the maintainer
+  decision requested in PR #1501's `#issuecomment-5292505929`.
+
+**New Standing check row, added out of table-row order on purpose (2026-08-14, PR #1501 protected-reference model)** -- inserted here immediately after the narrative it verifies, rather than into the large table above, for the same anchor-line/merge-conflict reason given at the "bug-hunt #849" insertion point further down this document:
+
+| Subsystem | What to check | How to check it for real | Pass/fail |
+|---|---|---|---|
+| **F-17 SHA retention audit — protected-reference model, current-state-only** (PR #1501, 2026-08-14) | The new specific reasons (`nightly-channel-protected`/`latest-channel-protected`/`stable-release-protected`) actually fire on real GHCR data instead of only in bats fixtures, AND the narrowed scope genuinely lets an unrecognized extra tag fall through to ordinary ranking rather than silently reverting to blanket-protecting every tagged root | Confirmed live 2026-08-14 against real GHCR data, `gc-sha-retention-audit.yml` run [31794626426](https://github.com/wiki-mod/lancache-ng/actions/runs/31794626426) (commit `bbd51666`, conclusion `success`) -- full record in PR #1501's `#issuecomment-5292835967`. **Note on run/commit currency:** this row itself landed in a docs-only follow-up commit (`48ad2a15`) pushed after `bbd51666`; `48ad2a15` touches only this file (`git show --stat 48ad2a15`), no audit code path, so the cited run's evidence remains representative of the code currently on this branch. Fetch the job log to a file (`gh run view <run-id> --repo wiki-mod/lancache-ng --log > <file>` -- pass the specific run ID, never rely on `--limit 1`'s newest-run guess once a later push exists) and run the two discriminating greps below against it, exactly as run for the 2026-08-14 confirmation. Grep (1): non-zero count required across all three reasons -- a run with all-zero counts is not evidence the mechanism regressed away silently, it means the mechanism never fired at all this run and must be investigated before being read as a pass. Grep (2): confirm at least one matched line's `tags=` field contains a tag other than a `sha-<commit>`/`sha-<commit>-<arch>` shape -- proves a real unrecognized-extra-tag root fell through to ordinary ranking instead of being blanket-protected. The 2026-08-14 run's own concrete instance for (2): package `proxy`, id `1106042122`, `tags=pr-1436-sha-dee3889,sha-62f05e4`, `legacy_rank=31`, `budget=beyond-30`, `decision=would-delete`, `reason=acceptance-evidence-unavailable` -- a real `decision`-outcome change traced to a real record, not merely a `reason`-text difference. `tests/bats/sha_retention_audit.bats`'s 14 new cases (38 total) cover the same properties at the unit level and must also pass, but do not substitute for this live-data check -- a bats fixture cannot regress the way `sra_protected_reference_reason` silently reading a stale/wrong tag classification against real GHCR data could. See the fenced commands immediately below this table for the exact, copy-pasteable greps (a markdown table cell cannot safely carry an unescaped shell pipe) | Fail if grep (1) returns zero total matches across all three reasons on a real run's log, or if grep (2) finds no line with both a numeric `legacy_rank` and a non-`sha-` extra tag (the narrowed-scope fallthrough no longer demonstrable against real data), or if `tests/bats/sha_retention_audit.bats` regresses |
+
+```bash
+# (1) at least one non-zero count required across all three reasons
+grep -oE "reason=(nightly-channel-protected|latest-channel-protected|stable-release-protected)" <logfile> | sort | uniq -c
+
+# (2) at least one line needed with a numeric legacy_rank AND a non-sha- extra tag in `tags=`
+grep -E "legacy_rank=[0-9]" <logfile> | grep -v "decision=protect"
+```
+
 ### Additions dated 2026-08-15 (real incident since the 2026-08-07 survey above)
 
 - **`current-dev-auto-close.yml` closing-keyword scanner reading the whole PR
@@ -958,7 +1033,7 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   immediately after (see PR #1580's Validation section for the full
   transcript). **New standing check: none yet** — this workflow's scanning
   logic is inline `actions/github-script` JS with no local Node tooling in
-  this project's build-tools image, and `scripts/validate-pr-template.sh`
+  this project's build-tools image, and `scripts/tracked/validate-pr-template.sh`
   has no existing bats coverage at all to extend (pre-existing gap, not
   introduced by this fix); recorded as an open gap in Coverage Assessment
   below rather than left unautomated silently.
@@ -1352,6 +1427,22 @@ omitted):**
     third occurrence of the same underlying pattern should prompt revisiting
     whether a mechanical guard is worth the false-positive cost after all
     (Rule-Ref: AG-WF-025).
+
+- **F-17 SHA retention audit: no "previous nightly" protection** (PR #1501,
+  2026-08-14) — the protected-reference model protects only the exact digest
+  `nightly` currently points at, not whichever digest it pointed at
+  immediately before that. GHCR's package-version API exposes no tag
+  history at all (only the current pointer), so proving "the previous
+  nightly build" requires reading `nightly-refresh.yml`'s own GitHub Actions
+  run history via a new `actions: read` permission and API surface this
+  audit's workflow does not have today. In practice, `accepted_ordinary_
+  roots_per_package` (30) already retains far more than one prior build's
+  `sha-<commit>` root as ordinary ranked history regardless of channel-tag
+  status, so a last-known-good nightly commit typically stays available as
+  an ordinary root even without dedicated channel-level protection — but
+  this is incidental retention, not a proven guarantee. **Tracking**: PR
+  #1501's `#issuecomment-5292505929` records the open maintainer decision on
+  whether to build the dedicated lookup.
 
 ---
 

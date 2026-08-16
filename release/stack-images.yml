@@ -18,11 +18,26 @@ registry: ghcr.io
 image_prefix: wiki-mod/lancache-ng
 retention:
   minimum_stable_releases: 3
+  # What: raises accepted_ordinary_roots_per_package from 10 to 30.
+  # Why: a burst of concurrently open, YAML/governance-only PRs still
+  # produces one new sha-<commit> image per push; a ten-slot window could
+  # evict still-relevant recent history during a busy review period.
+  # From: Issue #1095 | PR #1501.
+  accepted_ordinary_roots_per_package: 30
   keep_mutable_channels:
     - latest
     - nightly
   keep_sha_tags_for_supported_releases: true
   protect_release_and_rollback_digests: true
+  # What: maintainer-curated list of exact sha256:<64-hex> digests explicitly
+  # designated as protected rollback targets, empty until a maintainer adds
+  # one after a real regression is found.
+  # Why: closes the "DECISION NEEDED" rollback-anchor gap -- a rollback
+  # target is an explicit maintainer judgment call, not something Git
+  # history or GHCR tag state can derive on its own, so it needs its own
+  # declared list (see docs/release-versioning.md's Retention section).
+  # From: Issue #1095 | PR #1501.
+  rollback_anchors:
   deletion_policy: manual-or-approved-automation-only
 channels:
   sha:
