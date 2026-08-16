@@ -979,7 +979,7 @@ services:
     security_opt: [apparmor:unconfined]
     # What: entrypoint override writes a netdata.conf redirecting daemon/health logs to real files, then writes the web_log job and alarm notification override before execing the image's own entrypoint; collector/access/debug stay on stdout, uncollected.
     # Why: this third-party image's own log paths are symlinks to /dev/stdout|stderr, nothing for fluent-bit to tail; quickstart has no services/ checkout to bind-mount a config from, unlike syslog.
-    # From: Issue #633
+    # From: Issue #453
     entrypoint: ["/usr/bin/bash", "-c"]
     command:
       - |

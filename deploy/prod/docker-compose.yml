@@ -1004,7 +1004,7 @@ services:
       - apparmor:unconfined
     # What: entrypoint override writes a netdata.conf redirecting daemon/health logs to real files, then execs the image's own entrypoint; collector/access/debug stay on stdout, uncollected.
     # Why: this third-party image's own log paths are symlinks to /dev/stdout|stderr, nothing for fluent-bit to tail; collector/access are high-rate chatter that would flood the shared bounded /logs view.
-    # From: Issue #633
+    # From: Issue #453
     entrypoint: ["/usr/bin/bash", "-c"]
     command:
       - |
