@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free coverage for scripts/ensure-pr-staging-images.sh (#715) -- the
+# Docker-free coverage for scripts/untracked/ensure-pr-staging-images.sh (#715) -- the
 # fail-closed staging guard + untouched-service back-fill that reuses the
 # #626/#627 pr-<N>-sha-<short> mechanism. The registry probe and the
 # imagetools back-fill are stubbed via STAGING_IMAGE_EXISTS_CMD /
@@ -76,7 +76,7 @@ bats_require_minimum_version 1.5.0
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/ensure-pr-staging-images.sh"
+    script="$repo_root/scripts/untracked/ensure-pr-staging-images.sh"
     backfill_log="$BATS_TEST_TMPDIR/backfill.log"
     : > "$backfill_log"
 
@@ -245,6 +245,132 @@ STUB
     run bash "$script"
     [ "$status" -ne 0 ]
     printf '%s\n' "$output" | grep -q "never appeared"
+}
+
+# What: Real (non-stubbed) coverage for image_exists()'s _sif_inspect() call
+# path, using a fake `docker` executable ahead of the real one on PATH (no
+# real registry/daemon), mirroring staging_image_freshness.bats's own
+# fake_docker_returning_stderr helper.
+# Why: Every other test in this file drives image_exists() through the
+# STAGING_IMAGE_EXISTS_CMD stub hook, which never exercises the real
+# docker-calling branch, so a regression there would go undetected.
+# From: PR #1538, Issue #1449
+fake_docker_returning_stderr() {
+    local stderr_text="$1"
+    local fake_bin_dir="$BATS_TEST_TMPDIR/fakebin"
+    mkdir -p "$fake_bin_dir"
+    cat > "$fake_bin_dir/docker" <<STUB
+#!/usr/bin/env bash
+echo "$stderr_text" >&2
+exit 1
+STUB
+    chmod +x "$fake_bin_dir/docker"
+    PATH="$fake_bin_dir:$PATH"
+}
+
+@test "image_exists real docker path: a confirmed-absence registry error is reported as confirmed absent" {
+    unset STAGING_IMAGE_EXISTS_CMD
+    fake_docker_returning_stderr "Error response from daemon: manifest unknown"
+    export PATH
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_INTERVAL_SECONDS=0
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "confirmed no such manifest"
+    # What: asserts the "did NOT positively confirm absence" wording is absent.
+    # Why: proves the confirmed-absence branch was actually selected, not merely appended alongside the other wording.
+    # From: PR #1538, Issue #1449
+    ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
+}
+
+# Issue #1581: the two tests above (and their staging_image_freshness.bats
+# counterparts) only prove the classifier itself recognizes the real
+# wording -- they don't prove wait_for_touched_image()'s own fail-fast
+# branch (added by PR #1538) now correctly takes the confirmed-absence path
+# instead of hard-failing at ~95s for THIS exact wording, end to end through
+# the real ensure-pr-staging-images.sh script. This closes that gap.
+@test "image_exists real docker path: buildx's real GHCR \"not found\" wording is reported as confirmed absent, not a hard fail (Issue #1581)" {
+    unset STAGING_IMAGE_EXISTS_CMD
+    fake_docker_returning_stderr "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"
+    export PATH
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_INTERVAL_SECONDS=0
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    # Confirmed-absence branch reached (poll continued to the hard ceiling,
+    # the same outcome the "manifest unknown" test above asserts) --
+    # pre-fix, this wording hit the exists_status!=2 fail-fast branch
+    # instead and never reached this wording at all.
+    printf '%s\n' "$output" | grep -q "confirmed no such manifest"
+    ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
+}
+
+# What: fake `docker` yields an unrecognized/transient error, not a
+# confirmed-absence one, for image_exists()'s other branch.
+# Why: exercises the exists_status==1 path (registry call failed,
+# not confirmed absent) so both halves of the tri-state contract are covered
+# by a real docker-calling test, not just the confirmed-absence half above.
+# From: PR #1538, Issue #1449
+@test "image_exists real docker path: a transient/unrecognized registry error is reported as NOT confirmed absent" {
+    unset STAGING_IMAGE_EXISTS_CMD
+    fake_docker_returning_stderr "dial tcp: lookup ghcr.io: connection refused"
+    export PATH
+    # What: pins ghcr_retry to a single attempt (no 30s backoff sleep)
+    # instead of inheriting its production default of 4 attempts.
+    # Why: this test's fake `docker` fails identically every attempt, so
+    # without this override _sif_inspect's ghcr_retry wrapper would burn its
+    # full default retry budget (4 attempts, 30s backoff between each) on
+    # every run, adding ~90s to this single test -- the analogous real-docker
+    # transient-error test in staging_image_freshness.bats
+    # (sif_image_revision, "an unrecognized/transient registry error returns
+    # status 1") already pins the same override for the identical reason,
+    # here exported (not a plain assignment) because this test drives the
+    # script via `run bash "$script"`, a separate subprocess that only
+    # inherits exported variables.
+    # From: PR #1538, Issue #1449
+    export GHCR_RETRY_MAX_ATTEMPTS=1
+    export WORKFLOW_CHANGED="false"
+    export PROXY_TOUCHED="true" DNS_TOUCHED="false" WATCHDOG_TOUCHED="false" UI_TOUCHED="false" BUILD_TOOLS_TOUCHED="false"
+    export STAGING_POLL_TIMEOUT_SECONDS=0
+    export STAGING_POLL_HARD_CEILING_SECONDS=1
+    export STAGING_POLL_INTERVAL_SECONDS=0
+    export STAGING_POLL_CONGESTION_CHECK_INTERVAL_SECONDS=0
+    active_stub="$BATS_TEST_TMPDIR/active.sh"
+    cat > "$active_stub" <<'STUB'
+#!/usr/bin/env bash
+exit 0
+STUB
+    chmod +x "$active_stub"
+    export STAGING_BUILD_RUN_STATUS_CMD="$active_stub"
+    export BUILD_SHA="deadbeef0123"
+    run bash "$script"
+    [ "$status" -ne 0 ]
+    printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
+    ! printf '%s\n' "$output" | grep -q "confirmed no such manifest"
 }
 
 @test "workflow change forces every service but build-tools to be treated as touched" {
@@ -556,9 +682,9 @@ STUB
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
 }
 
-@test "#1095 F-20: BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
+@test "BASE_SHA's own image with a push-reuse-retagged (older) revision label is accepted directly, no ancestor substitution" {
     # Discriminating test for the two allow_reverse_ancestry=true call sites
-    # F-20 added inside saf_resolve_untouched_backfill_source() (Step 1's
+    # issue #1095 added inside saf_resolve_untouched_backfill_source() (Step 1's
     # fast path here, since every service is untouched by default per
     # setup()'s docs-only fixture -- Step 2's normal-path call site carries
     # the identical fix and reasoning, see that call site's own comment).
@@ -574,7 +700,7 @@ STUB
     # through to saf_find_built_ancestor, and that walk finds nothing usable
     # either (every ancestor's own tag is also stubbed absent) -- a hard
     # failure, not a quieter wrong-answer. Verified this test fails against
-    # the pre-F-20 baseline for exactly that reason (status non-zero, "No
+    # the earlier baseline for exactly that reason (status non-zero, "No
     # usable ancestor" error) before writing this comment.
     revision_map_stub="$BATS_TEST_TMPDIR/revision_map.sh"
     cat > "$revision_map_stub" <<STUB
@@ -841,7 +967,7 @@ STUB
     # would let the ordinary backfill succeed before this scenario is even
     # reached, the same reason the dedicated "confirmed run" test below needs
     # this override too. `exit 1` for every image, not "echo an older
-    # ancestor's sha" (#1095 F-20, 2026-08-07): since
+    # ancestor's sha" (issue #1095, 2026-08-07): since
     # saf_resolve_untouched_backfill_source's own BASE_SHA-level checks now
     # pass allow_reverse_ancestry=true (the same push-reuse-retag-aware
     # acceptance saf_find_built_ancestor's own candidate checks already used),
@@ -909,7 +1035,7 @@ STUB
     # Force the exact-BASE_SHA freshness check to fail first, so the script
     # actually reaches the new fallback decision point instead of succeeding
     # earlier. `exit 1` (no such image), not "echo an older ancestor's sha"
-    # (#1095 F-20, 2026-08-07): saf_resolve_untouched_backfill_source's own
+    # (issue #1095, 2026-08-07): saf_resolve_untouched_backfill_source's own
     # BASE_SHA-level checks now pass allow_reverse_ancestry=true, so echoing
     # a genuine ancestor of base_sha here would now be legitimately accepted
     # as fresh instead of refused -- see the "#808: ... is NOT back-filled
@@ -952,7 +1078,7 @@ STUB
     export STAGING_BASE_BUILD_RUN_EXISTS_CMD="$indeterminate_stub"
 
     # Force the exact-BASE_SHA freshness check to fail first. `exit 1` (no
-    # such image), not "echo an older ancestor's sha" (#1095 F-20,
+    # such image), not "echo an older ancestor's sha" (issue #1095,
     # 2026-08-07): saf_resolve_untouched_backfill_source's own BASE_SHA-level
     # checks now pass allow_reverse_ancestry=true, so echoing a genuine
     # ancestor of base_sha here would now be legitimately accepted as fresh

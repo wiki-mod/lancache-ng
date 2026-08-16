@@ -23,7 +23,7 @@
 name: lancache-ng
 
 # What: the Docker socket proxy's HAProxy allowlist lives in exactly one
-# place, scripts/docker-socket-proxy.sh (mounted read-only below).
+# place, scripts/untracked/docker-socket-proxy.sh (mounted read-only below).
 # Why: docs/naming-conventions.md names this the canonical source -- do not
 # duplicate the allowlist as a YAML anchor in this file.
 # From: PR #635
@@ -33,7 +33,7 @@ name: lancache-ng
 # default, and the only supported value for a real single-host install --
 # see docs/naming-conventions.md and issue #849 finding #5 for why these 14
 # names are otherwise fixed by design), every name resolves to the plain
-# `lancache-<service>` literal, so scripts/docker-socket-proxy.sh's HAProxy allowlist,
+# `lancache-<service>` literal, so scripts/untracked/docker-socket-proxy.sh's HAProxy allowlist,
 # services/watchdog/watchdog.sh's CONTAINER_* FATAL guard, and
 # services/ui/src/docker_client.rs's hardcoded match arms all keep working
 # unchanged. This variable exists ONLY so CI can run more than one
@@ -44,7 +44,7 @@ name: lancache-ng
 # isolation entirely, which is exactly what let two concurrent CI runs
 # collide on the identical fixed name despite already having distinct
 # project names. Setting this suffix to something derived from that same
-# per-run uniqueness (see scripts/setup-cli-simulation.sh's
+# per-run uniqueness (see scripts/untracked/simulations/setup-cli-simulation.sh's
 # sim_compose_project_name()) restores real per-run isolation without
 # touching the fixed-name contract real installs depend on. The
 # docker-socket-proxy and watchdog services below also receive this same
@@ -97,7 +97,7 @@ services:
       # empty exactly like unset, so the bare `${IP_SSL:-127.0.0.1}` this used
       # to read fell back to the one shared literal every SSL-declined install
       # on a host defaults to -- including two concurrent CI simulation runs,
-      # which is why scripts/setup-cli-simulation.sh's own dynamic
+      # which is why scripts/untracked/simulations/setup-cli-simulation.sh's own dynamic
       # IP_STANDARD/IP_SSL derivation (already fixed for the IP_STANDARD row
       # above by PR #1456) never actually closed this second row's collision:
       # exporting IP_SSL from the wrapper is moot once setup.sh's wizard
@@ -112,7 +112,7 @@ services:
       # Left unset (the default, and the only supported value for a real
       # install), both rows below still resolve to the identical historical
       # 127.0.0.1 literal -- unchanged for every real deployment. Only
-      # scripts/setup-cli-simulation.sh sets it, to this run's own
+      # scripts/untracked/simulations/setup-cli-simulation.sh sets it, to this run's own
       # sim_ip_octet()-derived address, mirroring LANCACHE_CONTAINER_SUFFIX's
       # existing CI-only-knob pattern documented at the top of this file.
       - "${IP_SSL:-${IP_SSL_BIND_FALLBACK:-127.0.0.1}}:80:80"
@@ -693,7 +693,7 @@ services:
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-      - ./scripts/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
+      - ./scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro
     networks:
       - docker-api
     healthcheck:
@@ -702,7 +702,7 @@ services:
       # by lancache-docker-socket-proxy.sh is actually forwarding to the real
       # Docker socket backend, not just that something is listening on 2375.
       # /_ping is explicitly allowlisted by that script's own `safe_ping` ACL
-      # (see scripts/docker-socket-proxy.sh), so this exercises the same path
+      # (see scripts/untracked/docker-socket-proxy.sh), so this exercises the same path
       # watchdog itself depends on. Uses wget (BusyBox): verified empirically
       # against this exact pinned image (tecnativa/docker-socket-proxy, Alpine
       # base) that wget is present but curl is not -- same reasoning as nats'

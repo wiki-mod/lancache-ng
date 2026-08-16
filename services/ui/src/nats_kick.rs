@@ -65,7 +65,7 @@
 //! callout-authenticated connection, not some JWT subject/NKey. Confirmed
 //! against the real nats-server source for the pinned 2.14.3 version, and
 //! exercised end-to-end (not just read from source) by
-//! `scripts/nats-secondary-auth-callout-simulation.sh`.
+//! `scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh`.
 //!
 //! ## Ordering is load-bearing: revoke in the DB first, kick second
 //! `KICK` alone does not revoke anything -- a kicked client with still-valid
@@ -258,7 +258,7 @@ mod tests {
 
     // These two structs are the shapes disconnect_secondary parses off the
     // wire; exercising them directly (without a real nats-server, which the
-    // real end-to-end proof is scripts/nats-secondary-auth-callout-simulation.sh's
+    // real end-to-end proof is scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh's
     // job) catches a field-name/shape regression -- e.g. an accidental rename
     // of `cid`/`user_id`/`server`/`data` -- at unit-test speed.
 

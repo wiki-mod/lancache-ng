@@ -357,7 +357,7 @@ Two concrete findings from this:
 
 1. **`master`** has branch protection, but its required status checks are
    only `shellcheck` and `validate-compose` — the "Full-Setup Deep Validate"
-   aggregate job (the only workflow that runs `scripts/setup-cli-simulation.sh`,
+   aggregate job (the only workflow that runs `scripts/untracked/simulations/setup-cli-simulation.sh`,
    the sole real end-to-end exerciser of `setup.sh install`/`update`/`restore`
    against a live stack, per the SoT's own test-coverage matrix) is **not**
    in that list. A PR could merge into `master` even if that workflow failed,
@@ -393,7 +393,7 @@ carries the same list (`strict:true`). So a PR can no longer be merged into
 Sub-finding 1 **still holds**, but name it precisely: `full-setup-deep-validate.yml`
 is the workflow *file*, `Full-Setup Deep Validate` is that workflow's `name:`,
 and `setup.sh CLI simulation` is one individual dependency *job* in it (the one
-that actually runs `scripts/setup-cli-simulation.sh`) — none of those three is
+that actually runs `scripts/untracked/simulations/setup-cli-simulation.sh`) — none of those three is
 the always-run aggregate gate. That aggregate is a separate job,
 `deep-full-setup-validation`, whose own `name:` is literally
 `deep full-setup validation` (lowercase, no branding) — this is the exact
@@ -440,7 +440,7 @@ are affected.
 Severity assessment: minor/moderate (test-quality defect: the two assertions
 are silently inert, weakening this test's proof of one part of the #456
 legacy-cache-key-collapse migration, though the same collapse is still
-proven at the real-CLI level by `scripts/setup-cli-simulation.sh` Phase 4b's
+proven at the real-CLI level by `scripts/untracked/simulations/setup-cli-simulation.sh` Phase 4b's
 `grep -q '^CACHE_DIR_STANDARD=' "$install_dir/.env" && { echo error; exit 1;
 }` check, which correctly uses the bare/unwrapped form).
 
@@ -466,7 +466,7 @@ together.
 ```
 Testing the pure mapping function directly is both simpler and strictly
 more reliable ... the actual registry pull path stays covered by the real
-end-to-end CI simulations (scripts/setup-cli-simulation.sh,
+end-to-end CI simulations (scripts/untracked/simulations/setup-cli-simulation.sh,
 scripts/watchtower-update-simulation.sh) instead of an in-bats mock.
 ```
 
@@ -506,8 +506,8 @@ about test-coverage scope in exactly the area #785 already tracks as a gap).
   that is directly checkable without needing a runner.
 - Also did a full read of all 14 `tests/bats/setup_*.bats` files (the 15th,
   `detect_full_setup_changes.bats`, is not `setup.sh`-specific) plus both
-  `scripts/setup-cli-simulation.sh` and
-  `scripts/setup-reset-kea-config-simulation.sh` in full for test-quality
+  `scripts/untracked/simulations/setup-cli-simulation.sh` and
+  `scripts/untracked/simulations/setup-reset-kea-config-simulation.sh` in full for test-quality
   bugs (vacuous assertions, wrong fixtures, stale doc claims). That pass
   found findings #9 and #10 above; every other file/script read clean (every
   `run` call is followed by a real `$status`/`$output` assertion, fixtures

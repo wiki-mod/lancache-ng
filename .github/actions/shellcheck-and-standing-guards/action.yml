@@ -30,7 +30,17 @@ runs:
     # (containers seen alive 5-14h). The real guard is the INNER `timeout --kill-after=30
     # 300` around actionlint below: SIGTERM at 300s, then an UNIGNORABLE SIGKILL 30s later,
     # so even a deadlocked actionlint is force-killed from inside the container and the
-    # slot is freed fast (verified on-host: exit 137, container removed).
+    # slot is freed fast (verified on-host: exit 137, container removed). An OUTER
+    # `timeout --kill-after=30 --signal=KILL 600` wraps the whole `docker run`'s in-container
+    # command (shellcheck's own find/xargs pass plus actionlint together) for the same
+    # AG-CI-016 reason: shellcheck itself has no documented hang history, but nothing about
+    # this container guarantees it never will, and a signal-deaf shellcheck would otherwise
+    # be reachable only by the coarse job-level `timeout-minutes` backstop this whole
+    # comment block already explains is not sufficient on its own. The outer bound uses the
+    # same single-quoted `bash -lc` script unchanged (so it keeps inheriting this step's own
+    # `set -euo pipefail`, rather than the nested `bash -c '...'` subshell an earlier version
+    # of this fix used, which silently dropped that inheritance) -- 600s outer vs. actionlint's
+    # own 300s inner still leaves actionlint's dedicated budget intact in the common case.
     #
     # A real CI run confirmed that a composite action step does NOT
     # support `timeout-minutes` at all -- GitHub's real schema validator rejects it
@@ -39,8 +49,8 @@ runs:
     # support timeout-minutes like any other step"); that was wrong and unverified when
     # written, caught only by a real run neither `yaml.safe_load` nor a hand-written
     # schema check could catch (actionlint doesn't scan .github/actions/**/action.yml
-    # in this project's CI either). The INNER `timeout --kill-after=30 300` guard inside
-    # the run: script below is therefore the ONLY hang-protection this step has; both
+    # in this project's CI either). The OUTER and INNER `timeout --kill-after` guards inside
+    # the run: script below are therefore the ONLY hang-protection this step has; both
     # calling jobs' own step-level `timeout-minutes: 15` (set where this action is
     # invoked, a real job step, not a composite-action step) remains the coarse backstop.
     - name: Run ShellCheck and ActionLint
@@ -52,6 +62,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 600 \
           bash -lc 'set -euo pipefail; find . \( -name "*.sh" -o -name "*.bats" \) -not -path "./.git/*" -not -path "*/target/*" -print0 | xargs -0 --no-run-if-empty shellcheck --severity=warning; timeout --kill-after=30 300 actionlint .github/workflows/*.yml'
 
     - name: Run setup migration semantics tests
@@ -65,7 +76,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash tests/setup-migration-semantics.sh
+          timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
 
     - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
       # check-action-node-versions.sh calls curl against api.github.com to
@@ -82,13 +93,21 @@ runs:
         GH_TOKEN: ${{ github.token }}
       run: |
         set -euo pipefail
+        # 600s, not the 300s used for this file's other (pure text-scan)
+        # steps: this script makes real curl calls to api.github.com per
+        # pinned action and has its own rate-limit retry/backoff path
+        # (tests/bats/check_action_node_versions.bats covers a transient
+        # rate-limit response that recovers on a later attempt) that can
+        # legitimately need more time than a text scan under real GitHub API
+        # backoff -- still well inside the calling step's own 900s
+        # (timeout-minutes: 15) budget for this whole composite action.
         docker run --rm \
           --user "$(id -u):$(id -g)" \
           -v "$PWD:/work:ro" \
           -w /work \
           -e GH_TOKEN \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-action-node-versions.sh
+          timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
 
     - name: Check validation-subnet wrapper coverage (#896)
       # Standing guard: every full-setup-validate.yml/
@@ -107,7 +126,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-validation-subnet-wrapper-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
     - name: Check executable bits on bare-path script invocations (#1019)
       # Standing guard for the executable-bit failure pattern: a repo script
@@ -127,7 +146,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-executable-bits.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-executable-bits.sh
 
     - name: Check build-tools smoke-test coverage (#790/#791)
       # Standing guard for build-tool coverage: keeps select-build-tools-image.sh's
@@ -144,7 +163,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-build-tools-smoke-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-build-tools-smoke-coverage.sh
 
     - name: Check for pipefail/SIGPIPE early-exit-consumer pattern (AG-VAL-029)
       # Standing guard for a confirmed real CI failure:
@@ -165,7 +184,7 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          bash scripts/check-pipefail-early-exit-grep.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/untracked/check-pipefail-early-exit-grep.sh
 
     - name: Check pipefail guard's own scope coverage
       # Standing guard on the guard above: verifies
@@ -173,7 +192,7 @@ runs:
       # exercising every top-level path prefix check-pipefail-early-exit-
       # grep.sh's own scan_files currently scans, AND that scan_files itself
       # has not narrowed below this project's independently-pinned required
-      # minimum -- see scripts/check-pipefail-scope-coverage.sh's own header
+      # minimum -- see scripts/tracked/check-pipefail-scope-coverage.sh's own header
       # for why (a real instance of scan_files being narrower than its scope
       # claim survived undetected in services/dns/entrypoint.sh because no
       # fixture proved the missing prefix was ever
@@ -192,4 +211,4 @@ runs:
           -v "$PWD:/work:ro" \
           -w /work \
           "${{ inputs.build-tools-image }}" \
-          timeout --kill-after=30 --signal=KILL 300 bash scripts/check-pipefail-scope-coverage.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh

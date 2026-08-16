@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Optional local pre-push hook (issue #801): runs
-# scripts/check-action-node-versions.sh before a push that touches any
+# scripts/tracked/check-action-node-versions.sh before a push that touches any
 # .github/workflows/*.yml (or *.yaml) file, so a pinned action declaring a
 # deprecated Node runtime surfaces to the person pushing before CI does, not
 # only after a run comes back red.
@@ -41,7 +41,7 @@ repo_root=$(git rev-parse --show-toplevel 2>/dev/null) || {
   exit 0
 }
 
-script="$repo_root/scripts/check-action-node-versions.sh"
+script="$repo_root/scripts/tracked/check-action-node-versions.sh"
 if [ ! -f "$script" ]; then
   echo "pre-push (check-action-node-versions): $script not found; skipping this local check (not blocking push)." >&2
   exit 0
@@ -60,6 +60,12 @@ is_zero_sha() {
 # touches a workflow file -- every other push is a guaranteed no-op for it,
 # and this hook otherwise runs synchronously before every single push.
 workflow_changed=0
+# local_ref (the first of git's four pre-push stdin fields per updated ref:
+# local ref, local sha1, remote ref, remote sha1) is read but never used --
+# it must still be named here so `read` assigns the remaining three fields
+# to the correct variables; dropping it would shift local_sha into the
+# local_ref slot instead.
+# shellcheck disable=SC2034
 while read -r local_ref local_sha remote_ref remote_sha; do
   [ -n "${local_sha:-}" ] || continue
   is_zero_sha "$local_sha" && continue # branch/tag deletion: nothing to scan
@@ -81,7 +87,15 @@ while read -r local_ref local_sha remote_ref remote_sha; do
   fi
 
   if [ -n "$base" ]; then
-    if git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null | grep -q .; then
+    # Capture into a variable first, then test for non-empty output instead
+    # of piping git diff directly into `grep -q .` (AG-VAL-032): grep -q can
+    # exit the instant it sees the first output line while git diff is still
+    # writing further changed paths, which under `set -o pipefail` (this
+    # hook enables it above) can make the pipeline report git diff's own
+    # SIGPIPE exit (141) instead of grep's successful match -- silently
+    # taking the "no workflow file changed" branch even when one did.
+    changed_workflow_files=$(git diff --name-only "$base" "$local_sha" -- '.github/workflows/*.yml' '.github/workflows/*.yaml' 2>/dev/null) || changed_workflow_files=""
+    if [ -n "$changed_workflow_files" ]; then
       workflow_changed=1
     fi
   else
@@ -93,7 +107,7 @@ if [ "$workflow_changed" -eq 0 ]; then
   exit 0
 fi
 
-echo "pre-push: .github/workflows changed -- running scripts/check-action-node-versions.sh (#801) as an early local warning (CI enforces this authoritatively either way)..." >&2
+echo "pre-push: .github/workflows changed -- running scripts/tracked/check-action-node-versions.sh (#801) as an early local warning (CI enforces this authoritatively either way)..." >&2
 
 if ! bash "$script" "$repo_root"; then
   echo "pre-push: check-action-node-versions.sh found a problem (see above) -- push blocked." >&2

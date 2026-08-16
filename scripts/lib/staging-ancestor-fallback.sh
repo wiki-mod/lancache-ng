@@ -14,7 +14,7 @@
 # nightly/latest channel, matching the fail-closed design
 # scripts/lib/staging-image-freshness.sh's own header already documents.
 #
-# Sourced by scripts/ensure-pr-staging-images.sh and by build-push.yml's
+# Sourced by scripts/untracked/ensure-pr-staging-images.sh and by build-push.yml's
 # "Ensure PR staging tags exist for full-setup services" step, so the two
 # independent copies this recovery path used to require stay a single
 # implementation instead of drifting -- same reasoning, and the same
@@ -32,6 +32,14 @@
 # Deliberately NOT `set -euo pipefail` at the top level, for the same reason
 # ghcr-retry.sh/staging-image-freshness.sh aren't: this file only defines
 # functions for a caller to invoke under the caller's own shell options.
+#
+# What: self-sources docker-metadata.sh inline, with no intermediate
+#   `script_dir`-style variable.
+# Why: not every real caller already sources docker-metadata.sh, and a bare
+#   top-level assignment here would silently overwrite a caller's own
+#   identically-named variable.
+# From: Issue #1095 (G2) | PR #1503
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"
 
 # Process-lifetime cache for saf_find_built_ancestor's own per-candidate run
 # lookups (see that function's own comment at its one read/write site for the
@@ -42,7 +50,7 @@
 # against a shared, repository-scoped GitHub API rate limit.
 #
 # Deliberately a DIRECTORY OF FILES, not a shell associative array: both real
-# callers (scripts/ensure-pr-staging-images.sh, build-push.yml's own step)
+# callers (scripts/untracked/ensure-pr-staging-images.sh, build-push.yml's own step)
 # invoke saf_resolve_untouched_backfill_source via
 # `resolved_source="$(saf_resolve_untouched_backfill_source ...)"` once per
 # service, inside a loop -- and `$(...)` command substitution ALWAYS forks a
@@ -112,7 +120,7 @@
 # and set traps later -- still replaces this combined trap outright, and this
 # file has no way to detect or prevent that. Defence 1 above is what actually
 # holds in that case. No caller in this repository registers an EXIT trap at
-# all today (checked: scripts/ensure-pr-staging-images.sh, scripts/lib/
+# all today (checked: scripts/untracked/ensure-pr-staging-images.sh, scripts/lib/
 # ghcr-retry.sh, scripts/lib/staging-image-freshness.sh, scripts/lib/
 # validation-image-tag.sh, and build-push.yml's own inline step), so the
 # composition path is currently unexercised in production; it exists so a
@@ -360,7 +368,7 @@ saf_base_commit_paths_are_ignorable() {
 # 2026-08-02: ui:sha-<commit> never gets created when Step 4 (#1095) reuses
 # ui for a push, for exactly this reason.
 #
-# Delegates to scripts/classify-image-impact.sh -- the same single-source-of-
+# Delegates to scripts/untracked/classify-image-impact.sh -- the same single-source-of-
 # truth per-service classifier detect-changes and promote's own version-bump
 # step already use -- fed via its CHANGED_FILES=<file> input mode with
 # saf_base_commit_diff_paths' own already-computed path list, rather than
@@ -392,7 +400,7 @@ saf_base_commit_service_untouched() {
     return 0
   fi
   local classify_script paths_file classify_output value
-  classify_script="$(dirname "${BASH_SOURCE[0]}")/../classify-image-impact.sh"
+  classify_script="$(dirname "${BASH_SOURCE[0]}")/../untracked/classify-image-impact.sh"
   paths_file="$(mktemp)" || return 2
   printf '%s\n' "$paths" > "$paths_file"
   classify_output="$(CHANGED_FILES="$paths_file" bash "$classify_script" 2>/dev/null)"
@@ -422,7 +430,7 @@ saf_base_commit_service_untouched() {
 # on a dropped connection.
 #
 # --connect-timeout/--max-time (matching the same flags/values reasoning
-# scripts/ssl-mitm-cache-simulation.sh's own curl_timeouts comment documents
+# scripts/untracked/simulations/ssl-mitm-cache-simulation.sh's own curl_timeouts comment documents
 # for the identical hazard): without them, curl has no bound on either
 # establishing the connection or on how long a stalled transfer can sit
 # there once GitHub has accepted the connection but stops sending data --
@@ -549,8 +557,8 @@ _saf_github_api_get() {
 # treat as "a run exists" -- see saf_base_commit_has_confirmed_run's own
 # header -- permanently blocking the exact fallback this file exists to
 # provide). `curl` matches this project's own established precedent for
-# exactly this situation (scripts/check-action-node-versions.sh's
-# fetch_external_action_yaml(), scripts/check-pr-tracking-metadata.sh's
+# exactly this situation (scripts/tracked/check-action-node-versions.sh's
+# fetch_external_action_yaml(), scripts/tracked/check-pr-tracking-metadata.sh's
 # project-board lookup -- both curl+GH_TOKEN specifically because `gh`
 # cannot be assumed present either). Response parsing uses a bare `grep` on
 # the `total_count` field, not `jq`/`python3`, for the same reason
@@ -620,7 +628,7 @@ saf_query_run_count() {
   # reports as the whole pipeline's own failure -- exit 141 for a query that
   # actually succeeded. That is the same failure class this file's own
   # saf_find_built_ancestor header documents for `git log | head`, the same one
-  # scripts/check-pipefail-early-exit-grep.sh was added to guard after it took
+  # scripts/untracked/check-pipefail-early-exit-grep.sh was added to guard after it took
   # down a real CI job, and the same capture-first shape tools/build-tools/
   # Dockerfile was fixed into. `grep -m1` against the file directly has no live
   # producer process to signal, so the early exit is free here.
@@ -719,7 +727,7 @@ saf_query_tag_publishing_run_count() {
 #
 # Fetches up to 20 recent runs per event type (matching
 # build_push_run_active()'s own per_page=20 convention in
-# scripts/ensure-pr-staging-images.sh) and inspects every returned run's
+# scripts/untracked/ensure-pr-staging-images.sh) and inspects every returned run's
 # own `status` field, not just the newest one -- the same "a single commit
 # can have more than one recorded run" reasoning #975 already established
 # for that congestion probe applies here too. Stops at the first event type
@@ -767,7 +775,7 @@ saf_candidate_run_is_active() {
 # The single low-level "is any build-push.yml run for <sha> triggered by
 # <event> still non-completed?" query, shared by saf_candidate_run_is_active
 # above (which asks it once per tag-publishing event type) and by
-# scripts/ensure-pr-staging-images.sh's build_push_run_active() congestion
+# scripts/untracked/ensure-pr-staging-images.sh's build_push_run_active() congestion
 # probe (which asks it for `pull_request`). Those two used to be independent
 # implementations of the same question against the same endpoint -- one on
 # `curl`, one on the `gh` CLI -- which is exactly the duplication this file
@@ -813,7 +821,7 @@ saf_event_has_incomplete_run() {
   # that surfaces as a failed pipeline, so a genuinely incomplete run would be
   # misread as "none" and the extended retry silently skipped. Same failure
   # class, and same capture-first remedy, as saf_query_run_count above and
-  # scripts/check-pipefail-early-exit-grep.sh's own guard.
+  # scripts/untracked/check-pipefail-early-exit-grep.sh's own guard.
   statuses="$(grep -o '"status"[[:space:]]*:[[:space:]]*"[^"]*"' "$body" || true)"
   rm -f "$body"
   if [[ -n "$statuses" ]] && grep -qv '"status"[[:space:]]*:[[:space:]]*"completed"' <<< "$statuses"; then
@@ -993,7 +1001,7 @@ saf_base_commit_has_confirmed_run() {
 # service-affecting commit is a genuine CI problem worth surfacing on its
 # own, not a reason to keep hunting for an even older substitute.
 #
-# #1095 F-22 (2026-08-07): the confirmed-untouched case described above used
+# Issue #1095 (2026-08-07): the confirmed-untouched case described above used
 # to be reached ONLY here, after paying the full wait -- a candidate whose
 # own diff never touched <service> still burned the full wait, up to
 # <freshness_hard_ceiling_seconds> (and, if a confirmed-active retry
@@ -1042,6 +1050,12 @@ saf_find_built_ancestor() {
   fi
 
   local candidate has_run ancestor_image candidate_paths_status
+  # What: assigns the short SHA to a local before use in ancestor_image.
+  # Why: embedding the call directly in the ancestor_image="...$(...)"
+  #   string would let a non-zero exit be silently absorbed by the
+  #   surrounding assignment (Rule-Ref: AG-VAL-030).
+  # From: Issue #1095 (G2) | PR #1503
+  local candidate_sha_short
   while IFS= read -r candidate; do
     [[ -z "$candidate" ]] && continue
 
@@ -1158,7 +1172,16 @@ saf_find_built_ancestor() {
           # exactly as safe to use as the has_run==0 case already is. Only
           # when the image ALSO does not exist does this remain a genuine,
           # unbuilt real change that must still fail closed.
-          ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
+          # What: assigns the short SHA to a local before use in ancestor_image.
+          # Why: this file has no top-level set -e; embedding the call in the
+          #   assignment string would let a non-zero exit pass silently
+          #   (Rule-Ref: AG-VAL-030).
+          # From: Issue #1095 (G2) | PR #1503
+          candidate_sha_short="$(dmeta_short_sha "$candidate")" || {
+            echo "::error::Could not derive the short SHA for ancestor candidate $candidate (see dmeta_short_sha's own error above). Refusing to build an ancestor_image tag from an incomplete value." >&2
+            return 1
+          }
+          ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate_sha_short}"
           # allow_reverse_ancestry=true: $ancestor_image is always an
           # immutable per-commit sha-tag here (never a mutable channel tag),
           # so a label that predates $candidate is exactly build-push.yml's
@@ -1198,7 +1221,7 @@ saf_find_built_ancestor() {
     # whether that run actually produced a confirmed-fresh image for
     # <service>.
     #
-    # #1095 F-22 (2026-08-07, confirmed live against runs 31184925428/
+    # Issue #1095 (2026-08-07, confirmed live against runs 31184925428/
     # 31187... for PR #1468): four untouched services each independently
     # paid the full 600s ancestor-candidate ceiling waiting on the exact same
     # candidate commit, ~40 minutes total, when a cheap, no-network,
@@ -1247,7 +1270,7 @@ saf_find_built_ancestor() {
     # JUDGMENT CALL further down. So if this candidate's own run is still
     # genuinely IN FLIGHT (not aborted, not yet reached the retag step), the
     # probe will not see the tag yet and this candidate is skipped in favor
-    # of an older one -- where the pre-F-22 code would instead have waited
+    # of an older one -- where the earlier code would instead have waited
     # out the full budget and likely found it. This is a deliberate
     # freshness-for-speed trade, not an oversight: the older ancestor this
     # falls back to still carries the same full untouched-diff proof, so
@@ -1255,11 +1278,19 @@ saf_find_built_ancestor() {
     # (still-valid) candidate gets picked. If this trade-off proves too
     # aggressive in practice, the fix is to call saf_candidate_run_is_active()
     # before the 0/0 probe and only skip on a confirmed-not-active answer --
-    # deliberately not done here to keep this pass's change minimal and
+    # deliberately not done here, to keep this change minimal and
     # single-purpose.
     local candidate_pre_service_untouched_status=0
     saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_pre_service_untouched_status=$?
-    ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate:0:7}"
+    # What: same separate-assignment shape as this function's other
+    #   ancestor_image site above.
+    # Why: see that site's comment (Rule-Ref: AG-VAL-030).
+    # From: Issue #1095 (G2) | PR #1503
+    candidate_sha_short="$(dmeta_short_sha "$candidate")" || {
+      echo "::error::Could not derive the short SHA for ancestor candidate $candidate (see dmeta_short_sha's own error above). Refusing to build an ancestor_image tag from an incomplete value." >&2
+      return 1
+    }
+    ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate_sha_short}"
     if (( candidate_pre_service_untouched_status == 0 )); then
       if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" 0 0 "$freshness_poll_interval_seconds" true >/dev/null; then
         printf '%s\n' "$candidate"
@@ -1307,7 +1338,7 @@ saf_find_built_ancestor() {
     # -- even after the activity-confirmed extended retry, if one applied.
     # Before applying the JUDGMENT CALL above (stop, do not walk further):
     # re-derive the same service-scoped untouched check the PRE-wait check
-    # above already ran (#1095 F-22). This is now normally redundant (a
+    # above already ran (issue #1095). This is now normally redundant (a
     # positive pre-check already `continue`d past this candidate before ever
     # reaching the wait), EXCEPT when the pre-check was inconclusive (status
     # 2 -- a transient git/fetch issue), in which case the wait still ran per
@@ -1346,7 +1377,7 @@ saf_find_built_ancestor() {
 #     <ancestor_extended_freshness_timeout_seconds> <ancestor_extended_freshness_hard_ceiling_seconds> \
 #     <freshness_poll_interval_seconds> <ancestor_search_depth> [git_dir]
 #
-# The single shared orchestrator both callers (scripts/ensure-pr-staging-images.sh
+# The single shared orchestrator both callers (scripts/untracked/ensure-pr-staging-images.sh
 # and build-push.yml's own "Ensure PR staging tags exist for full-setup
 # services" step) use to decide what to back-fill an untouched service's PR
 # staging tag from. Neither caller reimplements this decision independently:
@@ -1364,7 +1395,7 @@ saf_find_built_ancestor() {
 #     legitimately be racing a real, still-building push run -- exactly the
 #     scenario a confirmed push-triggered run (pre_run_status/post_run_status
 #     == 0 below) describes -- so it needs the same congestion-scale headroom
-#     wait_for_touched_image() in scripts/ensure-pr-staging-images.sh already
+#     wait_for_touched_image() in scripts/untracked/ensure-pr-staging-images.sh already
 #     gets for the identical reason, not a short ceiling tuned for "this
 #     should already exist or never will".
 #   - <ancestor_freshness_timeout_seconds>/<ancestor_freshness_hard_ceiling_seconds>
@@ -1384,7 +1415,7 @@ saf_find_built_ancestor() {
 #     check above already failed. Deliberately NOT the same parameter as
 #     base_freshness_* even though this project's own two real callers
 #     currently pass the identical VALUE for both (900/5400) for
-#     scripts/ensure-pr-staging-images.sh: reusing base_freshness_* here would
+#     scripts/untracked/ensure-pr-staging-images.sh: reusing base_freshness_* here would
 #     make build-push.yml's "Ensure PR staging tags exist for full-setup
 #     services" step (inside the full-setup-validate job, timeout-minutes: 30)
 #     implicitly inherit a fresh, up-to-5400s (90-minute) wait it structurally
@@ -1467,9 +1498,24 @@ saf_resolve_untouched_backfill_source() {
   # environment, not a parameter.
   local -x STAGING_FRESHNESS_GIT_DIR="$git_dir"
 
-  local base_sha_short="${base_sha:0:7}"
+  # What: assigns the short SHA to a local, checked explicitly with ||.
+  # Why: this file has no top-level set -e; an unchecked failure would
+  #   silently continue with base_image="ghcr.io/.../svc:sha-" instead of
+  #   aborting (Rule-Ref: AG-VAL-030).
+  # From: Issue #1095 (G2) | PR #1503
+  local base_sha_short
+  base_sha_short="$(dmeta_short_sha "$base_sha")" || {
+    echo "::error::Could not derive the short SHA for base_sha $base_sha (see dmeta_short_sha's own error above). Refusing to build a base_image tag from an incomplete value." >&2
+    return 1
+  }
   local base_image="ghcr.io/${repository}/${service}:sha-${base_sha_short}"
   local ancestor_sha
+  # What: declared once, shared by the fast-path and regular-path branches
+  #   below that each assign and read it.
+  # Why: avoids a separate `local` declaration (and separate-assignment
+  #   fail-closed shape) duplicated in both branches.
+  # From: Issue #1095 (G2) | PR #1503
+  local ancestor_sha_short
 
   # Step 1: fast-path pre-check (see this function's own header). Either
   # route (service-scoped or commit-wide) independently confirming a
@@ -1505,13 +1551,13 @@ saf_resolve_untouched_backfill_source() {
     # longer cannot help: no push run exists, and the paths are confirmed
     # ignorable, so there is no in-flight push build to wait out.
     #
-    # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): $base_image is
+    # allow_reverse_ancestry=true (issue #1095, 2026-08-07): $base_image is
     # always an immutable per-commit sha-<base_sha> tag here, never a mutable
     # channel tag -- exactly the same safety condition
     # sif_wait_for_fresh_base_image's own allow_reverse_ancestry doc requires,
     # and exactly the same reasoning saf_find_built_ancestor's own candidate
     # checks already rely on (see that function's own comments). Before this
-    # fix, this specific call site was the one F-20 named as still exposed:
+    # fix, this specific call site was the one still left exposed:
     # push-reuse (Step 4, #1095) can retag $base_image FOR $base_sha's own
     # commit while content-copying an older commit's build, which keeps that
     # older commit's org.opencontainers.image.revision label (imagetools
@@ -1531,8 +1577,15 @@ saf_resolve_untouched_backfill_source() {
       echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
       return 1
     fi
-    echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $base_sha ($service was never built for $base_sha itself). (re)pointing at ghcr.io/${repository}/${service}:sha-${ancestor_sha:0:7}, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
-    printf '%s\n' "ghcr.io/${repository}/${service}:sha-${ancestor_sha:0:7}"
+    # What: same separate-assignment shape as base_sha_short above.
+    # Why: see that site's comment (Rule-Ref: AG-VAL-030).
+    # From: Issue #1095 (G2) | PR #1503
+    ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")" || {
+      echo "::error::Could not derive the short SHA for ancestor $ancestor_sha (see dmeta_short_sha's own error above). Refusing to substitute a tag built from an incomplete value." >&2
+      return 1
+    }
+    echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $base_sha ($service was never built for $base_sha itself). (re)pointing at ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
+    printf '%s\n' "ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}"
     return 0
   fi
 
@@ -1542,7 +1595,7 @@ saf_resolve_untouched_backfill_source() {
   # header for why this specific wait, unlike the ancestor-candidate checks,
   # needs congestion-scale headroom.
   #
-  # allow_reverse_ancestry=true (#1095 F-20, 2026-08-07): same reasoning as
+  # allow_reverse_ancestry=true (issue #1095, 2026-08-07): same reasoning as
   # Step 1's fast-path call above -- $base_image is always an immutable
   # per-commit tag, so a push-reuse retag that kept an older source commit's
   # revision label is exactly as safe to accept here as it already is for
@@ -1594,7 +1647,15 @@ saf_resolve_untouched_backfill_source() {
     echo "::error::No usable ancestor of $base_sha was found within $ancestor_search_depth commits with both a recorded build-push.yml run and a freshness-confirmed $service image. Refusing to back-fill $service's PR staging tag -- this needs a maintainer look at $base_sha's own ancestor history." >&2
     return 1
   fi
-  echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $base_sha ($service was never built for $base_sha itself). (re)pointing at ghcr.io/${repository}/${service}:sha-${ancestor_sha:0:7}, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
-  printf '%s\n' "ghcr.io/${repository}/${service}:sha-${ancestor_sha:0:7}"
+  # What: same separate-assignment shape as this function's earlier
+  #   ancestor_sha_short site above.
+  # Why: see that site's comment (Rule-Ref: AG-VAL-030).
+  # From: Issue #1095 (G2) | PR #1503
+  ancestor_sha_short="$(dmeta_short_sha "$ancestor_sha")" || {
+    echo "::error::Could not derive the short SHA for ancestor $ancestor_sha (see dmeta_short_sha's own error above). Refusing to substitute a tag built from an incomplete value." >&2
+    return 1
+  }
+  echo "::notice::Substituting nearest built ancestor $ancestor_sha for base commit $base_sha ($service was never built for $base_sha itself). (re)pointing at ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}, its own immutable per-commit tag -- never the mutable nightly/latest channel." >&2
+  printf '%s\n' "ghcr.io/${repository}/${service}:sha-${ancestor_sha_short}"
   return 0
 }

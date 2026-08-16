@@ -17,11 +17,11 @@ on:
       - .github/workflows/gc-sha-retention-audit.yml
       - release/stack-images.yml
       - docs/release-versioning.md
-      - scripts/select-build-tools-image.sh
+      - scripts/untracked/select-build-tools-image.sh
       - scripts/untracked/gc-sha-retention-audit.sh
       - scripts/lib/github-api-retry.sh
       - scripts/lib/sha-retention-audit.sh
-      - scripts/validate-stack-images.sh
+      - scripts/untracked/validate-stack-images.sh
       - tests/bats/sha_retention_audit.bats
   workflow_dispatch:
 
@@ -93,7 +93,7 @@ jobs:
           git rev-parse --verify --quiet 'origin/current_dev^{commit}' >/dev/null
           for required in \
             release/stack-images.yml \
-            scripts/select-build-tools-image.sh \
+            scripts/untracked/select-build-tools-image.sh \
             scripts/untracked/gc-sha-retention-audit.sh \
             scripts/lib/github-api-retry.sh \
             scripts/lib/sha-retention-audit.sh \
@@ -123,7 +123,7 @@ jobs:
           GHCR_RETRY_PASSWORD: ${{ github.token }}
         run: |
           set -euo pipefail
-          image="$(bash scripts/select-build-tools-image.sh)"
+          image="$(bash scripts/untracked/select-build-tools-image.sh)"
           if [[ -z "$image" ]]; then
             echo "::error::Build-tools selector returned an empty image reference."
             exit 1
@@ -148,12 +148,12 @@ jobs:
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30s 15m bash -lc '
               set -euo pipefail
-              bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/validate-stack-images.sh
-              shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/validate-stack-images.sh tests/bats/sha_retention_audit.bats
+              bash -n scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh
+              shellcheck --severity=warning scripts/untracked/gc-sha-retention-audit.sh scripts/lib/github-api-retry.sh scripts/lib/sha-retention-audit.sh scripts/untracked/validate-stack-images.sh tests/bats/sha_retention_audit.bats
               actionlint .github/workflows/gc-sha-retention-audit.yml
               bats tests/bats/sha_retention_audit.bats
-              bash scripts/validate-stack-images.sh
-              bash scripts/check-workflow-line-limit.sh
+              bash scripts/untracked/validate-stack-images.sh
+              bash scripts/untracked/check-workflow-line-limit.sh
             '
 
       # What: exports the runner.temp cache dir via GITHUB_ENV for later steps.

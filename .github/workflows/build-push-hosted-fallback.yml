@@ -74,7 +74,7 @@ on:
         default: "no"
       services:
         description: >-
-          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ui,build-tools
+          Comma-separated subset of proxy,dns,watchdog,dhcp,dhcp-proxy,ntp,syslog,ui,build-tools,utilities
           to build, or "all".
         required: false
         default: all
@@ -138,7 +138,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           case "$build_tools_image" in
             *@sha256:*)
               ;;
@@ -177,8 +177,11 @@ jobs:
             [watchdog]=services/watchdog
             [dhcp]=services/dhcp
             [dhcp-proxy]=services/dhcp-proxy
+            [ntp]=services/ntp
+            [syslog]=services/syslog
             [ui]=services/ui
             [build-tools]=tools/build-tools
+            [utilities]=services/utilities
           )
           declare -A build_contexts=(
             [proxy]="dns-domains=services/dns"
@@ -186,8 +189,11 @@ jobs:
             [watchdog]=""
             [dhcp]=""
             [dhcp-proxy]=""
+            [ntp]=""
+            [syslog]=""
             [ui]=""
             [build-tools]=""
+            [utilities]=""
           )
           declare -A descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
@@ -195,8 +201,11 @@ jobs:
             [watchdog]="lancache-ng watchdog helper for runtime health checks and recovery hooks."
             [dhcp]="Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             [dhcp-proxy]="dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
+            [ntp]="chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
+            [syslog]="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             [ui]="lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             [build-tools]="Prebuilt lancache-ng CI and developer validation toolchain image."
+            [utilities]="Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
           )
           declare -A is_rust=(
             [dns]=true
@@ -204,7 +213,7 @@ jobs:
           )
 
           if [ "$SERVICES_INPUT" = "all" ] || [ -z "$SERVICES_INPUT" ]; then
-            selected=(proxy dns watchdog dhcp dhcp-proxy ui build-tools)
+            selected=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
           else
             IFS=',' read -ra selected <<< "$SERVICES_INPUT"
           fi
@@ -331,6 +340,13 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Real Docker Hub secret, unconditional (no pull_request
+          # gate like build-tools.yml's).
+          # Why: this workflow's only trigger is workflow_dispatch, never
+          # pull_request, so there is no same-repo-PR exposure to gate.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: lancache-ng-scan:${{ matrix.service }}-amd64-hosted-fallback-${{ github.run_id }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -391,7 +407,18 @@ jobs:
         id: short-sha
         run: |
           set -euo pipefail
-          printf 'value=%s\n' "${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: assigns the short SHA to a local before printf, instead of
+          #   embedding the call in printf's argument list.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
+          printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
 
       - name: Set up Docker Buildx
         # Retried variant (not the plain action): ubuntu-latest is also a
@@ -525,6 +552,11 @@ jobs:
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+          # What: Same unconditional Docker Hub secret as the amd64 scan
+          # step above.
+          # From: PR #1543, Issue #1535
+          dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
+          dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
           scanners: vuln,secret
           severity: HIGH,CRITICAL
@@ -594,7 +626,6 @@ jobs:
 
       - name: Create multi-platform manifests
         env:
-          REPOSITORY: ${{ github.repository }}
           SHORT_SHA: ${{ needs['build-hosted-fallback'].outputs.short_sha }}
           MATRIX_JSON: ${{ needs.preflight.outputs.matrix }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -604,6 +635,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           source_tag="sha-${SHORT_SHA}"
           mapfile -t services < <(printf '%s' "$MATRIX_JSON" | jq -r '.include[].service')

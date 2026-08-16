@@ -3,7 +3,7 @@
 //! SPDX-License-Identifier: AGPL-3.0-or-later
 //!
 //! HTTP client for the narrow subset of the Docker API
-//! `scripts/docker-socket-proxy.sh`'s HAProxy allowlist actually permits:
+//! `scripts/untracked/docker-socket-proxy.sh`'s HAProxy allowlist actually permits:
 //! reading a container's health JSON, restarting a container, and pinging
 //! docker-socket-proxy itself. Mirrors watchdog.sh's `get_health()`/
 //! `restart_container()`/`probe_docker_socket_proxy()` curl invocations.

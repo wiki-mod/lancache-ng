@@ -555,7 +555,7 @@ Depending on your installation path, the file may be inside your selected instal
 Use PowerShell as Administrator:
 
 ```powershell
-scripts\install-ca-cert.ps1
+scripts\untracked\install-ca-cert.ps1
 ```
 
 ### Install on Linux
@@ -563,7 +563,7 @@ scripts\install-ca-cert.ps1
 Use:
 
 ```bash
-sudo scripts/install-ca-cert.sh
+sudo scripts/untracked/install-ca-cert.sh
 ```
 
 ### Manual instructions

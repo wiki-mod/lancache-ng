@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # #808: shared "is this back-fill source image actually fresh enough to
-# validate an untouched service against" check. scripts/ensure-pr-staging-images.sh
+# validate an untouched service against" check. scripts/untracked/ensure-pr-staging-images.sh
 # (full-setup-deep-validate.yml) and build-push.yml's own "Ensure PR staging
 # tags exist for full-setup services" step both back-fill any full-setup
 # service a PR did NOT touch by re-pointing that PR's staging tag at a source
@@ -40,7 +40,7 @@
 # only its callers' choice of tag changed.
 #
 # Pure-ish functions (one intentional side effect: sif_image_revision shells
-# out to the registry). Sourced directly by scripts/ensure-pr-staging-images.sh
+# out to the registry). Sourced directly by scripts/untracked/ensure-pr-staging-images.sh
 # and by build-push.yml's "Ensure PR staging tags exist for full-setup
 # services" step (via "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh",
 # the same sourcing convention scripts/lib/ghcr-retry.sh already uses for the
@@ -68,7 +68,7 @@
 # registry HTTP API while building this fix: its manifest has a top-level
 # "manifests" array, not a "config" object. `docker buildx imagetools
 # inspect --format '{{.Image...}}'` only populates `.Image` for a genuinely
-# single-platform manifest -- scripts/require-image-platforms.sh's own
+# single-platform manifest -- scripts/untracked/require-image-platforms.sh's own
 # `{{if .Image}}...{{end}}` guard exists for exactly this reason (that
 # script's images happen to be amd64-only single manifests today, so the
 # guard is usually true there, but it would be EMPTY for a real
@@ -129,7 +129,7 @@
 #
 # Deliberately does NOT match a bare "not found": AG-CI-001 requires
 # assuming self-hosted runners do not provide project tooling, and
-# scripts/ensure-pr-staging-images.sh (one of this file's two real callers)
+# scripts/untracked/ensure-pr-staging-images.sh (one of this file's two real callers)
 # runs directly on a bare `lancache-light` runner, not inside the pinned
 # build-tools image -- so `docker` itself being absent from PATH is a real,
 # reachable failure mode here, and its shell-level error ("docker: command
@@ -138,9 +138,16 @@
 # have this function tell a job log the registry positively confirmed
 # something it was never even asked, which is a worse failure than the
 # original ambiguous wording this whole classifier exists to improve on.
-# Anchoring to "manifest"/"no such manifest"/NAME_UNKNOWN keeps the match
-# specific to an actual registry response instead of any shell-level
-# "not found" text.
+# Anchoring to "manifest"/"no such manifest"/NAME_UNKNOWN, or to buildx's own
+# `^ERROR: ...: not found$` line shape (see the dedicated comment right above
+# that alternative in the pattern below), keeps the match specific to an
+# actual registry response instead of any shell-level "not found" text.
+#
+# What: Added a 4th alternative, `^ERROR:.*: not found$`.
+# Why: buildx's real wording for a missing GHCR tag is `ERROR: <ref>: not
+# found`, not "manifest unknown" -- verified live on two real buildx builds;
+# this misclassification made every touched-service wait hard-fail at ~95s.
+# From: Issue #1581
 #
 # Deliberately conservative in the other direction too: text this hasn't
 # seen before falls through to "everything else" (return 1, the original
@@ -164,7 +171,10 @@ _sif_inspect_failure_is_confirmed_absence() {
   # (underscore, all-caps), but a human-readable message wrapping it can
   # render the same words space-separated -- match both rather than only the
   # shape this project has actually observed so far.
-  grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown' <<<"$stderr_text"
+  # `^ERROR:.*: not found$`: buildx's own real wording for a missing GHCR
+  # tag/manifest (see Issue #1581 comment above) -- anchored to buildx's
+  # "ERROR: " line prefix, never matching a bare shell "command not found".
+  grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown\|^ERROR:.*: not found$' <<<"$stderr_text"
 }
 
 # _sif_inspect_attempt <err_file> <args...>
@@ -196,6 +206,13 @@ _sif_inspect_attempt() {
   if [[ -n "$err_text" ]] && _sif_inspect_failure_is_confirmed_absence "$err_text"; then
     return "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
   fi
+  # What: Echoes the real stderr instead of only returning 1 (discarding it).
+  # Why: previously undiagnosable from the job log alone -- Issue #1581's own
+  # root cause needed live reproduction against a real runner to find.
+  # From: Issue #1581
+  if [[ -n "$err_text" ]]; then
+    echo "docker buildx imagetools inspect failed with stderr not recognized as a confirmed absence: $err_text" >&2
+  fi
   return 1
 }
 
@@ -203,7 +220,7 @@ _sif_inspect_attempt() {
 #
 # Internal helper: runs `docker buildx imagetools inspect "$@"` through the
 # project's shared ghcr_retry wrapper (scripts/lib/ghcr-retry.sh) instead of
-# a single bare attempt (#1095 F-21: PR #1378 widened this function's real
+# a single bare attempt (issue #1095: PR #1378 widened this function's real
 # callers from 2 to 8 services -- 12 more unprotected registry reads per
 # eligible push -- without retry coverage, so a single transient GHCR error
 # on any one of them was read as "revision undeterminable" and silently
@@ -213,7 +230,7 @@ _sif_inspect_attempt() {
 # optional -- see ghcr_retry's own header for the credential-less case) and
 # must already be sourced by the caller (scripts/lib/ghcr-retry.sh, the same
 # convention every other dual script/workflow-step caller in this project
-# already follows -- see e.g. scripts/require-image-platforms.sh).
+# already follows -- see e.g. scripts/untracked/require-image-platforms.sh).
 #
 # Echoes stdout on success (return 0). On failure, echoes nothing and
 # returns 2 for a confirmed absence, 1 for everything else -- this is the
@@ -300,7 +317,7 @@ sif_image_revision() {
       # Strip whatever reference form $image already carries before
       # appending the resolved child "@digest" -- $image can now be either
       # a mutable tag (repo:nightly) or an already-pinned digest reference
-      # (repo@sha256:...; #1095 F-21's digest-TOCTOU fix passes this form so
+      # (repo@sha256:...; issue #1095's digest-TOCTOU fix passes this form so
       # a caller can verify and export the exact same immutable reference,
       # see scripts/lib/push-reuse.sh's own header). A single
       # "${image%:*}" strip (the original form of this line) is only
@@ -348,7 +365,7 @@ sif_image_revision() {
 # is this PR's own base commit, known from the very start (before the
 # checkout even ran), so its absence means the CALLER'S checkout is
 # genuinely misconfigured (needs `fetch-depth: 0`, same as
-# scripts/classify-image-impact.sh and detect-full-setup-changes.sh already
+# scripts/untracked/classify-image-impact.sh and detect-full-setup-changes.sh already
 # require for their own merge-base diffs) -- a caller should fail immediately
 # on 2 instead of polling, since no amount of waiting fixes a shallow clone.
 #
@@ -495,12 +512,12 @@ sif_wait_for_fresh_base_image() {
   local allow_reverse_ancestry="${7:-}"
 
   # Scope ghcr_retry's own internal retry/backoff (added to sif_image_revision's
-  # underlying _sif_inspect calls by #1095 F-21) to match THIS call's own
+  # underlying _sif_inspect calls per issue #1095) to match THIS call's own
   # budget shape, rather than letting either extreme apply everywhere:
   #
   # - A genuine multi-iteration poll (hard_ceiling_seconds > 0) already IS a
   #   retry loop -- that is what "wait" means here, and its own budget/
-  #   ceiling contract is load-bearing (the F-22 incident, #1095, measured
+  #   ceiling contract is load-bearing (issue #1095's incident measured
   #   several services burning ~612s each against this exact ceiling).
   #   Letting ghcr_retry's own up-to-90s internal retry-with-backoff run
   #   silently inside a single poll iteration would eat into that same
@@ -510,8 +527,8 @@ sif_wait_for_fresh_base_image() {
   #   (no internal retry at all; a transient blip just becomes another "keep
   #   polling" iteration, the same outer-loop-driven recovery this function
   #   always relies on for any other transient condition).
-  # - A single non-polling probe (hard_ceiling_seconds == 0 -- e.g. F-22's
-  #   "one direct check before assuming the ancestor walk is needed" fast
+  # - A single non-polling probe (hard_ceiling_seconds == 0 -- e.g. issue
+  #   #1095's "one direct check before assuming the ancestor walk is needed" fast
   #   path, scripts/lib/staging-ancestor-fallback.sh's saf_find_built_ancestor())
   #   gets exactly ONE iteration of this outer loop, so it has ZERO
   #   redundancy of its own against a transient GHCR error -- confirmed live

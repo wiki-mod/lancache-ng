@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Shared classification/lookup functions for scripts/gc-pr-staging-images.sh
+# Shared classification/lookup functions for scripts/untracked/gc-pr-staging-images.sh
 # (the standalone reaper .github/workflows/gc-pr-staging-images.yml now
 # calls, extracted from that workflow's own former inline `run:` block --
 # see issue #1095 for the root-cause writeup this extraction answers).
@@ -24,7 +24,7 @@
 #      it reads the actual manifest graph (which digests a tagged manifest
 #      references as children) so an untagged version can be proven either
 #      "still referenced by something tagged" (keep) or "genuinely orphaned"
-#      (eligible, subject to the age gate in scripts/gc-pr-staging-images.sh).
+#      (eligible, subject to the age gate in scripts/untracked/gc-pr-staging-images.sh).
 #   2. RATE-LIMIT/CONCURRENCY GAP: fixed by the workflow's own new
 #      `concurrency:` block, not by anything in this file -- documented here
 #      only so a reader of this file's history knows both defects were fixed
@@ -41,8 +41,8 @@
 # gcps_version_name_is_digest <name>
 #
 # A GHCR container package version's `.name` field equals the manifest
-# digest (`sha256:<64 hex chars>`) -- verified live during this PR
-# (2026-08-06) via a real, unauthenticated `gh api
+# digest (`sha256:<64 hex chars>`) -- verified live (2026-08-06) via a
+# real, unauthenticated `gh api
 # "orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions?per_page=2"`
 # call against this project's own real `proxy` package, e.g.
 # `"name":"sha256:9c4b1dc4751ddc63099f1f65015442240d7de9faae3e3eb3992f3de3287e861b"`
@@ -55,7 +55,7 @@
 # orphan. The caller must treat a failing check here as a reason to skip
 # orphan classification for the WHOLE service, not just the one malformed
 # entry -- a partially-populated protected-digest set is more dangerous than
-# an empty one (see scripts/gc-pr-staging-images.sh's own comment at its
+# an empty one (see scripts/untracked/gc-pr-staging-images.sh's own comment at its
 # call site).
 gcps_version_name_is_digest() {
   local name="$1"
@@ -109,7 +109,7 @@ gcps_version_name_is_digest() {
 # whatsoever, so there is nothing in the JSON body this function receives
 # for it to find; the association only exists in that version's TAG, which
 # this function is never given (it only ever sees a manifest body). The
-# caller (scripts/gc-pr-staging-images.sh's process_service(), in its Pass 1
+# caller (scripts/untracked/gc-pr-staging-images.sh's process_service(), in its Pass 1
 # tag loop) handles that case itself, directly off the tag string, for
 # exactly this reason -- see its own comment at the `sha256-<hex>` tag-shape
 # check for the full live-verified rationale.
@@ -203,20 +203,20 @@ gcps_is_old_enough_to_delete() {
 # LOOKUP_FAILED answer for every single PR number, and the caller would
 # report a healthy-looking "GC complete" summary while the closed-PR
 # tagged-version reap path did effectively nothing that entire run, for a
-# reason nothing in the log surfaces. Investigated live (2026-08-06, this
-# PR): the one real historical scheduled run with a suspiciously low
+# reason nothing in the log surfaces. Investigated live (2026-08-06): the
+# one real historical scheduled run with a suspiciously low
 # deletion rate (2026-08-02, run 30736443878: 10 deleted, 21919 kept) was
 # checked against its own real GitHub Actions log -- zero real runtime
 # occurrences of either LOOKUP_FAILED warning message exist in that log
 # (the only matches found were the workflow's own pre-run source-code echo,
 # not an actual invocation), positively ruling out a systemic PAT/lookup
 # failure as that run's cause; that run's low delete count is explained
-# entirely by the classification-gap defect this PR's whole extraction
+# entirely by the classification-gap defect this whole extraction
 # fixes (the vast majority of "kept" versions there were untagged
 # entirely, never reachable by the pre-fix tag-only check, not because
 # their PR state was unknown). That verification does not retroactively
 # guarantee a FUTURE run can't hit this differently-shaped failure mode,
-# though, so scripts/gc-pr-staging-images.sh's caller now tracks how many
+# though, so scripts/untracked/gc-pr-staging-images.sh's caller now tracks how many
 # times this function returns LOOKUP_FAILED across a whole run and treats a
 # suspiciously high count as a real, run-failing error (see
 # GC_MAX_PR_LOOKUP_FAILURES in that file) -- turning a hypothetically
@@ -224,12 +224,26 @@ gcps_is_old_enough_to_delete() {
 # time it might genuinely occur, rather than relying on another manual log
 # audit to notice it again.
 gcps_pr_lookup_state() {
-  local pr_number="$1" repository="$2" cache_array_name="$3"
+  local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
-  local api_output pr_state
+  # What: optional 4th arg is a caller variable name, populated via nameref
+  # from cache_ref (the single source of truth) in both branches below;
+  # named lookup_state below, not pr_state, so a caller passing the literal
+  # name "pr_state" (the real one does) can't collide with this function's
+  # own same-named local and silently write back into that instead.
+  # Why: a caller invoking this as a plain statement (not `$(...)`) needs
+  # cache_ref written by reference (command substitution would fork a
+  # subshell and lose it), so the result must reach it by reference too.
+  # From: Issue #1557 | PR #1559
+  local api_output lookup_state
 
   if [[ -n "${cache_ref[$pr_number]:-}" ]]; then
     printf '%s\n' "${cache_ref[$pr_number]}"
+    if [[ -n "$result_var_name" ]]; then
+      local -n result_ref="$result_var_name"
+      # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
+      result_ref="${cache_ref[$pr_number]}"
+    fi
     return
   fi
 
@@ -241,8 +255,8 @@ gcps_pr_lookup_state() {
   # failure is handled by the `else` branches below instead of aborting the
   # whole GC run.
   if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
-    if pr_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
-      if [[ "$pr_state" == "open" ]]; then
+    if lookup_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
+      if [[ "$lookup_state" == "open" ]]; then
         cache_ref["$pr_number"]="OPEN"
       else
         cache_ref["$pr_number"]="CLOSED"
@@ -252,7 +266,7 @@ gcps_pr_lookup_state() {
       # parse it -- same "don't let this bare assignment trip set -e"
       # reasoning as the gh api call above, applied to every other jq call
       # in this script.
-      echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $pr_state" >&2
+      echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $lookup_state" >&2
       cache_ref["$pr_number"]="LOOKUP_FAILED"
     fi
   elif [[ "$api_output" == *"HTTP 404"* ]]; then
@@ -264,13 +278,18 @@ gcps_pr_lookup_state() {
     cache_ref["$pr_number"]="LOOKUP_FAILED"
   fi
 
+  if [[ -n "$result_var_name" ]]; then
+    local -n result_ref="$result_var_name"
+    # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
+    result_ref="${cache_ref[$pr_number]}"
+  fi
   printf '%s\n' "${cache_ref[$pr_number]}"
 }
 
 # gcps_registry_anon_token <service> <repository>
 #
 # Fetches (and the caller is expected to cache -- see
-# scripts/gc-pr-staging-images.sh's own per-service token cache) an anonymous
+# scripts/untracked/gc-pr-staging-images.sh's own per-service token cache) an anonymous
 # read-only Bearer token scoped to `repository:<repository>/<service>:pull`.
 # This project's GHCR packages are public, so an anonymous pull token is
 # sufficient for manifest reads -- no GHCR_PACKAGE_DELETE_PAT scope is spent

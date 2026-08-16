@@ -4,8 +4,8 @@ Part of the unscoped vacuum-first bug-hunt sweep, issue #849 (sub-issue of #843)
 Scope: `services/dhcp/` (Kea DHCPv4, Control Agent, DHCP-DDNS/D2), the Kea-facing
 parts of `services/ui/src/routes/dhcp.rs` and `services/ui/src/kea_snapshots.rs`,
 `services/ui/dhcp-probe.sh`, the Kea-focused simulation scripts
-(`scripts/dhcp-kea-lease-flow-simulation.sh`,
-`scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`), and the Kea-related bats
+(`scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`,
+`scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh`), and the Kea-related bats
 tests. Read against `origin/v0.2.0`. Starting point: the existing Kea capability
 inventory posted to issue #843 (CLD-1784091523), re-verified against current code,
 not assumed accurate.
@@ -88,8 +88,8 @@ suite exercises its *migration* branches:
   are never extracted or sourced by any bats test.
 - `tests/bats/dhcp_kea_config_generation.bats` mentions `migrate_dhcp4_config` only
   in a comment (explaining why `is_ipv4` exists), never calls it.
-- Both Kea E2E scripts (`scripts/dhcp-kea-lease-flow-simulation.sh`,
-  `scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh`) build a brand-new Kea
+- Both Kea E2E scripts (`scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh`,
+  `scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh`) build a brand-new Kea
   container with no pre-existing `/var/lib/kea/kea-dhcp4.conf`, so
   `migrate_dhcp4_config` always runs once, against its own just-rendered
   first-boot template output. `cmp -s "$next" "$runtime"` then finds no diff
@@ -220,7 +220,7 @@ empty directory, breaking the `dhcp-probe` container's entrypoint outright.
 Traced every CI reference to this file: all of them (`build-push.yml`) only run
 `docker compose ... config`/grep-based structural checks, never `up`, against
 this file directly; the one job that does bring up a real quickstart stack
-(`scripts/setup-cli-simulation.sh`, via `full-setup-validate.yml`) goes through
+(`scripts/untracked/simulations/setup-cli-simulation.sh`, via `full-setup-validate.yml`) goes through
 the real `setup.sh` install flow, so this gap is currently masked everywhere
 it's exercised — but it is a live trap for a future contributor/reviewer who
 tries to validate this compose file standalone (the exact kind of manual check

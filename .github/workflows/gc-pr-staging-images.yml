@@ -2,107 +2,53 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Reaps the per-PR GHCR staging tags that build-push.yml now pushes on
-# pull_request events (see #626) so "validate full-setup image" can test a
-# PR's own commits instead of stale base-branch state. Three tag shapes
-# exist per touched service: pr-<N>-sha-<short>-amd64 and
-# pr-<N>-sha-<short>-arm64 (the per-arch legs pushed by build/build-arm64),
-# and pr-<N>-sha-<short> (the combined multi-platform tag merge-manifests
-# assembles from those two legs, and the only one full-setup-validate
-# actually pulls). Without this workflow, those tags would accumulate in
-# GHCR forever -- every PR that touches a runtime service pushes staging
-# images per touched service, and nothing else in the repo ever removes
-# them.
+# What: reaps per-PR GHCR staging tags build-push.yml pushes, plus orphaned
+# untagged package versions (manifest-graph classification).
+# Why: nothing else removes them; ~55% of GHCR versions were untagged,
+# unreachable by a tagged-only check alone.
+# From: PR #627 | PR #1443
 #
-# ALSO reaps genuinely orphaned untagged package versions -- the per-
-# platform manifests and Buildx attestation/SBOM sub-manifests every
-# multi-arch push creates automatically alongside a real tag. The original
-# (pre-2026-08) version of this workflow's own inline classification logic
-# never considered an untagged version at all: it only ever asked "are ALL
-# of this version's tags closed-PR tags?", a question with no meaningful
-# answer for a version that has zero tags to begin with. Confirmed live
-# (2026-08-06, issue #1095): roughly 55% of this project's ~24,734 GHCR
-# package versions across its 8 services are completely untagged, and none
-# of them were ever reachable by that check -- this was the majority
-# contributor to registry bloat, not the closed-PR tags this workflow was
-# originally built to reap. See scripts/lib/gc-pr-staging-images.sh's own
-# header for the full manifest-graph mechanism that now classifies these
-# safely (never deleting a still-referenced platform manifest or a live
-# referrers-API attestation), and this file's own "reap staging tags and
-# orphaned versions" step below for why the actual logic now lives in
-# scripts/gc-pr-staging-images.sh rather than inline here.
+# What: two triggers -- pull_request(closed) reaps promptly; a weekly
+# schedule is the safety net for a run that never fired.
+# Why: `schedule:` only ever evaluates from the default branch's own copy
+# (AG-CI-018), independent of what triggered a given PR's own branch.
+# From: PR #627 | PR #1443
 #
-# Two triggers cover both the common case and the safety-net case:
-#   - pull_request (closed): reaps promptly right after the PR that owns a
-#     given staging tag closes (merged or not).
-#   - schedule: a periodic full sweep across every service's package
-#     versions, so a PR whose close-triggered run never fired (workflow
-#     added after the PR closed, a failed run, a PR closed via a path that
-#     doesn't fire this trigger) still gets cleaned up eventually.
-# Both paths run the exact same reap logic: find every pr-<N>-sha-<short>
-# (optionally -amd64/-arm64 suffixed) tag, resolve PR <N>'s current state,
-# delete if it isn't open; and separately, find every untagged version no
-# live tagged manifest still references and old enough to be safe. There is
-# no separate "delete just this one PR" fast path -- checking every
-# version's own state is simple, avoids duplicating the reap logic, and
-# doubles as a general sweep on every PR close for free.
-#
-# NOTE (AG-CI-018/AG-CI-019, unverified either direction as of this PR): the
-# `schedule:` trigger only ever fires from this file's copy on the
-# repository's DEFAULT branch (currently `master`) -- confirmed generally
-# true for `schedule:` triggers by issue #1254's `nightly-refresh.yml`
-# incident, not re-verified specifically for this file. Whatever
-# classification/cap logic lands here via this PR on `current_dev` will not
-# actually run on a real schedule until a release promotes it to `master`.
-# The `pull_request: closed` trigger's own evaluating-branch semantics were
-# NOT independently re-verified as part of this PR either (AG-CI-019: don't
-# assert either direction without checking) -- treat both as open questions
-# for whoever next investigates this workflow's live behavior, not as
-# settled by this comment.
+# What: this job's steps evaluate from whichever branch triggered the run,
+# but Checkout below pins `ref:` to the default branch, which can lack
+# scripts a PR branch already has -- confirmed live 2026-08-13.
+# Why: "Verify required scripts exist" below turns that into an accurate skip.
+# From: Issue #1095 | PR #1528
 name: GC PR Staging Images
 
 on:
   pull_request:
     types: [closed]
-    # current_dev is the active development branch today (v0.2.0 is frozen).
-    # Without it, a closed PR against current_dev misses this prompt reap and
-    # falls back to the weekly schedule sweep below as its only cleanup path
-    # (#709).
+    # What: also matches current_dev, the active development branch.
+    # Why: without it, a closed current_dev PR misses this prompt reap and
+    # falls back to the weekly schedule sweep as its only cleanup path.
+    # From: PR #1110
     branches: [master, current_dev, "v[0-9]*"]
   schedule:
-    # Weekly, offset from build-tools.yml's Sunday 03:23 refresh so the two
-    # scheduled jobs don't contend for the same runner at the same minute.
+    # What: weekly Sunday sweep at 04:17 UTC.
+    # Why: offset from build-tools.yml's 03:23 refresh so the two scheduled
+    # jobs don't contend for the same runner.
+    # From: PR #627
     - cron: "17 4 * * 0"
   workflow_dispatch: {}
 
-# Package version deletion is intentionally NOT done with the default
-# GITHUB_TOKEN: GitHub's REST API for deleting a container package version
-# requires a classic personal access token with read:packages and
-# delete:packages scopes (confirmed against GitHub's own REST API docs while
-# implementing #626) -- the Actions-issued GITHUB_TOKEN cannot do this
-# regardless of the `packages: write` permission granted to a job. No
-# permissions are needed here beyond the workflow default.
+# What: no elevated `permissions:` block; deletion uses a separate PAT.
+# Why: GitHub's package-version-delete REST API requires a classic PAT with
+# read:packages+delete:packages -- the Actions-issued GITHUB_TOKEN cannot do
+# this regardless of any `packages: write` job permission.
+# From: PR #627
 permissions: {}
 
-# Serializes every run of this workflow (both triggers share one group, no
-# per-PR/per-ref suffix) rather than letting several pull_request(closed)
-# events fire concurrent full sweeps. Root-caused live (2026-08-06, issue
-# #1095): two independent runs (31071606321 and its neighbor, 75 seconds
-# apart, both `pull_request: closed`) both hit "API rate limit exceeded ...
-# (HTTP 403)" on their very first per-service listing call, because both
-# shared the same GHCR_PACKAGE_DELETE_PAT's single 5000-requests/hour REST
-# budget -- 0 deleted, 0 kept, complete failure for both. `cancel-in-
-# progress: false` is deliberate, not the more common `true`: this job is
-# never scoped to "just PR <N>" -- every run (pull_request OR schedule) does
-# a full sweep across all 8 services -- so a currently-running sweep must be
-# allowed to finish rather than be killed mid-listing/mid-delete, which could
-# otherwise leave a service's classification only half-applied. With
-# `cancel-in-progress: false`, GitHub Actions keeps the in-progress run plus
-# only the SINGLE MOST RECENT queued run, discarding any other queued runs in
-# between -- safe here specifically because every discarded queued run would
-# only have repeated the exact same full-sweep work the one that does run
-# already covers; no queued run carries unique per-PR work that a later sweep
-# wouldn't also pick up.
+# What: one shared concurrency group serializes every run;
+# `cancel-in-progress: false`, not the more common `true`.
+# Why: two concurrent sweeps exhausted the shared PAT rate limit; every run
+# is a full sweep (never "just PR <N>"), so a running one must finish.
+# From: PR #1443
 concurrency:
   group: gc-pr-staging-images
   cancel-in-progress: false
@@ -111,30 +57,17 @@ jobs:
   gc:
     name: reap closed-PR staging tags and orphaned versions
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # 60 minutes: a real, reasoned durable value, replacing the prior
-    # "TEMPORARY DIAGNOSTIC BUMP...this bump to 150 is explicitly a test"
-    # placeholder (2026-08-03) that was never revisited. Real runs since that
-    # bump (no longer hitting a timeout/cancellation) completed a full sweep
-    # across all 8 services in 20-30 minutes. This PR adds, per tagged
-    # version, one anonymous registry manifest GET (for the new orphan
-    # manifest-graph classification -- see scripts/lib/gc-pr-staging-images.sh)
-    # plus, per about-to-delete orphan candidate, one more GET to check for a
-    # referrers-API attestation subject -- real added work, not free, but
-    # bounded by max_deletions_per_service (see GC_MAX_DELETIONS_PER_SERVICE
-    # in scripts/gc-pr-staging-images.sh) rather than by the full ~13,600-
-    # version untagged backlog this PR deliberately does not drain in one
-    # pass. 60 minutes is double the observed 20-30 minute baseline -- enough
-    # headroom for the new per-version registry calls under normal GHCR
-    # response times, without reintroducing a multi-hour silent-hang window
-    # the way 150 minutes did.
+    # What: 60-minute job timeout, replacing an earlier temporary bump to
+    # 150 that was never revisited.
+    # Why: double the observed 20-30 minute full-sweep baseline -- headroom
+    # without reopening a multi-hour silent-hang window.
+    # From: PR #1443
     timeout-minutes: 60
     steps:
-      # GHCR_PACKAGE_DELETE_PAT does not exist yet as of #626 -- creating and
-      # storing it is a deliberate human/admin action (a new credential with
-      # org package-delete rights is a real operational decision, not
-      # something to mint unattended). Until a repo/org admin adds it, this
-      # job degrades to a loud no-op instead of failing the workflow: PR
-      # staging tags will keep accumulating in GHCR, but nothing else breaks.
+      # What: checks whether GHCR_PACKAGE_DELETE_PAT is configured.
+      # Why: minting this PAT is a deliberate admin action, not automatable;
+      # absent, this job degrades to a loud no-op instead of failing.
+      # From: PR #627
       - name: Check for GHCR deletion credentials
         id: creds
         env:
@@ -148,85 +81,77 @@ jobs:
             echo "have-pat=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # Needed only because the reap logic now lives in a real script file
-      # (scripts/gc-pr-staging-images.sh) instead of inline YAML -- the
-      # pre-extraction version of this workflow never checked out the repo
-      # at all, since every line it needed was already inline. `sparse-
-      # checkout` keeps this light (just the two script paths this job
-      # actually runs), matching AG-CI-002's "route lightweight static
-      # checks to the light runner tier" intent -- this job has no other use
-      # for the rest of the repository tree.
-      #
-      # `ref` is pinned to the default branch deliberately, not left to
-      # default to `github.ref`: for this job's actual trigger,
-      # `pull_request: closed`, `github.ref` resolves to
-      # `refs/pull/<N>/merge` -- a ref GitHub does NOT maintain once a PR is
-      # closed WITHOUT merging, so an unpinned checkout could fail outright
-      # on exactly that path and silently stop the whole reap job from
-      # running for every closed-unmerged PR. Pinning to the default branch
-      # also means this privileged, GHCR_PACKAGE_DELETE_PAT-wielding script
-      # always runs the reviewed, already-merged version -- never a version
-      # edited on the PR branch that triggered the run -- which matters
-      # because `pull_request` (unlike `pull_request_target`) normally
-      # checks out the PR's own head; an unpinned ref here would let any
-      # branch that touches this file redefine what a privileged deletion
-      # job does to GHCR before that change is ever reviewed. The
-      # consequence to be aware of: edits to this script only take effect
-      # for closed-PR sweeps (and the `schedule:`/`workflow_dispatch:`
-      # triggers below) after they land on the default branch -- consistent
-      # with this file's own AG-CI-018 note above about `schedule:` already
-      # only ever running the default-branch copy.
-      - name: Checkout gc-pr-staging-images.sh and its lib
+      # What: preflight-checks the required scripts exist on the default
+      # branch before the sparse checkout below attempts them.
+      # Why: Checkout pins `ref:` there, which can lack a script the
+      # triggering branch has -- a guaranteed failure this turns into a skip.
+      # From: Issue #1095 | PR #1528
+      - name: Verify required scripts exist on the default branch
+        id: script-check
         if: steps.creds.outputs.have-pat == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          # What: read-only Contents-API existence check per required path,
+          # using GITHUB_TOKEN, not GHCR_PACKAGE_DELETE_PAT.
+          # Why: that PAT is scoped for package deletion, not repo reads;
+          # `--silent` discards the file body, only the HTTP status decides.
+          # From: Issue #1095 | PR #1528
+          required_paths=(
+            "scripts/untracked/gc-pr-staging-images.sh"
+            "scripts/lib/ghcr-retry.sh"
+          )
+          missing=()
+          for path in "${required_paths[@]}"; do
+            if ! gh api "repos/${{ github.repository }}/contents/${path}?ref=${DEFAULT_BRANCH}" --silent >/dev/null 2>&1; then
+              missing+=("$path")
+            fi
+          done
+
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::warning::Skipping GC reap: ${#missing[@]} required script path(s) do not exist yet on the default branch ('${DEFAULT_BRANCH}'): ${missing[*]}. This job's own job definition was evaluated from a branch that already has issue #1095's scripts/untracked/gc-pr-staging-images.sh extraction (2026-08-06, commit 7b03f99b), but the default branch has not received it via a release yet -- attempting the sparse checkout below against that mismatch is a guaranteed failure (git tries to remove nearly the whole tree and hits 'not uptodate' errors), not a real GC attempt. This self-heals automatically once a release promotes the extraction to the default branch; until then, PR staging tags accumulate in GHCR same as the missing-PAT case above. See issue #1095."
+            echo "scripts-present=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "scripts-present=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # What: sparse checkout of only the two script paths this job runs.
+      # Why: a narrow checkout keeps this light-tier job's clone minimal.
+      # From: Issue #1557 | PR #1559
+      #
+      # What: `ref:` is pinned to the default branch, not left to default.
+      # Why: `github.ref` for a closed-unmerged PR is a ref GitHub drops;
+      # pinning also ensures this GHCR_PACKAGE_DELETE_PAT-wielding script
+      # only ever runs the reviewed, merged version, never a PR-edited one.
+      # From: PR #1443
+      - name: Checkout gc-pr-staging-images.sh and its ghcr-retry.sh dependency
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: |
-            scripts/gc-pr-staging-images.sh
+            scripts/untracked/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
-            scripts/lib/gc-pr-staging-images.sh
           sparse-checkout-cone-mode: false
 
       - name: Reap staging tags and orphaned versions
-        if: steps.creds.outputs.have-pat == 'true'
+        if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-        run: bash scripts/gc-pr-staging-images.sh
+        run: bash scripts/untracked/gc-pr-staging-images.sh
 
-      # actions/checkout@v7.0.1's sparseCheckoutNonConeMode() (the code path
-      # `sparse-checkout-cone-mode: false` above selects) sets core.sparseCheckout
-      # via `git config` but writes the path patterns by appending directly to
-      # .git/info/sparse-checkout with a raw file write, never going through the
-      # `git sparse-checkout set` porcelain command. Reproduced repeatedly, live,
-      # on a self-hosted runner host (git 2.47.3, 2026-08-07), both against this
-      # real repository and against throwaway synthetic repositories of varying
-      # size: a sparse-checkout state set up that way does not reliably clear on
-      # a later job's plain `git sparse-checkout disable` call, nor on `git
-      # sparse-checkout init` immediately followed by `disable` -- both report
-      # exit 0, and across repeated runs the outcome varied between full
-      # recovery and index skip-worktree bits staying set on every path outside
-      # the narrow set (the working tree stays wrongly narrowed even though
-      # `disable` reported success). The exact trigger for the variation was not
-      # isolated; this step therefore does not trust either subcommand to have
-      # worked and verifies the actual index state instead of the exit code.
-      # Self-hosted runners reuse `_work/lancache-ng/lancache-ng` across
-      # unrelated jobs and workflows (no per-job clone), and no other workflow
-      # in this repo passes a sparse-checkout input at all -- so whatever state
-      # this job leaves behind is inherited by the next job scheduled onto the
-      # same runner instance, whatever workflow it belongs to, with that job's
-      # own checkout step reporting full success regardless (confirmed: this
-      # produced "No such file or directory" / "Can't find 'action.yml'"
-      # failures across several unrelated build-push.yml jobs on 2026-08-07,
-      # traced via the runner's own _diag worker logs to a prior run of this
-      # exact job on the same runner instance). A lingering
-      # core.sparseCheckout=true is dangerous even when the working tree
-      # happens to look complete right now: git re-applies whatever
-      # sparse-checkout config is active on every future tree-changing
-      # operation, so the next job's checkout of a genuinely different commit
-      # (not the no-op case most of these reproductions exercised) would
-      # re-narrow down to the three paths above again. `if: always()` so a
-      # failing reap script still leaves the runner clean for whatever job
-      # runs on it next.
+      # What: restores a full working tree, verifying the real index state
+      # rather than trusting `disable`'s exit code.
+      # Why: non-cone sparse-checkout doesn't reliably clear on `disable`;
+      # a narrowed tree corrupts the next job reusing this runner instance.
+      # From: PR #1492
+      #
+      # What: runs unconditionally, not gated on `scripts-present`.
+      # Why: when the preflight above skips Checkout, this step's commands
+      # are trivial no-ops -- still a safety net for pre-existing narrowing.
+      # From: Issue #1095 | PR #1528
       - name: Restore full working tree for the next job on this runner
         if: always() && steps.creds.outputs.have-pat == 'true'
         run: |
@@ -236,14 +161,11 @@ jobs:
           git config --local --unset-all core.sparseCheckout || true
           rm -f .git/info/sparse-checkout
 
-          # `disable` above is not trusted to have actually cleared every
-          # index skip-worktree bit (see the comment above this step) -- sweep
-          # any that remain directly rather than assuming a clean state.
-          # `git ls-files -v` is captured into a variable BEFORE piping to
-          # awk, not piped to it directly: a real git failure here (broken
-          # repo, corrupted index) must trip `set -e` immediately via this
-          # plain assignment, which a direct pipe into awk would instead hide
-          # behind awk's own unrelated exit code.
+          # What: sweeps remaining skip-worktree bits, capturing `git
+          # ls-files -v` into a variable before piping to awk.
+          # Why: a direct pipe would hide a real git failure behind awk's
+          # own exit code instead of tripping `set -e`.
+          # From: PR #1492
           ls_files_before="$(git ls-files -v)"
           mapfile -t remaining_skip_worktree < <(printf '%s\n' "$ls_files_before" | awk '/^S /{print substr($0,3)}')
           if [ "${#remaining_skip_worktree[@]}" -gt 0 ]; then
@@ -251,17 +173,11 @@ jobs:
           fi
           git checkout --progress --force HEAD -- .
 
-          # Verify the actual result instead of trusting the commands above
-          # reported success: fail loudly if any path is still excluded, so a
-          # silently-incomplete restore never masquerades as a healthy runner
-          # for the next job scheduled onto this same instance. Counts with
-          # awk rather than `grep -c`: awk's own exit code is 0 regardless of
-          # match count, so a zero-match "fully restored" result needs no
-          # `|| true` fallback that could otherwise let remaining_after end up
-          # empty/invalid and silently skip the check below under `set -e`
-          # (an empty `[ "$x" -ne 0 ]` comparison is a runtime error, not a
-          # fatal one, inside an `if` condition -- it would NOT stop the
-          # script, and the check would be silently skipped).
+          # What: verifies the restore worked, failing loudly if any path
+          # is still excluded, using awk's count (not `grep -c`).
+          # Why: awk's exit code is always 0 regardless of match count, so
+          # a `|| true` fallback could silently skip the `-ne 0` check.
+          # From: PR #1492
           ls_files_after="$(git ls-files -v)"
           remaining_after="$(printf '%s\n' "$ls_files_after" | awk '/^S /{c++} END{print c+0}')"
           if [ "$remaining_after" -ne 0 ]; then
