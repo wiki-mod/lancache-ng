@@ -88,14 +88,10 @@ runs:
           exit 0
         fi
 
-        # Pull and run the tools image outside BuildKit so cache layers cannot mask
-        # acceleration-infrastructure failures.
-        #
-        # #822: this preflight runs once per matrix leg with Rust acceleration
-        # secrets configured (up to 14 times per build-push.yml run), each a
-        # real ghcr.io pull of the same class of call that hit a transient 401
-        # live. GHCR_RETRY_USERNAME/PASSWORD are optional -- callers that
-        # don't set them still get backoff+retry, just without a relogin.
+        # What: pulls and runs the tools image outside BuildKit, via the shared retry wrapper.
+        # Why: a BuildKit cache layer could mask an acceleration-infrastructure failure, and
+        # this repeats per matrix leg -- optional credentials only add a relogin.
+        # From: Issue #822 | PR #833
         # shellcheck source=scripts/lib/ghcr-retry.sh
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
         ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
@@ -146,6 +142,9 @@ runs:
             }
             trap cleanup EXIT
 
+            # What: fails closed if a log file contains a warning/error/failure/panic diagnostic.
+            # Why: a silently-degraded acceleration tool must not pass as a clean preflight.
+            # From: PR #441
             scan_log() {
               local log_file="$1"
               if grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file"; then
@@ -154,6 +153,10 @@ runs:
               fi
             }
 
+            # What: runs a command, capturing its output to log_file, then feeds it through scan_log.
+            # Why: every acceleration command run below needs the same fail-closed exit/log/scan
+            # behavior; this avoids repeating it at each call site.
+            # From: PR #441
             run_logged() {
               local log_file="$1"
               shift
@@ -166,6 +169,9 @@ runs:
               scan_log "$log_file"
             }
 
+            # What: fails closed unless `sccache --dist-status`'s JSON shows a connected scheduler.
+            # Why: a misconfigured sccache-dist client can start up without ever reaching a scheduler.
+            # From: PR #441
             require_sccache_dist_connected() {
               local status_file="$1"
               if ! jq -e 'type == "object" and has("SchedulerStatus")' "$status_file" >/dev/null; then
@@ -175,6 +181,11 @@ runs:
               fi
             }
 
+            # What: fails closed unless sccache's stats show the compile request, and (when
+            # require_cache_write is set) a real Redis-backed cache write, read hit, and zero errors.
+            # Why: a preflight compile that "succeeds" without touching the cache backend at all
+            # would silently mask a broken Redis connection.
+            # From: PR #441
             require_sccache_activity() {
               local stats_file="$1"
               local require_cache_write="$2"
@@ -223,6 +234,11 @@ runs:
               fi
             }
 
+            # What: fails closed unless sccache-dist's stats show zero dist_errors and at least
+            # one successful distributed compile.
+            # Why: a client that falls back to local compilation without erroring would otherwise
+            # pass this preflight while never actually exercising the dist scheduler.
+            # From: PR #441
             require_sccache_dist_activity() {
               local stats_file="$1"
 
@@ -308,16 +324,11 @@ runs:
                   distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"
                 fi
                 case "$distcc_host_spec" in
-                  # distcc-pump's own lsdistcc probe does a literal hostname
-                  # lookup on every DISTCC_POTENTIAL_HOSTS token it is given
-                  # (verified live: "192.168.1.x,cpp,lzo" fails gethostbyname()
-                  # while "192.168.1.x" resolves fine), and distcc-pump
-                  # re-derives and re-appends the ,cpp/,lzo suffix itself for
-                  # whichever hosts it confirms alive. Feeding it the original
-                  # comma-suffixed spec here would make every pump-candidate
-                  # host unresolvable, so DISTCC_POTENTIAL_HOSTS would never
-                  # resolve to usable remote hosts -- use the bare base
-                  # instead.
+                  # What: strips the ,cpp/,lzo suffix before feeding a pump candidate host to distcc-pump.
+                  # Why: distcc-pump's own lsdistcc probe does a literal hostname lookup per token and
+                  # fails gethostbyname() on the suffixed form; it re-derives and re-appends that suffix
+                  # itself for whichever hosts it confirms alive.
+                  # From: PR #613
                   *,cpp*) distcc_pump_hosts="${distcc_pump_hosts:+$distcc_pump_hosts }$distcc_host_base" ;;
                   *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;;
                 esac
@@ -328,14 +339,10 @@ runs:
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
-              # distcc-pump always exports a DISTCC_HOSTS value that starts
-              # with the "--randomize" option token, even when its lsdistcc
-              # probe found zero live hosts (in that case nothing follows the
-              # option). A plain non-empty-string test on DISTCC_HOSTS can't
-              # tell "pump published real hosts" apart from "pump published
-              # nothing" -- verified live, that false positive both wastes a
-              # doomed compile attempt and, further down, clobbers a good
-              # non-pump host list with that same hostless value.
+              # What: checks for a real host token after distcc-pump's leading
+              # "--randomize" option, not just a non-empty DISTCC_HOSTS.
+              # Why: distcc-pump exports that option token even with zero live hosts found.
+              # From: PR #613
               distcc_pump_published_hosts() {
                 for distcc_host_token in $1; do
                   case "$distcc_host_token" in
@@ -376,19 +383,10 @@ runs:
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
-                # This probe runs AFTER distcc-pump has already been shut
-                # down above (INCLUDE_SERVER_PORT/INCLUDE_SERVER_PID unset),
-                # so it must never use the pump-published host list -- that
-                # list's ",cpp"/",lzo" suffix only means anything to a
-                # running include server. Reusing it here (a prior version
-                # of this logic reassigned distcc_hosts_without_pump from
-                # distcc_pump_filtered_hosts whenever pump succeeded) made a
-                # *successful* pump-host resolution trigger
-                # "INCLUDE_SERVER_PORT not set" on this post-shutdown probe
-                # instead of proving plain distcc acceleration -- confirmed
-                # live. distcc_hosts_without_pump already holds the correct,
-                # stripped non-pump host list computed above, before any
-                # pump handling; leave it untouched here.
+                # What: uses distcc_hosts_without_pump, not the pump-published host list.
+                # Why: the pump list's ",cpp"/",lzo" suffix only means anything to a running
+                # include server, which this post-shutdown probe no longer has.
+                # From: PR #613
                 final_distcc_hosts="$distcc_hosts_without_pump"
                 if [ -z "$final_distcc_hosts" ]; then
                   final_distcc_hosts="$distcc_hosts"

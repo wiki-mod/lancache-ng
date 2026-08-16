@@ -60,10 +60,9 @@ network_name="${compose_project}_validation"
 # workflow's own compute-validation-network job/comment) so existing
 # behaviour there is unchanged. The full-setup-deep-validate.yml automatic
 # gate (#715) DOES set these, giving each concurrent PR run its own
-# collision-free subnet instead of the fixed one (Codex review finding on
-# #764: without this, two concurrent runs on the same self-hosted host could
-# still overlap on the default subnet despite having distinct Compose
-# project names).
+# collision-free subnet instead of the fixed one: without this, two
+# concurrent runs on the same self-hosted host could still overlap on the
+# default subnet despite having distinct Compose project names.
 proxy_ip="${VALIDATION_PROXY_IP:-172.30.99.2}"
 dns_standard_ip="${VALIDATION_DNS_STANDARD_IP:-172.30.99.3}"
 dns_ssl_ip="${VALIDATION_DNS_SSL_IP:-172.30.99.5}"
@@ -83,14 +82,7 @@ compose=(docker compose -p "$compose_project" -f deploy/full-setup/docker-compos
 
 cleanup() {
     local status=$?
-    "${compose[@]}" down -v --remove-orphans >/dev/null 2>&1 || true
-    # `down` above can lose the "has active endpoints" race (see
-    # validation_project_networks_teardown's own comment in reserve-validation-
-    # subnet.sh) and silently leave this network non-empty, poisoning it for
-    # whichever job/run reserves this slot next -- wait for and force a
-    # real removal instead of trusting `down`'s own exit code.
-    validation_project_networks_teardown "$compose_project" || true
-    rm -rf "$work_dir"
+    validation_simulation_teardown "$compose_project" "$work_dir"
     exit "$status"
 }
 trap cleanup EXIT
@@ -182,7 +174,7 @@ run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/ca.crt:/ca.crt:ro" \
         -v "$work_dir/shared:/shared" \
-        "$build_tools_image" bash -c "$1"
+        "$build_tools_image" timeout --kill-after=30 --signal=KILL 120 bash -c "$1"
 }
 
 # ─────────────────────────────────────────────────────────────────────────

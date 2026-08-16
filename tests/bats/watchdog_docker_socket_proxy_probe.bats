@@ -4,8 +4,8 @@
 #
 # Coverage for issue #1170 Part 1: services/watchdog/watchdog.sh's new
 # probe_docker_socket_proxy() function, an alert-only detector for a hung
-# (process alive, HAProxy unresponsive) docker-socket-proxy. Before this
-# change, nothing in the stack could detect that failure mode -- watchdog's
+# (process alive, HAProxy unresponsive) docker-socket-proxy. Absent this
+# probe, nothing in the stack could detect that failure mode -- watchdog's
 # only restart channel goes THROUGH docker-socket-proxy, so it structurally
 # cannot restart docker-socket-proxy itself, and there was no probe of any
 # kind against it either.

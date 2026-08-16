@@ -63,8 +63,8 @@ network_name="${compose_project}_validation"
 # deploy/full-setup/docker-compose.yml's own VALIDATION_UI_IP default so this
 # matches the real ui container IP `docker compose up` below assigns. Falls
 # back to the fixed IP when unset (manual full-setup-validate.yml); the
-# automatic full-setup-deep-validate.yml gate (#715) sets it per-run (Codex
-# review finding on #764).
+# automatic full-setup-deep-validate.yml gate (#715) sets it per-run so
+# concurrent PR runs on the same self-hosted host get distinct subnets.
 ui_ip="${VALIDATION_UI_IP:-172.30.99.9}"
 registration_token="validation-secondary-registration-token"
 # Issue #681: defined here (not just at first use) so `cleanup`'s `docker rm
@@ -85,17 +85,9 @@ cleanup() {
     local status=$?
     # Issue #681: the held-open live connection container isn't part of the
     # compose project (it's a plain `docker run`, same as run_client's
-    # ephemeral clients), so `compose down` below never touches it.
-    docker rm -f "$live_container_name" >/dev/null 2>&1 || true
-    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
-        down -v --remove-orphans >/dev/null 2>&1 || true
-    # `down` above can lose the "has active endpoints" race (see
-    # validation_project_networks_teardown's own comment in reserve-validation-
-    # subnet.sh) and silently leave this network non-empty, poisoning it for
-    # whichever job/run reserves this slot next -- wait for and force a
-    # real removal instead of trusting `down`'s own exit code.
-    validation_project_networks_teardown "$compose_project" || true
-    rm -rf "$work_dir"
+    # ephemeral clients), so it needs its own teardown, separate from the
+    # compose project `down` below.
+    validation_simulation_teardown "$compose_project" "$work_dir" docker rm -f "$live_container_name"
     exit "$status"
 }
 trap cleanup EXIT
@@ -144,7 +136,7 @@ echo "proxy, dns-standard, dns-ssl, and ui are healthy."
 run_client() {
     docker run --rm --network "$network_name" \
         -v "$work_dir/shared:/shared" \
-        "$build_tools_image" bash -c "$1"
+        "$build_tools_image" timeout --kill-after=30 --signal=KILL 120 bash -c "$1"
 }
 
 echo "== UI: establishing a session and extracting its CSRF token =="
@@ -216,7 +208,7 @@ attempt_nats_connect() {
         -e "NATS_CONSUMER=$consumer" \
         -e "PDNS_API_KEY=validation-pdns-key" \
         "$dns_image" \
-        -c 'timeout 5 nats-subscriber || true' \
+        -c 'timeout --kill-after=2 --signal=KILL 5 nats-subscriber || true' \
         > "$log_file" 2>&1 || true
     if grep -q "Connected to NATS" "$log_file"; then
         echo "1"

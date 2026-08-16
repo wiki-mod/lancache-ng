@@ -73,7 +73,7 @@ repo_root=$(cd "$script_dir/../.." && pwd)
 # set is derived from (its `- service:` build matrix), plus any further
 # arguments naming additional files whose service-list arrays get checked
 # against that same canonical set. Defaults (zero args) to this repo's
-# build-push.yml plus the 3 additional real files above, so CI can call this
+# build-push.yml plus the additional real files below, so CI can call this
 # with no arguments while the bats suite points it at a single self-contained
 # fixture file (matrix + arrays together, exactly like the original
 # single-file invocation this script started as) with no further arguments.
@@ -152,6 +152,29 @@ if [[ -z "$canonical" ]]; then
     exit 1
 fi
 canonical_oneline=$(printf '%s' "$canonical" | tr '\n' ' ')
+
+# build-push.yml uses one workflow-level runtime list for its shell loops.
+# Older/synthetic fixtures may still use services=(...) directly, so the guard
+# supports both shapes and fails closed if the runtime list diverges.
+workflow_services_requirement="required"
+mapfile -t workflow_service_entries < <(grep -nE '^  CI_BUILD_SERVICES:[[:space:]]*' "$workflow" || true)
+if [[ ${#workflow_service_entries[@]} -gt 1 ]]; then
+    fail "multiple CI_BUILD_SERVICES declarations found in $workflow; expected one maintained runtime list."
+elif [[ ${#workflow_service_entries[@]} -eq 1 ]]; then
+    entry=${workflow_service_entries[0]}
+    content=${entry#*:}
+    value=${content#*:}
+    value="$(xargs <<<"$value")"
+    value=${value#\"}
+    value=${value%\"}
+    runtime_services=$(printf '%s\n' "$value" | tr ' ' '\n' | sed '/^$/d' | sort -u)
+    if [[ "$runtime_services" != "$canonical" ]]; then
+        fail "CI_BUILD_SERVICES in $workflow diverges from the build matrix."
+        printf "    expected: %s\n" "$canonical_oneline" >&2
+        printf "    found:    %s\n" "$(printf '%s' "$runtime_services" | tr '\n' ' ')" >&2
+    fi
+    workflow_services_requirement="optional"
+fi
 
 # Normalize a `name=(a b c)` bash array line to a sorted, newline-separated
 # element list so set comparison is order-independent.
@@ -237,6 +260,7 @@ check_services_arrays() {
         fi
     done
 }
+
 
 # Files where full_setup_services=(...) must equal canonical minus a KNOWN,
 # EXACT exclusion set (not just "no phantom members") -- same reasoning as
@@ -420,12 +444,9 @@ declare -A REQUIRES_FULL_SETUP_ARRAY=(
     ["ensure-pr-staging-images.sh"]=1
 )
 
-# The matrix-source file itself always requires at least one services=(...)
-# copy (this is build-push.yml's own long-standing invariant, preserved
-# exactly for the single-file bats-fixture invocation too). It is not itself
-# required to declare full_setup_services=(...) -- a bats fixture testing
-# only the services=(...) equality case has no reason to include one.
-check_services_arrays "$workflow" "required"
+# The production workflow uses CI_BUILD_SERVICES; legacy synthetic fixtures may
+# still use services=(...). full_setup_services=(...) remains optional here.
+check_services_arrays "$workflow" "$workflow_services_requirement"
 check_full_setup_arrays "$workflow" "optional"
 [[ -z "$hosted_fallback" ]] || check_hosted_fallback_matrix "$hosted_fallback"
 
@@ -446,9 +467,9 @@ for file in "${extra_files[@]}"; do
 done
 
 if [[ $violations -gt 0 ]]; then
-    printf "%b✗ %d service-list divergence(s) found.%b Keep every services=(...)/full_setup_services=(...) copy in sync with the build matrix; see issue #822.\n" "$RED" "$violations" "$NC" >&2
+    printf "%b✗ %d service-list/metadata divergence(s) found.%b Keep runtime service metadata in sync with the build matrix.\n" "$RED" "$violations" "$NC" >&2
     exit 1
 fi
 
-printf "%b✓ All checked service lists are consistent with the build matrix (%s).%b\n" "$GREEN" "$canonical_oneline" "$NC"
+printf "%b✓ All checked service lists and metadata are consistent with the build matrix (%s).%b\n" "$GREEN" "$canonical_oneline" "$NC"
 exit 0

@@ -3,8 +3,8 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Coverage for scripts/untracked/generate-vex.sh's per-entry status/justification
-# handling, added after a Codex review finding on PR #1286: entries whose
-# .trivyignore.yaml statement asserts a real non-exploitability finding
+# handling: entries whose .trivyignore.yaml statement asserts a real
+# non-exploitability finding
 # (vulnerable code confirmed absent) must produce an OpenVEX `not_affected`
 # statement with a `justification`, not the generator's long-standing
 # `affected`/`action_statement` default meant for entries genuinely awaiting

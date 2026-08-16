@@ -147,10 +147,7 @@ smoke_test_image() {
 published_image_reference() {
   local image="$1" digest=""
 
-  digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
-  digest="${digest%\"}"
-  digest="${digest#\"}"
-  if [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+  if digest="$(resolve_manifest_digest "$image")"; then
     printf '%s@%s\n' "${image%:*}" "$digest"
   else
     fail "could not resolve multi-platform manifest digest for $image"

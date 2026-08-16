@@ -60,9 +60,8 @@ jobs:
     name: detect changed paths (CodeQL rust relevance)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: a git diff plus one classify-image-impact.sh invocation,
-    # comparable to build-push.yml's own detect-changes job (6-17s there).
-    # Same generous 15-minute floor that job's comment explains.
+    # Real runs are one git diff plus the shared path classifier, comparable
+    # to build-push.yml's own detect-changes job. Keep the same generous floor.
     timeout-minutes: 15
     outputs:
       rust_relevant: ${{ steps.filter.outputs.rust_relevant }}

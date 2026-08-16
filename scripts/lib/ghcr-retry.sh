@@ -177,3 +177,49 @@ ghcr_retry() {
   done
   return "$status"
 }
+
+# resolve_manifest_digest <image-ref> [username] [password]
+#
+# Resolves <image-ref> to its immutable multi-platform manifest digest via
+# `docker buildx imagetools inspect --format '{{json .Manifest.Digest}}'`.
+# Prints "sha256:<64 hex>" on stdout and returns 0 on success; prints
+# nothing and returns 1 on any failure (an inspect error and a malformed or
+# empty --format result are treated the same way, since no current caller
+# needs to tell them apart).
+#
+# <username>/<password> are optional; when both are non-empty the call goes
+# through ghcr_retry for backoff+relogin, otherwise it is a single
+# unwrapped attempt -- this preserves each of this function's two original
+# call sites' exact prior behavior (see below) rather than changing either.
+#
+# Extracted (PR #1523, AG-CODE-013) out of near-identical duplicate
+# digest-strip logic that had already started to drift independently in
+# scripts/render-full-setup-digest-override.sh's resolve_digest() (called
+# through ghcr_retry with credentials) and
+# scripts/select-build-tools-image.sh's published_image_reference() (called
+# with no credentials) -- both now call this instead.
+#
+# Validates strictly lowercase hex (`[0-9a-f]`), matching
+# select-build-tools-image.sh's original pattern, not
+# render-full-setup-digest-override.sh's looser `[0-9a-fA-F]`: every sha256
+# digest this project's tooling actually produces (`sha256sum`, Go's `%x`
+# formatting, BuildKit/Docker's own digest computation) is lowercase by
+# construction -- confirmed against a real `docker buildx imagetools
+# inspect` result live on lancache-243 -- so accepting uppercase hex here
+# would silently pass a value no real registry call can ever legitimately
+# produce, which is a real fail-open bug this consolidation fixes, not a
+# stylistic choice between two equally valid patterns.
+resolve_manifest_digest() {
+  local image="${1:?resolve_manifest_digest: image is required}"
+  local username="${2:-}" password="${3:-}"
+  local digest=""
+  if [[ -n "$username" && -n "$password" ]]; then
+    digest="$(ghcr_retry ghcr.io "$username" "$password" -- docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
+  else
+    digest="$(docker buildx imagetools inspect "$image" --format '{{json .Manifest.Digest}}' 2>/dev/null || true)"
+  fi
+  digest="${digest%\"}"
+  digest="${digest#\"}"
+  [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || return 1
+  printf '%s\n' "$digest"
+}

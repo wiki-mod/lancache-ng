@@ -247,8 +247,8 @@ _sif_inspect_attempt() {
 # stderr is captured to a scratch file, not a variable via a second `2>&1`
 # command substitution: mixing stdout and stderr into one stream would lose
 # which bytes were which, and this function's contract requires stdout
-# (the manifest JSON / label value) to stay exactly what it was before this
-# change -- untouched by whatever the registry wrote to stderr. `mktemp`
+# (the manifest JSON / label value) to remain exactly the registry's own
+# payload -- untouched by whatever the registry wrote to stderr. `mktemp`
 # failing (a full/read-only $TMPDIR) degrades to the pre-existing
 # "everything else" classification (no retry-vs-permanent distinction
 # possible without a file to classify) rather than aborting -- the

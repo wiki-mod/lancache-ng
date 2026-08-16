@@ -1556,8 +1556,8 @@ saf_resolve_untouched_backfill_source() {
     # channel tag -- exactly the same safety condition
     # sif_wait_for_fresh_base_image's own allow_reverse_ancestry doc requires,
     # and exactly the same reasoning saf_find_built_ancestor's own candidate
-    # checks already rely on (see that function's own comments). Before this
-    # fix, this specific call site was the one still left exposed:
+    # checks already rely on (see that function's own comments). This
+    # specific call site is the one F-20 (#1095) named as exposed:
     # push-reuse (Step 4, #1095) can retag $base_image FOR $base_sha's own
     # commit while content-copying an older commit's build, which keeps that
     # older commit's org.opencontainers.image.revision label (imagetools

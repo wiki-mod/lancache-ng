@@ -268,12 +268,15 @@ require_grep 'outputs: type=image,oci-mediatypes=true' \
 require_grep 'annotation "index:org\.opencontainers\.image\.description=' \
   .github/workflows/build-tools.yml \
   'build-tools.yml must publish an OCI image description index annotation on its merged multi-platform manifest'
-# What: checks this one literal services=(...) array directly, rather than
-# relying on check-workflow-service-lists.sh's broader guard.
-# Why: that broader guard keeps every OTHER services=(...) copy in sync but
-# does not reach this narrower, release/promotion-scoped array (#1428/#1556).
-# From: PR #1501.
-require_grep 'services=\(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities\)' \
+# Promotion and release jobs now all read the shared CI_BUILD_SERVICES env
+# scalar (read -ra services <<< "$CI_BUILD_SERVICES") rather than each
+# carrying its own hand-duplicated services=(...) literal -- this check was
+# updated in lockstep with that consolidation so it keeps verifying a real,
+# still-present pattern instead of a literal array shape build-push.yml no
+# longer contains. #1428 (syslog) and #1556 (utilities) both joined the
+# first-party service set after this consolidation landed; both are covered
+# here because CI_BUILD_SERVICES already carries them.
+require_grep 'CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"' \
   .github/workflows/build-push.yml \
   'promotion and release jobs must share the full first-party service set'
 # release-sbom's own `service: [...]` flow-sequence matrix is a fourth,
@@ -338,27 +341,37 @@ fi
 require_grep 'channel_tags\+=\(latest\)' \
   .github/workflows/build-push.yml \
   'stable release promotion must publish latest'
-require_grep 'docker buildx imagetools inspect "\$source_image"' \
+require_grep 'source_tag_digest="\$\(digest_for_image "\$source_tag_image"\)"' \
   .github/workflows/build-push.yml \
-  'promotion must verify every sha-* source image before moving a public channel'
+  'promotion must verify the sha-* record still resolves to the exact producer digest before moving a public channel'
 require_grep 'imagetools inspect "\$image" --format' \
   scripts/untracked/require-image-platforms.sh \
   'the shared platform coverage guard must inspect single-platform image metadata before falling back to text Platform lines'
 if awk '!/^[[:space:]]*#/ && /(^|[^[:alnum:]_])jq([[:space:]]|$)/ { found=1 } END { exit found ? 0 : 1 }' "$repo_root/scripts/untracked/require-image-platforms.sh"; then
   fail 'the shared platform coverage guard must not require host jq'
 fi
-require_grep 'bash scripts/untracked/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}:\$\{source_tag\}" "\$REQUIRED_PLATFORMS"' \
+# CI 1.1: the promotion step verifies platform coverage against the exact
+# same-repo PR image digest (`@${expected_digest}`) it is about to promote,
+# not a moving `:${source_tag}` tag reference -- scanning the tag would risk
+# checking a different image than the one actually promoted if the tag moved
+# between the scan and the promotion step.
+require_grep 'bash scripts/untracked/require-image-platforms\.sh "ghcr\.io/\$\{REPOSITORY\}/\$\{service\}@\$\{expected_digest\}" "\$REQUIRED_PLATFORMS"' \
   .github/workflows/build-push.yml \
-  'promotion must verify every sha-* service image platform before moving public tags'
+  'promotion must verify every exact service digest platform before moving public tags'
 require_grep 'rollback_promotions\(\)' \
   .github/workflows/build-push.yml \
   'promotion must attempt rollback if a public channel move fails midway'
 require_grep 'previous_refs\["\$target_image"\]' \
   .github/workflows/build-push.yml \
   'promotion must remember previous channel digests before moving public tags'
-require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack:\$\{source_tag\}"' \
+require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack@\$\{STACK_DIGEST\}"' \
   .github/workflows/build-push.yml \
-  'promotion must create an immutable stack pointer image for the source commit'
+  'promotion must consume the immutable stack pointer digest created before validation'
+# CI 1.1 deliberately keeps the existing immutable stack pointer/stack.env
+# contract rather than introducing a separate stack-bom.json artifact (that
+# BOM/Stack-Lock design is out of scope here, tracked under the broader V2
+# work in #1095) -- so this validator only asserts stack.env's own presence
+# below, not a stack-bom.json file build-push.yml no longer builds.
 require_grep 'LANCACHE_IMAGE_TAG=%s\\n' \
   .github/workflows/build-push.yml \
   'stack pointer image must contain the resolved immutable service image tag'
@@ -462,11 +475,10 @@ require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-p
 require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
   .github/workflows/build-push.yml \
   'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
-# What: checks that syslog and utilities are included in this SERVICES
-# scalar too.
-# Why: same reason as the services=(...) array check above (issue
-# #1428/#1556).
-# From: PR #1501.
+# Keep release verification aligned with the canonical first-party service
+# set plus the immutable stack pointer (#1428 added syslog, #1556 added
+# utilities, both for the same reason the runtime_images/Dockerfile loops
+# above cover them).
 require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'

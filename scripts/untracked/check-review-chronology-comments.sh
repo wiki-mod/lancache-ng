@@ -38,14 +38,20 @@
 # violation class worth a standing mechanical guard rather than relying on
 # manual review to catch it again each time (AG-VAL-028).
 #
-# Detection is deliberately per-line, not a full-file/multiline scan: every
-# real instance found in this repository's own audit had the offending
-# phrase entirely on one line, and a per-line grep keeps the false-positive
-# surface small and the match easy to point at with a file:line reference.
-# The known, accepted tradeoff is that a phrase awkwardly split across a
-# line wrap would not be caught -- the same simplicity tradeoff this
-# project's other line-oriented guards (e.g. check-file-headers.sh,
-# check-workflow-line-limit.sh) already make.
+# Detection runs two passes over each file. The first is per-line (a plain
+# grep against each physical line independently), which keeps the common
+# case's false-positive surface small and the match easy to point at with a
+# single file:line reference. The second pass additionally joins each
+# physically-adjacent pair of hand-written comment lines (same comment
+# style, consecutive line numbers) into one string and re-applies the same
+# pattern to that joined text, so a phrase awkwardly wrapped across a line
+# break (e.g. "a review\n    # finding on PR #764") is still caught even
+# though neither line alone contains it. Only comment lines are joined --
+# joining across a comment/code boundary would only manufacture false
+# positives, since a chronology phrase is never split between a comment and
+# real code. This two-pass design was added after a real gap: a phrase split
+# across adjacent comment lines by line wrapping survived the original
+# per-line-only scan undetected in this repository's own history.
 #
 # Patterns matched (case-insensitive):
 #   1. A discovery verb (caught/found/flagged/spotted/identified/discovered)
@@ -56,6 +62,10 @@
 #   2. "before/prior to/until this fix/change/commit/patch" -- the deictic
 #      "this <noun>" self-reference to whichever change introduced the
 #      comment, independent of the review-discovery verbs in pattern 1.
+#   3. The noun form "review finding" (e.g. "a review finding on PR #764"),
+#      independent of patterns 1/2's verb-adjacency requirement -- "finding"
+#      used as a noun right after "review" is itself already the chronology
+#      claim, with no discovery verb needed alongside it.
 #
 # Deliberately NOT flagged, by construction, so as not to over-match a
 # legitimate, permanently-valid comment that merely mentions code review as
@@ -164,6 +174,9 @@ REVIEW_CHRONOLOGY_PATTERN+="|(\\breview\\b[^a-zA-Z.]{0,20}\\b${DISCOVERY_VERBS}\
 # "before/prior to/until this fix/change/commit/patch" -- the deictic
 # self-reference to whichever change introduced the comment.
 REVIEW_CHRONOLOGY_PATTERN+="|(\\b(before|prior to|until)[[:space:]]+this[[:space:]]+(fix|change|commit|patch)\\b)"
+# The noun form "review finding" -- no adjacent discovery verb required,
+# since "finding" itself already carries the chronology claim.
+REVIEW_CHRONOLOGY_PATTERN+="|(\\breview[[:space:]]+finding\\b)"
 
 # Checks for ".git" directly under target_root itself, not "somewhere in an
 # enclosing directory" (which `git rev-parse --is-inside-work-tree` would
@@ -191,6 +204,34 @@ for path in "${files[@]}"; do
         [ -n "$match" ] || continue
         violations+=("$match")
     done < <(grep -EinIH "$REVIEW_CHRONOLOGY_PATTERN" "$path" || true)
+
+    # Second pass: join each physically-adjacent pair of hand-written
+    # comment lines and re-apply the same pattern to the joined text (see
+    # the "Detection runs two passes" header comment above for why).
+    while IFS=$'\t' read -r line_no joined; do
+        [ -n "$line_no" ] || continue
+        if grep -Eiq "$REVIEW_CHRONOLOGY_PATTERN" <<<"$joined"; then
+            violations+=("$path:$line_no: $joined")
+        fi
+    done < <(awk '
+        function is_comment(line) {
+            return line ~ /^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)/
+        }
+        function payload(line,    p) {
+            p = line
+            sub(/^[[:space:]]*(#|\/\/|--|\/\*|\*|<!--|\{#)[[:space:]]*/, "", p)
+            return p
+        }
+        {
+            cur_is_comment = is_comment($0)
+            cur = cur_is_comment ? payload($0) : ""
+            if (prev_is_comment && cur_is_comment) {
+                printf "%d\t%s %s\n", NR - 1, prev, cur
+            }
+            prev_is_comment = cur_is_comment
+            prev = cur
+        }
+    ' "$path")
 done
 
 if [ "${#violations[@]}" -gt 0 ]; then

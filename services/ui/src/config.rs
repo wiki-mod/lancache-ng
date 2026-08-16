@@ -176,11 +176,11 @@ pub struct Config {
     // in this deployment -- this container's own connection (main.rs),
     // dns-standard/dns-ssl's co-located subscribers -- because they all sit
     // on the same Docker network as the `nats` service. It is never
-    // reachable from a genuinely remote secondary DNS node, though: before
-    // this fix, routes/secondaries.rs::register_secondary handed that same
-    // internal-only value back to `setup.sh secondary` as `nats_url` in its
-    // JSON response, which wrote it verbatim into the remote host's `.env`,
-    // where it could never resolve.
+    // reachable from a genuinely remote secondary DNS node, though: without
+    // the override below, routes/secondaries.rs::register_secondary would
+    // hand that same internal-only value back to `setup.sh secondary` as
+    // `nats_url` in its JSON response, which would write it verbatim into
+    // the remote host's `.env`, where it could never resolve.
     //
     // These two fields let an operator supply a real, externally-reachable
     // address instead, without touching nats_url itself (still correct for

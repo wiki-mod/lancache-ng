@@ -47,7 +47,7 @@ setup() {
     diff "$repo_root/scripts/lib/shared-secret-bootstrap.sh" "$install_dir/scripts/shared-secret-bootstrap.sh"
 }
 
-# The exact scenario from the PR #539 review finding: an install that already
+# The exact scenario #539/#538 describe: an install that already
 # hit #538 has Docker's own auto-vivified bind-mount source sitting at the
 # target path as an empty directory (docker compose creates one when the
 # bind-mount source doesn't exist). Re-running setup.sh update must replace

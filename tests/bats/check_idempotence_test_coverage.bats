@@ -235,9 +235,10 @@ EOF
     # file, so an unrelated pre-existing test (here modelling the real
     # generate_nats_password_is_high_entropy_and_never_repeats, about key
     # generation, not config-writing) whose name merely contains "repeat"
-    # must NOT satisfy the NATS entry's extra_marker ("nats_conf") -- before
-    # this fix, deleting the real nats_conf_write_converges_... test still
-    # left the guard reporting OK because of this test alone.
+    # must NOT satisfy the NATS entry's extra_marker ("nats_conf") --
+    # without this narrower match, deleting the real
+    # nats_conf_write_converges_... test would still leave the guard
+    # reporting OK because of this unrelated test alone.
     seed_passing_fixture
     cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
 #[cfg(test)]

@@ -374,7 +374,12 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm \
+          # What: runs with an init process as container PID 1.
+          # Why: without a PID-1 reaper, the lock-holder subprocess
+          # tests/bats/reserve_validation_subnet.bats kills becomes a
+          # permanent zombie that `kill -0` still reports as alive.
+          # From: Issue #1522 | PR #1523
+          docker run --rm --init \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
@@ -388,7 +393,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm \
+          # What: uses the same init-as-PID-1 container setting as the Bats step above.
+          # Why: keeps both fixture runners on the same resource-lifecycle contract.
+          # From: Issue #1522 | PR #1523
+          docker run --rm --init \
             --user "$(id -u):$(id -g)" \
             -v "$PWD:/work:ro" \
             -w /work \
