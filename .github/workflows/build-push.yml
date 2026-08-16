@@ -1841,6 +1841,12 @@ jobs:
             || { echo "::error::Acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
           grep -F 'SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::Acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
+          grep -F 'ccache-redis-file:' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F "CCACHE_PREFIX=distcc" .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'remote_storage_write' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'remote_storage_hit' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'ccache_dir_warm="$preflight_dir/ccache-dir-warm"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must validate ccache-over-distcc with a real Redis write then a real Redis read from a fresh local CCACHE_DIR."; exit 1; }
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
