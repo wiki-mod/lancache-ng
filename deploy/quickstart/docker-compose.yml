@@ -823,7 +823,7 @@ services:
   # ── DHCP conflict probe ────────────────────────────────────────────────────
   # What: predeclared start/stop/wait helper for the Admin UI's "check for other DHCP servers" feature; runs the UI image in `--dhcp-probe` mode (services/ui/src/dhcp_probe_native.rs), a native DHCPv4 client.
   # Why: the Admin UI only ever starts/stops this container and reads its output, never creates or removes it, so docker-socket-proxy needs only the start/restart capability class, not generic container creation.
-  # From: Issue #1288
+  # From: Issue #1288 | PR #1336
   dhcp-probe:
     container_name: lancache-dhcp-probe${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/ui:${LANCACHE_IMAGE_TAG:-latest}
@@ -979,7 +979,7 @@ services:
     security_opt: [apparmor:unconfined]
     # What: entrypoint override writes a netdata.conf redirecting daemon/health logs to real files, then writes the web_log job and alarm notification override before execing the image's own entrypoint; collector/access/debug stay on stdout, uncollected.
     # Why: this third-party image's own log paths are symlinks to /dev/stdout|stderr, nothing for fluent-bit to tail; quickstart has no services/ checkout to bind-mount a config from, unlike syslog.
-    # From: Issue #847
+    # From: Issue #633
     entrypoint: ["/usr/bin/bash", "-c"]
     command:
       - |
