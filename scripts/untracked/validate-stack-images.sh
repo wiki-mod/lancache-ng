@@ -432,7 +432,7 @@ require_grep 'cache_dir="\$\{cache_dir\}-\$\{GITHUB_RUN_ID\}"' \
   'Trivy cache-dir keys must mirror their concurrency groups run_id suffix for workflow_dispatch/rerun, not just the ref component (see #904)'
 # #1428: syslog joined this SERVICES scalar too, same reason as line 180's
 # services=(...) pattern above.
-require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack' \
+require_grep 'SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack' \
   .github/workflows/build-push.yml \
   'release workflow must verify the stack pointer platform coverage too'
 require_grep 'assert_prebuilt_image_platform_supported' \

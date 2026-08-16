@@ -7216,12 +7216,15 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
-          # syslog (issue #1428) added here explicitly: this SERVICES scalar is a
-          # plain space-separated env value, not a services=(...) bash array, so
-          # scripts/tracked/check-workflow-service-lists.sh's regex-based guard cannot see
-          # or enforce it -- missing it here would silently drop syslog from this
-          # release job's platform-coverage verification with no CI signal at all.
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
+          # syslog (issue #1428) and utilities (issue #1556) added here explicitly:
+          # this SERVICES scalar is a plain space-separated env value, not a
+          # services=(...) bash array, so scripts/tracked/check-workflow-service-lists.sh's
+          # regex-based guard cannot see or enforce it -- missing either would silently
+          # drop that service from this release job's platform-coverage verification
+          # with no CI signal at all. utilities is tagged vX.Y.Z by promote's own
+          # services=(...) array on every real release exactly like build-tools is, so
+          # it needs the same coverage check.
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}

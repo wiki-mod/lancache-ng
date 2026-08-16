@@ -6,7 +6,7 @@ description: >-
   Wraps ghcr-attest-retry with a permanent digest-bound cache (actions/cache):
   if this exact subject-digest was already attested by a previous run, skip
   attesting it again. Found while investigating issue #1095's attestation-
-  caching question: merge-manifests re-creates and re-attests all 9 services'
+  caching question: merge-manifests re-creates and re-attests all 10 services'
   merged multi-platform manifests on every single push, with no check at all
   for whether the underlying per-arch digests (and therefore the merged
   digest, since `docker buildx imagetools create` is deterministic for
