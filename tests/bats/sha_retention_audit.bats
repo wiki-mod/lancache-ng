@@ -71,14 +71,16 @@ EOF
   [ "$output" = "" ]
 }
 
-# A missing rollback_anchors header must fail closed, not be treated as an empty list.
-@test "rollback_anchors reader fails closed when the header is entirely absent" {
+# An entirely absent header is treated the same as an empty list -- the
+# manifest's steady state before any rollback_anchors key existed at all.
+@test "rollback_anchors reader succeeds with empty output when the header is entirely absent" {
   cat >"$tmp_dir/manifest.yml" <<'EOF'
 retention:
   minimum_stable_releases: 3
 EOF
   run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
-  [ "$status" -ne 0 ]
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
 }
 
 # Two competing list declarations are a malformed manifest in every case.
