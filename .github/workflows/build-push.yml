@@ -147,8 +147,8 @@ jobs:
   # What: Start-of-job supersession check for build/build-arm64/container-scan via git ls-remote; carries
   # no `if:`/`needs:` of its own, so its output can never resolve to skipped, only success/failure/cancelled.
   # Why: `cancel-in-progress` on an already-running job starves the channel; an implicit-success() check that
-  # treats a skipped dependency as passing was this project's original root cause, so this must never be skippable.
-  # From: PR #1334
+  # treats a skipped dependency as passing was the root cause this job exists to prevent, so this must never be skippable itself.
+  # From: PR #1334, Issue #532
   push-supersession-check:
     name: check for a newer push already superseding this one
     runs-on: [self-hosted, linux, lancache, lancache-light]
