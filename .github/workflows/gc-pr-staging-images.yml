@@ -37,7 +37,11 @@ on:
       concurrency:
         description: Packages processed in parallel.
         type: string
-        default: "4"
+        # What: starts supervised/manual sweeps with one package worker.
+        # Why: the real 2026-08-17 dry-run at four workers ended in systemic
+        # GitHub 503s; higher values remain opt-in until measured stable.
+        # From: Issue #1585 | PR #1586
+        default: "1"
       max_deletions_per_service:
         description: Maximum deletions per package for this manual run.
         type: string
@@ -165,7 +169,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
           GC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
-          GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '4' }}
+          GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '1' }}
           GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
           GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
           GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '86400' }}

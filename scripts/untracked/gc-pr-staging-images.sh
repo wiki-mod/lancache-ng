@@ -104,6 +104,12 @@ gcps_package_presence=""
 # From: Issue #1095.
 declare -A retention_delete_candidates=()
 retention_history_refs=""
+# What: package inventory exported by the authoritative filtered audit.
+# Why: the collector reuses it instead of immediately listing the same
+# package again; fresh exact-version GETs still protect every DELETE.
+# From: Issue #1585 | PR #1586
+retention_versions_snapshot=""
+retention_package_absent=0
 
 # What: runs one DELETE through the existing bounded retry wrapper.
 # Why: every destructive category needs the same retry/idempotency behavior,
@@ -189,10 +195,12 @@ gc_resolve_retention_history_refs() {
 # a second retention classifier or serializing the full registry inventory.
 # From: Issue #1095.
 gc_build_service_retention_plan() {
-  local service="$1" audit_output line field package_name version_id digest tags decision package
+  local service="$1" audit_output snapshot_file line field package_name version_id digest tags decision package
   local -a audit_fields=()
 
   retention_delete_candidates=()
+  retention_versions_snapshot=""
+  retention_package_absent=0
   package="lancache-ng%2F${service}"
   if ! ghcr_retry api.github.com "" "" -- gcps_package_presence_once \
       "orgs/${org}/packages/container/${package}/versions?per_page=1"; then
@@ -200,21 +208,31 @@ gc_build_service_retention_plan() {
     return 1
   fi
   if [[ "$gcps_package_presence" == "ABSENT" ]]; then
+    retention_package_absent=1
+    services_not_found=$((services_not_found + 1))
     echo "::notice::lancache-ng/$service has no GHCR package; retention planning has no work."
     return 0
   fi
 
   audit_output="$(mktemp)"
+  snapshot_file="$(mktemp)"
   if ! GITHUB_REPOSITORY="$repo" \
       SRA_MANIFEST="$manifest" \
       SRA_HISTORY_REFS="$retention_history_refs" \
       SRA_PACKAGE_FILTER="$service" \
+      SRA_VERSION_SNAPSHOT_FILE="$snapshot_file" \
       GITHUB_API_CACHE_DIR="" \
       bash "$script_dir/gc-sha-retention-audit.sh" >"$audit_output"; then
-    rm -f -- "$audit_output"
-    echo "::error::Retention planning failed for lancache-ng/$service; keeping its retention-managed sha-* history this run."
+    rm -f -- "$audit_output" "$snapshot_file"
+    echo "::error::Retention planning failed for lancache-ng/$service; keeping the whole package untouched this run."
     return 1
   fi
+  if [[ ! -s "$snapshot_file" ]]; then
+    rm -f -- "$audit_output" "$snapshot_file"
+    echo "::error::Retention planning for lancache-ng/$service returned no reusable package snapshot; refusing a second independent inventory read."
+    return 1
+  fi
+  retention_versions_snapshot="$snapshot_file"
 
   while IFS= read -r line; do
     [[ "$line" == AUDIT$'\t'* ]] || continue
@@ -235,7 +253,8 @@ gc_build_service_retention_plan() {
     done
     [[ "$package_name" == "$service" && "$decision" == "would-delete" ]] || continue
     [[ "$version_id" =~ ^[0-9]+$ && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
-      rm -f -- "$audit_output"
+      rm -f -- "$audit_output" "$retention_versions_snapshot"
+      retention_versions_snapshot=""
       echo "::error::Retention planner emitted an invalid deletion identity for lancache-ng/$service."
       return 1
     }
@@ -244,10 +263,10 @@ gc_build_service_retention_plan() {
   rm -f -- "$audit_output"
 }
 
-# What: re-reads one exact version immediately before retention deletion.
-# Why: digest, complete tags, age, and PR state can change after planning;
-# stale evidence must never authorize a destructive operation.
-# From: Issue #1095.
+# What: re-reads one exact package version immediately before any GC deletion.
+# Why: digest, complete tags, age, and PR state can change after the sweep
+# snapshot; every destructive category needs the same fresh fail-closed gate.
+# From: Issue #1095 | Issue #1585 | PR #1586
 gc_revalidate_retention_candidate() {
   local service="$1" package="$2" version_id="$3" expected_digest="$4" expected_tags="$5"
   local body_file fields fresh_id fresh_digest fresh_tags fresh_created_at fresh_epoch tag pr_number pr_state
@@ -291,7 +310,11 @@ gc_revalidate_retention_candidate() {
   for tag in "${fresh_tag_array[@]}"; do
     if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
       pr_number="${BASH_REMATCH[1]}"
-      gcps_pr_lookup_state "$pr_number" "$repo" fresh_pr_state_cache pr_state >/dev/null
+      # What: bypasses the run-local planning cache for the final safety check.
+      # Why: a PR can reopen after planning; only a live answer immediately
+      # before DELETE may authorize removal of a PR-associated version.
+      # From: Issue #1585 | PR #1586
+      GCPS_PR_STATE_CACHE_DIR="" gcps_pr_lookup_state "$pr_number" "$repo" fresh_pr_state_cache pr_state
       if [[ "$pr_state" == "LOOKUP_FAILED" ]]; then
         pr_lookup_failures=$((pr_lookup_failures + 1))
       fi
@@ -304,7 +327,7 @@ gc_revalidate_retention_candidate() {
   return 0
 }
 
-# process_service <service>
+# process_service <service> [version-snapshot-jsonl]
 # What: runs in the current shell -- called as a plain statement, never
 # wrapped in `$(...)`.
 # Why: top-level had_errors/deleted/kept/pr_state_cache updates must stay
@@ -312,64 +335,60 @@ gc_revalidate_retention_candidate() {
 # From: Issue #1095 | PR #1443
 process_service() {
   local service="$1"
+  local version_snapshot_file="${2:-}"
   local package="lancache-ng%2F${service}"
   local versions_json version_list
-  local -A removed_retention_prefixes=() removed_retention_digests=() protected_children_digests=() deleted_version_ids=() manifest_children_by_version=()
+  local -A protected_children_digests=() deleted_version_ids=() manifest_children_by_version=()
+  local -A retained_root_prefixes=() live_subject_digests=()
   local revalidate_status delete_description kind prefix
-  local -a removed_tags=()
 
-  # What: had_errors fails the run at the end without aborting other
-  # services; stderr is captured to a scratch file, not merged via `2>&1`.
-  # Why: merging stderr would risk corrupting the JSON `jq -c '.[]'`
-  # depends on, since `--paginate` can write rate-limit notices to stderr.
-  # From: Issue #1095 | PR #1443
-  local versions_stderr
-  versions_stderr="$(mktemp)"
-  if ! versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>"$versions_stderr")"; then
-    local list_error
-    list_error="$(cat "$versions_stderr")"
-    rm -f "$versions_stderr"
-    # What: a real 404 here means the package doesn't exist yet (a new
-    # service, no image pushed) -- not a reaper error.
-    # Why: `gh api` writes "Package not found. (HTTP 404)" to stderr
-    # (hence reading $list_error), never had_errors, for this case.
-    # From: Issue #1095 | PR #1443
-    if [[ "$list_error" == *"HTTP 404"* ]]; then
-      echo "::notice::lancache-ng/${service} has no GHCR package yet (HTTP 404 listing its versions) -- nothing to reap for a service with no images published. Not treated as an error."
-      # What: counted via services_not_found, not just logged.
-      # Why: a single occurrence is a safe notice, but nearly every service
-      # hitting this path in one run must not still read as healthy.
-      # From: Issue #1557 | PR #1559
-      services_not_found=$((services_not_found + 1))
+  # What: production reuses the exact JSONL inventory exported by the
+  # authoritative filtered retention audit. Direct unit callers may omit the
+  # snapshot and retain the legacy mocked gh-listing path.
+  # Why: a live GC previously fetched every multi-thousand-version package
+  # twice before deleting anything, multiplying API pressure for no safety gain.
+  # From: Issue #1585 | PR #1586
+  if [[ -n "$version_snapshot_file" ]]; then
+    if [[ ! -s "$version_snapshot_file" ]]; then
+      echo "::error::Package snapshot is missing or empty for lancache-ng/${service}: $version_snapshot_file"
+      had_errors=1
       return
     fi
-    echo "::error::Failed to list package versions for lancache-ng/${service}: $list_error"
-    had_errors=1
-    return
-  fi
-  rm -f "$versions_stderr"
-
-  # What: `gh api --paginate` merges every page into one array, not just
-  # page 1 (verified: a real 3678-version/37-page package returned all).
-  # Why: no truncation heuristic layers on top -- an earlier one warned on
-  # exact-multiple-of-100 counts, which fires on a normal round boundary.
-  # From: Issue #1095 | PR #1443
-  #
-  # What: jq's output is captured via checked command substitution, fed to
-  # `read` via a here-string, not consumed inside a process substitution.
-  # Why: jq's exit status inside `< <(...)` is never checked by `set -e`,
-  # so a broken jq would silently report "nothing to clean" instead.
-  # From: Issue #1095 | PR #1443
-  if ! version_list="$(printf '%s' "$versions_json" | jq -c '.[]' 2>&1)"; then
-    echo "::error::Failed to enumerate package versions for lancache-ng/${service} via jq: $version_list"
-    had_errors=1
-    return
+    if ! version_list="$(jq -cs 'sort_by((.created_at // ""), .id)[]' "$version_snapshot_file" 2>&1)"; then
+      echo "::error::Failed to normalize/sort the audit package snapshot for lancache-ng/${service}: $version_list"
+      had_errors=1
+      return
+    fi
+  else
+    # What: compatibility path for direct unit tests and standalone sourced use.
+    # Why: production workers always pass the audit snapshot; keeping this path
+    # avoids coupling process_service() unit coverage to the audit subprocess.
+    # From: Issue #1585 | PR #1586
+    local versions_stderr
+    versions_stderr="$(mktemp)"
+    if ! versions_json="$(gh api --paginate "orgs/${org}/packages/container/${package}/versions" 2>"$versions_stderr")"; then
+      local list_error
+      list_error="$(cat "$versions_stderr")"
+      rm -f "$versions_stderr"
+      if [[ "$list_error" == *"HTTP 404"* ]]; then
+        echo "::notice::lancache-ng/${service} has no GHCR package yet (HTTP 404 listing its versions) -- nothing to reap for a service with no images published. Not treated as an error."
+        services_not_found=$((services_not_found + 1))
+        return
+      fi
+      echo "::error::Failed to list package versions for lancache-ng/${service}: $list_error"
+      had_errors=1
+      return
+    fi
+    rm -f "$versions_stderr"
+    if ! version_list="$(printf '%s' "$versions_json" | jq -c 'sort_by((.created_at // ""), .id)[]' 2>&1)"; then
+      echo "::error::Failed to enumerate/sort package versions for lancache-ng/${service} via jq: $version_list"
+      had_errors=1
+      return
+    fi
   fi
 
   local orphan_phase_ok=1
   local registry_token=""
-  local -A children_digests=()
-  local -A all_digest_set=()
   local service_deletions=0
 
   # What: Pass 0 validates every version's `.name` matches the digest shape
@@ -397,7 +416,6 @@ process_service() {
       orphan_phase_ok=0
       continue
     fi
-    all_digest_set["$name"]=1
   done <<< "$version_list"
 
   # What: fetches the anonymous pull token once per service before Pass 1,
@@ -421,6 +439,10 @@ process_service() {
   local version_id tag_list planned_identity planned_digest planned_tags current_digest current_tags retention_candidate
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
+    if (( service_deletions >= max_deletions_per_service )); then
+      echo "::notice::$service reached its per-run deletion cap ($max_deletions_per_service); remaining versions are deferred without further candidate-specific API work."
+      return 0
+    fi
     if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
       echo "::error::Failed to read a package version's id for $service via jq: $version_id"
       had_errors=1
@@ -438,19 +460,11 @@ process_service() {
       continue # untagged -- classified in Pass 2 below, not here
     fi
 
-    # What: sha256-<hex> attestation tags are scanned in their own pass,
-    # before the protected/has_closed_pr_tag loop below.
-    # Why: that loop `break`s on the first decisive tag, which could
-    # under-populate children_digests and make a live manifest look orphaned.
-    # From: Issue #1095 | PR #1443
-    local attestation_tag
-    while IFS= read -r attestation_tag; do
-      [[ -z "$attestation_tag" ]] && continue
-      if [[ "$attestation_tag" =~ ^sha256-([0-9a-f]{64})$ ]]; then
-        children_digests["sha256:${BASH_REMATCH[1]}"]=1
-      fi
-    done <<< "$tag_list"
-
+    # What: sha256-<subject> tags are NOT added to the forward child set.
+    # Why: they are reverse attestation/referrer edges; allowing a stale
+    # attestation to protect its otherwise-orphaned subject creates a cycle
+    # in which neither object can ever become garbage.
+    # From: Issue #1585 | PR #1586
     local protected=0 has_closed_pr_tag=0 tag
     retention_candidate=0
     if [[ -n "${retention_delete_candidates[$version_id]:-}" ]]; then
@@ -545,7 +559,6 @@ process_service() {
           else
             while IFS= read -r child_digest; do
               [[ -z "$child_digest" ]] && continue
-              children_digests["$child_digest"]=1
               manifest_children_by_version["$version_id"]+="${child_digest}"$'\n'
             done <<< "$children_output"
           fi
@@ -581,12 +594,6 @@ process_service() {
       continue
     fi
 
-    if (( service_deletions >= max_deletions_per_service )); then
-      echo "::notice::$service hit its per-run deletion cap ($max_deletions_per_service) while processing closed-PR tagged versions; the rest are left for a later run."
-      kept=$((kept + 1))
-      continue
-    fi
-
     # What: tags_display is cosmetic (log message only); a jq failure here
     # degrades the message instead of aborting.
     # Why: this isn't actually blocking the delete, since tag_list above
@@ -607,30 +614,36 @@ process_service() {
       fi
       delete_description="$service version $version_id (ordinary root beyond retention budget; tags: $tags_display)"
     else
+      if ! current_digest="$(jq -r '.name' <<<"$version_entry")" \
+          || ! current_tags="$(jq -r '.metadata.container.tags | sort | join(",")' <<<"$version_entry")"; then
+        echo "::error::Could not build the fresh-revalidation identity for closed-PR $service version $version_id; keeping it."
+        had_errors=1
+        kept=$((kept + 1))
+        continue
+      fi
+      if gc_revalidate_retention_candidate "$service" "$package" "$version_id" "$current_digest" "$current_tags"; then
+        :
+      else
+        revalidate_status=$?
+        if (( revalidate_status == 1 )); then
+          had_errors=1
+        fi
+        kept=$((kept + 1))
+        continue
+      fi
       delete_description="$service version $version_id (only closed-PR staging tags: $tags_display)"
     fi
 
     if gc_delete_version "orgs/${org}/packages/container/${package}/versions/${version_id}" "$delete_description"; then
       service_deletions=$((service_deletions + 1))
       deleted_version_ids["$version_id"]=1
-      if [[ "$retention_candidate" == "1" ]]; then
-        removed_retention_digests["$planned_digest"]=1
-        IFS=',' read -r -a removed_tags <<<"$planned_tags"
-        for tag in "${removed_tags[@]}"; do
-          kind="$(sra_tag_kind "$tag")" || continue
-          if [[ "$kind" == root$'\t'* ]]; then
-            prefix="${kind#root$'\t'}"
-            removed_retention_prefixes["$prefix"]=1
-          fi
-        done
-      fi
     fi
   done <<< "$version_list"
 
-  # What: protects children of every tagged parent that actually remains after Pass 1.
-  # Why: a planned retention root can still survive age, cap, revalidation,
-  # dry-run, or DELETE failure; shared closure must follow final parent state.
-  # From: Issue #1095.
+  # What: protects forward children of every tagged parent that remains after Pass 1.
+  # Why: shared platform/attestation closure follows the final simulated/real
+  # parent state, not the stale inventory state from before retention deletes.
+  # From: Issue #1095 | PR #1586
   local parent_version_id retained_child_digest
   for parent_version_id in "${!manifest_children_by_version[@]}"; do
     [[ -z "${deleted_version_ids[$parent_version_id]:-}" ]] || continue
@@ -640,15 +653,52 @@ process_service() {
     done <<<"${manifest_children_by_version[$parent_version_id]}"
   done
 
-  # What: Pass 1.5 removes child/attestation tags tied only to removed roots.
-  # Why: deleting a root alone would leave sha-*-<arch> and sha256-<digest>
-  # tagged closure objects permanently unreachable by the orphan-only pass.
-  # From: Issue #1095.
+  # What: rebuilds live root/subject identities from the versions that remain
+  # after Pass 1 (WOULD_DELETE counts as removed in dry-run simulation).
+  # Why: tagged closure must still be collectible on a later sweep when its
+  # root was deleted in an earlier run; same-run removed_* maps lose that fact.
+  # From: Issue #1585 | PR #1586
+  local retained_version_id retained_digest retained_tags
+  while IFS= read -r version_entry; do
+    [[ -n "$version_entry" ]] || continue
+    if ! retained_version_id="$(jq -r '.id' <<<"$version_entry")" \
+        || ! retained_digest="$(jq -r '.name' <<<"$version_entry")" \
+        || ! retained_tags="$(jq -r '.metadata.container.tags[]? // empty' <<<"$version_entry")"; then
+      echo "::error::Could not rebuild retained root/subject identities for $service; disabling closure/orphan deletion this run."
+      had_errors=1
+      orphan_phase_ok=0
+      break
+    fi
+    [[ -z "${deleted_version_ids[$retained_version_id]:-}" ]] || continue
+    if [[ -n "$retained_tags" ]]; then
+      live_subject_digests["$retained_digest"]=1
+    fi
+    while IFS= read -r tag; do
+      [[ -n "$tag" ]] || continue
+      kind="$(sra_tag_kind "$tag")" || continue
+      if [[ "$kind" == root$'\t'* ]]; then
+        prefix="${kind#root$'\t'}"
+        retained_root_prefixes["$prefix"]=1
+      fi
+    done <<<"$retained_tags"
+  done <<<"$version_list"
+  for retained_child_digest in "${!protected_children_digests[@]}"; do
+    live_subject_digests["$retained_child_digest"]=1
+  done
+
+  # What: Pass 1.5 removes tagged closure whose root/subject is no longer live.
+  # Why: sha-*-<arch> and sha256-<subject> objects must remain collectible
+  # across GC runs instead of requiring their root to be deleted in this run.
+  # From: Issue #1095 | Issue #1585 | PR #1586
   if [[ "$orphan_phase_ok" == "1" ]]; then
     local associated_candidate associated_tag_count association_ok candidate_digest expected_tags
     local child_subject_digest
     while IFS= read -r version_entry; do
       [[ -n "$version_entry" ]] || continue
+      if (( service_deletions >= max_deletions_per_service )); then
+        echo "::notice::$service reached its per-run deletion cap ($max_deletions_per_service); remaining closure/orphan work is deferred without further candidate-specific API work."
+        return 0
+      fi
       version_id="$(jq -r '.id' <<<"$version_entry")" || { had_errors=1; continue; }
       [[ -n "${deleted_version_ids[$version_id]:-}" ]] && continue
       tag_list="$(jq -r '.metadata.container.tags[]? // empty' <<<"$version_entry")" || { had_errors=1; continue; }
@@ -666,10 +716,10 @@ process_service() {
         if [[ "$kind" == child$'\t'* ]]; then
           prefix="${kind#child$'\t'}"
           prefix="${prefix%%$'\t'*}"
-          [[ -n "${removed_retention_prefixes[$prefix]:-}" ]] && association_ok=1
+          [[ -z "${retained_root_prefixes[$prefix]:-}" ]] && association_ok=1
         elif [[ "$tag" =~ ^sha256-([0-9a-f]{64})$ ]]; then
           child_subject_digest="sha256:${BASH_REMATCH[1]}"
-          [[ -n "${removed_retention_digests[$child_subject_digest]:-}" ]] && association_ok=1
+          [[ -z "${live_subject_digests[$child_subject_digest]:-}" ]] && association_ok=1
         fi
         if [[ "$association_ok" == "0" ]]; then
           associated_candidate=0
@@ -689,10 +739,6 @@ process_service() {
         kept=$((kept + 1))
         continue
       fi
-      if (( service_deletions >= max_deletions_per_service )); then
-        kept=$((kept + 1))
-        continue
-      fi
       expected_tags="$(jq -r '.metadata.container.tags | sort | join(",")' <<<"$version_entry")" || { had_errors=1; kept=$((kept + 1)); continue; }
       if gc_revalidate_retention_candidate "$service" "$package" "$version_id" "$candidate_digest" "$expected_tags"; then
         :
@@ -702,10 +748,11 @@ process_service() {
         kept=$((kept + 1))
         continue
       fi
-      delete_description="$service version $version_id (unprotected closure of a removed retention root; tags: $expected_tags)"
+      delete_description="$service version $version_id (unprotected tagged closure with no live root/subject; tags: $expected_tags)"
       if gc_delete_version "orgs/${org}/packages/container/${package}/versions/${version_id}" "$delete_description"; then
         service_deletions=$((service_deletions + 1))
         deleted_version_ids["$version_id"]=1
+        unset "live_subject_digests[$candidate_digest]"
         (( kept > 0 )) && kept=$((kept - 1))
       fi
     done <<<"$version_list"
@@ -715,36 +762,39 @@ process_service() {
     return
   fi
 
-  # What: Pass 2 -- orphan classification, re-reading the same
-  # version_list captured at the top of this function.
-  # Why: reusing the listing keeps children_digests a single, internally
-  # consistent snapshot of this service's manifest graph.
-  # From: Issue #1095 | PR #1443
+  # What: Pass 2 -- orphan classification against the retained-parent graph.
+  # Why: children of roots removed in this or a prior run must not remain
+  # protected by stale edges from the beginning of this sweep.
+  # From: Issue #1095 | Issue #1585 | PR #1586
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
+    if (( service_deletions >= max_deletions_per_service )); then
+      echo "::notice::$service reached its per-run deletion cap ($max_deletions_per_service); remaining orphan work is deferred without further candidate-specific API work."
+      return 0
+    fi
     if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
       had_errors=1
       continue
     fi
     [[ -z "$version_id" || "$version_id" == "null" ]] && continue
+    [[ -n "${deleted_version_ids[$version_id]:-}" ]] && continue
 
     if ! tag_list="$(printf '%s' "$version_entry" | jq -r '(.metadata.container.tags // [])[]' 2>&1)"; then
       had_errors=1
       continue
     fi
-    [[ -n "$tag_list" ]] && continue # tagged -- already handled in Pass 1
+    [[ -n "$tag_list" ]] && continue # tagged -- already handled in Pass 1/1.5
 
     if ! name="$(printf '%s' "$version_entry" | jq -r '.name' 2>&1)"; then
       echo "::error::Failed to read a package version's name/digest for $service via jq: $name"
       had_errors=1
       continue
     fi
-    if [[ -n "${children_digests[$name]:-}" ]]; then
-      # What: still referenced as a child (a platform manifest, or a
-      # Buildx-embedded attestation/SBOM manifest) by at least one
-      # currently-tagged image index.
-      # Why: deleting it would break that live tag.
-      # From: Issue #1095 | PR #1443
+    if [[ -n "${protected_children_digests[$name]:-}" ]]; then
+      # What: still referenced as a forward child by a parent that remains.
+      # Why: only retained-parent edges protect closure; an edge from a root
+      # deleted earlier in this sweep must not make the child immortal.
+      # From: Issue #1095 | PR #1586
       kept=$((kept + 1))
       continue
     fi
@@ -772,13 +822,7 @@ process_service() {
       continue
     fi
 
-    if (( service_deletions >= max_deletions_per_service )); then
-      echo "::notice::$service hit its per-run deletion cap ($max_deletions_per_service) while processing orphan candidates; the rest are left for a later run."
-      kept=$((kept + 1))
-      continue
-    fi
-
-    # What: a candidate with no `manifests[]` reference may still be a
+    # What: a candidate with no retained `.manifests[]` parent may still be a
     # REFERRERS-API attestation via its own manifest's `subject` field.
     # Why: one extra GET per candidate is cheap insurance against deleting
     # a still-relevant attestation.
@@ -796,12 +840,30 @@ process_service() {
       continue
     fi
     local subject_digest
-    subject_digest="$(printf '%s' "$candidate_manifest" | jq -r '.subject.digest // empty' 2>/dev/null)" || subject_digest=""
-    if [[ -n "$subject_digest" ]] && [[ -n "${all_digest_set[$subject_digest]:-}" ]]; then
-      # What: a live referrers-API attestation, subject digest still present in
-      # this service's package.
-      # Why: keep it -- deleting would orphan a still-relevant attestation.
-      # From: Issue #1095 | PR #1443
+    if ! subject_digest="$(gcps_extract_manifest_subject "$candidate_manifest")"; then
+      echo "::error::Could not parse $service candidate orphan $name's subject relationship; keeping it."
+      had_errors=1
+      kept=$((kept + 1))
+      continue
+    fi
+    if [[ -n "$subject_digest" && -n "${live_subject_digests[$subject_digest]:-}" ]]; then
+      # What: an OCI referrer is retained only while its subject is itself live.
+      # Why: mere existence of an otherwise-orphaned subject must not create a
+      # subject<->attestation retention cycle that survives forever.
+      # From: Issue #1585 | PR #1586
+      kept=$((kept + 1))
+      continue
+    fi
+
+    # What: revalidates an orphan's exact identity and still-empty tag set.
+    # Why: a version can gain a channel/release/root tag after the package
+    # snapshot was taken; stale untagged evidence must never authorize DELETE.
+    # From: Issue #1585 | PR #1586
+    if gc_revalidate_retention_candidate "$service" "$package" "$version_id" "$name" ""; then
+      :
+    else
+      revalidate_status=$?
+      (( revalidate_status == 1 )) && had_errors=1
       kept=$((kept + 1))
       continue
     fi
@@ -809,6 +871,7 @@ process_service() {
     if gc_delete_version "orgs/${org}/packages/container/${package}/versions/${version_id}" \
         "$service version $version_id (untagged, unreferenced orphan digest $name)"; then
       service_deletions=$((service_deletions + 1))
+      deleted_version_ids["$version_id"]=1
     fi
   done <<< "$version_list"
 }
@@ -833,9 +896,18 @@ gc_run_package_worker() {
   pr_state_cache=()
 
   if ! gc_build_service_retention_plan "$service"; then
+    # What: skips the second collector phase when the authoritative plan failed.
+    # Why: retrying the same package through an independent full listing after
+    # an API failure increases pressure and cannot restore safe SHA evidence.
+    # From: Issue #1585 | PR #1586
     had_errors=1
+  elif (( retention_package_absent == 0 )); then
+    process_service "$service" "$retention_versions_snapshot"
   fi
-  process_service "$service"
+  if [[ -n "$retention_versions_snapshot" ]]; then
+    rm -f -- "$retention_versions_snapshot"
+    retention_versions_snapshot=""
+  fi
   printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
     "$had_errors" "$deleted" "$kept" "$would_delete" "$pr_lookup_failures" "$services_not_found" >"$result_file"
 }
@@ -860,7 +932,7 @@ main() {
   # container -- no tool beyond the bare OS can be assumed present.
   # From: Issue #1095 | PR #1443
   local required_cmd
-  for required_cmd in gh jq curl date git awk mktemp sort uniq; do
+  for required_cmd in gh jq curl date git awk mkdir mktemp sleep sort uniq; do
     if ! command -v "$required_cmd" >/dev/null 2>&1; then
       echo "::error::Required tool '$required_cmd' was not found on this runner. This script cannot run without it."
       exit 1
@@ -927,6 +999,16 @@ main() {
     gc_concurrency="$package_count"
   fi
 
+  # What: shares confirmed PR planning states across package-worker shells.
+  # Why: without a run-local cross-worker cache the same PR is queried once
+  # per package, multiplying GitHub API pressure during large registry sweeps.
+  # Fresh pre-delete checks bypass this directory explicitly.
+  # From: Issue #1585 | PR #1586
+  local shared_pr_cache_dir
+  shared_pr_cache_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-gc-pr-state.XXXXXX")"
+  GCPS_PR_STATE_CACHE_DIR="$shared_pr_cache_dir"
+  export GCPS_PR_STATE_CACHE_DIR
+
   local offset batch_end pid result_file log_file worker_failed
   local worker_had_errors worker_deleted worker_kept worker_would_delete worker_pr_failures worker_not_found
   local -a worker_pids=() worker_results=() worker_logs=()
@@ -981,6 +1063,9 @@ main() {
       (( worker_failed == 0 )) || had_errors=1
     done
   done
+
+  rm -rf -- "$shared_pr_cache_dir"
+  unset GCPS_PR_STATE_CACHE_DIR
 
   echo "::notice::GHCR GC complete: deleted $deleted version(s), would-delete $would_delete version(s) in dry-run mode, kept $kept classification(s)."
 

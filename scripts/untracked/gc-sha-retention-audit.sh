@@ -21,8 +21,14 @@ source "$repo_root/scripts/lib/sha-retention-audit.sh"
 manifest="${SRA_MANIFEST:-$repo_root/release/stack-images.yml}"
 history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
 package_filter="${SRA_PACKAGE_FILTER:-}"
+version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
 per_page=100
+
+if [[ -n "$version_snapshot_file" && -z "$package_filter" ]]; then
+  echo "::error::SRA_VERSION_SNAPSHOT_FILE requires SRA_PACKAGE_FILTER so one snapshot maps to exactly one package." >&2
+  exit 1
+fi
 
 [[ "$GITHUB_REPOSITORY" == */* ]] || {
   echo "::error::GITHUB_REPOSITORY must be in owner/repository form." >&2
@@ -39,7 +45,7 @@ repository_name="${GITHUB_REPOSITORY#*/}"
   exit 1
 }
 
-for required_command in awk curl git jq mktemp sort uniq; do
+for required_command in awk cp curl git jq mktemp sort uniq; do
   command -v "$required_command" >/dev/null 2>&1 || {
     echo "::error::Required command is unavailable: $required_command" >&2
     exit 1
@@ -257,6 +263,20 @@ audit_package() {
     echo "::error::Package ${repository_name}/${package} returned no versions; retention state cannot be proven." >&2
     return 1
   }
+
+  # What: exports the exact normalized inventory used for this filtered audit.
+  # Why: the destructive collector can reuse the same snapshot for graph/PR/
+  # orphan classification instead of immediately listing thousands of package
+  # versions a second time; fresh per-version GETs still guard each DELETE.
+  # From: Issue #1585 | PR #1586
+  if [[ -n "$version_snapshot_file" ]]; then
+    if cp -- "$versions_file" "$version_snapshot_file"; then
+      :
+    else
+      echo "::error::Cannot export the filtered package-version snapshot for ${repository_name}/${package}." >&2
+      return 1
+    fi
+  fi
 
   # What: computes this package's stable-release tag set once, via a single
   # jq pass over the whole already-fetched versions file.

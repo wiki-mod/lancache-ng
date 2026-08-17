@@ -64,65 +64,43 @@ gcps_version_name_is_digest() {
 
 # gcps_extract_manifest_children <manifest-json>
 #
-# Given the raw JSON body of a manifest fetched from the GHCR registry API
-# (GET /v2/<repo>/<service>/manifests/<digest>), prints one child digest per
-# line: every entry in `.manifests[]` (the image-index case: a multi-arch
-# tag's per-platform manifests AND its own Buildx-embedded provenance/SBOM
-# attestation manifests -- Buildx lists both kinds inside the same
-# `manifests[]` array, distinguished only by a `platform: unknown/unknown`
-# value and a `vnd.docker.reference.type: attestation-manifest` annotation
-# neither this function nor its caller needs to inspect, since every entry in
-# this array is unconditionally a child of the parent index regardless of
-# that annotation), plus `.subject.digest` if present (the OCI Referrers-API
-# attestation case: a manifest fetched directly can itself declare which
-# other digest it is "about" via a top-level `subject` field). Prints nothing
-# for a plain single-platform manifest with neither field, which is a normal,
-# expected result (not a failure) -- the caller should check the raw HTTP
-# fetch's own success separately from this function ever printing output.
+# Prints only forward `.manifests[].digest` edges from an image index to the
+# platform/attestation manifests it requires. A top-level `.subject.digest`
+# is deliberately NOT a child edge: it points in the opposite direction,
+# from a referrer/attestation to the artifact it describes. Treating subject
+# as a child makes an otherwise-orphaned subject keep itself alive merely
+# because a stale attestation still refers to it.
 #
-# NOTE: this only walks ONE level. This project's own image-building pipeline
-# (build-push.yml/build-tools.yml, confirmed via a repo-wide grep for
-# `actions/attest`/`--provenance`/`--sbom`) never produces a nested index
-# (an index whose own `manifests[]` children are themselves indices), so a
-# single level is sufficient for every real artifact shape this project
-# currently produces; if that ever changes, this function -- and its
-# caller's single-pass child collection -- would need to walk recursively
-# instead.
+# NOTE: this only walks ONE level. This project's current publishers do not
+# produce nested indices; if that changes, the caller must recurse rather
+# than trusting this one-level closure.
 #
-# Returns non-zero (and prints nothing) if EITHER jq extraction itself
-# genuinely fails (a broken/missing jq, or a manifest body that passed the
-# caller's own gcps_manifest_looks_valid check yet still trips a jq error on
-# this specific query) -- distinct from a legitimate, successful extraction
-# that simply finds no children (a plain single-platform manifest), which
-# still returns 0 with empty output. This distinction matters because an
-# UNDER-populated children set is dangerous (a still-referenced platform
-# manifest would look orphaned), so the caller must be able to tell "really
-# has no children" apart from "we don't actually know" and treat the latter
-# as a reason to abort orphan classification for the whole service, the same
-# way it already does for an outright manifest-fetch failure.
-#
-# Deliberately does NOT handle GHCR/Buildx's OTHER attestation-association
-# convention, the `sha256-<64-hex>` fallback TAG scheme (an attestation
-# manifest naming its subject via its own tag string instead of a `subject`
-# field in its body) -- confirmed live (2026-08-06, real lancache-ng/proxy
-# package) that a manifest using this scheme has no `subject` field
-# whatsoever, so there is nothing in the JSON body this function receives
-# for it to find; the association only exists in that version's TAG, which
-# this function is never given (it only ever sees a manifest body). The
-# caller (scripts/untracked/gc-pr-staging-images.sh's process_service(), in its Pass 1
-# tag loop) handles that case itself, directly off the tag string, for
-# exactly this reason -- see its own comment at the `sha256-<hex>` tag-shape
-# check for the full live-verified rationale.
+# Returns non-zero on jq failure and 0 with empty output for a valid manifest
+# with no `.manifests[]` children.
+# From: Issue #1095 | PR #1443 | PR #1586
 gcps_extract_manifest_children() {
   local manifest_json="$1"
-  local manifests_children subject_child
+  local manifests_children
   if ! manifests_children="$(printf '%s' "$manifest_json" | jq -r '(.manifests // [])[]?.digest // empty' 2>/dev/null)"; then
     return 1
   fi
+  [[ -n "$manifests_children" ]] && printf '%s\n' "$manifests_children"
+  return 0
+}
+
+# gcps_extract_manifest_subject <manifest-json>
+#
+# Prints the top-level OCI `.subject.digest` when present. Kept separate from
+# gcps_extract_manifest_children because a subject is a reverse referrer edge:
+# the referrer is useful while the subject remains live, but the referrer must
+# not by itself make an otherwise-dead subject immortal.
+# From: Issue #1585 | PR #1586
+gcps_extract_manifest_subject() {
+  local manifest_json="$1"
+  local subject_child
   if ! subject_child="$(printf '%s' "$manifest_json" | jq -r '.subject.digest // empty' 2>/dev/null)"; then
     return 1
   fi
-  [[ -n "$manifests_children" ]] && printf '%s\n' "$manifests_children"
   [[ -n "$subject_child" ]] && printf '%s\n' "$subject_child"
   return 0
 }
@@ -227,63 +205,129 @@ gcps_pr_lookup_state() {
   local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
   # What: optional 4th arg is a caller variable name, populated via nameref
-  # from cache_ref (the single source of truth) in both branches below;
-  # named lookup_state below, not pr_state, so a caller passing the literal
-  # name "pr_state" (the real one does) can't collide with this function's
-  # own same-named local and silently write back into that instead.
-  # Why: a caller invoking this as a plain statement (not `$(...)`) needs
-  # cache_ref written by reference (command substitution would fork a
-  # subshell and lose it), so the result must reach it by reference too.
-  # From: Issue #1557 | PR #1559
-  local api_output lookup_state
+  # after local/shared-cache or live-API resolution. When present, stdout
+  # stays empty; legacy callers without the 4th arg still receive the state.
+  # Why: production calls this as a plain statement so cache writes survive;
+  # result output must not also leak raw OPEN/CLOSED lines into workflow logs.
+  # From: Issue #1557 | PR #1559 | PR #1586
+  local api_output lookup_state shared_cache_dir="" shared_cache_file="" shared_cache_lock=""
+  local shared_cache_tmp="" wait_attempt=0 lock_owned=0
 
-  if [[ -n "${cache_ref[$pr_number]:-}" ]]; then
-    printf '%s\n' "${cache_ref[$pr_number]}"
-    if [[ -n "$result_var_name" ]]; then
-      local -n result_ref="$result_var_name"
-      # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
-      result_ref="${cache_ref[$pr_number]}"
+  lookup_state="${cache_ref[$pr_number]:-}"
+
+  # What: optionally reuses confirmed OPEN/CLOSED states across package workers.
+  # Why: package workers are separate shells, so their associative arrays
+  # cannot deduplicate the same PR across services; a run-local file cache
+  # bounds that API amplification without persisting state between sweeps.
+  # From: Issue #1585 | PR #1586
+  if [[ -z "$lookup_state" && -n "${GCPS_PR_STATE_CACHE_DIR:-}" ]]; then
+    shared_cache_dir="${GCPS_PR_STATE_CACHE_DIR%/}"
+    shared_cache_file="${shared_cache_dir}/${pr_number}.state"
+    if [[ -r "$shared_cache_file" ]] && IFS= read -r lookup_state <"$shared_cache_file"; then
+      case "$lookup_state" in
+        OPEN | CLOSED)
+          cache_ref["$pr_number"]="$lookup_state"
+          ;;
+        *)
+          lookup_state=""
+          ;;
+      esac
+    else
+      lookup_state=""
     fi
-    return
+
+    # What: serializes only the first live lookup for one PR number.
+    # Why: an atomic result file alone still lets concurrent workers miss it
+    # at the same time and issue duplicate pulls API requests. mkdir is the
+    # lock primitive so no extra flock dependency is required.
+    # From: Issue #1585 | PR #1586
+    if [[ -z "$lookup_state" ]]; then
+      shared_cache_lock="${shared_cache_file}.lock"
+      for (( wait_attempt=1; wait_attempt<=100; wait_attempt++ )); do
+        if mkdir "$shared_cache_lock" 2>/dev/null; then
+          lock_owned=1
+          # Another owner may have finished between our first read and this
+          # mkdir. Re-read before spending a live API request.
+          if [[ -r "$shared_cache_file" ]] && IFS= read -r lookup_state <"$shared_cache_file"; then
+            case "$lookup_state" in
+              OPEN | CLOSED)
+                cache_ref["$pr_number"]="$lookup_state"
+                ;;
+              *)
+                lookup_state=""
+                ;;
+            esac
+          else
+            lookup_state=""
+          fi
+          break
+        fi
+        if [[ -r "$shared_cache_file" ]] && IFS= read -r lookup_state <"$shared_cache_file"; then
+          case "$lookup_state" in
+            OPEN | CLOSED)
+              cache_ref["$pr_number"]="$lookup_state"
+              break
+              ;;
+            *)
+              lookup_state=""
+              ;;
+          esac
+        fi
+        sleep 0.1
+      done
+    fi
   fi
 
-  # `api_output="$(gh api ...)"` as a bare assignment statement is itself a
-  # "simple command" under `set -e`: if `gh api` returns non-zero, THIS
-  # SCRIPT (not just the function) would exit right here, before a
-  # separately-captured `$?` on the next line could ever be read. Putting the
-  # assignment directly in the `if` condition makes it a tested context, so a
-  # failure is handled by the `else` branches below instead of aborting the
-  # whole GC run.
-  if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
-    if lookup_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
-      if [[ "$lookup_state" == "open" ]]; then
-        cache_ref["$pr_number"]="OPEN"
+  if [[ -z "$lookup_state" ]]; then
+    # Keep the assignment in an if-condition: a failed gh call must be
+    # classified here rather than tripping a caller's `set -e`.
+    if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
+      if lookup_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
+        if [[ "$lookup_state" == "open" ]]; then
+          lookup_state="OPEN"
+        elif [[ "$lookup_state" == "closed" ]]; then
+          lookup_state="CLOSED"
+        else
+          echo "::warning::Could not classify PR #$pr_number's state from a successful API response: $lookup_state" >&2
+          lookup_state="LOOKUP_FAILED"
+        fi
       else
-        cache_ref["$pr_number"]="CLOSED"
+        echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $lookup_state" >&2
+        lookup_state="LOOKUP_FAILED"
       fi
+    elif [[ "$api_output" == *"HTTP 404"* ]]; then
+      lookup_state="CLOSED"
     else
-      # gh api succeeded (a real response came back) but jq itself failed to
-      # parse it -- same "don't let this bare assignment trip set -e"
-      # reasoning as the gh api call above, applied to every other jq call
-      # in this script.
-      echo "::warning::Could not parse PR #$pr_number's state from a successful API response via jq: $lookup_state" >&2
-      cache_ref["$pr_number"]="LOOKUP_FAILED"
+      echo "::warning::Could not determine PR #$pr_number's state (not a 404): $api_output" >&2
+      lookup_state="LOOKUP_FAILED"
     fi
-  elif [[ "$api_output" == *"HTTP 404"* ]]; then
-    # Confirmed: this PR number genuinely does not exist (deleted,
-    # renumbered, whatever) -- a real answer, not an ambiguous one.
-    cache_ref["$pr_number"]="CLOSED"
-  else
-    echo "::warning::Could not determine PR #$pr_number's state (not a 404): $api_output" >&2
-    cache_ref["$pr_number"]="LOOKUP_FAILED"
+    cache_ref["$pr_number"]="$lookup_state"
+
+    # What: shares only confirmed answers, written atomically.
+    # Why: LOOKUP_FAILED must remain retriable; a transient API failure must
+    # not poison every other package worker for the rest of the sweep.
+    # From: Issue #1585 | PR #1586
+    if [[ "$lock_owned" == "1" && -n "$shared_cache_file" && -d "$shared_cache_dir" && "$lookup_state" != "LOOKUP_FAILED" ]]; then
+      shared_cache_tmp="${shared_cache_file}.${BASHPID}.tmp"
+      if printf '%s\n' "$lookup_state" >"$shared_cache_tmp"; then
+        mv -f -- "$shared_cache_tmp" "$shared_cache_file" 2>/dev/null || rm -f -- "$shared_cache_tmp"
+      else
+        rm -f -- "$shared_cache_tmp"
+      fi
+    fi
+  fi
+
+  if (( lock_owned == 1 )); then
+    rm -rf -- "$shared_cache_lock"
   fi
 
   if [[ -n "$result_var_name" ]]; then
     local -n result_ref="$result_var_name"
     # shellcheck disable=SC2034 # nameref write-only output param, read by the caller through result_var_name
-    result_ref="${cache_ref[$pr_number]}"
+    result_ref="$lookup_state"
+  else
+    printf '%s\n' "$lookup_state"
   fi
-  printf '%s\n' "${cache_ref[$pr_number]}"
 }
 
 # gcps_registry_anon_token <service> <repository>

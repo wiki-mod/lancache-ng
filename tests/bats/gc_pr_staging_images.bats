@@ -108,19 +108,23 @@ teardown() {
     [ "$(printf '%s\n' "$output" | grep -c '^sha256:')" -eq 3 ]
 }
 
-@test "gcps_extract_manifest_children collects a single manifest's own subject.digest" {
+@test "gcps_extract_manifest_subject returns a referrer's subject without treating it as a child" {
     # What: the referrers-API attestation shape -- a single manifest declaring
     # which other digest it is "about" via a top-level `subject` field.
-    # Why: this is the shape gcps_fetch_manifest's caller checks when
-    # evaluating an about-to-delete orphan candidate for a live attestation.
-    # From: Issue #1095 | PR #1443
+    # Why: subject is a reverse edge; conflating it with `.manifests[]` makes
+    # stale attestations keep otherwise-orphaned subjects alive forever.
+    # From: Issue #1095 | PR #1443 | PR #1586
     local manifest='{
       "mediaType": "application/vnd.oci.image.manifest.v1+json",
       "subject": {"digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}
     }'
-    run gcps_extract_manifest_children "$manifest"
+    run gcps_extract_manifest_subject "$manifest"
     [ "$status" -eq 0 ]
     [ "$output" = "sha256:4444444444444444444444444444444444444444444444444444444444444444" ]
+
+    run gcps_extract_manifest_children "$manifest"
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
 
 @test "gcps_extract_manifest_children prints nothing for a plain single-platform manifest" {
@@ -251,20 +255,26 @@ teardown() {
     [ "$(wc -l < "$call_log")" -eq 1 ]
 }
 
-@test "gcps_pr_lookup_state populates a 4th-arg result variable without printing being required" {
+@test "gcps_pr_lookup_state populates a 4th-arg result variable without leaking state to stdout" {
     gh() { printf '{"state":"open"}\n'; }
     export -f gh
     # shellcheck disable=SC2034 # passed by name to gcps_pr_lookup_state, which populates it via nameref
     declare -A cache=()
-    local result
-    gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >/dev/null
+    local result output_file
+    output_file="$BATS_TEST_TMPDIR/pr-state-stdout"
+    : >"$output_file"
+
+    gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >"$output_file"
     [ "$result" = "OPEN" ]
-    # What: second call is a cache hit.
-    # Why: the early-return branch must populate the 4th-arg output too,
-    # not just the post-lookup branch.
-    # From: Issue #1557 | PR #1559
-    gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >/dev/null
+    [ ! -s "$output_file" ]
+
+    # What: second call is a local-cache hit and must remain silent too.
+    # Why: the real collector always uses the result variable; raw OPEN/CLOSED
+    # lines in the live dry-run were an unintended duplicate output channel.
+    # From: Issue #1557 | PR #1559 | PR #1586
+    gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >"$output_file"
     [ "$result" = "OPEN" ]
+    [ ! -s "$output_file" ]
 }
 
 @test "process_service: caching a PR's state actually works through the real caller call site (issue #1557 item 74)" {
@@ -659,63 +669,42 @@ VERSIONS_JSON
     [ "$had_errors" -eq 1 ]
 }
 
-# What: $attested_orphan is untagged, not in $tagged_index's
-# `.manifests[]`; its only protection is $attestation's own tag.
-# Why: gcps_extract_manifest_children() only reads a manifest BODY, so
-# it can never discover this tag-based convention on its own.
-# From: Issue #1095 | PR #1443
-@test "process_service: an untagged version named only by another version's sha256-<hex> attestation TAG (not its manifest body) is protected" {
-    local tagged_index attestation attested_orphan
-    tagged_index="sha256:$(printf '7%.0s' {1..64})"
+# What: a sha256-<subject> fallback tag is a reverse referrer edge.
+# Why: the attestation stays while its subject is live, but must not make a
+# dead subject immortal after the real root/subject disappeared.
+# From: Issue #1095 | Issue #1585 | PR #1586
+@test "process_service: a sha256-<subject> attestation stays while its subject is a live tagged root" {
+    local subject attestation subject_hex
+    subject="sha256:$(printf '7%.0s' {1..64})"
     attestation="sha256:$(printf '8%.0s' {1..64})"
-    attested_orphan="sha256:$(printf '9%.0s' {1..64})"
-    local attested_orphan_hex
-    attested_orphan_hex="${attested_orphan#sha256:}"
+    subject_hex="${subject#sha256:}"
 
-    delete_log="$BATS_TEST_TMPDIR/deletes3"
-    : > "$delete_log"
+    delete_log="$BATS_TEST_TMPDIR/live-attestation-deletes"
+    : >"$delete_log"
     export delete_log
 
     gh() {
         if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
-            cat <<VERSIONS_JSON
-[
-  {"id":20,"name":"$tagged_index","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-cafe123"]}}},
-  {"id":21,"name":"$attestation","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha256-$attested_orphan_hex"]}}},
-  {"id":22,"name":"$attested_orphan","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":[]}}}
-]
-VERSIONS_JSON
+            printf '[{"id":20,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-cafe123"]}}},{"id":21,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}}]\n' "$subject" "$attestation" "$subject_hex"
             return 0
         fi
         if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
-            echo "$4" >> "$delete_log"
+            echo "$4" >>"$delete_log"
             return 0
         fi
         echo "unexpected gh call: $*" >&2
         return 1
     }
     export -f gh
-
     curl() {
-        local args="$*"
-        if [[ "$args" == *"ghcr.io/token"* ]]; then
-            printf '{"token":"faketoken"}\n'
-            return 0
-        fi
-        # What: tagged_index's and attestation's own manifest bodies are
-        # plain, childless manifests -- neither mentions $attested_orphan.
-        # Why: isolates this test to the tag-string association only, so a
-        # pass proves that parsing, not the `.manifests[]`/`.subject` path.
-        # From: Issue #1095 | PR #1443
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
         printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
-        return 0
     }
     export -f curl
 
     process_service proxy
 
     [ "$deleted" -eq 0 ]
-    [ "$kept" -eq 3 ]
     [ "$had_errors" -eq 0 ]
     [ ! -s "$delete_log" ]
 }
@@ -1110,6 +1099,327 @@ VERSIONS_JSON
     [ "$(wc -l <"$delete_log")" -eq 1 ]
     grep -F '/versions/51' "$delete_log"
     ! grep -F '/versions/53' "$delete_log"
+}
+
+
+# ---------------------------------------------------------------------------
+# Issue #1585 / PR #1586 live-GC regressions
+# ---------------------------------------------------------------------------
+
+@test "gcps_pr_lookup_state shares one concurrent planning lookup across worker caches" {
+    call_log="$BATS_TEST_TMPDIR/shared-pr-calls"
+    : >"$call_log"
+    shared_cache="$BATS_TEST_TMPDIR/shared-pr-cache"
+    mkdir -p "$shared_cache"
+    GCPS_PR_STATE_CACHE_DIR="$shared_cache"
+    export GCPS_PR_STATE_CACHE_DIR call_log
+
+    gh() {
+        echo "call" >>"$call_log"
+        sleep 0.3
+        printf '{"state":"closed"}\n'
+    }
+    export -f gh
+
+    lookup_once() {
+        # shellcheck disable=SC2034 # nameref input/output used by gcps_pr_lookup_state
+        declare -A worker_cache=()
+        local worker_state
+        gcps_pr_lookup_state 77 wiki-mod/lancache-ng worker_cache worker_state >/dev/null
+        [ "$worker_state" = "CLOSED" ]
+    }
+
+    lookup_once &
+    pid_a=$!
+    lookup_once &
+    pid_b=$!
+    wait "$pid_a"
+    wait "$pid_b"
+
+    [ "$(wc -l <"$call_log")" -eq 1 ]
+}
+
+@test "process_service reuses an audit snapshot instead of listing the package again" {
+    snapshot="$BATS_TEST_TMPDIR/package-snapshot.jsonl"
+    digest="sha256:$(printf 'a%.0s' {1..64})"
+    printf '{"id":60,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-abcdef1"]}}}\n' "$digest" >"$snapshot"
+    paginate_log="$BATS_TEST_TMPDIR/unexpected-paginate"
+    : >"$paginate_log"
+    export paginate_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            echo "unexpected" >>"$paginate_log"
+            return 1
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+
+    process_service proxy "$snapshot"
+
+    [ "$had_errors" -eq 0 ]
+    [ ! -s "$paginate_log" ]
+}
+
+@test "process_service: child-only tag is collected when its root disappeared in an earlier run" {
+    local child
+    child="sha256:$(printf 'd%.0s' {1..64})"
+    delete_log="$BATS_TEST_TMPDIR/stranded-child-deletes"
+    : >"$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":71,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-deadbee-amd64"]}}}]\n' "$child"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '{"id":71,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-deadbee-amd64"]}}}\n' "$child" >"$2"
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 1 ]
+    [ "$had_errors" -eq 0 ]
+    grep -F '/versions/71' "$delete_log"
+}
+
+@test "process_service: stale sha256 attestation and its untagged dead subject are eventually collected" {
+    local subject attestation subject_hex
+    subject="sha256:$(printf '9%.0s' {1..64})"
+    attestation="sha256:$(printf '8%.0s' {1..64})"
+    subject_hex="${subject#sha256:}"
+
+    delete_log="$BATS_TEST_TMPDIR/stale-attestation-deletes"
+    : >"$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":21,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}},{"id":22,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":[]}}}]\n' "$attestation" "$subject_hex" "$subject"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        case "$1" in
+            */versions/21)
+                printf '{"id":21,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha256-%s"]}}}\n' "$attestation" "$subject_hex" >"$2"
+                ;;
+            */versions/22)
+                printf '{"id":22,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":[]}}}\n' "$subject" >"$2"
+                ;;
+            *)
+                return 1
+                ;;
+        esac
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 2 ]
+    [ "$had_errors" -eq 0 ]
+    [ "$(wc -l <"$delete_log")" -eq 2 ]
+}
+
+@test "process_service: a PR reopened after planning is kept by full fresh revalidation" {
+    pull_count_file="$BATS_TEST_TMPDIR/reopen-pull-count"
+    printf '0\n' >"$pull_count_file"
+    delete_log="$BATS_TEST_TMPDIR/reopen-deletes"
+    : >"$delete_log"
+    export pull_count_file delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":80,"name":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-800-sha-aaaaaaa"]}}}]\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            local count
+            count="$(cat "$pull_count_file")"
+            count=$((count + 1))
+            printf '%s\n' "$count" >"$pull_count_file"
+            if (( count == 1 )); then
+                printf '{"state":"closed"}\n'
+            else
+                printf '{"state":"open"}\n'
+            fi
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '{"id":80,"name":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-800-sha-aaaaaaa"]}}}\n' >"$2"
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 1 ]
+    [ "$(cat "$pull_count_file")" -eq 2 ]
+    [ ! -s "$delete_log" ]
+}
+
+@test "process_service: package cap stops later PR lookups and emits one quota notice" {
+    max_deletions_per_service=1
+    pull_log="$BATS_TEST_TMPDIR/quota-pull-calls"
+    delete_log="$BATS_TEST_TMPDIR/quota-deletes"
+    run_log="$BATS_TEST_TMPDIR/quota-run.log"
+    : >"$pull_log"
+    : >"$delete_log"
+    export pull_log delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            cat <<'VERSIONS_JSON'
+[
+  {"id":81,"name":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-801-sha-aaaaaaa"]}}},
+  {"id":82,"name":"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","created_at":"2020-01-02T00:00:00Z","metadata":{"container":{"tags":["pr-802-sha-bbbbbbb"]}}}
+]
+VERSIONS_JSON
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            echo "call" >>"$pull_log"
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '{"id":81,"name":"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-801-sha-aaaaaaa"]}}}\n' >"$2"
+    }
+
+    process_service proxy >"$run_log"
+
+    [ "$deleted" -eq 1 ]
+    [ "$(wc -l <"$pull_log")" -eq 2 ]
+    [ "$(grep -c 'reached its per-run deletion cap' "$run_log")" -eq 1 ]
+    [ "$(wc -l <"$delete_log")" -eq 1 ]
+}
+
+@test "process_service: dry-run performs fresh validation but issues zero DELETE requests" {
+    gc_dry_run=true
+    delete_log="$BATS_TEST_TMPDIR/dry-run-deletes"
+    : >"$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":83,"name":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-803-sha-ccccccc"]}}}]\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
+            printf '{"state":"closed"}\n'
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '{"id":83,"name":"sha256:cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-803-sha-ccccccc"]}}}\n' >"$2"
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$would_delete" -eq 1 ]
+    [ ! -s "$delete_log" ]
+}
+
+@test "process_service: an orphan that gains a tag before DELETE is kept" {
+    digest="sha256:$(printf 'e%.0s' {1..64})"
+    delete_log="$BATS_TEST_TMPDIR/orphan-retag-deletes"
+    : >"$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":84,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":[]}}}]\n' "$digest"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '{"id":84,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["latest"]}}}\n' "$digest" >"$2"
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 0 ]
+    [ "$kept" -eq 1 ]
+    [ ! -s "$delete_log" ]
 }
 
 # ---------------------------------------------------------------------------

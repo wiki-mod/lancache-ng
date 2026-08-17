@@ -441,20 +441,32 @@ now only ever label a root with no *resolvable* commit history at all (the
 
 **Destructive retention GC (issue #1095)**: `gc-pr-staging-images.yml` keeps
 the read-only audit as the sole ordinary-root classifier and runs one filtered
-audit per manifest package. Package workers may run concurrently, but each
-package's listing, graph analysis, revalidation, and DELETE sequence remains
-serial and subject to the existing per-package deletion cap. Immediately before
-deleting an audit-authorized root (or a tagged child/attestation associated only
-with a root successfully removed in the same worker), the GC re-reads the exact
-package-version object with caching disabled and requires its ID, digest, sorted
-tag set, and minimum age to match the plan. Any PR tag is also rechecked and must
-resolve CLOSED. A changed channel/release tag, API ambiguity, malformed data, or
-shared child digest therefore keeps the object. DELETE itself uses the project's
-bounded retry wrapper; HTTP 404 is idempotent success, permanent 4xx responses
-fail immediately, and transient failures retry. Closed-PR and genuinely
-unreferenced-orphan cleanup remains in the same collector and uses the same
-DELETE wrapper. `workflow_dispatch` additionally exposes dry-run, concurrency,
-age, per-package deletion-cap, and run-wide deletion-cap controls for backlog draining.
+audit per manifest package. The filtered audit exports the exact normalized
+package snapshot it classified, and the destructive worker reuses that snapshot
+instead of immediately listing the same multi-thousand-version package again.
+Package workers may run concurrently, but each package's graph analysis,
+revalidation, and DELETE sequence remains serial and subject to the existing
+per-package and run-wide deletion caps. Confirmed PR planning states are shared
+only within the current sweep to avoid duplicate cross-package API lookups;
+immediate pre-delete PR checks always bypass that cache.
+
+Immediately before deleting an audit-authorized root, closed-PR version,
+retention-closure artifact, or untagged orphan, the GC re-reads the exact package
+version with caching disabled and requires its ID, digest, complete sorted tag
+set, and minimum age to still match the planned candidate. Any PR tag is also
+rechecked and must resolve CLOSED. A changed channel/release tag, API ambiguity,
+malformed data, or shared child digest therefore keeps the object. Tagged
+`sha-<commit>-<arch>` / `sha256-<subject>` closure is retained while its root or
+subject is live, but remains collectible in a later sweep if that parent was
+removed by an earlier run; closure no longer depends on remembering a same-run
+root deletion. OCI `.subject.digest` is treated as a reverse referrer edge, not
+a forward child edge, so a stale attestation cannot keep an otherwise-dead
+subject alive by itself.
+
+DELETE itself uses the project's bounded retry wrapper; HTTP 404 is idempotent
+success, permanent 4xx responses fail immediately, and transient failures retry.
+`workflow_dispatch` exposes dry-run, concurrency, age, per-package deletion-cap,
+and run-wide deletion-cap controls for supervised/backlog runs.
 
 **Deliberately not implemented: a "previous nightly" safety net.** The
 maintainer's real operational intent for `nightly` protection is narrower
@@ -536,12 +548,16 @@ above was already implemented before that revision was written; this section
 now reflects the actually-shipped design.
 
 Automated cleanup must be explicitly approved and must consume the manifest
-retention contract plus canonical accepted/protected identity evidence. A
-read-only audit may classify and report candidates, but must not expose a switch
-that turns the audit itself into a package-version deletion path. Destructive
-activation is a separate approval and validation boundary and must fail closed
-when acceptance, package-version schema, protected references, or artifact-graph
-closure cannot be proven.
+retention contract plus canonical accepted/protected identity evidence. The
+repository's configured `GHCR Retention GC` schedule is that approved automation:
+it currently performs one bounded destructive sweep per day, while
+`workflow_dispatch` permits either the same destructive mode or a supervised
+dry-run. During a large historical backlog the schedule may be run more often
+only after measured API behavior shows the smaller repeated sweeps remain below
+GitHub rate/service-pressure limits. The read-only audit itself still must not
+expose a switch that turns it into a package-version deletion path. Every
+destructive run must fail closed when package-version schema, protected
+references, PR state, age, or artifact-graph closure cannot be proven.
 
 The audit reports every package version beyond the accepted-roots budget as a
 labeled dry-run candidate (`decision=would-delete`) rather than folding it into
@@ -558,14 +574,12 @@ data-quality defect in the build/publish pipeline (e.g. a missing container
 timestamp), reported as its own distinct finding, and never silently folded
 into an unrelated protect/would-delete reason.
 
-**Deferred, not yet authorized:** a future destructive-activation pass is
-expected to need selection by more than "beyond the ordinary-roots budget" —
-concretely, filtering by an explicit date or date range, by a tag matched
-against a time span, and by free-text/pattern input (a specific `sha-<commit>`
-alias, a full `sha256:` digest, or a PR-associated tag). None of that selection
-or activation logic exists yet. This note exists so the dry-run report's data
-model (build date, tag, digest, rank) is not redesigned again once that
-decision is made, not as a description of current behavior.
+**Optional operator selectors remain deferred:** date/date-range, tag/time-span,
+and free-text/pattern selectors (for example a specific `sha-<commit>` alias,
+full `sha256:` digest, or PR-associated tag) are not implemented. They are
+optional targeting conveniences, not an activation prerequisite: normal
+retention GC is already authorized through the bounded scheduled/manual
+collector described above.
 
 ## CI Guardrails
 
