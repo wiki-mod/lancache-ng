@@ -251,6 +251,10 @@ gc_build_service_retention_plan() {
 gc_revalidate_retention_candidate() {
   local service="$1" package="$2" version_id="$3" expected_digest="$4" expected_tags="$5"
   local body_file fields fresh_id fresh_digest fresh_tags fresh_created_at fresh_epoch tag pr_number pr_state
+  # What: suppresses SC2034 for a nameref-backed PR-state cache.
+  # Why: gcps_pr_lookup_state receives its name and accesses it through local -n.
+  # From: Issue #1095 | PR #1585.
+  # shellcheck disable=SC2034
   local -A fresh_pr_state_cache=()
   local -a fresh_tag_array=()
 
@@ -822,6 +826,10 @@ gc_run_package_worker() {
   would_delete=0
   pr_lookup_failures=0
   services_not_found=0
+  # What: suppresses SC2034 for the worker-local reset of the nameref cache.
+  # Why: gcps_pr_lookup_state accesses pr_state_cache indirectly through local -n.
+  # From: Issue #1095 | PR #1585.
+  # shellcheck disable=SC2034
   pr_state_cache=()
 
   if ! gc_build_service_retention_plan "$service"; then
