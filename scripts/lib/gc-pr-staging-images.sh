@@ -273,7 +273,10 @@ gcps_delete_package_version_once() {
     return 0
   fi
   if [[ "$output" == *"HTTP 404"* ]]; then
-    # shellcheck disable=SC2034 # cross-file output var, see function header
+    # What: suppresses SC2034 for this cross-file output assignment.
+    # Why: the sourced caller reads the helper output after the function returns.
+    # From: Issue #1095 | PR #1585.
+    # shellcheck disable=SC2034
     gcps_delete_result="ALREADY_ABSENT"
     return 0
   fi
@@ -306,7 +309,10 @@ gcps_package_presence_once() {
     return 0
   fi
   if [[ "$output" == *"HTTP 404"* ]]; then
-    # shellcheck disable=SC2034 # cross-file output var, see function header
+    # What: suppresses SC2034 for this cross-file output assignment.
+    # Why: the sourced caller reads the helper output after the function returns.
+    # From: Issue #1095 | PR #1585.
+    # shellcheck disable=SC2034
     gcps_package_presence="ABSENT"
     return 0
   fi

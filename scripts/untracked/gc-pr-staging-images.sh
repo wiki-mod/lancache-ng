@@ -836,6 +836,10 @@ gc_run_package_worker() {
   would_delete=0
   pr_lookup_failures=0
   services_not_found=0
+  # What: suppresses SC2034 for the worker-local reset of the nameref cache.
+  # Why: gcps_pr_lookup_state accesses pr_state_cache indirectly through local -n.
+  # From: Issue #1095 | PR #1585.
+  # shellcheck disable=SC2034
   pr_state_cache=()
 
   if ! gc_build_service_retention_plan "$service"; then
