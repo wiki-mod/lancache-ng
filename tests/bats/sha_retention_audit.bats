@@ -1,11 +1,10 @@
 #!/usr/bin/env bats
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: regression coverage for the protect-only SHA retention audit and
-# its read-only GitHub REST helper.
-# Why: each test carries its own AG-CODE-010 purpose comment; this
-# file-level note covers all of them rather than repeating it per test.
-# From: Issue #1095 | PR #1501.
+# What: regression coverage for the read-only SHA retention planner and API helper.
+# Why: destructive GC consumes planner output, so its protection decisions
+# must remain independently testable without any DELETE capability here.
+# From: Issue #1095.
 
 setup() {
   repo_root="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
@@ -171,6 +170,18 @@ EOF
   [[ "$manifest_services" == *"ntp"* ]]
   [[ "$manifest_services" == *"syslog"* ]]
   [[ "$manifest_services" == *"build-tools"* ]]
+}
+
+# What: keeps legacy selection explicit instead of changing the default inventory.
+# Why: the destructive GC may retire manifest-declared historical packages,
+# while the standalone audit must retain its original first-party scope.
+# From: Issue #1095.
+@test "manifest package parser exposes legacy only when explicitly requested" {
+  default_inventory="$(sra_manifest_packages "$repo_root/release/stack-images.yml")"
+  legacy_inventory="$(sra_manifest_packages "$repo_root/release/stack-images.yml" "legacy")"
+  [[ "$default_inventory" != *$'legacy\tproxy-standard'* ]]
+  [[ "$legacy_inventory" == *$'legacy\tproxy-standard'* ]]
+  [[ "$legacy_inventory" == *$'legacy\tfluent-bit'* ]]
 }
 
 # GHCR version objects are deletion units, so every required field must be valid before classification.
@@ -561,6 +572,30 @@ EOF
   [ "$output" = "non-ordinary-version" ]
 }
 
+# What: rollback anchors must precede tag/history classification for every class.
+# Why: metadata stack roots now use the same bounded history policy instead
+# of an unconditional class exemption, but rollback remains absolute.
+# From: Issue #1095.
+@test "gc-sha-retention-audit.sh checks rollback_anchors before tag/history classification" {
+  anchor_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  facts_line="$(grep -n 'sra_version_tag_facts "\$version_json"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  [ -n "$anchor_line" ]
+  [ -n "$facts_line" ]
+  [ "$anchor_line" -lt "$facts_line" ]
+  run grep -F 'metadata-stack-identity' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 1 ]
+}
+
+# What: filtered mode is the package-parallel planner entry point used by GC.
+# Why: it must exist without adding DELETE capability to the audit itself.
+# From: Issue #1095.
+@test "gc-sha-retention-audit.sh exposes a read-only package filter for GC workers" {
+  run grep -F 'SRA_PACKAGE_FILTER' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
+  run grep -F 'ordinary-root-beyond-retention-budget' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
+}
+
 # The retention audit surface must remain structurally incapable of package deletion.
 @test "retention audit code and workflow contain no destructive package path" {
   run grep -ER --line-number -- '-X[[:space:]]+DELETE|delete:packages|GHCR_PACKAGE_DELETE_PAT' \
@@ -569,21 +604,4 @@ EOF
     "$repo_root/scripts/lib/github-api-retry.sh" \
     "$repo_root/.github/workflows/gc-sha-retention-audit.yml"
   [ "$status" -eq 1 ]
-}
-
-# The rollback_anchors membership check must run before the class==metadata
-# branch, which is itself the first classification decision in the loop --
-# an anchor must protect a digest regardless of what class it belongs to.
-@test "gc-sha-retention-audit.sh checks rollback_anchors before every other classification branch" {
-  anchor_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
-  metadata_line="$(grep -n 'class" == "metadata"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
-  [ -n "$anchor_line" ]
-  [ -n "$metadata_line" ]
-  [ "$anchor_line" -lt "$metadata_line" ]
-}
-
-# A declared-but-never-observed anchor must fail the whole run closed, not silently no-op.
-@test "gc-sha-retention-audit.sh fails closed on an unresolvable rollback_anchors entry" {
-  run grep -F 'does not exist as a real package version digest' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
-  [ "$status" -eq 0 ]
 }

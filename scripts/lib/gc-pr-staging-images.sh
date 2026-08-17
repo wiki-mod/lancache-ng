@@ -338,3 +338,63 @@ gcps_fetch_manifest() {
     -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
     "https://ghcr.io/v2/${repository}/${service}/manifests/${digest}"
 }
+
+# What: performs one GitHub package-version DELETE attempt and classifies it.
+# Why: ghcr_retry needs permanent-vs-transient signaling and 404 is an
+# idempotent success when another cleanup path already removed the version.
+# From: Issue #1095.
+gcps_delete_package_version_once() {
+  local endpoint="${1:?gcps_delete_package_version_once: endpoint is required}"
+  local output http_status
+
+  gcps_delete_result="FAILED"
+  if output="$(gh api -X DELETE "$endpoint" 2>&1)"; then
+    gcps_delete_result="DELETED"
+    return 0
+  fi
+  if [[ "$output" == *"HTTP 404"* ]]; then
+    gcps_delete_result="ALREADY_ABSENT"
+    return 0
+  fi
+
+  if [[ "$output" =~ HTTP\ ([0-9]{3}) ]]; then
+    http_status="${BASH_REMATCH[1]}"
+    if [[ "$http_status" == 4?? && "$http_status" != "429" ]] \
+        && ! { [[ "$http_status" == "403" ]] && [[ "${output,,}" == *"rate limit"* ]]; }; then
+      echo "::error::GitHub package-version DELETE failed permanently with HTTP $http_status for $endpoint: $output" >&2
+      return "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+    fi
+  fi
+
+  echo "::notice::GitHub package-version DELETE attempt failed for $endpoint: $output" >&2
+  return 1
+}
+
+# What: probes whether one package exists and classifies the API result.
+# Why: manifest-declared legacy names may be intentionally absent, while
+# transient/auth failures must still use the shared bounded retry contract.
+# From: Issue #1095.
+gcps_package_presence_once() {
+  local endpoint="${1:?gcps_package_presence_once: endpoint is required}"
+  local output http_status
+
+  gcps_package_presence="FAILED"
+  if output="$(gh api "$endpoint" 2>&1)"; then
+    gcps_package_presence="EXISTS"
+    return 0
+  fi
+  if [[ "$output" == *"HTTP 404"* ]]; then
+    gcps_package_presence="ABSENT"
+    return 0
+  fi
+  if [[ "$output" =~ HTTP\ ([0-9]{3}) ]]; then
+    http_status="${BASH_REMATCH[1]}"
+    if [[ "$http_status" == 4?? && "$http_status" != "429" ]] \
+        && ! { [[ "$http_status" == "403" ]] && [[ "${output,,}" == *"rate limit"* ]]; }; then
+      echo "::error::GitHub package presence probe failed permanently with HTTP $http_status for $endpoint: $output" >&2
+      return "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE"
+    fi
+  fi
+  echo "::notice::GitHub package presence probe attempt failed for $endpoint: $output" >&2
+  return 1
+}

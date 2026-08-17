@@ -2,10 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # What: read-only GHCR retention audit -- inventories package versions,
-# ranks legacy ordinary roots from Git history, reports protection reasons.
-# Why: never issues a DELETE call; over-budget roots are labeled
-# would-delete with a real build date, dry-run only.
-# From: Issue #1095 | PR #1501.
+# ranks ordinary roots from Git history, and reports protection decisions.
+# Why: never issues DELETE; the destructive GC may consume only its exact
+# would-delete identities after independent live safety revalidation.
+# From: Issue #1095.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -19,7 +19,8 @@ source "$repo_root/scripts/lib/sha-retention-audit.sh"
 : "${GH_TOKEN:?GH_TOKEN is required}"
 
 manifest="${SRA_MANIFEST:-$repo_root/release/stack-images.yml}"
-history_ref="${SRA_HISTORY_REF:-origin/current_dev}"
+history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
+package_filter="${SRA_PACKAGE_FILTER:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
 per_page=100
 
@@ -47,10 +48,6 @@ done
 
 [[ -f "$manifest" ]] || {
   echo "::error::Retention manifest is missing: $manifest" >&2
-  exit 1
-}
-git -C "$repo_root" rev-parse --verify --quiet "${history_ref}^{commit}" >/dev/null || {
-  echo "::error::History ref is unavailable in the full checkout: $history_ref" >&2
   exit 1
 }
 
@@ -120,7 +117,13 @@ cleanup() {
 trap cleanup EXIT
 
 packages_file="$work_dir/packages.tsv"
-if sra_manifest_packages "$manifest" >"$packages_file"; then
+if [[ -n "$package_filter" ]]; then
+  # What: filtered mode includes declared legacy packages for per-package GC.
+  # Why: standalone audit keeps its original first-party scope while the GC
+  # can intentionally retire manifest-declared historical package names.
+  # From: Issue #1095.
+  sra_manifest_packages "$manifest" "runtime tooling metadata legacy" >"$packages_file"
+elif sra_manifest_packages "$manifest" >"$packages_file"; then
   :
 else
   echo "::error::Cannot derive first-party package inventory from $manifest." >&2
@@ -131,42 +134,70 @@ fi
   exit 1
 }
 
+if [[ -n "$package_filter" ]]; then
+  filtered_packages="$work_dir/packages.filtered.tsv"
+  awk -F '\t' -v wanted="$package_filter" '$2 == wanted { print }' "$packages_file" >"$filtered_packages"
+  mv -- "$filtered_packages" "$packages_file"
+  [[ -s "$packages_file" ]] || {
+    echo "::error::SRA_PACKAGE_FILTER is not declared in $manifest: $package_filter" >&2
+    exit 1
+  }
+fi
+
 duplicate_packages="$(sort "$packages_file" | uniq -d)"
 [[ -z "$duplicate_packages" ]] || {
   echo "::error::Duplicate first-party package inventory entries were found: $duplicate_packages" >&2
   exit 1
 }
-for required_class in runtime tooling metadata; do
-  if awk -F '\t' -v wanted="$required_class" '$1 == wanted { found=1 } END { exit found ? 0 : 1 }' "$packages_file"; then
-    :
-  else
-    echo "::error::Manifest inventory has no $required_class package." >&2
-    exit 1
-  fi
-done
-
-history_file="$work_dir/history.txt"
-if git -C "$repo_root" rev-list --first-parent "$history_ref" >"$history_file"; then
-  :
-else
-  echo "::error::Cannot enumerate first-parent history for $history_ref." >&2
-  exit 1
+if [[ -z "$package_filter" ]]; then
+  for required_class in runtime tooling metadata; do
+    if awk -F '\t' -v wanted="$required_class" '$1 == wanted { found=1 } END { exit found ? 0 : 1 }' "$packages_file"; then
+      :
+    else
+      echo "::error::Manifest inventory has no $required_class package." >&2
+      exit 1
+    fi
+  done
 fi
-[[ -s "$history_file" ]] || {
-  echo "::error::First-parent history is empty for $history_ref." >&2
+
+read -r -a history_refs <<<"$history_refs_raw"
+(( ${#history_refs[@]} > 0 )) || {
+  echo "::error::No managed Git history refs were supplied." >&2
   exit 1
 }
 
 declare -A history_rank=()
-history_position=0
-while IFS= read -r history_commit; do
-  [[ "$history_commit" =~ ^[0-9a-f]{40}$ ]] || {
-    echo "::error::Unexpected commit value in $history_ref history: $history_commit" >&2
+history_index=0
+for history_ref in "${history_refs[@]}"; do
+  git -C "$repo_root" rev-parse --verify --quiet "${history_ref}^{commit}" >/dev/null || {
+    echo "::error::Managed history ref is unavailable in the full checkout: $history_ref" >&2
     exit 1
   }
-  (( history_position += 1 ))
-  history_rank["$history_commit"]="$history_position"
-done <"$history_file"
+  history_index=$((history_index + 1))
+  history_file="$work_dir/history-${history_index}.txt"
+  if git -C "$repo_root" rev-list --first-parent "$history_ref" >"$history_file"; then
+    :
+  else
+    echo "::error::Cannot enumerate first-parent history for $history_ref." >&2
+    exit 1
+  fi
+  [[ -s "$history_file" ]] || {
+    echo "::error::First-parent history is empty for $history_ref." >&2
+    exit 1
+  }
+
+  history_position=0
+  while IFS= read -r history_commit; do
+    [[ "$history_commit" =~ ^[0-9a-f]{40}$ ]] || {
+      echo "::error::Unexpected commit value in $history_ref history: $history_commit" >&2
+      exit 1
+    }
+    history_position=$((history_position + 1))
+    if [[ -z "${history_rank[$history_commit]:-}" ]] || (( history_position < history_rank[$history_commit] )); then
+      history_rank["$history_commit"]="$history_position"
+    fi
+  done <"$history_file"
+done
 
 # What: audits one package's versions -- fetches pages, classifies each
 # version protect/would-delete, and prints AUDIT + SUMMARY report lines.
@@ -253,8 +284,9 @@ audit_package() {
   : >"$root_candidates"
   local version_json id digest tags built facts root_count child_count other_count
   local encoded_tags encoded_tag tag kind prefix full_commit rank min_rank
-  local root_resolution_failed reason other_tags
+  local root_resolution_failed reason other_tags managed_root_count unmanaged_root_count
   local missing_build_date_count=0
+  local direct_would_delete_count=0
   declare -A seen_id_digest=()
   declare -A seen_digest_id=()
 
@@ -266,7 +298,7 @@ audit_package() {
     # "|"-joined (not @tsv) since bash `read` treats a literal tab as IFS
     # whitespace, silently collapsing an empty middle field.
     # From: Issue #1095 | PR #1501.
-    if version_fields="$(jq -r '[.id, .name, (.metadata.container.tags | join(",")), (.created_at // "")] | join("|")' <<<"$version_json")"; then
+    if version_fields="$(jq -r '[.id, .name, (.metadata.container.tags | sort | join(",")), (.created_at // "")] | join("|")' <<<"$version_json")"; then
       :
     else
       echo "::error::Cannot extract identity/tag/date fields for a package version in ${repository_name}/${package}." >&2
@@ -329,10 +361,6 @@ audit_package() {
       return 1
     }
 
-    if [[ "$class" == "metadata" ]]; then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "metadata-stack-identity"
-      continue
-    fi
     if (( root_count == 0 && child_count > 0 )); then
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
       continue
@@ -382,6 +410,8 @@ audit_package() {
     fi
     min_rank=0
     root_resolution_failed=false
+    managed_root_count=0
+    unmanaged_root_count=0
     while IFS= read -r encoded_tag; do
       [[ -n "$encoded_tag" ]] || continue
       tag="$(jq -Rr '@base64d' <<<"$encoded_tag")" || {
@@ -400,24 +430,35 @@ audit_package() {
         root_resolution_failed=true
         break
       fi
-      if sra_commit_is_on_history_ref "$repo_root" "$full_commit" "$history_ref"; then
-        :
-      else
-        root_resolution_failed=true
-        break
-      fi
       rank="${history_rank[$full_commit]:-}"
       if [[ -z "$rank" ]]; then
-        root_resolution_failed=true
-        break
+        unmanaged_root_count=$((unmanaged_root_count + 1))
+        continue
       fi
+      managed_root_count=$((managed_root_count + 1))
       if (( min_rank == 0 || rank < min_rank )); then
         min_rank="$rank"
       fi
     done <<<"$encoded_tags"
 
-    if [[ "$root_resolution_failed" == "true" || "$min_rank" == "0" ]]; then
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-resolution-or-history-unknown"
+    if [[ "$root_resolution_failed" == "true" ]]; then
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-resolution-unknown"
+      continue
+    fi
+
+    if (( managed_root_count == 0 && unmanaged_root_count > 0 )); then
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "outside-managed-history" "outside-managed-history" "would-delete" "sha-not-on-managed-history"
+      direct_would_delete_count=$((direct_would_delete_count + 1))
+      continue
+    fi
+
+    if (( unmanaged_root_count > 0 )); then
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "mixed-managed-and-unmanaged-root-tags"
+      continue
+    fi
+
+    if (( min_rank == 0 )); then
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-history-rank-unknown"
       continue
     fi
 
@@ -432,29 +473,34 @@ audit_package() {
     return 1
   fi
 
-  local legacy_position=0 budget decision would_delete_count=0
+  local legacy_position=0 budget decision reason would_delete_count="$direct_would_delete_count" package_retention_keep="$retention_keep"
+  if [[ "$class" == "legacy" ]]; then
+    package_retention_keep=0
+  fi
   while IFS=$'\t' read -r rank id digest tags built; do
     [[ -n "$id" ]] || continue
     (( legacy_position += 1 ))
-    # What: reports beyond-budget ordinary roots as dry-run "would-delete".
-    # Why: only a plain root or one with an unrecognized extra tag reaches
-    # this loop, so "acceptance-evidence-unavailable" stays correct here.
-    # From: Issue #1095 | PR #1501.
-    if (( legacy_position <= retention_keep )); then
-      budget="within-${retention_keep}"
+    # What: marks only roots outside the manifest's storage budget deletable.
+    # Why: the destructive GC consumes these exact identities after its
+    # independent age, tag, PR-state, graph, and live-revalidation gates.
+    # From: Issue #1095.
+    if (( legacy_position <= package_retention_keep )); then
+      budget="within-${package_retention_keep}"
       decision="protect"
+      reason="ordinary-root-within-retention-budget"
     else
-      budget="beyond-${retention_keep}"
+      budget="beyond-${package_retention_keep}"
       decision="would-delete"
+      reason="ordinary-root-beyond-retention-budget"
       (( would_delete_count += 1 ))
     fi
-    sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_position" "$budget" "$decision" "acceptance-evidence-unavailable"
+    sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_position" "$budget" "$decision" "$reason"
   done <"$sorted_candidates"
 
   printf 'SUMMARY\tclass=%s\tpackage=%s\tlegacy_roots=%s\tretention_keep=%s\twould_delete_count=%s\tmissing_build_date_count=%s\tdecision=protect-only\n' \
-    "$class" "$package" "$legacy_position" "$retention_keep" "$would_delete_count" "$missing_build_date_count"
+    "$class" "$package" "$legacy_position" "$package_retention_keep" "$would_delete_count" "$missing_build_date_count"
   if (( would_delete_count > 0 )); then
-    echo "::notice::${repository_name}/${package}: $would_delete_count ordinary root(s) past the accepted-roots budget of $retention_keep in this dry-run report; no deletion was performed." >&2
+    echo "::notice::${repository_name}/${package}: $would_delete_count ordinary root(s) past the storage-retention budget of $package_retention_keep; this read-only audit performed no deletion." >&2
   fi
 }
 
@@ -486,16 +532,18 @@ done <"$packages_file"
 # anchor itself is bad and remove it without first checking for an
 # unrelated fetch failure above.
 # From: Issue #1095 | PR #1501.
+if [[ -z "$package_filter" ]]; then
 for retention_rollback_anchor_entry in "${!retention_rollback_anchor_digests[@]}"; do
   if [[ -z "${retention_rollback_anchor_found[$retention_rollback_anchor_entry]+x}" ]]; then
     echo "::error::retention.rollback_anchors entry does not exist as a real package version digest in any audited first-party package: $retention_rollback_anchor_entry (if any package above failed to be audited this run, this may be a fetch failure rather than a genuinely missing digest -- resolve those errors before removing this entry)" >&2
     overall_status=1
   fi
 done
+fi
 
 if (( overall_status != 0 )); then
   echo "::error::SHA retention audit was incomplete or encountered invalid required data. No destructive conclusion is permitted." >&2
   exit 1
 fi
 
-echo "::notice::SHA retention audit completed in protect-only mode. Beyond-budget candidates are labeled would-delete for this dry-run report only; nothing was deleted. Legacy budget position is informational because canonical acceptance evidence is not yet available to this audit." >&2
+echo "::notice::SHA retention audit completed in read-only mode. would-delete records are storage-retention candidates for the separate destructive GC; this audit itself never deletes package versions." >&2

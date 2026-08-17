@@ -158,22 +158,24 @@ sra_validate_rollback_anchors_list() {
   done <<<"$anchors_raw"
 }
 
-# What: lists every "class<TAB>name" package under the manifest's
-# runtime/tooling/metadata top-level sections.
-# Why: a top-level-key state machine, since the manifest has no per-package
-# class field of its own to filter on directly.
-# From: Issue #1095 | PR #1501.
+# What: lists class/name packages from caller-selected manifest sections.
+# Why: retention audit and destructive GC need one parser while the default
+# remains the current runtime/tooling/metadata first-party inventory.
+# From: Issue #1095.
 sra_manifest_packages() {
   local manifest="${1:?sra_manifest_packages: manifest is required}"
+  local sections="${2:-runtime tooling metadata}"
 
-  awk '
-    /^(runtime|tooling|metadata):$/ {
-      section=$0
-      sub(/:$/, "", section)
-      next
+  awk -v wanted="$sections" '
+    BEGIN {
+      count=split(wanted, requested, " ")
+      for (i=1; i<=count; i++) allowed[requested[i]]=1
     }
-    section != "" && /^[[:alnum:]_-]+:/ {
-      section=""
+    /^[[:alnum:]_-]+:$/ {
+      candidate=$0
+      sub(/:$/, "", candidate)
+      section=(candidate in allowed) ? candidate : ""
+      next
     }
     section != "" && /^  - name: / {
       name=$0
@@ -306,7 +308,7 @@ sra_emit_record() {
   local budget="${8:?sra_emit_record: budget is required}"
   local decision="${9:?sra_emit_record: decision is required}"
   local reason="${10:?sra_emit_record: reason is required}"
-  printf 'AUDIT\tclass=%s\tpackage=%s\tid=%s\tdigest=%s\ttags=%s\tbuilt=%s\tlegacy_rank=%s\tbudget=%s\tacceptance=unknown\tdecision=%s\treason=%s\n' \
+  printf 'AUDIT\tclass=%s\tpackage=%s\tid=%s\tdigest=%s\ttags=%s\tbuilt=%s\tlegacy_rank=%s\tbudget=%s\tacceptance=not-required-for-storage-retention\tdecision=%s\treason=%s\n' \
     "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_rank" "$budget" "$decision" "$reason"
 }
 

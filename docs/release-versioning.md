@@ -334,9 +334,12 @@ bad pull without guessing which image was running.
 
 `release/stack-images.yml` defines the retention contract. The normal history
 budget is `accepted_ordinary_roots_per_package: 30`: for each first-party
-runtime or tooling package, keep the thirty newest **accepted ordinary root
-identities**. The current accepted identity counts as one of those thirty, so
-the rolling window is one current plus twenty-nine previous accepted roots.
+runtime, tooling, or metadata package, keep the thirty newest ordinary root
+identities that can be ranked on the managed producer histories (`current_dev`,
+`master`, `release/*`, and `v*` release branches that actually exist in the
+full checkout). A commit present on several histories uses its best first-parent
+rank, and the package still receives one shared thirty-root budget rather than
+thirty roots per branch.
 (Raised from 10 to 30: a period with many concurrently open PRs that each
 only change YAML/governance files still produces one new build-tools
 `sha-<commit>` image per push, and a ten-slot window could evict still-live
@@ -348,13 +351,17 @@ history slot. Platform child manifests and provenance/SBOM/referrer artifacts
 also do not consume ordinary-history slots; they remain part of the required
 artifact closure while a retained or otherwise protected root references them.
 
-A legacy `sha-*` tag proves that an immutable build identity exists, but it does
-not by itself prove that the artifact passed the acceptance gates. Rejected,
-abandoned, failed, or acceptance-unknown candidates do not become accepted
-ordinary history merely because they are new or carry a SHA-shaped tag. Until
-canonical accepted-artifact evidence can prove acceptance for the exact root,
-a retention audit must report that state conservatively and must not use it as
-destructive deletion authority.
+A `sha-*` tag proves that an immutable build identity exists; it is not a
+permanent storage exemption. The read-only retention audit ranks resolvable
+ordinary roots by the managed Git first-parent histories and labels roots
+beyond the manifest budget `would-delete`. A resolvable root on none of those
+managed histories is also `would-delete`; an unresolvable or mixed managed/
+unmanaged root set stays protected fail-closed. The destructive GC may consume
+only those exact version
+IDs after independently confirming the same digest and complete tag set still
+exist, the version is older than `GC_MIN_AGE_SECONDS`, and no open/unknown PR
+state blocks deletion. A root whose commit cannot be resolved on the managed
+history remains protected fail-closed instead of being guessed deletable.
 
 Protected references are exceptions to the rolling ordinary-history budget.
 The exact digest/root identities required by `nightly`, `latest`, a supported
@@ -363,6 +370,13 @@ their required artifact closure even when they fall outside the thirty
 ordinary accepted roots. Git ancestry can help classify where a legacy SHA
 came from, but being an ancestor of a protected branch or tag is not by
 itself a permanent storage exemption.
+
+The `stack` metadata package follows the same bounded `sha-*` root policy as
+runtime/tooling packages; its package class alone is not a permanent exemption.
+Its live `latest`/`nightly`/supported-release/rollback identities remain
+protected by the same reference rules below. Manifest-declared `legacy:`
+packages use a zero ordinary-root budget when the destructive GC addresses
+them, while any live protected release/channel/rollback reference still wins.
 
 The project must additionally keep at least the current stable release and two
 previous stable releases for the full first-party image set. Release digests,
@@ -377,10 +391,8 @@ rule still protects that identity.
 **The protected-reference model (issue #1501)**: the audit
 (`scripts/lib/sha-retention-audit.sh`, `scripts/untracked/gc-sha-retention-audit.sh`)
 checks every classified package version's attached tags against the
-`nightly`/`latest`/supported-stable-release categories above (the "accepted
-stack identity" category was already handled separately and unconditionally,
-via the `metadata-stack-identity` reason for the `stack` pointer package) and
-reports a specific reason instead of a generic one whenever a match is found:
+`nightly`/`latest`/supported-stable-release categories above and reports a
+specific reason instead of a generic one whenever a match is found:
 
 - `nightly-channel-protected` — this exact digest currently carries the
   `nightly` tag.
@@ -426,6 +438,23 @@ budget) as a plain `sha-<commit>` root, since it still has a resolvable
 git-history root to rank by. `non-sha-tag-attached`/`non-ordinary-version`
 now only ever label a root with no *resolvable* commit history at all (the
 `root_count==0` case), not "carries some extra tag."
+
+**Destructive retention GC (issue #1095)**: `gc-pr-staging-images.yml` keeps
+the read-only audit as the sole ordinary-root classifier and runs one filtered
+audit per manifest package. Package workers may run concurrently, but each
+package's listing, graph analysis, revalidation, and DELETE sequence remains
+serial and subject to the existing per-package deletion cap. Immediately before
+deleting an audit-authorized root (or a tagged child/attestation associated only
+with a root successfully removed in the same worker), the GC re-reads the exact
+package-version object with caching disabled and requires its ID, digest, sorted
+tag set, and minimum age to match the plan. Any PR tag is also rechecked and must
+resolve CLOSED. A changed channel/release tag, API ambiguity, malformed data, or
+shared child digest therefore keeps the object. DELETE itself uses the project's
+bounded retry wrapper; HTTP 404 is idempotent success, permanent 4xx responses
+fail immediately, and transient failures retry. Closed-PR and genuinely
+unreferenced-orphan cleanup remains in the same collector and uses the same
+DELETE wrapper. `workflow_dispatch` additionally exposes dry-run, concurrency,
+age, per-package deletion-cap, and run-wide deletion-cap controls for backlog draining.
 
 **Deliberately not implemented: a "previous nightly" safety net.** The
 maintainer's real operational intent for `nightly` protection is narrower

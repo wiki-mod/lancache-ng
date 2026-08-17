@@ -459,27 +459,25 @@ VERSIONS_JSON
 }
 
 @test "main(): every configured service reporting no GHCR package yet crosses the systemic-404 threshold (issue #1557 item 72)" {
-    # shellcheck disable=SC2034 # read by main() in the sourced script
     GH_TOKEN="unused-but-required-by-main"
-
-    gh() {
-        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
-            echo '{"message":"Package not found.","documentation_url":"https://docs.github.com/rest/packages/packages#list-package-versions-for-a-package-owned-by-an-organization","status":"404"}'
-            echo "gh: Package not found. (HTTP 404)" >&2
-            return 1
-        fi
-        echo "unexpected gh call: $*" >&2
-        return 1
+    services=(proxy dns)
+    gc_concurrency=2
+    gh() { :; }
+    curl() { :; }
+    export -f gh curl
+    sra_manifest_packages() { :; }
+    gc_resolve_retention_history_refs() { printf 'origin/current_dev\n'; }
+    gc_run_package_worker() {
+        printf '0\t0\t0\t0\t0\t1\n' >"$2"
     }
-    export -f gh
 
-    # What: `run` forks a subshell to catch main()'s own `exit 1`.
-    # Why: same pattern as the pervasive-PR-lookup-failure main() test further
-    # down this file.
-    # From: Issue #1557 | PR #1559
+    # What: worker result records simulate two independently missing packages.
+    # Why: this isolates parent-side concurrency aggregation and the systemic
+    # 404 threshold from package-listing mechanics covered above.
+    # From: Issue #1095.
     run --separate-stderr main
     [ "$status" -eq 1 ]
-    [[ "$output" == *"of ${#services[@]} configured services reported no GHCR package yet this run"* ]]
+    [[ "$output" == *"2 of 2 configured packages reported no GHCR package"* ]]
     [[ "$output" == *"One or more package-version listings, manifest fetches, or deletions failed"* ]]
 }
 
@@ -794,32 +792,280 @@ VERSIONS_JSON
 }
 
 @test "main(): the same pervasive PR-lookup-failure scenario actually fails the whole run, not just the counter" {
-    # What: restricts the sweep to one service so the expected count (3)
-    # is exact and the test stays fast.
-    # Why: main()'s real service loop would otherwise process all 8 for
-    # no added coverage.
-    # From: Issue #1095 | PR #1443
-    # shellcheck disable=SC2034 # read by main() in the sourced script
     services=(proxy)
+    gc_concurrency=1
     max_pr_lookup_failures=2
-    # shellcheck disable=SC2034 # read by main()'s own required-var guard in
-    # the sourced script
     GH_TOKEN="unused-but-required-by-main"
+    gh() { :; }
+    curl() { :; }
+    export -f gh curl
+    sra_manifest_packages() { :; }
+    gc_resolve_retention_history_refs() { printf 'origin/current_dev\n'; }
+    gc_run_package_worker() { printf '0\t0\t3\t0\t3\t0\n' >"$2"; }
+
+    # What: a worker reports three fail-closed PR-state lookups to the parent.
+    # Why: package concurrency must not lose the existing systemic-failure gate.
+    # From: Issue #1095.
+    run --separate-stderr main
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"PR-state lookups failed this run (threshold: 2)"* ]]
+    [[ "$output" == *"One or more package-version listings, manifest fetches, or deletions failed"* ]]
+}
+
+# What: a planned old sha root is deleted after exact live revalidation.
+# Why: proves the new retention path reaches DELETE rather than remaining
+# another protect-only report while preserving the existing age/manifest gates.
+# From: Issue #1095.
+@test "process_service: an over-budget sha root is deleted after live revalidation" {
+    digest="sha256:$(printf 'a%.0s' {1..64})"
+    retention_delete_candidates[42]="${digest}"$'\t'"sha-abcdef1"
+    delete_log="$BATS_TEST_TMPDIR/retention-delete"
+    : >"$delete_log"
+    export delete_log
 
     gh() {
         if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
-            cat <<VERSIONS_JSON
-[
-  {"id":1,"name":"sha256:$(printf '7%.0s' {1..64})","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-101-sha-1234567"]}}},
-  {"id":2,"name":"sha256:$(printf '8%.0s' {1..64})","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-102-sha-1234567"]}}},
-  {"id":3,"name":"sha256:$(printf '9%.0s' {1..64})","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["pr-103-sha-1234567"]}}}
-]
-VERSIONS_JSON
+            printf '[{"id":42,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-abcdef1"]}}}]\n' "$digest"
             return 0
         fi
-        if [[ "$1" == "api" && "$2" == repos/*/pulls/* ]]; then
-            echo "gh: HTTP 403: API rate limit exceeded" >&2
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        echo "unexpected gh call: $*" >&2
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '[{"id":42,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-abcdef1"]}}}]\n' "$digest" \
+          | jq '.[0]' >"$2"
+    }
+
+    process_service proxy
+    [ "$deleted" -eq 1 ]
+    [ -s "$delete_log" ]
+}
+
+# What: a newly-added protected channel tag invalidates an old retention plan.
+# Why: immediate revalidation must fail closed if latest/nightly/release state
+# changes while a long GC sweep is running.
+# From: Issue #1095.
+@test "process_service: changed tags after planning cancel retention deletion" {
+    digest="sha256:$(printf 'b%.0s' {1..64})"
+    retention_delete_candidates[43]="${digest}"$'\t'"sha-bcdef12"
+    delete_log="$BATS_TEST_TMPDIR/retention-revalidation-delete"
+    : >"$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":43,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-bcdef12"]}}}]\n' "$digest"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
+        fi
+        return 1
+    }
+    export -f gh
+    curl() {
+        [[ "$*" == *"ghcr.io/token"* ]] && { printf '{"token":"faketoken"}\n'; return 0; }
+        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+    }
+    export -f curl
+    github_api_get_with_retry() {
+        printf '[{"id":43,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-bcdef12","latest"]}}}]\n' "$digest" \
+          | jq '.[0]' >"$2"
+    }
+
+    process_service proxy
+    [ "$deleted" -eq 0 ]
+    [ ! -s "$delete_log" ]
+}
+
+# What: two package workers run concurrently and their counters are aggregated.
+# Why: background-shell state must not disappear under the exact strict shell
+# options inherited when this test sourced the production script.
+# From: Issue #1095.
+@test "main(): bounded concurrent package workers preserve result counters" {
+    services=(proxy dns)
+    gc_concurrency=2
+    GH_TOKEN="unused-but-required-by-main"
+    gh() { :; }
+    curl() { :; }
+    export -f gh curl
+    sra_manifest_packages() { :; }
+    gc_resolve_retention_history_refs() { printf 'origin/current_dev\n'; }
+    gc_run_package_worker() { printf '0\t1\t2\t0\t0\t0\n' >"$2"; }
+
+    run --separate-stderr main
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"deleted 2 version(s)"* ]]
+    [[ "$output" == *"kept 4 classification(s)"* ]]
+}
+
+# What: transient GitHub DELETE failures use the shared bounded retry policy.
+# Why: a temporary 5xx must not strand the whole retention backlog or create
+# a false successful run with zero deletions.
+# From: Issue #1095.
+@test "package-version DELETE retries a transient failure and then succeeds" {
+    GHCR_RETRY_BACKOFF_SECONDS=0
+    GHCR_RETRY_MAX_ATTEMPTS=3
+    attempt_log="$BATS_TEST_TMPDIR/delete-retry-attempts"
+    printf '0\n' >"$attempt_log"
+    export attempt_log
+    gh() {
+        local count
+        count="$(cat "$attempt_log")"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$attempt_log"
+        if (( count == 1 )); then
+            echo "gh: transient failure (HTTP 502)" >&2
             return 1
+        fi
+        return 0
+    }
+    export -f gh
+
+    run ghcr_retry api.github.com "" "" -- gcps_delete_package_version_once "orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions/42"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$attempt_log")" -eq 2 ]
+}
+
+# What: a DELETE 404 is idempotent success and consumes no retry budget.
+# Why: concurrent/manual cleanup may remove a planned version first; absence
+# already satisfies the collector's intended end state.
+# From: Issue #1095.
+@test "package-version DELETE treats HTTP 404 as already absent" {
+    attempt_log="$BATS_TEST_TMPDIR/delete-404-attempts"
+    printf '0\n' >"$attempt_log"
+    export attempt_log
+    gh() {
+        local count
+        count="$(cat "$attempt_log")"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$attempt_log"
+        echo "gh: Package version not found. (HTTP 404)" >&2
+        return 1
+    }
+    export -f gh
+
+    run ghcr_retry api.github.com "" "" -- gcps_delete_package_version_once "orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions/42"
+    [ "$status" -eq 0 ]
+    [ "$(cat "$attempt_log")" -eq 1 ]
+}
+
+# What: permanent non-rate-limit 4xx DELETE failures stop immediately.
+# Why: bad permissions/requests cannot improve through retries and should
+# preserve the remaining job budget for other diagnostic work.
+# From: Issue #1095.
+@test "package-version DELETE does not retry a permanent HTTP 403" {
+    GHCR_RETRY_BACKOFF_SECONDS=0
+    GHCR_RETRY_MAX_ATTEMPTS=4
+    attempt_log="$BATS_TEST_TMPDIR/delete-403-attempts"
+    printf '0\n' >"$attempt_log"
+    export attempt_log
+    gh() {
+        local count
+        count="$(cat "$attempt_log")"
+        count=$((count + 1))
+        printf '%s\n' "$count" >"$attempt_log"
+        echo "gh: Resource not accessible by personal access token (HTTP 403)" >&2
+        return 1
+    }
+    export -f gh
+
+    run ghcr_retry api.github.com "" "" -- gcps_delete_package_version_once "orgs/wiki-mod/packages/container/lancache-ng%2Fproxy/versions/42"
+    [ "$status" -eq "$GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE" ]
+    [ "$(cat "$attempt_log")" -eq 1 ]
+}
+
+# What: the run-wide deletion cap is divided across workers before any work starts.
+# Why: a large manual per-package cap must never multiply past the global
+# destructive ceiling when several packages execute concurrently.
+# From: Issue #1095.
+@test "main(): run-wide deletion cap bounds the sum of package quotas" {
+    services=(proxy dns watchdog)
+    gc_concurrency=3
+    max_deletions_per_service=500
+    max_deletions_total=5
+    GH_TOKEN="unused-but-required-by-main"
+    quota_dir="$BATS_TEST_TMPDIR/gc-package-quotas"
+    mkdir -p "$quota_dir"
+    export quota_dir
+    gh() { :; }
+    curl() { :; }
+    export -f gh curl
+    sra_manifest_packages() { :; }
+    gc_resolve_retention_history_refs() { printf 'origin/current_dev\n'; }
+    gc_run_package_worker() {
+        printf '%s\n' "$3" >"$quota_dir/$1"
+        printf '0\t0\t0\t0\t0\t0\n' >"$2"
+    }
+
+    run --separate-stderr main
+    [ "$status" -eq 0 ]
+    quota_sum="$(awk '{ sum += $1 } END { print sum + 0 }' "$quota_dir"/*)"
+    [ "$quota_sum" -eq 5 ]
+    quota_set="$(sort -n "$quota_dir"/*)"
+    [ "$quota_set" = $'1\n2\n2' ]
+}
+
+# What: automatic history discovery includes every supported producer-branch shape.
+# Why: release/hotfix SHA roots must age out by the same shared count policy
+# instead of becoming immortal merely because they are outside current_dev.
+# From: Issue #1095.
+@test "retention history discovery includes current_dev master release and v branches" {
+    test_repo="$BATS_TEST_TMPDIR/history-ref-repo"
+    git init -q "$test_repo"
+    git -C "$test_repo" config user.name "GC Test"
+    git -C "$test_repo" config user.email "gc-test@example.invalid"
+    printf 'base\n' >"$test_repo/file"
+    git -C "$test_repo" add file
+    git -C "$test_repo" commit -qm base
+    git -C "$test_repo" update-ref refs/remotes/origin/current_dev HEAD
+    git -C "$test_repo" update-ref refs/remotes/origin/master HEAD
+    git -C "$test_repo" update-ref refs/remotes/origin/release/1.2 HEAD
+    git -C "$test_repo" update-ref refs/remotes/origin/v1.2 HEAD
+
+    repo_root="$test_repo"
+    GC_RETENTION_HISTORY_REFS=""
+    run gc_resolve_retention_history_refs
+    [ "$status" -eq 0 ]
+    [[ " $output " == *" origin/current_dev "* ]]
+    [[ " $output " == *" origin/master "* ]]
+    [[ " $output " == *" origin/release/1.2 "* ]]
+    [[ " $output " == *" origin/v1.2 "* ]]
+}
+
+# What: a root that survives live revalidation still protects shared closure.
+# Why: a child digest referenced by both a deleted root and a retained root
+# must never be removed merely because the first root was successfully reaped.
+# From: Issue #1095.
+@test "process_service: retained root protects a child digest shared with a deleted retention root" {
+    root_a="sha256:$(printf 'a%.0s' {1..64})"
+    root_b="sha256:$(printf 'b%.0s' {1..64})"
+    child="sha256:$(printf 'c%.0s' {1..64})"
+    retention_delete_candidates[51]="${root_a}"$'\t'"sha-aaaaaaa"
+    retention_delete_candidates[52]="${root_b}"$'\t'"sha-bbbbbbb"
+    delete_log="$BATS_TEST_TMPDIR/shared-child-delete"
+    : >"$delete_log"
+    export delete_log
+
+    gh() {
+        if [[ "$1" == "api" && "$2" == "--paginate" ]]; then
+            printf '[{"id":51,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-aaaaaaa"]}}},{"id":52,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-bbbbbbb"]}}},{"id":53,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-aaaaaaa-amd64"]}}}]\n' "$root_a" "$root_b" "$child"
+            return 0
+        fi
+        if [[ "$1" == "api" && "$2" == "-X" && "$3" == "DELETE" ]]; then
+            echo "$4" >>"$delete_log"
+            return 0
         fi
         echo "unexpected gh call: $*" >&2
         return 1
@@ -832,20 +1078,38 @@ VERSIONS_JSON
             printf '{"token":"faketoken"}\n'
             return 0
         fi
-        printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
-        return 0
+        if [[ "$args" == *"manifests/$root_a"* || "$args" == *"manifests/$root_b"* ]]; then
+            printf '{"mediaType":"application/vnd.oci.image.index.v1+json","manifests":[{"digest":"%s"}]}\n' "$child"
+            return 0
+        fi
+        if [[ "$args" == *"manifests/$child"* ]]; then
+            printf '{"mediaType":"application/vnd.oci.image.manifest.v1+json"}\n'
+            return 0
+        fi
+        echo "unexpected curl call: $args" >&2
+        return 1
     }
     export -f curl
 
-    # What: `run` forks a subshell, so main()'s own internal `exit 1`
-    # terminates only that subshell.
-    # Why: this test's own process survives to assert on the captured
-    # status/output.
-    # From: Issue #1095 | PR #1443
-    run --separate-stderr main
-    [ "$status" -eq 1 ]
-    [[ "$output" == *"PR-state lookups failed this run (threshold: 2)"* ]]
-    [[ "$output" == *"One or more package-version listings, manifest fetches, or deletions failed"* ]]
+    github_api_get_with_retry() {
+        if [[ "$1" == */versions/51 ]]; then
+            printf '{"id":51,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["sha-aaaaaaa"]}}}\n' "$root_a" >"$2"
+            return 0
+        fi
+        if [[ "$1" == */versions/52 ]]; then
+            printf '{"id":52,"name":"%s","created_at":"2020-01-01T00:00:00Z","metadata":{"container":{"tags":["latest","sha-bbbbbbb"]}}}\n' "$root_b" >"$2"
+            return 0
+        fi
+        echo "unexpected revalidation URL: $1" >&2
+        return 1
+    }
+
+    process_service proxy
+
+    [ "$deleted" -eq 1 ]
+    [ "$(wc -l <"$delete_log")" -eq 1 ]
+    grep -F '/versions/51' "$delete_log"
+    ! grep -F '/versions/53' "$delete_log"
 }
 
 # ---------------------------------------------------------------------------

@@ -2,23 +2,33 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: reaps GHCR container package versions for this project's images --
-# closed-PR staging tags and orphaned untagged versions.
-# Why: invoked by gc-pr-staging-images.yml; the BASH_SOURCE guard at this
-# file's bottom lets Bats source every function without running main().
-# From: Issue #1557 | PR #1559
+# What: garbage-collects unprotected GHCR versions for manifest packages.
+# Why: closed PRs and orphans are not enough; ordinary sha-* history must
+# also obey the manifest retention budget instead of growing indefinitely.
+# From: Issue #1095.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+repo_root="$(cd "$script_dir/../.." && pwd)"
 # shellcheck source=scripts/lib/ghcr-retry.sh
 source "$script_dir/../lib/ghcr-retry.sh"
 # shellcheck source=scripts/lib/gc-pr-staging-images.sh
 source "$script_dir/../lib/gc-pr-staging-images.sh"
+# shellcheck source=scripts/lib/github-api-retry.sh
+source "$script_dir/../lib/github-api-retry.sh"
+# shellcheck source=scripts/lib/sha-retention-audit.sh
+source "$script_dir/../lib/sha-retention-audit.sh"
+
+# What: disables GET caching inside the destructive collector process.
+# Why: immediate pre-delete revalidation must always read current API state.
+# From: Issue #1095.
+GITHUB_API_CACHE_DIR=""
 
 # --- Reaper entry point (org/config/process_service/main) ---------------
 
 org="wiki-mod"
 repo="wiki-mod/lancache-ng"
+manifest="${GC_RETENTION_MANIFEST:-$repo_root/release/stack-images.yml}"
 # What: every service build-push.yml's build/build-arm64 jobs can push a
 # PR staging tag for (including dhcp/dhcp-proxy and build-tools).
 # Why: check-workflow-service-lists.sh requires this to equal the full
@@ -26,12 +36,27 @@ repo="wiki-mod/lancache-ng"
 # From: Issue #626 | PR #627
 services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
 
-# What: a PER-SERVICE (not global) deletion cap -- up to 360 deletions
-# per run across 9 services.
-# Why: a single global cap in fixed iteration order would let the first
-# service starve every later one against the large untagged backlog.
-# From: Issue #1095 | PR #1443
+# What: keeps the existing per-package deletion cap, default 40.
+# Why: each package gets its own bounded drain budget so one large backlog
+# cannot starve every later package in the same sweep.
+# From: Issue #1095.
 max_deletions_per_service="${GC_MAX_DELETIONS_PER_SERVICE:-40}"
+
+# What: caps destructive work across the whole run, independent of package count.
+# Why: a large manual per-package cap must not multiply into an unbounded API drain.
+# From: Issue #1095.
+max_deletions_total="${GC_MAX_DELETIONS_TOTAL:-1500}"
+
+# What: bounds how many packages may be processed concurrently, default 1.
+# Why: package-level parallelism attacks listing/audit wall time while every
+# individual package still performs DELETE operations serially.
+# From: Issue #1095.
+gc_concurrency="${GC_CONCURRENCY:-1}"
+
+# What: optionally performs every classification/revalidation but no DELETE.
+# Why: workflow_dispatch needs a live safety preview before a large drain.
+# From: Issue #1095.
+gc_dry_run="${GC_DRY_RUN:-false}"
 
 # What: 24-hour safety margin, applied to every deletion category alike.
 # Why: a version deletable by tag/reference state alone can still be a
@@ -68,6 +93,212 @@ services_not_found=0
 had_errors=0
 deleted=0
 kept=0
+would_delete=0
+# Output slots populated by gcps_* helpers sourced above.
+gcps_delete_result=""
+gcps_package_presence=""
+
+# What: stores exact root-version identities authorized by the read-only audit.
+# Why: normal sha-* deletion must consume the existing classifier's result,
+# not independently reimplement its release/channel/history policy here.
+# From: Issue #1095.
+declare -A retention_delete_candidates=()
+retention_history_refs=""
+
+# What: runs one DELETE through the existing bounded retry wrapper.
+# Why: every destructive category needs the same retry/idempotency behavior,
+# while dry-run must exercise classification without touching GHCR state.
+# From: Issue #1095.
+gc_delete_version() {
+  local endpoint="$1" description="$2"
+  gc_delete_result="FAILED"
+
+  if [[ "$gc_dry_run" == "true" ]]; then
+    echo "::notice::[dry-run] Would delete $description."
+    would_delete=$((would_delete + 1))
+    gc_delete_result="WOULD_DELETE"
+    return 0
+  fi
+
+  if ghcr_retry api.github.com "" "" -- gcps_delete_package_version_once "$endpoint"; then
+    gc_delete_result="$gcps_delete_result"
+    if [[ "$gc_delete_result" == "DELETED" ]]; then
+      deleted=$((deleted + 1))
+      echo "Deleted $description."
+    else
+      echo "::notice::$description was already absent when deletion was attempted."
+    fi
+    return 0
+  fi
+
+  had_errors=1
+  return 1
+}
+
+# What: resolves the Git histories whose sha-* roots share the retention budget.
+# Why: current_dev/master, release branches, and v* release refs are all
+# legitimate producers; an old root must not become immortal merely because
+# it is no longer reachable from current_dev alone.
+# From: Issue #1095.
+gc_resolve_retention_history_refs() {
+  local explicit="${GC_RETENTION_HISTORY_REFS:-}" refs_output ref
+  local -a refs=()
+
+  if [[ -n "$explicit" ]]; then
+    read -r -a refs <<<"$explicit"
+  else
+    if refs_output="$(git -C "$repo_root" for-each-ref --format='%(refname:short)' \
+        refs/remotes/origin/current_dev \
+        refs/remotes/origin/master \
+        'refs/remotes/origin/release/*' \
+        'refs/remotes/origin/v[0-9]*')"; then
+      :
+    else
+      echo "::error::Could not enumerate managed retention history refs." >&2
+      return 1
+    fi
+    while IFS= read -r ref; do
+      [[ -n "$ref" && "$ref" != "origin/HEAD" ]] || continue
+      refs+=("$ref")
+    done <<<"$refs_output"
+  fi
+
+  (( ${#refs[@]} > 0 )) || {
+    echo "::error::No managed retention history refs are available." >&2
+    return 1
+  }
+
+  local normalized=""
+  declare -A seen_refs=()
+  for ref in "${refs[@]}"; do
+    [[ -n "$ref" ]] || continue
+    git -C "$repo_root" rev-parse --verify --quiet "${ref}^{commit}" >/dev/null || {
+      echo "::error::Configured retention history ref does not resolve to a commit: $ref" >&2
+      return 1
+    }
+    [[ -z "${seen_refs[$ref]:-}" ]] || continue
+    seen_refs["$ref"]=1
+    normalized+="${normalized:+ }${ref}"
+  done
+  [[ -n "$normalized" ]] || return 1
+  printf '%s\n' "$normalized"
+}
+
+# What: builds one package's exact would-delete map with the existing audit.
+# Why: filtered audits let package workers run concurrently without creating
+# a second retention classifier or serializing the full registry inventory.
+# From: Issue #1095.
+gc_build_service_retention_plan() {
+  local service="$1" audit_output line field package_name version_id digest tags decision package
+  local -a audit_fields=()
+
+  retention_delete_candidates=()
+  package="lancache-ng%2F${service}"
+  if ! ghcr_retry api.github.com "" "" -- gcps_package_presence_once \
+      "orgs/${org}/packages/container/${package}/versions?per_page=1"; then
+    echo "::error::Could not establish whether lancache-ng/$service exists before retention planning."
+    return 1
+  fi
+  if [[ "$gcps_package_presence" == "ABSENT" ]]; then
+    echo "::notice::lancache-ng/$service has no GHCR package; retention planning has no work."
+    return 0
+  fi
+
+  audit_output="$(mktemp)"
+  if ! GITHUB_REPOSITORY="$repo" \
+      SRA_MANIFEST="$manifest" \
+      SRA_HISTORY_REFS="$retention_history_refs" \
+      SRA_PACKAGE_FILTER="$service" \
+      GITHUB_API_CACHE_DIR="" \
+      bash "$script_dir/gc-sha-retention-audit.sh" >"$audit_output"; then
+    rm -f -- "$audit_output"
+    echo "::error::Retention planning failed for lancache-ng/$service; keeping its retention-managed sha-* history this run."
+    return 1
+  fi
+
+  while IFS= read -r line; do
+    [[ "$line" == AUDIT$'\t'* ]] || continue
+    package_name=""
+    version_id=""
+    digest=""
+    tags=""
+    decision=""
+    IFS=$'\t' read -r -a audit_fields <<<"$line"
+    for field in "${audit_fields[@]:1}"; do
+      case "$field" in
+        package=*) package_name="${field#package=}" ;;
+        id=*) version_id="${field#id=}" ;;
+        digest=*) digest="${field#digest=}" ;;
+        tags=*) tags="${field#tags=}" ;;
+        decision=*) decision="${field#decision=}" ;;
+      esac
+    done
+    [[ "$package_name" == "$service" && "$decision" == "would-delete" ]] || continue
+    [[ "$version_id" =~ ^[0-9]+$ && "$digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+      rm -f -- "$audit_output"
+      echo "::error::Retention planner emitted an invalid deletion identity for lancache-ng/$service."
+      return 1
+    }
+    retention_delete_candidates["$version_id"]="${digest}"$'\t'"${tags}"
+  done <"$audit_output"
+  rm -f -- "$audit_output"
+}
+
+# What: re-reads one exact version immediately before retention deletion.
+# Why: digest, complete tags, age, and PR state can change after planning;
+# stale evidence must never authorize a destructive operation.
+# From: Issue #1095.
+gc_revalidate_retention_candidate() {
+  local service="$1" package="$2" version_id="$3" expected_digest="$4" expected_tags="$5"
+  local body_file fields fresh_id fresh_digest fresh_tags fresh_created_at fresh_epoch tag pr_number pr_state
+  local -A fresh_pr_state_cache=()
+  local -a fresh_tag_array=()
+
+  body_file="$(mktemp)"
+  if ! github_api_get_with_retry \
+      "https://api.github.com/orgs/${org}/packages/container/${package}/versions/${version_id}" \
+      "$body_file"; then
+    rm -f -- "$body_file"
+    echo "::error::Could not revalidate lancache-ng/$service version $version_id immediately before deletion."
+    return 1
+  fi
+  if ! fields="$(jq -r '[.id, .name, (.metadata.container.tags | sort | join(",")), (.created_at // "")] | join("|")' "$body_file")"; then
+    rm -f -- "$body_file"
+    echo "::error::Could not parse live revalidation data for lancache-ng/$service version $version_id."
+    return 1
+  fi
+  rm -f -- "$body_file"
+  IFS='|' read -r fresh_id fresh_digest fresh_tags fresh_created_at <<<"$fields"
+
+  if [[ "$fresh_id" != "$version_id" || "$fresh_digest" != "$expected_digest" || "$fresh_tags" != "$expected_tags" ]]; then
+    echo "::notice::Keeping lancache-ng/$service version $version_id because its digest or tags changed after retention planning."
+    return 2
+  fi
+  if ! fresh_epoch="$(gcps_created_at_to_epoch "$fresh_created_at")"; then
+    echo "::error::Could not parse live created_at for lancache-ng/$service version $version_id; keeping it."
+    return 1
+  fi
+  if ! gcps_is_old_enough_to_delete "$fresh_epoch" "$now_epoch" "$min_age_seconds"; then
+    echo "::notice::Keeping lancache-ng/$service version $version_id because it no longer satisfies the minimum-age gate."
+    return 2
+  fi
+
+  IFS=',' read -r -a fresh_tag_array <<<"$fresh_tags"
+  for tag in "${fresh_tag_array[@]}"; do
+    if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
+      pr_number="${BASH_REMATCH[1]}"
+      gcps_pr_lookup_state "$pr_number" "$repo" fresh_pr_state_cache pr_state >/dev/null
+      if [[ "$pr_state" == "LOOKUP_FAILED" ]]; then
+        pr_lookup_failures=$((pr_lookup_failures + 1))
+      fi
+      if [[ "$pr_state" != "CLOSED" ]]; then
+        echo "::notice::Keeping lancache-ng/$service version $version_id because PR #$pr_number is open or could not be revalidated as closed."
+        return 2
+      fi
+    fi
+  done
+  return 0
+}
 
 # process_service <service>
 # What: runs in the current shell -- called as a plain statement, never
@@ -79,6 +310,9 @@ process_service() {
   local service="$1"
   local package="lancache-ng%2F${service}"
   local versions_json version_list
+  local -A removed_retention_prefixes=() removed_retention_digests=() protected_children_digests=() deleted_version_ids=() manifest_children_by_version=()
+  local revalidate_status delete_description kind prefix
+  local -a removed_tags=()
 
   # What: had_errors fails the run at the end without aborting other
   # services; stderr is captured to a scratch file, not merged via `2>&1`.
@@ -180,7 +414,7 @@ process_service() {
   # Why: Pass 2 needs children_digests to tell a genuinely orphaned
   # version apart from one still referenced by a live tag's index.
   # From: Issue #1095 | PR #1443
-  local version_id tag_list
+  local version_id tag_list planned_identity planned_digest planned_tags current_digest current_tags retention_candidate
   while IFS= read -r version_entry; do
     [[ -z "$version_entry" ]] && continue
     if ! version_id="$(printf '%s' "$version_entry" | jq -r '.id' 2>&1)"; then
@@ -214,6 +448,23 @@ process_service() {
     done <<< "$tag_list"
 
     local protected=0 has_closed_pr_tag=0 tag
+    retention_candidate=0
+    if [[ -n "${retention_delete_candidates[$version_id]:-}" ]]; then
+      planned_identity="${retention_delete_candidates[$version_id]}"
+      IFS=$'\t' read -r planned_digest planned_tags <<<"$planned_identity"
+      if ! current_digest="$(jq -r '.name' <<<"$version_entry")" \
+          || ! current_tags="$(jq -r '.metadata.container.tags | sort | join(",")' <<<"$version_entry")"; then
+        echo "::error::Could not verify the planned retention identity for $service version $version_id; keeping it."
+        had_errors=1
+        protected=1
+      elif [[ "$current_digest" == "$planned_digest" && "$current_tags" == "$planned_tags" ]]; then
+        retention_candidate=1
+      else
+        echo "::notice::Keeping $service version $version_id because its initial GC listing no longer matches the retention plan."
+        protected=1
+      fi
+    fi
+
     while IFS= read -r tag; do
       [[ -z "$tag" ]] && continue
       if [[ "$tag" =~ ^pr-([0-9]+)-sha-[0-9a-f]{7,}(-amd64|-arm64)?$ ]]; then
@@ -244,6 +495,9 @@ process_service() {
         esac
         [[ "$protected" == "1" ]] && break
       else
+        if [[ "$retention_candidate" == "1" ]]; then
+          continue
+        fi
         # What: any non pr-* tag is protected unconditionally.
         # Why: a scan-failed sha-<commit> tag is already deleted upstream
         # by build-push.yml's own cleanup step, so this reaper never
@@ -253,6 +507,7 @@ process_service() {
         break
       fi
     done <<< "$tag_list"
+
 
     if [[ "$orphan_phase_ok" == "1" ]]; then
       local version_digest manifest_json
@@ -287,13 +542,14 @@ process_service() {
             while IFS= read -r child_digest; do
               [[ -z "$child_digest" ]] && continue
               children_digests["$child_digest"]=1
+              manifest_children_by_version["$version_id"]+="${child_digest}"$'\n'
             done <<< "$children_output"
           fi
         fi
       fi
     fi
 
-    if [[ "$protected" == "1" || "$has_closed_pr_tag" == "0" ]]; then
+    if [[ "$protected" == "1" || ( "$has_closed_pr_tag" == "0" && "$retention_candidate" == "0" ) ]]; then
       kept=$((kept + 1))
       continue
     fi
@@ -334,21 +590,122 @@ process_service() {
     # From: Issue #1095 | PR #1443
     local tags_display
     tags_display="$(printf '%s' "$version_entry" | jq -rc '.metadata.container.tags // []' 2>&1)" || tags_display="<jq error: $tags_display>"
-    echo "Deleting $service version $version_id (only closed-PR staging tags: $tags_display)."
-    local delete_output
-    if delete_output="$(gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" 2>&1)"; then
-      deleted=$((deleted + 1))
-      service_deletions=$((service_deletions + 1))
+    if [[ "$retention_candidate" == "1" ]]; then
+      if gc_revalidate_retention_candidate "$service" "$package" "$version_id" "$planned_digest" "$planned_tags"; then
+        :
+      else
+        revalidate_status=$?
+        if (( revalidate_status == 1 )); then
+          had_errors=1
+        fi
+        kept=$((kept + 1))
+        continue
+      fi
+      delete_description="$service version $version_id (ordinary root beyond retention budget; tags: $tags_display)"
     else
-      # What: a failed delete is `::error::` + had_errors=1, not just a
-      # warning.
-      # Why: otherwise every delete could fail (PAT lacks delete:packages)
-      # while `deleted` stays 0 and the job still exits 0.
-      # From: Issue #1095 | PR #1443
-      echo "::error::Failed to delete $service version $version_id (tags: $tags_display): $delete_output"
-      had_errors=1
+      delete_description="$service version $version_id (only closed-PR staging tags: $tags_display)"
+    fi
+
+    if gc_delete_version "orgs/${org}/packages/container/${package}/versions/${version_id}" "$delete_description"; then
+      service_deletions=$((service_deletions + 1))
+      deleted_version_ids["$version_id"]=1
+      if [[ "$retention_candidate" == "1" ]]; then
+        removed_retention_digests["$planned_digest"]=1
+        IFS=',' read -r -a removed_tags <<<"$planned_tags"
+        for tag in "${removed_tags[@]}"; do
+          kind="$(sra_tag_kind "$tag")" || continue
+          if [[ "$kind" == root$'\t'* ]]; then
+            prefix="${kind#root$'\t'}"
+            removed_retention_prefixes["$prefix"]=1
+          fi
+        done
+      fi
     fi
   done <<< "$version_list"
+
+  # What: protects children of every tagged parent that actually remains after Pass 1.
+  # Why: a planned retention root can still survive age, cap, revalidation,
+  # dry-run, or DELETE failure; shared closure must follow final parent state.
+  # From: Issue #1095.
+  local parent_version_id retained_child_digest
+  for parent_version_id in "${!manifest_children_by_version[@]}"; do
+    [[ -z "${deleted_version_ids[$parent_version_id]:-}" ]] || continue
+    while IFS= read -r retained_child_digest; do
+      [[ -n "$retained_child_digest" ]] || continue
+      protected_children_digests["$retained_child_digest"]=1
+    done <<<"${manifest_children_by_version[$parent_version_id]}"
+  done
+
+  # What: Pass 1.5 removes child/attestation tags tied only to removed roots.
+  # Why: deleting a root alone would leave sha-*-<arch> and sha256-<digest>
+  # tagged closure objects permanently unreachable by the orphan-only pass.
+  # From: Issue #1095.
+  if [[ "$orphan_phase_ok" == "1" ]]; then
+    local associated_candidate associated_tag_count association_ok candidate_digest expected_tags
+    local child_subject_digest
+    while IFS= read -r version_entry; do
+      [[ -n "$version_entry" ]] || continue
+      version_id="$(jq -r '.id' <<<"$version_entry")" || { had_errors=1; continue; }
+      [[ -n "${deleted_version_ids[$version_id]:-}" ]] && continue
+      tag_list="$(jq -r '.metadata.container.tags[]? // empty' <<<"$version_entry")" || { had_errors=1; continue; }
+      [[ -n "$tag_list" ]] || continue
+      candidate_digest="$(jq -r '.name' <<<"$version_entry")" || { had_errors=1; continue; }
+      [[ -z "${protected_children_digests[$candidate_digest]:-}" ]] || continue
+
+      associated_candidate=1
+      associated_tag_count=0
+      while IFS= read -r tag; do
+        [[ -n "$tag" ]] || continue
+        associated_tag_count=$((associated_tag_count + 1))
+        association_ok=0
+        kind="$(sra_tag_kind "$tag")" || { associated_candidate=0; break; }
+        if [[ "$kind" == child$'\t'* ]]; then
+          prefix="${kind#child$'\t'}"
+          prefix="${prefix%%$'\t'*}"
+          [[ -n "${removed_retention_prefixes[$prefix]:-}" ]] && association_ok=1
+        elif [[ "$tag" =~ ^sha256-([0-9a-f]{64})$ ]]; then
+          child_subject_digest="sha256:${BASH_REMATCH[1]}"
+          [[ -n "${removed_retention_digests[$child_subject_digest]:-}" ]] && association_ok=1
+        fi
+        if [[ "$association_ok" == "0" ]]; then
+          associated_candidate=0
+          break
+        fi
+      done <<<"$tag_list"
+      (( associated_candidate == 1 && associated_tag_count > 0 )) || continue
+
+      if ! created_at="$(jq -r '.created_at // empty' <<<"$version_entry")" \
+          || ! created_epoch="$(gcps_created_at_to_epoch "$created_at")"; then
+        echo "::error::Could not prove age for $service retention-closure version $version_id; keeping it."
+        had_errors=1
+        kept=$((kept + 1))
+        continue
+      fi
+      if ! gcps_is_old_enough_to_delete "$created_epoch" "$now_epoch" "$min_age_seconds"; then
+        kept=$((kept + 1))
+        continue
+      fi
+      if (( service_deletions >= max_deletions_per_service )); then
+        kept=$((kept + 1))
+        continue
+      fi
+      expected_tags="$(jq -r '.metadata.container.tags | sort | join(",")' <<<"$version_entry")" || { had_errors=1; kept=$((kept + 1)); continue; }
+      if gc_revalidate_retention_candidate "$service" "$package" "$version_id" "$candidate_digest" "$expected_tags"; then
+        :
+      else
+        revalidate_status=$?
+        (( revalidate_status == 1 )) && had_errors=1
+        kept=$((kept + 1))
+        continue
+      fi
+      delete_description="$service version $version_id (unprotected closure of a removed retention root; tags: $expected_tags)"
+      if gc_delete_version "orgs/${org}/packages/container/${package}/versions/${version_id}" "$delete_description"; then
+        service_deletions=$((service_deletions + 1))
+        deleted_version_ids["$version_id"]=1
+        (( kept > 0 )) && kept=$((kept - 1))
+      fi
+    done <<<"$version_list"
+  fi
 
   if [[ "$orphan_phase_ok" != "1" ]]; then
     return
@@ -445,16 +802,34 @@ process_service() {
       continue
     fi
 
-    echo "Deleting $service version $version_id (untagged, unreferenced orphan digest $name)."
-    local delete_output
-    if delete_output="$(gh api -X DELETE "orgs/${org}/packages/container/${package}/versions/${version_id}" 2>&1)"; then
-      deleted=$((deleted + 1))
+    if gc_delete_version "orgs/${org}/packages/container/${package}/versions/${version_id}" \
+        "$service version $version_id (untagged, unreferenced orphan digest $name)"; then
       service_deletions=$((service_deletions + 1))
-    else
-      echo "::error::Failed to delete $service orphan version $version_id (digest $name): $delete_output"
-      had_errors=1
     fi
   done <<< "$version_list"
+}
+
+# What: runs one package worker and serializes its mutable counters.
+# Why: background shells cannot update the parent's globals directly, so
+# bounded package concurrency needs an explicit result handoff.
+# From: Issue #1095.
+gc_run_package_worker() {
+  local service="$1" result_file="$2" package_deletion_cap="$3"
+  max_deletions_per_service="$package_deletion_cap"
+  had_errors=0
+  deleted=0
+  kept=0
+  would_delete=0
+  pr_lookup_failures=0
+  services_not_found=0
+  pr_state_cache=()
+
+  if ! gc_build_service_retention_plan "$service"; then
+    had_errors=1
+  fi
+  process_service "$service"
+  printf '%s\t%s\t%s\t%s\t%s\t%s\n' \
+    "$had_errors" "$deleted" "$kept" "$would_delete" "$pr_lookup_failures" "$services_not_found" >"$result_file"
 }
 
 # main
@@ -477,18 +852,129 @@ main() {
   # container -- no tool beyond the bare OS can be assumed present.
   # From: Issue #1095 | PR #1443
   local required_cmd
-  for required_cmd in gh jq curl date; do
+  for required_cmd in gh jq curl date git awk mktemp sort uniq; do
     if ! command -v "$required_cmd" >/dev/null 2>&1; then
       echo "::error::Required tool '$required_cmd' was not found on this runner. This script cannot run without it."
       exit 1
     fi
   done
 
-  for service in "${services[@]}"; do
-    process_service "$service"
+  [[ "$max_deletions_per_service" =~ ^[0-9]+$ ]] || {
+    echo "::error::GC_MAX_DELETIONS_PER_SERVICE must be a non-negative integer."
+    exit 1
+  }
+  [[ "$max_deletions_total" =~ ^[0-9]+$ ]] || {
+    echo "::error::GC_MAX_DELETIONS_TOTAL must be a non-negative integer."
+    exit 1
+  }
+  [[ "$min_age_seconds" =~ ^[0-9]+$ ]] || {
+    echo "::error::GC_MIN_AGE_SECONDS must be a non-negative integer."
+    exit 1
+  }
+  [[ "$gc_concurrency" =~ ^[1-9][0-9]*$ ]] || {
+    echo "::error::GC_CONCURRENCY must be a positive integer."
+    exit 1
+  }
+  case "$gc_dry_run" in
+    true | false) ;;
+    *) echo "::error::GC_DRY_RUN must be exactly true or false."; exit 1 ;;
+  esac
+  [[ -f "$manifest" ]] || {
+    echo "::error::Retention manifest is missing: $manifest"
+    exit 1
+  }
+  if retention_history_refs="$(gc_resolve_retention_history_refs)"; then
+    :
+  else
+    echo "::error::Cannot establish the managed Git histories used by GHCR retention."
+    exit 1
+  fi
+
+  local target_class target_name target_inventory
+  local -a package_targets=("${services[@]}")
+  if target_inventory="$(sra_manifest_packages "$manifest" "metadata legacy")"; then
+    :
+  else
+    echo "::error::Could not derive metadata/legacy GC targets from $manifest."
+    exit 1
+  fi
+  while IFS=$'\t' read -r target_class target_name; do
+    [[ -n "$target_class" && -n "$target_name" ]] || continue
+    package_targets+=("$target_name")
+  done <<<"$target_inventory"
+
+  local package_count quota_base quota_remainder quota index
+  local -a package_quotas=()
+  package_count="${#package_targets[@]}"
+  quota_base=$((max_deletions_total / package_count))
+  quota_remainder=$((max_deletions_total % package_count))
+  for (( index=0; index<package_count; index++ )); do
+    quota="$quota_base"
+    (( index < quota_remainder )) && quota=$((quota + 1))
+    (( quota > max_deletions_per_service )) && quota="$max_deletions_per_service"
+    package_quotas+=("$quota")
   done
 
-  echo "::notice::PR staging-tag GC complete: deleted $deleted version(s), kept $kept."
+  if (( gc_concurrency > package_count )); then
+    gc_concurrency="$package_count"
+  fi
+
+  local offset batch_end pid result_file log_file worker_failed
+  local worker_had_errors worker_deleted worker_kept worker_would_delete worker_pr_failures worker_not_found
+  local -a worker_pids=() worker_results=() worker_logs=()
+  for (( offset=0; offset<${#package_targets[@]}; offset+=gc_concurrency )); do
+    worker_pids=()
+    worker_results=()
+    worker_logs=()
+    batch_end=$((offset + gc_concurrency))
+    (( batch_end > ${#package_targets[@]} )) && batch_end="${#package_targets[@]}"
+
+    for (( index=offset; index<batch_end; index++ )); do
+      result_file="$(mktemp)"
+      log_file="$(mktemp)"
+      gc_run_package_worker "${package_targets[$index]}" "$result_file" "${package_quotas[$index]}" >"$log_file" 2>&1 &
+      worker_pids+=("$!")
+      worker_results+=("$result_file")
+      worker_logs+=("$log_file")
+    done
+
+    for index in "${!worker_pids[@]}"; do
+      pid="${worker_pids[$index]}"
+      worker_failed=0
+      if ! wait "$pid"; then
+        worker_failed=1
+      fi
+      if ! cat "${worker_logs[$index]}"; then
+        worker_failed=1
+      fi
+      if [[ ! -s "${worker_results[$index]}" ]]; then
+        echo "::error::GHCR GC package worker $pid produced no result record."
+        worker_failed=1
+      else
+        IFS=$'\t' read -r worker_had_errors worker_deleted worker_kept worker_would_delete worker_pr_failures worker_not_found <"${worker_results[$index]}"
+        if [[ ! "$worker_had_errors" =~ ^[0-9]+$ \
+            || ! "$worker_deleted" =~ ^[0-9]+$ \
+            || ! "$worker_kept" =~ ^[0-9]+$ \
+            || ! "$worker_would_delete" =~ ^[0-9]+$ \
+            || ! "$worker_pr_failures" =~ ^[0-9]+$ \
+            || ! "$worker_not_found" =~ ^[0-9]+$ ]]; then
+          echo "::error::GHCR GC package worker $pid produced a malformed result record."
+          worker_failed=1
+        else
+          deleted=$((deleted + worker_deleted))
+          kept=$((kept + worker_kept))
+          would_delete=$((would_delete + worker_would_delete))
+          pr_lookup_failures=$((pr_lookup_failures + worker_pr_failures))
+          services_not_found=$((services_not_found + worker_not_found))
+          (( worker_had_errors == 0 )) || worker_failed=1
+        fi
+      fi
+      rm -f -- "${worker_results[$index]}" "${worker_logs[$index]}"
+      (( worker_failed == 0 )) || had_errors=1
+    done
+  done
+
+  echo "::notice::GHCR GC complete: deleted $deleted version(s), would-delete $would_delete version(s) in dry-run mode, kept $kept classification(s)."
 
   if (( pr_lookup_failures > 0 )); then
     echo "::warning::$pr_lookup_failures PR-state lookup(s) could not be confirmed this run (ambiguous gh api result, not a real 404) -- every one of those tagged versions was kept as a precaution, per gcps_pr_lookup_state's own fail-safe design."
@@ -503,9 +989,9 @@ main() {
   # Why: GitHub's REST docs say a 404 can also hide an authorization
   # failure this reaper can't distinguish from genuine absence.
   # From: Issue #1557 | PR #1559
-  local max_services_not_found=$(( (${#services[@]} / 2) + 1 ))
+  local max_services_not_found=$(( (${#package_targets[@]} / 2) + 1 ))
   if (( services_not_found >= max_services_not_found )); then
-    echo "::error::$services_not_found of ${#services[@]} configured services reported no GHCR package yet this run (threshold: $max_services_not_found) -- this many simultaneous 404s is far more consistent with GHCR_PACKAGE_DELETE_PAT losing its read:packages scope (which GitHub's own REST docs say can also surface as 404, not just 403) than with that many services genuinely never having published an image. Each one was still safely treated as nothing-to-reap, but reporting this run as a plain success would hide that the reap path likely did far less real work than it should have across the whole services list, not just one service."
+    echo "::error::$services_not_found of ${#package_targets[@]} configured packages reported no GHCR package this run (threshold: $max_services_not_found) -- this many simultaneous 404s is consistent with a read:packages credential problem."
     had_errors=1
   fi
 

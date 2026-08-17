@@ -2,40 +2,54 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: reaps per-PR GHCR staging tags build-push.yml pushes, plus orphaned
-# untagged package versions (manifest-graph classification).
-# Why: nothing else removes them; ~55% of GHCR versions were untagged,
-# unreachable by a tagged-only check alone.
-# From: PR #627 | PR #1443
+# What: reaps closed PR, orphan, and over-budget sha-* GHCR versions.
+# Why: CI continuously creates immutable history and artifact closure, so
+# the registry needs a bounded retention collector rather than PR-only GC.
+# From: Issue #1095.
 #
-# What: two triggers -- pull_request(closed) reaps promptly; a weekly
-# schedule is the safety net for a run that never fired.
-# Why: `schedule:` only ever evaluates from the default branch's own copy
-# (AG-CI-018), independent of what triggered a given PR's own branch.
-# From: PR #627 | PR #1443
-#
-# What: this job's steps evaluate from whichever branch triggered the run,
-# but Checkout below pins `ref:` to the default branch, which can lack
-# scripts a PR branch already has -- confirmed live 2026-08-13.
-# Why: "Verify required scripts exist" below turns that into an accurate skip.
-# From: Issue #1095 | PR #1528
-name: GC PR Staging Images
+# What: closed PRs reap promptly and a daily schedule bounds normal growth.
+# Why: the delete-capable checkout is pinned below to a trusted merged ref,
+# never to feature-branch code, regardless of which event invoked the job.
+# From: Issue #1095.
+name: GHCR Retention GC
 
 on:
   pull_request:
     types: [closed]
     # What: also matches current_dev, the active development branch.
     # Why: without it, a closed current_dev PR misses this prompt reap and
-    # falls back to the weekly schedule sweep as its only cleanup path.
+    # falls back to the daily schedule sweep as its only cleanup path.
     # From: PR #1110
-    branches: [master, current_dev, "v[0-9]*"]
+    branches: [master, current_dev, "release/**", "v[0-9]*"]
   schedule:
-    # What: weekly Sunday sweep at 04:17 UTC.
+    # What: daily sweep at 04:17 UTC.
     # Why: offset from build-tools.yml's 03:23 refresh so the two scheduled
     # jobs don't contend for the same runner.
     # From: PR #627
-    - cron: "17 4 * * 0"
-  workflow_dispatch: {}
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: Classify and revalidate candidates without deleting them.
+        type: choice
+        options: ["false", "true"]
+        default: "false"
+      concurrency:
+        description: Packages processed in parallel.
+        type: string
+        default: "4"
+      max_deletions_per_service:
+        description: Maximum deletions per package for this manual run.
+        type: string
+        default: "500"
+      max_deletions_total:
+        description: Maximum deletions across all packages for this manual run.
+        type: string
+        default: "1500"
+      minimum_age_seconds:
+        description: Minimum version age before any deletion.
+        type: string
+        default: "86400"
 
 # What: no elevated `permissions:` block; deletion uses a separate PAT.
 # Why: GitHub's package-version-delete REST API requires a classic PAT with
@@ -55,14 +69,20 @@ concurrency:
 
 jobs:
   gc:
-    name: reap closed-PR staging tags and orphaned versions
+    name: collect unprotected GHCR versions
+    if: github.event_name != 'workflow_dispatch' || github.ref == 'refs/heads/current_dev'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # What: 60-minute job timeout, replacing an earlier temporary bump to
-    # 150 that was never revisited.
-    # Why: double the observed 20-30 minute full-sweep baseline -- headroom
-    # without reopening a multi-hour silent-hang window.
-    # From: PR #1443
-    timeout-minutes: 60
+    # What: gives the bounded package-parallel collector a 120-minute ceiling.
+    # Why: backlog-drain dispatches may legitimately process thousands of
+    # deletions while a stuck API/registry call still needs a hard stop.
+    # From: Issue #1095.
+    timeout-minutes: 120
+    env:
+      # What: the collector checkout uses the protected PR base, current_dev, or default ref.
+      # Why: the delete-capable script itself never comes from a feature checkout;
+      # manual dispatch is additionally gated above to refs/heads/current_dev.
+      # From: Issue #1095.
+      GC_CODE_REF: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.ref || (github.event_name == 'workflow_dispatch' && 'current_dev' || github.event.repository.default_branch) }}
     steps:
       # What: checks whether GHCR_PACKAGE_DELETE_PAT is configured.
       # Why: minting this PAT is a deliberate admin action, not automatable;
@@ -77,21 +97,18 @@ jobs:
           if [ "$HAVE_PAT" = "true" ]; then
             echo "have-pat=true" >> "$GITHUB_OUTPUT"
           else
-            echo "::warning::GHCR_PACKAGE_DELETE_PAT is not configured; skipping PR staging-tag GC. Container package version deletion requires a classic PAT with read:packages+delete:packages scopes (the default GITHUB_TOKEN cannot delete package versions) -- a repo/org admin must create this PAT and add it as a repository secret named GHCR_PACKAGE_DELETE_PAT before this job can reap anything. Until then, per-PR staging tags pushed by build-push.yml will keep accumulating in GHCR. See issue #626."
+            echo "::warning::GHCR_PACKAGE_DELETE_PAT is not configured; skipping GHCR GC. Container package version deletion requires a classic PAT with read:packages+delete:packages scopes (the default GITHUB_TOKEN cannot delete package versions) -- a repo/org admin must create this PAT and add it as a repository secret named GHCR_PACKAGE_DELETE_PAT before this job can reap anything. Until then, package versions will keep accumulating in GHCR. See issue #626."
             echo "have-pat=false" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: preflight-checks the required scripts exist on the default
-      # branch before the sparse checkout below attempts them.
-      # Why: Checkout pins `ref:` there, which can lack a script the
-      # triggering branch has -- a guaranteed failure this turns into a skip.
-      # From: Issue #1095 | PR #1528
-      - name: Verify required scripts exist on the default branch
+      # What: preflight-checks every required collector path on GC_CODE_REF.
+      # Why: an incomplete trusted checkout must stop before delete-capable code runs.
+      # From: Issue #1095.
+      - name: Verify required collector paths exist on trusted ref
         id: script-check
         if: steps.creds.outputs.have-pat == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
           # What: read-only Contents-API existence check per required path,
@@ -101,45 +118,58 @@ jobs:
           # From: Issue #1095 | PR #1528
           required_paths=(
             "scripts/untracked/gc-pr-staging-images.sh"
+            "scripts/untracked/gc-sha-retention-audit.sh"
+            "scripts/lib/gc-pr-staging-images.sh"
             "scripts/lib/ghcr-retry.sh"
+            "scripts/lib/github-api-retry.sh"
+            "scripts/lib/sha-retention-audit.sh"
+            "release/stack-images.yml"
           )
           missing=()
           for path in "${required_paths[@]}"; do
-            if ! gh api "repos/${{ github.repository }}/contents/${path}?ref=${DEFAULT_BRANCH}" --silent >/dev/null 2>&1; then
+            if ! gh api "repos/${{ github.repository }}/contents/${path}?ref=${GC_CODE_REF}" --silent >/dev/null 2>&1; then
               missing+=("$path")
             fi
           done
 
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::warning::Skipping GC reap: ${#missing[@]} required script path(s) do not exist yet on the default branch ('${DEFAULT_BRANCH}'): ${missing[*]}. This job's own job definition was evaluated from a branch that already has issue #1095's scripts/untracked/gc-pr-staging-images.sh extraction (2026-08-06, commit 7b03f99b), but the default branch has not received it via a release yet -- attempting the sparse checkout below against that mismatch is a guaranteed failure (git tries to remove nearly the whole tree and hits 'not uptodate' errors), not a real GC attempt. This self-heals automatically once a release promotes the extraction to the default branch; until then, PR staging tags accumulate in GHCR same as the missing-PAT case above. See issue #1095."
+            echo "::warning::Skipping GHCR GC: ${#missing[@]} required path(s) do not exist on trusted ref '${GC_CODE_REF}': ${missing[*]}. No delete-capable script will run from an incomplete checkout."
             echo "scripts-present=false" >> "$GITHUB_OUTPUT"
           else
             echo "scripts-present=true" >> "$GITHUB_OUTPUT"
           fi
 
-      # What: sparse checkout of only the two script paths this job runs.
-      # Why: a narrow checkout keeps this light-tier job's clone minimal.
-      # From: Issue #1557 | PR #1559
-      #
-      # What: `ref:` is pinned to the default branch, not left to default.
-      # Why: `github.ref` for a closed-unmerged PR is a ref GitHub drops;
-      # pinning also ensures this GHCR_PACKAGE_DELETE_PAT-wielding script
-      # only ever runs the reviewed, merged version, never a PR-edited one.
-      # From: PR #1443
-      - name: Checkout gc-pr-staging-images.sh and its ghcr-retry.sh dependency
+      # What: sparse-checks out the collector, shared retention code, and manifest.
+      # Why: fetch-depth 0 supplies all producer-branch history needed to rank
+      # current_dev/master/release/v* roots while the narrow tree stays minimal.
+      # From: Issue #1095.
+      - name: Checkout GHCR collector and retention planner
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ github.event.repository.default_branch }}
+          ref: ${{ env.GC_CODE_REF }}
+          fetch-depth: 0
+          persist-credentials: false
           sparse-checkout: |
             scripts/untracked/gc-pr-staging-images.sh
+            scripts/untracked/gc-sha-retention-audit.sh
+            scripts/lib/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
+            scripts/lib/github-api-retry.sh
+            scripts/lib/sha-retention-audit.sh
+            release/stack-images.yml
           sparse-checkout-cone-mode: false
 
-      - name: Reap staging tags and orphaned versions
+      - name: Collect unprotected GHCR versions
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
+          GC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '4' }}
+          GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
+          GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
+          GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '86400' }}
+          GC_MAX_PR_LOOKUP_FAILURES: ${{ vars.GC_MAX_PR_LOOKUP_FAILURES || '10' }}
         run: bash scripts/untracked/gc-pr-staging-images.sh
 
       # What: restores a full working tree, verifying the real index state
