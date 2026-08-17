@@ -501,6 +501,23 @@ success, permanent 4xx responses fail immediately, and transient failures retry.
 `workflow_dispatch` exposes dry-run, concurrency, age, per-package deletion-cap,
 and run-wide deletion-cap controls for supervised/backlog runs.
 
+**Destructive retention GC (issue #1095)**: `gc-pr-staging-images.yml` keeps
+the read-only audit as the sole ordinary-root classifier and runs one filtered
+audit per manifest package. Package workers may run concurrently, but each
+package's listing, graph analysis, revalidation, and DELETE sequence remains
+serial and subject to the existing per-package deletion cap. Immediately before
+deleting an audit-authorized root (or a tagged child/attestation associated only
+with a root successfully removed in the same worker), the GC re-reads the exact
+package-version object with caching disabled and requires its ID, digest, sorted
+tag set, and minimum age to match the plan. Any PR tag is also rechecked and must
+resolve CLOSED. A changed channel/release tag, API ambiguity, malformed data, or
+shared child digest therefore keeps the object. DELETE itself uses the project's
+bounded retry wrapper; HTTP 404 is idempotent success, permanent 4xx responses
+fail immediately, and transient failures retry. Closed-PR and genuinely
+unreferenced-orphan cleanup remains in the same collector and uses the same
+DELETE wrapper. `workflow_dispatch` additionally exposes dry-run, concurrency,
+age, per-package deletion-cap, and run-wide deletion-cap controls for backlog draining.
+
 **Deliberately not implemented: a "previous nightly" safety net.** The
 maintainer's real operational intent for `nightly` protection is narrower
 than "every digest nightly ever pointed at," but broader than "only the

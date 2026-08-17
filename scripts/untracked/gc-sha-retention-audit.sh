@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: read-only GHCR retention audit -- inventories, ranks, and classifies.
+# What: read-only GHCR retention audit -- inventories package versions,
+# ranks ordinary roots from Git history, and reports protection decisions.
 # Why: never issues DELETE; the destructive GC may consume only its exact
 # would-delete identities after independent live safety revalidation.
-# From: Issue #1095 | PR #1586
+# From: Issue #1095.
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -124,11 +125,11 @@ cleanup() {
 trap cleanup EXIT
 
 packages_file="$work_dir/packages.tsv"
-# What: filtered mode includes declared legacy packages for per-package GC.
-# Why: standalone audit keeps its original first-party scope while the GC
-# can intentionally retire manifest-declared historical package names.
-# From: Issue #1095 | PR #1586
 if [[ -n "$package_filter" ]]; then
+  # What: filtered mode includes declared legacy packages for per-package GC.
+  # Why: standalone audit keeps its original first-party scope while the GC
+  # can intentionally retire manifest-declared historical package names.
+  # From: Issue #1095.
   sra_manifest_packages "$manifest" "runtime tooling metadata legacy" >"$packages_file"
 elif sra_manifest_packages "$manifest" >"$packages_file"; then
   :
