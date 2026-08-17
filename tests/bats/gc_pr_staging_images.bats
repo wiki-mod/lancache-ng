@@ -126,11 +126,12 @@ teardown() {
     [ "$(printf '%s\n' "$output" | grep -c '^sha256:')" -eq 3 ]
 }
 
-# What: a referrers-API subject is a subject, never counted as a child.
-# Why: subject is a reverse edge; conflating it with `.manifests[]` would let
-# a stale attestation keep an otherwise-orphaned subject alive forever.
-# From: Issue #1585 | PR #1586
 @test "gcps_extract_manifest_subject returns a referrer's subject without treating it as a child" {
+    # What: the referrers-API attestation shape -- a single manifest declaring
+    # which other digest it is "about" via a top-level `subject` field.
+    # Why: subject is a reverse edge; conflating it with `.manifests[]` makes
+    # stale attestations keep otherwise-orphaned subjects alive forever.
+    # From: Issue #1095 | PR #1443 | PR #1586
     local manifest='{
       "mediaType": "application/vnd.oci.image.manifest.v1+json",
       "subject": {"digest": "sha256:4444444444444444444444444444444444444444444444444444444444444444"}
@@ -301,10 +302,6 @@ teardown() {
     [ "$(wc -l < "$call_log")" -eq 1 ]
 }
 
-# What: a 4th-arg result variable never leaks state to stdout, even on a repeat call.
-# Why: production always uses the result variable; a raw OPEN/CLOSED stdout
-# line was an unintended duplicate output channel.
-# From: Issue #1585 | PR #1586
 @test "gcps_pr_lookup_state populates a 4th-arg result variable without leaking state to stdout" {
     gh() { printf '{"state":"open"}\n'; }
     export -f gh
@@ -318,6 +315,10 @@ teardown() {
     [ "$result" = "OPEN" ]
     [ ! -s "$output_file" ]
 
+    # What: second call is a local-cache hit and must remain silent too.
+    # Why: the real collector always uses the result variable; raw OPEN/CLOSED
+    # lines in the live dry-run were an unintended duplicate output channel.
+    # From: Issue #1557 | PR #1559 | PR #1586
     gcps_pr_lookup_state 66 wiki-mod/lancache-ng cache result >"$output_file"
     [ "$result" = "OPEN" ]
     [ ! -s "$output_file" ]
@@ -1124,13 +1125,9 @@ VERSIONS_JSON
 
 
 # ---------------------------------------------------------------------------
-# Live-GC regression tests
+# Issue #1585 / PR #1586 live-GC regressions
 # ---------------------------------------------------------------------------
 
-# What: two concurrent lookups for the same PR share one live API call.
-# Why: proves the mkdir-lock + shared-cache-file path actually deduplicates
-# under real concurrency, not just in a single-threaded call sequence.
-# From: Issue #1585 | PR #1586
 @test "gcps_pr_lookup_state shares one concurrent planning lookup across worker caches" {
     call_log="$BATS_TEST_TMPDIR/shared-pr-calls"
     : >"$call_log"
@@ -1164,10 +1161,6 @@ VERSIONS_JSON
     [ "$(wc -l <"$call_log")" -eq 1 ]
 }
 
-# What: reuses a pre-fetched audit snapshot instead of listing the package again.
-# Why: asserts the `--paginate` listing call never fires when a snapshot is
-# passed in, avoiding a second full listing of a package already inventoried.
-# From: Issue #1585 | PR #1586
 @test "process_service reuses an audit snapshot instead of listing the package again" {
     snapshot="$BATS_TEST_TMPDIR/package-snapshot.jsonl"
     digest="sha256:$(printf 'a%.0s' {1..64})"
@@ -1197,10 +1190,6 @@ VERSIONS_JSON
     [ ! -s "$paginate_log" ]
 }
 
-# What: a child-only tag is collected once its root has already disappeared.
-# Why: a stranded child must not become permanently unreachable just because
-# its root was already reaped before this run started.
-# From: Issue #1585 | PR #1586
 @test "process_service: child-only tag is collected when its root disappeared in an earlier run" {
     local child
     child="sha256:$(printf 'd%.0s' {1..64})"
@@ -1237,10 +1226,6 @@ VERSIONS_JSON
     grep -F '/versions/71' "$delete_log"
 }
 
-# What: a stale attestation and its untagged dead subject are eventually collected.
-# Why: the fallback-tag reverse-referrer edge must not keep a genuinely dead
-# subject (and its attestation) alive forever.
-# From: Issue #1585 | PR #1586
 @test "process_service: stale sha256 attestation and its untagged dead subject are eventually collected" {
     local subject attestation subject_hex
     subject="sha256:$(printf '9%.0s' {1..64})"
@@ -1290,10 +1275,6 @@ VERSIONS_JSON
     [ "$(wc -l <"$delete_log")" -eq 2 ]
 }
 
-# What: a PR reopened after planning is kept, by full fresh revalidation.
-# Why: a closed-then-reopened PR must never be deleted on a stale
-# once-closed lookup; the live revalidation pulls call must run again.
-# From: Issue #1585 | PR #1586
 @test "process_service: a PR reopened after planning is kept by full fresh revalidation" {
     pull_count_file="$BATS_TEST_TMPDIR/reopen-pull-count"
     printf '0\n' >"$pull_count_file"
@@ -1342,10 +1323,6 @@ VERSIONS_JSON
     [ ! -s "$delete_log" ]
 }
 
-# What: the per-service deletion cap stops later PR lookups, one quota notice.
-# Why: the cap must stop work early (saving API calls), not just stop
-# deleting after everything is already looked up.
-# From: Issue #1585 | PR #1586
 @test "process_service: package cap stops later PR lookups and emits one quota notice" {
     max_deletions_per_service=1
     pull_log="$BATS_TEST_TMPDIR/quota-pull-calls"
@@ -1395,10 +1372,6 @@ VERSIONS_JSON
     [ "$(wc -l <"$delete_log")" -eq 1 ]
 }
 
-# What: dry-run performs the same fresh validation but issues zero DELETEs.
-# Why: gc_dry_run must exercise every real gate up to the DELETE call itself,
-# so `would_delete` reflects the actual decision, not a shortcut path.
-# From: Issue #1585 | PR #1586
 @test "process_service: dry-run performs fresh validation but issues zero DELETE requests" {
     gc_dry_run=true
     delete_log="$BATS_TEST_TMPDIR/dry-run-deletes"
@@ -1437,10 +1410,6 @@ VERSIONS_JSON
     [ ! -s "$delete_log" ]
 }
 
-# What: an orphan that gains a tag between planning and DELETE is kept.
-# Why: the live revalidation fetch (not the earlier plan) must be the one
-# that decides DELETE, so a newly-tagged version is never removed.
-# From: Issue #1585 | PR #1586
 @test "process_service: an orphan that gains a tag before DELETE is kept" {
     digest="sha256:$(printf 'e%.0s' {1..64})"
     delete_log="$BATS_TEST_TMPDIR/orphan-retag-deletes"

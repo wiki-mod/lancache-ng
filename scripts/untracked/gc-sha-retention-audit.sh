@@ -280,11 +280,11 @@ audit_package() {
     fi
   fi
 
-  # What: computes this package's stable-release tag set once via one jq pass.
-  # Why: avoids a per-version jq call (the cost class that made run
-  # 31774741729 time out); a nonzero pipeline exit is treated as an empty
-  # result, since `grep` alone exits 1 on zero matches under pipefail.
-  # From: Issue #1095 | PR #1586
+  # What: computes this package's stable-release tag set once, via a single
+  # jq pass over the whole already-fetched versions file.
+  # Why: avoids a per-version jq call (the class of cost that caused run
+  # 31774741729 to time out); the per-version loop below only looks it up.
+  # From: Issue #1095 | PR #1501.
   local release_tags_file="$package_dir/release-tags.txt"
   if jq -r '.metadata.container.tags[]? // empty' "$versions_file" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -u >"$release_tags_file"; then
     :

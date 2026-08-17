@@ -41,8 +41,8 @@ on:
         description: Packages processed in parallel.
         type: string
         # What: starts supervised/manual sweeps with one package worker.
-        # Why: real 2026-08-17 dry-runs showed transient GitHub API failures even at
-        # five workers; one worker stays the conservative default while higher values remain opt-in.
+        # Why: the real 2026-08-17 dry-run at four workers ended in systemic
+        # GitHub 503s; higher values remain opt-in until measured stable.
         # From: Issue #1585 | PR #1586
         default: "1"
       max_deletions_per_service:

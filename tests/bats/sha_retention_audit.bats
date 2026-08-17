@@ -693,7 +693,7 @@ EOF
 
 # What: filtered mode is the package-parallel planner entry point used by GC.
 # Why: it must exist without adding DELETE capability to the audit itself.
-# From: Issue #1095 | PR #1586
+# From: Issue #1095.
 @test "gc-sha-retention-audit.sh exposes a read-only package filter and reusable snapshot for GC workers" {
   run grep -F 'SRA_PACKAGE_FILTER' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
   [ "$status" -eq 0 ]
