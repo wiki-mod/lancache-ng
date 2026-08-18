@@ -2412,7 +2412,7 @@ jobs:
 
       - name: Check setup.sh/simulation-script prompt drift (issue #1176)
         # What: scripts/tracked/check-setup-prompt-drift.sh fails closed whenever an unconditional wizard prompt in setup.sh's interactive install wizard is missing a matching expect_prompt answer in scripts/untracked/simulations/setup-cli-simulation.sh or scripts/untracked/simulations/syslog-forwarding-simulation.sh, or a simulation script's pattern no longer matches any real prompt.
-        # Why: These two expect-driven simulation scripts hand-encode setup.sh's prompt sequence by convention with nothing checking they stay in sync; a new unconditional prompt added without updating either script hung both until timeout, discovered only because those jobs happened to run against an unrelated PR.
+        # Why: These two expect-driven simulation scripts hand-encode setup.sh's prompt sequence by convention with nothing checking they stay in sync; an unconditional prompt added without updating either script silently hangs both until timeout instead of failing with a clear cause.
         # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
@@ -4418,9 +4418,7 @@ jobs:
 
       - name: Self-heal Trivy's own default cache directory ownership
         # What: Chowns/setgids `~/.cache/trivy` if it exists, tolerant of it not existing yet.
-        # Why: A self-hosted runner was found with this dir owned by root:root, failing container-scan with
-        # a permission error; host-level ownership was fixed directly, but that doesn't survive the
-        # directory being wiped and recreated by a future root-run process, so this step self-heals it.
+        # Why: A self-hosted runner's cache dir can end up owned by root:root from a prior root-run process, failing container-scan with a permission error; a one-time host-level chown does not survive the directory being wiped and recreated later, so this step self-heals it every run.
         # From: PR #1405
         run: |
           set -euo pipefail
@@ -4636,7 +4634,7 @@ jobs:
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
           # What: All 8 first-party product/tooling services (including build-tools) go through the identical decide_one() call below, with no per-service branching.
-          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; build-tools used to have its own separate, hand-rolled verification built independently, so sharing this allowlist keeps exactly one implementation of the check in the codebase instead of two drifting copies. Real push-path verification status (which services have actually been observed taking the reuse=true retag branch on a live push, not just in tests) belongs in the PR/issue trail, not in this comment.
+          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy.
           # From: Issue #1095 | PR #1532
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools)
 
