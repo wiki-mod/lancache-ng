@@ -1933,13 +1933,9 @@ jobs:
           # From: Issue #1095 | PR #1532
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
-          # AG-CODE-013 (PR #1523): published_image_reference() no longer calls
-          # `docker buildx imagetools inspect` inline -- it delegates to the
-          # shared resolve_manifest_digest() helper in
-          # scripts/lib/ghcr-retry.sh (deduplicated against
-          # scripts/render-full-setup-digest-override.sh's now-removed
-          # identical copy), so this check verifies both ends of that
-          # delegation instead of the old inline call.
+          # What: published_image_reference() delegates to the shared resolve_manifest_digest() helper in scripts/lib/ghcr-retry.sh instead of calling `docker buildx imagetools inspect` inline; this check verifies both ends of that delegation.
+          # Why: Deduplicated against scripts/render-full-setup-digest-override.sh's now-removed identical copy (AG-CODE-013).
+          # From: PR #1523
           grep -F 'published_image_reference()' scripts/untracked/select-build-tools-image.sh >/dev/null \
             && grep -F 'resolve_manifest_digest "$image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
             && grep -F 'docker buildx imagetools inspect "$image"' scripts/lib/ghcr-retry.sh >/dev/null \
@@ -3155,14 +3151,9 @@ jobs:
           command: cargo clippy --locked --all-targets --manifest-path services/ui/Cargo.toml -- -D warnings
 
   watchdog_rust_quality:
-    # Watchdog Rust quality mirrors dns_rust_quality/ui_rust_quality exactly
-    # (same toolchain-isolation/sccache/fmt/check/clippy shape), now that
-    # services/watchdog/Cargo.toml exists (#1355) alongside the crate's
-    # pre-existing shell runtime. This job covers only the Rust crate; the
-    # shell-script syntax/executable-bit check stays in watchdog_test below,
-    # unchanged, since it validates a different artifact (watchdog.sh, still
-    # the production entrypoint -- the Rust crate is a scaffold not yet wired
-    # into the Dockerfile ENTRYPOINT, see #1355's own Scope Boundaries).
+    # What: Watchdog Rust quality mirrors dns_rust_quality/ui_rust_quality exactly, now that services/watchdog/Cargo.toml exists alongside the crate's pre-existing shell runtime.
+    # Why: Covers only the Rust crate; the shell-script syntax/executable-bit check stays in watchdog_test below since it validates a different artifact (watchdog.sh, still the production entrypoint -- the Rust crate is a scaffold not yet wired into the Dockerfile ENTRYPOINT).
+    # From: PR #1355
     #
     # Also skipped on a metadata-only pull_request event -- see
     # dns_rust_quality's identical comment above for the full reasoning.
@@ -3965,10 +3956,9 @@ jobs:
               fi'
 
   watchdog_cargo_audit:
-    # Watchdog dependency audit mirrors the DNS/UI audits and stays parallel
-    # to avoid serializing independent Rust checks. Added alongside
-    # watchdog_rust_quality/watchdog_test now that services/watchdog/Cargo.toml
-    # exists (#1355).
+    # What: Watchdog dependency audit mirrors the DNS/UI audits and stays parallel to avoid serializing independent Rust checks.
+    # Why: Added alongside watchdog_rust_quality/watchdog_test now that services/watchdog/Cargo.toml exists.
+    # From: PR #1355
     #
     # Also skipped on a metadata-only pull_request event -- see
     # dns_rust_quality's comment above for the full reasoning.
@@ -4919,7 +4909,7 @@ jobs:
           - service: utilities
             context: services/utilities
             build_contexts: ""
-            description: Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556).
+            description: &ci-description-utilities "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
             # Heavy, not light, despite being a small/fast build in practice
             # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
             # requires "no real compile/link step of its own AT ALL", verified
