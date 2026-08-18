@@ -4804,12 +4804,9 @@ jobs:
           echo "admitted=$admitted" >> "$GITHUB_OUTPUT"
 
   build:
-    # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
-    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. The admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
+    # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/vulnerability scans first, then scans each service's own exact pushed digest with Trivy before attestation/promotion; skips on a metadata-only pull_request event.
+    # Why: Stays on self-hosted runners for the shared build-tools image, sccache/distcc, and registry credentials; needs: still lists every check job even though if: reads few of their .result values directly, because several of their outputs (e.g. validate-compose's build_tools_image) are consumed elsewhere and Actions only exposes outputs to jobs listed in needs:.
     # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
-    # What: needs: still lists every check job below even though if: no longer reads most of their .result directly.
-    # Why: several of their outputs (e.g. validate-compose's build_tools_image) are consumed elsewhere in this job, and Actions only exposes outputs to jobs listed in needs:.
-    # From: Issue #1095 (G7) | PR #1503
     needs:
       - determine-build-admission
       - shellcheck
@@ -4973,11 +4970,8 @@ jobs:
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # What: determine-push-reuse-scope's real verification (channel image revision label + git
-            #   ancestry + content diff) applies only to the currently allowlisted services (build-tools
-            #   included); every other service, syslog included, is a plain pass-through to `*) reuse="false"`.
-            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted
-            #   service always gets a real rebuild, never a silent retag.
+            # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies only to the currently allowlisted services (build-tools included); every other service, syslog included, is a plain pass-through to `*) reuse="false"`.
+            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
@@ -7514,11 +7508,8 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # The Trivy-scanned first-party image set (container-scan's matrix).
-        # `stack` is intentionally excluded: it is a busybox channel-pointer
-        # image, not a compiled software asset, and is not vuln-scanned either.
-        # What: Includes syslog and utilities, both already part of container-scan's own matrix, so every released first-party image gets a CycloneDX SBOM.
-        # Why: This separate matrix copy previously lagged container-scan's own list on both entries.
+        # What: The Trivy-scanned first-party image set (container-scan's matrix), including syslog and utilities so every released image gets a CycloneDX SBOM; `stack` is intentionally excluded since it is a busybox channel-pointer image, not vuln-scanned either.
+        # Why: This separate matrix copy previously lagged container-scan's own list on syslog/utilities.
         # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
