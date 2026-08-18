@@ -225,9 +225,13 @@ async fn reconcile_ntp_container(state: &AppState, ntp_enabled: bool) -> Result<
             .await
             .map_err(|err| NtpError::config_error(err.to_string()))?;
     } else {
-        docker_client::stop_service_if_present(&state.docker, "ntp", &state.config.container_suffix)
-            .await
-            .map_err(|err| NtpError::config_error(err.to_string()))?;
+        docker_client::stop_service_if_present(
+            &state.docker,
+            "ntp",
+            &state.config.container_suffix,
+        )
+        .await
+        .map_err(|err| NtpError::config_error(err.to_string()))?;
     }
     Ok(())
 }

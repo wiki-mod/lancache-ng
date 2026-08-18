@@ -668,17 +668,29 @@ async fn reconcile_dhcp_mode(
     // from the UI's persisted DHCP mode.
     match mode {
         crate::config::DhcpMode::Disabled => {
-            docker_client::stop_service_if_present(&state.docker, "dhcp", &state.config.container_suffix)
-                .await
-                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
-            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy", &state.config.container_suffix)
-                .await
-                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
+            docker_client::stop_service_if_present(
+                &state.docker,
+                "dhcp",
+                &state.config.container_suffix,
+            )
+            .await
+            .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
+            docker_client::stop_service_if_present(
+                &state.docker,
+                "dhcp-proxy",
+                &state.config.container_suffix,
+            )
+            .await
+            .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
         crate::config::DhcpMode::Kea => {
-            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy", &state.config.container_suffix)
-                .await
-                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
+            docker_client::stop_service_if_present(
+                &state.docker,
+                "dhcp-proxy",
+                &state.config.container_suffix,
+            )
+            .await
+            .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
             docker_client::start_service(&state.docker, "dhcp", &state.config.container_suffix)
                 .await
                 .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
@@ -690,12 +702,20 @@ async fn reconcile_dhcp_mode(
         // dhcp-proxy container is running. The container itself, on (re)start,
         // reads the new mode and renders the matching config.
         crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
-            docker_client::stop_service_if_present(&state.docker, "dhcp", &state.config.container_suffix)
-                .await
-                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
-            docker_client::start_service(&state.docker, "dhcp-proxy", &state.config.container_suffix)
-                .await
-                .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
+            docker_client::stop_service_if_present(
+                &state.docker,
+                "dhcp",
+                &state.config.container_suffix,
+            )
+            .await
+            .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
+            docker_client::start_service(
+                &state.docker,
+                "dhcp-proxy",
+                &state.config.container_suffix,
+            )
+            .await
+            .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
         }
     }
 

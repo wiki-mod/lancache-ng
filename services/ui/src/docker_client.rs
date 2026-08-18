@@ -176,8 +176,14 @@ mod tests {
     // From: Issue #1590
     #[test]
     fn container_name_for_service_with_empty_suffix_matches_pre_suffix_behavior() {
-        assert_eq!(container_name_for_service("nats", "").unwrap(), "lancache-nats");
-        assert_eq!(container_name_for_service("proxy", "").unwrap(), "lancache-proxy");
+        assert_eq!(
+            container_name_for_service("nats", "").unwrap(),
+            "lancache-nats"
+        );
+        assert_eq!(
+            container_name_for_service("proxy", "").unwrap(),
+            "lancache-proxy"
+        );
     }
 
     // What: a non-empty suffix is appended to the resolved base name.
