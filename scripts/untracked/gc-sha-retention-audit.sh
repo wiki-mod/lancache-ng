@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: read-only GHCR retention audit -- inventories package versions,
-# ranks ordinary roots from Git history, and reports protection decisions.
+# What: read-only GHCR retention audit -- inventories, ranks, and classifies.
 # Why: never issues DELETE; the destructive GC may consume only its exact
 # would-delete identities after independent live safety revalidation.
-# From: Issue #1095.
+# From: Issue #1095 | PR #1586
 set -euo pipefail
 
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd "$script_dir/../.." && pwd)"
+# What: the `# shellcheck source=` lines below are shellcheck directives.
+# Why: not commented-out code -- they tell the linter which file a dynamic
+# `source` call resolves to, since shellcheck cannot infer that itself.
+# From: Issue #1095 | PR #1586
 # shellcheck source=scripts/lib/github-api-retry.sh
 source "$repo_root/scripts/lib/github-api-retry.sh"
 # shellcheck source=scripts/lib/sha-retention-audit.sh
@@ -63,10 +66,9 @@ else
   echo "::error::Cannot read exactly one valid accepted_ordinary_roots_per_package value from $manifest." >&2
   exit 1
 fi
-# What: reads how many of a package's newest vX.Y.Z tags still count as
-# supported (see audit_package's supported_releases computation below).
-# Why: needed for protected-reference classification.
-# From: Issue #1095 | PR #1501.
+# What: reads how many newest vX.Y.Z tags per package still count as supported.
+# Why: needed for protected-reference classification below.
+# From: Issue #1095 | PR #1586
 if minimum_stable_releases="$(sra_read_minimum_stable_releases "$manifest")"; then
   :
 else
@@ -74,17 +76,11 @@ else
   exit 1
 fi
 
-# rollback_anchors: a maintainer-curated list of exact sha256:<64-hex>
-# digests explicitly designated as protected rollback targets, independent
-# of git history, tags, or release status entirely (see
-# scripts/lib/sha-retention-audit.sh's sra_is_rollback_anchor_digest and
-# docs/release-versioning.md's Retention section for the full rationale).
-# Read and format-validated here, defensively, even though
-# scripts/untracked/validate-stack-images.sh already enforces the exact same
-# shape statically in CI: this script has no guarantee that check ran first
-# against the exact manifest content it is about to consume, so it fails
-# closed on its own rather than trusting an upstream check happened.
-# From: Issue #1095 | PR #1501.
+# What: reads and format-validates retention.rollback_anchors defensively.
+# Why: an explicit, maintainer-curated digest list, independent of git
+# history/tags/release status; re-validated here since this script has no
+# guarantee validate-stack-images.sh's static CI check already ran first.
+# From: Issue #1095 | PR #1586
 if retention_rollback_anchors_raw="$(sra_read_rollback_anchors "$manifest")"; then
   :
 else
@@ -104,10 +100,10 @@ if [[ -n "$retention_rollback_anchors_raw" ]]; then
     retention_rollback_anchor_digests["$retention_rollback_anchor_entry"]=1
   done <<<"$retention_rollback_anchors_raw"
 fi
-# Populated per-package below as each declared anchor digest is actually
-# observed among that package's real fetched GHCR versions -- the only way
-# to prove a declared anchor is real evidence; see the post-loop existence
-# check near the bottom of this file.
+# What: tracks which declared rollback anchors were actually observed.
+# Why: an anchor is proven real only by being seen among a package's fetched
+# GHCR versions; the post-loop check below fails closed on any unobserved one.
+# From: Issue #1095 | PR #1586
 declare -A retention_rollback_anchor_found=()
 
 work_dir="$(mktemp -d "${TMPDIR:-/tmp}/lancache-ng-sha-retention-audit.XXXXXX")"
@@ -123,11 +119,11 @@ cleanup() {
 trap cleanup EXIT
 
 packages_file="$work_dir/packages.tsv"
+# What: filtered mode includes declared legacy packages for per-package GC.
+# Why: standalone audit keeps its original first-party scope while the GC
+# can intentionally retire manifest-declared historical package names.
+# From: Issue #1095 | PR #1586
 if [[ -n "$package_filter" ]]; then
-  # What: filtered mode includes declared legacy packages for per-package GC.
-  # Why: standalone audit keeps its original first-party scope while the GC
-  # can intentionally retire manifest-declared historical package names.
-  # From: Issue #1095.
   sra_manifest_packages "$manifest" "runtime tooling metadata legacy" >"$packages_file"
 elif sra_manifest_packages "$manifest" >"$packages_file"; then
   :
@@ -205,11 +201,10 @@ for history_ref in "${history_refs[@]}"; do
   done <"$history_file"
 done
 
-# What: audits one package's versions -- fetches pages, classifies each
-# version protect/would-delete, and prints AUDIT + SUMMARY report lines.
-# Why: the single per-package entry point; everything else in this file
-# only sets up its inputs (manifest, history, credentials) or loops over it.
-# From: Issue #1095 | PR #1501.
+# What: audits one package -- fetches, classifies, prints AUDIT/SUMMARY lines.
+# Why: the single per-package entry point; everything else in this file only
+# sets up its inputs (manifest, history, credentials) or loops over it.
+# From: Issue #1095 | PR #1586
 audit_package() {
   local class="${1:?audit_package: class is required}"
   local package="${2:?audit_package: package is required}"
@@ -278,20 +273,15 @@ audit_package() {
     fi
   fi
 
-  # What: computes this package's stable-release tag set once, via a single
-  # jq pass over the whole already-fetched versions file.
-  # Why: avoids a per-version jq call (the class of cost that caused run
-  # 31774741729 to time out); the per-version loop below only looks it up.
-  # From: Issue #1095 | PR #1501.
+  # What: computes this package's stable-release tag set once via one jq pass.
+  # Why: avoids a per-version jq call (the cost class that made run
+  # 31774741729 time out); a nonzero pipeline exit is treated as an empty
+  # result, since `grep` alone exits 1 on zero matches under pipefail.
+  # From: Issue #1095 | PR #1586
   local release_tags_file="$package_dir/release-tags.txt"
   if jq -r '.metadata.container.tags[]? // empty' "$versions_file" | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -u >"$release_tags_file"; then
     :
   else
-    # What: treats a nonzero exit here as an empty result, not a failure.
-    # Why: grep exits 1 under `set -o pipefail` on zero matches (a brand-new
-    # package with no release tags yet), even though `sort` itself succeeds
-    # (AG-VAL-030).
-    # From: Issue #1095 | PR #1501.
     : >"$release_tags_file"
   fi
   local supported_releases
@@ -352,17 +342,11 @@ audit_package() {
       echo "::warning::Package version $id (digest $digest) in ${repository_name}/${package} has no usable GHCR build date; this is a build-pipeline defect, not audit absence." >&2
     fi
 
-    # rollback_anchors: checked first, before every other classification
-    # branch below (metadata class, root/child-tag shape, channel/release
-    # protection, ordinary-history ranking) and independent of all of them.
-    # An explicit, maintainer-curated rollback declaration is the
-    # highest-priority signal this audit has, and must protect a matching
-    # digest regardless of what tags it does or doesn't carry, what class it
-    # belongs to, or how far outside the ordinary-history budget it would
-    # otherwise fall. This is also where each declared anchor gets marked
-    # "actually observed in a real fetched GHCR version" for the post-loop
-    # existence check below.
-    # From: Issue #1095 | PR #1501.
+    # What: checks rollback-anchor membership before every other classification.
+    # Why: an explicit, maintainer-curated anchor is the highest-priority
+    # protect signal and overrides tag/class/history-budget classification;
+    # a match also marks this anchor "observed" for the post-loop check below.
+    # From: Issue #1095 | PR #1586
     if sra_digest_is_rollback_anchor "$digest" "${!retention_rollback_anchor_digests[@]}"; then
       retention_rollback_anchor_found["$digest"]=1
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "explicit-rollback-anchor"
@@ -385,12 +369,11 @@ audit_package() {
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
       continue
     fi
+    # What: classifies a rootless version by its specific channel/release.
+    # Why: no sha-<commit> alias means no history root to rank by, so it
+    # always stays protect; the other_count==0 skip avoids a no-op scan.
+    # From: Issue #1095 | PR #1586
     if (( root_count == 0 )); then
-      # What: classifies a rootless version by its specific channel/release,
-      # skipping the scan when it has no extra tag.
-      # Why: no sha-<commit> alias means no history root to rank by, so it
-      # always stays protect; the other_count==0 skip avoids a no-op scan.
-      # From: Issue #1095 | PR #1501.
       if (( other_count > 0 )); then
         reason="$(sra_extra_tag_protect_reason "$tags" "$supported_releases" "non-ordinary-version")" || {
           echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
@@ -406,12 +389,11 @@ audit_package() {
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "mixed-root-and-child-tags"
       continue
     fi
+    # What: classifies a root tag's extra tags into a protect reason, if any.
+    # Why: promote retags an existing digest rather than rebuilding, so only
+    # a recognized active channel/release may protect here.
+    # From: Issue #1095 | PR #1586
     if (( other_count > 0 )); then
-      # What: classifies a root tag's extra tags; protects only on a
-      # specific channel/release match, else falls to root-candidate ranking.
-      # Why: promote retags an existing digest rather than rebuilding, so
-      # only a recognized active channel/release may protect here.
-      # From: Issue #1095 | PR #1501.
       other_tags="$(sra_other_tags_from_csv "$tags")" || {
         echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
         return 1
@@ -539,19 +521,11 @@ while IFS=$'\t' read -r package_class package_name; do
   fi
 done <"$packages_file"
 
-# rollback_anchors existence check: a declared anchor digest that was never
-# observed as a real fetched package version across every audited
-# first-party package is a typo, an already-deleted digest, or a digest that
-# never existed -- fail the whole run closed rather than silently treating
-# an unproven declaration as harmless. If any package above already failed
-# (overall_status is already 1 from that earlier failure), a real,
-# still-valid anchor cannot have been marked found either, and would be
-# misreported here as "does not exist" even though it may simply be
-# unproven this run; the run still correctly fails closed either way, but
-# the message below calls this out so a maintainer does not conclude the
-# anchor itself is bad and remove it without first checking for an
-# unrelated fetch failure above.
-# From: Issue #1095 | PR #1501.
+# What: fails closed on any declared rollback anchor never observed live.
+# Why: an unobserved anchor is a typo, an already-deleted digest, or one
+# that never existed; the error message itself notes an earlier package
+# failure above as a possible cause, so this stays silent on that nuance.
+# From: Issue #1095 | PR #1586
 if [[ -z "$package_filter" ]]; then
 for retention_rollback_anchor_entry in "${!retention_rollback_anchor_digests[@]}"; do
   if [[ -z "${retention_rollback_anchor_found[$retention_rollback_anchor_entry]+x}" ]]; then
