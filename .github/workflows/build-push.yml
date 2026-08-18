@@ -874,15 +874,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted
-      # into a composite action (issue #1095 duplication finding): this job and
-      # shellcheck-hosted below used to carry the identical steps twice. Job-level
-      # scheduling (needs/if/concurrency/permissions, and the docs-only skip in this
-      # job's own if: above) stays here -- a composite action cannot express those.
-      # timeout-minutes here, not inside the composite action: a composite-action step
-      # cannot carry timeout-minutes at all (see that action's own comment on its "Run
-      # ShellCheck and ActionLint" step) -- this restores the finer-grained per-step
-      # backstop the original inline step had, in the one place it can actually work.
+      # What: Step content (ShellCheck/ActionLint plus 7 standing text/YAML guards) extracted into a composite action; job-level scheduling (needs/if/concurrency/permissions, the docs-only skip above) and this step's own timeout-minutes stay here since a composite-action step cannot carry either.
+      # Why: This job and shellcheck-hosted below used to carry the identical steps twice; the per-step timeout-minutes restores the finer-grained backstop the original inline step had, in the one place it can actually work.
+      # From: Issue #1095 | PR #1532
       - uses: ./.github/actions/shellcheck-and-standing-guards
         timeout-minutes: 15
         with:
@@ -1338,18 +1332,9 @@ jobs:
             }
 
           for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            # Anchored on the full "scripts/untracked/docker-socket-proxy.sh"
-            # source prefix, not just the "docker-socket-proxy.sh:/usr/local/bin/..."
-            # mount-target suffix: a target-only match is satisfied equally by a
-            # stale source path (e.g. "./scripts/docker-socket-proxy.sh:...", missing
-            # a required subdirectory prefix) as by the real current one, since only
-            # the right-hand side of the bind-mount ever differs between them. This
-            # exact anchoring gap let a stale bind-mount source path pass this check
-            # for real once (issue #1095): Docker silently creates an empty directory
-            # at a bind-mount source that doesn't exist, so the affected container
-            # failed at runtime with "is a directory" instead of this static check
-            # failing at review time -- a source-path move that isn't reflected in
-            # every consumer is exactly the class this anchoring exists to catch.
+            # What: Anchored on the full "scripts/untracked/docker-socket-proxy.sh" source prefix, not just the mount-target suffix.
+            # Why: A target-only match is satisfied equally by a stale source path missing a required subdirectory prefix, since only the bind-mount's right-hand side ever differs; Docker silently creates an empty directory at a nonexistent bind-mount source, so a stale path fails at runtime ("is a directory") instead of at review time.
+            # From: Issue #1095 | PR #1532
             grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
                 echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline, divergent, or stale pre-move copy."
@@ -4580,20 +4565,9 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # Issue #1095: the exact immutable manifest-list digest this job pinned
-      # AND verified reuse safety against, for every service that came back
-      # reuse=true -- empty for a service that stayed reuse=false. Every
-      # downstream consumer (container-scan, build, build-arm64) reads this
-      # instead of independently re-resolving the mutable channel tag a
-      # second (or third, fourth) time, which is the digest TOCTOU race two
-      # Codex review threads on PR #1378 found: a channel refresh between
-      # this job's own verification and a much-later downstream job's
-      # independent re-resolution could scan/retag a different image than
-      # the one just proven safe. Because the verification (sif_image_revision
-      # + ancestry + content diff, all in scripts/lib/push-reuse.sh) now runs
-      # against this exact pinned digest reference rather than the mutable
-      # tag, the verified bytes and the exported bytes are provably
-      # identical -- there is no gap for the channel to move in between.
+      # What: The exact immutable manifest-list digest this job pinned and verified reuse safety against, for every service with reuse=true (empty when reuse=false); every downstream consumer (container-scan, build, build-arm64) reads this instead of re-resolving the mutable channel tag again.
+      # Why: Independently re-resolving the tag a second/third/fourth time is a digest TOCTOU race -- a channel refresh between this job's verification and a later job's re-resolution could scan/retag a different image than the one proven safe; verifying against this exact pinned digest instead of the mutable tag makes the verified and exported bytes provably identical.
+      # From: Issue #1095 | PR #1532, PR #1378
       digest_proxy: ${{ steps.decide.outputs.digest_proxy }}
       digest_dns: ${{ steps.decide.outputs.digest_dns }}
       digest_ui: ${{ steps.decide.outputs.digest_ui }}
@@ -4641,9 +4615,9 @@ jobs:
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
-          # Issue #1095: needed both for push_reuse_decide's own sif_image_revision
-          # call (now ghcr_retry-wrapped, see scripts/lib/staging-image-freshness.sh)
-          # and for this step's own digest-pinning read below.
+          # What: Needed both for push_reuse_decide's own sif_image_revision call and this step's own digest-pinning read below.
+          # Why: sif_image_revision is now ghcr_retry-wrapped (see scripts/lib/staging-image-freshness.sh).
+          # From: Issue #1095 | PR #1532
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -4662,11 +4636,9 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/staging-image-freshness.sh"
           # shellcheck source=scripts/lib/push-reuse.sh
           source "$GITHUB_WORKSPACE/scripts/lib/push-reuse.sh"
-          # resolve_build_tools_channel is plain ref-to-channel-name mapping (master ->
-          # latest, everything else -> nightly) with nothing build-tools-specific in its actual
-          # logic despite this file's name -- reused as-is here rather than duplicating the
-          # same mapping a second time (the "single-source CI logic, no silent second copy"
-          # concern issue #1095 itself names as a risk for this kind of extraction).
+          # What: resolve_build_tools_channel (master -> latest, everything else -> nightly) is reused as-is despite its build-tools-specific name; the mapping itself has nothing build-tools-specific in it.
+          # Why: Avoids duplicating the same ref-to-channel mapping a second time, keeping single-source CI logic instead of a silent second copy.
+          # From: Issue #1095 | PR #1532
           # shellcheck source=scripts/lib/build-tools-channel.sh
           source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
@@ -4843,7 +4815,7 @@ jobs:
 
   build:
     # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
-    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. Issue #1095 G7: the admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
+    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. The admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
     # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
     # What: needs: still lists every check job below even though if: no longer reads most of their .result directly.
     # Why: several of their outputs (e.g. validate-compose's build_tools_image) are consumed elsewhere in this job, and Actions only exposes outputs to jobs listed in needs:.
@@ -4892,18 +4864,9 @@ jobs:
       fail-fast: false
       matrix:
         include: &normal-build-services
-          # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
-          # decision 2026-08-06): proxy/dhcp-proxy/watchdog/dhcp/syslog/ntp have no real
-          # compile/link step in their Dockerfiles (precompiled package install or a
-          # COPY --from an upstream image only, confirmed by direct inspection, not
-          # assumed from the service name) and measured well below dns/ui/build-tools in
-          # a real full-rebuild run -- see issue #1095's comment thread for the numbers.
-          # dns/ui (Rust via ${BUILD_TOOLS_IMAGE}) and build-tools (Go+Rust) stay heavy.
-          # watchdog is scoped to its CURRENT Dockerfile only: issue #842's planned Rust
-          # rewrite must trigger a fresh re-evaluation, not a grandfathered stay on light.
-          # CI 1.1: this is now the single canonical definition -- build-arm64's own
-          # matrix below reuses it via the &normal-build-services/*normal-build-services
-          # YAML anchor instead of a hand-kept duplicate that could silently drift.
+          # What: Runner tiers below (AG-CI-002 measured exception, maintainer decision 2026-08-06): proxy/dhcp-proxy/watchdog/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles and measured well below dns/ui/build-tools in a real full-rebuild run; dns/ui (Rust) and build-tools (Go+Rust) stay heavy.
+          # Why: watchdog is scoped to its CURRENT Dockerfile only -- issue #842's planned Rust rewrite must trigger a fresh re-evaluation, not a grandfathered stay on light. This is the single canonical definition; build-arm64's own matrix below reuses it via the &normal-build-services/*normal-build-services YAML anchor instead of a hand-kept duplicate that could drift.
+          # From: Issue #1095 | PR #1523
 
           - service: proxy
             context: services/proxy
@@ -4979,11 +4942,9 @@ jobs:
           MATRIX_SERVICE: ${{ matrix.service }}
           DETECT_CHANGES_RESULT: ${{ needs['detect-changes'].result }}
           SUPERSEDED: ${{ needs['push-supersession-check'].outputs.superseded }}
-          # Step 4 (issue #1095): determine-push-reuse-scope's own `if:`
-          # only fires on `push` to a branch ref (see that job), so its
-          # `result` is legitimately 'skipped' on pull_request/schedule/
-          # workflow_dispatch -- checked explicitly below (fail-safe to a
-          # real build) rather than assumed success.
+          # What: Step 4's determine-push-reuse-scope only fires on `push` to a branch ref, so its `result` is legitimately 'skipped' on pull_request/schedule/workflow_dispatch.
+          # Why: Checked explicitly below (fail-safe to a real build) rather than assumed success.
+          # From: Issue #1095 | PR #1532
           REUSE_JOB_RESULT: ${{ needs['determine-push-reuse-scope'].result }}
           REUSE_PROXY: ${{ needs['determine-push-reuse-scope'].outputs.reuse_proxy }}
           REUSE_DNS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_dns }}
@@ -5044,13 +5005,9 @@ jobs:
             fi
           fi
 
-          # Issue #1095 Part 1 (Option B): on push, a newer commit may have already superseded
-          # this one before this job even started (see push-supersession-check's own comment).
-          # Applies uniformly to every service, including build-tools. Deliberately placed
-          # AFTER both branches above (not folded into either) so it can override should_build
-          # back to false regardless of which branch set it true, and deliberately does NOT
-          # apply on pull_request (build/container-scan already get real per-commit
-          # cancellation there via their own job-level concurrency groups, not this check).
+          # What: On push, a newer commit may already have superseded this one before this job started (see push-supersession-check's own comment); applies uniformly to every service, deliberately placed AFTER both branches above so it can override should_build back to false regardless of which branch set it true.
+          # Why: Deliberately does NOT apply on pull_request -- build/container-scan already get real per-commit cancellation there via their own job-level concurrency groups.
+          # From: Issue #1095 | PR #1532
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
             echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
             should_build=false
