@@ -3,24 +3,9 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # What: opt-in, maintainer-dispatched GitHub-hosted overflow build/scan/merge path.
-# Why: self-hosted lancache-heavy runners stay the default; this path only
-#   covers a self-hosted outage and never runs on push/PR (workflow_dispatch only).
+# Why: self-hosted lancache-heavy stays the default; this only covers a
+#   self-hosted outage (workflow_dispatch only, never push/PR).
 # From: Issue #686
-#
-# What: covers build (amd64) + scan + manifest merge only, not promote/release.
-# Why: arm64 already runs unconditionally on hosted build-arm64 (Issue #592);
-#   promote/release need self-hosted promote-lock machinery not re-derivable here.
-# From: Issue #592, docs/ci-github-hosted-fallback-decision.md
-#
-# What: every job uses the default short-lived GITHUB_TOKEN, no LAN secrets.
-# Why: workflow_dispatch is already write-access-gated; same token exposure
-#   build-arm64 already accepts on hosted runners.
-# From: Issue #686
-#
-# What: single build/push/scan job per service, no separate scan-only pre-build.
-# Why: the digest scanned below is the exact digest pushed, attested, and
-#   merged -- never a mutable tag.
-# From: Issue #1522 | PR #1523
 name: Build & Push (GitHub-hosted overflow fallback)
 
 on:
