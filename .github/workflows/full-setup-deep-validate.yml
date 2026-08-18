@@ -22,13 +22,13 @@
 #
 # On a pull_request event this validates the PR's OWN commits by reusing the
 # #626/#627 pr-<N>-sha-<short> staging-tag mechanism (see
-# scripts/ensure-pr-staging-images.sh) -- it does NOT reinvent a second
+# scripts/untracked/ensure-pr-staging-images.sh) -- it does NOT reinvent a second
 # tagging scheme. workflow_dispatch is preserved as a manual trigger for
 # ad-hoc runs against a specific published channel tag.
 #
 # BRANCH PROTECTION NOTE: making this a REQUIRED check is a repository
 # branch-protection setting, which lives in GitHub's settings and not in any
-# file in this repo -- it cannot be set by this PR's diff. A maintainer must
+# file in this repo -- no PR's diff can set it. A maintainer must
 # add the "deep full-setup validation" job (the always-run aggregate below,
 # whose name is stable precisely so it can be required) to the branch
 # protection required-status-checks list for v0.2.0/master. The aggregate is
@@ -51,10 +51,9 @@
 # heavy-tier demand per PR run (sims move off light onto the same small pool
 # builds already compete for), a real, separate capacity concern that
 # intersects with issue #1065's heavy-pool saturation finding, not one this
-# note's ordering argument resolves. See the PR body for the capacity
-# trade-off; #715 states CI time is not the constraint but acknowledges
-# self-hosted CAPACITY under higher trigger frequency is a real, separate
-# concern to watch.
+# note's ordering argument resolves. #715 states CI time is not the
+# constraint but acknowledges self-hosted CAPACITY under higher trigger
+# frequency is a real, separate concern to watch.
 
 name: Full-Setup Deep Validate
 
@@ -68,8 +67,8 @@ on:
   # this filter a PR opened against a base branch build-push.yml ignores
   # would still be marked staging-available here, and
   # ensure-pr-staging-images would poll for tags that no workflow will ever
-  # push until it times out and fails closed (Codex review finding on
-  # #764). Restricting the trigger the same way build-push.yml is restricted
+  # push until it times out and fails closed. Restricting the trigger the
+  # same way build-push.yml is restricted
   # is the correct fix rather than teaching the planner a fallback: a PR
   # against an unprotected branch isn't covered by branch-protection
   # required-status-checks anyway (see the BRANCH PROTECTION NOTE above), so
@@ -162,7 +161,7 @@ jobs:
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
           REPOSITORY: ${{ github.repository }}
           DISPATCH_TAG: ${{ github.event.inputs.image_tag }}
-        run: bash scripts/plan-deep-validation.sh
+        run: bash scripts/untracked/plan-deep-validation.sh
 
   # Cross-workflow wait + fail-closed staging guard. Only meaningful for a
   # same-repo PR (pr_staging_available): waits for build-push to push the
@@ -175,7 +174,7 @@ jobs:
     needs: plan
     if: needs.plan.outputs.should_run == 'true' && needs.plan.outputs.pr_staging_available == 'true'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # 100 minutes: covers scripts/ensure-pr-staging-images.sh's internal poll
+    # 100 minutes: covers scripts/untracked/ensure-pr-staging-images.sh's internal poll
     # loop, not just the wrapper's own overhead.
     #
     # Per-service worst case (1200s base + 600s ancestor-short + 1200s
@@ -189,7 +188,7 @@ jobs:
     permissions:
       contents: read
       packages: write
-      # #895: scripts/ensure-pr-staging-images.sh's congestion probe reads
+      # #895: scripts/untracked/ensure-pr-staging-images.sh's congestion probe reads
       # build-push.yml's own run status for this commit from
       # `/repos/{repo}/actions/workflows/build-push.yml/runs` once the normal
       # poll budget is exceeded, to tell a still-building run apart from a
@@ -202,7 +201,7 @@ jobs:
       actions: read
     steps:
       # #808: fetch-depth: 0 (not the default shallow depth-1 clone) so
-      # scripts/ensure-pr-staging-images.sh can prove real git ancestry
+      # scripts/untracked/ensure-pr-staging-images.sh can prove real git ancestry
       # (`git merge-base --is-ancestor`) between this PR's base.sha and a
       # base-channel image's build-commit label before backfilling an
       # untouched service from it. Same requirement, and same fix, as the
@@ -253,7 +252,7 @@ jobs:
           # to derive that source image's own tag directly (this PR's base
           # commit's durable sha-<short> image, not a mutable channel tag --
           # no separate BASE_CHANNEL_TAG input is passed anymore, see
-          # scripts/ensure-pr-staging-images.sh's own base_sha_short
+          # scripts/untracked/ensure-pr-staging-images.sh's own base_sha_short
           # computation). Always present here: this job only runs on a
           # pull_request event (see this job's own `if:` above, gated on
           # pr_staging_available).
@@ -290,7 +289,7 @@ jobs:
           # login instead of the single bare attempt it had before.
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
-        run: bash scripts/ensure-pr-staging-images.sh
+        run: bash scripts/untracked/ensure-pr-staging-images.sh
 
       # #1241: this job's buildx builder is only ever used for the
       # imagetools inspect/create calls inside ensure-pr-staging-images.sh
@@ -333,8 +332,8 @@ jobs:
     # CAP_SYS_TIME graceful-degradation work, that when that capability is
     # denied it correctly surfaces the real, maintainer-kept degraded/amber
     # status AND still serves genuinely accurate time to real NTP clients
-    # (Scenario B). See scripts/ntp-cap-sys-time-simulation.sh's own header
-    # for the full design and proof technique for both scenarios.
+    # (Scenario B). See scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh's
+    # own header for the full design and proof technique for both scenarios.
     #
     # GITHUB-HOSTED, NOT SELF-HOSTED: confirmed live (2026-07-30) that every
     # host in this project's self-hosted runner fleet is itself an LXC
@@ -378,7 +377,7 @@ jobs:
         env:
           REPOSITORY: ${{ github.repository }}
           IMAGE_TAG: ${{ needs.plan.outputs.image_tag }}
-        run: bash scripts/ntp-cap-sys-time-simulation.sh
+        run: bash scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh
 
   dns-zone-rollback-simulation:
     # Real end-to-end test (#628) of the PowerDNS zone/record known-good
@@ -388,7 +387,7 @@ jobs:
     # directly over HTTP with the real X-API-Key, and confirms via real
     # `dig` queries that PowerDNS's data and dns-standard's own recursor
     # cache were both actually rolled back -- see
-    # scripts/dns-zone-rollback-simulation.sh's header comment for why this
+    # scripts/untracked/simulations/dns-zone-rollback-simulation.sh's header comment for why this
     # is needed alongside the crate's unit tests (they cannot exercise a
     # live PowerDNS/recursor round-trip). Pulls the real dns/ui/nats images,
     # so it threads the PR staging tag to test the PR's own code.
@@ -434,7 +433,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run DNS zone/record rollback simulation
@@ -444,7 +443,7 @@ jobs:
           set -euo pipefail
           # Reserve a collision-free subnet (flock + retry, #820) and run the
           # sim inside it rather than racing the shared job-level subnet.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/dns-zone-rollback-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/dns-zone-rollback-simulation.sh
 
   dhcp-kea-ui-rollback-simulation:
     # Real end-to-end proof for issue #837: the Admin UI's OWN Kea rollback
@@ -457,7 +456,7 @@ jobs:
     # #1014); this covers the UI-reachable path that one does not. Builds Kea
     # from THIS checkout's services/dhcp (like the sibling sims), so it needs
     # no staging tag for that image; only the published `ui` image is pulled.
-    # See scripts/dhcp-kea-ui-rollback-simulation.sh's own header for exactly
+    # See scripts/untracked/simulations/dhcp-kea-ui-rollback-simulation.sh's own header for exactly
     # what this does and does not prove.
     #
     # This job is deep-validate-only (it has no counterpart in the manual
@@ -511,7 +510,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run Admin UI Kea rollback (POST /dhcp/snapshot/rollback) simulation
@@ -523,16 +522,16 @@ jobs:
           # sim inside it, exactly like the other deep-only sims above -- both
           # stand up a full validation stack and must not share a _validation
           # network with a concurrent run.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/dhcp-kea-ui-rollback-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/dhcp-kea-ui-rollback-simulation.sh
 
   syslog-forwarding-simulation:
     # Real end-to-end proof for #453's last two comments: not just "a log
     # line reached syslog-ng on disk" (which #756/#757/#758 already covered
-    # at the config/render-time level via scripts/check-logging-matrix.sh),
+    # at the config/render-time level via scripts/tracked/check-logging-matrix.sh),
     # but "the operator can actually see that line through the real Admin UI
     # /logs route" -- the gap the maintainer identified as the same #822
     # Pattern G shape ("a check that never really looked"). See
-    # scripts/syslog-forwarding-simulation.sh's header comment for the full
+    # scripts/untracked/simulations/syslog-forwarding-simulation.sh's header comment for the full
     # design (compose base, per-service trigger mechanisms, and why dhcp/
     # dhcp-proxy are explicit, tracked follow-up rather than silently
     # skipped).
@@ -565,8 +564,7 @@ jobs:
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: this script needs `expect` (real
         # setup.sh CLI fresh install, same reason setup-cli-simulation.sh
         # needs it) from build-tools. Same PR-staging-tag preference as
-        # setup-cli-simulation above, for the same reason (Codex review
-        # finding on #764).
+        # setup-cli-simulation above, for the same reason.
         id: build-tools-image
         # See dns-zone-rollback-simulation's "Resolve build-tools image" step
         # for why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/
@@ -586,7 +584,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/select-build-tools-image.sh)"
+            image="$(bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run syslog forwarding + Admin UI visibility simulation
@@ -672,7 +670,8 @@ jobs:
             -e GITHUB_RUN_ID \
             -e GITHUB_RUN_ATTEMPT \
             "$BUILD_TOOLS_IMAGE" \
-            bash scripts/syslog-forwarding-simulation.sh
+            timeout --kill-after=30 --signal=KILL 2400 \
+            bash scripts/untracked/simulations/syslog-forwarding-simulation.sh
 
   # THE REQUIRED CHECK. Always runs (even when the suite was skipped for a
   # docs-only PR, or a sim failed), so branch protection always sees a real
@@ -737,8 +736,8 @@ jobs:
           # and the eight simulations. should_run is already 'true' here, so this
           # suite must have actually run and succeeded -- never merely be
           # 'skipped' (which check() treats as fine and would let this required
-          # gate go green after silently losing the isolation guarantee, the
-          # Codex review finding on #764 this preserves).
+          # gate go green after silently losing the isolation guarantee this
+          # hard requirement exists to preserve).
           if [[ "$FULL_SETUP_SIMS_RESULT" != "success" ]]; then
             echo "::error::The shared full-setup simulation suite did not succeed (full-setup-sims result: $FULL_SETUP_SIMS_RESULT); see its individual jobs in the checks UI. Failing closed."
             exit 1

@@ -33,31 +33,35 @@ pub fn connect_from_env() -> Result<Docker> {
     Docker::connect_with_socket_defaults().context("Failed to connect to Docker socket")
 }
 
-pub async fn restart_service(docker: &Docker, service_name: &str) -> Result<()> {
-    let id = container_name_for_service(service_name)?;
+pub async fn restart_service(docker: &Docker, service_name: &str, suffix: &str) -> Result<()> {
+    let id = container_name_for_service(service_name, suffix)?;
     let options = RestartContainerOptionsBuilder::default().t(5).build();
     docker
-        .restart_container(id, Some(options))
+        .restart_container(&id, Some(options))
         .await
         .with_context(|| format!("Failed to restart '{}'", service_name))?;
     tracing::info!("Restarted service '{}'", service_name);
     Ok(())
 }
 
-pub async fn start_service(docker: &Docker, service_name: &str) -> Result<()> {
-    let id = container_name_for_service(service_name)?;
+pub async fn start_service(docker: &Docker, service_name: &str, suffix: &str) -> Result<()> {
+    let id = container_name_for_service(service_name, suffix)?;
     docker
-        .start_container(id, None)
+        .start_container(&id, None)
         .await
         .with_context(|| format!("Failed to start '{}'", service_name))?;
     tracing::info!("Started service '{}'", service_name);
     Ok(())
 }
 
-pub async fn stop_service_if_present(docker: &Docker, service_name: &str) -> Result<()> {
-    let id = container_name_for_service(service_name)?;
+pub async fn stop_service_if_present(
+    docker: &Docker,
+    service_name: &str,
+    suffix: &str,
+) -> Result<()> {
+    let id = container_name_for_service(service_name, suffix)?;
     let options = StopContainerOptionsBuilder::default().t(10).build();
-    match docker.stop_container(id, Some(options)).await {
+    match docker.stop_container(&id, Some(options)).await {
         Ok(()) => {
             tracing::info!("Stopped service '{}'", service_name);
             Ok(())
@@ -95,21 +99,28 @@ pub fn is_container_not_created(err: &anyhow::Error) -> bool {
     })
 }
 
-pub fn container_name_for_service(service_name: &str) -> Result<&'static str> {
-    match service_name {
-        "proxy" | "lancache-proxy" => Ok("lancache-proxy"),
-        "dns-standard" | "lancache-dns-standard" => Ok("lancache-dns-standard"),
-        "dns-ssl" | "lancache-dns-ssl" => Ok("lancache-dns-ssl"),
-        "dhcp" | "lancache-dhcp" => Ok("lancache-dhcp"),
-        "dhcp-proxy" | "lancache-dhcp-proxy" => Ok("lancache-dhcp-proxy"),
-        "dhcp-probe" | "lancache-dhcp-probe" => Ok("lancache-dhcp-probe"),
-        "nats" | "lancache-nats" => Ok("lancache-nats"),
-        "ntp" | "lancache-ntp" => Ok("lancache-ntp"),
+// What: appends `suffix` to the fixed base name for `service_name`.
+// Why: docker-socket-proxy.sh and watchdog.sh both already accept
+// LANCACHE_CONTAINER_SUFFIX-suffixed names (issue #1415); this was the one
+// remaining hardcoded consumer, breaking every restart/start/stop call in a
+// suffixed CI run. `suffix` is "" for every real install.
+// From: Issue #1590
+pub fn container_name_for_service(service_name: &str, suffix: &str) -> Result<String> {
+    let base = match service_name {
+        "proxy" | "lancache-proxy" => "lancache-proxy",
+        "dns-standard" | "lancache-dns-standard" => "lancache-dns-standard",
+        "dns-ssl" | "lancache-dns-ssl" => "lancache-dns-ssl",
+        "dhcp" | "lancache-dhcp" => "lancache-dhcp",
+        "dhcp-proxy" | "lancache-dhcp-proxy" => "lancache-dhcp-proxy",
+        "dhcp-probe" | "lancache-dhcp-probe" => "lancache-dhcp-probe",
+        "nats" | "lancache-nats" => "lancache-nats",
+        "ntp" | "lancache-ntp" => "lancache-ntp",
         _ => anyhow::bail!(
             "Docker service '{}' is not in the lancache-ng socket-proxy allowlist",
             service_name
         ),
-    }
+    };
+    Ok(format!("{base}{suffix}"))
 }
 
 #[cfg(test)]
@@ -157,5 +168,38 @@ mod tests {
     fn is_container_not_created_rejects_non_docker_errors() {
         let err = anyhow::anyhow!("Docker service 'bogus' is not in the allowlist");
         assert!(!is_container_not_created(&err));
+    }
+
+    // What: an empty suffix (every real install) must be byte-identical to
+    // pre-#1590 behavior.
+    // Why: this is the only regression that matters for production installs.
+    // From: Issue #1590
+    #[test]
+    fn container_name_for_service_with_empty_suffix_matches_pre_suffix_behavior() {
+        assert_eq!(
+            container_name_for_service("nats", "").unwrap(),
+            "lancache-nats"
+        );
+        assert_eq!(
+            container_name_for_service("proxy", "").unwrap(),
+            "lancache-proxy"
+        );
+    }
+
+    // What: a non-empty suffix is appended to the resolved base name.
+    // Why: this is exactly what a suffixed CI simulation run needs to
+    // restart/start/stop the container it actually created.
+    // From: Issue #1590
+    #[test]
+    fn container_name_for_service_appends_a_non_empty_suffix() {
+        assert_eq!(
+            container_name_for_service("nats", "-e2e-q88wjq").unwrap(),
+            "lancache-nats-e2e-q88wjq"
+        );
+    }
+
+    #[test]
+    fn container_name_for_service_rejects_unknown_service_regardless_of_suffix() {
+        assert!(container_name_for_service("bogus", "-e2e-q88wjq").is_err());
     }
 }

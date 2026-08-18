@@ -2,7 +2,7 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Coverage for scripts/check-idempotence-test-coverage.sh (#640): the CI
+# Coverage for scripts/tracked/check-idempotence-test-coverage.sh (#640): the CI
 # guard that fails a build if a known config-writer entrypoint has no
 # repeat-run/idempotence test. This file does NOT merely run the guard
 # against the real repo (that would only prove "passes today", not that the
@@ -22,7 +22,7 @@
 # tree.
 
 setup() {
-    script="$BATS_TEST_DIRNAME/../../scripts/check-idempotence-test-coverage.sh"
+    script="$BATS_TEST_DIRNAME/../../scripts/tracked/check-idempotence-test-coverage.sh"
     fixture_root="$BATS_TEST_TMPDIR/fixture-repo"
     # bats-core's own preprocessor (tools/build-tools's bats-preprocess,
     # BATS_TEST_PATTERN='^[[:blank:]]*@test[[:blank:]]+...') scans every
@@ -235,9 +235,10 @@ EOF
     # file, so an unrelated pre-existing test (here modelling the real
     # generate_nats_password_is_high_entropy_and_never_repeats, about key
     # generation, not config-writing) whose name merely contains "repeat"
-    # must NOT satisfy the NATS entry's extra_marker ("nats_conf") -- before
-    # this fix, deleting the real nats_conf_write_converges_... test still
-    # left the guard reporting OK because of this test alone.
+    # must NOT satisfy the NATS entry's extra_marker ("nats_conf") --
+    # without this narrower match, deleting the real
+    # nats_conf_write_converges_... test would still leave the guard
+    # reporting OK because of this unrelated test alone.
     seed_passing_fixture
     cat > "$fixture_root/services/ui/src/routes/secondaries.rs" <<'EOF'
 #[cfg(test)]

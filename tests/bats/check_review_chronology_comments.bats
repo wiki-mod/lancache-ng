@@ -10,7 +10,7 @@
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
-    script="$repo_root/scripts/check-review-chronology-comments.sh"
+    script="$repo_root/scripts/untracked/check-review-chronology-comments.sh"
     fixture_root="$(mktemp -d)"
 }
 
@@ -196,12 +196,12 @@ EOF
 #   reference exclusion, the guard would fail against its own repo.
 # From: PR #1546
 @test "does not flag itself: the script's own file and its bats test are excluded from the scan" {
-    mkdir -p "$fixture_root/scripts" "$fixture_root/tests/bats"
-    cp "$script" "$fixture_root/scripts/check-review-chronology-comments.sh"
+    mkdir -p "$fixture_root/scripts/untracked" "$fixture_root/tests/bats"
+    cp "$script" "$fixture_root/scripts/untracked/check-review-chronology-comments.sh"
     cp "$BATS_TEST_DIRNAME/check_review_chronology_comments.bats" \
         "$fixture_root/tests/bats/check_review_chronology_comments.bats"
 
-    run bash "$fixture_root/scripts/check-review-chronology-comments.sh" "$fixture_root"
+    run bash "$fixture_root/scripts/untracked/check-review-chronology-comments.sh" "$fixture_root"
     [ "$status" -eq 0 ] || fail "guard flagged its own documentation/test file: $output"
 }
 
@@ -222,6 +222,39 @@ EOF
     [ "$status" -eq 1 ]
     [[ "$output" == *"a.sh:2"* ]] || fail "missing first offender: $output"
     [[ "$output" == *"b.sh:2"* ]] || fail "missing second offender: $output"
+}
+
+# What: a comment saying 'a review finding on PR #764'.
+# Why: covers the noun form, no adjacent discovery verb required.
+# From: PR #1546
+@test "fails on the noun form 'review finding'" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+on:
+  push:
+    # The isolation gap was a review finding on PR #764.
+    branches: [master]
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:3"* ]] || fail "did not name the offending line: $output"
+}
+
+# What: 'review finding' split across two adjacent comment lines.
+# Why: proves the adjacent-comment-line join pass catches a wrapped phrase.
+# From: PR #1385, PR #1546
+@test "fails when 'review finding' is wrapped across adjacent comment lines" {
+    cat > "$fixture_root/example.yml" <<'EOF'
+on:
+  push:
+    # The isolation gap was a review
+    # finding on PR #764 and must not survive line wrapping.
+    branches: [master]
+EOF
+
+    run bash "$script" "$fixture_root"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"example.yml:3"* ]] || fail "did not catch the wrapped phrase: $output"
 }
 
 ## Check 2: check_fragile_line_references() -- "(line ~N)" self-references

@@ -100,7 +100,7 @@ jobs:
           # `--silent` discards the file body, only the HTTP status decides.
           # From: Issue #1095 | PR #1528
           required_paths=(
-            "scripts/gc-pr-staging-images.sh"
+            "scripts/untracked/gc-pr-staging-images.sh"
             "scripts/lib/ghcr-retry.sh"
           )
           missing=()
@@ -111,7 +111,7 @@ jobs:
           done
 
           if [ "${#missing[@]}" -gt 0 ]; then
-            echo "::warning::Skipping GC reap: ${#missing[@]} required script path(s) do not exist yet on the default branch ('${DEFAULT_BRANCH}'): ${missing[*]}. This job's own job definition was evaluated from a branch that already has issue #1095's scripts/gc-pr-staging-images.sh extraction (2026-08-06, commit 7b03f99b), but the default branch has not received it via a release yet -- attempting the sparse checkout below against that mismatch is a guaranteed failure (git tries to remove nearly the whole tree and hits 'not uptodate' errors), not a real GC attempt. This self-heals automatically once a release promotes the extraction to the default branch; until then, PR staging tags accumulate in GHCR same as the missing-PAT case above. See issue #1095."
+            echo "::warning::Skipping GC reap: ${#missing[@]} required script path(s) do not exist yet on the default branch ('${DEFAULT_BRANCH}'): ${missing[*]}. This job's own job definition was evaluated from a branch that already has issue #1095's scripts/untracked/gc-pr-staging-images.sh extraction (2026-08-06, commit 7b03f99b), but the default branch has not received it via a release yet -- attempting the sparse checkout below against that mismatch is a guaranteed failure (git tries to remove nearly the whole tree and hits 'not uptodate' errors), not a real GC attempt. This self-heals automatically once a release promotes the extraction to the default branch; until then, PR staging tags accumulate in GHCR same as the missing-PAT case above. See issue #1095."
             echo "scripts-present=false" >> "$GITHUB_OUTPUT"
           else
             echo "scripts-present=true" >> "$GITHUB_OUTPUT"
@@ -132,7 +132,7 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           sparse-checkout: |
-            scripts/gc-pr-staging-images.sh
+            scripts/untracked/gc-pr-staging-images.sh
             scripts/lib/ghcr-retry.sh
           sparse-checkout-cone-mode: false
 
@@ -140,7 +140,7 @@ jobs:
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-        run: bash scripts/gc-pr-staging-images.sh
+        run: bash scripts/untracked/gc-pr-staging-images.sh
 
       # What: restores a full working tree, verifying the real index state
       # rather than trusting `disable`'s exit code.

@@ -14,13 +14,13 @@ Scope examined (full read or targeted grep-and-read, all against `origin/v0.2.0`
 - `services/dhcp-proxy/Dockerfile`, `.dockerignore`, `dnsmasq.conf.template` (full read)
 - `config/dev/dhcp-proxy.env`, `config/prod/dhcp-proxy.env`, `deploy/quickstart/.env` (dhcp-proxy keys)
 - `deploy/dev/docker-compose.yml`, `deploy/prod/docker-compose.yml`, `deploy/quickstart/docker-compose.yml` (dhcp-proxy service blocks + healthcheck comparison across the whole file)
-- `scripts/dhcp-proxy-pxe-simulation.sh` (full read, 389 lines) + `scripts/lib/pxe-client-probe.py` (full read)
+- `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` (full read, 389 lines) + `scripts/lib/pxe-client-probe.py` (full read)
 - `tests/bats/dhcp_proxy_known_good_snapshot.bats`, `tests/bats/dhcp_proxy_optional_directives.bats`, `tests/bats/known_good_snapshots_sync.bats` + their helpers (full read)
 - `docs/dhcp-modes.md` (full read, 379 lines)
 - `services/ui/src/routes/dhcp.rs`, `services/ui/src/templates/dhcp.html` (targeted grep + read of every dnsmasq-proxy/PXE-related section)
 - `setup.sh` (targeted grep for DHCP_PROXY*/dnsmasq-proxy handling)
 - `.github/workflows/full-setup-validate.yml`, `.github/workflows/full-setup-deep-validate.yml`, `.github/workflows/build-push.yml` (dhcp-proxy job/guard wiring)
-- `release/stack-images.yml`, `scripts/validate-stack-images.sh`
+- `release/stack-images.yml`, `scripts/untracked/validate-stack-images.sh`
 - `CHANGELOG.md` (dhcp-proxy/#450/#705 entries)
 - `tools/build-tools/Dockerfile` (python3-scapy/tcpdump packages)
 
@@ -218,7 +218,7 @@ via a targeted `awk` block matching those two function names specifically —
 confirmed by reading the helper directly. Grepping `tests/` for
 `_dhcp_proxy_render_pxe_service_directives` returns nothing. The only thing
 that exercises this function's actual rendered output is
-`scripts/dhcp-proxy-pxe-simulation.sh`, a full Docker-container-and-scapy
+`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh`, a full Docker-container-and-scapy
 integration test that only runs on `workflow_dispatch` (see §6).
 
 Severity: info (test-coverage gap, reconfirms SoT).
@@ -278,7 +278,7 @@ anywhere in this codebase:
 - `tests/bats/dhcp_proxy_optional_directives.bats` only tests "both filename
   and server set" and "server set without filename" — never "filename set,
   server left empty".
-- `scripts/dhcp-proxy-pxe-simulation.sh` never exercises the #450
+- `scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` never exercises the #450
   `DHCP_PROXY_BOOT_FILENAME`/`DHCP_PROXY_BOOT_SERVER` pair at all (it only
   configures the separate #705 PXE vars).
 
@@ -294,7 +294,7 @@ confirm either way; flagging as unverified, not asserting it's wrong).
 ## 8. UEFI-only PXE configuration path never exercised end-to-end
    (independently reconfirmed from SoT §5.3)
 
-`scripts/dhcp-proxy-pxe-simulation.sh` always sets both `bios_boot_filename`
+`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` always sets both `bios_boot_filename`
 (line 205) and `uefi_boot_filename` (line 206) in the same run and passes
 both `DHCP_PROXY_PXE_BOOT_FILENAME_BIOS` and `_UEFI` to the container (lines
 221-223). The `have_bios -eq 0` branch in
@@ -356,7 +356,7 @@ Severity: info/minor (new finding, not previously in SoT).
     with no visible documented maintainer approval
 
 `scripts/lib/pxe-client-probe.py` is a Python 3 script (using `scapy`) that
-`scripts/dhcp-proxy-pxe-simulation.sh` invokes inside the build-tools image to
+`scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh` invokes inside the build-tools image to
 craft and parse real PXE-tagged DHCP packets. `tools/build-tools/Dockerfile`
 installs `python3`, `python3-scapy`, and `tcpdump` specifically to support it
 (lines ~224-263, ~375-379), with an extensive comment justifying the
@@ -402,7 +402,7 @@ line ~1114 does contain a `dhcp-proxy:` service block referencing
 `compose:` field for this image is therefore incomplete/stale relative to the
 actual repo. Note: the `dhcp` (Kea) entry has the exact same omission pattern,
 so this might be a deliberate convention for optional/profile-gated services
-rather than a dhcp-proxy-specific bug — but `scripts/validate-stack-images.sh`
+rather than a dhcp-proxy-specific bug — but `scripts/untracked/validate-stack-images.sh`
 never actually reads or validates the `compose:` field's contents at all (confirmed
 by reading the full script), so there is no way to tell "intentional" from
 "simply never audited" from the code alone.
@@ -414,7 +414,7 @@ Severity: info.
 ## 13. `validate-stack-images.sh`'s per-image quickstart registry-variable check
     does not cover `dhcp`/`dhcp-proxy`
 
-`scripts/validate-stack-images.sh` lines 107-118 explicitly `require_grep`
+`scripts/untracked/validate-stack-images.sh` lines 107-118 explicitly `require_grep`
 that `deploy/quickstart/docker-compose.yml` references `proxy`, `dns`,
 `watchdog`, and `ui` through the `${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}`
 variable pattern (not a hardcoded image reference). There is **no equivalent

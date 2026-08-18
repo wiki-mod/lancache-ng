@@ -1,0 +1,130 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+name: Trivy scan exact image digest
+description: >-
+  Runs the blocking vulnerability and secret scan against one immutable,
+  digest-qualified image reference. Candidate build jobs share this action so
+  every architecture and event path uses the same fail-closed scan policy.
+
+inputs:
+  image-ref:
+    description: Immutable image reference in repository@sha256:digest form.
+    required: true
+  cache-dir:
+    description: Trivy vulnerability database cache directory owned by the caller.
+    required: true
+  cleanup-cache:
+    description: Remove cache-dir after the scan when it is an ephemeral candidate cache.
+    required: false
+    default: "false"
+  registry-username:
+    description: Registry username, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    required: true
+  registry-password:
+    description: Registry password/token, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    required: true
+  dockerhub-username:
+    description: Docker Hub username, forwarded to trivy-scan-retry for its optional third DB-source tier (issue #1535).
+    required: false
+    default: ""
+  dockerhub-password:
+    description: Docker Hub password/token, forwarded to trivy-scan-retry (issue #1535).
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Require immutable digest identity
+      id: require
+      shell: bash
+      env:
+        IMAGE_REF: ${{ inputs.image-ref }}
+        CACHE_DIR: ${{ inputs.cache-dir }}
+        CLEANUP_CACHE: ${{ inputs.cleanup-cache }}
+      run: |
+        set -euo pipefail
+        case "$IMAGE_REF" in
+          *@sha256:[0-9a-fA-F]*) ;;
+          *)
+            echo "::error::Exact-digest scan refuses mutable image reference '$IMAGE_REF'. Expected repository@sha256:<digest>."
+            exit 1
+            ;;
+        esac
+        if [[ ! "$IMAGE_REF" =~ @sha256:[0-9a-fA-F]{64}$ ]]; then
+          echo "::error::Exact-digest scan received malformed OCI digest '$IMAGE_REF'."
+          exit 1
+        fi
+        : "${CACHE_DIR:?cache-dir is required}"
+
+        cleanup_safe=false
+        if [[ "$CLEANUP_CACHE" == "true" ]]; then
+          # Cleanup is intentionally limited to the two cache roots this
+          # action's callers own. A typo must never turn a reusable action's
+          # caller-controlled input into an arbitrary recursive deletion.
+          [[ "$CACHE_DIR" == /* ]] || {
+            echo "::error::Refusing to clean non-absolute Trivy cache path '$CACHE_DIR'."
+            exit 1
+          }
+          case "/${CACHE_DIR#/}/" in
+            */../* | */./*)
+              echo "::error::Refusing Trivy cache cleanup path containing dot traversal: '$CACHE_DIR'."
+              exit 1
+              ;;
+          esac
+
+          runner_temp="${RUNNER_TEMP:-}"
+          runner_temp="${runner_temp%/}"
+          if [[ -n "$runner_temp" && "$CACHE_DIR" == "$runner_temp/"* ]]; then
+            cleanup_safe=true
+          elif [[ "$CACHE_DIR" == /var/tmp/lancache-ng-trivy-cache/* ]]; then
+            cleanup_safe=true
+          fi
+
+          if [[ "$cleanup_safe" != "true" ]]; then
+            echo "::error::Refusing to clean unexpected Trivy cache path '$CACHE_DIR'."
+            exit 1
+          fi
+        fi
+
+        mkdir -p "$CACHE_DIR"
+        if [[ "$CLEANUP_CACHE" == "true" && -L "$CACHE_DIR" ]]; then
+          echo "::error::Refusing to clean symlinked Trivy cache path '$CACHE_DIR'."
+          exit 1
+        fi
+        printf 'cleanup-safe=%s\n' "$cleanup_safe" >> "$GITHUB_OUTPUT"
+
+    # What: scans via trivy-scan-retry (not aquasecurity/trivy-action directly) for its
+    # retry, GHCR-first-mirror, and Docker Hub auth.
+    # Why: trivy's unauthenticated first-choice DB mirror caused real CI failures with
+    # zero retry anywhere (PR #1503, #1500).
+    # From: PR #1542, Issue #1535
+    - name: Scan exact image digest with Trivy
+      uses: ./.github/actions/trivy-scan-retry
+      with:
+        username: ${{ inputs.registry-username }}
+        password: ${{ inputs.registry-password }}
+        dockerhub-username: ${{ inputs.dockerhub-username }}
+        dockerhub-password: ${{ inputs.dockerhub-password }}
+        image-ref: ${{ inputs.image-ref }}
+        scanners: vuln,secret
+        severity: HIGH,CRITICAL
+        ignore-unfixed: true
+        trivyignores: .trivyignore.yaml
+        skip-dirs: /usr/local/rustup/toolchains
+        hide-progress: true
+        cache: "false"
+        cache-dir: ${{ inputs.cache-dir }}
+        timeout: 10m
+        exit-code: "1"
+
+    - name: Remove ephemeral exact-digest scan cache
+      if: always() && inputs.cleanup-cache == 'true' && steps.require.outputs.cleanup-safe == 'true'
+      shell: bash
+      env:
+        CACHE_DIR: ${{ inputs.cache-dir }}
+      run: |
+        set -euo pipefail
+        : "${CACHE_DIR:?cache-dir is required}"
+        rm -rf -- "$CACHE_DIR"

@@ -42,44 +42,10 @@ ARG GOLANG_X_TEXT_VERSION=0.41.0
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
-# What: builds actionlint, the Docker CLI, docker-compose, and the buildx
-# CLI plugin from source instead of using official release binaries.
-# Why: Go statically embeds its stdlib into every binary, so a release
-# binary only gets a current stdlib when that project itself cuts a new
-# release, not on every Go security release; building here with whatever
-# `golang:latest` resolves to at build time gets a patched stdlib without
-# waiting on upstream. cargo-audit/cargo-tarpaulin below are Rust binaries
-# and have no equivalent statically-embedded runtime to go stale.
-# From: Issue #1570 | PR #1571
-
-# What: builds the Docker CLI by cloning its tagged release and running its
-# own `scripts/build/binary`, not `go install`.
-# Why: docker/cli ships a `vendor.mod`, not a `go.mod` (deliberately, so it
-# cannot be imported as a library), so `go install` has no module file to
-# resolve against; bumping its vendored grpc-go/x-text needs a real
-# `go.mod` to establish the module root -- `-modfile=vendor.mod` alone is
-# not enough, since Go still looks for a literal `go.mod` to find the
-# root before it honors which file to read/write -- so `go.mod`/`go.sum`
-# are symlinked to `vendor.mod`/`vendor.sum` for the duration of the
-# bump, then removed before the build runs.
-# From: Issue #1570 | PR #1571
-
-# What: builds docker-compose by cloning its tagged release and running a
-# local `go build`, not `go install pkg@version`.
-# Why: its go.mod carries `exclude` directives, which `go install
-# pkg@version` rejects outright (it treats the target as the main module,
-# where `exclude` is invalid).
-# From: Issue #1570 | PR #1571
-
-# What: builds buildx the same clone-and-`go build` way, with its cmd
-# package explicitly renamed from `buildx` to `docker-buildx` on output.
-# Why: buildx needs the containerd bump above applied, which `go install`
-# cannot do (no go.mod in scope to `go get` against); its cmd package name
-# doesn't match the `docker-<subcommand>` filename Docker's CLI plugin
-# discovery requires. Its release tag ships a committed vendor/ directory
-# that Go auto-selects, so `go mod vendor` must re-sync it after `go get`
-# or the build fails with "inconsistent vendoring" instead of silently
-# using the old version.
+# What: builds actionlint/Docker CLI/docker-compose/buildx from source, with
+# grpc-go/containerd/x-text vendor bumps applied via go.mod/vendor.mod swaps.
+# Why: gets a current Go stdlib without waiting on upstream; each tool's own
+# module quirks (vendor.mod-only, exclude directives) rule out `go install`.
 # From: Issue #1570 | PR #1571
 RUN set -euo pipefail; \
     GOBIN=/out go install "github.com/rhysd/actionlint/cmd/actionlint@v${ACTIONLINT_VERSION}"; \
@@ -284,8 +250,8 @@ RUN docker --version; \
     docker buildx version
 
 # What: isc-dhcp-client (dhclient) supports
-# scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/syslog-forwarding-simulation.sh, which perform a real
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
+# scripts/untracked/simulations/syslog-forwarding-simulation.sh, which perform a real
 # Discover/Offer/Request/Ack exchange against a Kea container on an
 # isolated Docker bridge network.
 # Why: the Admin UI's own dhcp-probe feature now uses a native Rust DHCP
@@ -295,7 +261,7 @@ RUN docker --version; \
 # are a separate concern from the Admin UI's probe.
 # From: Issue #1570 | PR #1571
 
-# What: tcpdump supports scripts/dhcp-proxy-pxe-simulation.sh, capturing
+# What: tcpdump supports scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, capturing
 # dnsmasq's real DHCPOFFER reply to a synthetic PXE DHCPDISCOVER
 # (tools/pxe-client-probe, a Rust binary built from source by that script)
 # to a pcap file rather than sniffing live in-process.
@@ -364,18 +330,12 @@ RUN set -euo pipefail; \
     # From: Issue #1570 | PR #1571
     apt-get dist-upgrade -y; \
     apt-get full-upgrade -y; \
-    # What: force-upgrades linux-libc-dev, jq, and libjq1 explicitly,
-    # beyond the generic dist-upgrade/full-upgrade above.
-    # Why: linux-libc-dev is pulled in by the toolchain layer and can lag
-    # behind the base image even after a generic upgrade, failing Trivy on
-    # stale headers. jq/libjq1 are installed by an earlier, non-cache-busted
-    # RUN step above, so once that layer is cached it never re-resolves
-    # against a newer mirror on its own (confirmed live: CVE-2026-32316,
-    # fixed in trixie-security's 1.7.1-6+deb13u3); naming both here forces
-    # this build to pick up a mid-week fix immediately rather than waiting
-    # for the next weekly rotation.
+    # What: force-upgrades linux-libc-dev, jq, libjq1, libpq-dev, and libpq5 explicitly, beyond dist-upgrade/full-upgrade above.
+    # Why: jq/libjq1 are confirmed transitively pulled in by an earlier, non-cache-busted
+    #   apt-get install (CVE-2026-32316); libpq-dev/libpq5 hit the identical
+    #   still-outdated-after-dist-upgrade symptom for CVE-2026-6473, though their own origin is not established here -- the same proven fix applies regardless.
     # From: Issue #1570 | PR #1571
-    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1; \
+    apt-get install -y --no-install-recommends --only-upgrade linux-libc-dev jq libjq1 libpq-dev libpq5; \
     distcc_pump_tmp="$(mktemp -d)"; \
     chmod 0755 "${distcc_pump_tmp}"; \
     # What: chowns the download temp dir to _apt:root before `apt-get
@@ -559,6 +519,10 @@ RUN set -euo pipefail; \
     rustc_host_line="$(rustc -vV)"; \
     grep -qE '^host: .*-gnu$' <<<"${rustc_host_line}"
 
+# A generic default working directory for interactive/manual use of this
+# image (e.g. a developer shelling in locally); CI callers never rely on
+# it, since every CI invocation of this image explicitly bind-mounts the
+# checked-out repository at /work and passes -w /work of its own accord.
 WORKDIR /workspace
 
 CMD ["bash"]

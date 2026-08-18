@@ -3,43 +3,31 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 name: PR title Conventional-Commit lint
 description: >-
-  The exact check sequence build-push.yml's self-hosted `pr-title-convention-check` job
-  and its `pr-title-convention-check-hosted` GitHub-hosted fallback both ran as
-  byte-identical duplicated steps (issue #1095 duplication finding: 9 light+hosted-fallback
-  job pairs share their real step content and only differ in job-level scheduling
-  metadata -- needs/if/permissions -- which a composite action cannot express, so those
-  stay on the two calling jobs). `vars.PR_TITLE_LINT_MODE` is passed in as an input rather
-  than read directly here because `vars.*`/`secrets.*` context expressions are only
-  guaranteed to resolve in the calling workflow, not inside a composite action.
+  Shared step logic for the self-hosted `pr-title-convention-check` job and its
+  `pr-title-convention-check-hosted` fallback (From: PR #1467).
 inputs:
   build-tools-image:
     description: Resolved BUILD_TOOLS_IMAGE reference (already smoke-tested by the caller).
     required: true
   pr-title-lint-mode:
     description: >-
-      Caller's PR_TITLE_LINT_MODE repository variable value, evaluated in the caller's
-      own context and threaded through as a plain input. Deliberately written without
-      any double-brace expression syntax (real CI run, PR #1467, 2026-08-06): GitHub's
-      schema validator evaluates that syntax anywhere it appears in this file, including
-      inside a description string, and fails the whole action to load on an
-      unresolvable named-value like the repository-variables one -- it is not inert
-      prose to the parser the way it looks to a human reader. Do not add that syntax
-      back into this description, even as an illustrative example.
+      Caller's PR_TITLE_LINT_MODE repository variable, passed in as a plain input
+      because `vars.*`/`secrets.*` only resolve in the calling workflow, not inside
+      a composite action. Do not add GitHub Actions expression-interpolation syntax
+      to this description string (even as an example): GitHub's schema validator
+      evaluates it here too and fails the whole action to load on an unresolvable
+      name (From: PR #1467).
     required: false
     default: ""
 runs:
   using: composite
   steps:
     - name: Fetch current PR title live
-      # github.event.pull_request.title is a snapshot taken when THIS event fired, and an
-      # edited title (without a new commit, which does not retrigger this workflow's
-      # declared event types) can leave that snapshot stale (same class of bug found and
-      # fixed in pr-template-check and pr-tracking-metadata-check, 2026-07-16). A live `gh
-      # pr view` fetch is always current regardless of why/when this job runs.
-      # Uses `github.token`, not `secrets.GITHUB_TOKEN` as both original jobs had it: a
-      # composite action cannot resolve `secrets.*` directly, and GitHub's own docs state
-      # `github.token` is "functionally equivalent to the GITHUB_TOKEN secret" -- read-only
-      # access to the PR is all this call needs, which the default scope covers either way.
+      # What: fetches the PR title via `gh pr view` instead of using the event payload.
+      # Why: the event payload is a snapshot from trigger time and goes stale on a
+      # title-only edit; `github.token` covers this read-only call since a composite
+      # action cannot resolve `secrets.*` directly.
+      # From: PR #1467
       id: live-title
       shell: bash
       env:
@@ -53,15 +41,13 @@ runs:
       shell: bash
       env:
         PR_DRAFT: ${{ github.event.pull_request.draft }}
-        # Dependabot's own PR author identity -- see
-        # check-pr-title-convention.sh's dependabot[bot] exemption.
+        # What: PR author login, read for check-pr-title-convention.sh's dependabot[bot] exemption.
+        # From: PR #1467
         PR_AUTHOR: ${{ github.event.pull_request.user.login }}
-        # Grace-period switch (see check-pr-title-convention.sh's header): unset (the default)
-        # currently means "warn", per the maintainer's 2026-07-23 decision on #850 -- a
-        # transitional grace period, not a permanent downgrade; a warn result is still a real
-        # AG-GH-018 violation that must be fixed before merge, it just does not hard-block CI
-        # yet. Set the PR_TITLE_LINT_MODE repository variable to "block" once ready for full
-        # enforcement, with no code change needed.
+        # What: warn/block switch for the lint result (default unset = warn).
+        # Why: maintainer's transitional grace-period decision; a warn result is still an
+        # AG-GH-018 violation that must be fixed before merge, it just does not hard-block yet.
+        # From: Issue #850
         PR_TITLE_LINT_MODE: ${{ inputs.pr-title-lint-mode }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
       run: |
@@ -76,4 +62,4 @@ runs:
           -e PR_AUTHOR \
           -e PR_TITLE_LINT_MODE \
           "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-          bash scripts/check-pr-title-convention.sh
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pr-title-convention.sh

@@ -2,10 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Main CI/CD pipeline: detects changed paths, lints and tests the DNS/UI Rust
-# crates and shell scripts, validates the docker-compose files, scans
-# container images, then builds, pushes, promotes, and releases the stack
-# images on the relevant triggers.
+# What: main CI/CD pipeline -- detects changed paths, lints/tests the Rust
+# crates and shell scripts, validates compose, scans images, then builds,
+# pushes, promotes, and releases the stack images on the relevant triggers.
+# From: PR #1523
 
 name: Build & Push
 
@@ -63,6 +63,10 @@ concurrency:
 
 env:
   CARGO_BUILD_JOBS: ${{ vars.CARGO_BUILD_JOBS }}
+  # What: one runtime service list for manifest assembly, promotion, and release loops.
+  # Why: scripts/check-workflow-service-lists.sh fails CI if this drifts from the build matrix.
+  # From: PR #1523
+  CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
@@ -121,13 +125,13 @@ jobs:
 
           : "${GITHUB_SHA:?GitHub checkout SHA is required}"
 
-          # What: Classification logic lives in scripts/classify-image-impact.sh (shared with `promote`'s
+          # What: Classification logic lives in scripts/untracked/classify-image-impact.sh (shared with `promote`'s
           # own version-bump logic); it writes "Changed files:" to stderr and key=value booleans to stdout.
           # Why: A merge-base diff needs the full history `fetch-depth: 0` above provides.
           # From: PR #1129
           if [ "$GITHUB_EVENT_NAME" = "pull_request" ]; then
             : "${BASE_SHA:?pull request base SHA is required}"
-            bash scripts/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+            bash scripts/untracked/classify-image-impact.sh "$BASE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
           else
             # What: Push (branch/tag) diffs exactly the commits this push introduced (`before`..`sha`);
             # falls back to `--all-changed` when `before` is unusable.
@@ -138,9 +142,9 @@ jobs:
               || [ "$BEFORE_SHA" = "0000000000000000000000000000000000000000" ] \
               || ! git cat-file -e "${BEFORE_SHA}^{commit}" 2>/dev/null; then
               echo "::notice::No usable push diff base (before='${BEFORE_SHA:-<empty>}'); classifying all paths as changed."
-              bash scripts/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
+              bash scripts/untracked/classify-image-impact.sh --all-changed >> "$GITHUB_OUTPUT"
             else
-              bash scripts/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
+              bash scripts/untracked/classify-image-impact.sh "$BEFORE_SHA" "$GITHUB_SHA" >> "$GITHUB_OUTPUT"
             fi
           fi
 
@@ -219,7 +223,13 @@ jobs:
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - uses: ./.github/actions/file-headers-check
         with:
           build-tools-image: ${{ env.BUILD_TOOLS_IMAGE }}
@@ -244,7 +254,7 @@ jobs:
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
 
   compose-healthchecks:
     # What: Cheap hygiene gate: scans docker-compose files for healthcheck configuration.
@@ -302,7 +312,7 @@ jobs:
             exit 1
           }
           echo "::notice::gh pr view succeeded. Body byte count: $(wc -c < /tmp/pr-body-live.txt). stderr: $(cat /tmp/pr-body-live.stderr)"
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-template-check-hosted:
     # What: GitHub-hosted fallback for pr-template-check; LAN-independent, but its validation step still
@@ -340,7 +350,7 @@ jobs:
         run: |
           set -euo pipefail
           gh pr view "$PR_NUMBER" --repo "$GITHUB_REPOSITORY" --json body -q .body > /tmp/pr-body-live.txt
-          bash scripts/validate-pr-template.sh /tmp/pr-body-live.txt
+          bash scripts/tracked/validate-pr-template.sh /tmp/pr-body-live.txt
 
   pr-tracking-metadata-check:
     # What: Enforces AG-GH-008 (labels + milestone required); project-board placement is enforced too only
@@ -426,7 +436,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -520,7 +536,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running PR title convention check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -546,7 +568,13 @@ jobs:
       - name: Select immutable build-tools image
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running file-headers check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -577,7 +605,7 @@ jobs:
             -e GITHUB_SHA \
             "$BUILD_TOOLS_IMAGE" \
             timeout --kill-after=30 --signal=KILL 300 bash -c \
-              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/check-pr-diff-file-headers.sh'
+              'cp -a /source /tmp/work && cd /tmp/work && bash scripts/tracked/check-pr-diff-file-headers.sh'
 
   compose-healthchecks-hosted:
     name: compose healthchecks (GitHub-hosted fallback)
@@ -640,7 +668,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; bash scripts/check-line-endings.sh'
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash -lc 'set -euo pipefail; bash scripts/tracked/check-line-endings.sh'
 
       # What: Governance guardrails step relocated from shellcheck.
       # Why: shellcheck gained a docs-only self-skip, but this check must run on every PR regardless.
@@ -650,7 +679,10 @@ jobs:
         env:
           GOVERNANCE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           GOVERNANCE_BASE_REF: ${{ github.event.pull_request.base.ref }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
+          # What: no step-level GITHUB_REPOSITORY entry (the docker run flag
+          #   below still forwards it into the container).
+          # Why: GITHUB_REPOSITORY is already a default Actions env var.
+          # From: Issue #1095 (G1) | PR #1503
           GH_TOKEN: ${{ github.token }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
@@ -688,7 +720,8 @@ jobs:
             -e GOVERNANCE_PR_TITLE="$governance_pr_title" \
             -e GOVERNANCE_PR_BODY="$governance_pr_body" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-governance-guards.sh --changed-files-file "/work/$(basename "$changed_files")"
 
       # What: Warn-only guard flagging a PR that edits CHANGELOG.md directly (normally written only by an
       # automated release-publish bot commit, see CONTRIBUTING.md).
@@ -724,7 +757,8 @@ jobs:
             -w /work \
             -e CHANGELOG_GUARD_PR_LABELS="$PR_LABELS" \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-changelog-direct-edit.sh --changed-files-file "/work/$(basename "$changelog_guard_changed_files")" \
           || true
 
   line-endings-hosted:
@@ -738,7 +772,7 @@ jobs:
         run: |
           echo "::notice::Running line-endings check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check tracked files use Unix (LF) line endings
-        run: bash scripts/check-line-endings.sh
+        run: bash scripts/tracked/check-line-endings.sh
 
   language-policy:
     # What: Enforces AG-REL-001 by asserting the ABSENCE of banned-language source files, not scanning
@@ -773,7 +807,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash -lc 'set -euo pipefail; bash scripts/check-language-policy.sh'
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash -lc 'set -euo pipefail; bash scripts/tracked/check-language-policy.sh'
 
   language-policy-hosted:
     name: language policy (GitHub-hosted fallback)
@@ -785,7 +820,7 @@ jobs:
         run: |
           echo "::notice::Running language-policy check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Check for banned-language source files (AG-REL-001)
-        run: bash scripts/check-language-policy.sh
+        run: bash scripts/tracked/check-language-policy.sh
 
   # What: GitHub-hosted fallbacks are limited to cheap lint jobs (file-headers, compose-healthchecks,
   # line-endings, language-policy, shellcheck, the pr-* checks, and watchdog_test).
@@ -877,7 +912,13 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          printf 'BUILD_TOOLS_IMAGE=%s\n' "$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)" >> "$GITHUB_ENV"
+          # What: assigns the resolved image to a local before printf.
+          # Why: printf's own exit status stays 0 even if a command
+          #   substitution inside its argument fails, so `set -e` cannot
+          #   catch a failure embedded there.
+          # From: PR #1503
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$build_tools_image" >> "$GITHUB_ENV"
       - name: GitHub-hosted fallback notice
         run: |
           echo "::notice::Running ShellCheck and ActionLint on GitHub-hosted runner as fallback for non-LAN-dependent linting."
@@ -942,7 +983,7 @@ jobs:
           # Why: If it's unavailable or fails smoke checks, this exits before the permissive selector below
           # ever builds the (large) local fallback image, so there's nothing left to clean up.
           # From: PR #365
-          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+          downstream_build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
 
           case "$downstream_build_tools_image" in
             *@sha256:*)
@@ -979,7 +1020,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/validate-stack-images.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/untracked/validate-stack-images.sh
 
       - name: Validate prebuilt production install path
         run: |
@@ -990,6 +1032,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -s <<'VALIDATE_PREBUILT'
           set -euo pipefail
 
@@ -1042,8 +1085,8 @@ jobs:
           grep -F 'config/prod' setup.sh >/dev/null \
             && grep -F 'services/dns/cdn-domains.txt' setup.sh >/dev/null \
             || { echo "::error::deploy/prod backups must include repo-root config/prod env files and the domain list."; exit 1; }
-          grep -F 'scripts/docker-socket-proxy.sh' setup.sh >/dev/null \
-            || { echo "::error::deploy/prod backups must include the repo-root scripts/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
+          grep -F 'scripts/untracked/docker-socket-proxy.sh' setup.sh >/dev/null \
+            || { echo "::error::deploy/prod backups must include the repo-root scripts/untracked/docker-socket-proxy.sh bind-mount input (see docs/naming-conventions.md)."; exit 1; }
           grep -F 'deploy_prod_repo_root "$archived_install"' setup.sh >/dev/null \
             && grep -F 'deploy_prod_repo_root "$install_dir"' setup.sh >/dev/null \
             || { echo "::error::deploy/prod restore must remap repo-root snapshot entries to the new checkout path."; exit 1; }
@@ -1172,7 +1215,13 @@ jobs:
               return 1
             fi
 
-            if printf '%s\n' "$output" | grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)'; then
+            # here-string, not `printf ... | grep -q`: AG-VAL-032 -- grep -q
+            # can exit as soon as it matches while the producer is still
+            # writing, and under this heredoc's own `set -euo pipefail`
+            # (above) that can surface as the producer's SIGPIPE (141)
+            # instead of grep's successful match, silently skipping this
+            # branch and missing a real docker-compose warning.
+            if grep -Eqi '(^|[[:space:]])(warn|warning|level=warning)' <<<"$output"; then
               printf 'docker compose emitted warnings; treating warnings as errors:\n%s\n' "$output"
               return 1
             fi
@@ -1270,11 +1319,11 @@ jobs:
             echo "::error::Broad CONTAINERS=1/POST=1 exposes generic Docker container APIs; use the explicit HAProxy allowlist instead."
             exit 1
           fi
-          # What: Validates the single real HAProxy allowlist script (scripts/docker-socket-proxy.sh).
+          # What: Validates the single real HAProxy allowlist script (scripts/untracked/docker-socket-proxy.sh).
           # Why: The allowlist used to also be duplicated into a dead, unreferenced per-Compose-file anchor;
           # that duplicate is removed, so only the real script is checked now.
           # From: PR #635
-          socket_proxy_script="scripts/docker-socket-proxy.sh"
+          socket_proxy_script="scripts/untracked/docker-socket-proxy.sh"
           grep -Fq 'acl safe_service_restart' "$socket_proxy_script" \
             && grep -Fq 'acl safe_dhcp_action' "$socket_proxy_script" \
             && grep -Fq 'acl safe_probe_action' "$socket_proxy_script" \
@@ -1295,9 +1344,21 @@ jobs:
             }
 
           for compose_file in deploy/prod/docker-compose.yml deploy/quickstart/docker-compose.yml; do
-            grep -Fq 'docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
+            # Anchored on the full "scripts/untracked/docker-socket-proxy.sh"
+            # source prefix, not just the "docker-socket-proxy.sh:/usr/local/bin/..."
+            # mount-target suffix: a target-only match is satisfied equally by a
+            # stale source path (e.g. "./scripts/docker-socket-proxy.sh:...", missing
+            # a required subdirectory prefix) as by the real current one, since only
+            # the right-hand side of the bind-mount ever differs between them. This
+            # exact anchoring gap let a stale bind-mount source path pass this check
+            # for real once (issue #1095): Docker silently creates an empty directory
+            # at a bind-mount source that doesn't exist, so the affected container
+            # failed at runtime with "is a directory" instead of this static check
+            # failing at review time -- a source-path move that isn't reflected in
+            # every consumer is exactly the class this anchoring exists to catch.
+            grep -Fq 'scripts/untracked/docker-socket-proxy.sh:/usr/local/bin/lancache-docker-socket-proxy.sh:ro' "$compose_file" \
               || {
-                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/docker-socket-proxy.sh, not an inline or divergent copy."
+                echo "::error file=${compose_file}::docker-socket-proxy service must mount the one real scripts/untracked/docker-socket-proxy.sh, not an inline, divergent, or stale pre-move copy."
                 exit 1
               }
             # What: Matches only the real top-level YAML key/anchor syntax, not any occurrence of the string.
@@ -1306,7 +1367,7 @@ jobs:
             # From: PR #635
             grep -Eq '^x-docker-socket-proxy-command:' "$compose_file" \
               && {
-                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/docker-socket-proxy.sh without ever being referenced."
+                echo "::error file=${compose_file}::The dead x-docker-socket-proxy-command anchor must not be reintroduced; it duplicated scripts/untracked/docker-socket-proxy.sh without ever being referenced."
                 exit 1
               }
             true
@@ -1729,7 +1790,7 @@ jobs:
             || { echo "::error::shellcheck container must run with the runner UID/GID."; exit 1; }
           grep -F -- "-v \"\$PWD:/work:ro\"" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::shellcheck container must mount the workspace read-only."; exit 1; }
-          grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/select-build-tools-image.sh >/dev/null \
+          grep -F 'lancache-ng-build-tools-validation:${GITHUB_SHA:-local}-${GITHUB_RUN_ID:-local}-${GITHUB_RUN_ATTEMPT:-1}' scripts/untracked/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Compose validation fallback image tag must be scoped to the workflow run and attempt."; exit 1; }
           grep -F -- "--env DOCKER_CONFIG=/tmp/.docker" .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Compose validation must set a writable Docker config directory inside the build-tools container."; exit 1; }
@@ -1841,6 +1902,12 @@ jobs:
             || { echo "::error::Acceleration preflight must use the same platform as the real Docker builds."; exit 1; }
           grep -F 'SCCACHE_SERVER_UDS="$preflight_dir/sccache.sock"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             || { echo "::error::Acceleration preflight must isolate its sccache server from runner-global daemons."; exit 1; }
+          grep -F 'ccache-redis-file:' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F "CCACHE_PREFIX=distcc" .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'remote_storage_write' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'remote_storage_hit' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            && grep -F 'ccache_dir_warm="$preflight_dir/ccache-dir-warm"' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
+            || { echo "::error::Acceleration preflight must validate ccache-over-distcc with a real Redis write then a real Redis read from a fresh local CCACHE_DIR."; exit 1; }
           grep -F -- '--network "$RUST_ACCELERATION_NETWORK"' .github/workflows/build-push.yml >/dev/null \
             && grep -E '^[[:space:]]+network:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'env.RUST_BUILDX_NETWORK' >/dev/null \
             && grep -E '^[[:space:]]+allow:[[:space:]]+' .github/workflows/build-push.yml | grep -F 'network.host' >/dev/null \
@@ -1882,19 +1949,27 @@ jobs:
             || { echo "::error::Docker Rust builds must expose the selected build-tools image as a job output."; exit 1; }
           grep -F "printf 'build_tools_image=ghcr.io/%s/build-tools:latest\\n' \"\$GITHUB_REPOSITORY\" >> \"\$GITHUB_OUTPUT\"" .github/workflows/build-push.yml >/dev/null \
             && { echo "::error::The exported build-tools job output must not be hardcoded without validating that exact pullable image."; exit 1; }
-          grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
+          grep -F 'BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::Downstream build-tools job output must validate the exact pullable GHCR image before exporting it."; exit 1; }
           # What: A positive check (grep for the correct pattern), not a "must NOT contain the old pattern" negative check.
           # Why: The old negative form quoted the forbidden pattern as its own grep -F argument, so the check's own source line was a byte-for-byte match of the thing it claimed to detect as absent -- it would have failed unconditionally, forever, regardless of the real code below.
           # From: Issue #1095 | PR #1532
           grep -F 'validation_build_tools_image="$downstream_build_tools_image"' .github/workflows/build-push.yml >/dev/null \
             || { echo "::error::validate-compose runs on the light tier and must reuse the already-resolved downstream_build_tools_image instead of building a local fallback."; exit 1; }
-          grep -F 'published_image_reference()' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'docker buildx imagetools inspect "$image"' scripts/select-build-tools-image.sh >/dev/null \
-            && grep -F 'published_image_reference "$published_image"' scripts/select-build-tools-image.sh >/dev/null \
+          # AG-CODE-013 (PR #1523): published_image_reference() no longer calls
+          # `docker buildx imagetools inspect` inline -- it delegates to the
+          # shared resolve_manifest_digest() helper in
+          # scripts/lib/ghcr-retry.sh (deduplicated against
+          # scripts/render-full-setup-digest-override.sh's now-removed
+          # identical copy), so this check verifies both ends of that
+          # delegation instead of the old inline call.
+          grep -F 'published_image_reference()' scripts/untracked/select-build-tools-image.sh >/dev/null \
+            && grep -F 'resolve_manifest_digest "$image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
+            && grep -F 'docker buildx imagetools inspect "$image"' scripts/lib/ghcr-retry.sh >/dev/null \
+            && grep -F 'published_image_reference "$published_image"' scripts/untracked/select-build-tools-image.sh >/dev/null \
             || { echo "::error::Build-tools selector must export the smoke-validated published image by multi-arch manifest digest."; exit 1; }
           if awk '
-            index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)\"") { in_resolve = 1 }
+            index($0, "downstream_build_tools_image=\"$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)\"") { in_resolve = 1 }
             in_resolve && index($0, "printf '\''build_tools_image=%s\\n'\'' \"$downstream_build_tools_image\"") { exit found ? 0 : 1 }
             in_resolve && index($0, "docker pull \"$downstream_build_tools_image\"") { found = 1 }
             END { exit found ? 0 : 1 }
@@ -1956,9 +2031,9 @@ jobs:
             && { echo "::error::The build-tools workflow must not keep the stale arm64 scan deferral notice."; exit 1; }
           grep -F 'Build local arm64 scan image' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'BUILD_TOOLS_SCAN_IMAGE_ARM64' .github/workflows/build-tools.yml >/dev/null \
-            && grep -F 'docker run --rm --platform linux/arm64 "${BUILD_TOOLS_SCAN_IMAGE_ARM64:?BUILD_TOOLS_SCAN_IMAGE_ARM64 is required}"' .github/workflows/build-tools.yml >/dev/null \
+            && grep -F 'uses: ./.github/actions/build-tools-candidate-smoke' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'Scan local build-tools arm64 image with Trivy' .github/workflows/build-tools.yml >/dev/null \
-            || { echo "::error::The build-tools workflow must build, smoke-test, and Trivy-scan the local arm64 scan image before publishing."; exit 1; }
+            || { echo "::error::The build-tools workflow must build, smoke-test, and Trivy-scan the local arm64 candidate before publishing."; exit 1; }
           grep -F 'merge-build-tools-manifests' .github/workflows/build-tools.yml >/dev/null \
             && grep -F 'imagetools create' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::The build-tools workflow must merge its amd64/arm64 tags into the real sha-<commit> manifest before promoting mutable tags."; exit 1; }
@@ -2020,7 +2095,9 @@ jobs:
               MERGED_DIGEST=sha256:0000000000000000000000000000000000000000000000000000000000000 \
               bash "$guard_script"
             )"
-            if printf '%s' "$derived_tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+            # here-string per AG-VAL-032, same SIGPIPE-under-pipefail hazard
+            # as the other `printf | grep -q` conversions in this file.
+            if grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$' <<<"$derived_tag"; then
               echo "::error::build-tools.yml's branch-tag derivation must never be able to emit a release-shaped tag; ref '$candidate_ref' produced '$derived_tag'."
               exit 1
             fi
@@ -2034,11 +2111,11 @@ jobs:
             echo "::error::Rust service Dockerfiles must not use scheduler-only args or hardcoded CARGO_BUILD_JOBS values."
             exit 1
           fi
-          if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh; then
+          if grep -RInE 'cargo install sccache .*--locked|cargo install .*--locked .*sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts; then
             echo "::error::sccache source installs must stay version-pinned but not use --locked while the pinned upstream lockfile emits yanked-crate warnings."
             exit 1
           fi
-          if grep -RIn 'cargo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts/*.sh | grep -v -- '--no-default-features --features redis,dist-client'; then
+          if grep -RIn 'cargo install sccache' services/*/Dockerfile tools/build-tools/Dockerfile scripts | grep -v -- '--no-default-features --features redis,dist-client'; then
             echo "::error::sccache source installs must use the minimal Redis plus dist-client feature set."
             exit 1
           fi
@@ -2215,9 +2292,9 @@ jobs:
             || { echo "::error::README must document latest as the normal install default."; exit 1; }
           grep -F 'fresh installs use `LANCACHE_IMAGE_CHANNEL=nightly` by default pre-1.0' docs/release-versioning.md >/dev/null \
             || { echo "::error::Release docs must document nightly as the pre-1.0 default (see #1068 item 1 / #1120)."; exit 1; }
-          grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/select-build-tools-image.sh >/dev/null \
+          grep -F 'docker build --pull -t "$fallback_image" "$build_tools_context" >&2' scripts/untracked/select-build-tools-image.sh >/dev/null \
             || { echo "::error::build-tools selector must keep Docker build output out of stdout."; exit 1; }
-          bash scripts/validate-stack-images.sh
+          bash scripts/untracked/validate-stack-images.sh
           VALIDATE_COMPOSE_IMAGE_CHANNEL_RESOLUTION
 
       # What: Deliberately its own step, not appended to "Validate compose files" above; do not merge back without re-confirming actionlint still completes.
@@ -2289,10 +2366,11 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-naming-consistency.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-naming-consistency.sh
 
       - name: Check workflow service lists stay in sync (issue #822)
-        # What: Checks this file's own 4 hardcoded `services=(...)`/`full_setup_services=(...)` copies, plus gc-pr-staging-images.yml, backfill-stack-latest.yml, and scripts/ensure-pr-staging-images.sh; runs in the build-tools container because it needs GNU grep -P, same as the naming-consistency guard above.
+        # What: Checks this file's own 4 hardcoded `services=(...)`/`full_setup_services=(...)` copies, plus gc-pr-staging-images.yml, backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh; runs in the build-tools container because it needs GNU grep -P, same as the naming-consistency guard above.
         # Why: Guards against a service silently dropping out of manifest merge, channel promotion, release, PR-staging-tag garbage collection, or latest-channel backfill when a new one is added to the build matrix but one of these hardcoded copies is missed.
         # From: Issue #1095 | PR #1532
         run: |
@@ -2303,10 +2381,11 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-workflow-service-lists.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-workflow-service-lists.sh
 
       - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
-        # What: Fails closed if the committed OpenVEX document (vex.openvex.json) drifts from .trivyignore.yaml; runs in the build-tools container because scripts/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
+        # What: Fails closed if the committed OpenVEX document (vex.openvex.json) drifts from .trivyignore.yaml; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
         # Why: OSPS-VM-04.02 requires vex.openvex.json to be regenerated from .trivyignore.yaml whenever the accepted-vulnerability list changes, so a PR editing .trivyignore.yaml without regenerating it cannot ship a stale supply-chain artifact.
         # From: Issue #1095 | PR #1532
         run: |
@@ -2317,7 +2396,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-vex-drift.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-vex-drift.sh
 
       - name: Check netdata's vendored curl pin against issue #1304's tracked CVEs (PR #1352 tracking mechanism)
         # What: Reads netdata's own upstream build recipe for the pinned NETDATA_VERSION and fails if the vendored curl is still inside the affected range for 7 tracked CVE IDs; needs real network access to fetch that recipe, unlike the other checks in this job.
@@ -2331,7 +2411,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-netdata-curl-pin.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/untracked/check-netdata-curl-pin.sh
 
       - name: Check config-writer idempotence test coverage (#640)
         run: |
@@ -2342,7 +2423,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-idempotence-test-coverage.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-idempotence-test-coverage.sh
 
       - name: Check bats path-filter coverage (build-tools.yml vs. real bats dependencies, issue #879)
         # What: Checks that every repo file a tests/bats/*.bats suite sources/reads is also listed in build-tools.yml's on.push.paths/on.pull_request.paths; runs in the build-tools container for the same real bash/grep/awk/sed semantics the other check-*.sh guards above require.
@@ -2356,10 +2438,11 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-bats-path-filter-coverage.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-bats-path-filter-coverage.sh
 
       - name: Check setup.sh/simulation-script prompt drift (issue #1176)
-        # What: scripts/check-setup-prompt-drift.sh fails closed whenever an unconditional wizard prompt in setup.sh's interactive install wizard is missing a matching expect_prompt answer in scripts/setup-cli-simulation.sh or scripts/syslog-forwarding-simulation.sh, or a simulation script's pattern no longer matches any real prompt.
+        # What: scripts/tracked/check-setup-prompt-drift.sh fails closed whenever an unconditional wizard prompt in setup.sh's interactive install wizard is missing a matching expect_prompt answer in scripts/untracked/simulations/setup-cli-simulation.sh or scripts/untracked/simulations/syslog-forwarding-simulation.sh, or a simulation script's pattern no longer matches any real prompt.
         # Why: These two expect-driven simulation scripts hand-encode setup.sh's prompt sequence by convention with nothing checking they stay in sync; a new unconditional prompt added without updating either script hung both until timeout, discovered only because those jobs happened to run against an unrelated PR.
         # From: Issue #1095 | PR #1532
         run: |
@@ -2370,10 +2453,11 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-setup-prompt-drift.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-setup-prompt-drift.sh
 
       - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
-        # What: scripts/check-proxy-cache-env-doc-drift.sh fails closed whenever a documented CACHE_* default in docs/architecture-ng.md's nginx cache-configuration table disagrees with config/prod/proxy.env's real value.
+        # What: scripts/untracked/check-proxy-cache-env-doc-drift.sh fails closed whenever a documented CACHE_* default in docs/architecture-ng.md's nginx cache-configuration table disagrees with config/prod/proxy.env's real value.
         # Why: That table hand-duplicates each CACHE_* variable's default as a literal string with nothing checking it against the real shipped default; CACHE_MEM_MB's documented default was found stale for roughly 7 weeks after the real default changed, an unnoticed drift class this guard closes per AG-VAL-029.
         # From: Issue #1095 | PR #1532, AG-VAL-029
         run: |
@@ -2384,7 +2468,8 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-proxy-cache-env-doc-drift.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/untracked/check-proxy-cache-env-doc-drift.sh
 
       - name: Check logging matrix (docs/architecture-ng.md, issue #633)
         # What: Reuses the "Validate compose files" step's exact dummy env values, kept as its own separate `env:` block rather than merged into that step.
@@ -2467,7 +2552,8 @@ jobs:
             --env SSL_CACHE_MAX_GB \
             --env STANDARD_CACHE_MAX_GB \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
-            bash scripts/check-logging-matrix.sh
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/tracked/check-logging-matrix.sh
 
       - name: Remove fallback compose validation image
         if: always()
@@ -2480,19 +2566,8 @@ jobs:
               ;;
           esac
 
-  # A fixed validation subnet collided repeatedly across different, concurrent workflow
-  # runs sharing one of the 3 physical self-hosted runner hosts (#623) -- `needs:` only
-  # serializes jobs within one run. Deriving the subnet from this run's own id/attempt
-  # gives every run its own subnet, so two runs on the same host (almost) never collide.
-  #
-  # Deliberately unconditional (no `needs`/`if` gating on detect-changes): detect-changes
-  # itself only runs on pull_request, so on push it is skipped -- and a job that `needs`
-  # a skipped job is itself skipped by default. full-setup-validate below uses
-  # `always()` to tolerate its own skipped/failed `needs`, so gating this job the same
-  # way would make it skip on every push while full-setup-validate still ran, silently
-  # falling back to the old fixed subnet on every master merge -- exactly the bug this
-  # fixes. Running unconditionally costs a few seconds on the rare PR that doesn't touch
-  # deploy/ or the CI contract, far cheaper than that.
+  # Derive a per-run validation subnet candidate; actual collision-safe reservation still happens in the stack-start helper.
+  # This job stays unconditional because full-setup validation also runs on push.
   compute-validation-network:
     name: derive per-run validation subnet
     runs-on: [self-hosted, linux, lancache, lancache-light]
@@ -2519,25 +2594,15 @@ jobs:
 
   full-setup-validate:
     name: validate full-setup image
-    # On a pull_request event, `promote` never runs at all -- there is no channel image
-    # for THIS PR to wait for. Instead this job waits directly for `merge-manifests`,
-    # because (see #626) that job is where a same-repo PR's per-arch staging legs get
-    # combined into the real pr-<N>-sha-<short> multi-platform tag this job actually
-    # pulls. This job MUST NOT start before merge-manifests finishes: build/build-arm64
-    # wait on several lighter jobs and then compile Rust, so they (and merge-manifests
-    # after them) are much slower than the lightweight `detect-changes` job this used to
-    # depend on alone -- depending on only detect-changes let this job race ahead, find no
-    # staging tags yet, and silently fall back to stale base-channel content, reproducing
-    # #626's exact bug. On push events, this job still waits for `promote` so it validates
-    # the freshly-promoted channel state instead of racing ahead of it or checking a stale
-    # channel tag.
-    needs: [detect-changes, merge-manifests, promote, compute-validation-network]
+    # Wait for merge-manifests so PR validation consumes this PR staging manifest, not stale base-channel content.
+    # Trusted non-PR validation likewise waits for the exact merged sha-* candidate before promotion.
+    needs: [detect-changes, merge-manifests, compute-validation-network, validate-compose]
     if: >-
       ${{
         always() &&
         (
           (github.event_name == 'pull_request' && needs['merge-manifests'].result == 'success') ||
-          (github.event_name != 'pull_request' && needs.promote.result == 'success')
+          (github.event_name != 'pull_request' && needs['merge-manifests'].result == 'success')
         ) &&
         (
           github.event_name != 'pull_request' ||
@@ -2591,9 +2656,15 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
           ACTOR: ${{ github.actor }}
           HEAD_REPO: ${{ github.event.pull_request.head.repo.full_name }}
-          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # Calls scripts/lib/validation-image-tag.sh's own functions instead of reimplementing
           # the same channel/pr-staging-available/tag decisions inline a second time (issue #822
@@ -2615,6 +2686,14 @@ jobs:
           # this job only ever runs from push/pull_request -- so the empty
           # dispatch_tag argument is never read.
           tag="$(vit_resolve_tag "$EVENT_NAME" "$BASE_REF" "$PR_NUMBER" "$BUILD_SHA" "$ACTOR" "$HEAD_REPO" "$REPOSITORY" "")"
+
+          # CI 1.1: a trusted push validates the immutable commit candidate
+          # before public promotion. PRs keep their unique staging tag and
+          # immediately pin every service behind it to a digest below.
+          if [[ "$EVENT_NAME" != "pull_request" ]]; then
+            tag="sha-$(dmeta_short_sha "$BUILD_SHA")"
+            echo "Validating pre-promotion candidate set '$tag'."
+          fi
 
           if [[ "$pr_staging_available" == "true" ]]; then
             # #1254/#1255: any untouched service is backfilled from this PR's
@@ -2648,21 +2727,11 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # A service detect-changes says THIS PR touched (or any service other than
-      # build-tools, if the PR changed a workflow/CI-contract file -- mirrors build/
-      # build-arm64's own should-build override) must already have a staging image by the
-      # time this runs: full-setup-validate now waits for merge-manifests specifically so
-      # that's true. If it's missing anyway -- build/build-arm64 actually failed to push it,
-      # or imagetools inspect hit a transient registry error -- silently copying the PR base
-      # commit's own per-commit image into that service's PR tag would make this job green
-      # while testing exactly the stale image #626 exists to stop testing, just now hidden
-      # behind a tag name that LOOKS PR-specific. Fail loudly instead; only a genuinely
-      # untouched service gets the base-commit back-fill (#1254/#1255: sourced from the PR
-      # base commit's own durable sha-<short> tag, not a mutable channel).
+      # Touched services must have a PR staging image after merge-manifests; never hide a missing candidate with base-content fallback.
+      # Only genuinely untouched services may use the verified base-commit backfill path.
       - name: Ensure PR staging tags exist for full-setup services
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
-          REPOSITORY: ${{ github.repository }}
           PR_TAG: ${{ steps.channel.outputs.tag }}
           # #808/#1254/#1255: this PR's own base commit. Needed both to prove the back-fill
           # source image was actually built from it (or later) before backfilling an untouched
@@ -2688,6 +2757,13 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -2720,9 +2796,9 @@ jobs:
           )
 
           # Maps this step's own matrix-service names to
-          # scripts/classify-image-impact.sh's output keys, for
+          # scripts/untracked/classify-image-impact.sh's output keys, for
           # saf_resolve_untouched_backfill_source's service-scoped check
-          # below -- see scripts/ensure-pr-staging-images.sh's own
+          # below -- see scripts/untracked/ensure-pr-staging-images.sh's own
           # classify_key_map for the full reasoning.
           declare -A classify_key_map=(
             [proxy]="proxy"
@@ -2769,7 +2845,7 @@ jobs:
             # from base.sha or later -- see scripts/lib/staging-image-freshness.sh for the
             # mechanism, and scripts/lib/staging-ancestor-fallback.sh for the full resolution
             # sequence (exact-BASE_SHA wait, then the ancestor fallback when that wait genuinely
-            # cannot succeed) this step now shares with scripts/ensure-pr-staging-images.sh
+            # cannot succeed) this step now shares with scripts/untracked/ensure-pr-staging-images.sh
             # instead of carrying an independent copy of the same logic. 900/1200 (BASE_SHA's own
             # wait), 300/600 (ancestor-candidate checks) and the "50" search depth intentionally
             # match that script's own BASE_FRESHNESS_POLL_*/ANCESTOR_FRESHNESS_POLL_*/
@@ -2789,44 +2865,98 @@ jobs:
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$resolved_source"
           done
 
-      # This is the last step in the job that uses the builder set up above --
-      # "Build full-setup validation image" below is a plain `docker build`,
-      # not buildx. Same `pr-staging-available` gate as the setup step itself,
-      # since there is nothing to remove when that step never ran.
+      # What: renders the full-setup compose override from immutable OCI digests
+      # (AG-CODE-013 consolidation, PR #1523; previously a separate
+      # scripts/render-full-setup-digest-override.sh, this workflow's only
+      # caller). Digests already handed off by merge-manifests are consumed
+      # directly; only a service without a producer output (e.g. an untouched
+      # PR backfill) is resolved once from its event-unique staging tag.
+      # From: PR #1523
+      - name: Pin full-setup service identities to immutable digests
+        id: pin-full-setup-digests
+        env:
+          REPOSITORY: ${{ github.repository }}
+          IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+          PROXY_DIGEST: ${{ needs['merge-manifests'].outputs.proxy_digest }}
+          DNS_DIGEST: ${{ needs['merge-manifests'].outputs.dns_digest }}
+          WATCHDOG_DIGEST: ${{ needs['merge-manifests'].outputs.watchdog_digest }}
+          UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
+          BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          # shellcheck source=scripts/lib/ghcr-retry.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+
+          resolve_digest() {
+            local service=$1 supplied=$2 image digest
+            if [[ "$supplied" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
+              printf '%s\n' "$supplied"
+              return 0
+            fi
+            image="ghcr.io/${REPOSITORY}/${service}:${IMAGE_TAG}"
+            echo "::notice::No producer digest was exported for $service; resolving $image once and pinning the result for this validation run." >&2
+            digest="$(resolve_manifest_digest "$image" "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}")" \
+              || { echo "::error::Could not resolve immutable digest for $image." >&2; exit 1; }
+            printf '%s\n' "$digest"
+          }
+
+          proxy_digest="$(resolve_digest proxy "${PROXY_DIGEST:-}")"
+          dns_digest="$(resolve_digest dns "${DNS_DIGEST:-}")"
+          watchdog_digest="$(resolve_digest watchdog "${WATCHDOG_DIGEST:-}")"
+          ui_digest="$(resolve_digest ui "${UI_DIGEST:-}")"
+          build_tools_digest="$(resolve_digest build-tools "${BUILD_TOOLS_DIGEST:-}")"
+
+          override_file=".ci-exact-digests.yml"
+          mkdir -p "$(dirname "deploy/full-setup/${override_file}")"
+          cat > "deploy/full-setup/${override_file}" <<YAML
+          # Generated by build-push.yml's "Pin full-setup service identities to
+          # immutable digests" step for one CI run.
+          services:
+            proxy:
+              image: "ghcr.io/${REPOSITORY}/proxy@${proxy_digest}"
+            dns-standard:
+              image: "ghcr.io/${REPOSITORY}/dns@${dns_digest}"
+            dns-ssl:
+              image: "ghcr.io/${REPOSITORY}/dns@${dns_digest}"
+            watchdog:
+              image: "ghcr.io/${REPOSITORY}/watchdog@${watchdog_digest}"
+            retention:
+              image: "ghcr.io/${REPOSITORY}/watchdog@${watchdog_digest}"
+            ui:
+              image: "ghcr.io/${REPOSITORY}/ui@${ui_digest}"
+          YAML
+
+          client_tools_ref="ghcr.io/${REPOSITORY}/build-tools@${build_tools_digest}"
+          printf 'FULL_SETUP_COMPOSE_OVERRIDE=%s\n' "$override_file" >> "$GITHUB_ENV"
+          printf 'FULL_SETUP_CLIENT_TOOLS_IMAGE=%s\n' "$client_tools_ref" >> "$GITHUB_ENV"
       - name: Remove buildx builder
         if: ${{ always() && steps.channel.outputs.pr-staging-available == 'true' }}
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      - name: Build full-setup validation image
-        env:
-          IMAGE_TAG: ${{ steps.channel.outputs.tag }}
-        run: |
-          set -euo pipefail
-
-          docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
-            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
-            --build-arg LANCACHE_IMAGE_TAG="$IMAGE_TAG" \
-            -t lancache-ng-full-setup:validation \
-            deploy/full-setup
-
       - name: Validate compose configuration
         env:
+          BUILD_TOOLS_IMAGE: ${{ needs['validate-compose'].outputs.build_tools_image }}
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
           LANCACHE_IMAGE_TAG: ${{ steps.channel.outputs.tag }}
+          FULL_SETUP_COMPOSE_OVERRIDE: ${{ env.FULL_SETUP_COMPOSE_OVERRIDE }}
         run: |
           set -euo pipefail
+          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
 
+          # Reuse validate-compose's already smoke-tested, digest-qualified CI toolchain.
           docker run --rm \
             -v "$PWD/deploy/full-setup:/validation:ro" \
             -w /validation \
             --env LANCACHE_IMAGE_REGISTRY \
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
-            docker:latest \
-            docker compose -f docker-compose.yml config >/dev/null
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            docker compose -f docker-compose.yml -f "${FULL_SETUP_COMPOSE_OVERRIDE:?FULL_SETUP_COMPOSE_OVERRIDE is required}" config >/dev/null
 
       # What: Reserves the validation subnet via a host-local `flock` (scripts/lib/reserve-validation-subnet.sh) with a retry-on-collision loop, then starts the stack; static config validation above only checks YAML/Compose structure, not runtime health (see "Wait for the stack to stabilize" below).
       # Why: compute-validation-network's per-run hash derivation alone has an unlocked check-then-create race between two genuinely concurrent runs on the same self-hosted host -- both could derive the same slot, pass the old `docker network ls` pre-flight (which only catches a leftover network, not a concurrent run), then race the kernel to create the bridge with only one winning; the flock idiom mirrors the one already used for another shared-per-host resource (build-tools.yml's Buildx cache lock).
@@ -2835,6 +2965,7 @@ jobs:
         uses: ./.github/actions/reserve-validation-subnet-stack
         with:
           image-tag: ${{ steps.channel.outputs.tag }}
+          compose-override-file: ${{ env.FULL_SETUP_COMPOSE_OVERRIDE }}
           ghcr-retry-username: ${{ github.actor }}
           ghcr-retry-password: ${{ secrets.GITHUB_TOKEN }}
 
@@ -2857,10 +2988,18 @@ jobs:
 
       - name: Run client simulation against the full-setup stack
         env:
-          FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ steps.channel.outputs.tag }}
+          CHANNEL_TAG: ${{ steps.channel.outputs.tag }}
         run: |
           set -euo pipefail
-          scripts/full-setup-client-simulation.sh
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: builds the image ref from the single declared GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          FULL_SETUP_CLIENT_TOOLS_IMAGE="ghcr.io/$(dmeta_ghcr_repo)/build-tools:${CHANNEL_TAG}"
+          export FULL_SETUP_CLIENT_TOOLS_IMAGE
+          scripts/untracked/simulations/full-setup-client-simulation.sh
 
       - name: Tear down full-setup validation stack
         if: always()
@@ -2897,10 +3036,9 @@ jobs:
             kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
           fi
 
-      - name: Clean up image
+      - name: Clean up exact-digest override
         if: always()
-        run: |
-          docker rmi lancache-ng-full-setup:validation || true
+        run: rm -f deploy/full-setup/.ci-exact-digests.yml
 
   dns_rust_quality:
     # DNS Rust quality is scoped by detect-changes for PR speed, but workflow changes
@@ -3356,7 +3494,7 @@ jobs:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
         run: |
           set -euo pipefail
-          image="$(bash scripts/select-build-tools-image.sh)"
+          image="$(bash scripts/untracked/select-build-tools-image.sh)"
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
       # Coverage output must land on a writable host path: the repo checkout
       # itself is bind-mounted read-only into the build-tools container below,
@@ -3378,6 +3516,7 @@ jobs:
             -v "$PWD/coverage-dns:/coverage-dns" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 1800 \
             bash -c 'set -euo pipefail
               cargo tarpaulin \
                 --engine llvm \
@@ -3399,6 +3538,7 @@ jobs:
             -v "$PWD/coverage-ui:/coverage-ui" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 1800 \
             bash -c 'set -euo pipefail
               cargo tarpaulin \
                 --engine llvm \
@@ -3420,6 +3560,7 @@ jobs:
             -v "$PWD/coverage-badge:/coverage-badge" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
             bash -c 'set -euo pipefail
 
               # Extract coverage percentages from JSON reports inside the
@@ -3796,6 +3937,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -3864,6 +4006,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -3934,6 +4077,7 @@ jobs:
             -v "$PWD:/work:ro" \
             -w /work \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 900 \
             bash -c 'set -euo pipefail
               audit_log="$(mktemp)"
               trap '"'"'rm -f "$audit_log"'"'"' EXIT
@@ -4291,7 +4435,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Determine per-service publish scan reuse
-        # What: Reads determine-push-reuse-scope's `reuse_<service>` output for every matrix.service, the same already-verified three-part decision (channel image revision label + real git ancestry + a real content diff via scripts/classify-image-impact.sh) build/build-arm64's own retag-vs-rebuild decision trusts, instead of a second, independently-computed check; fails safe to a full scan whenever determine-push-reuse-scope did not run or did not succeed.
+        # What: Reads determine-push-reuse-scope's `reuse_<service>` output for every matrix.service, the same already-verified three-part decision (channel image revision label + real git ancestry + a real content diff via scripts/untracked/classify-image-impact.sh) build/build-arm64's own retag-vs-rebuild decision trusts, instead of a second, independently-computed check; fails safe to a full scan whenever determine-push-reuse-scope did not run or did not succeed.
         # Why: A narrower, independently-computed check could say "unchanged" while the wider one correctly falls back to a real rebuild, and if the two disagreed, a freshly rebuilt-and-published image could go completely unscanned this run -- sharing one decision makes that disagreement structurally impossible, since should-scan and should-build both derive from the identical per-service output and neither can go false while the other stays true.
         # From: Issue #1095 | PR #1532
         id: push-scan-changes
@@ -4382,9 +4526,13 @@ jobs:
         run: |
           set -euo pipefail
 
-          # What: Mirrors "Determine per-service publish scan reuse" above's own case mapping.
-          # Why: Single source for which digest_* output belongs to which matrix.service.
-          # From: PR #1499
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          repository="$(dmeta_ghcr_repo)"
           case "$MATRIX_SERVICE" in
             proxy) digest="$DIGEST_PROXY" ;;
             dns) digest="$DIGEST_DNS" ;;
@@ -4401,7 +4549,7 @@ jobs:
             echo "::error::determine-push-reuse-scope reported reuse=true for $MATRIX_SERVICE but did not export a pinned digest -- refusing to scan an unverified reference." >&2
             exit 1
           fi
-          image="ghcr.io/${{ github.repository }}/${MATRIX_SERVICE}@${digest}"
+          image="ghcr.io/${repository}/${MATRIX_SERVICE}@${digest}"
           echo "::notice::$MATRIX_SERVICE is unchanged on this push; scanning $image (the exact digest determine-push-reuse-scope already pinned and verified) instead of rebuilding it."
           echo "image=$image" >> "$GITHUB_OUTPUT"
           echo "digest=$digest" >> "$GITHUB_OUTPUT"
@@ -4437,7 +4585,7 @@ jobs:
 
   determine-push-reuse-scope:
     # What: Decides once per push (not once per build/build-arm64/per-arch matrix row) whether each allowlisted product service can safely retag its already-published channel image instead of paying for a real rebuild+rescan; build/build-arm64 just read this job's plain true/false output.
-    # Why: The verification (ancestry check plus a real content diff via scripts/classify-image-impact.sh from the channel image's own build commit) needs full git history, which build/build-arm64's own shallow checkouts don't have -- running it once here, in the one job in this push path with full history, lets both jobs agree without either needing its own deep checkout or duplicated per-arch logic; see scripts/lib/push-reuse.sh's own header comment for why a channel image (not the immediately-preceding push's predecessor commit) is the reuse source, and why ancestry alone without the content diff is not sufficient evidence of "safe to reuse."
+    # Why: The verification (ancestry check plus a real content diff via scripts/untracked/classify-image-impact.sh from the channel image's own build commit) needs full git history, which build/build-arm64's own shallow checkouts don't have -- running it once here, in the one job in this push path with full history, lets both jobs agree without either needing its own deep checkout or duplicated per-arch logic; see scripts/lib/push-reuse.sh's own header comment for why a channel image (not the immediately-preceding push's predecessor commit) is the reuse source, and why ancestry alone without the content diff is not sufficient evidence of "safe to reuse."
     # From: Issue #1095 | PR #1532
     name: determine push reuse scope (Step 4)
     needs: detect-changes
@@ -4473,7 +4621,7 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # #1095 F-21: the exact immutable manifest-list digest this job pinned
+      # Issue #1095: the exact immutable manifest-list digest this job pinned
       # AND verified reuse safety against, for every service that came back
       # reuse=true -- empty for a service that stayed reuse=false. Every
       # downstream consumer (container-scan, build, build-arm64) reads this
@@ -4523,7 +4671,6 @@ jobs:
       - name: Decide per-service push reuse
         id: decide
         env:
-          REPOSITORY: ${{ github.repository }}
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
@@ -4535,13 +4682,20 @@ jobs:
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
-          # #1095 F-21: needed both for push_reuse_decide's own sif_image_revision
+          # Issue #1095: needed both for push_reuse_decide's own sif_image_revision
           # call (now ghcr_retry-wrapped, see scripts/lib/staging-image-freshness.sh)
           # and for this step's own digest-pinning read below.
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -4553,7 +4707,7 @@ jobs:
           # latest, everything else -> nightly) with nothing build-tools-specific in its actual
           # logic despite this file's name -- reused as-is here rather than duplicating the
           # same mapping a second time (the "single-source CI logic, no silent second copy"
-          # concern issue #1095 itself names as a risk for this refactor).
+          # concern issue #1095 itself names as a risk for this kind of extraction).
           # shellcheck source=scripts/lib/build-tools-channel.sh
           source "$GITHUB_WORKSPACE/scripts/lib/build-tools-channel.sh"
 
@@ -4634,11 +4788,109 @@ jobs:
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
+  # What: computes build/build-arm64's shared should-build admission once,
+  #   exposed as a plain output both jobs read.
+  # Why: the two jobs previously each duplicated the same boolean `if:`
+  #   byte-for-byte; a fix to one copy could silently leave the other diverged.
+  # From: Issue #1095 (G7) | PR #1503
+  determine-build-admission:
+    name: determine build/build-arm64 admission (G7)
+    needs:
+      - shellcheck
+      - validate-compose
+      - ci_scope_policy
+      - line-endings
+      - container-scan
+      - file-headers
+      - compose-healthchecks
+      - pr-template-check
+      - pr-tracking-metadata-check
+      - pr-title-convention-check
+    # What: never resolves to "skipped" (if: always(), no other condition).
+    # Why: avoids the implicit-success()-over-a-skippable-dependency hazard
+    #   noted on container-scan/promote's own `if:` blocks in this file.
+    # From: Issue #1095 (G7) | PR #1503
+    if: always()
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    timeout-minutes: 15
+    outputs:
+      admitted: ${{ steps.decide.outputs.admitted }}
+    steps:
+      - name: Decide whether build/build-arm64 may run
+        id: decide
+        env:
+          # What: passes each dependency's result as a plain env string.
+          # Why: a malformed value fails the `case` match below loudly
+          #   instead of silently passing a raw `[[ ... ]]` expansion.
+          # From: Issue #1095 (G7) | PR #1503
+          SHELLCHECK_RESULT: ${{ needs.shellcheck.result }}
+          VALIDATE_COMPOSE_RESULT: ${{ needs['validate-compose'].result }}
+          CI_SCOPE_POLICY_RESULT: ${{ needs.ci_scope_policy.result }}
+          LINE_ENDINGS_RESULT: ${{ needs['line-endings'].result }}
+          CONTAINER_SCAN_RESULT: ${{ needs['container-scan'].result }}
+          FILE_HEADERS_RESULT: ${{ needs['file-headers'].result }}
+          COMPOSE_HEALTHCHECKS_RESULT: ${{ needs['compose-healthchecks'].result }}
+          PR_TEMPLATE_CHECK_RESULT: ${{ needs['pr-template-check'].result }}
+          PR_TRACKING_METADATA_CHECK_RESULT: ${{ needs['pr-tracking-metadata-check'].result }}
+          PR_TITLE_CONVENTION_CHECK_RESULT: ${{ needs['pr-title-convention-check'].result }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_ACTION: ${{ github.event.action }}
+        run: |
+          set -euo pipefail
+
+          is_success() { [ "$1" = "success" ]; }
+
+          admitted=true
+
+          # What: Step 1 -- gates required regardless of event type.
+          is_success "$SHELLCHECK_RESULT" || admitted=false
+          is_success "$VALIDATE_COMPOSE_RESULT" || admitted=false
+          is_success "$CI_SCOPE_POLICY_RESULT" || admitted=false
+          is_success "$LINE_ENDINGS_RESULT" || admitted=false
+
+          # What: Step 2 -- rejects a metadata-only pull_request event.
+          # Why: labeled/unlabeled/milestoned/demilestoned never carry a new
+          #   commit, so there is no new image content to build.
+          # From: Issue #1095 (G7) | PR #1503
+          case "$EVENT_NAME" in
+            pull_request)
+              case "$EVENT_ACTION" in
+                labeled | unlabeled | milestoned | demilestoned)
+                  admitted=false
+                  ;;
+              esac
+              ;;
+          esac
+
+          # What: Step 3 -- pull_request-only gates, skipped otherwise.
+          # Why: these jobs only run on pull_request; a plain is_success check
+          #   would fail closed on any other event where they never ran.
+          # From: Issue #1095 (G7) | PR #1503
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            is_success "$FILE_HEADERS_RESULT" || admitted=false
+            is_success "$COMPOSE_HEALTHCHECKS_RESULT" || admitted=false
+            is_success "$PR_TEMPLATE_CHECK_RESULT" || admitted=false
+            is_success "$PR_TRACKING_METADATA_CHECK_RESULT" || admitted=false
+            is_success "$PR_TITLE_CONVENTION_CHECK_RESULT" || admitted=false
+          else
+            # What: container-scan gate, required only off pull_request.
+            # Why: mirrors build's own if: block (container-scan is the
+            #   inverse shape of the pull_request-only gates above).
+            # From: Issue #1095 (G7) | PR #1503
+            is_success "$CONTAINER_SCAN_RESULT" || admitted=false
+          fi
+
+          echo "admitted=$admitted" >> "$GITHUB_OUTPUT"
+
   build:
     # What: The only job that publishes service sha-* images; waits for lightweight validation/policy checks/trusted-ref vulnerability scans first, then scans every service's own exact pushed digest with Trivy before attestation/promotion can proceed. Also skips on a metadata-only pull_request event.
-    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push -- a prior run already published the sha-*/pr-<N>-sha-<short> tags for this exact commit, and merge-manifests/full-setup-validate downstream already tolerate a skipped build/build-arm64 cleanly via their own `needs.build.result == 'success'` gates.
-    # From: Issue #1095 | PR #1532
+    # Why: Stays on self-hosted runners because the heavy Rust/image path depends on the shared build-tools image, sccache/distcc acceleration, and registry credentials; a metadata-only event never carries a new commit, so there is no new image content to build or push. Issue #1095 G7: the admission decision itself is now computed once by determine-build-admission and read as a plain output, replacing a previously byte-identically-duplicated boolean shared with build-arm64.
+    # From: Issue #1095 | PR #1499 | PR #1503 | PR #1532
+    # What: needs: still lists every check job below even though if: no longer reads most of their .result directly.
+    # Why: several of their outputs (e.g. validate-compose's build_tools_image) are consumed elsewhere in this job, and Actions only exposes outputs to jobs listed in needs:.
+    # From: Issue #1095 (G7) | PR #1503
     needs:
+      - determine-build-admission
       - shellcheck
       - validate-compose
       - container-scan
@@ -4652,24 +4904,7 @@ jobs:
       - pr-title-convention-check
       - line-endings
       - push-supersession-check
-    if: >-
-      ${{
-        always() &&
-        needs.shellcheck.result == 'success' &&
-        needs['validate-compose'].result == 'success' &&
-        needs.ci_scope_policy.result == 'success' &&
-        needs['line-endings'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
-      }}
+    if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
     # What: Selects the runner per matrix service via `${{ fromJSON(matrix.runner) }}`, mirroring container-scan's own pattern.
     # Why: An AG-CI-002 measured exception; see this job's matrix comment above for which services route to light vs heavy and why.
     # From: Issue #1095 | PR #1532
@@ -4697,68 +4932,67 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
+        include: &normal-build-services
           # Runner tiers below (issue #1095, AG-CI-002 measured exception, maintainer
-          # decision 2026-08-06) are this rule's canonical copy: proxy/dhcp-proxy/
-          # watchdog/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles
-          # (precompiled package install or a COPY --from an upstream image only,
-          # confirmed by direct inspection, not assumed from the service name) and
-          # measured well below dns/ui/build-tools in a real full-rebuild run -- see issue
-          # #1095's comment thread for the numbers. dns/ui (Rust via ${BUILD_TOOLS_IMAGE})
-          # and build-tools (Go+Rust) stay heavy. watchdog is scoped to its CURRENT
-          # Dockerfile only: issue #842's planned Rust rewrite must trigger a fresh
-          # re-evaluation, not a grandfathered stay on light. container-scan's own matrix
-          # mirrors this split (kept in sync manually) even though it no longer builds
-          # anything itself (G8 fix) -- see that job's own comment for why it still cares.
+          # decision 2026-08-06): proxy/dhcp-proxy/watchdog/dhcp/syslog/ntp have no real
+          # compile/link step in their Dockerfiles (precompiled package install or a
+          # COPY --from an upstream image only, confirmed by direct inspection, not
+          # assumed from the service name) and measured well below dns/ui/build-tools in
+          # a real full-rebuild run -- see issue #1095's comment thread for the numbers.
+          # dns/ui (Rust via ${BUILD_TOOLS_IMAGE}) and build-tools (Go+Rust) stay heavy.
+          # watchdog is scoped to its CURRENT Dockerfile only: issue #842's planned Rust
+          # rewrite must trigger a fresh re-evaluation, not a grandfathered stay on light.
+          # CI 1.1: this is now the single canonical definition -- build-arm64's own
+          # matrix below reuses it via the &normal-build-services/*normal-build-services
+          # YAML anchor instead of a hand-kept duplicate that could silently drift.
+
           - service: proxy
             context: services/proxy
-            # cdn-domains.txt lives in services/dns/, outside this image's own
-            # build context — see services/proxy/Dockerfile's COPY --from
-            # comment for why a named additional context is needed here.
+            # Proxy needs DNS domain data that lives outside its own build context.
             build_contexts: dns-domains=services/dns
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
+            description: &ci-description-proxy "nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dns
             context: services/dns
             build_contexts: ""
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
+            description: &ci-description-dns "PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: watchdog
             context: services/watchdog
             build_contexts: ""
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
+            description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp
             context: services/dhcp
             build_contexts: ""
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
+            description: &ci-description-dhcp "Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: dhcp-proxy
             context: services/dhcp-proxy
             build_contexts: ""
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
+            description: &ci-description-dhcp-proxy "dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ntp
             context: services/ntp
             build_contexts: ""
-            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
+            description: &ci-description-ntp "chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: syslog
             context: services/syslog
             build_contexts: ""
-            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
+            description: &ci-description-syslog "Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
             runner: '["self-hosted", "linux", "lancache", "lancache-light"]'
           - service: ui
             context: services/ui
             build_contexts: ""
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
+            description: &ci-description-ui "lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management."
             rust: true
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: build-tools
             context: tools/build-tools
             build_contexts: ""
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
+            description: &ci-description-build-tools "Prebuilt lancache-ng CI and developer validation toolchain image."
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: utilities
             context: services/utilities
@@ -4941,7 +5175,6 @@ jobs:
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
-          REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -4958,6 +5191,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -4981,7 +5221,10 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-amd64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
@@ -5010,20 +5253,8 @@ jobs:
           tags: |
             type=sha,prefix=sha-,format=short,suffix=-amd64
 
-      # Uses github.sha (the actual checked-out/built commit), NOT docker/metadata-action's
-      # `type=sha` output above and NOT the PR branch's own head commit. For a
-      # pull_request event, github.sha is the synthetic merge commit -- head merged into
-      # the base branch's tip AT THE TIME OF THIS EVENT -- and that is exactly the property
-      # needed here: it changes whenever the actual built content changes, even if the PR's
-      # own head commit doesn't, and it stays the same across a re-run of the identical
-      # event. Tagging by the PR head SHA alone let two different events for the same head,
-      # merged against two different base states, collide on one tag -- and since this
-      # workflow's concurrency group does not cancel in-progress PR runs, a slower/older run
-      # could overwrite a newer run's tag with different image content after the fact. The
-      # `pr-<N>-` prefix lets the GC workflow (gc-pr-staging-images.yml) find and reap this
-      # once the PR closes. The `-amd64` suffix matches this job's own per-arch tag
-      # convention; merge-manifests combines it with build-arm64's `-arm64` PR staging tag
-      # into the real pr-<N>-sha-<short> multi-platform tag full-setup-validate consumes.
+      # Key PR staging tags by github.sha, the actual synthetic merge commit that was built.
+      # This prevents two events for the same PR head but different base states from overwriting one staging tag.
       - name: Compute PR staging tag
         id: pr-tag
         if: >-
@@ -5040,12 +5271,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${BUILD_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
-            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "$repository" "$MATRIX_SERVICE" "$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
@@ -5240,7 +5481,9 @@ jobs:
           fi
 
           if [ -n "$DISTCC_POTENTIAL_HOSTS" ]; then
-            if ! printf '%s\n' "$DISTCC_POTENTIAL_HOSTS" | grep -q ',cpp'; then
+            # here-string per AG-VAL-032, same SIGPIPE-under-pipefail hazard
+            # as the other `printf | grep -q` conversions in this file.
+            if ! grep -q ',cpp' <<<"$DISTCC_POTENTIAL_HOSTS"; then
               echo "::error::DISTCC_POTENTIAL_HOSTS must include at least one pump-capable host with the ',cpp' option."
               exit 1
             fi
@@ -5405,9 +5648,15 @@ jobs:
         id: trivy-cache
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
-            steps.build.outcome == 'success'
-          }}
+                      steps.build.outcome == 'success' &&
+                      (
+                        github.event_name != 'pull_request' ||
+                        (
+                          github.actor != 'dependabot[bot]' &&
+                          github.event.pull_request.head.repo.id == github.event.repository.id
+                        )
+                      )
+                    }}
         env:
           MATRIX_SERVICE: ${{ matrix.service }}
         run: |
@@ -5462,36 +5711,53 @@ jobs:
       - name: Scan pushed service digest with Trivy
         # Step 3 (issue #1095): generalized from build-tools-only to every service -- the
         # exact pushed digest is scanned before provenance and channel promotion for all 8
-        # services now. G8 fix: this is now the ONLY vulnerability scan for a changed
+        # services now. This is now the ONLY vulnerability scan for a changed
         # service on a trusted ref -- container-scan's own throwaway rebuild-and-scan
         # (which used to scan a different, never-published image with a different
         # digest) was removed, since it never verified the artifact actually published.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
-            steps.build.outcome == 'success'
+            steps.build.outcome == 'success' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.id == github.event.repository.id
+              )
+            )
           }}
-        # 50 min (was 20): retry wrapper (issue #1535) below can run up to 4
-        # scan attempts, so the bound must cover the worst case.
+        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
+        # attempts, so the bound must cover the worst case.
         timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-retry
+        uses: ./.github/actions/trivy-scan-exact-digest
         with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
-          hide-progress: true
-          cache: "false"
           cache-dir: ${{ steps.trivy-cache.outputs.dir }}
-          timeout: 10m
-          exit-code: "1"
+          cleanup-cache: ${{ steps.trivy-cache.outputs.ephemeral == 'true' && 'true' || 'false' }}
 
+
+      - name: Smoke-test exact build-tools candidate
+        if: >-
+          ${{
+            matrix.service == 'build-tools' &&
+            steps.build.outcome == 'success' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.id == github.event.repository.id
+              )
+            )
+          }}
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
+          platform: linux/amd64
+          run-fixtures: "true"
       - name: Remove ephemeral pushed service Trivy cache
         # Same rationale and fail-closed path guard as container-scan's
         # "Remove ephemeral Trivy cache" step above: ephemeral dirs
@@ -5546,7 +5812,12 @@ jobs:
     #
     # Also skipped on a metadata-only pull_request event -- see `build`'s identical
     # comment above.
+    #
+    # What: `needs:` mirrors `build`'s own superset, for the same reason.
+    # Why: see `build`'s own `needs:` comment above.
+    # From: Issue #1095 (G7) | PR #1503
     needs:
+      - determine-build-admission
       - shellcheck
       - validate-compose
       - container-scan
@@ -5560,34 +5831,11 @@ jobs:
       - pr-title-convention-check
       - line-endings
       - push-supersession-check
-    if: >-
-      ${{
-        always() &&
-        needs.shellcheck.result == 'success' &&
-        needs['validate-compose'].result == 'success' &&
-        needs.ci_scope_policy.result == 'success' &&
-        needs['line-endings'].result == 'success' &&
-        (
-          github.event_name != 'pull_request' ||
-          !contains(fromJSON('["labeled", "unlabeled", "milestoned", "demilestoned"]'), github.event.action)
-        ) &&
-        (github.event_name == 'pull_request' || needs['container-scan'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['file-headers'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['compose-healthchecks'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-template-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-tracking-metadata-check'].result == 'success') &&
-        (github.event_name != 'pull_request' || needs['pr-title-convention-check'].result == 'success')
-      }}
+    if: always() && needs['determine-build-admission'].result == 'success' && needs['determine-build-admission'].outputs.admitted == 'true'
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
-    # Job-level concurrency, mirroring `build` (the amd64 leg) exactly, and for the same
-    # reasons -- see `build`'s group comment for the full #979 rationale.
-    # cancel-in-progress is pull_request-only: merge-manifests needs this native arm64
-    # leg's success, so on push it is on the channel publish path and must survive to
-    # completion (cancelling it in a merge cascade starves the channel exactly like
-    # cancelling `build`). On a PR, a superseded commit's arm64 leg is wasted work
-    # merge-manifests can never use, so cancelling it there reclaims arm64 runner
-    # capacity. Same workflow_dispatch/rerun run_id isolation as `build`'s group.
+    # Obsolete PR arm64 work may be cancelled; push/tag candidates must survive for manifest assembly.
+    # Dispatches and reruns use isolated concurrency keys.
     concurrency:
       group: >-
         ${{
@@ -5607,49 +5855,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        include:
-          - service: proxy
-            context: services/proxy
-            build_contexts: dns-domains=services/dns
-            description: nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic.
-          - service: dns
-            context: services/dns
-            build_contexts: ""
-            description: PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing.
-            rust: true
-          - service: watchdog
-            context: services/watchdog
-            build_contexts: ""
-            description: lancache-ng watchdog helper for runtime health checks and recovery hooks.
-          - service: dhcp
-            context: services/dhcp
-            build_contexts: ""
-            description: Kea DHCP, control-agent, and DHCP-DDNS service for lancache-ng managed networks.
-          - service: dhcp-proxy
-            context: services/dhcp-proxy
-            build_contexts: ""
-            description: dnsmasq-based DHCP proxy and relay helper for lancache-ng deployments.
-          - service: ntp
-            context: services/ntp
-            build_contexts: ""
-            description: chrony-based NTP server for lancache-ng, disciplined against public NTP servers and serving LAN clients on UDP/123.
-          - service: syslog
-            context: services/syslog
-            build_contexts: ""
-            description: Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428).
-          - service: ui
-            context: services/ui
-            build_contexts: ""
-            description: lancache-ng Admin UI and control-plane service for cache, DNS, DHCP, and secondary management.
-            rust: true
-          - service: build-tools
-            context: tools/build-tools
-            build_contexts: ""
-            description: Prebuilt lancache-ng CI and developer validation toolchain image.
-          - service: utilities
-            context: services/utilities
-            build_contexts: ""
-            description: Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556).
+        # CI 1.1: reuses build:'s own canonical matrix (including its unused-here
+        # `runner:`/`description:` anchor fields) via YAML alias instead of a
+        # hand-kept duplicate, so a new/changed service can never drift between
+        # the two jobs -- see build:'s own &normal-build-services comment.
+        include: *normal-build-services
 
     steps:
       - name: Checkout
@@ -5793,7 +6003,7 @@ jobs:
 
       # Mirrors build's own "Retag unchanged service image" step exactly,
       # just for the linux/arm64 leg -- see that step's comment for the full
-      # Step 4/#1095 rationale, including the #1095 F-21 digest-pinning fix
+      # Step 4/#1095 rationale, including the issue #1095 digest-pinning fix
       # and the push-supersession-check guard's own reasoning. Both legs run
       # independently in parallel jobs but resolve the SAME pinned digest
       # determine-push-reuse-scope exported, so they always agree on which
@@ -5802,7 +6012,6 @@ jobs:
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
           COMMIT_SHA: ${{ github.sha }}
-          REPOSITORY: ${{ github.repository }}
           MATRIX_SERVICE: ${{ matrix.service }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
@@ -5819,6 +6028,13 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           command -v jq >/dev/null 2>&1 || {
             echo "::error::jq is required on this runner for the Step 4 retag-only path."
@@ -5842,7 +6058,10 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-arm64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
@@ -5886,12 +6105,22 @@ jobs:
         run: |
           set -euo pipefail
 
-          short_sha="${BUILD_SHA::7}"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          repository="$(dmeta_ghcr_repo)"
           {
             printf 'tag=%s\n' "$tag"
-            printf 'image=ghcr.io/%s/%s:%s\n' "${{ github.repository }}" "$MATRIX_SERVICE" "$tag"
+            printf 'image=ghcr.io/%s/%s:%s\n' "$repository" "$MATRIX_SERVICE" "$tag"
           } >> "$GITHUB_OUTPUT"
 
       - name: Resolve build-tools base image digests
@@ -6020,41 +6249,52 @@ jobs:
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Scan pushed service digest with Trivy
-        # Same exact-pushed-digest scan build performs for its linux/amd64
-        # image, mirrored here for the linux/arm64 digest. Step 3 (issue
-        # #1095) generalized this from build-tools-only to every service; no
-        # persistent Trivy cache here (unlike build's own equivalent step) --
-        # this job runs on an ephemeral GitHub-hosted runner with nothing to
-        # persist across runs.
+        # CI 1.1: this scan consumes the immutable digest emitted by the one
+        # candidate build. Same-repo PR candidates are scanned too; fork and
+        # Dependabot PRs remain read-only and therefore have no pushed digest.
         if: >-
           ${{
-            github.event_name != 'pull_request' &&
-            steps.build.outcome == 'success'
+            steps.build.outcome == 'success' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.id == github.event.repository.id
+              )
+            )
           }}
-        # 50 min (was 20): retry wrapper (issue #1535) below can run up to 4
-        # scan attempts, so the bound must cover the worst case.
+        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
+        # attempts, so the bound must cover the worst case.
         timeout-minutes: 50
-        uses: ./.github/actions/trivy-scan-retry
+        uses: ./.github/actions/trivy-scan-exact-digest
         with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          registry-username: ${{ github.actor }}
+          registry-password: ${{ secrets.GITHUB_TOKEN }}
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
           image-ref: ghcr.io/${{ github.repository }}/${{ matrix.service }}@${{ steps.build.outputs.digest }}
-          scanners: vuln,secret
-          severity: HIGH,CRITICAL
-          ignore-unfixed: true
-          trivyignores: .trivyignore.yaml
-          skip-dirs: /usr/local/rustup/toolchains
-          hide-progress: true
-          cache: "false"
-          timeout: 10m
-          exit-code: "1"
+          cache-dir: ${{ runner.temp }}/trivy-${{ matrix.service }}-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          cleanup-cache: "true"
 
-      # No separate "Log in to GHCR for provenance attestation" step: same
-      # reasoning as build's equivalent step (ghcr-attest-retry re-logs-in
-      # itself on retry, and the first attempt reuses the session from this
-      # job's own earlier "Log in to GHCR" step before "Build and push").
+
+      - name: Smoke-test exact build-tools candidate
+        if: >-
+          ${{
+            matrix.service == 'build-tools' &&
+            steps.build.outcome == 'success' &&
+            (
+              github.event_name != 'pull_request' ||
+              (
+                github.actor != 'dependabot[bot]' &&
+                github.event.pull_request.head.repo.id == github.event.repository.id
+              )
+            )
+          }}
+        uses: ./.github/actions/build-tools-candidate-smoke
+        with:
+          image-ref: ghcr.io/${{ github.repository }}/build-tools@${{ steps.build.outputs.digest }}
+          platform: linux/arm64
+          run-fixtures: "false"
       - name: Attest image build provenance
         if: >-
           ${{
@@ -6106,6 +6346,17 @@ jobs:
       id-token: write
       attestations: write
       artifact-metadata: write
+    outputs:
+      proxy_digest: ${{ steps.create-trusted-manifests.outputs.proxy_digest || steps.create-pr-staging-manifests.outputs.proxy_digest }}
+      dns_digest: ${{ steps.create-trusted-manifests.outputs.dns_digest || steps.create-pr-staging-manifests.outputs.dns_digest }}
+      watchdog_digest: ${{ steps.create-trusted-manifests.outputs.watchdog_digest || steps.create-pr-staging-manifests.outputs.watchdog_digest }}
+      dhcp_digest: ${{ steps.create-trusted-manifests.outputs.dhcp_digest || steps.create-pr-staging-manifests.outputs.dhcp_digest }}
+      dhcp_proxy_digest: ${{ steps.create-trusted-manifests.outputs.dhcp_proxy_digest || steps.create-pr-staging-manifests.outputs.dhcp_proxy_digest }}
+      ntp_digest: ${{ steps.create-trusted-manifests.outputs.ntp_digest || steps.create-pr-staging-manifests.outputs.ntp_digest }}
+      syslog_digest: ${{ steps.create-trusted-manifests.outputs.syslog_digest || steps.create-pr-staging-manifests.outputs.syslog_digest }}
+      ui_digest: ${{ steps.create-trusted-manifests.outputs.ui_digest || steps.create-pr-staging-manifests.outputs.ui_digest }}
+      build_tools_digest: ${{ steps.create-trusted-manifests.outputs.build_tools_digest || steps.create-pr-staging-manifests.outputs.build_tools_digest }}
+      stack_digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -6125,30 +6376,46 @@ jobs:
         id: create-trusted-manifests
         if: github.event_name != 'pull_request'
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          DESCRIPTION_PROXY: *ci-description-proxy
+          DESCRIPTION_DNS: *ci-description-dns
+          DESCRIPTION_WATCHDOG: *ci-description-watchdog
+          DESCRIPTION_DHCP: *ci-description-dhcp
+          DESCRIPTION_DHCP_PROXY: *ci-description-dhcp-proxy
+          DESCRIPTION_NTP: *ci-description-ntp
+          DESCRIPTION_SYSLOG: *ci-description-syslog
+          DESCRIPTION_UI: *ci-description-ui
+          DESCRIPTION_BUILD_TOOLS: *ci-description-build-tools
         run: |
           set -euo pipefail
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          # What: reads the shared CI_BUILD_SERVICES scalar rather than a
+          #   hand-duplicated services=(...) literal.
+          # Why: scripts/tracked/check-workflow-service-lists.sh only guards
+          #   copies it knows about; a scalar shared by every promotion/GC/
+          #   release loop removes the duplication class entirely (#822).
+          # From: PR #1523
+          read -ra services <<< "$CI_BUILD_SERVICES"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
+          declare -A merged_digests=()
 
-          # Same wording as this same file's build/build-arm64 matrix.description entries --
-          # kept in sync manually, not sourced from one shared place, because merge-manifests
-          # has no matrix of its own to read matrix.description from directly. This is where
-          # the OCI org.opencontainers.image.description annotation is actually set (issue
-          # #620): per-platform images upstream stay unannotated on purpose (see build's
-          # "Build and push" step comment), and every `imagetools create` downstream of this
-          # one (promote's channel and stack-pointer moves) carbon-copies this index annotation
-          # forward untouched rather than re-declaring it, confirmed live to preserve both the
-          # annotation and the exact source digest unchanged.
           declare -A service_descriptions=(
             [proxy]="nginx-based lancache-ng caching proxy for standard and TLS-interception cache traffic."
             [dns]="PowerDNS recursor, authoritative DNS, and NATS subscriber service for lancache-ng cache routing."
@@ -6207,19 +6474,75 @@ jobs:
               exit 1
             fi
 
+            amd64_digest="$(digest_for_image "$amd64_image")"
+            arm64_digest="$(digest_for_image "$arm64_image")"
+            [[ "$amd64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest for $service: $amd64_digest"; exit 1; }
+            [[ "$arm64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest for $service: $arm64_digest"; exit 1; }
+            amd64_ref="ghcr.io/${REPOSITORY}/${service}@${amd64_digest}"
+            arm64_ref="ghcr.io/${REPOSITORY}/${service}@${arm64_digest}"
+
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image" \
+              docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref" \
               --annotation "index:org.opencontainers.image.description=${service_descriptions[$service]}"
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+              bash scripts/untracked/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
 
             # Output key uses underscores (dhcp-proxy/build-tools contain
             # hyphens, which the expression syntax in the attest steps below
             # would otherwise parse as subtraction) so those steps can
             # reference steps.create-trusted-manifests.outputs.<service>_digest.
             merged_digest="$(digest_for_image "$target_image")"
+            [[ "$merged_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid merged digest for $service: $merged_digest"; exit 1; }
+            merged_digests["$service"]="$merged_digest"
             printf '%s_digest=%s\n' "${service//-/_}" "$merged_digest" >> "$GITHUB_OUTPUT"
           done
+
+
+          # Build the immutable stack pointer before any public channel is moved.
+          # All service digests must already be present so the pointer can only
+          # represent one complete, validated candidate set.
+          for service in "${services[@]}"; do
+            digest="${merged_digests[$service]:-}"
+            [[ "$digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
+              echo "::error::Cannot create stack pointer: missing exact digest for $service."
+              exit 1
+            }
+          done
+
+          pointer_context="$(mktemp -d)"
+          cleanup_pointer_context() { rm -rf "$pointer_context"; }
+          trap cleanup_pointer_context EXIT
+
+          {
+            printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
+            printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
+            printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
+          } > "$pointer_context/stack.env"
+
+          stack_pointer_description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
+          cat > "$pointer_context/Dockerfile" <<DOCKERFILE
+          FROM busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
+          LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
+          LABEL org.opencontainers.image.description="${stack_pointer_description}"
+          COPY stack.env /stack.env
+          CMD ["true"]
+          DOCKERFILE
+
+          stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
+          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
+            docker buildx build \
+            --platform "$REQUIRED_PLATFORMS" \
+            --push \
+            -t "$stack_pointer_image" \
+            --annotation "index:org.opencontainers.image.description=${stack_pointer_description}" \
+            "$pointer_context"
+          GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
+            bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
+          stack_digest="$(digest_for_image "$stack_pointer_image")"
+          [[ "$stack_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid stack pointer digest: $stack_digest"; exit 1; }
+          printf 'stack_digest=%s\n' "$stack_digest" >> "$GITHUB_OUTPUT"
+          cleanup_pointer_context
+          trap - EXIT
 
       # Same merge, for the PR-scoped staging tag instead of the trusted-ref sha-<short>
       # tag. Only same-repo PRs ever push the two per-arch inputs (build/build-arm64's own
@@ -6227,11 +6550,11 @@ jobs:
       # service is skipped, nothing is published. A service this PR did not touch also has
       # no inputs here (detect-changes scoped build/build-arm64 to skip it) -- that is
       # expected and not an error; full-setup-validate's own backfill step fills the gap.
+
       - name: Create PR staging multi-platform manifest
         id: create-pr-staging-manifests
         if: github.event_name == 'pull_request'
         env:
-          REPOSITORY: ${{ github.repository }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
           # Must match build/build-arm64's "Compute PR staging tag" exactly
           # -- see that step's comment for why this is github.sha (the
@@ -6245,9 +6568,19 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${BUILD_SHA::7}"
+          read -ra services <<< "$CI_BUILD_SERVICES"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
           source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
 
           # Same helper as the trusted-ref step above (and promote's own
@@ -6284,10 +6617,17 @@ jobs:
               exit 1
             fi
 
+            amd64_digest="$(digest_for_image "$amd64_image")"
+            arm64_digest="$(digest_for_image "$arm64_image")"
+            [[ "$amd64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest for $service: $amd64_digest"; exit 1; }
+            [[ "$arm64_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest for $service: $arm64_digest"; exit 1; }
+            amd64_ref="ghcr.io/${REPOSITORY}/${service}@${amd64_digest}"
+            arm64_ref="ghcr.io/${REPOSITORY}/${service}@${arm64_digest}"
+
             ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-              docker buildx imagetools create -t "$target_image" "$amd64_image" "$arm64_image"
+              docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref"
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
+              bash scripts/untracked/require-image-platforms.sh "$target_image" "$REQUIRED_PLATFORMS"
 
             # Same underscore-key reasoning as the trusted-ref step above.
             # This PR staging manifest is the exact tag full-setup-validate
@@ -6301,6 +6641,16 @@ jobs:
       # mutually-exclusive "Create ..." steps that consume it), so this
       # teardown is unconditional too -- exactly one of those two steps ever
       # uses the builder per run, but it was created either way.
+
+      - name: Attest immutable stack pointer provenance
+        if: steps.create-trusted-manifests.outputs.stack_digest != ''
+        uses: ./.github/actions/ghcr-attest-with-cache
+        with:
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          subject-name: ghcr.io/${{ github.repository }}/stack
+          subject-digest: ${{ steps.create-trusted-manifests.outputs.stack_digest }}
+
       - name: Remove buildx builder
         if: always()
         run: |
@@ -6481,16 +6831,10 @@ jobs:
     # Why: A bare condition gets GitHub's implicit `&& success()` appended, which walks the whole transitive needs graph including PR-only jobs (detect-changes/file-headers/pr-template-check) that always skip on push -- success() treats a skipped dependency as failed, so promote silently never ran on push even though build succeeded (confirmed live); !cancelled() avoids that skipped-as-failure trap while still stopping the job on a real maintainer cancellation, unlike always().
     # From: Issue #1095 | PR #1532
     name: promote stack image channels
-    needs: merge-manifests
-    if: "!cancelled() && needs['merge-manifests'].result == 'success' && github.event_name != 'pull_request'"
+    needs: [merge-manifests, full-setup-validate]
+    if: "!cancelled() && needs['merge-manifests'].result == 'success' && needs['full-setup-validate'].result == 'success' && github.event_name != 'pull_request'"
     runs-on: [self-hosted, linux, lancache, lancache-heavy]
-    # Real runs: 17s-3.6min for this job's own promotion work, but
-    # scripts/lib/promote-lock.sh's promote_lock_acquire_with_retry is called with
-    # (max_attempts=40, backoff_seconds=15), a legitimate non-hang wait of up to ~10
-    # minutes for the shared cross-run lock under real contention (concurrent promotions
-    # from a merge cascade), before this job's own work even starts. 45 minutes covers
-    # that real lock-wait ceiling plus this job's own work with headroom, so normal lock
-    # contention can never be mistaken for a hang.
+    # 45 minutes covers the cross-workflow promote-lock retry budget plus normal registry work.
     timeout-minutes: 45
     # What: Real mutual exclusion for promote comes from scripts/lib/promote-lock.sh's cross-workflow promote lock (a global, git-ref-backed, remote-atomic lock), not a job-level `concurrency:` group -- promote and backfill-stack-latest.yml both admit immediately and self-serialize through it.
     # Why: A prior job-level concurrency group let a newer pending promote run silently cancel an older, still-queued one before its first step ran (GitHub only holds one pending request per group, and a queued job has no self-protection), which became practically reachable once parallel tag pushes/dispatches could all reach this point together; a job-level group also cannot protect a job from the enclosing workflow run's own cancellation (only the top-level group's run_id-suffixed push/tag key does that, per GitHub's documented cancel-in-progress:true behavior), and the lock stays global rather than per-ref specifically to avoid racing backfill-stack-latest.yml's own tag move for a different ref; a host-local lock would not work either, since the lancache-heavy pool spans several physical hosts.
@@ -6552,25 +6896,54 @@ jobs:
       - name: Promote coherent stack tags
         id: promote-stack
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           REQUESTED_CHANNEL: ${{ inputs.channel }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+          PROXY_DIGEST: ${{ needs['merge-manifests'].outputs.proxy_digest }}
+          DNS_DIGEST: ${{ needs['merge-manifests'].outputs.dns_digest }}
+          WATCHDOG_DIGEST: ${{ needs['merge-manifests'].outputs.watchdog_digest }}
+          DHCP_DIGEST: ${{ needs['merge-manifests'].outputs.dhcp_digest }}
+          DHCP_PROXY_DIGEST: ${{ needs['merge-manifests'].outputs.dhcp_proxy_digest }}
+          NTP_DIGEST: ${{ needs['merge-manifests'].outputs.ntp_digest }}
+          SYSLOG_DIGEST: ${{ needs['merge-manifests'].outputs.syslog_digest }}
+          UI_DIGEST: ${{ needs['merge-manifests'].outputs.ui_digest }}
+          BUILD_TOOLS_DIGEST: ${{ needs['merge-manifests'].outputs.build_tools_digest }}
+          STACK_DIGEST: ${{ needs['merge-manifests'].outputs.stack_digest }}
         run: |
           set -euo pipefail
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          read -ra services <<< "$CI_BUILD_SERVICES"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
-          stack_pointer_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
+          stack_pointer_image="ghcr.io/${REPOSITORY}/stack@${STACK_DIGEST}"
           channel_tags=()
-          pointer_context=""
+          declare -A candidate_digests=(
+            [proxy]="$PROXY_DIGEST"
+            [dns]="$DNS_DIGEST"
+            [watchdog]="$WATCHDOG_DIGEST"
+            [dhcp]="$DHCP_DIGEST"
+            [dhcp-proxy]="$DHCP_PROXY_DIGEST"
+            [ntp]="$NTP_DIGEST"
+            [syslog]="$SYSLOG_DIGEST"
+            [ui]="$UI_DIGEST"
+            [build-tools]="$BUILD_TOOLS_DIGEST"
+          )
           declare -A previous_refs=()
           promoted_targets=()
 
@@ -6596,10 +6969,6 @@ jobs:
           rollback_promotions() {
             local status=$?
             local target_image previous_digest
-
-            if [[ -n "$pointer_context" ]]; then
-              rm -rf "$pointer_context"
-            fi
 
             if [[ "$status" = "0" || "${#promoted_targets[@]}" = "0" ]]; then
               exit "$status"
@@ -6655,7 +7024,7 @@ jobs:
             if [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
               :
             elif [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-              bash scripts/check-stable-external-images.sh
+              bash scripts/tracked/check-stable-external-images.sh
               channel_tags+=(latest)
             else
               echo "::error::Unsupported release tag '${GITHUB_REF_NAME}'. Use vX.Y.Z or vX.Y.Z-rc.N."
@@ -6683,66 +7052,33 @@ jobs:
             exit 0
           fi
 
-          # Wrapped in ghcr_retry: unlike merge-manifests' per-arch checks,
-          # a missing source image here is always treated as an error, never
-          # an expected skip -- retrying protects against a transient read
-          # failure being reported as a genuinely missing image.
-          missing=0
+          # Validate the exact candidate identities handed off by merge-manifests.
+          # The sha-* names are checked only as immutable-record pointers; promotion
+          # itself consumes repository@sha256 references from the job outputs.
           for service in "${services[@]}"; do
-            source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
-            if ! ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$source_image" >/dev/null; then
-              echo "::error::Cannot promote because required source image is missing: $source_image"
-              missing=1
-            fi
-          done
-          if [[ "$missing" = "1" ]]; then
-            exit 1
-          fi
-
-          for service in "${services[@]}"; do
+            expected_digest="${candidate_digests[$service]:-}"
+            [[ "$expected_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || {
+              echo "::error::Missing or malformed candidate digest for $service: '$expected_digest'."
+              exit 1
+            }
+            source_tag_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+            source_tag_digest="$(digest_for_image "$source_tag_image")"
+            [[ "$source_tag_digest" = "$expected_digest" ]] || {
+              echo "::error::$source_tag_image moved away from the merge-manifests digest; refusing promotion."
+              exit 1
+            }
             GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-              bash scripts/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}:${source_tag}" "$REQUIRED_PLATFORMS"
+              bash scripts/untracked/require-image-platforms.sh "ghcr.io/${REPOSITORY}/${service}@${expected_digest}" "$REQUIRED_PLATFORMS"
           done
 
-          pointer_context="$(mktemp -d)"
-          {
-            printf 'LANCACHE_IMAGE_TAG=%s\n' "$source_tag"
-            printf 'LANCACHE_IMAGE_COMMIT=%s\n' "$COMMIT_SHA"
-            printf 'LANCACHE_IMAGE_SERVICES=%s\n' "${services[*]}"
-          } > "$pointer_context/stack.env"
-          # One variable feeds both the per-platform config LABEL below (an
-          # unquoted heredoc so it can expand) and the index-level OCI
-          # annotation on the buildx build call right after, so the two never
-          # drift out of sync with each other.
-          stack_pointer_description="Resolves a mutable lancache-ng stack channel to one immutable sha-* service image set."
-          cat > "$pointer_context/Dockerfile" <<DOCKERFILE
-          FROM busybox:stable-musl@sha256:3c6ae8008e2c2eedd141725c30b20d9c36b026eb796688f88205845ef17aa213
-          LABEL org.opencontainers.image.title="lancache-ng stack channel pointer"
-          LABEL org.opencontainers.image.description="${stack_pointer_description}"
-          COPY stack.env /stack.env
-          CMD ["true"]
-          DOCKERFILE
-          # This build is always genuinely multi-platform ($RELEASE_PLATFORMS
-          # is always 2+ platforms), so unlike the per-platform service
-          # builds above, an index already exists here for --annotation to
-          # attach to -- confirmed live while fixing issue #620. This step
-          # does not disable provenance, so it already defaults to OCI
-          # mediatypes without needing an explicit `outputs:` override.
-          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
-            docker buildx build \
-            --platform "$RELEASE_PLATFORMS" \
-            --push \
-            -t "$stack_pointer_image" \
-            --annotation "index:org.opencontainers.image.description=${stack_pointer_description}" \
-            "$pointer_context"
-          ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$stack_pointer_image" >/dev/null
+          [[ "$STACK_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Missing or malformed stack pointer digest '$STACK_DIGEST'."; exit 1; }
+          stack_tag_image="ghcr.io/${REPOSITORY}/stack:${source_tag}"
+          [[ "$(digest_for_image "$stack_tag_image")" = "$STACK_DIGEST" ]] || {
+            echo "::error::$stack_tag_image moved away from the merge-manifests stack pointer digest; refusing promotion."
+            exit 1
+          }
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
-            bash scripts/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
-          stack_pointer_digest="$(digest_for_image "$stack_pointer_image")"
-          {
-            printf 'stack-pointer-subject=ghcr.io/%s/stack\n' "$REPOSITORY"
-            printf 'stack-pointer-digest=%s\n' "$stack_pointer_digest"
-          } >> "$GITHUB_OUTPUT"
+            bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
 
           # Neither loop below passes --annotation. $source_image already carries the
           # org.opencontainers.image.description index annotation from merge-manifests above
@@ -6754,7 +7090,7 @@ jobs:
           # job's invariant that a channel/release tag resolves to the exact same digest as its
           # source sha-* tag.
           for service in "${services[@]}"; do
-            source_image="ghcr.io/${REPOSITORY}/${service}:${source_tag}"
+            source_image="ghcr.io/${REPOSITORY}/${service}@${candidate_digests[$service]}"
             for channel_tag in "${channel_tags[@]}"; do
               target_image="ghcr.io/${REPOSITORY}/${service}:${channel_tag}"
               previous_refs["$target_image"]="$(digest_for_image "$target_image" || true)"
@@ -6789,6 +7125,7 @@ jobs:
       # patch release tag" nor anything after it touches buildx. Torn down
       # here rather than left running until this job's own much-later
       # "Release the cross-workflow promote lock" cleanup.
+
       - name: Remove buildx builder
         if: always()
         run: |
@@ -6798,7 +7135,7 @@ jobs:
       # (master) only -- on any other ref this step is a deliberate no-op until master
       # itself starts receiving pushes, the still-undesigned "v0.2.0 -> master" promotion
       # event tracked in #825. Minor/major bumps stay a manual maintainer tag push; only Z
-      # is ever computed here (see scripts/compute-next-release-tag.sh).
+      # is ever computed here (see scripts/untracked/compute-next-release-tag.sh).
       #
       # `if:` is written as `success() && ...`, not a bare `github.ref == ...` condition,
       # for the same reason the job-level `if:` above carries its own long comment: a
@@ -6808,11 +7145,17 @@ jobs:
       - name: Cut an automated patch release tag for image-affecting master changes
         if: ${{ success() && github.ref == 'refs/heads/master' }}
         env:
-          REPOSITORY: ${{ github.repository }}
           COMMIT_SHA: ${{ github.sha }}
           PROJECT_AUTOMATION_PAT: ${{ secrets.PROJECT_AUTOMATION_PAT }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # This is core release machinery on the release-bearing branch, not
           # optional convenience automation, so a missing PAT fails closed
@@ -6839,13 +7182,13 @@ jobs:
           # (not just "the previous push") means a burst of N merges landing
           # on master between two promote runs still yields exactly ONE
           # bump reflecting the whole burst, not N.
-          image_impact="$(bash scripts/classify-image-impact.sh "$base_commit" "$COMMIT_SHA" | grep -x 'IMAGE_IMPACT=true' || true)"
+          image_impact="$(bash scripts/untracked/classify-image-impact.sh "$base_commit" "$COMMIT_SHA" | grep -x 'IMAGE_IMPACT=true' || true)"
           if [[ -z "$image_impact" ]]; then
             echo "::notice::No image-affecting change between ${base_tag} (${base_commit}) and ${COMMIT_SHA}; no patch release cut."
             exit 0
           fi
 
-          next_tag="$(bash scripts/compute-next-release-tag.sh "$base_tag")"
+          next_tag="$(bash scripts/untracked/compute-next-release-tag.sh "$base_tag")"
 
           # Cheap end-of-run re-check, independent of and in addition to the debounce check
           # the "Promote coherent stack tags" step already performed earlier in this same job:
@@ -6892,21 +7235,6 @@ jobs:
       # attestation-caching finding): a push where every service was unchanged reproduces
       # the identical stack-pointer digest, which would otherwise be re-attested for no
       # reason every time.
-      - name: Attest stack pointer provenance
-        if: ${{ steps.promote-stack.outputs.stack-pointer-digest != '' }}
-        uses: ./.github/actions/ghcr-attest-with-cache
-        with:
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-          subject-name: ${{ steps.promote-stack.outputs.stack-pointer-subject }}
-          subject-digest: ${{ steps.promote-stack.outputs.stack-pointer-digest }}
-
-      # `if: always()` (issue #897): the lock must be released whether the
-      # steps above succeeded or failed, otherwise a real promotion failure
-      # would ALSO wedge every other queued promote/backfill run behind this
-      # job's own stale_after timeout for no reason. Safe to run even if the
-      # acquire step itself never succeeded (promote_lock_release is a
-      # verified-ownership no-op when this job never held the lock).
       - name: Release the cross-workflow promote lock
         if: always()
         env:
@@ -6984,24 +7312,33 @@ jobs:
       - name: Verify release image platform coverage
         shell: bash
         env:
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
-          # syslog (issue #1428) added here explicitly: this SERVICES scalar is a
-          # plain space-separated env value, not a services=(...) bash array, so
-          # scripts/check-workflow-service-lists.sh's regex-based guard cannot see
-          # or enforce it -- missing it here would silently drop syslog from this
-          # release job's platform-coverage verification with no CI signal at all.
-          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools stack
+          # syslog (issue #1428) and utilities (issue #1556) added here explicitly:
+          # this SERVICES scalar is a plain space-separated env value, not a
+          # services=(...) bash array, so scripts/tracked/check-workflow-service-lists.sh's
+          # regex-based guard cannot see or enforce it -- missing either would silently
+          # drop that service from this release job's platform-coverage verification
+          # with no CI signal at all. utilities is tagged vX.Y.Z by promote's own
+          # services=(...) array on every real release exactly like build-tools is, so
+          # it needs the same coverage check.
+          SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           read -r -a services <<< "$SERVICES"
           for service in "${services[@]}"; do
             image="ghcr.io/${REPOSITORY}/${service}:${TAG_NAME}"
-            bash scripts/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
+            bash scripts/untracked/require-image-platforms.sh "$image" "$REQUIRED_PLATFORMS"
           done
 
       # Patches (rather than overwrites) an existing release body: the image_notes_start/end
@@ -7017,7 +7354,6 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -7027,9 +7363,19 @@ jobs:
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities)
-          short_sha="${COMMIT_SHA::7}"
+          read -ra services <<< "$CI_BUILD_SERVICES"
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
+
+          # What: reads the single declared short-SHA derivation.
+          # Why: keeps every truncation length in sync with one declared source.
+          # From: Issue #1095 (G2) | PR #1503
+          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
           source_tag="sha-${short_sha}"
           expected_prerelease=false
           if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
@@ -7114,6 +7460,7 @@ jobs:
             -e EXPECTED_PRERELEASE="$expected_prerelease" \
             -v "$notes_file:/tmp/lancache-release-notes.md:ro" \
             "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPDATE_RELEASE'
           set -euo pipefail
 
@@ -7221,10 +7568,16 @@ jobs:
         shell: bash
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           if [ ! -s vex.openvex.json ]; then
             echo "::error::vex.openvex.json is missing from the checkout." >&2
@@ -7238,6 +7591,7 @@ jobs:
             -e TAG_NAME \
             -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
             "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPLOAD_VEX'
           set -euo pipefail
 
@@ -7305,14 +7659,11 @@ jobs:
         # The Trivy-scanned first-party image set (container-scan's matrix).
         # `stack` is intentionally excluded: it is a busybox channel-pointer
         # image, not a compiled software asset, and is not vuln-scanned either.
-        # `utilities` (issue #1556) added per this same stated criterion, now
-        # that it is part of container-scan's own matrix too. Note, not fixed
-        # here (separate, pre-existing, unrelated to #1556): `syslog` (#1428)
-        # is already part of container-scan's matrix but was never added
-        # here, a real gap against this array's own documented criterion --
-        # flagged rather than silently carried forward or silently expanded
-        # into this PR's own scope.
-        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, ui, build-tools, utilities]
+        # What: includes syslog (#1428/#1433) and utilities (#1556), both already part of
+        # container-scan's own matrix, so every released first-party image gets a CycloneDX SBOM.
+        # Why: This separate matrix copy previously lagged container-scan's own list on both entries.
+        # From: Issue #1428 | Issue #1556
+        service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -7331,13 +7682,19 @@ jobs:
       - name: Resolve released image digest
         id: digest
         env:
-          REPOSITORY: ${{ github.repository }}
           SERVICE: ${{ matrix.service }}
           TAG_NAME: ${{ github.ref_name }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
@@ -7393,11 +7750,17 @@ jobs:
         # OpenVEX upload above.
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPOSITORY: ${{ github.repository }}
           TAG_NAME: ${{ github.ref_name }}
           SERVICE: ${{ matrix.service }}
         run: |
           set -euo pipefail
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           asset="${SERVICE}.cdx.json"
           if [ ! -s "$asset" ]; then
@@ -7413,6 +7776,7 @@ jobs:
             -e ASSET_NAME="$asset" \
             -v "$PWD/$asset:/tmp/$asset:ro" \
             "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPLOAD_SBOM'
           set -euo pipefail
 

@@ -478,8 +478,8 @@ test-coverage gap)
 entrypoint's config-*generation* idempotence (byte-identical `nats.conf`
 across restarts, never clobbering the UI's `auth_callout.conf` fragment, no
 drift across dev/prod/quickstart) — but nothing in the bats suite or the
-shell simulation scripts (`scripts/nats-secondary-auth-callout-simulation.sh`,
-`scripts/ui-nats-dns-integration-simulation.sh`) asserts that the
+shell simulation scripts (`scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh`,
+`scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh`) asserts that the
 *permission content* itself is sufficient for what `nats-subscriber`'s real
 code actually calls. Neither the full-setup permission gap (Finding C) nor
 the rollback-flush permission gap (Finding B) would have been caught by

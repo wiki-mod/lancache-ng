@@ -17,8 +17,17 @@ FROM cr.fluentbit.io/fluent/fluent-bit:3.2.10@sha256:d6dec000c4929a439562525728c
 
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
-# What: pins the Alpine base to 3.24 (was 3.20); syslog-ng stays on
-# Alpine's stable main repo. bash provides `wait -n` for entrypoint.sh.
+LABEL org.opencontainers.image.description="Combined fluent-bit + syslog-ng first-party central logging service for lancache-ng (issue #1428)."
+
+# syslog-ng ships in Alpine's STABLE main repo (confirmed live: 4.7.1-r1) --
+# the POC's own Dockerfile comment already established this; only fluent-bit
+# needed the edge/testing repo, which this image never touches. bash is this
+# project's default shell (AG-REL-006) and provides `wait -n` for
+# entrypoint.sh's fail-fast multi-child supervision; su-exec is NOT used here
+# (see the capability-posture comment on the fluent-bit interpreter's setcap
+# step below for why a runtime privilege-drop design was tried and rejected).
+#
+# What: pins the Alpine base to 3.24 (was 3.20).
 # Why: 3.20 was an unintentional scaffold-commit inconsistency -- every
 # other first-party service already pins 3.24.
 # From: Issue #1554 | PR #1555

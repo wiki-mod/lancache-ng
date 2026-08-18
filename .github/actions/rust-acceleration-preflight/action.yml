@@ -1,7 +1,7 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc) configuration and connectivity
+# GitHub Action for validating Rust build acceleration infrastructure (sccache, sccache-dist, distcc, and services/dns's ccache-over-distcc layer) configuration and connectivity
 name: Rust acceleration infrastructure preflight
 description: Validate Rust build acceleration infrastructure outside BuildKit cacheable Docker build layers.
 
@@ -21,11 +21,19 @@ inputs:
     description: Optional file containing DISTCC_POTENTIAL_HOSTS.
     required: false
     default: ""
+  ccache-redis-file:
+    description: |
+      Optional file containing the ccache Redis remote-storage endpoint for
+      services/dns/Dockerfile's ccache-over-distcc C-dependency cache only. Reuses the
+      same Redis URL as redis-file -- see build-push.yml's own comment on why this is
+      not a second secret.
+    required: false
+    default: ""
   build-tools-image:
     description: |
-      Build tools image that provides rustc, sccache, distcc, and distcc-pump.
+      Build tools image that provides rustc, sccache, distcc, distcc-pump, and ccache.
       Primary CI workflows (build-push.yml) pass an explicit pinned digest via
-      scripts/select-build-tools-image.sh; this `:latest` default is a fallback
+      scripts/untracked/select-build-tools-image.sh; this `:latest` default is a fallback
       for local developer usage and other callers that do not override it.
     required: false
     default: ghcr.io/wiki-mod/lancache-ng/build-tools:latest
@@ -48,6 +56,7 @@ runs:
         REDIS_FILE: ${{ inputs.redis-file }}
         DIST_CONFIG_FILE: ${{ inputs.dist-config-file }}
         DISTCC_HOSTS_FILE: ${{ inputs.distcc-hosts-file }}
+        CCACHE_REDIS_FILE: ${{ inputs.ccache-redis-file }}
         BUILD_TOOLS_IMAGE: ${{ inputs.build-tools-image }}
         BUILD_NETWORK: ${{ inputs.build-network }}
         BUILD_PLATFORM: ${{ inputs.platform }}
@@ -69,40 +78,81 @@ runs:
           [ -s "$DISTCC_HOSTS_FILE" ] || { echo "::error::distcc-hosts-file input points to an empty or missing file."; exit 1; }
           mount_args+=(-v "$DISTCC_HOSTS_FILE:/run/lancache/distcc-potential-hosts:ro")
         fi
+        if [ -n "$CCACHE_REDIS_FILE" ]; then
+          [ -s "$CCACHE_REDIS_FILE" ] || { echo "::error::ccache-redis-file input points to an empty or missing file."; exit 1; }
+          mount_args+=(-v "$CCACHE_REDIS_FILE:/run/lancache/ccache-redis-url:ro")
+        fi
 
         if [ "${#mount_args[@]}" -eq 0 ]; then
           echo "[INFO] no Rust acceleration secrets configured; skipping external preflight."
           exit 0
         fi
 
-        # Pull and run the tools image outside BuildKit so cache layers cannot mask
-        # acceleration-infrastructure failures.
-        #
-        # #822: this preflight runs once per matrix leg with Rust acceleration
-        # secrets configured (up to 14 times per build-push.yml run), each a
-        # real ghcr.io pull of the same class of call that hit a transient 401
-        # live. GHCR_RETRY_USERNAME/PASSWORD are optional -- callers that
-        # don't set them still get backoff+retry, just without a relogin.
+        # What: pulls and runs the tools image outside BuildKit, via the shared retry wrapper.
+        # Why: a BuildKit cache layer could mask an acceleration-infrastructure failure, and
+        # this repeats per matrix leg -- optional credentials only add a relogin.
+        # From: Issue #822 | PR #833
         # shellcheck source=scripts/lib/ghcr-retry.sh
         source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
         ghcr_retry ghcr.io "${GHCR_RETRY_USERNAME:-}" "${GHCR_RETRY_PASSWORD:-}" -- docker pull --platform "$BUILD_PLATFORM" "$BUILD_TOOLS_IMAGE" >/dev/null
 
+        # AG-CI-016: the in-container command needs its own unignorable
+        # kill-timeout, not just this step's outer `timeout-minutes` --
+        # GitHub cancels a timed-out step by sending SIGTERM to this
+        # `docker run` client, which a signal-deaf or network-hung sccache-dist/
+        # distcc-pump call inside the container would not receive, leaving
+        # both the client and the container running and the runner slot
+        # occupied (same failure mode documented in
+        # .github/actions/shellcheck-and-standing-guards/action.yml).
+        # Verified live in the pinned build-tools container (AG-VAL-030):
+        # `timeout --kill-after` only signals its DIRECT child (the `bash -s`
+        # below), and if bash is itself blocked waiting on a hung grandchild
+        # (e.g. a stuck sccache/distcc network call), the SIGKILL at the end
+        # of the grace period kills bash without ever running its `trap
+        # cleanup EXIT` (confirmed: a `trap ...EXIT; sleep 60` heredoc under
+        # `timeout --kill-after=30 --signal=KILL 3` exits 137 with no trap
+        # output). That is still safe here specifically because every
+        # resource the trap would clean up (the mktemp -d preflight dir, the
+        # distcc-pump include server) lives entirely inside this container
+        # and is discarded when `docker run --rm` tears the container down
+        # regardless of whether the trap ran -- there is no host-shared or
+        # writable-mount state (mount_args above are all `:ro`) that could
+        # leak past a missed trap.
+        # 600s, not the 300s used for pure-text-scan checks elsewhere in this
+        # project: this preflight makes real network calls (sccache-dist
+        # --dist-status, distcc-pump --startup probing every candidate host
+        # via lsdistcc) that can legitimately take longer than a text scan
+        # under real network latency. The calling job (`build` in
+        # build-push.yml) has its own timeout-minutes: 150 covering the full
+        # Rust/Docker build that follows, so 600s here for this early step
+        # leaves the overwhelming majority of that budget intact.
         docker run --rm -i --platform "$BUILD_PLATFORM" --network "$BUILD_NETWORK" \
           "${mount_args[@]}" \
           -e "LANCACHE_SERVICE=$LANCACHE_SERVICE" \
           "$BUILD_TOOLS_IMAGE" \
-          bash -s <<'PREFLIGHT'
+          timeout --kill-after=30 --signal=KILL 600 bash -s <<'PREFLIGHT'
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"
+            # What: bounds distcc-pump --shutdown with its own short timeout.
+            # Why: the call can block in do_wait() indefinitely; only the
+            # outer 600s timeout guarded against that before. `|| true`
+            # stays -- a failed shutdown must not fail the build.
+            # From: Issue #1590
+            shutdown_distcc_pump() {
+              timeout --kill-after=5 --signal=KILL 10 distcc-pump --shutdown >/dev/null 2>&1 || true
+            }
             cleanup() {
               if [ -n "${pump_started:-}" ]; then
-                distcc-pump --shutdown >/dev/null 2>&1 || true
+                shutdown_distcc_pump
               fi
               rm -rf "$preflight_dir"
             }
             trap cleanup EXIT
 
+            # What: fails closed if a log file contains a warning/error/failure/panic diagnostic.
+            # Why: a silently-degraded acceleration tool must not pass as a clean preflight.
+            # From: PR #441
             scan_log() {
               local log_file="$1"
               if grep -Eai "(^|[^[:alpha:]])(warning|warn|error|failed|failure|panic)([^[:alpha:]]|$)" "$log_file"; then
@@ -111,6 +161,10 @@ runs:
               fi
             }
 
+            # What: runs a command, capturing its output to log_file, then feeds it through scan_log.
+            # Why: every acceleration command run below needs the same fail-closed exit/log/scan
+            # behavior; this avoids repeating it at each call site.
+            # From: PR #441
             run_logged() {
               local log_file="$1"
               shift
@@ -123,6 +177,9 @@ runs:
               scan_log "$log_file"
             }
 
+            # What: fails closed unless `sccache --dist-status`'s JSON shows a connected scheduler.
+            # Why: a misconfigured sccache-dist client can start up without ever reaching a scheduler.
+            # From: PR #441
             require_sccache_dist_connected() {
               local status_file="$1"
               if ! jq -e 'type == "object" and has("SchedulerStatus")' "$status_file" >/dev/null; then
@@ -132,6 +189,11 @@ runs:
               fi
             }
 
+            # What: fails closed unless sccache's stats show the compile request, and (when
+            # require_cache_write is set) a real Redis-backed cache write, read hit, and zero errors.
+            # Why: a preflight compile that "succeeds" without touching the cache backend at all
+            # would silently mask a broken Redis connection.
+            # From: PR #441
             require_sccache_activity() {
               local stats_file="$1"
               local require_cache_write="$2"
@@ -180,6 +242,11 @@ runs:
               fi
             }
 
+            # What: fails closed unless sccache-dist's stats show zero dist_errors and at least
+            # one successful distributed compile.
+            # Why: a client that falls back to local compilation without erroring would otherwise
+            # pass this preflight while never actually exercising the dist scheduler.
+            # From: PR #441
             require_sccache_dist_activity() {
               local stats_file="$1"
 
@@ -239,6 +306,11 @@ runs:
             fi
 
             if [ -s /run/lancache/distcc-potential-hosts ]; then
+              # What: locates the cc/gcc/c++/g++ distcc wrapper directory.
+              # Why: the two candidates are both valid, image-dependent
+              # install layouts; an absent wrapper disables distcc for this
+              # run instead of failing hard.
+              # From: Issue #1590
               wrapper_dir=""
               for candidate in /usr/local/lib/distcc /usr/lib/distcc; do
                 if [ -x "$candidate/cc" ] && [ -x "$candidate/gcc" ] && [ -x "$candidate/c++" ] && [ -x "$candidate/g++" ]; then
@@ -255,6 +327,11 @@ runs:
 
               printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/distcc-probe.c"
 
+              # What: splits DISTCC_POTENTIAL_HOSTS into pump-capable vs
+              # plain-distcc host lists.
+              # Why: pump and plain distcc dispatch take different host list
+              # shapes downstream; only a ,cpp-tagged host is pump-capable.
+              # From: Issue #1590
               distcc_hosts=""
               distcc_pump_hosts=""
               distcc_hosts_without_pump=""
@@ -265,16 +342,11 @@ runs:
                   distcc_hosts="${distcc_hosts:+$distcc_hosts }$distcc_host_base"
                 fi
                 case "$distcc_host_spec" in
-                  # distcc-pump's own lsdistcc probe does a literal hostname
-                  # lookup on every DISTCC_POTENTIAL_HOSTS token it is given
-                  # (verified live: "192.168.1.x,cpp,lzo" fails gethostbyname()
-                  # while "192.168.1.x" resolves fine), and distcc-pump
-                  # re-derives and re-appends the ,cpp/,lzo suffix itself for
-                  # whichever hosts it confirms alive. Feeding it the original
-                  # comma-suffixed spec here would make every pump-candidate
-                  # host unresolvable, so DISTCC_POTENTIAL_HOSTS would never
-                  # resolve to usable remote hosts -- use the bare base
-                  # instead.
+                  # What: strips the ,cpp/,lzo suffix before feeding a pump candidate host to distcc-pump.
+                  # Why: distcc-pump's own lsdistcc probe does a literal hostname lookup per token and
+                  # fails gethostbyname() on the suffixed form; it re-derives and re-appends that suffix
+                  # itself for whichever hosts it confirms alive.
+                  # From: PR #613
                   *,cpp*) distcc_pump_hosts="${distcc_pump_hosts:+$distcc_pump_hosts }$distcc_host_base" ;;
                   *) distcc_hosts_without_pump="${distcc_hosts_without_pump:+$distcc_hosts_without_pump }$distcc_host_spec" ;;
                 esac
@@ -285,14 +357,10 @@ runs:
               fi
               distcc_hosts_without_pump="${distcc_hosts_without_pump:-$distcc_hosts}"
 
-              # distcc-pump always exports a DISTCC_HOSTS value that starts
-              # with the "--randomize" option token, even when its lsdistcc
-              # probe found zero live hosts (in that case nothing follows the
-              # option). A plain non-empty-string test on DISTCC_HOSTS can't
-              # tell "pump published real hosts" apart from "pump published
-              # nothing" -- verified live, that false positive both wastes a
-              # doomed compile attempt and, further down, clobbers a good
-              # non-pump host list with that same hostless value.
+              # What: checks for a real host token after distcc-pump's leading
+              # "--randomize" option, not just a non-empty DISTCC_HOSTS.
+              # Why: distcc-pump exports that option token even with zero live hosts found.
+              # From: PR #613
               distcc_pump_published_hosts() {
                 for distcc_host_token in $1; do
                   case "$distcc_host_token" in
@@ -329,23 +397,14 @@ runs:
                     echo "[INFO] distcc-pump did not publish usable hosts (lsdistcc found none of the candidate hosts alive); continuing with plain distcc fallback."
                     distcc_pump_filtered_hosts=""
                   fi
-                  distcc-pump --shutdown >/dev/null 2>&1 || true
+                  shutdown_distcc_pump
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
-                # This probe runs AFTER distcc-pump has already been shut
-                # down above (INCLUDE_SERVER_PORT/INCLUDE_SERVER_PID unset),
-                # so it must never use the pump-published host list -- that
-                # list's ",cpp"/",lzo" suffix only means anything to a
-                # running include server. Reusing it here (a prior version
-                # of this logic reassigned distcc_hosts_without_pump from
-                # distcc_pump_filtered_hosts whenever pump succeeded) made a
-                # *successful* pump-host resolution trigger
-                # "INCLUDE_SERVER_PORT not set" on this post-shutdown probe
-                # instead of proving plain distcc acceleration -- confirmed
-                # live. distcc_hosts_without_pump already holds the correct,
-                # stripped non-pump host list computed above, before any
-                # pump handling; leave it untouched here.
+                # What: uses distcc_hosts_without_pump, not the pump-published host list.
+                # Why: the pump list's ",cpp"/",lzo" suffix only means anything to a running
+                # include server, which this post-shutdown probe no longer has.
+                # From: PR #613
                 final_distcc_hosts="$distcc_hosts_without_pump"
                 if [ -z "$final_distcc_hosts" ]; then
                   final_distcc_hosts="$distcc_hosts"
@@ -377,6 +436,81 @@ runs:
                 plain_log="$preflight_dir/plain-cc.log"
                 run_logged "$plain_log" cc -c "$preflight_dir/distcc-probe.c" -o "$preflight_dir/distcc.o"
                 echo "[INFO] plain cc fallback completed."
+              fi
+
+              # What: validates ccache-over-distcc (services/dns only) with a real Redis
+              # write, then a real Redis read from a deliberately fresh local
+              # CCACHE_DIR, mirroring the sccache validation above.
+              # Why: only meaningful once real distcc dispatch above succeeded, and a
+              # fresh CCACHE_DIR proves the Redis round trip instead of passing on
+              # local-disk-only caching alone.
+              # From: Issue #887
+              if [ -s /run/lancache/ccache-redis-url ] && [ "$distcc_enabled" = "1" ] && [ -n "${DISTCC_HOSTS:-}" ]; then
+                real_cc="$(PATH="$original_path" command -v cc)"
+                ccache_redis_endpoint="$(cat /run/lancache/ccache-redis-url)"
+                # What: normalizes a schemeless ccache_redis_endpoint to redis://.
+                # Why: ccache rejects a bare host:port outright, and this must accept
+                # the same configurations services/dns/Dockerfile's own normalization
+                # already accepts.
+                # From: Issue #887
+                case "$ccache_redis_endpoint" in
+                  redis://*|redis+unix:*) ;;
+                  *) ccache_redis_endpoint="redis://$ccache_redis_endpoint" ;;
+                esac
+                export CCACHE_REMOTE_STORAGE="$ccache_redis_endpoint"
+                export CCACHE_PREFIX=distcc
+                export CCACHE_COMPILERCHECK=content
+                # What: pins CCACHE_BASEDIR to this probe's own directory, and compiles
+                # using a relative filename from inside it (both below).
+                # Why: ccache's default hash_dir behavior folds the compile's absolute
+                # source path and CWD into the remote cache key; preflight_dir is a fresh
+                # mktemp path every run, so without this every CI run would leak a
+                # brand-new, never-reused Redis entry with no TTL. Verified empirically
+                # (2026-08-14, real Redis on lancache-240): CCACHE_BASEDIR alone, with an
+                # absolute compile argument, still produced a remote miss on a second run
+                # from a different mktemp dir; combining it with `cd` into that dir and a
+                # relative filename produced a genuine remote_storage_hit from the first
+                # run's entry.
+                # From: Issue #887
+                export CCACHE_BASEDIR="$preflight_dir"
+                printf '%s\n' 'int main(void) { return 0; }' > "$preflight_dir/ccache-probe.c"
+                cd "$preflight_dir"
+
+                ccache_dir_cold="$preflight_dir/ccache-dir-cold"
+                mkdir -p "$ccache_dir_cold"
+                CCACHE_DIR="$ccache_dir_cold" ccache --zero-stats >/dev/null
+                cold_log="$preflight_dir/ccache-cold.log"
+                run_logged "$cold_log" env CCACHE_DIR="$ccache_dir_cold" ccache "$real_cc" -c ccache-probe.c -o ccache-cold.o
+                cold_stats="$preflight_dir/ccache-cold-stats.log"
+                CCACHE_DIR="$ccache_dir_cold" ccache --print-stats > "$cold_stats"
+                if ! grep -qE '^remote_storage_write[[:space:]]+[1-9]' "$cold_stats"; then
+                  echo "[ERROR] ccache did not record a Redis remote-storage write on the cold compile." >&2
+                  cat "$cold_stats" >&2
+                  exit 1
+                fi
+
+                ccache_dir_warm="$preflight_dir/ccache-dir-warm"
+                mkdir -p "$ccache_dir_warm"
+                CCACHE_DIR="$ccache_dir_warm" ccache --zero-stats >/dev/null
+                warm_log="$preflight_dir/ccache-warm.log"
+                run_logged "$warm_log" env CCACHE_DIR="$ccache_dir_warm" ccache "$real_cc" -c ccache-probe.c -o ccache-warm.o
+                warm_stats="$preflight_dir/ccache-warm-stats.log"
+                CCACHE_DIR="$ccache_dir_warm" ccache --print-stats > "$warm_stats"
+                if ! grep -qE '^remote_storage_hit[[:space:]]+[1-9]' "$warm_stats"; then
+                  echo "[ERROR] ccache did not record a Redis remote-storage read hit from a fresh local CCACHE_DIR -- the Redis round trip is not proven, only local-disk caching (if any)." >&2
+                  cat "$warm_stats" >&2
+                  exit 1
+                fi
+                if grep -qE '^remote_storage_error[[:space:]]+[1-9]' "$cold_stats" "$warm_stats"; then
+                  echo "[ERROR] ccache recorded a Redis remote-storage error." >&2
+                  cat "$cold_stats" "$warm_stats" >&2
+                  exit 1
+                fi
+
+                unset CCACHE_REMOTE_STORAGE CCACHE_PREFIX CCACHE_COMPILERCHECK
+                echo "[INFO] ccache-over-distcc preflight completed (real Redis write + read confirmed)."
+              elif [ -s /run/lancache/ccache-redis-url ]; then
+                echo "[INFO] ccache-redis-file was provided but real distcc dispatch did not succeed above; skipping ccache preflight (nothing real to prefix)."
               fi
             fi
         PREFLIGHT

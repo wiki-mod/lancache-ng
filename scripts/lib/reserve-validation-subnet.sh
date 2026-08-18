@@ -77,8 +77,8 @@
 # validation_subnet_release, which it's built on) is also reused, as a
 # generic "reserve one free integer with host-local flock" primitive, by two
 # entirely independent consumers on their OWN separate /16 ranges --
-# scripts/dhcp-kea-lease-flow-simulation.sh (172.31.0.0/16) and
-# scripts/dhcp-proxy-pxe-simulation.sh (172.29.0.0/16) -- neither of which
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh (172.31.0.0/16) and
+# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh (172.29.0.0/16) -- neither of which
 # has (or wants) a `/27` subdivision; both still want a single, whole `/24`
 # per octet, exactly as before. A first version of this redesign renamed
 # this function's output to "slot" and changed what it locked/derived,
@@ -260,8 +260,8 @@ validation_subnet_release() {
 #
 # For the general 172.30.0.0/16 validation-stack pool ONLY -- see
 # validation_subnet_reserve_slot (below) for the `/27`-per-slot equivalent.
-# scripts/dhcp-kea-lease-flow-simulation.sh and
-# scripts/dhcp-proxy-pxe-simulation.sh call THIS function (on their own,
+# scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh and
+# scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh call THIS function (on their own,
 # separate 172.31.0.0/16 / 172.29.0.0/16 lock_root/range), expecting a plain
 # octet, unchanged by the #832 redesign.
 #
@@ -427,8 +427,8 @@ PYEOF
 # #832: only 10 of the /27's 30 usable host addresses (base+1..base+10) are
 # claimed here; base+11..base+30 stay free for a couple of consumer scripts
 # that need a few MORE addresses within the SAME reserved subnet
-# (scripts/dhcp-kea-ctrl-agent-mutation-simulation.sh,
-# scripts/setup-reset-kea-config-simulation.sh -- each derives its own
+# (scripts/untracked/simulations/dhcp-kea-ctrl-agent-mutation-simulation.sh,
+# scripts/untracked/simulations/setup-reset-kea-config-simulation.sh -- each derives its own
 # extra addresses directly from $VALIDATION_SUBNET's actual base, see those
 # scripts' own comments) and for genuine future growth of the validation
 # stack itself.
@@ -596,4 +596,37 @@ validation_project_networks_teardown() {
     done < <(docker network ls --filter "label=com.docker.compose.project=$compose_project" -q 2>/dev/null)
 
     return "$failed"
+}
+
+# validation_simulation_teardown <compose_project> <work_dir> [extra_cleanup_cmd...]
+#
+# Standard EXIT-trap teardown shared by every full-setup simulation script
+# that starts deploy/full-setup/docker-compose.yml under its own
+# reserved-slot Compose project: runs [extra_cleanup_cmd...] first if given
+# (e.g. a plain `docker run` container outside the compose project that
+# needs tearing down separately), tears the compose project down (`down -v
+# --remove-orphans`), waits for its networks to actually detach
+# (validation_project_networks_teardown -- not just `down`'s own exit code,
+# see that function's own comment for the race this closes), then removes
+# <work_dir>. Does not call `exit` itself: callers keep their own `trap
+# cleanup EXIT` wrapper, which captures `$?` before calling this and exits
+# with that saved status afterward, so this function's own internal
+# `|| true` guards never mask the real exit code the trap must propagate.
+#
+# Consolidated (PR #1523, AG-CODE-013) out of a word-for-word duplicated
+# cleanup() body that had independently accumulated in
+# scripts/nats-secondary-auth-callout-simulation.sh,
+# scripts/ssl-mitm-cache-simulation.sh, and
+# scripts/ui-nats-dns-integration-simulation.sh -- all three already source
+# this file for validation_project_networks_teardown alone.
+validation_simulation_teardown() {
+    local compose_project="$1" work_dir="$2"
+    shift 2
+    if (( $# > 0 )); then
+        "$@" >/dev/null 2>&1 || true
+    fi
+    docker compose -p "$compose_project" -f deploy/full-setup/docker-compose.yml \
+        down -v --remove-orphans >/dev/null 2>&1 || true
+    validation_project_networks_teardown "$compose_project" || true
+    rm -rf "$work_dir"
 }

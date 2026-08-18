@@ -1,0 +1,589 @@
+#!/usr/bin/env bats
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# What: regression coverage for the protect-only SHA retention audit and
+# its read-only GitHub REST helper.
+# Why: each test carries its own AG-CODE-010 purpose comment; this
+# file-level note covers all of them rather than repeating it per test.
+# From: Issue #1095 | PR #1501.
+
+setup() {
+  repo_root="$(cd "$(dirname "$BATS_TEST_FILENAME")/../.." && pwd)"
+  # shellcheck source=scripts/lib/github-api-retry.sh
+  source "$repo_root/scripts/lib/github-api-retry.sh"
+  # shellcheck source=scripts/lib/sha-retention-audit.sh
+  source "$repo_root/scripts/lib/sha-retention-audit.sh"
+  tmp_dir="$(mktemp -d "${BATS_TEST_TMPDIR}/sha-retention-audit.XXXXXX")"
+}
+
+teardown() {
+  rm -rf -- "$tmp_dir"
+}
+
+# The manifest value is the single machine-readable ordinary-root budget.
+@test "retention manifest defines exactly thirty accepted ordinary roots" {
+  run sra_read_retention_keep "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "30" ]
+}
+
+# A duplicate key would create two competing retention values, so parsing must fail.
+@test "retention parser rejects duplicate budget declarations" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  accepted_ordinary_roots_per_package: 10
+  accepted_ordinary_roots_per_package: 11
+EOF
+  run sra_read_retention_keep "$tmp_dir/manifest.yml"
+  [ "$status" -ne 0 ]
+}
+
+# minimum_stable_releases feeds sra_select_supported_release_tags's "how many
+# of a package's own newest stable releases stay protected" question.
+@test "retention manifest defines exactly three minimum stable releases" {
+  run sra_read_minimum_stable_releases "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
+}
+
+# The refactor sharing _sra_read_manifest_positive_integer between
+# sra_read_retention_keep and sra_read_minimum_stable_releases must not let
+# the two keys' values bleed into each other.
+@test "retention keep and minimum stable releases parse independently" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  accepted_ordinary_roots_per_package: 30
+  minimum_stable_releases: 3
+EOF
+  run sra_read_retention_keep "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "30" ]
+
+  run sra_read_minimum_stable_releases "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "3" ]
+}
+
+# The real manifest's steady state is an empty rollback_anchors list.
+@test "rollback_anchors reader succeeds with empty output on the real manifest" {
+  run sra_read_rollback_anchors "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+# An entirely absent header is treated the same as an empty list -- the
+# manifest's steady state before any rollback_anchors key existed at all.
+@test "rollback_anchors reader succeeds with empty output when the header is entirely absent" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  minimum_stable_releases: 3
+EOF
+  run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "" ]
+}
+
+# Two competing list declarations are a malformed manifest in every case.
+@test "rollback_anchors reader rejects a duplicate list header" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  rollback_anchors:
+    - sha256:1111111111111111111111111111111111111111111111111111111111111111
+  rollback_anchors:
+EOF
+  run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
+  [ "$status" -ne 0 ]
+}
+
+# Declared entries come back one per line, in manifest order.
+@test "rollback_anchors reader returns declared digest entries" {
+  cat >"$tmp_dir/manifest.yml" <<'EOF'
+retention:
+  rollback_anchors:
+    - sha256:1111111111111111111111111111111111111111111111111111111111111111
+    - sha256:2222222222222222222222222222222222222222222222222222222222222222
+EOF
+  run sra_read_rollback_anchors "$tmp_dir/manifest.yml"
+  [ "$status" -eq 0 ]
+  [ "${lines[0]}" = "sha256:1111111111111111111111111111111111111111111111111111111111111111" ]
+  [ "${lines[1]}" = "sha256:2222222222222222222222222222222222222222222222222222222222222222" ]
+}
+
+# A rollback anchor is deliberately digest-only -- a tag/ref must never pass.
+@test "rollback anchor digest format accepts only an exact sha256:<64-hex> value" {
+  run sra_is_rollback_anchor_digest "sha256:$(printf 'a%.0s' {1..64})"
+  [ "$status" -eq 0 ]
+
+  run sra_is_rollback_anchor_digest "nightly"
+  [ "$status" -ne 0 ]
+
+  run sra_is_rollback_anchor_digest "sha256:tooshort"
+  [ "$status" -ne 0 ]
+}
+
+# Membership must be exact equality, never a prefix/substring match.
+@test "rollback anchor membership check is exact, not a prefix match" {
+  anchor="sha256:$(printf 'a%.0s' {1..64})"
+  prefixed="sha256:$(printf 'a%.0s' {1..63})b"
+
+  run sra_digest_is_rollback_anchor "$anchor" "$anchor"
+  [ "$status" -eq 0 ]
+
+  run sra_digest_is_rollback_anchor "$prefixed" "$anchor"
+  [ "$status" -ne 0 ]
+}
+
+# The list validator is what both the CI static check and the live audit share.
+@test "rollback anchor list validator accepts a well-formed digest list" {
+  list="$(printf 'sha256:%s\nsha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})")"
+  run sra_validate_rollback_anchors_list "$list"
+  [ "$status" -eq 0 ]
+}
+
+# The empty steady state must validate cleanly too, never as an error.
+@test "rollback anchor list validator accepts an empty list" {
+  run sra_validate_rollback_anchors_list ""
+  [ "$status" -eq 0 ]
+}
+
+# A git tag/ref in place of a digest defeats the whole point of an immutable anchor.
+@test "rollback anchor list validator rejects a git tag/ref in place of a digest" {
+  run sra_validate_rollback_anchors_list "nightly"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"not an exact sha256"* ]]
+}
+
+# A blank line in the list must be caught explicitly, not silently accepted.
+@test "rollback anchor list validator rejects a blank entry" {
+  list="$(printf 'sha256:%s\n\nsha256:%s\n' "$(printf 'a%.0s' {1..64})" "$(printf 'b%.0s' {1..64})")"
+  run sra_validate_rollback_anchors_list "$list"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"blank entry"* ]]
+}
+
+# Runtime and tooling retention must follow the same publisher inventory as build-push.
+@test "manifest runtime and tooling packages match the build matrix" {
+  package_inventory="$(sra_manifest_packages "$repo_root/release/stack-images.yml")"
+  manifest_services="$(awk -F '\t' '$1 == "runtime" || $1 == "tooling" { print $2 }' <<<"$package_inventory" | sort -u)"
+  matrix_services="$(awk '/^[[:space:]]+- service: / { line=$0; sub(/^.*- service: /, "", line); print line }' "$repo_root/.github/workflows/build-push.yml" | sort -u)"
+  [ -n "$manifest_services" ]
+  [ "$manifest_services" = "$matrix_services" ]
+  [[ "$manifest_services" == *"ntp"* ]]
+  [[ "$manifest_services" == *"syslog"* ]]
+  [[ "$manifest_services" == *"build-tools"* ]]
+}
+
+# GHCR version objects are deletion units, so every required field must be valid before classification.
+@test "package-version page schema accepts complete objects" {
+  cat >"$tmp_dir/page.json" <<'EOF'
+[
+  {
+    "id": 42,
+    "name": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "metadata": {"container": {"tags": ["sha-abcdef1", "nightly"]}}
+  }
+]
+EOF
+  run sra_validate_version_page "$tmp_dir/page.json"
+  [ "$status" -eq 0 ]
+}
+
+# Tag text is emitted into line-oriented audit output, so control characters must fail schema validation.
+@test "package-version page schema rejects control characters in tags" {
+  cat >"$tmp_dir/page.json" <<'EOF'
+[
+  {
+    "id": 42,
+    "name": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "metadata": {"container": {"tags": ["bad\tseparator"]}}
+  }
+]
+EOF
+  run sra_validate_version_page "$tmp_dir/page.json"
+  [ "$status" -ne 0 ]
+}
+
+# Missing tag metadata must never collapse into an apparently untagged version.
+@test "package-version page schema rejects missing tag metadata" {
+  cat >"$tmp_dir/page.json" <<'EOF'
+[
+  {
+    "id": 42,
+    "name": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "metadata": {"container": {}}
+  }
+]
+EOF
+  run sra_validate_version_page "$tmp_dir/page.json"
+  [ "$status" -ne 0 ]
+}
+
+# A missing/null version id cannot be used as a stable package-version identity.
+@test "package-version page schema rejects null version ids" {
+  cat >"$tmp_dir/page.json" <<'EOF'
+[
+  {
+    "id": null,
+    "name": "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "metadata": {"container": {"tags": ["sha-abcdef1"]}}
+  }
+]
+EOF
+  run sra_validate_version_page "$tmp_dir/page.json"
+  [ "$status" -ne 0 ]
+}
+
+# A malformed digest must not enter the identity graph as if it were an OCI digest.
+@test "package-version page schema rejects malformed digests" {
+  cat >"$tmp_dir/page.json" <<'EOF'
+[
+  {
+    "id": 42,
+    "name": "not-a-digest",
+    "metadata": {"container": {"tags": ["sha-abcdef1"]}}
+  }
+]
+EOF
+  run sra_validate_version_page "$tmp_dir/page.json"
+  [ "$status" -ne 0 ]
+}
+
+# Multiple SHA aliases on one package version are one stored root identity, not multiple slots.
+@test "tag facts preserve multiple root aliases on one version" {
+  version='{"metadata":{"container":{"tags":["sha-abcdef1","sha-1234567"]}}}'
+  run sra_version_tag_facts "$version"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'2\t0\t0' ]
+}
+
+# A protected non-SHA identity attached to the version must be visible to the classifier.
+@test "tag facts classify protected non-SHA tags separately" {
+  version='{"metadata":{"container":{"tags":["sha-abcdef1","nightly"]}}}'
+  run sra_version_tag_facts "$version"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'1\t0\t1' ]
+}
+
+# Platform child tags are closure, not ordinary root-history slots.
+@test "tag facts distinguish architecture child tags" {
+  version='{"metadata":{"container":{"tags":["sha-abcdef1-amd64","sha-abcdef1-arm64"]}}}'
+  run sra_version_tag_facts "$version"
+  [ "$status" -eq 0 ]
+  [ "$output" = $'0\t2\t0' ]
+}
+
+# Ambiguous or absent REST resources are not positive proof of package absence.
+@test "GitHub REST retry treats 404 as a hard unknown failure" {
+  _github_api_get_once() {
+    GITHUB_API_HTTP_STATUS="404"
+    printf '{"message":"Not Found"}\n' >"$2"
+    return 0
+  }
+  GITHUB_API_RETRY_ATTEMPTS=4
+  GITHUB_API_RETRY_DELAY_SECONDS=0
+  run github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/body.json"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"refusing to interpret this response as an empty result"* ]]
+}
+
+# Recovered transient failures are notices, not warnings, under the warnings-as-errors contract.
+@test "GitHub REST retry recovers transient status without warning output" {
+  retry_state="$tmp_dir/retry-state"
+  _github_api_get_once() {
+    if [[ ! -e "$retry_state" ]]; then
+      : >"$retry_state"
+      GITHUB_API_HTTP_STATUS="500"
+      printf '{"message":"transient"}\n' >"$2"
+    else
+      GITHUB_API_HTTP_STATUS="200"
+      printf '[]\n' >"$2"
+    fi
+    return 0
+  }
+  GITHUB_API_RETRY_ATTEMPTS=2
+  GITHUB_API_RETRY_DELAY_SECONDS=0
+  run github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/body.json"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"::notice::"* ]]
+  [[ "$output" != *"::warning::"* ]]
+}
+
+# SHA abbreviation handling must resolve through Git itself and reject unknown prefixes.
+@test "commit-prefix resolution is exact and history-aware" {
+  git_dir="$tmp_dir/repo"
+  git init -q "$git_dir"
+  git -C "$git_dir" config user.name Test
+  git -C "$git_dir" config user.email test@example.invalid
+  printf 'one\n' >"$git_dir/file"
+  git -C "$git_dir" add file
+  git -C "$git_dir" commit -q -m one
+  first="$(git -C "$git_dir" rev-parse HEAD)"
+  printf 'two\n' >>"$git_dir/file"
+  git -C "$git_dir" commit -q -am two
+  git -C "$git_dir" update-ref refs/remotes/origin/current_dev HEAD
+
+  run sra_resolve_commit_prefix "$git_dir" "${first:0:7}"
+  [ "$status" -eq 0 ]
+  [ "$output" = "$first" ]
+
+  run sra_commit_is_on_history_ref "$git_dir" "$first" origin/current_dev
+  [ "$status" -eq 0 ]
+
+  run sra_resolve_commit_prefix "$git_dir" deadbee
+  [ "$status" -ne 0 ]
+}
+
+# Split out so the orchestrator's per-version hot loop can validate a value
+# it already extracted via one combined jq call, without a second jq
+# subprocess per version just for this field (see gc-sha-retention-audit.sh's
+# own Why comment on the timeout this avoids).
+@test "created_at string validator accepts only the exact GHCR shape" {
+  run sra_validate_created_at_string "2026-08-01T12:00:00Z"
+  [ "$status" -eq 0 ]
+
+  run sra_validate_created_at_string ""
+  [ "$status" -ne 0 ]
+
+  run sra_validate_created_at_string "2026-08-01 12:00:00"
+  [ "$status" -ne 0 ]
+}
+
+# The dry-run report shows a real build date per candidate; created_at must
+# never feed ranking (see docs/release-versioning.md's Retention section).
+@test "version created_at is extracted for display when well-formed" {
+  version='{"created_at":"2026-08-01T12:00:00Z","metadata":{"container":{"tags":["sha-abcdef1"]}}}'
+  run sra_version_created_at "$version"
+  [ "$status" -eq 0 ]
+  [ "$output" = "2026-08-01T12:00:00Z" ]
+}
+
+# A missing/malformed build date is a real build-pipeline defect, not proof
+# of absence; the caller must be able to detect it and report it separately.
+@test "version created_at fails closed when missing or malformed" {
+  run sra_version_created_at '{"metadata":{"container":{"tags":["sha-abcdef1"]}}}'
+  [ "$status" -ne 0 ]
+
+  run sra_version_created_at '{"created_at":"not-a-timestamp","metadata":{"container":{"tags":["sha-abcdef1"]}}}'
+  [ "$status" -ne 0 ]
+}
+
+# Within-budget candidates stay a plain protect decision.
+@test "emit_record labels a within-budget candidate as protect" {
+  run sra_emit_record runtime proxy 1 sha256:aa sha-abcdef1 2026-08-01T12:00:00Z 3 within-30 protect acceptance-evidence-unavailable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"budget=within-30"* ]]
+  [[ "$output" == *"decision=protect"* ]]
+  [[ "$output" == *"built=2026-08-01T12:00:00Z"* ]]
+}
+
+# Beyond-budget candidates are the dry-run "I would delete this" report line.
+@test "emit_record labels a beyond-budget candidate as would-delete" {
+  run sra_emit_record runtime proxy 2 sha256:bb sha-1234567 2026-01-01T00:00:00Z 31 beyond-30 would-delete acceptance-evidence-unavailable
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"budget=beyond-30"* ]]
+  [[ "$output" == *"decision=would-delete"* ]]
+}
+
+# An untagged package version (e.g. an attestation/referrer manifest) has a
+# legitimately empty tags string, which a naive "${5:?}" required-argument
+# guard would reject as if the argument were missing entirely.
+@test "emit_record accepts a legitimately empty tags value" {
+  run sra_emit_record runtime proxy 3 sha256:cc "" unknown n/a protected protect non-ordinary-version
+  [ "$status" -eq 0 ]
+  [[ "$output" == *$'\ttags=\t'* ]]
+}
+
+# A cold cache (no directory configured) must fall through to a real GET,
+# exactly matching this helper's pre-caching behavior.
+@test "GitHub REST retry performs a real GET when no cache directory is set" {
+  calls=0
+  _github_api_get_once() {
+    calls=$(( calls + 1 ))
+    GITHUB_API_HTTP_STATUS="200"
+    printf '[]\n' >"$2"
+    return 0
+  }
+  GITHUB_API_CACHE_DIR=""
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/body.json" >/dev/null
+  [ "$calls" -eq 1 ]
+}
+
+# A fresh cached response must be served without a second real GET, and a
+# response older than the TTL must not be trusted as current.
+@test "GitHub REST retry serves a fresh cache hit without a real GET, and expires it" {
+  calls=0
+  _github_api_get_once() {
+    calls=$(( calls + 1 ))
+    GITHUB_API_HTTP_STATUS="200"
+    printf '[]\n' >"$2"
+    return 0
+  }
+  GITHUB_API_CACHE_DIR="$tmp_dir/api-cache"
+  GITHUB_API_CACHE_TTL_SECONDS=600
+  mkdir -p "$GITHUB_API_CACHE_DIR"
+
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/first.json" >/dev/null
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/second.json" >/dev/null
+  [ "$calls" -eq 1 ]
+
+  # Force the cached entry to look older than the TTL without sleeping.
+  touch -d "@$(( $(date +%s) - 700 ))" "$GITHUB_API_CACHE_DIR"/*.json
+  github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/third.json" >/dev/null
+  [ "$calls" -eq 2 ]
+}
+
+# Only a genuine vX.Y.Z stable release counts -- a release-candidate tag
+# must not be mistaken for one (docs/release-versioning.md's Retention
+# section: only stable releases count toward minimum_stable_releases).
+@test "stable release tag shape accepts vX.Y.Z and rejects rc/other shapes" {
+  run sra_is_stable_release_tag "v1.2.3"
+  [ "$status" -eq 0 ]
+
+  run sra_is_stable_release_tag "v1.2.3-rc.1"
+  [ "$status" -ne 0 ]
+
+  run sra_is_stable_release_tag "nightly"
+  [ "$status" -ne 0 ]
+
+  run sra_is_stable_release_tag "v1.2"
+  [ "$status" -ne 0 ]
+}
+
+# Bash has no native semver comparator; the zero-padded key must order
+# releases correctly even across differing digit widths (v2.0.0 > v1.20.0).
+@test "release sort key orders newer releases ahead of older ones" {
+  key_low="$(sra_release_sort_key "v1.20.0")"
+  key_high="$(sra_release_sort_key "v2.0.0")"
+  [[ "$key_high" > "$key_low" ]]
+}
+
+@test "release sort key rejects a non-stable-release tag" {
+  run sra_release_sort_key "v1.2.3-rc.1"
+  [ "$status" -ne 0 ]
+}
+
+# retention.minimum_stable_releases (3) selects the newest 3 by real semver
+# order, not by input/file order.
+@test "select supported release tags picks the newest N by semver" {
+  supported="$(printf 'v1.0.0\nv1.2.0\nv1.10.0\nv2.0.0\n' | sra_select_supported_release_tags 3)"
+  [ "$supported" = $'v2.0.0\nv1.10.0\nv1.2.0' ]
+}
+
+# An empty release-tag set (a brand-new package with no stable release yet)
+# is a legitimate empty result, not a failure.
+@test "select supported release tags returns empty for a package with no releases yet" {
+  supported="$(printf '' | sra_select_supported_release_tags 3)"
+  [ -z "$supported" ]
+}
+
+@test "channel tag classifier recognizes nightly, latest, and stable release shapes" {
+  run sra_classify_channel_tag "nightly"
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly" ]
+
+  run sra_classify_channel_tag "latest"
+  [ "$status" -eq 0 ]
+  [ "$output" = "latest" ]
+
+  run sra_classify_channel_tag "v0.4.1"
+  [ "$status" -eq 0 ]
+  [ "$output" = "stable-release" ]
+
+  run sra_classify_channel_tag "v0.4.1-rc.2"
+  [ "$status" -eq 0 ]
+  [ "$output" = "other" ]
+
+  run sra_classify_channel_tag "pr-1501-staging"
+  [ "$status" -eq 0 ]
+  [ "$output" = "other" ]
+}
+
+# The orchestrator's root_count==0/other_count>0 branches need the actual
+# "other"-kind tag text, not just sra_version_tag_facts's count, derived in
+# pure bash from the already-extracted comma-joined tag list (no extra jq
+# round-trip per version -- see the function's own Why comment).
+@test "other tags from csv excludes sha root and child aliases" {
+  other_tags="$(sra_other_tags_from_csv "sha-abcdef1,sha-abcdef1-amd64,nightly,v0.4.1")"
+  [[ "$other_tags" == *"nightly"* ]]
+  [[ "$other_tags" == *"v0.4.1"* ]]
+  [[ "$other_tags" != *"sha-abcdef1"* ]]
+}
+
+# A digest can legitimately be nightly AND latest AND a just-cut stable
+# release at once (current_dev and master sharing a commit right after a
+# promotion) -- all applicable reasons must be reported, not just one.
+@test "protected reference reason combines every channel that applies" {
+  other_tags=$'nightly\nlatest\nv0.4.1'
+  supported="v0.4.1"
+  run sra_protected_reference_reason "$other_tags" "$supported"
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly-channel-protected+latest-channel-protected+stable-release-protected" ]
+}
+
+@test "protected reference reason reports only the channel that actually applies" {
+  run sra_protected_reference_reason "nightly" ""
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly-channel-protected" ]
+}
+
+# An old, no-longer-supported release tag (past minimum_stable_releases) must
+# not be mislabeled as stable-release-protected -- it is real history, but
+# not one of the currently supported releases.
+@test "protected reference reason does not credit an unsupported old release tag" {
+  supported=$'v0.5.0\nv0.4.2\nv0.4.1'
+  run sra_protected_reference_reason "v0.1.0" "$supported"
+  [ "$status" -ne 0 ]
+}
+
+# What: an unrecognized extra tag (not nightly/latest/a supported release)
+# must not be mislabeled as a protected channel.
+# Why: the orchestrator's other_count>0 branch relies on this exact failure
+# to fall through to ordinary root-candidate ranking instead of protecting.
+# From: Issue #1095 | PR #1501.
+@test "protected reference reason fails for an unrecognized tag" {
+  run sra_protected_reference_reason "pr-1501-staging" ""
+  [ "$status" -ne 0 ]
+}
+
+@test "extra tag protect reason returns the specific channel when one matches" {
+  run sra_extra_tag_protect_reason "sha-abcdef1,nightly" "" "non-ordinary-version"
+  [ "$status" -eq 0 ]
+  [ "$output" = "nightly-channel-protected" ]
+}
+
+# sra_extra_tag_protect_reason always succeeds with a fallback -- this is
+# deliberately only correct for the root_count==0 branch (see the
+# function's own Why comment), which has no root tag to rank by regardless
+# of whether its extra tag is recognized.
+@test "extra tag protect reason falls back to the caller's generic reason" {
+  run sra_extra_tag_protect_reason "pr-1501-staging" "" "non-ordinary-version"
+  [ "$status" -eq 0 ]
+  [ "$output" = "non-ordinary-version" ]
+}
+
+# The retention audit surface must remain structurally incapable of package deletion.
+@test "retention audit code and workflow contain no destructive package path" {
+  run grep -ER --line-number -- '-X[[:space:]]+DELETE|delete:packages|GHCR_PACKAGE_DELETE_PAT' \
+    "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" \
+    "$repo_root/scripts/lib/sha-retention-audit.sh" \
+    "$repo_root/scripts/lib/github-api-retry.sh" \
+    "$repo_root/.github/workflows/gc-sha-retention-audit.yml"
+  [ "$status" -eq 1 ]
+}
+
+# The rollback_anchors membership check must run before the class==metadata
+# branch, which is itself the first classification decision in the loop --
+# an anchor must protect a digest regardless of what class it belongs to.
+@test "gc-sha-retention-audit.sh checks rollback_anchors before every other classification branch" {
+  anchor_line="$(grep -n 'sra_digest_is_rollback_anchor "\$digest"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  metadata_line="$(grep -n 'class" == "metadata"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  [ -n "$anchor_line" ]
+  [ -n "$metadata_line" ]
+  [ "$anchor_line" -lt "$metadata_line" ]
+}
+
+# A declared-but-never-observed anchor must fail the whole run closed, not silently no-op.
+@test "gc-sha-retention-audit.sh fails closed on an unresolvable rollback_anchors entry" {
+  run grep -F 'does not exist as a real package version digest' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -eq 0 ]
+}

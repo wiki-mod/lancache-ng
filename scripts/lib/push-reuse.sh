@@ -39,7 +39,7 @@
 # ORDERING, i.e. the image cannot have been built from a commit "in the
 # future" relative to what we're about to tag it as; (3) a real content diff
 # for THIS service's own path, from that revision to github.sha (not from
-# detect-changes' before..sha) via scripts/classify-image-impact.sh -- proves
+# detect-changes' before..sha) via scripts/untracked/classify-image-impact.sh -- proves
 # CONTENT IDENTITY across the whole span back to the image's actual source
 # commit, which ancestry alone does not. Reuse requires all three; anything
 # missing, unreadable, ambiguous, or showing a real change fails closed to a
@@ -77,7 +77,7 @@
 #
 # Sourced by build-push.yml's push-only reuse-decision job (needs
 # fetch-depth: 0 -- sif_is_ancestor_or_equal requires full history, same
-# requirement scripts/classify-image-impact.sh already documents for its own
+# requirement scripts/untracked/classify-image-impact.sh already documents for its own
 # merge-base diff). Deliberately NOT `set -euo pipefail` at the top level,
 # matching scripts/lib/ghcr-retry.sh and scripts/lib/staging-image-freshness.sh's
 # own convention: this file only defines functions for a caller to invoke
@@ -150,7 +150,7 @@ push_reuse_decide() {
       return 0
     }
   else
-    local classify_script="${PUSH_REUSE_CLASSIFY_SCRIPT:-$(dirname "${BASH_SOURCE[0]}")/../classify-image-impact.sh}"
+    local classify_script="${PUSH_REUSE_CLASSIFY_SCRIPT:-$(dirname "${BASH_SOURCE[0]}")/../untracked/classify-image-impact.sh}"
     classify_output="$(bash "$classify_script" "$revision" "$github_sha" 2>/dev/null)" || {
       echo "push_reuse_decide: $classify_script failed for ${revision}..${github_sha} -- failing closed to a real rebuild." >&2
       printf 'false\n'

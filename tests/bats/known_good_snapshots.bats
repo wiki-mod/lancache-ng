@@ -68,7 +68,7 @@ write_config() {
 }
 
 @test "kgs_list_snapshots excludes an unfinished .staging.* directory" {
-    # Regression test for a Codex review finding on #616: kgs_snapshot_create
+    # Regression test for #616: kgs_snapshot_create
     # assembles a new snapshot in a ".staging.XXXXXX" sibling directory before
     # the final atomic `mv` into its real <id> name. A container killed
     # mid-copy (before that mv) leaves the staging directory behind under
@@ -181,7 +181,7 @@ write_config() {
 }
 
 @test "kgs_snapshot_apply rejects an incomplete snapshot missing a requested file" {
-    # Regression test for a Codex review finding on #616: a finalized
+    # Regression test for #616: a finalized
     # snapshot directory missing one of the requested basenames (e.g. taken
     # before a new generated file was added to the multi-file candidate
     # list) must be rejected outright, not partially applied -- otherwise

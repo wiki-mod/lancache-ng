@@ -220,3 +220,93 @@ always_fail_cmd() {
     captured="$(ghcr_retry ghcr.io testuser testpass -- real_cmd 2>/dev/null)"
     [ "$captured" = "sha256:cleanvalue" ]
 }
+
+# Coverage for resolve_manifest_digest (PR #1523, AG-CODE-013): extracted out
+# of near-identical duplicate digest-strip logic previously copied between
+# scripts/render-full-setup-digest-override.sh and
+# scripts/select-build-tools-image.sh.
+
+@test "resolve_manifest_digest prints the stripped digest on a clean inspect result, no credentials" {
+    docker() {
+        if [[ "$1" = "buildx" && "$2" = "imagetools" && "$3" = "inspect" ]]; then
+            echo '"sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"'
+            return 0
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:nightly"
+    [ "$status" -eq 0 ]
+    [ "$output" = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" ]
+}
+
+@test "resolve_manifest_digest fails on an unparsable/missing digest" {
+    docker() {
+        if [[ "$1" = "buildx" ]]; then
+            return 1
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:nightly"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "resolve_manifest_digest rejects an uppercase-hex digest instead of silently accepting it" {
+    # Regression test for the real drift this consolidation fixed:
+    # render-full-setup-digest-override.sh's original pattern accepted
+    # [0-9a-fA-F], which would have let a value no real registry call can
+    # legitimately produce pass validation.
+    docker() {
+        if [[ "$1" = "buildx" ]]; then
+            echo '"sha256:AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"'
+            return 0
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:nightly"
+    [ "$status" -eq 1 ]
+    [ -z "$output" ]
+}
+
+@test "resolve_manifest_digest routes through ghcr_retry (with relogin) when credentials are given" {
+    FAKE_FAIL_COUNT=1
+    docker() {
+        if [[ "$1" = "login" ]]; then
+            echo "relogin" >> "$relogin_log"
+            return 0
+        fi
+        if [[ "$1" = "buildx" ]]; then
+            echo "attempt" >> "$attempt_log"
+            local calls
+            calls=$(wc -l < "$attempt_log")
+            if (( calls <= "${FAKE_FAIL_COUNT:-0}" )); then
+                return 1
+            fi
+            echo '"sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"'
+            return 0
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:nightly" testuser testpass
+    [ "$status" -eq 0 ]
+    [ "$output" = "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" ]
+    [ "$(relogin_calls)" -eq 1 ]
+}
+
+@test "resolve_manifest_digest does not retry when no credentials are given (single unwrapped attempt)" {
+    docker() {
+        if [[ "$1" = "buildx" ]]; then
+            echo "attempt" >> "$attempt_log"
+            return 1
+        fi
+        return 1
+    }
+    export -f docker
+    run resolve_manifest_digest "ghcr.io/wiki-mod/lancache-ng/build-tools:nightly"
+    [ "$status" -eq 1 ]
+    [ "$(wc -l < "$attempt_log")" -eq 1 ]
+}

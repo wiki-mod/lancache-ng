@@ -872,9 +872,9 @@ mod tests {
         ));
     }
 
-    // This is the actual regression case finding #16 is about: before this
-    // fix, a hung child (e.g. a wedged pdnsutil against a locked PowerDNS
-    // database) would block the caller forever. A short timeout here proves
+    // This is the actual regression case finding #16 is about: without a
+    // timeout guard, a hung child (e.g. a wedged pdnsutil against a locked
+    // PowerDNS database) would block the caller forever. A short timeout here proves
     // the function returns `false` promptly instead of hanging, and that
     // the child is actually killed rather than left running.
     #[test]

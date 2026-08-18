@@ -115,29 +115,37 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Build full-setup validation image
+      - name: Resolve immutable build-tools image
+        id: build-tools
         run: |
           set -euo pipefail
-          docker build \
-            --build-arg LANCACHE_IMAGE_REGISTRY=ghcr.io \
-            --build-arg LANCACHE_IMAGE_PREFIX=wiki-mod/lancache-ng \
-            --build-arg LANCACHE_IMAGE_TAG="$LANCACHE_IMAGE_TAG" \
-            -t lancache-ng-full-setup:validation \
-            deploy/full-setup
+          build_tools_image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          case "$build_tools_image" in
+            *@sha256:*) ;;
+            *)
+              echo "::error::Expected digest-qualified build-tools image, got '$build_tools_image'."
+              exit 1
+              ;;
+          esac
+          printf 'image=%s\n' "$build_tools_image" >> "$GITHUB_OUTPUT"
 
       - name: Validate compose configuration
         env:
+          BUILD_TOOLS_IMAGE: ${{ steps.build-tools.outputs.image }}
           LANCACHE_IMAGE_REGISTRY: ghcr.io
           LANCACHE_IMAGE_PREFIX: wiki-mod/lancache-ng
         run: |
           set -euo pipefail
+          : "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}"
+
           docker run --rm \
             -v "$PWD/deploy/full-setup:/validation:ro" \
             -w /validation \
             --env LANCACHE_IMAGE_REGISTRY \
             --env LANCACHE_IMAGE_PREFIX \
             --env LANCACHE_IMAGE_TAG \
-            docker:latest \
+            "$BUILD_TOOLS_IMAGE" \
+            timeout --kill-after=30 --signal=KILL 300 \
             docker compose -f docker-compose.yml config >/dev/null
 
       - name: Reserve a validation subnet and start the stack (locked, retries on collision)
@@ -153,7 +161,7 @@ jobs:
           FULL_SETUP_CLIENT_TOOLS_IMAGE: ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          bash scripts/full-setup-client-simulation.sh
+          bash scripts/untracked/simulations/full-setup-client-simulation.sh
 
       - name: Tear down full-setup validation stack
         if: always()
@@ -182,24 +190,20 @@ jobs:
             validation_project_networks_teardown "$COMPOSE_PROJECT_NAME" || true
           fi
 
-          # Release the host-local subnet lock the reserve composite acquired, so
-          # the slot frees up for the next run immediately instead of waiting
-          # for this whole job's process tree to exit. Only set if that step
-          # actually reserved a lock before any later failure.
+          # What: releases the host-local subnet lock the reserve composite acquired.
+          # Why: frees the slot for the next run immediately, without waiting for this
+          # job's whole process tree to exit; only set if a lock was actually reserved.
+          # From: PR #1523
           if [[ -n "${VALIDATION_LOCK_HOLDER_PID:-}" ]]; then
             kill "$VALIDATION_LOCK_HOLDER_PID" 2>/dev/null || true
           fi
 
-      - name: Clean up image
-        if: always()
-        run: docker rmi lancache-ng-full-setup:validation || true
-
   ssl-mitm-cache-simulation:
-    # Real DNS/HTTP/HTTPS caching test (deb.debian.org). Chained after the
-    # health-check job to serialize onto the shared runner tier and the
-    # fixed validation IPs; if: always() keeps its signal independent of that
-    # job's own result. LANCACHE_IMAGE_TAG threads the resolved PR staging
-    # tag so it tests the PR's own proxy/dns.
+    # What: real DNS/HTTP/HTTPS caching test (deb.debian.org) against the PR's own
+    # proxy/dns (LANCACHE_IMAGE_TAG threads the resolved PR staging tag).
+    # Why: chained after the health-check job to serialize onto the shared runner
+    # tier and fixed validation IPs; if: always() keeps its signal independent.
+    # From: PR #1523
     name: SSL MITM cache simulation
     needs: [compute-validation-network, full-setup-validate]
     if: >-
@@ -215,16 +219,15 @@ jobs:
       # build-push.yml's own shallow validate job when both run for the same
       # PR (they derive different values from different run ids). The
       # VALIDATION_SUBNET/*_IP/GATEWAY block below is needed too, not just
-      # the project name: scripts/ssl-mitm-cache-simulation.sh calls `docker
+      # the project name: scripts/untracked/simulations/ssl-mitm-cache-simulation.sh calls `docker
       # compose up` against deploy/full-setup/docker-compose.yml, whose
       # network block falls back to the fixed 172.30.99.0/27 subnet
       # (docker-compose.yml's own ${VALIDATION_SUBNET:-172.30.99.0/27}
       # default) whenever these are unset -- a different project NAME alone
       # does not stop two concurrent runs' bridge networks from overlapping
-      # on the same fixed subnet on a shared self-hosted host (Codex review
-      # finding on #764: the isolation claim above was only true for the
-      # full-setup-validate job, which already threaded these through; the
-      # sibling simulation jobs below did not).
+      # on the same fixed subnet on a shared self-hosted host -- the
+      # isolation claim above only holds once VALIDATION_SUBNET/*_IP/GATEWAY
+      # are actually threaded through, as this job does below.
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
       VALIDATION_PROXY_IP: ${{ needs.compute-validation-network.outputs.proxy_ip }}
@@ -235,11 +238,10 @@ jobs:
       VALIDATION_NETDATA_IP: ${{ needs.compute-validation-network.outputs.netdata_ip }}
       VALIDATION_NATS_IP: ${{ needs.compute-validation-network.outputs.nats_ip }}
       VALIDATION_UI_IP: ${{ needs.compute-validation-network.outputs.ui_ip }}
-      # This is the only job in this workflow that threads this through: the
-      # standard-passthrough-shim service it names is Compose-profile-gated
-      # (see deploy/full-setup/docker-compose.yml), so only this job's own
-      # `docker compose up ... standard-passthrough-shim` call ever starts
-      # it -- no other job needs a collision-safe value for it (issue #668).
+      # What: threads a collision-safe IP for the Compose-profile-gated standard-passthrough-shim.
+      # Why: only this job's own `docker compose up ... standard-passthrough-shim` call ever
+      # starts that service, so no other job needs this value.
+      # From: Issue #668
       VALIDATION_STANDARD_SHIM_IP: ${{ needs.compute-validation-network.outputs.standard_shim_ip }}
       COMPOSE_PROJECT_NAME: ${{ needs.compute-validation-network.outputs.project_name }}
       VALIDATION_UI_PORT: ${{ needs.compute-validation-network.outputs.ui_port }}
@@ -251,22 +253,17 @@ jobs:
         # should fail loudly rather than silently build a branch-local one.
         # EXCEPTION: when this PR itself touched tools/build-tools,
         # ensure-pr-staging-images has already polled for and confirmed
-        # build-tools:$PR_TAG exists (scripts/ensure-pr-staging-images.sh),
+        # build-tools:$PR_TAG exists (scripts/untracked/ensure-pr-staging-images.sh),
         # so use that PR-scoped image directly instead of build-tools:latest
         # -- otherwise a same-PR build-tools change that still happens to
         # pass select-build-tools-image.sh's baseline smoke test would never
-        # actually be exercised by this job (Codex review finding on #764).
+        # actually be exercised by this job.
         id: build-tools-image
         env:
           EVENT_NAME: ${{ github.event_name }}
-          # Read via env: + a quoted shell variable instead of interpolating
-          # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
-          # hardening, refs #1130): matches this file's own
-          # LANCACHE_IMAGE_TAG/env-var convention elsewhere and avoids the
-          # documented GitHub Actions script-injection anti-pattern, even
-          # though image_tag only ever holds a raw workflow_dispatch value
-          # when pr_staging_available is false (see scripts/lib/
-          # validation-image-tag.sh's vit_pr_staging_available/vit_resolve_tag).
+          # What: passes inputs via env: + quoted shell vars, not ${{ }} interpolation.
+          # Why: OSPS-BR-01.04 script-injection hardening; matches this file's own convention.
+          # From: Issue #1130
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -277,7 +274,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run SSL MITM cache simulation
@@ -291,13 +288,13 @@ jobs:
           # this host. The wrapper exports the whole VALIDATION_* set (incl.
           # VALIDATION_STANDARD_SHIM_IP, which compose reads to place the
           # standard-passthrough-shim this sim relies on) for the slot it wins.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ssl-mitm-cache-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ssl-mitm-cache-simulation.sh
 
   proxy-deep-wildcard-tls-simulation:
     # Real TLS-handshake test for entrypoint.sh's deep leading-dot wildcard
     # cert path (_EXTRA_WILDCARD_BASES/_bounded_cert_name/_sign_cert),
     # exercising a synthetic example.com-rooted fixture rather than the real
-    # cdn-domains.txt (see scripts/proxy-deep-wildcard-tls-simulation.sh's own
+    # cdn-domains.txt (see scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh's own
     # header for why this needs its own locally-built image instead of
     # reusing ssl-mitm-cache-simulation's published-image approach). Does not
     # need the compute-validation-network subnet/IP outputs at all -- it
@@ -324,8 +321,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
+        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
+        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # From: PR #1523
         id: build-tools-image
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
@@ -338,7 +336,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy deep-wildcard TLS simulation
@@ -346,7 +344,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/proxy-deep-wildcard-tls-simulation.sh
+          bash scripts/untracked/simulations/proxy-deep-wildcard-tls-simulation.sh
 
   proxy-standard-mode-sni-routing-simulation:
     # Real TLS-handshake test for entrypoint.sh's standard-mode (SNI
@@ -355,7 +353,7 @@ jobs:
     # different nginx context (the stream module's own :8443 passthrough
     # listener, not the http block's cert-selection map the sibling
     # proxy-deep-wildcard-tls-simulation job above validates). See
-    # scripts/proxy-standard-mode-sni-routing-simulation.sh's own header for
+    # scripts/untracked/simulations/proxy-standard-mode-sni-routing-simulation.sh's own header for
     # the full fake-origin/Docker-embedded-DNS mechanism this needs and why
     # it can't reuse either sibling script's approach. Chained after the
     # existing proxy-deep-wildcard-tls-simulation job for the same
@@ -374,8 +372,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
+        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
+        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # From: PR #1523
         id: build-tools-image
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
@@ -388,7 +387,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy standard-mode SNI routing simulation
@@ -396,30 +395,13 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/proxy-standard-mode-sni-routing-simulation.sh
+          bash scripts/untracked/simulations/proxy-standard-mode-sni-routing-simulation.sh
 
   proxy-ssl-mode-two-relay-dispatch-simulation:
-    # Real end-to-end test for the SSL-mode stream-level SNI depth-dispatch
-    # and symmetric two-relay client-IP fix (issue #1276/#1322): regex-
-    # anchored depth dispatch (MITM-covered vs passthrough-only SNI), real
-    # client-IP preservation through the two internal relays for
-    # PROXY_ALLOWED_CLIENT_CIDRS/access logging, and the dedicated
-    # healthcheck port. See scripts/proxy-ssl-mode-two-relay-dispatch-
-    # simulation.sh's own header for the full mechanism, including why this
-    # job deliberately does NOT rebuild a "pre-fix" image from git history on
-    # every run: once this fix is part of the base branch, every other PR's
-    # checkout already contains it, so there is no longer a stable,
-    # branch-independent pre-fix commit to compute (an earlier version of
-    # this job tried a runtime `git merge-base` for that purpose and it
-    # produced three different, unpredictable TLS errors across three real
-    # runs depending purely on which unrelated PR branch triggered it --
-    # the negative control that matters was performed once, live, by hand,
-    # and is recorded in issue #1276). No checkout `fetch-depth` override is
-    # needed here for that reason; the default shallow checkout is enough.
-    # Chained after proxy-standard-mode-sni-routing-simulation for the same
-    # AG-CI-017 BuildKit-content-store contention reasoning every job in
-    # this file already documents -- this job also builds its own throwaway
-    # proxy image on the same runner pool.
+    # What: end-to-end test for the SSL-mode SNI depth-dispatch and two-relay client-IP fix.
+    # Why: no "pre-fix" image is rebuilt from git history; the base branch already contains
+    # the fix. Chained after the sibling job for the same AG-CI-017 contention reasons.
+    # From: Issue #1276
     name: Proxy SSL-mode two-relay dispatch simulation
     needs: [compute-validation-network, proxy-standard-mode-sni-routing-simulation]
     if: >-
@@ -432,8 +414,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
+        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
+        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # From: PR #1523
         id: build-tools-image
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
@@ -446,7 +429,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run proxy SSL-mode two-relay dispatch simulation
@@ -454,7 +437,7 @@ jobs:
           BUILD_TOOLS_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/proxy-ssl-mode-two-relay-dispatch-simulation.sh
+          bash scripts/untracked/simulations/proxy-ssl-mode-two-relay-dispatch-simulation.sh
 
   ui-nats-dns-integration-simulation:
     # Real UI -> NATS -> nats-subscriber -> PowerDNS integration test. Wiring
@@ -491,8 +474,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
+        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
+        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # From: PR #1523
         id: build-tools-image
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step
         # above for why these are read via env: + quoted shell variables
@@ -509,7 +493,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run UI/NATS/DNS integration simulation
@@ -519,7 +503,7 @@ jobs:
           set -euo pipefail
           # Reserve a collision-free subnet (flock + retry, #820) and run the
           # sim inside it rather than racing the shared job-level subnet.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-nats-dns-integration-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ui-nats-dns-integration-simulation.sh
 
   setup-cli-simulation:
     # Runs the real setup.sh installer end-to-end (fresh install, update/
@@ -575,8 +559,7 @@ jobs:
         # fallback only rebuilds branch-local when the published `latest`
         # image FAILS its smoke test, so a same-PR build-tools change that
         # still happens to pass the baseline smoke test would otherwise
-        # silently run against `latest` instead of the PR's own image
-        # (Codex review finding on #764).
+        # silently run against `latest` instead of the PR's own image.
         id: build-tools-image
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
         # why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/REPOSITORY are
@@ -596,7 +579,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/select-build-tools-image.sh)"
+            image="$(bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh CLI simulation
@@ -664,7 +647,8 @@ jobs:
             -e SETUP_SIM_IMAGE_CHANNEL \
             -e SETUP_SIM_IMAGE_TAG \
             "$BUILD_TOOLS_IMAGE" \
-            bash scripts/setup-cli-simulation.sh
+            timeout --kill-after=30 --signal=KILL 1800 \
+            bash scripts/untracked/simulations/setup-cli-simulation.sh
 
   dhcp-kea-lease-flow-simulation:
     # Real DHCP lease flow against a Kea container built from THIS checkout's
@@ -672,7 +656,7 @@ jobs:
     # directly and needs no staging tag. This is where dhcp coverage lands in
     # the automatic gate (it was absent from the shallow check). dhcp-proxy's
     # own real, live-Docker PXE simulation now exists too
-    # (scripts/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
+    # (scripts/untracked/simulations/dhcp-proxy-pxe-simulation.sh, issue #705, closed), but it
     # currently runs only as a manual-dispatch job in full-setup-validate.yml,
     # not as part of THIS automatic per-PR gate -- wiring it in here (mirroring
     # this job's own shape) is a real, separate CI-trigger-behavior change,
@@ -690,7 +674,7 @@ jobs:
         # above, for the same reason: select-build-tools-image.sh's
         # trusted-ref fallback only rebuilds branch-local when the published
         # `latest` FAILS its smoke test, which a same-PR build-tools change
-        # would often still pass (Codex review finding on #764).
+        # would often still pass.
         id: build-tools-image
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
         # why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/REPOSITORY are
@@ -710,7 +694,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image."
           else
-            image="$(bash scripts/select-build-tools-image.sh)"
+            image="$(bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run DHCP Kea lease-flow simulation
@@ -718,7 +702,7 @@ jobs:
           DHCP_LEASE_FLOW_CLIENT_IMAGE: ${{ steps.build-tools-image.outputs.image }}
         run: |
           set -euo pipefail
-          bash scripts/dhcp-kea-lease-flow-simulation.sh
+          bash scripts/untracked/simulations/dhcp-kea-lease-flow-simulation.sh
 
   nats-auth-callout-simulation:
     # Real per-secondary NATS auth-callout integration test. Pulls the real
@@ -737,7 +721,7 @@ jobs:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above: this job's own
       # `docker compose up proxy docker-socket-proxy dns-standard dns-ssl nats
-      # ui` call (in scripts/nats-secondary-auth-callout-simulation.sh) needs
+      # ui` call (in scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh) needs
       # these to land on this run's derived subnet.
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
@@ -754,8 +738,9 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
-        # See ssl-mitm-cache-simulation's identical step above for why a
-        # same-PR build-tools change prefers the confirmed PR staging tag.
+        # What: same build-tools resolution as ssl-mitm-cache-simulation's step above.
+        # Why: prefers the confirmed PR staging tag for a same-PR build-tools change.
+        # From: PR #1523
         id: build-tools-image
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
         # why these are read via env: + quoted shell variables instead of
@@ -772,7 +757,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run NATS auth-callout simulation
@@ -784,7 +769,7 @@ jobs:
           # sim inside it. This is the exact job whose octet-22 stack died on
           # "Pool overlaps" in run 29287590206 -- the concrete recurrence this
           # wrapper eliminates.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/nats-secondary-auth-callout-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/nats-secondary-auth-callout-simulation.sh
 
   ui-reachability-crash-loop-simulation:
     # Real end-to-end proof for #763: deliberately crash-loops `proxy` (a
@@ -807,7 +792,7 @@ jobs:
       LANCACHE_IMAGE_TAG: ${{ inputs.image_tag }}
       # See ssl-mitm-cache-simulation's identical block above: this job's own
       # `docker compose up ui` call (in
-      # scripts/ui-reachability-crash-loop-simulation.sh) needs these to land
+      # scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh) needs these to land
       # on this run's derived subnet.
       VALIDATION_SUBNET: ${{ needs.compute-validation-network.outputs.subnet }}
       VALIDATION_GATEWAY: ${{ needs.compute-validation-network.outputs.gateway }}
@@ -845,7 +830,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run Admin UI reachability during crash-loop simulation
@@ -863,7 +848,7 @@ jobs:
           # _validation network, the same failure class
           # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
           # already guard against with this same wrapper.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/ui-reachability-crash-loop-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/ui-reachability-crash-loop-simulation.sh
 
   setup-reset-kea-config-simulation:
     # Real end-to-end proof for #763's CLI-fallback item: `setup.sh
@@ -872,7 +857,7 @@ jobs:
     # not just return success. Builds Kea from THIS checkout's services/dhcp
     # (like dhcp-kea-lease-flow-simulation above), so it needs no staging tag
     # for that image; only the published `ui` image is pulled. See
-    # scripts/setup-reset-kea-config-simulation.sh's own header for exactly
+    # scripts/untracked/simulations/setup-reset-kea-config-simulation.sh's own header for exactly
     # what this does and does not prove.
     name: setup.sh reset-to-last-known-good-config (Kea) simulation
     needs: [compute-validation-network, ui-reachability-crash-loop-simulation]
@@ -918,7 +903,7 @@ jobs:
             image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh reset-to-last-known-good-config (Kea) simulation
@@ -934,14 +919,14 @@ jobs:
           # concurrent run's _validation network, the same failure class
           # ssl-mitm-cache-simulation/ui-nats-dns-integration-simulation
           # already guard against with this same wrapper.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-kea-config-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/setup-reset-kea-config-simulation.sh
 
   setup-reset-dns-config-simulation:
     # Real end-to-end proof for issue #836's CLI-fallback item: `setup.sh
     # reset-to-last-known-good-config dns` must genuinely roll a real,
     # running PowerDNS zone's live record data back to an earlier known-good
     # snapshot via nats-subscriber's rollback listener, not just return
-    # success. See scripts/setup-reset-dns-config-simulation.sh's own header
+    # success. See scripts/untracked/simulations/setup-reset-dns-config-simulation.sh's own header
     # for exactly what this does and does not prove -- including the
     # deliberate wrong-PDNS_API_KEY regression guard for the
     # host-.env-vs-in-container key resolution this command depends on.
@@ -979,15 +964,28 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Resolve build-tools image
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
-        # preference, matching every other job in this suite.
+        # preference, matching every other job in this suite. Read via env: +
+        # quoted shell variables rather than interpolating ${{ }} expressions
+        # directly into the run: script (OSPS-BR-01.04 hardening, refs #1130):
+        # matches this file's own LANCACHE_IMAGE_TAG/env-var convention
+        # elsewhere and avoids the documented GitHub Actions script-injection
+        # anti-pattern, even though image_tag only ever holds a raw
+        # workflow_dispatch value when pr_staging_available is false (see
+        # scripts/lib/validation-image-tag.sh's
+        # vit_pr_staging_available/vit_resolve_tag).
         id: build-tools-image
+        env:
+          PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
+          BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          REPOSITORY: ${{ github.repository }}
         run: |
           set -euo pipefail
-          if [[ "${{ inputs.pr_staging_available }}" == "true" && "${{ inputs.build_tools_touched }}" == "true" ]]; then
-            image="ghcr.io/${{ github.repository }}/build-tools:${{ inputs.image_tag }}"
+          if [[ "$PR_STAGING_AVAILABLE" == "true" && "$BUILD_TOOLS_TOUCHED" == "true" ]]; then
+            image="ghcr.io/${REPOSITORY}/build-tools:${IMAGE_TAG}"
             echo "::notice::This PR touched tools/build-tools; using its confirmed staging image $image instead of build-tools:latest."
           else
-            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/select-build-tools-image.sh)"
+            image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
           fi
           echo "image=$image" >> "$GITHUB_OUTPUT"
       - name: Run setup.sh reset-to-last-known-good-config (DNS) simulation
@@ -998,4 +996,4 @@ jobs:
           # Reserve a collision-free subnet (flock + retry, #820) and run the
           # sim inside it -- same reasoning as setup-reset-kea-config-
           # simulation above.
-          bash scripts/lib/run-in-validation-subnet.sh bash scripts/setup-reset-dns-config-simulation.sh
+          bash scripts/lib/run-in-validation-subnet.sh bash scripts/untracked/simulations/setup-reset-dns-config-simulation.sh

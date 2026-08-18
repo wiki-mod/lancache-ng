@@ -176,11 +176,11 @@ pub struct Config {
     // in this deployment -- this container's own connection (main.rs),
     // dns-standard/dns-ssl's co-located subscribers -- because they all sit
     // on the same Docker network as the `nats` service. It is never
-    // reachable from a genuinely remote secondary DNS node, though: before
-    // this fix, routes/secondaries.rs::register_secondary handed that same
-    // internal-only value back to `setup.sh secondary` as `nats_url` in its
-    // JSON response, which wrote it verbatim into the remote host's `.env`,
-    // where it could never resolve.
+    // reachable from a genuinely remote secondary DNS node, though: without
+    // the override below, routes/secondaries.rs::register_secondary would
+    // hand that same internal-only value back to `setup.sh secondary` as
+    // `nats_url` in its JSON response, which would write it verbatim into
+    // the remote host's `.env`, where it could never resolve.
     //
     // These two fields let an operator supply a real, externally-reachable
     // address instead, without touching nats_url itself (still correct for
@@ -291,6 +291,11 @@ pub struct Config {
     // the include target that entrypoint resolves relative to /etc/nats.
     pub nats_auth_callout_path: String,
     pub nats_service: String,
+    // What: appended to every container_name_for_service() lookup.
+    // Why: mirrors watchdog.sh's LANCACHE_CONTAINER_SUFFIX (issue #1415) --
+    // empty for every real install, non-empty only for a suffixed CI run.
+    // From: Issue #1590
+    pub container_suffix: String,
     // Central logging pipeline (#633): written into nats.conf's top-level
     // `log_file:` directive by the nats service's own entrypoint (since #811
     // the Admin UI no longer writes nats.conf, only the auth_callout fragment;
@@ -452,6 +457,7 @@ impl fmt::Debug for Config {
             .field("nats_conf_path", &self.nats_conf_path)
             .field("nats_auth_callout_path", &self.nats_auth_callout_path)
             .field("nats_service", &self.nats_service)
+            .field("container_suffix", &self.container_suffix)
             .field("nats_log_file", &self.nats_log_file)
             .field("dev_mode", &self.dev_mode)
             .field("syslog_enabled", &self.syslog_enabled)
@@ -941,6 +947,7 @@ impl Config {
                 "/etc/nats/auth_callout.conf",
             ),
             nats_service: env_str("NATS_SERVICE", "nats"),
+            container_suffix: env_str("LANCACHE_CONTAINER_SUFFIX", ""),
             nats_log_file: env_str("NATS_LOG_FILE", "/var/log/lancache-nats/nats.log"),
             dev_mode: env_bool("LANCACHE_DEV_MODE", false),
             // Mirrors watchdog.sh's maybe_prune_syslog() contract (PR3/#757)

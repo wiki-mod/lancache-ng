@@ -60,9 +60,8 @@ jobs:
     name: detect changed paths (CodeQL rust relevance)
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     runs-on: [self-hosted, linux, lancache, lancache-light]
-    # Real runs: a git diff plus one classify-image-impact.sh invocation,
-    # comparable to build-push.yml's own detect-changes job (6-17s there).
-    # Same generous 15-minute floor that job's comment explains.
+    # Real runs are one git diff plus the shared path classifier, comparable
+    # to build-push.yml's own detect-changes job. Keep the same generous floor.
     timeout-minutes: 15
     outputs:
       rust_relevant: ${{ steps.filter.outputs.rust_relevant }}
@@ -110,7 +109,7 @@ jobs:
             # while refs/pull/<N>/head identifies the contributor's head. Use
             # like-for-like SHAs so a current PR is not rejected as stale.
             : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
-            if ! current_head="$(bash scripts/resolve-remote-ref-with-retry.sh \
+            if ! current_head="$(bash scripts/tracked/resolve-remote-ref-with-retry.sh \
               origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
               current_head=""
             fi
@@ -185,8 +184,14 @@ jobs:
           if [ "$force_all" = "true" ]; then
             rust_via_shared_classifier=true
           else
-            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/classify-image-impact.sh)"
-            if printf '%s\n' "$classifier_output" | grep -qE '^(dns_rust|ui|watchdog|workflow)=true$'; then
+            classifier_output="$(CHANGED_FILES="$changed_files" bash scripts/untracked/classify-image-impact.sh)"
+            # here-string, not `printf ... | grep -q` (AG-VAL-032): grep -q
+            # can exit on its first match while printf is still writing the
+            # classifier's remaining `key=value` lines, and under pipefail
+            # that can surface as printf's own SIGPIPE (141) instead of
+            # grep's successful match, silently skipping the Rust CodeQL
+            # matrix entry even when a Rust-relevant service changed.
+            if grep -qE '^(dns_rust|ui|watchdog|workflow)=true$' <<<"$classifier_output"; then
               rust_via_shared_classifier=true
             fi
           fi
@@ -319,7 +324,7 @@ jobs:
           : "${CHECK_PR_HEAD_SHA:?pull_request event must carry a head SHA}"
           : "${CHECK_PR_NUMBER:?pull_request event must carry a PR number}"
           current_head=""
-          if ! current_head="$(bash scripts/resolve-remote-ref-with-retry.sh \
+          if ! current_head="$(bash scripts/tracked/resolve-remote-ref-with-retry.sh \
             origin "refs/pull/${CHECK_PR_NUMBER}/head")"; then
             echo "::warning::Could not resolve the current remote head after retry; failing open."
           fi
@@ -366,7 +371,7 @@ jobs:
         # 'actions' always analyzes; 'rust' only when Rust is actually relevant
         # (or on schedule/dispatch where detect-changes is skipped).
         if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: github/codeql-action/init@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/init@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
@@ -394,7 +399,7 @@ jobs:
         # Same gate as Initialize CodeQL above: skip the 'rust' analysis when
         # Rust is not relevant, so init and analyze stay paired.
         if: steps.admission.outputs.superseded != 'true' && (matrix.language != 'rust' || needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
-        uses: github/codeql-action/analyze@5595ccaf912efad79be6eef63a5619ff05969be3 # v4.37.6
+        uses: github/codeql-action/analyze@ff2f1c621b7f889edc0d3c761ac2e6a3f8cdb0dd # v4.37.7
         with:
           category: "/language:${{ matrix.language }}"
           # Persist the interpreted SARIF locally so the extraction-quality step can read

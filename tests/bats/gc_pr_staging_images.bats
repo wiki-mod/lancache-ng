@@ -17,13 +17,13 @@ bats_require_minimum_version 1.5.0
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
 
-    # What: sources scripts/gc-pr-staging-images.sh, pulling in every
+    # What: sources scripts/untracked/gc-pr-staging-images.sh, pulling in every
     # gcps_* function/process_service()/config var without running main().
     # Why: the script's own BASH_SOURCE guard only calls main() when
     # executed, never when sourced -- safe without a real GH_TOKEN.
     # From: Issue #1557 | PR #1559
-    # shellcheck source=scripts/gc-pr-staging-images.sh
-    source "$repo_root/scripts/gc-pr-staging-images.sh"
+    # shellcheck source=scripts/untracked/gc-pr-staging-images.sh
+    source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"
 }
 
 teardown() {
