@@ -5540,19 +5540,9 @@ jobs:
           ) 9>"$lock_file"
 
       - name: Prepare pushed service Trivy cache
-        # Same shared-cache-directory race as container-scan's own Trivy step above (#904):
-        # this job's own concurrency group is keyed by service+ref[+run_id], so two different
-        # trusted refs (or a dispatch/rerun overlapping a fresh push) building the SAME
-        # service can now run this step concurrently, and a cache-dir key that omits
-        # matrix.service would let two DIFFERENT services race on the same BoltDB cache file
-        # whenever this job runs its full 8-way matrix concurrently (originally build-tools-
-        # only, so a static prefix could not yet collide across services; Step 3, issue
-        # #1095, generalized this step to every service, so the key must now include
-        # matrix.service too). Mirrors container-scan's own concurrency-group key exactly --
-        # see that job's equivalent step for the full invariant this has to satisfy -- and the
-        # same ephemeral-dir classification and cleanup rationale (#912): dispatch/rerun and
-        # tag-ref dirs are cold-by-design, never reused, and are deleted again by the "Remove
-        # ephemeral pushed service Trivy cache" step below the scan.
+        # What: Same shared-cache-directory race as container-scan's own Trivy step above (#904): this job's concurrency group is keyed by service+ref[+run_id], so two different trusted refs (or a dispatch/rerun overlapping a fresh push) building the SAME service can run this step concurrently, and a cache-dir key omitting matrix.service would let two DIFFERENT services race on the same BoltDB cache file.
+        # Why: Mirrors container-scan's own concurrency-group key exactly -- see that job's equivalent step for the full invariant -- and the same ephemeral-dir classification and cleanup rationale (#912): dispatch/rerun and tag-ref dirs are cold-by-design, never reused, and are deleted again by the "Remove ephemeral pushed service Trivy cache" step below.
+        # From: Issue #1095 | PR #1532
         id: trivy-cache
         if: >-
           ${{
@@ -5617,12 +5607,9 @@ jobs:
           touch -- "$stamp"
 
       - name: Scan pushed service digest with Trivy
-        # Step 3 (issue #1095): generalized from build-tools-only to every service -- the
-        # exact pushed digest is scanned before provenance and channel promotion for all 8
-        # services now. This is now the ONLY vulnerability scan for a changed
-        # service on a trusted ref -- container-scan's own throwaway rebuild-and-scan
-        # (which used to scan a different, never-published image with a different
-        # digest) was removed, since it never verified the artifact actually published.
+        # What: Step 3 -- scans the exact pushed digest before provenance/channel promotion, generalized from build-tools-only to all 8 services.
+        # Why: This is now the ONLY vulnerability scan for a changed service on a trusted ref; container-scan's own throwaway rebuild-and-scan (a different, never-published image/digest) was removed, since it never verified the artifact actually published.
+        # From: Issue #1095 | PR #1532
         if: >-
           ${{
             steps.build.outcome == 'success' &&
@@ -5828,8 +5815,9 @@ jobs:
             fi
           fi
 
-          # Issue #1095 Part 1 (Option B): mirrors build's own copy of this
-          # check exactly -- see that job's comment for the full reasoning.
+          # What: Mirrors build's own copy of this check exactly.
+          # Why: See build's own comment above for the full push-supersession reasoning.
+          # From: Issue #1095 | PR #1532
           if [ "$GITHUB_EVENT_NAME" != "pull_request" ] && [ "$SUPERSEDED" = "true" ]; then
             echo "::notice::A newer push to $GITHUB_REF has already superseded this run; skipping $MATRIX_SERVICE's build so only the run already targeting the current tip does the heavy work."
             should_build=false
@@ -5894,13 +5882,9 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Mirrors build's own "Retag unchanged service image" step exactly,
-      # just for the linux/arm64 leg -- see that step's comment for the full
-      # Step 4/#1095 rationale, including the issue #1095 digest-pinning fix
-      # and the push-supersession-check guard's own reasoning. Both legs run
-      # independently in parallel jobs but resolve the SAME pinned digest
-      # determine-push-reuse-scope exported, so they always agree on which
-      # source content to retag.
+      # What: Mirrors build's own "Retag unchanged service image" step exactly, just for the linux/arm64 leg -- see that step's comment for the full rationale.
+      # Why: Both legs run independently in parallel jobs but resolve the SAME pinned digest determine-push-reuse-scope exported, so they always agree on which source content to retag.
+      # From: Issue #1095 | PR #1532
       - name: Retag unchanged service image for this commit (linux/arm64, no rebuild)
         if: github.event_name == 'push' && steps.should-build.outputs.should-build == 'false' && needs['push-supersession-check'].outputs.superseded != 'true'
         env:
@@ -7121,10 +7105,9 @@ jobs:
             git push "$push_url" "refs/tags/${next_tag}"
           echo "::notice::Cut ${next_tag} from ${COMMIT_SHA}. The tag-triggered run of this workflow will move 'latest' and publish the GitHub release."
 
-      # Same digest-bound cache as merge-manifests' per-service attest steps (issue #1095
-      # attestation-caching finding): a push where every service was unchanged reproduces
-      # the identical stack-pointer digest, which would otherwise be re-attested for no
-      # reason every time.
+      # What: Same digest-bound cache as merge-manifests' per-service attest steps.
+      # Why: A push where every service was unchanged reproduces the identical stack-pointer digest, which would otherwise be re-attested for no reason every time.
+      # From: Issue #1095 | PR #1532
       - name: Release the cross-workflow promote lock
         if: always()
         env:
