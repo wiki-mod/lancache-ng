@@ -130,12 +130,19 @@ EOF_ALLOWLIST
 # Every name it can resolve to must actually be allowed by the proxy, or the
 # UI would send a request the proxy silently denies (fails closed, but is
 # still a drift bug worth catching before it ships).
-docker_client_names=$(grep -oE '=> Ok\("lancache-[a-z0-9-]+"\)' "$DOCKER_CLIENT_RS" \
+#
+# What: matches a match-arm base literal (`=> "lancache-x"`), not a whole
+# `Ok("lancache-x")` return.
+# Why: issue #1592 made container_name_for_service append a runtime suffix
+# (`Ok(format!("{base}{suffix}"))` once, outside the match), so no arm
+# returns a bare `Ok(...)` anymore -- only the base-name literal itself.
+# From: Issue #1592
+docker_client_names=$(grep -oE '=> "lancache-[a-z0-9-]+"' "$DOCKER_CLIENT_RS" \
   | grep -oE 'lancache-[a-z0-9-]+' \
   | sort -u)
 
 if [ -z "$docker_client_names" ]; then
-  fail "Could not find any 'Ok(\"lancache-*\")' resolutions in $DOCKER_CLIENT_RS."
+  fail "Could not find any '=> \"lancache-*\"' base-name resolutions in $DOCKER_CLIENT_RS."
 fi
 
 while IFS= read -r name; do
