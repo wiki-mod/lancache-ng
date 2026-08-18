@@ -28,9 +28,9 @@ name: lancache-ng
 # duplicate the allowlist as a YAML anchor in this file.
 # From: PR #635
 #
-# What: LANCACHE_CONTAINER_SUFFIX, appended to every container_name: below (`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`); left unset for a real install, matching the fixed names docs/naming-conventions.md and issue #849 finding #5 document.
+# What: LANCACHE_CONTAINER_SUFFIX, appended to every container_name: below (`lancache-<service>${LANCACHE_CONTAINER_SUFFIX:-}`); left unset for a real install, matching the fixed names docs/naming-conventions.md documents.
 # Why: an explicit container_name: overrides Compose's own project-name isolation entirely, so two concurrent CI runs on one runner host collided on the identical fixed name despite distinct project names; this lets CI derive a per-run unique suffix instead.
-# From: Issue #1415
+# From: Issue #1415 | PR #1456
 
 services:
 
@@ -729,7 +729,7 @@ services:
       - DHCP_DNS_PRIMARY=${DHCP_DNS_PRIMARY:-}
       - DHCP_DNS_SECONDARY=${DHCP_DNS_SECONDARY:-}
       - UPSTREAM_DHCP_IP=${UPSTREAM_DHCP_IP:-}
-      # Issue #450: additional optional dnsmasq relay/proxy options.
+      # Additional optional dnsmasq relay/proxy options.
       - DHCP_PROXY_INTERFACE=${DHCP_PROXY_INTERFACE:-}
       - DHCP_PROXY_ROUTER=${DHCP_PROXY_ROUTER:-}
       - DHCP_NTP_SERVERS=${DHCP_NTP_SERVERS:-}
@@ -870,10 +870,10 @@ services:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
-      # Issue #1590: docker_client.rs's restart/start/stop calls need this to
-      # resolve the same suffixed container names docker-socket-proxy.sh and
-      # watchdog.sh already accept (issue #1415). Empty for every real
-      # install, same as every other LANCACHE_CONTAINER_SUFFIX reference.
+      # What: LANCACHE_CONTAINER_SUFFIX, passed through to the ui container.
+      # Why: docker_client.rs's restart/start/stop calls need it to resolve the
+      #   same suffixed container names docker-socket-proxy.sh/watchdog.sh accept.
+      # From: Issue #1592
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
