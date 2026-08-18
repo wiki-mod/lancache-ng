@@ -134,9 +134,22 @@ runs:
             set -euo pipefail
 
             preflight_dir="$(mktemp -d)"
+            # What: bounds distcc-pump --shutdown with its own short timeout.
+            # Why: a hung/orphaned include-server can make this call block in
+            # do_wait() indefinitely -- live-confirmed via `docker exec` +
+            # /proc/<pid>/wchan on a real hung runner. Only the outer
+            # `timeout ... 600` around this whole preflight script protected
+            # against that, so one stuck shutdown call could burn the entire
+            # 600s budget before the step was killed. `|| true` is preserved:
+            # a shutdown that doesn't complete cleanly must not fail the
+            # build, it must simply not block it either.
+            # From: Issue #1590
+            shutdown_distcc_pump() {
+              timeout --kill-after=5 --signal=KILL 10 distcc-pump --shutdown >/dev/null 2>&1 || true
+            }
             cleanup() {
               if [ -n "${pump_started:-}" ]; then
-                distcc-pump --shutdown >/dev/null 2>&1 || true
+                shutdown_distcc_pump
               fi
               rm -rf "$preflight_dir"
             }
@@ -379,7 +392,14 @@ runs:
                     echo "[INFO] distcc-pump did not publish usable hosts (lsdistcc found none of the candidate hosts alive); continuing with plain distcc fallback."
                     distcc_pump_filtered_hosts=""
                   fi
-                  distcc-pump --shutdown >/dev/null 2>&1 || true
+                  # What: bounded via shutdown_distcc_pump (see its own
+                  # definition above) instead of calling distcc-pump
+                  # --shutdown directly.
+                  # Why: same do_wait() hang risk as the EXIT trap's call --
+                  # this is the probe-compile's own pump session, started
+                  # just above, and needs the identical bound.
+                  # From: Issue #1590
+                  shutdown_distcc_pump
                   unset pump_started INCLUDE_SERVER_PORT INCLUDE_SERVER_PID DISTCC_POTENTIAL_HOSTS DISTCC_HOSTS
                 fi
 
