@@ -2,11 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: single CI/CD pipeline -- path detection, Rust/shell lint+test, compose
-#   validation, image build/scan/push, promote, and release.
-# Why: enforces the single-artifact rule: each candidate is built once, its
-#   digest retained, and every later stage consumes that exact digest instead
-#   of re-resolving a mutable tag.
+# What: single CI/CD pipeline -- path detection, Rust/shell lint+test, compose validation, image build/scan/push, promote, and release.
+# Why: enforces the single-artifact rule: each candidate is built once, its digest retained, and every later
+#   stage consumes that exact digest instead of re-resolving a mutable tag.
 # From: PR #1523
 
 name: Build & Push
@@ -181,11 +179,8 @@ jobs:
           if [ "$CHECK_EVENT_NAME" = "push" ]; then
             case "$CHECK_GITHUB_REF" in
               refs/heads/*)
-                # What: An unresolvable `git ls-remote` here fails OPEN (treats the push as not superseded),
-                # unlike `promote`'s own copy of this check, which fails closed.
-                # Why: Wrongly reporting `superseded=true` would skip the only job that ever builds this
-                # commit's image with no retry path, unlike `promote` where failing closed only delays one
-                # channel move.
+                # What: An unresolvable `git ls-remote` here fails OPEN (treats the push as not superseded), unlike `promote`'s own copy of this check, which fails closed.
+                # Why: Wrongly reporting `superseded=true` would skip the only job that ever builds this commit's image with no retry path; `promote` failing closed only delays one channel move.
                 # From: PR #1334
                 current_tip="$(git ls-remote origin "$CHECK_GITHUB_REF" | cut -f1 || true)"
                 if [ -z "$current_tip" ]; then
@@ -1927,11 +1922,9 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_RUST_PREFLIGHT_BUILDTOOLS'
           set -euo pipefail
 
-          # What: no check remains for container-scan's old local scan-build
-          #   networking entitlement.
-          # Why: container-scan no longer runs a local `docker buildx build`
-          #   for a changed service, so there is no code path left to check;
-          #   a self-matching `grep -F` check here would be meaningless.
+          # What: No check remains for container-scan's old local scan-build networking entitlement.
+          # Why: container-scan no longer runs a local `docker buildx build` for a changed service, so a
+          #   self-matching `grep -F` check here would be meaningless.
           # From: Issue #1095 | PR #1532
           grep -F -- '--crate-type lib' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
             && grep -F -- '--emit=link,dep-info' .github/actions/rust-acceleration-preflight/action.yml >/dev/null \
@@ -2052,12 +2045,8 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 bash -s <<'VALIDATE_COMPOSE_PROMOTE_TAGS_DOCKERFILES'
           set -euo pipefail
 
-          # What: extracts build-tools.yml's real "Promote mutable tags" script and
-          #   runs it under real and adversarial ref names, including "v0.2.0".
-          # Why: this repo has a branch literally named "v0.2.0"; without the "-tc"
-          #   suffix, pushing it would publish build-tools:v0.2.0, the same tag a
-          #   real vX.Y.Z release uses. Running the real script (not retyped logic)
-          #   catches a bypass added anywhere in that range too.
+          # What: Extracts build-tools.yml's real "Promote mutable tags" script and runs it under real and adversarial ref names, including "v0.2.0".
+          # Why: This repo has a branch literally named "v0.2.0"; without the "-tc" suffix, pushing it would publish build-tools:v0.2.0, the same tag a real vX.Y.Z release uses. Running the real script, not retyped logic, catches a bypass added anywhere in it too.
           # From: Issue #1095 | PR #1532
           grep -F 'branch_tag="${sanitized_ref}-tc"' .github/workflows/build-tools.yml >/dev/null \
             || { echo "::error::build-tools.yml's branch-tag promotion must suffix every derived tag with '-tc' so a branch named like a release tag (e.g. v0.2.0) can never collide with a real vX.Y.Z stable-release tag on the same GHCR package."; exit 1; }
@@ -2864,12 +2853,8 @@ jobs:
               docker buildx imagetools create --prefer-index=false -t "$pr_image" "$resolved_source"
           done
 
-      # What: renders the full-setup compose override from immutable OCI digests
-      # (AG-CODE-013 consolidation, PR #1523; previously a separate
-      # scripts/render-full-setup-digest-override.sh, this workflow's only
-      # caller). Digests already handed off by merge-manifests are consumed
-      # directly; only a service without a producer output (e.g. an untouched
-      # PR backfill) is resolved once from its event-unique staging tag.
+      # What: Renders the full-setup compose override from immutable OCI digests; digests already handed off by merge-manifests are consumed directly, and only a service without a producer output (e.g. an untouched PR backfill) is resolved once from its event-unique staging tag.
+      # Why: Consolidated from a separate scripts/render-full-setup-digest-override.sh (this workflow's only caller) under AG-CODE-013.
       # From: PR #1523
       - name: Pin full-setup service identities to immutable digests
         id: pin-full-setup-digests
@@ -3268,15 +3253,9 @@ jobs:
     # so no new behavior to test).
     name: test (dns/nats-subscriber)
     needs: [validate-compose, dns_rust_quality, detect-changes]
-    # Path-scoped on BOTH pull_request and push (#1095). detect-changes now runs on push
-    # too (diffing github.event.before..github.sha), so this consults its outputs
-    # uniformly instead of the old always-run-on-push short-circuit: on a push that did
-    # not touch the crate (nor the workflow), the PR that produced that push already ran
-    # and passed this exact test (AG-WF-004), so skipping reuses that known-good result.
-    # `detect-changes.result != 'success'` fails safe to running whenever the
-    # classification is unavailable rather than silently skipping. ci_scope_policy
-    # tolerates the resulting `skipped` on push and re-derives strict per-path
-    # required-ness on pull_request.
+    # What: Path-scoped on BOTH pull_request and push; detect-changes now runs on push too (diffing github.event.before..github.sha), so this consults its outputs uniformly instead of the old always-run-on-push short-circuit. Canonical rationale; ui_test/watchdog_test/dns_cargo_audit/ui_cargo_audit/watchdog_cargo_audit's own `if:` comments point back to this one.
+    # Why: On a push that did not touch the crate (nor the workflow), the PR that produced that push already ran and passed this exact test (AG-WF-004), so skipping reuses that known-good result; `detect-changes.result != 'success'` fails safe to running when classification is unavailable, and ci_scope_policy tolerates the resulting `skipped` on push while re-deriving strict per-path required-ness on pull_request.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -3300,15 +3279,9 @@ jobs:
     # dns_rust_quality/ui_rust_quality's bound for that reason, not derived
     # from the fast warm-cache samples alone.
     timeout-minutes: 45
-    # Job-level concurrency (#891 follow-up, extending #888/#892/#915's proven pattern):
-    # dns_test is on the scarce self-hosted lancache-heavy pool, so reclaiming a superseded
-    # commit's run matters for real capacity. Safe to cancel mid-flight: it is one of
-    # ci_scope_policy's `needs`, but that job's push-branch check on this job's result now
-    # uses require_success_or_intentional_cancellation() (tolerates
-    # success/skipped/cancelled) specifically because of this group. Its only other
-    # consumer, rust_coverage, already gates with a skip-or-success check, which cleanly
-    # skips coverage rather than erroring; a cancelled result makes that gate false the
-    # same way a skipped one does.
+    # What: Job-level concurrency, cancel-in-progress: true -- reclaims a superseded run's lancache-heavy slot; canonical rationale ui_test/dns_cargo_audit/ui_cargo_audit/rust_coverage's own concurrency comments below point back to.
+    # Why: Safe because it is one of ci_scope_policy's `needs`, whose push-branch check on this job's result uses require_success_or_intentional_cancellation(); its only other consumer, rust_coverage, already treats a non-success result as a clean skip.
+    # From: PR #926
     concurrency:
       group: >-
         ${{
@@ -3358,10 +3331,9 @@ jobs:
     # dns_rust_quality's comment above for the full reasoning.
     name: test (ui)
     needs: [validate-compose, ui_rust_quality, detect-changes]
-    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
-    # comment above for the full reasoning (reuse of the PR-time known-good
-    # result on an unchanged push, fail-safe run when classification is
-    # unavailable, ci_scope_policy tolerance of the resulting push `skipped`).
+    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
+    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -3382,12 +3354,9 @@ jobs:
     # cargo-with-sccache-fallback path, so shares its cold-compile risk).
     # Real warm-cache runs: 40-51s.
     timeout-minutes: 45
-    # Job-level concurrency (#891 follow-up, mirroring dns_test's own group
-    # above for the same reason): scarce lancache-heavy capacity, safe to
-    # cancel mid-flight -- ci_scope_policy's push-branch check on this job's
-    # result now uses require_success_or_intentional_cancellation(), and
-    # rust_coverage's own `success`/`skipped` gate on ui_test already treats
-    # a non-matching result as a clean skip.
+    # What: Job-level concurrency, cancel-in-progress: true -- mirrors dns_test's own group above for the same reason.
+    # Why: Same scarce lancache-heavy pool and same cancellation-tolerant consumers as dns_test.
+    # From: PR #926
     concurrency:
       group: >-
         ${{
@@ -3461,15 +3430,9 @@ jobs:
     # step comment below) when a PR's own Dockerfile change hasn't been
     # published yet -- neither cold path is represented by the samples above.
     timeout-minutes: 60
-    # Job-level concurrency (#891, extending #888/#892's proven build/container-scan
-    # pattern): rust_coverage is on the scarce self-hosted lancache-heavy pool, same as
-    # build/container-scan, so reclaiming a superseded commit's coverage run matters for
-    # real capacity, not just consistency. Safe to cancel mid-flight: it is NOT one of
-    # ci_scope_policy's `needs` (unlike dns_test/ui_test/dns_cargo_audit/ui_cargo_audit,
-    # deliberately excluded from this pattern), so nothing hard-asserts its result. Its
-    # only consumer, publish_coverage_badge, gates with
-    # `!cancelled() && needs.rust_coverage.result == 'success'` and only runs on push -- a
-    # cancelled rust_coverage cleanly skips the badge publish instead of erroring.
+    # What: Job-level concurrency, cancel-in-progress: true -- same scarce lancache-heavy pool as dns_test/build/container-scan.
+    # Why: Deliberately NOT one of ci_scope_policy's `needs` (unlike dns_test/ui_test/dns_cargo_audit/ui_cargo_audit), so nothing hard-asserts its result; its only consumer, publish_coverage_badge, treats a cancelled result as a clean skip and only runs on push.
+    # From: PR #915
     concurrency:
       group: >-
         ${{
@@ -3786,12 +3749,9 @@ jobs:
     # From: Issue #1095 | PR #1532
     name: test (watchdog)
     needs: [validate-compose, watchdog_rust_quality, detect-changes]
-    # Path-scoped like dns_test/ui_test (#1095's shape) -- see
-    # dns_rust_quality's comment above for the full metadata-only-event
-    # reasoning. This is a behavior change from this job's pre-Rust-crate
-    # shape, which intentionally ran unconditionally at near-zero cost; now
-    # that it does real compile work, reusing a prior run's known-good result
-    # on an unchanged event is the same trade dns_test/ui_test already make.
+    # What: Path-scoped like dns_test/ui_test -- see dns_rust_quality's comment above for the metadata-only-event reasoning.
+    # Why: A behavior change from this job's pre-Rust-crate shape, which ran unconditionally at near-zero cost; now that it does real compile work, reusing a prior run's known-good result on an unchanged event is the same trade dns_test/ui_test already make.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -3887,8 +3847,9 @@ jobs:
     # unchanged, so a prior run's audit result already stands).
     name: cargo-audit (dns/nats-subscriber)
     needs: [validate-compose, detect-changes]
-    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
-    # comment above for the full reasoning.
+    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
+    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -3909,10 +3870,9 @@ jobs:
     # the crate, so it does not share dns_test's cold-compile risk. 20
     # minutes covers a slow advisory-database fetch with real headroom.
     timeout-minutes: 20
-    # Job-level concurrency (#891 follow-up, same pattern/reasoning as
-    # dns_test above): scarce lancache-heavy capacity, no other consumer
-    # besides ci_scope_policy, whose push-branch check on this job's result
-    # now uses require_success_or_intentional_cancellation().
+    # What: Job-level concurrency, cancel-in-progress: true -- same pattern/reasoning as dns_test above.
+    # Why: No consumer besides ci_scope_policy, whose push-branch check tolerates a cancelled result.
+    # From: PR #926
     concurrency:
       group: >-
         ${{
@@ -3958,8 +3918,9 @@ jobs:
     # dns_rust_quality's comment above for the full reasoning.
     name: cargo-audit (ui)
     needs: [validate-compose, detect-changes]
-    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
-    # comment above for the full reasoning.
+    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
+    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -3978,10 +3939,9 @@ jobs:
     # Same reasoning and value as dns_cargo_audit above (prebuilt cargo-audit
     # binary, no crate compilation). Real runs: 10-18s.
     timeout-minutes: 20
-    # Job-level concurrency (#891 follow-up, same pattern/reasoning as
-    # dns_cargo_audit above): scarce lancache-heavy capacity, no other
-    # consumer besides ci_scope_policy, whose push-branch check on this
-    # job's result now uses require_success_or_intentional_cancellation().
+    # What: Job-level concurrency, cancel-in-progress: true -- same pattern/reasoning as dns_cargo_audit above.
+    # Why: No consumer besides ci_scope_policy, whose push-branch check tolerates a cancelled result.
+    # From: PR #926
     concurrency:
       group: >-
         ${{
@@ -4029,8 +3989,9 @@ jobs:
     # dns_rust_quality's comment above for the full reasoning.
     name: cargo-audit (watchdog)
     needs: [validate-compose, detect-changes]
-    # Path-scoped on BOTH pull_request and push (#1095) -- see dns_test's if:
-    # comment above for the full reasoning.
+    # What: Path-scoped on BOTH pull_request and push, identical to dns_test's own if: above.
+    # Why: Same detect-changes/AG-WF-004 known-good-result reuse and ci_scope_policy tolerance as dns_test.
+    # From: Issue #1095 | PR #1532
     if: >-
       ${{
         always() &&
@@ -4049,10 +4010,9 @@ jobs:
     # Same reasoning and value as dns_cargo_audit/ui_cargo_audit above
     # (prebuilt cargo-audit binary, no crate compilation).
     timeout-minutes: 20
-    # Job-level concurrency (mirroring dns_cargo_audit/ui_cargo_audit's own
-    # pattern): scarce lancache-heavy capacity, no other consumer besides
-    # ci_scope_policy, whose push-branch check on this job's result uses
-    # require_success_or_intentional_cancellation().
+    # What: Job-level concurrency, cancel-in-progress: true -- mirrors dns_cargo_audit/ui_cargo_audit's own pattern.
+    # Why: No consumer besides ci_scope_policy, whose push-branch check tolerates a cancelled result.
+    # From: PR #1355
     concurrency:
       group: >-
         ${{
@@ -5062,20 +5022,12 @@ jobs:
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # Step 4 (issue #1095): determine-push-reuse-scope already did the real
-            # verification (channel image revision label + git ancestry + a real content diff)
-            # for whichever services are currently allowlisted. Every other service's reuse_*
-            # output is unconditionally 'false' from that job, so this case is a plain
-            # pass-through, not a second copy of that job's decision logic. build-tools (issue
-            # #1290) is allowlisted here too -- it used to have its own dedicated `elif` branch
-            # with a hand-rolled copy of this exact same three-part verification, built
-            # independently and in parallel with this job before the duplication was noticed;
-            # folding it into the shared allowlist removes that copy instead of keeping two
-            # implementations of the same check in sync by hand. syslog (issue #1428) is NOT
-            # allowlisted here -- widening Step 4's reuse allowlist is a separate, maintainer-
-            # gated decision (see #1095); the `*) reuse="false"` fallback below already gives
-            # syslog the same safe default every not-yet-allowlisted service gets: always a
-            # real rebuild, never a silent retag.
+            # What: determine-push-reuse-scope's real verification (channel image revision label + git
+            #   ancestry + content diff) applies only to the currently allowlisted services (build-tools
+            #   included); every other service, syslog included, is a plain pass-through to `*) reuse="false"`.
+            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted
+            #   service always gets a real rebuild, never a silent retag.
+            # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
               dns) reuse="$REUSE_DNS" ;;
@@ -5800,17 +5752,9 @@ jobs:
           subject-digest: ${{ steps.build.outputs.digest }}
 
   build-arm64:
-    # Native linux/arm64 leg of the same publish contract as build above. Runs on a
-    # GitHub-hosted arm64 runner (free for this public repo, GA since 2026-08-07) instead
-    # of QEMU on the self-hosted amd64 pool, so ui/dns compile Rust natively rather than
-    # emulated. This runner is outside the self-hosted LAN and cannot reach Redis-backed
-    # sccache, sccache-dist, or distcc -- see docs/self-hosted-actions-runner.md.
-    # merge-manifests below combines this job's per-service linux/arm64 tag with build's
-    # linux/amd64 tag into the real sha-<commit> multi-platform tag; this job never writes
-    # that tag directly.
-    #
-    # Also skipped on a metadata-only pull_request event -- see `build`'s identical
-    # comment above.
+    # What: Native linux/arm64 leg of build's publish contract, on a GitHub-hosted arm64 runner instead of QEMU on the self-hosted amd64 pool; also skips on a metadata-only pull_request event, see `build`'s identical comment above.
+    # Why: The hosted runner is outside the self-hosted LAN and cannot reach Redis-backed sccache/sccache-dist/distcc (see docs/self-hosted-actions-runner.md); merge-manifests below combines this job's arm64 tag with build's amd64 tag into the real sha-<commit> multi-platform tag -- this job never writes that tag directly.
+    # From: Issue #592
     #
     # What: `needs:` mirrors `build`'s own superset, for the same reason.
     # Why: see `build`'s own `needs:` comment above.
@@ -5908,16 +5852,9 @@ jobs:
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # Mirrors build's own (the amd64 leg) identical branch here -- see that job's comment
-            # for the full Step 4/#1095 rationale, including why build-tools (issue #1290) is
-            # folded into this same allowlisted case statement instead of keeping its own
-            # separate hand-rolled copy of the same verification (and why syslog, issue #1428,
-            # is deliberately NOT added to this allowlist -- same reasoning as build's own copy).
-            # Both legs must agree on
-            # should-build for the same commit: build-arm64's own "Retag unchanged service
-            # image" step below only produces the linux/arm64 leg when this resolves to false,
-            # exactly mirroring what build produces for linux/amd64 -- both read the SAME
-            # determine-push-reuse-scope outputs, so they provably cannot disagree.
+            # What: Mirrors build's own (amd64) identical Step 4 branch; see that job's comment above for the full rationale.
+            # Why: Both legs must agree on should-build for the same commit -- build-arm64's own "Retag unchanged service image" step below only produces the arm64 leg when this resolves to false, exactly mirroring what build produces for amd64, since both read the same determine-push-reuse-scope outputs.
+            # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
               dns) reuse="$REUSE_DNS" ;;
@@ -6396,11 +6333,8 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # What: reads the shared CI_BUILD_SERVICES scalar rather than a
-          #   hand-duplicated services=(...) literal.
-          # Why: scripts/tracked/check-workflow-service-lists.sh only guards
-          #   copies it knows about; a scalar shared by every promotion/GC/
-          #   release loop removes the duplication class entirely (#822).
+          # What: Reads the shared CI_BUILD_SERVICES scalar rather than a hand-duplicated services=(...) literal.
+          # Why: scripts/tracked/check-workflow-service-lists.sh only guards copies it knows about; a scalar shared by every promotion/GC/release loop removes the duplication class entirely (#822).
           # From: PR #1523
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
@@ -7312,14 +7246,9 @@ jobs:
         shell: bash
         env:
           TAG_NAME: ${{ github.ref_name }}
-          # syslog (issue #1428) and utilities (issue #1556) added here explicitly:
-          # this SERVICES scalar is a plain space-separated env value, not a
-          # services=(...) bash array, so scripts/tracked/check-workflow-service-lists.sh's
-          # regex-based guard cannot see or enforce it -- missing either would silently
-          # drop that service from this release job's platform-coverage verification
-          # with no CI signal at all. utilities is tagged vX.Y.Z by promote's own
-          # services=(...) array on every real release exactly like build-tools is, so
-          # it needs the same coverage check.
+          # What: syslog and utilities are listed explicitly in this space-separated SERVICES scalar, not a services=(...) bash array scripts/tracked/check-workflow-service-lists.sh's regex-based guard can see.
+          # Why: Missing either would silently drop that service from this release job's platform-coverage verification with no CI signal; utilities is tagged vX.Y.Z by promote's own services=(...) array on every real release exactly like build-tools, so it needs the same coverage check.
+          # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
           SERVICES: proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities stack
           REQUIRED_PLATFORMS: ${{ env.RELEASE_PLATFORMS }}
           GHCR_RETRY_USERNAME: ${{ github.actor }}
@@ -7658,10 +7587,9 @@ jobs:
         # The Trivy-scanned first-party image set (container-scan's matrix).
         # `stack` is intentionally excluded: it is a busybox channel-pointer
         # image, not a compiled software asset, and is not vuln-scanned either.
-        # What: includes syslog (#1428/#1433) and utilities (#1556), both already part of
-        # container-scan's own matrix, so every released first-party image gets a CycloneDX SBOM.
+        # What: Includes syslog and utilities, both already part of container-scan's own matrix, so every released first-party image gets a CycloneDX SBOM.
         # Why: This separate matrix copy previously lagged container-scan's own list on both entries.
-        # From: Issue #1428 | Issue #1556
+        # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
       - name: Checkout
