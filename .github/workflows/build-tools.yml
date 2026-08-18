@@ -110,7 +110,7 @@ jobs:
           # Why: under this workflow's default -eo pipefail, a live producer
           #   piped into an early-exiting grep -q can surface the producer's
           #   own SIGPIPE (141) instead of grep's match.
-          # From: Issue AG-VAL-032
+          # From: PR #1500
           changed_build_tools_files="$(git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml)" || changed_build_tools_files=""
           if [ -n "$changed_build_tools_files" ]; then
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
