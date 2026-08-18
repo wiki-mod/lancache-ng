@@ -49,6 +49,7 @@ permissions:
   # narrows) this default for that job.
   # Why: This floor is a safety net for a future job that omits its own permissions block, not something the
   # current jobs depend on -- they already declare their own scopes.
+  # From: PR #905
   pull-requests: read
 
 concurrency:
@@ -358,6 +359,7 @@ jobs:
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: 15-minute timeout, same floor as detect-changes above; real runs are 8-12s.
+    # Why: A round, generous bound so a future hang still fails fast rather than a tight, scaled value.
     # From: PR #1218
     timeout-minutes: 15
     permissions:
@@ -380,6 +382,7 @@ jobs:
           REPO: ${{ github.repository }}
           # What: Milestone #11 = "LanCache-NG Roadmap" catch-all for non-version-tied PRs/issues.
           # Why: If this milestone is ever renumbered or renamed, this value and comment must be updated together.
+          # From: PR #1279
           DEPENDABOT_MILESTONE_NUMBER: 11
         run: |
           set -euo pipefail
@@ -490,6 +493,7 @@ jobs:
     needs: validate-compose
     runs-on: [self-hosted, linux, lancache, lancache-light]
     # What: 15-minute timeout, same floor as detect-changes above; real runs are 7-10s.
+    # Why: A round, generous bound so a future hang still fails fast rather than a tight, scaled value.
     # From: PR #1218
     timeout-minutes: 15
     permissions:
@@ -615,6 +619,7 @@ jobs:
         run: |
           echo "::notice::Running compose-healthchecks check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       # What: Same composite action as the self-hosted compose-healthchecks job above.
+      # Why: Keeps the hosted fallback in parity with its self-hosted twin's check.
       # From: PR #1249
       - uses: ./.github/actions/compose-healthchecks-check
 
@@ -959,9 +964,8 @@ jobs:
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
           # What: Authenticates GHCR pull via github.actor + GITHUB_TOKEN.
-          # Why: An anonymous pull hits a much lower GHCR rate limit and fails closed under real concurrent
-          # load, confirmed live for this exact job; every other GHCR-pulling job already authenticates this
-          # way, so this job was the one remaining gap.
+          # Why: An anonymous pull hits a much lower GHCR rate limit and fails closed under real concurrent load; every other GHCR-pulling job already authenticates this way.
+          # From: PR #1237
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -992,8 +996,8 @@ jobs:
           printf 'build_tools_image=%s\n' "$downstream_build_tools_image" >> "$GITHUB_OUTPUT"
 
       # What: Removes the buildx builder right after the select step, its only consumer in this job.
-      # Why: The fallback path (if ever taken) uses plain docker build, not buildx, so nothing later in this
-      # job needs the builder kept alive until the job's own end-of-job cleanup.
+      # Why: The fallback path (if ever taken) uses plain docker build, not buildx, so nothing later in this job needs the builder kept alive until the job's own end-of-job cleanup.
+      # From: PR #1241
       - name: Remove buildx builder
         if: always()
         run: |
@@ -4762,6 +4766,8 @@ jobs:
           admitted=true
 
           # What: Step 1 -- gates required regardless of event type.
+          # Why: shellcheck/validate-compose/ci_scope_policy must pass before any build/scan work proceeds, on every trigger.
+          # From: Issue #1095 (G7) | PR #1503
           is_success "$SHELLCHECK_RESULT" || admitted=false
           is_success "$VALIDATE_COMPOSE_RESULT" || admitted=false
           is_success "$CI_SCOPE_POLICY_RESULT" || admitted=false
@@ -4904,7 +4910,7 @@ jobs:
           - service: utilities
             context: services/utilities
             build_contexts: ""
-            description: &ci-description-utilities "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
+            description: "Shared lancache-ng utilities image (curl, nano, lsof, ripgrep, findutils, coreutils, gettext-envsubst, jq, ca-certificates, zstd) for COPY --from= consumption by other first-party images (issue #1556)."
             # Heavy, not light, despite being a small/fast build in practice
             # (curl's own C compile is ~20s): AG-CI-002's light-tier exception
             # requires "no real compile/link step of its own AT ALL", verified
