@@ -2,9 +2,11 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# What: main CI/CD pipeline -- detects changed paths, lints/tests the Rust
-# crates and shell scripts, validates compose, scans images, then builds,
-# pushes, promotes, and releases the stack images on the relevant triggers.
+# What: single CI/CD pipeline -- path detection, Rust/shell lint+test, compose
+#   validation, image build/scan/push, promote, and release.
+# Why: enforces the single-artifact rule: each candidate is built once, its
+#   digest retained, and every later stage consumes that exact digest instead
+#   of re-resolving a mutable tag.
 # From: PR #1523
 
 name: Build & Push
@@ -37,11 +39,10 @@ on:
       - "!CHANGELOG.md"
   pull_request:
     branches: [master, current_dev, "v[0-9]*"]
-    # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) alongside
-    # opened/synchronize/reopened.
-    # Why: Every downstream job filtering on event `action` (build/build-arm64, the Rust quality/test/audit
-    # jobs, rust_coverage) must stay in sync with this list, or a metadata-only event silently skips a required check.
-    # From: AG-GH-008
+    # What: Adds metadata-change triggers (labeled/unlabeled/milestoned/demilestoned/ready_for_review) to opened/synchronize/reopened.
+    # Why: Every downstream job filtering on event `action` (build/build-arm64, the Rust quality/test/audit jobs,
+    #   rust_coverage) must stay in sync with this list, or a metadata-only event silently skips a required check.
+    # From: Issue #1095 | PR #1532
     types: [opened, synchronize, reopened, labeled, unlabeled, milestoned, demilestoned, ready_for_review]
 
 permissions:
@@ -238,7 +239,7 @@ jobs:
         # pinned build-tools image.
         # Why: The repo-wide check above is already a hard gate; this step exists for PR-specific error
         # attribution and to keep a self-hosted runner's stale host tooling from diverging from the toolchain.
-        # From: AG-HDR-008
+        # From: Issue #1510 | PR #1511
         if: github.event_name == 'pull_request'
         env:
           SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -399,7 +400,7 @@ jobs:
           # What: Uses `if !` to keep set -e active; an API failure degrades to a warning, not an abort.
           # Why: AG-VAL-004 exempts an `if` test from errexit; the authoritative gate is the milestone check
           # inside check-pr-tracking-metadata.sh a few steps below, not this best-effort assignment.
-          # From: AG-VAL-004
+          # From: PR #1279
           if ! gh api -X PATCH "repos/$REPO/issues/$PR_NUMBER" -F milestone="$DEPENDABOT_MILESTONE_NUMBER"; then
             echo "::warning::Failed to auto-assign milestone #$DEPENDABOT_MILESTONE_NUMBER to PR #$PR_NUMBER via the GitHub API."
             exit 0
@@ -447,13 +448,11 @@ jobs:
         run: |
           echo "::notice::Running PR tracking metadata check on GitHub-hosted runner as fallback for non-LAN-dependent linting."
       - name: Auto-assign Dependabot PR milestone
-        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs, same as the primary
-        # pr-tracking-metadata-check job's identical step, and must likewise run before the composite action
-        # below fetches current labels/milestone.
-        # Why: Dependabot cannot set its own milestone; PROJECT_AUTOMATION_PAT still reaches this job on a
-        # same-repo Dependabot PR, replacing the prior blanket exemption, and the before-fetch ordering avoids
-        # the same empty-milestone false failure documented on the primary job's identical step.
-        # From: Issue #1095 | PR #1532, AG-GH-008
+        # What: Auto-assigns milestone #11 (LanCache-NG Roadmap) to Dependabot PRs, mirroring
+        #   pr-tracking-metadata-check's identical step.
+        # Why: Dependabot cannot set its own milestone; PROJECT_AUTOMATION_PAT reaches this job on a same-repo
+        #   Dependabot PR and must run before the composite action below fetches current labels/milestone.
+        # From: Issue #1095 | PR #1532
         if: github.event.pull_request.user.login == 'dependabot[bot]'
         env:
           GH_TOKEN: ${{ secrets.PROJECT_AUTOMATION_PAT }}
@@ -589,7 +588,7 @@ jobs:
       - name: Check SPDX header on this PR's changed files (AG-HDR-008)
         # What: Mirrors the self-hosted file-headers job's own step above exactly.
         # Why: Kept in parity so a fallback run enforces the identical PR-diff header check.
-        # From: AG-HDR-008
+        # From: Issue #1510 | PR #1511
         if: github.event_name == 'pull_request'
         env:
           SPDX_BASE_SHA: ${{ github.event.pull_request.base.sha }}
@@ -2337,7 +2336,7 @@ jobs:
           fi
           # What: Explicit if/! instead of a chained `A && B && C || D`.
           # Why: shellcheck SC2015 flags that chained shape as not real if-then-else, since D can also run when an earlier `&&` term fails to execute for an unrelated reason, not just when the check's condition is false -- a real, if narrow, correctness footgun AG-VAL-001 ("warnings are errors") does not carve out an exception for.
-          # From: Issue #1095 | PR #1532, AG-VAL-001
+          # From: Issue #1095 | PR #1532
           if ! { grep -F 'build-push.yml' .github/workflows/nightly-refresh.yml >/dev/null \
               && grep -F 'current_dev' .github/workflows/nightly-refresh.yml >/dev/null \
               && grep -F 'channel=nightly' .github/workflows/nightly-refresh.yml >/dev/null; }; then
@@ -2458,8 +2457,8 @@ jobs:
 
       - name: Check proxy cache env/doc drift (docs/architecture-ng.md, bug-hunt #849/#1068 item 11)
         # What: scripts/untracked/check-proxy-cache-env-doc-drift.sh fails closed whenever a documented CACHE_* default in docs/architecture-ng.md's nginx cache-configuration table disagrees with config/prod/proxy.env's real value.
-        # Why: That table hand-duplicates each CACHE_* variable's default as a literal string with nothing checking it against the real shipped default; CACHE_MEM_MB's documented default was found stale for roughly 7 weeks after the real default changed, an unnoticed drift class this guard closes per AG-VAL-029.
-        # From: Issue #1095 | PR #1532, AG-VAL-029
+        # Why: That table hand-duplicates each CACHE_* variable's default as a literal string with nothing checking it against the real shipped default, so drift is silent and can persist indefinitely (AG-VAL-029).
+        # From: Issue #1095 | PR #1532
         run: |
           set -euo pipefail
 
@@ -2623,7 +2622,7 @@ jobs:
       packages: write
       # What: actions: read, required by the REST call scripts/lib/staging-ancestor-fallback.sh's ancestor-fallback recovery path makes to this workflow's own past-runs endpoint.
       # Why: That call uses plain `curl` + `GH_TOKEN`, never the `gh` CLI (AG-CI-001: not assumed present on a bare lancache-light runner), but the REST endpoint still requires this scope either way.
-      # From: Issue #1095 | PR #1532, AG-CI-001
+      # From: Issue #1095 | PR #1532
       actions: read
     # What: VALIDATION_SUBNET/GATEWAY/*_IP, COMPOSE_PROJECT_NAME, and VALIDATION_UI_PORT are deliberately NOT set as fixed job-level env; they come from a host-local flock reservation (scripts/lib/reserve-validation-subnet.sh) and retry-on-collision loop instead, matching full-setup-validate.yml's own step.
     # Why: A job-level `env:` entry is re-applied on top of every step's accumulated $GITHUB_ENV state, so a fixed value here would always win in later steps and silently override whatever a retry writes; a fixed value previously let two genuinely concurrent runs on the same self-hosted host derive the identical network slot from compute-validation-network's hash-only derivation, both pass the old `docker network ls` pre-flight (which only catches a leftover network from a PREVIOUS run, not a concurrent one), then race the kernel to create the bridge with only one winning -- a race this job hits more often than the workflow_dispatch-only full-setup-validate.yml.
