@@ -514,8 +514,12 @@ pub async fn toggle_ddns_allow_unsigned_updates(
     // here would be new shared infrastructure, not a one-line fix -- left
     // for a maintainer decision on priority rather than expanding this
     // PR's scope unilaterally.
-    if let Err(e) =
-        docker_client::restart_service(&state.docker, &state.config.dns_standard_service).await
+    if let Err(e) = docker_client::restart_service(
+        &state.docker,
+        &state.config.dns_standard_service,
+        &state.config.container_suffix,
+    )
+    .await
     {
         // {:#} (anyhow's alternate Display), not {}: the bare context
         // message alone ("Failed to restart 'dns-standard'") hid the real
@@ -528,8 +532,12 @@ pub async fn toggle_ddns_allow_unsigned_updates(
             e
         );
     }
-    if let Err(e) =
-        docker_client::restart_service(&state.docker, &state.config.dns_ssl_service).await
+    if let Err(e) = docker_client::restart_service(
+        &state.docker,
+        &state.config.dns_ssl_service,
+        &state.config.container_suffix,
+    )
+    .await
     {
         tracing::error!(
             "Restart dns-ssl for ddns-allow-unsigned-updates toggle failed: {:#}",
@@ -587,8 +595,12 @@ async fn is_aaaa_filter_enabled(state: &AppState) -> bool {
 }
 
 async fn restart_ssl(state: &AppState) {
-    if let Err(e) =
-        docker_client::restart_service(&state.docker, &state.config.proxy_ssl_service).await
+    if let Err(e) = docker_client::restart_service(
+        &state.docker,
+        &state.config.proxy_ssl_service,
+        &state.config.container_suffix,
+    )
+    .await
     {
         tracing::error!("Restart proxy service failed: {}", e);
     }

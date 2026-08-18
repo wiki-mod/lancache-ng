@@ -530,9 +530,17 @@ pub async fn reload_nats_conf(
     state: &AppState,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     update_nats_conf(state).await?;
-    docker_client::restart_service(&state.docker, &state.config.nats_service)
-        .await
-        .map_err(|e| format!("Failed to restart NATS service: {e}").into())
+    docker_client::restart_service(
+        &state.docker,
+        &state.config.nats_service,
+        &state.config.container_suffix,
+    )
+    .await
+    // What: uses {e:#} (anyhow's full chain), not {e}.
+    // Why: {e} alone hid the real bollard/Docker-API cause during this
+    // issue's own live-container debugging.
+    // From: Issue #1590
+    .map_err(|e| format!("Failed to restart NATS service: {e:#}").into())
 }
 
 pub async fn update_nats_conf(
