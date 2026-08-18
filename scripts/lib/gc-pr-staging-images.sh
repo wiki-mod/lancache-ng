@@ -23,20 +23,11 @@ gcps_version_name_is_digest() {
 
 # gcps_extract_manifest_children <manifest-json>
 #
-# Prints only forward `.manifests[].digest` edges from an image index to the
-# platform/attestation manifests it requires. A top-level `.subject.digest`
-# is deliberately NOT a child edge: it points in the opposite direction,
-# from a referrer/attestation to the artifact it describes. Treating subject
-# as a child makes an otherwise-orphaned subject keep itself alive merely
-# because a stale attestation still refers to it.
-#
-# NOTE: this only walks ONE level. This project's current publishers do not
-# produce nested indices; if that changes, the caller must recurse rather
-# than trusting this one-level closure.
-#
-# Returns non-zero on jq failure and 0 with empty output for a valid manifest
-# with no `.manifests[]` children.
-# From: Issue #1095 | PR #1443 | PR #1586
+# What: prints forward `.manifests[].digest` child edges of an image index.
+# Why: `.subject.digest` points the opposite direction (referrer to
+# subject) and must never count as a child, or a stale attestation could
+# keep an otherwise-orphaned subject alive; walks one level only.
+# From: Issue #1095 | PR #1586
 gcps_extract_manifest_children() {
   local manifest_json="$1"
   local manifests_children
@@ -49,10 +40,10 @@ gcps_extract_manifest_children() {
 
 # gcps_extract_manifest_subject <manifest-json>
 #
-# Prints the top-level OCI `.subject.digest` when present. Kept separate from
-# gcps_extract_manifest_children because a subject is a reverse referrer edge:
-# the referrer is useful while the subject remains live, but the referrer must
-# not by itself make an otherwise-dead subject immortal.
+# What: prints the top-level OCI `.subject.digest` when present.
+# Why: kept separate from gcps_extract_manifest_children -- a subject is a
+# reverse referrer edge, and must not by itself make an otherwise-dead
+# subject immortal while the referrer that names it remains live.
 # From: Issue #1585 | PR #1586
 gcps_extract_manifest_subject() {
   local manifest_json="$1"
@@ -112,12 +103,6 @@ gcps_is_old_enough_to_delete() {
 gcps_pr_lookup_state() {
   local pr_number="$1" repository="$2" cache_array_name="$3" result_var_name="${4:-}"
   local -n cache_ref="$cache_array_name"
-  # What: optional 4th arg is a caller variable name, populated via nameref
-  # after local/shared-cache or live-API resolution. When present, stdout
-  # stays empty; legacy callers without the 4th arg still receive the state.
-  # Why: production calls this as a plain statement so cache writes survive;
-  # result output must not also leak raw OPEN/CLOSED lines into workflow logs.
-  # From: Issue #1557 | PR #1559 | PR #1586
   local api_output lookup_state shared_cache_dir="" shared_cache_file="" shared_cache_lock=""
   local shared_cache_tmp="" wait_attempt=0 lock_owned=0
 
@@ -152,10 +137,12 @@ gcps_pr_lookup_state() {
     if [[ -z "$lookup_state" ]]; then
       shared_cache_lock="${shared_cache_file}.lock"
       for (( wait_attempt=1; wait_attempt<=100; wait_attempt++ )); do
+        # What: re-reads the cache file right after taking the lock.
+        # Why: another owner may have written and released it between this
+        # worker's first read and this mkdir, avoiding a wasted API call.
+        # From: Issue #1585 | PR #1586
         if mkdir "$shared_cache_lock" 2>/dev/null; then
           lock_owned=1
-          # Another owner may have finished between our first read and this
-          # mkdir. Re-read before spending a live API request.
           if [[ -r "$shared_cache_file" ]] && IFS= read -r lookup_state <"$shared_cache_file"; then
             case "$lookup_state" in
               OPEN | CLOSED)
@@ -186,9 +173,10 @@ gcps_pr_lookup_state() {
     fi
   fi
 
+  # What: the live `gh api` call's assignment stays inside the if-condition.
+  # Why: a failed call must be classified below, not trip a caller's `set -e`.
+  # From: Issue #1095 | PR #1586
   if [[ -z "$lookup_state" ]]; then
-    # Keep the assignment in an if-condition: a failed gh call must be
-    # classified here rather than tripping a caller's `set -e`.
     if api_output="$(gh api "repos/${repository}/pulls/${pr_number}" 2>&1)"; then
       if lookup_state="$(printf '%s' "$api_output" | jq -r '.state // empty' 2>&1)"; then
         if [[ "$lookup_state" == "open" ]]; then
@@ -285,10 +273,7 @@ gcps_delete_package_version_once() {
     return 0
   fi
   if [[ "$output" == *"HTTP 404"* ]]; then
-    # What: suppresses SC2034 for this cross-file output assignment.
-    # Why: the sourced caller reads the helper output after the function returns.
-    # From: Issue #1095 | PR #1585.
-    # shellcheck disable=SC2034
+    # shellcheck disable=SC2034 # cross-file output var, see function header
     gcps_delete_result="ALREADY_ABSENT"
     return 0
   fi
@@ -321,10 +306,7 @@ gcps_package_presence_once() {
     return 0
   fi
   if [[ "$output" == *"HTTP 404"* ]]; then
-    # What: suppresses SC2034 for this cross-file output assignment.
-    # Why: the sourced caller reads the helper output after the function returns.
-    # From: Issue #1095 | PR #1585.
-    # shellcheck disable=SC2034
+    # shellcheck disable=SC2034 # cross-file output var, see function header
     gcps_package_presence="ABSENT"
     return 0
   fi
