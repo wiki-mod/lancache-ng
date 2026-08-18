@@ -491,7 +491,7 @@ services:
       # From: Issue #1079 | PR #1082
       - "123:123/udp"
     # What: `cap_drop: [ALL]`, then only the capabilities below are added back for chronyd.
-    # Why: least-privilege posture; each grant was verified necessary via strace, and real clock-stepping under this set is proven on every PR by scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh's GitHub-hosted job (self-hosted runners are LXC-nested and can't prove this, Issue #1296).
+    # Why: least-privilege posture; each grant was verified necessary via strace, and real clock-stepping under this set is proven on every PR by scripts/untracked/simulations/ntp-cap-sys-time-simulation.sh's GitHub-hosted job (self-hosted runners can't prove this).
     # From: Issue #1413
     cap_drop:
       - ALL

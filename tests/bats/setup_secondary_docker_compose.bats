@@ -206,7 +206,7 @@ printf %s \"\$response\" > \"\$OUT_RESPONSE\"
     #   reference.
     # Why: that reference file's own header claims "do not edit
     #   manually," but PR #876 hand-edited it instead of the heredoc,
-    #   leaving the two silently diverged until #946 was filed.
+    #   leaving the two silently diverged.
     # From: Issue #946 | PR #976
     local heredoc_body reference_body
 
