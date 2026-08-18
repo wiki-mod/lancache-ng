@@ -221,11 +221,11 @@ pub async fn update_ntp_settings(
 // `dhcp`/`dhcp-proxy`.
 async fn reconcile_ntp_container(state: &AppState, ntp_enabled: bool) -> Result<(), NtpError> {
     if ntp_enabled {
-        docker_client::start_service(&state.docker, "ntp")
+        docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
             .await
             .map_err(|err| NtpError::config_error(err.to_string()))?;
     } else {
-        docker_client::stop_service_if_present(&state.docker, "ntp")
+        docker_client::stop_service_if_present(&state.docker, "ntp", &state.config.container_suffix)
             .await
             .map_err(|err| NtpError::config_error(err.to_string()))?;
     }

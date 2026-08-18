@@ -1145,6 +1145,11 @@ services:
       - "${UI_BIND_IP:-${IP_STANDARD}}:8080:8080"
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
+      # Issue #1590: docker_client.rs's restart/start/stop calls need this to
+      # resolve the same suffixed container names docker-socket-proxy.sh and
+      # watchdog.sh already accept (issue #1415). Empty for every real
+      # install, same as every other LANCACHE_CONTAINER_SUFFIX reference.
+      - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - DNS_STANDARD_SERVICE=dns-standard
       - DNS_SSL_SERVICE=dns-ssl
       - PROXY_SERVICE=proxy

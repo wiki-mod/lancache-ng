@@ -668,18 +668,18 @@ async fn reconcile_dhcp_mode(
     // from the UI's persisted DHCP mode.
     match mode {
         crate::config::DhcpMode::Disabled => {
-            docker_client::stop_service_if_present(&state.docker, "dhcp")
+            docker_client::stop_service_if_present(&state.docker, "dhcp", &state.config.container_suffix)
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
-            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
+            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy", &state.config.container_suffix)
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
         }
         crate::config::DhcpMode::Kea => {
-            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy")
+            docker_client::stop_service_if_present(&state.docker, "dhcp-proxy", &state.config.container_suffix)
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
-            docker_client::start_service(&state.docker, "dhcp")
+            docker_client::start_service(&state.docker, "dhcp", &state.config.container_suffix)
                 .await
                 .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
@@ -690,10 +690,10 @@ async fn reconcile_dhcp_mode(
         // dhcp-proxy container is running. The container itself, on (re)start,
         // reads the new mode and renders the matching config.
         crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
-            docker_client::stop_service_if_present(&state.docker, "dhcp")
+            docker_client::stop_service_if_present(&state.docker, "dhcp", &state.config.container_suffix)
                 .await
                 .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
-            docker_client::start_service(&state.docker, "dhcp-proxy")
+            docker_client::start_service(&state.docker, "dhcp-proxy", &state.config.container_suffix)
                 .await
                 .map_err(|err| start_service_error(err, "dhcp-proxy", "dhcp-proxy"))?;
         }
@@ -3066,7 +3066,7 @@ async fn check_dhcp_probe(state: &AppState) -> DhcpCheckReport {
     // restart/attach/inspect the same container.
     let _guard = state.dhcp_probe_lock.lock().await;
 
-    let output = match run_dhcp_probe(&state.docker).await {
+    let output = match run_dhcp_probe(&state.docker, &state.config.container_suffix).await {
         Ok(out) => out,
         Err(e) => {
             // Both statuses get the same diagnostic-rich reason -- neither
@@ -3250,24 +3250,24 @@ where
 // to Docker's own log API as a `since` filter, and current_probe_output
 // further discards anything before this run's own start marker within
 // whatever logs that filter still let through.
-async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, ProbeError> {
-    let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE)
+async fn run_dhcp_probe(docker: &bollard::Docker, suffix: &str) -> Result<String, ProbeError> {
+    let id = docker_client::container_name_for_service(DHCP_PROBE_SERVICE, suffix)
         .context("resolve DHCP probe container")
         .map_err(ProbeError::Other)?;
 
-    stop_container_if_running(docker, id)
+    stop_container_if_running(docker, &id)
         .await
         .map_err(ProbeError::Other)?;
     let started_since = unix_timestamp_seconds();
 
     docker
-        .start_container(id, Some(StartContainerOptionsBuilder::default().build()))
+        .start_container(&id, Some(StartContainerOptionsBuilder::default().build()))
         .await
         .context("start DHCP probe container")
         .map_err(ProbeError::Other)?;
 
     let mut wait = docker.wait_container(
-        id,
+        &id,
         Some(
             WaitContainerOptionsBuilder::default()
                 .condition("not-running")
@@ -3277,12 +3277,12 @@ async fn run_dhcp_probe(docker: &bollard::Docker) -> Result<String, ProbeError> 
     let wait_result = wait_for_probe_container(
         wait.next(),
         DHCP_PROBE_WAIT_TIMEOUT,
-        || collect_container_logs_since(docker, id, started_since),
-        || stop_container_if_running(docker, id),
+        || collect_container_logs_since(docker, &id, started_since),
+        || stop_container_if_running(docker, &id),
     )
     .await?;
 
-    let output = collect_container_logs_since(docker, id, started_since)
+    let output = collect_container_logs_since(docker, &id, started_since)
         .await
         .context("read DHCP probe logs")
         .map_err(ProbeError::Other)?;
