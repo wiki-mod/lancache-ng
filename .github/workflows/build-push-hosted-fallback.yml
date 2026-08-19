@@ -272,10 +272,9 @@ jobs:
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
       # What: builds and pushes a single-platform (amd64) candidate image.
-      # Why: forces oci-mediatypes with no provenance/annotations here so the
-      #   later imagetools merge with build-arm64's arm64 leg does not
-      #   silently drop the description annotation (see build-push.yml's
-      #   equivalent step for the full verified rationale).
+      # Why: forces oci-mediatypes so the later imagetools merge with
+      #   build-arm64's arm64 leg does not silently drop the description
+      #   annotation (build-push.yml's equivalent step has the full rationale).
       # From: Issue #620 | Issue #1522 | PR #1523
       - name: Build and push candidate once
         id: build
@@ -339,11 +338,10 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
-      # What: assembles the real multi-platform tag from this job's amd64
-      #   candidate and build-arm64's already-published arm64 leg.
+      # What: assembles the real multi-platform tag from this job's amd64 candidate and build-arm64's arm64 leg.
       # Why: this hosted-fallback job only ever builds amd64; merging by
-      #   digest (not by tag) keeps the exact scanned/attested candidate
-      #   from being swapped for a newer push mid-assembly.
+      #   digest keeps the exact scanned/attested candidate from being
+      #   swapped for a newer push mid-assembly.
       # From: Issue #1522 | PR #1523
       - name: Merge exact candidate with existing arm64 leg
         id: merge

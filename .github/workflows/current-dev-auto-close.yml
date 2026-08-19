@@ -54,15 +54,12 @@ jobs:
             const repo = context.repo.repo;
             const isDryRun = context.eventName === 'workflow_dispatch';
 
-            // Step 1: Resolve the PR to process -- the real event payload
-            // already carries everything for the pull_request trigger, but
-            // workflow_dispatch only gives us a bare number and must fetch
-            // the rest for real.
-            let pr;
-            // What: Converts the dry-run dispatch input to a Number before use.
+            // What: resolves the PR to process; workflow_dispatch fetches it, the real trigger already has it.
             // Why: `context.payload.inputs` values arrive as strings even
-            //   when declared `type: number` in the workflow file.
+            //   when declared `type: number`, so the dry-run number needs
+            //   an explicit conversion before use below.
             // From: Issue #1137 | PR #1157
+            let pr;
             if (isDryRun) {
               const prNumber = Number(context.payload.inputs?.pr_number);
               if (!prNumber || Number.isNaN(prNumber)) {
@@ -136,8 +133,7 @@ jobs:
             // From: Issue #1496
             const linkedIssuesSectionText = linkedIssuesText || '';
 
-            // Step 3: Parse the Linked Issues section text for closing keywords.
-            // What: Matches close/fix/resolve + #N, excluding a same-sentence negated mention and `Refs`.
+            // What: parses the Linked Issues section text, matching close/fix/resolve + #N while excluding a same-sentence negated mention and `Refs`.
             // Why: without the negation guard, prose like "does not close
             //   #N" matched as a real close.
             // From: PR #1491
