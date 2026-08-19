@@ -189,7 +189,7 @@ jobs:
             const commentBody = [
               '## Closed via merge to `current_dev` (not the default branch -- see #1137)',
               '',
-              `**Auto-close notice:** This comment and this issue's closure were generated automatically by the \`current-dev-auto-close\` GitHub Actions workflow, not by a human or an interactive session. GitHub's built-in "Closes #N"/"Fixes #N" auto-close only fires for merges into the default branch (\`master\`); this workflow mirrors that behavior for \`current_dev\`, the project's actual active development branch (see #1137). The content below is PR #${prNumber}'s own description, relayed verbatim -- it is not an AI-generated summary.`,
+              `**Auto-close notice:** This comment and this issue's closure were generated automatically by the \`current-dev-auto-close\` GitHub Actions workflow, not by a human or an interactive session. GitHub's built-in "Closes #N"/"Fixes #N" auto-close only fires for merges into the default branch (\`master\`); this workflow mirrors that behavior for \`current_dev\`, the project's actual active development branch. The content below is PR #${prNumber}'s own description, relayed verbatim -- it is not an AI-generated summary.`,
               '',
               `Resolved by PR #${prNumber}: ${prUrl} (merged ${mergedAt}, commit \`${mergeSha}\`). Full PR body below.`,
               '',
