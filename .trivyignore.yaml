@@ -1,7 +1,15 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Trivy security scanner ignore list for accepted vulnerabilities with expiry dates
+#
+# Trivy security scanner ignore list for accepted vulnerabilities.
+# Per-entry `statement:` convention (AG-CODE-012): What: (one line, what is
+# suppressed and for which artifact) / Why: (1-3 lines, sober
+# non-exploitability or accepted-risk reasoning) / From: (Issue/PR
+# reference, mandatory).
+# `status: not_affected` marks vulnerable code confirmed absent or
+# unreachable; an omitted `status` marks an accepted, tracked risk.
+# `expired_at` is this entry's next mandatory re-review date.
 vulnerabilities:
   - id: CVE-2026-34040
     paths:
@@ -9,57 +17,16 @@ vulnerabilities:
       - usr/local/lib/docker/cli-plugins/docker-buildx
     statement: >-
       What: Suppresses CVE-2026-34040 (a Docker daemon authorization-plugin
-      bypass) for the docker-compose and docker-buildx CLI plugin binaries
-      only.
+      bypass) for docker-compose/docker-buildx; anchor entry for the
+      docker/docker client-library-only group (CVE-2026-41567/42306 below
+      share this background).
 
-      Why: Not exploitable in these artifacts (vulnerable code not present).
-      The vulnerable code lives entirely in github.com/docker/docker's
-      pkg/authorization middleware, and the upstream fix (moby/moby commit
-      e89edb19ad7de0407a5d31e3111cb01aa10b5a38, released v29.3.1) changes only
-      pkg/authorization/authz.go. docker-compose and docker-buildx embed
-      github.com/docker/docker solely as an API client library; they neither
-      contain nor execute the daemon-side AuthZ middleware, so the vulnerable
-      code path is absent from these CLI plugin binaries and the scanner is
-      matching the embedded module version string, not reachable code. A
-      version bump does not remove the finding either, verified against upstream
-      on 2026-07-25: from v29 the fix lives in newly split, separately versioned
-      modules (github.com/moby/moby/client, github.com/moby/moby/api), and there
-      is NO v29.x at the old github.com/docker/docker path to pin to (a
-      pseudo-version has nothing to point at). docker/buildx master still
-      requires github.com/docker/docker v28.5.2+incompatible DIRECTLY, and
-      docker/compose main still pulls it in INDIRECTLY, both alongside the new
-      moby/moby/client v0.5.0 + moby/moby/api v1.55.0 modules -- upstream's
-      migration off the old path is incomplete, so building buildx/compose even
-      from their latest main would still embed docker/docker v28.5.2 and trip the
-      same scanner match; completing that import migration ourselves would mean
-      forking their dependency trees (not viable). This is unlike the grpc
-      v1.81.1->v1.82.1 and containerd/containerd/v2 v2.2.4->v2.2.5 minor/patch
-      pins those builds already apply (see #787), where a fixed version existed
-      at the same module path. Verified against the upstream fix commit's file
-      scope AND the current upstream go.mod files. This is a non-exploitability
-      disposition, not a wait for a fix at the old path, hence the
-      `status: not_affected` below (generate-vex.sh emits this as an OpenVEX
-      not_affected/vulnerable_code_not_present statement, not the
-      affected/action_statement shape used for entries genuinely awaiting an
-      upstream fix).
-
-      DISACK follow-up, live re-verified 2026-08-14 (PR #1548 review, this
-      entry's own `expired_at` was 2026-11-15, well past the file's 14-day
-      convention -- maintainer DISACK, "i never agreed such a long termin
-      date"): re-checked at the exact pinned tags this project actually
-      builds (docker/buildx v0.35.0, docker/compose v5.2.0, per
-      tools/build-tools/Dockerfile's DOCKER_BUILDX_VERSION/
-      DOCKER_COMPOSE_VERSION build args), not the 2026-07-25 finding's own
-      master/main branch tips. Fetched both tags' real go.mod and
-      vendor/modules.txt from GitHub directly: both still pin
-      github.com/docker/docker at v28.5.2+incompatible (direct in buildx,
-      indirect in compose), buildx's vendor/modules.txt still vendors only
-      github.com/docker/docker/pkg/namesgenerator from that module, and
-      moby/moby's own tag list still has no v29.x release at the old module
-      path (newest tag remains v28.5.2). The non-exploitability disposition
-      is unchanged. This was a live source-inspection re-check (go.mod/
-      vendor/modules.txt/tag list), not a rebuild-and-Trivy-scan -- no image
-      was built or scanned for this specific re-check.
+      Why: Vulnerable code not present -- the fix is daemon-side
+      pkg/authorization middleware; these binaries embed
+      github.com/docker/docker only as an API client library and never
+      compile it. No fixed release exists at the pinned
+      v28.5.2+incompatible module path (verified 2026-08-14 against both
+      projects' vendored modules).
 
       From: Issue #1304, PR #1548
     status: not_affected
@@ -70,38 +37,13 @@ vulnerabilities:
       - usr/local/lib/docker/cli-plugins/docker-buildx
     statement: >-
       What: Suppresses CVE-2026-41567 (a Docker daemon `docker cp`/archive-
-      upload host code execution finding) for the docker-compose and
-      docker-buildx CLI plugin binaries only.
+      upload host code execution finding) for docker-compose/docker-buildx.
 
-      Why: Not exploitable in these artifacts (vulnerable code not present).
-      Same github.com/docker/docker v28.5.2+incompatible finding as
-      CVE-2026-34040 above (see that entry for the full "client-library-only,
-      cannot be bumped" background) -- this is a newly-disclosed CVE against
-      the same pinned module version, not a regression from any change in
-      this repo. CVE-2026-41567 is a Docker daemon vulnerability in the
-      `PUT /containers/{id}/archive` request handler (and the `docker cp`
-      upload path that hits the same handler): the daemon resolves
-      decompression binaries (e.g. xz/unpigz) from the CONTAINER's filesystem
-      instead of the host's due to an operation-ordering bug, letting a
-      malicious image trojan those binaries for host-level code execution
-      when an operator uploads a compressed archive into it. This is
-      server-side request-handling code, not something a client merely
-      importing github.com/docker/docker as an API client library would ever
-      compile in. Verified directly (not just by the same reasoning as
-      CVE-2026-34040): docker/buildx v0.35.0's own committed
-      vendor/modules.txt lists exactly ONE package vendored from the entire
-      github.com/docker/docker module -- github.com/docker/docker/pkg/
-      namesgenerator (a trivial random-container-name generator, unrelated to
-      archive/cp handling) -- confirming the actual vulnerable daemon
-      code is not present in this binary at all.
-
-      DISACK follow-up, live re-verified 2026-08-14: same re-check as
-      CVE-2026-34040 above (see that entry for the full methodology) at the
-      exact pinned tag this project builds (docker/buildx v0.35.0) -- its
-      real, current vendor/modules.txt still vendors only
-      github.com/docker/docker/pkg/namesgenerator from this module, so the
-      daemon-side archive/cp handler this CVE actually needs remains absent.
-      Not a rebuild-and-Trivy-scan re-check, a live source-tree inspection.
+      Why: Same docker/docker client-library-only disposition as
+      CVE-2026-34040 above. This is server-side request-handling code in
+      the daemon's archive handler; docker/buildx's vendor/modules.txt
+      vendors only pkg/namesgenerator, confirming the handler is absent
+      (verified 2026-08-14).
 
       From: Issue #1304, PR #1548
     status: not_affected
@@ -111,32 +53,13 @@ vulnerabilities:
       - usr/local/lib/docker/cli-plugins/docker-compose
       - usr/local/lib/docker/cli-plugins/docker-buildx
     statement: >-
-      What: Suppresses CVE-2026-42306 (a Docker daemon `docker cp` bind-mount
-      race condition) for the docker-compose and docker-buildx CLI plugin
-      binaries only.
+      What: Suppresses CVE-2026-42306 (GHSA-rg2x-37c3-w2rh, a Docker daemon
+      `docker cp` bind-mount race condition) for docker-compose/docker-buildx.
 
-      Why: Not exploitable in these artifacts (vulnerable code not present).
-      Same github.com/docker/docker v28.5.2+incompatible finding as
-      CVE-2026-34040 and CVE-2026-41567 above -- see those entries for the
-      shared "client-library-only, cannot be bumped" background.
-      CVE-2026-42306 (GHSA-rg2x-37c3-w2rh) is a race condition in the Docker
-      daemon's own `docker cp` implementation that can redirect a copy
-      through a bind mount to write outside the intended container
-      filesystem onto the host. Like CVE-2026-41567, this is daemon-side
-      request-handling code, confirmed absent from these binaries by the
-      same direct vendor/modules.txt check (only
-      github.com/docker/docker/pkg/namesgenerator is actually vendored from
-      this module in docker/buildx v0.35.0; neither binary implements or
-      executes the daemon's cp handler).
-
-      DISACK follow-up, live re-verified 2026-08-14: same re-check as
-      CVE-2026-34040 above (see that entry for the full methodology) at the
-      exact pinned tag this project builds (docker/buildx v0.35.0) -- its
-      real, current vendor/modules.txt still vendors only
-      github.com/docker/docker/pkg/namesgenerator from this module, so the
-      daemon-side `docker cp` handler this CVE actually needs remains
-      absent. Not a rebuild-and-Trivy-scan re-check, a live source-tree
-      inspection.
+      Why: Same docker/docker client-library-only disposition as
+      CVE-2026-34040 above. This is a race condition in the daemon's own
+      `docker cp` implementation; confirmed absent by the same
+      vendor/modules.txt check (verified 2026-08-14).
 
       From: Issue #1304, PR #1548
     status: not_affected
@@ -145,120 +68,28 @@ vulnerabilities:
     statement: >-
       What: Accepts CVE-2026-12064 (an SSH host-verification bypass via
       schemeless SFTP/SCP URLs) as tracked risk for `tools/build-tools`'s
-      `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package.
+      `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package. Anchor entry for
+      this file's curl group (CVE-2026-8286/8927/8932/9079/9080/9545
+      below).
 
-      Why: Not a non-exploitability disposition. This
-      entry's own disposition for this CVE ID is stated precisely as what
-      was actually measured, not overstated: Trivy reports it
-      `Status: affected`, `FixedVersion: None` against the currently
-      installed package (see below); whether that reflects a genuinely
-      unfixed condition or a Debian-tracker/Trivy-DB mapping gap on a
-      package that is nominally at curl's own stated fixed version is NOT
-      resolved by this review -- issue #1304's own 2026-07-31 comment
-      already raised exactly this question ("could be Trivy's vulnerability
-      DB... not yet having the fixed-at-8.21.0 mapping recorded") and it
-      remains open. CVE-2026-12064 itself is an SSH host-verification
-      bypass triggered by schemeless URLs used with SFTP/SCP.
-
-      2026-08-15 checkpoint re-review (performed 2026-08-14, via real
-      execution on self-hosted runner lancache-240, not from tracker
-      websites alone -- see this entry's own prior history for why that
-      distinction matters): all 5 originally-named First-Party images
-      (`services/proxy`, `services/dns`, `services/watchdog`, `services/ui`,
-      `services/ntp`) share the byte-identical Alpine base image digest
-      `alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b`
-      (grep-confirmed across all 5 Dockerfiles' `FROM` lines) and each
-      installs `curl` via the same `apk add curl` mechanism from the same
-      package repositories. Built `services/proxy` for real from
-      `current_dev` (`docker buildx build --build-arg
-      BUILD_TOOLS_IMAGE=... --build-context dns-domains=services/dns
-      services/proxy`), confirmed `curl 8.21.0` installed via `curl
-      --version` inside the built image, then ran a real
-      `aquasec/trivy:latest` (v0.73.0) scan --
-      `trivy image --severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL --scanners vuln`,
-      no `.trivyignore.yaml` applied: 0 total findings of any severity,
-      this CVE ID and the rest of this group entirely absent. Cross-checked
-      against a second, independently-published image
-      (`ghcr.io/wiki-mod/lancache-ng/dns:nightly`, pulled fresh): also
-      resolves to `curl 8.21.0` and produces the identical real-scan result
-      (0 findings). `services/watchdog`/`services/ui`/`services/ntp` were
-      not separately rebuilt this pass -- the load-bearing fact for
-      generalizing to them is the shared base-image digest plus the
-      identical `apk` install mechanism verified at `curl 8.21.0` on 2 of
-      the 5 images, not any property of Trivy's finding class itself.
-      **Real, separate finding, not previously documented anywhere in this
-      entry**: `tools/build-tools`'s own image (built via
-      `scripts/select-build-tools-image.sh` from `current_dev`, tag
-      `lancache-ng-build-tools-validation:local-local-1`) is Debian-based
-      (`rust:latest`) and installs `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
-      from `trixie-backports` at `8.21.0-2~bpo13+1` -- confirmed via
-      `dpkg -l` inside the built image. Real Trivy scans against this image
-      at both `--severity HIGH,CRITICAL` and the full
-      `UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL` range (same date, same runner)
-      found this CVE ID reported: `Status: affected`, `FixedVersion: None`.
-      This is a real gap in every prior version of this entry, which only
-      ever discussed the 5 runtime service images and never mentioned
-      `tools/build-tools` as needing this suppression, even though the
-      no-`paths:`-scoping design (re-confirmed below) means it always
-      covered `tools/build-tools` too the moment that image also carried an
-      affected `curl` package. `tools/build-tools`'s actual `curl` usage
-      (grep-confirmed 2026-08-14, `tools/build-tools/Dockerfile`): every
-      invocation is `curl -fsSL "https://github.com/.../releases/download/..."`
-      against a small, fixed set of pinned GitHub-release URLs
-      (`cargo-audit`, `cargo-tarpaulin`, `shellspec`) -- no schemeless
-      SFTP/SCP URL, matching the same non-triggering usage shape already
-      established for the 5 runtime images' healthcheck/monitoring-loop
-      calls. This entry therefore now names `tools/build-tools` as its real,
-      live scope; the 5 originally-named runtime images no longer need it
-      (their own Alpine-migration accuracy notes above stay as historical
-      background, unedited, per this file's convention of not rewriting
-      prior findings). No `paths:` scoping is given for this entry: Trivy's
-      `os-pkgs`/`debian` finding class -- how curl/libcurl4t64 are detected
-      here, being installed via `apt`/`dpkg` rather than a
-      language-specific analyzer -- carries no `PkgPath` at all, unlike
-      this file's existing Go-binary entries above (`docker-compose`/
-      `docker-buildx`, scanned by Trivy's `gobinary` analyzer, which
-      genuinely does report a file path). Confirmed empirically on a real
-      build of the proxy image (prior finding, still valid): an ignore
-      entry for this same CVE ID with a populated but bogus `paths:` value
-      (`usr/bin/curl`) did NOT suppress the finding, while an otherwise
-      identical entry with no `paths:` field at all DID suppress it
-      cleanly. This is a time-boxed acceptance, not an indefinite one:
-      re-review on or before 2026-08-28 -- rebuild and re-scan
-      `tools/build-tools` at that time, at full severity range (a HIGH-only
-      scan alone previously missed 4 sibling IDs in this same group that had
-      been reclassified to MEDIUM, see CVE-2026-8932 below); if
-      trixie/backports/sid has shipped a fix for this CVE ID by then, drop
-      this entry; if not, revisit (extend, or investigate a narrower `curl`
-      footprint for `tools/build-tools`). See issue #1304 for the complete
-      historical Trivy evidence per image and the maintainer's original
-      recorded decision, and this checkpoint's own real-execution findings
-      above.
+      Why: Trivy reports `Status: affected`, `FixedVersion: None`; no
+      `paths:` scoping applies since Trivy's Debian os-pkgs finding class
+      carries no `PkgPath`. `tools/build-tools`'s own curl usage is
+      exclusively `curl -fsSL` against pinned GitHub-release URLs, never a
+      schemeless SFTP/SCP URL. The 5 Alpine-based runtime images run curl
+      8.21.0 and show 0 findings (verified 2026-08-14, lancache-240).
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
   - id: CVE-2026-8286
     statement: >-
       What: Accepts CVE-2026-8286 (an insecure TLS-configuration-mismatch
-      connection issue) as tracked risk for `tools/build-tools`'s
-      `curl`/`libcurl4t64`/`libcurl3t64-gnutls` package.
+      connection issue) as tracked risk for `tools/build-tools`'s curl
+      package.
 
-      Why: Same curl finding group as CVE-2026-12064
-      above (see that entry for the full background: the 2026-08-15
-      checkpoint's real-execution methodology, why the disposition is
-      stated as "Trivy reports affected" rather than "genuinely
-      vulnerable", why the 5 originally-named runtime images no longer need
-      this entry, why `tools/build-tools` is this entry's real remaining
-      scope, its actual narrow `curl` usage there, why no `paths:` scoping
-      is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8286 is
-      an insecure-connection-establishment issue caused by a TLS
-      configuration mismatch. Real, current Trivy scan (2026-08-14,
-      lancache-240, both HIGH,CRITICAL and full-severity-range) confirms
-      this ID is reported against `tools/build-tools`'s `curl`/
-      `libcurl4t64`/`libcurl3t64-gnutls` at `8.21.0-2~bpo13+1` (`Status:
-      affected`, `FixedVersion: None`, severity HIGH) and absent from both
-      real-scanned Alpine-based images at any severity, disclosed
-      2026-07-03.
+      Why: Same curl finding group as CVE-2026-12064 above; `Status:
+      affected`, severity HIGH on `tools/build-tools`, absent from the
+      Alpine-based runtime images (verified 2026-08-14, lancache-240).
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
@@ -266,25 +97,11 @@ vulnerabilities:
     statement: >-
       What: Accepts CVE-2026-8927 (a proxy-authentication-state
       information-disclosure issue) as tracked risk for
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
-      package.
+      `tools/build-tools`'s curl package.
 
-      Why: Same curl finding group as CVE-2026-12064
-      above (see that entry for the full background: the 2026-08-15
-      checkpoint's real-execution methodology, why the disposition is
-      stated as "Trivy reports affected" rather than "genuinely
-      vulnerable", why the 5 originally-named runtime images no longer need
-      this entry, why `tools/build-tools` is this entry's real remaining
-      scope, its actual narrow `curl` usage there, why no `paths:` scoping
-      is given, and the 2026-08-28 re-review checkpoint). CVE-2026-8927 is
-      an information-disclosure issue caused by proxy authentication state
-      not being cleared between connections. Real, current Trivy scan
-      (2026-08-14, lancache-240, both HIGH,CRITICAL and
-      full-severity-range) confirms this ID is reported against
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls` at
-      `8.21.0-2~bpo13+1` (`Status: affected`, `FixedVersion: None`,
-      severity HIGH) and absent from both real-scanned Alpine-based images
-      at any severity, disclosed 2026-07-03.
+      Why: Same curl finding group as CVE-2026-12064 above; `Status:
+      affected`, severity HIGH on `tools/build-tools`, absent from the
+      Alpine-based runtime images (verified 2026-08-14, lancache-240).
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
@@ -292,26 +109,12 @@ vulnerabilities:
     statement: >-
       What: Accepts CVE-2026-8932 (an mTLS-connection-reuse
       security-feature-bypass issue) as tracked risk for
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
-      package.
+      `tools/build-tools`'s curl package.
 
-      Why: Same curl finding group as CVE-2026-12064
-      above (see that entry for the full background). CVE-2026-8932 is a
-      security-feature-bypass issue caused by improper mTLS connection
-      reuse. This ID was initially, incorrectly, planned for removal
-      earlier in this same checkpoint pass, because the first real Trivy
-      scan of `tools/build-tools` used `--severity HIGH,CRITICAL` only and
-      found no match; a follow-up **full-severity-range** scan
-      (`--severity UNKNOWN,LOW,MEDIUM,HIGH,CRITICAL`, same image, same
-      runner, 2026-08-14) found this ID IS present, at `Severity: MEDIUM`
-      (reclassified down from its originally-tracked HIGH), `Status:
-      affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/
-      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`. Restored, not removed --
-      a HIGH,CRITICAL-only scan is not sufficient evidence that a
-      previously-HIGH finding is gone; it may only have been reclassified.
-      Absent from both real-scanned Alpine-based images at any severity.
-      Same `tools/build-tools`-only scope and narrow non-triggering usage
-      as CVE-2026-12064 above, disclosed 2026-07-03.
+      Why: Same curl finding group as CVE-2026-12064 above; reclassified
+      to `Severity: MEDIUM`, `Status: affected` on `tools/build-tools`,
+      only visible under a full-severity scan (verified 2026-08-14,
+      lancache-240); absent from the Alpine-based runtime images.
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
@@ -319,46 +122,26 @@ vulnerabilities:
     statement: >-
       What: Accepts CVE-2026-9079 (a proxy-authentication-credential
       information-disclosure issue) as tracked risk for
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
-      package.
+      `tools/build-tools`'s curl package.
 
-      Why: Same curl finding group as CVE-2026-12064
-      above (see that entry for the full background, and CVE-2026-8932
-      above for why this ID was restored after an initial incorrect
-      HIGH,CRITICAL-only removal in this same pass). CVE-2026-9079 is an
-      information-disclosure issue caused by failure to clear proxy
-      authentication credentials. Full-severity-range real Trivy scan
-      (2026-08-14, lancache-240) confirms this ID present at `Severity:
-      MEDIUM` (reclassified down from HIGH), `Status: affected`,
-      `FixedVersion: None`, on `tools/build-tools`'s `curl`/`libcurl4t64`/
-      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both
-      real-scanned Alpine-based images at any severity, disclosed
-      2026-07-03.
+      Why: Same curl finding group as CVE-2026-12064 above; reclassified
+      to `Severity: MEDIUM`, `Status: affected` on `tools/build-tools`
+      (verified 2026-08-14, lancache-240); absent from the Alpine-based
+      runtime images.
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
   - id: CVE-2026-9080
     statement: >-
       What: Accepts CVE-2026-9080 (a `curl_easy_pause()` use-after-free
-      reachable via a libcurl multi-interface callback) as tracked risk for
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
-      package.
+      reachable via a libcurl multi-interface callback) as tracked risk
+      for `tools/build-tools`'s curl package.
 
-      Why: Same curl finding group as CVE-2026-12064
-      above (see that entry for the full background, and CVE-2026-8932
-      above for why this ID was restored after an initial incorrect
-      HIGH,CRITICAL-only removal in this same pass). CVE-2026-9080 is a
-      use-after-free reachable via `curl_easy_pause()` inside a
-      `CURLMOPT_SOCKETFUNCTION` callback -- a libcurl multi-interface
-      callback API `tools/build-tools`'s own `curl` invocations never use
-      (each is a plain `curl -fsSL` CLI call against a pinned URL, not code
-      linking against libcurl's callback API directly). Full-severity-range
-      real Trivy scan (2026-08-14, lancache-240) confirms this ID present
-      at `Severity: MEDIUM` (reclassified down from HIGH), `Status:
-      affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/
-      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both
-      real-scanned Alpine-based images at any severity, disclosed
-      2026-07-03.
+      Why: Same curl finding group as CVE-2026-12064 above; the vulnerable
+      `CURLMOPT_SOCKETFUNCTION` callback API is never used --
+      `tools/build-tools`'s curl calls are plain `curl -fsSL` CLI
+      invocations, not code linking libcurl's callback API (verified
+      2026-08-14, lancache-240; absent from the Alpine-based images).
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
@@ -366,402 +149,420 @@ vulnerabilities:
     statement: >-
       What: Accepts CVE-2026-9545 (a cached-SSL-session-and-early-data
       information-disclosure issue) as tracked risk for
-      `tools/build-tools`'s `curl`/`libcurl4t64`/`libcurl3t64-gnutls`
-      package.
+      `tools/build-tools`'s curl package.
 
-      Why: Same curl finding group as CVE-2026-12064
-      above (see that entry for the full background, and CVE-2026-8932
-      above for why this ID was restored after an initial incorrect
-      HIGH,CRITICAL-only removal in this same pass). CVE-2026-9545 is an
-      information-disclosure issue via a cached SSL session and early data
-      -- reachable only across a long-lived process reusing a session,
-      which does not describe `tools/build-tools`'s own `curl` invocations:
-      each is a short-lived, one-shot-per-invocation `curl -fsSL` CLI call
-      during the image build, not a long-lived process. Full-severity-range
-      real Trivy scan (2026-08-14, lancache-240) confirms this ID present
-      at `Severity: MEDIUM` (reclassified down from HIGH), `Status:
-      affected`, `FixedVersion: None`, on `curl`/`libcurl4t64`/
-      `libcurl3t64-gnutls` at `8.21.0-2~bpo13+1`, absent from both
-      real-scanned Alpine-based images at any severity, disclosed
-      2026-07-03.
+      Why: Same curl finding group as CVE-2026-12064 above; reachable only
+      across a long-lived process reusing a cached session, which does
+      not describe `tools/build-tools`'s short-lived, one-shot `curl
+      -fsSL` invocations (verified 2026-08-14, lancache-240).
 
       From: Issue #1304, PR #1548
     expired_at: 2026-08-28
   - id: CVE-2011-4116
     statement: >-
-      Not exploitable in `services/ui` or `tools/build-tools` (vulnerable code
-      not present in any reachable path). Real, full-severity (not just
-      HIGH/CRITICAL) Trivy scan against both images' `sha-cc5a272` builds
-      (issue #815 Part C, 2026-08-06) surfaced this and the 29 other entries
-      below across the Debian `perl-base`, util-linux (`bsdutils`/
-      `libblkid1`/`libmount1`/`liblastlog2-2`/`libsmartcols1`/`libuuid1`/
-      `login`/`mount`/`util-linux`), ncurses (`libncursesw6`/`libtinfo6`/
-      `ncurses-base`/`ncurses-bin`), `gzip`, and `libacl1` package groups --
-      the same 5 groups issue #1298/#815 Part C already tracked at
-      HIGH/CRITICAL severity, now confirmed to carry additional LOW/MEDIUM/
-      UNKNOWN-severity findings too once scanned at full severity. All 30 are
-      `Priority: required`/`Essential: yes` Debian packages or their hard
-      link-time dependents (per #815 Part C's own package-index audit),
-      so none can be purged the way `gnupg`/`curl` were for other findings --
-      "not exploitable" is the only available disposition short of migrating
-      the image off Debian entirely (issue #815's own broader migration
-      direction; `services/dns`/`services/ntp`/`services/dhcp`/
-      `services/dhcp-proxy`/`services/watchdog` already moved to `alpine:3.24`
-      for exactly this class of reason, among others, and no longer carry any
-      finding in this group at all -- confirmed by the same full-severity scan
-      finding zero hits on either image). This specific entry: `perl-base`'s
-      `File::Temp` module creates temporary files predictably/insecurely
-      under certain conditions. Confirmed via a real grep of every script this
-      project actually controls and runs inside these two images
-      (`services/ui/docker-entrypoint.sh`; every `RUN`/`COPY`d script in
-      `tools/build-tools/Dockerfile`) for literal `perl` invocation: zero
-      hits in `services/ui`, and zero hits in `tools/build-tools` either --
-      neither image's own code ever invokes the Perl interpreter at all, so
-      `File::Temp`'s insecure-tempfile behavior can never trigger regardless
-      of what upstream tooling (cargo, git, docker CLI, etc.) might do
-      internally, none of which are Perl-based. `perl-base` is present only
-      as a `Priority: required` base-Debian dependency, never installed or
-      invoked by this project's own Dockerfiles or scripts.
+      What: Marks CVE-2011-4116 (`perl-base`'s `File::Temp` module
+      creating temporary files insecurely) as not exploitable in
+      `services/ui` and `tools/build-tools`. Anchor entry for a 30-ID
+      group spanning the Debian `perl-base`, util-linux, ncurses, `gzip`,
+      and `libacl1` package groups.
+
+      Why: All 30 are `Priority: required`/`Essential: yes` Debian
+      packages or their hard link-time dependents, so none can be purged;
+      "not exploitable" is the only available disposition short of
+      migrating the image off Debian. Neither image invokes Perl at all
+      (grep-confirmed across every project-controlled script; verified
+      2026-08-06, full-severity Trivy scan).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2025-15649
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      the full background: affected images, the full 30-ID list this full-
-      severity scan surfaced, why no `paths:` scoping is given for this
-      finding class -- matching this file's existing curl/libexpat os-pkgs
-      entries -- and the 2026-08-20 re-review checkpoint). CVE-2025-15649 is a
-      `perl-IO-Compress` denial-of-service via a malformed DOS date field in a
-      zip header, reachable only through code that actually calls
-      `IO::Compress::Zip`/`unzip`-equivalent Perl modules -- neither image
-      invokes Perl at all (confirmed by the same grep as CVE-2011-4116).
+      What: Marks CVE-2025-15649 (a `perl-IO-Compress` denial-of-service
+      via a malformed DOS date field in a zip header) as not exploitable
+      in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Reachable
+      only through code calling `IO::Compress::Zip`; neither image invokes
+      Perl at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-12087
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-12087 is a `perl-Socket` out-of-bounds-read
-      information disclosure, reachable only through code exercising Perl's
-      `Socket` module -- neither image invokes Perl at all.
+      What: Marks CVE-2026-12087 (a `perl-Socket` out-of-bounds-read
+      information disclosure) as not exploitable in `services/ui` and
+      `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Reachable
+      only through code exercising Perl's `Socket` module; neither image
+      invokes Perl at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-13221
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-13221 is a silently-incorrect Perl regular-
-      expression-matching result under certain patterns, reachable only
-      through code that runs Perl regexes -- neither image invokes Perl at
-      all.
+      What: Marks CVE-2026-13221 (a silently-incorrect Perl
+      regular-expression-matching result under certain patterns) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Reachable
+      only through code that runs Perl regexes; neither image invokes
+      Perl at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-42496
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-42496 is a `perl-Archive-Tar` path-traversal
-      via crafted symlinks during archive extraction, reachable only through
-      Perl code that extracts a tar archive via `Archive::Tar` -- neither
-      image invokes Perl at all, and neither extracts tar archives via any
-      Perl tooling (this project's own tar handling, where it exists, is
-      plain shell `tar`, not Perl's `Archive::Tar`).
+      What: Marks CVE-2026-42496 (a `perl-Archive-Tar` path-traversal via
+      crafted symlinks during archive extraction) as not exploitable in
+      `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Reachable
+      only through Perl code using `Archive::Tar`; neither image invokes
+      Perl, and this project's own tar handling is plain shell `tar`.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-42497
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-42497 is the sibling `perl-Archive-Tar`
-      arbitrary-file-modification-via-hardlinks finding to CVE-2026-42496
-      above -- same non-reachability (neither image invokes Perl or
-      `Archive::Tar` at all).
+      What: Marks CVE-2026-42497 (the sibling `perl-Archive-Tar`
+      arbitrary-file-modification-via-hardlinks finding to CVE-2026-42496)
+      as not exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group and non-reachability as
+      CVE-2026-42496 above (neither image invokes Perl or `Archive::Tar`
+      at all).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-48959
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-48959 is a `perl-IO-Compress` CPU-exhaustion
-      DoS via a per-byte read loop, reachable only through Perl code using
-      `IO::Compress` -- neither image invokes Perl at all.
+      What: Marks CVE-2026-48959 (a `perl-IO-Compress` CPU-exhaustion DoS
+      via a per-byte read loop) as not exploitable in `services/ui` and
+      `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Reachable
+      only through Perl code using `IO::Compress`; neither image invokes
+      Perl at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-48961
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-48961 is a DoS in `IO::Compress`'s
-      `zipdetails` CLI tool via a malformed Info-ZIP Unix Extra Field --
-      neither image invokes Perl or `zipdetails` at all.
+      What: Marks CVE-2026-48961 (a DoS in `IO::Compress`'s `zipdetails`
+      CLI tool via a malformed Info-ZIP Unix Extra Field) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Neither
+      image invokes Perl or `zipdetails` at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-48962
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-48962 is a `perl-IO-Compress` arbitrary-code-
-      execution via an attacker-controlled output glob -- neither image
-      invokes Perl or `IO::Compress` at all.
+      What: Marks CVE-2026-48962 (a `perl-IO-Compress`
+      arbitrary-code-execution via an attacker-controlled output glob) as
+      not exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Neither
+      image invokes Perl or `IO::Compress` at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-57432
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-57432 is a Perl information-disclosure via
-      integer overflow in `pack`/`unpack` operations -- neither image invokes
-      Perl at all.
+      What: Marks CVE-2026-57432 (a Perl information-disclosure via
+      integer overflow in `pack`/`unpack` operations) as not exploitable
+      in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Neither
+      image invokes Perl at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-57433
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-57433 is a `Storable` signed-integer-overflow
-      finding -- neither image invokes Perl or `Storable` at all.
+      What: Marks CVE-2026-57433 (a `Storable` signed-integer-overflow
+      finding) as not exploitable in `services/ui` and
+      `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Neither
+      image invokes Perl or `Storable` at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-7010
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-7010 is an `HTTP::Tiny` CRLF-validation gap
-      -- neither image invokes Perl or `HTTP::Tiny` at all; both images' own
-      HTTP clients are Rust (`reqwest`, `services/ui`) or shell `curl`
-      (`tools/build-tools`), never Perl.
+      What: Marks CVE-2026-7010 (an `HTTP::Tiny` CRLF-validation gap) as
+      not exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Neither
+      image invokes Perl or `HTTP::Tiny` at all; both images' own HTTP
+      clients are Rust
+      (`reqwest`, `services/ui`) or shell `curl` (`tools/build-tools`),
+      never Perl.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-7017
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-7017 is the sibling `HTTP::Tiny` credential-
-      header-forwarding finding to CVE-2026-7010 above -- same non-
-      reachability (neither image invokes Perl or `HTTP::Tiny` at all).
+      What: Marks CVE-2026-7017 (the sibling `HTTP::Tiny`
+      credential-header-forwarding finding to CVE-2026-7010) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group and non-reachability as
+      CVE-2026-7010 above (neither image invokes Perl or `HTTP::Tiny` at
+      all).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-8376
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-8376 is a 32-bit-only Perl regex-compilation
-      heap-buffer-overflow -- neither image invokes Perl at all, and both
-      images are built for `linux/amd64`/`linux/arm64` (64-bit only) per this
-      project's own `RELEASE_PLATFORMS`, an independent reason this specific
-      finding cannot trigger even if Perl were invoked.
+      What: Marks CVE-2026-8376 (a 32-bit-only Perl regex-compilation
+      heap-buffer-overflow) as not exploitable in `services/ui` and
+      `tools/build-tools`.
+
+      Why: Same perl-base finding group as CVE-2011-4116 above. Neither
+      image invokes Perl at all, and both are built for
+      `linux/amd64`/`linux/arm64` (64-bit only), an independent reason
+      this finding cannot trigger even if Perl were invoked.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-9538
     statement: >-
-      Same perl-base finding group as CVE-2011-4116 above (see that entry for
-      full background). CVE-2026-9538 is the third `perl-Archive-Tar` finding
-      in this group (DoS via a crafted tar header with a large entry size) --
-      same non-reachability as CVE-2026-42496/42497 above (neither image
-      invokes Perl or `Archive::Tar` at all).
+      What: Marks CVE-2026-9538 (the third `perl-Archive-Tar` finding in
+      this group -- DoS via a crafted tar header with a large entry size)
+      as not exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same perl-base finding group and non-reachability as
+      CVE-2026-42496/CVE-2026-42497 above (neither image invokes Perl or
+      `Archive::Tar` at all).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2022-0563
     statement: >-
-      Not exploitable in `services/ui` or `tools/build-tools` (vulnerable
-      code not present in any reachable path). Same full-severity scan as
-      CVE-2011-4116 above (see that entry for the shared background: affected
-      images, the full 30-ID list, why no `paths:` scoping is given, and the
-      2026-08-20 re-review checkpoint). This is the first of 9 findings
-      against the util-linux package family (`bsdutils`, `libblkid1`,
-      `libmount1`, `liblastlog2-2`, `libsmartcols1`, `libuuid1`, `login`,
-      `mount`, `util-linux` -- one shared CVE per finding, all reported
-      against every package in the family since Trivy attributes a
-      source-package-level finding to each binary package built from it).
-      CVE-2022-0563 is a partial-file-disclosure bug in `chfn`/`chsh` when
-      compiled with `libreadline` support. Confirmed via a real grep of every
-      script this project actually controls and runs inside these two images
-      for literal `chfn`/`chsh`/`mount`/`blkid`/`login` invocation: zero hits
-      in `services/ui/docker-entrypoint.sh`, zero hits in any
-      `tools/build-tools/Dockerfile` `RUN`/`COPY`d script -- neither image's
-      own code ever calls any util-linux CLI tool at all (`services/ui`'s
-      account/privilege-drop handling uses `setpriv`, not `chfn`/`chsh`; see
-      `docker-entrypoint.sh`'s own header). The whole util-linux family is
-      present only as a `Priority: required` base-Debian dependency.
+      What: Marks CVE-2022-0563 (a partial-file-disclosure bug in
+      `chfn`/`chsh` when compiled with `libreadline` support) as not
+      exploitable in `services/ui` and `tools/build-tools`. Anchor entry
+      for a 9-ID group against the util-linux package family (`bsdutils`,
+      `libblkid1`, `libmount1`, `liblastlog2-2`, `libsmartcols1`,
+      `libuuid1`, `login`, `mount`, `util-linux`).
+
+      Why: Same full-severity scan as CVE-2011-4116 above. Neither
+      image's own code calls any util-linux CLI tool (grep-confirmed;
+      `services/ui`'s privilege-drop handling uses `setpriv`, not
+      `chfn`/`chsh`); the family is present only as a required base-Debian
+      dependency.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2025-14104
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2025-14104 is a heap buffer-overread in
-      `setpwnam()` when processing 256-byte usernames -- reachable only
-      through code that calls `setpwnam()` (part of `chfn`/user-database
-      editing tools); neither image invokes any util-linux CLI tool at all.
+      What: Marks CVE-2025-14104 (a heap buffer-overread in `setpwnam()`
+      when processing 256-byte usernames) as not exploitable in
+      `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Reachable
+      only through code that calls `setpwnam()`; neither image invokes any
+      util-linux CLI tool at all.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-13595
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2026-13595 is a heap use-after-free in
-      `libblkid`'s nested-partition-table probing -- reachable only through
-      code that calls `libblkid` to probe a block device's partition table
-      (`blkid`, `mount`, `lsblk`); neither image ever probes a block device or
-      partition table at all (containers have no block-device access to
-      probe in the first place, running under a normal Docker overlay
-      filesystem, not a raw block device).
+      What: Marks CVE-2026-13595 (a heap use-after-free in `libblkid`'s
+      nested-partition-table probing) as not exploitable in `services/ui`
+      and `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Reachable
+      only through code that calls `libblkid` to probe a partition table;
+      neither image has block-device access, running under a normal
+      Docker overlay filesystem.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-27456
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2026-27456 is a TOCTOU race in the `mount`
-      program's loop-device setup -- reachable only through invoking `mount`
-      with a loop device; neither image invokes `mount` at all, and neither
-      container runs with the `CAP_SYS_ADMIN` capability `mount` itself
-      requires to do anything privileged in the first place.
+      What: Marks CVE-2026-27456 (a TOCTOU race in the `mount` program's
+      loop-device setup) as not exploitable in `services/ui` and
+      `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Neither
+      image invokes `mount` at all, and neither container runs with the
+      `CAP_SYS_ADMIN` capability `mount` requires.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-3184
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2026-3184 is an access-control bypass via
-      improper hostname canonicalization -- neither image's own code performs
-      hostname-based access-control decisions through any util-linux
-      component at all.
+      What: Marks CVE-2026-3184 (an access-control bypass via improper
+      hostname canonicalization) as not exploitable in `services/ui` and
+      `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Neither
+      image performs hostname-based access-control decisions through any
+      util-linux component.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-53612
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2026-53612 is a local privilege-escalation via a
-      TOCTOU race in `mount(8)`'s own `hook_owner.c` chmod/chown handling --
-      requires invoking the real, SUID-installed `mount(8)` binary with
-      attacker-influenced timing; neither image invokes `mount` at all, and
-      neither container runs with the capabilities a SUID `mount(8)` needs to
-      do anything privileged.
+      What: Marks CVE-2026-53612 (a local privilege-escalation via a
+      TOCTOU race in `mount(8)`'s own `hook_owner.c` chmod/chown handling)
+      as not exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group as CVE-2022-0563 above. Requires
+      invoking a SUID-installed `mount(8)` binary; neither image invokes
+      `mount`, and neither container runs with the needed capabilities.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-53613
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2026-53613 is the sibling `mount(8)` target-path-
-      redirection TOCTOU finding to CVE-2026-53612 above -- same non-
-      reachability (neither image invokes `mount` at all).
+      What: Marks CVE-2026-53613 (the sibling `mount(8)`
+      target-path-redirection TOCTOU finding to CVE-2026-53612) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group and non-reachability as
+      CVE-2026-53612 above (neither image invokes `mount` at all).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-53614
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). CVE-2026-53614 is a `LIBMOUNT_FORCE_MOUNT2`
-      environment-variable nosuid/noexec bypass in SUID `mount(8)` -- same
-      non-reachability as CVE-2026-53612/53613 above (neither image invokes
-      `mount` at all, let alone sets this environment variable).
+      What: Marks CVE-2026-53614 (a `LIBMOUNT_FORCE_MOUNT2`
+      environment-variable nosuid/noexec bypass in SUID `mount(8)`) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same util-linux finding group and non-reachability as
+      CVE-2026-53612/CVE-2026-53613 above (neither image invokes `mount`
+      at all, let alone sets this environment variable).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-53615
     statement: >-
-      Same util-linux finding group as CVE-2022-0563 above (see that entry for
-      full background). This is the one HIGH-severity finding issue #815 Part
-      C's original baseline already tracked at HIGH/CRITICAL severity: an
-      integer overflow in `libblkid/src/partitions/dos.c`'s DOS/MBR
-      partition-table parsing. Reachable only through code that parses a
-      partition table via `libblkid` (`blkid`, `mount`, `lsblk`) -- neither
-      image ever parses a partition table at all, matching the same
-      reasoning as CVE-2026-13595 above.
+      What: Marks CVE-2026-53615 (an integer overflow in
+      `libblkid/src/partitions/dos.c`'s DOS/MBR partition-table parsing)
+      as not exploitable in `services/ui` and `tools/build-tools`. The one
+      HIGH-severity finding in this group.
+
+      Why: Same util-linux finding group and non-reachability as
+      CVE-2026-13595 above (neither image ever parses a partition table).
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2025-6141
     statement: >-
-      Not exploitable in `services/ui` or `tools/build-tools` (vulnerable
-      code not present in any reachable path). Same full-severity scan as
-      CVE-2011-4116 above (see that entry for the shared background: affected
-      images, the full 30-ID list, why no `paths:` scoping is given, and the
-      2026-08-20 re-review checkpoint). This and CVE-2025-69720 below are the
-      2 findings against the ncurses package family (`libncursesw6`,
-      `libtinfo6`, `ncurses-base`, `ncurses-bin`). CVE-2025-6141 is an ncurses
-      stack-buffer-overflow reachable through malformed/malicious terminfo
-      data or terminal-control-sequence parsing. Confirmed via a real grep of
-      every script this project actually controls inside these two images:
-      `services/ui/docker-entrypoint.sh` never invokes any ncurses-linked
-      program (its own Rust binary does not link ncurses; confirmed via `ldd`
-      on the real built binary during this same PR's other validation, no
-      `libncursesw`/`libtinfo` in its dependency list), and
-      `tools/build-tools/Dockerfile`'s own scripts run entirely
-      non-interactively (CI context, no TTY, no interactive terminal
-      programs invoked). ncurses is present only as a `nano`/`bash`/similar
-      dependency, never itself directly exercised with untrusted terminfo
-      input.
+      What: Marks CVE-2025-6141 (an ncurses stack-buffer-overflow
+      reachable through malformed terminfo data or terminal-control-
+      sequence parsing) as not exploitable in `services/ui` and
+      `tools/build-tools`. Anchor entry for a 2-ID group against the
+      ncurses package family.
+
+      Why: Same full-severity scan as CVE-2011-4116 above. Neither image
+      invokes an ncurses-linked program with untrusted input:
+      `services/ui`'s Rust binary does not link ncurses (`ldd`-confirmed),
+      and `tools/build-tools`'s scripts run entirely non-interactively.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2025-69720
     statement: >-
-      Same ncurses finding group as CVE-2025-6141 above (see that entry for
-      full background). This is the second HIGH-severity finding issue #815
-      Part C's original baseline already tracked: an ncurses buffer overflow
-      that "may lead to arbitrary code execution." Same non-reachability as
-      CVE-2025-6141 (no ncurses-linked program is ever invoked with untrusted
-      input in either image).
+      What: Marks CVE-2025-69720 (an ncurses buffer overflow that may lead
+      to arbitrary code execution) as not exploitable in `services/ui` and
+      `tools/build-tools`. The second HIGH-severity finding in this group.
+
+      Why: Same ncurses finding group and non-reachability as CVE-2025-6141
+      above.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-54369
     statement: >-
-      Not exploitable in `services/ui` or `tools/build-tools` (vulnerable
-      code not present in any reachable path). Same full-severity scan as
-      CVE-2011-4116 above (see that entry for the shared background: affected
-      images, the full 30-ID list, why no `paths:` scoping is given, and the
-      2026-08-20 re-review checkpoint). This and CVE-2026-54370 below are the
-      2 findings against `libacl1`, the HIGH-severity one issue #815 Part C's
-      original baseline already tracked. CVE-2026-54369 is a symlink-
-      traversal privilege escalation via libacl's own functions, reachable
-      through code calling `acl_get_file`/`acl_set_file`-family libacl APIs
-      (typically via the `setfacl`/`getfacl` CLI tools) against an
-      attacker-influenced symlink path. Confirmed via a real grep of every
-      script this project actually controls inside these two images for
-      literal `acl`/`setfacl`/`getfacl` invocation: zero hits in either
-      image -- `libacl1` is present only as a transitive link dependency of
-      `coreutils`/`tar`/`sed` (all `Essential: yes` Debian packages that
-      link it for extended-attribute support), never itself directly
-      exercised by this project's own code.
+      What: Marks CVE-2026-54369 (a symlink-traversal privilege escalation
+      via libacl's own functions) as not exploitable in `services/ui` and
+      `tools/build-tools`. Anchor entry for a 2-ID group against
+      `libacl1`; the HIGH-severity ID in this group.
+
+      Why: Same full-severity scan as CVE-2011-4116 above. Reachable only
+      via `setfacl`/`getfacl`; grep-confirmed zero invocations in either
+      image -- `libacl1` is present only as a transitive link dependency
+      of `coreutils`/`tar`/`sed`.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-54370
     statement: >-
-      Same libacl1 finding group as CVE-2026-54369 above (see that entry for
-      full background). CVE-2026-54370 is a TOCTOU symlink-traversal finding
-      specifically in the `getfacl`/`setfacl` CLI tools -- same
-      non-reachability (neither `getfacl` nor `setfacl` is ever invoked by
-      either image's own code).
+      What: Marks CVE-2026-54370 (a TOCTOU symlink-traversal finding
+      specifically in the `getfacl`/`setfacl` CLI tools) as not
+      exploitable in `services/ui` and `tools/build-tools`.
+
+      Why: Same libacl1 finding group and non-reachability as
+      CVE-2026-54369 above.
+
+      From: Issue #815, PR #1454
     status: not_affected
     expired_at: 2026-08-20
   - id: CVE-2026-41991
     statement: >-
-      Accepted, tracked risk for `tools/build-tools` only -- not a
-      non-exploitability disposition there; genuinely narrow but real
-      exploitability. Not affected at all for `services/ui` (see below).
-      Real, full-severity Trivy scan (issue #815 Part C, 2026-08-06) found
-      this and CVE-2026-41992 below against `gzip` 1.13-1 on both images'
-      `sha-cc5a272` builds; this is the only one of the 30 findings in this
-      batch where the two images' exploitability genuinely differs, so it is
-      NOT grouped under the blanket "not_affected" disposition the other 28
-      IDs in this batch use (see CVE-2011-4116 for that group's shared
-      background). CVE-2026-41991 is an arbitrary-file-overwrite via insecure
-      temporary-file handling in the `gzexe` utility specifically (not plain
-      `gzip`/`gunzip` decompression) -- confirmed via a real grep of both
-      images' own scripts: `services/ui/docker-entrypoint.sh` never invokes
-      `gzip`, `gunzip`, or `gzexe` at all, so this CVE ID's own non-`gzexe`
-      disposition would also be `not_affected` there taken alone, but since
-      Trivy's finding applies per-CVE-ID repo-wide (no per-image `paths:`
-      scoping works for Debian os-pkgs findings, confirmed by this file's own
-      existing curl-group entries), the disposition for this ID must reflect
-      the MORE exploitable of the two images, hence "accepted" rather than
-      "not_affected" for this specific ID. `tools/build-tools/Dockerfile`
-      installs `gzip` explicitly (its own package list) and its build
-      process invokes `gzip`/`tar` transitively to unpack pinned,
-      checksum-verified upstream release tarballs when fetching
-      prebuilt tool binaries (see AG-KD-003's own build-tools tooling
-      history) -- never `gzexe` specifically, and never on attacker-supplied
-      input (every archive fetched is a specific pinned URL/version, verified
-      by checksum before use, not user- or CI-caller-controlled). This is a
-      narrow, indirect, checksum-gated reachability path for `gzexe`'s own
-      finding specifically (which this image's actual usage does not even
-      reach, since `gzexe` itself is never invoked) -- flagged as accepted
-      risk rather than not_affected purely for the repo-wide-per-CVE-ID
-      scoping reason above, not because a real exploitation path was found.
+      What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via
+      insecure temporary-file handling in the `gzexe` utility) as tracked
+      risk for `tools/build-tools` only; `services/ui` is unaffected.
+      Anchor entry for the 2-ID gzip group (this and CVE-2026-41992
+      below) -- the only ID in this file's 30-ID batch where the two
+      images' exploitability genuinely differs.
+
+      Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed).
+      Trivy's finding applies per-CVE-ID repo-wide with no per-image
+      `paths:` scoping for Debian os-pkgs, so the disposition reflects the
+      more exploitable image: `tools/build-tools` unpacks pinned,
+      checksum-verified release tarballs via `gzip`, never invoking
+      `gzexe` itself or on attacker-supplied input (verified 2026-08-06,
+      full-severity Trivy scan).
+
+      From: Issue #815, PR #1454
     expired_at: 2026-08-20
   - id: CVE-2026-41992
     statement: >-
-      Same gzip finding group as CVE-2026-41991 above (see that entry for the
-      full background: why this ID is "accepted" rather than "not_affected"
-      despite `services/ui` never invoking `gzip` at all). This is the
-      HIGH-severity finding issue #815 Part C's original baseline already
-      tracked: a global buffer overflow in gzip's own LZH decompression
-      path (`.lzh`/SCO-compress-format support, a legacy, rarely-used gzip
-      decompression mode). `tools/build-tools`'s own gzip usage (unpacking
-      pinned, checksum-verified plain `.tar.gz` release tarballs) never
-      exercises the LZH code path at all -- gzip only invokes LZH decoding
-      for input explicitly identified as LZH-formatted, which a plain gzip
-      tarball is not. Re-review by 2026-08-20 alongside CVE-2026-41991.
+      What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own
+      LZH decompression path -- legacy `.lzh`/SCO-compress-format support)
+      as tracked risk for `tools/build-tools` only; the HIGH-severity ID
+      in this group.
+
+      Why: Same gzip finding group as CVE-2026-41991 above.
+      `tools/build-tools`'s `gzip` usage (unpacking plain `.tar.gz`
+      tarballs) never exercises the LZH code path, which only triggers on
+      input explicitly identified as LZH-formatted.
+
+      From: Issue #815, PR #1454
     expired_at: 2026-08-20

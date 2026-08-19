@@ -96,7 +96,7 @@ section_exists_with_content() {
     # What: Searches via a here-string, not `echo "$body" | grep`.
     # Why: Under `set -o pipefail`, a large `$body` plus awk's `exit` below
     # can SIGPIPE the echo mid-write, non-deterministically failing the
-    # pipeline -- confirmed live (PR #627). A here-string has no such race.
+    # pipeline -- confirmed live. A here-string has no such race.
     # From: PR #627
     if ! grep -qF "## $section" <<<"$body"; then
         return 1

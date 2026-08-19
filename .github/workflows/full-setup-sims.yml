@@ -349,7 +349,7 @@ jobs:
   proxy-standard-mode-sni-routing-simulation:
     # Real TLS-handshake test for entrypoint.sh's standard-mode (SNI
     # passthrough) stream-target map generation loop over _UNIQUE_DOMAINS
-    # (issue #1297, folded into #1276) -- a different bug class and a
+    # (issue #1297) -- a different bug class and a
     # different nginx context (the stream module's own :8443 passthrough
     # listener, not the http block's cert-selection map the sibling
     # proxy-deep-wildcard-tls-simulation job above validates). See
@@ -481,7 +481,7 @@ jobs:
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step
         # above for why these are read via env: + quoted shell variables
         # instead of interpolating `${{ }}` expressions directly into the
-        # run: script (OSPS-BR-01.04 hardening, refs #1130).
+        # run: script (OSPS-BR-01.04 hardening).
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
@@ -565,7 +565,7 @@ jobs:
         # why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/REPOSITORY are
         # read via env: + quoted shell variables instead of interpolating
         # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
-        # hardening, refs #1130).
+        # hardening).
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -680,7 +680,7 @@ jobs:
         # why PR_STAGING_AVAILABLE/BUILD_TOOLS_TOUCHED/IMAGE_TAG/REPOSITORY are
         # read via env: + quoted shell variables instead of interpolating
         # `${{ }}` expressions directly into the run: script (OSPS-BR-01.04
-        # hardening, refs #1130).
+        # hardening).
         env:
           EVENT_NAME: ${{ github.event_name }}
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
@@ -745,7 +745,7 @@ jobs:
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
         # why these are read via env: + quoted shell variables instead of
         # interpolating `${{ }}` expressions directly into the run: script
-        # (OSPS-BR-01.04 hardening, refs #1130).
+        # (OSPS-BR-01.04 hardening).
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
@@ -818,7 +818,7 @@ jobs:
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
         # why these are read via env: + quoted shell variables instead of
         # interpolating `${{ }}` expressions directly into the run: script
-        # (OSPS-BR-01.04 hardening, refs #1130).
+        # (OSPS-BR-01.04 hardening).
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
@@ -891,7 +891,7 @@ jobs:
         # See ssl-mitm-cache-simulation's "Resolve build-tools image" step for
         # why these are read via env: + quoted shell variables instead of
         # interpolating `${{ }}` expressions directly into the run: script
-        # (OSPS-BR-01.04 hardening, refs #1130).
+        # (OSPS-BR-01.04 hardening).
         env:
           PR_STAGING_AVAILABLE: ${{ inputs.pr_staging_available }}
           BUILD_TOOLS_TOUCHED: ${{ inputs.build_tools_touched }}
@@ -966,7 +966,7 @@ jobs:
         # No BUILD_TOOLS_REQUIRE_PUBLISHED: same-PR tools/build-tools override
         # preference, matching every other job in this suite. Read via env: +
         # quoted shell variables rather than interpolating ${{ }} expressions
-        # directly into the run: script (OSPS-BR-01.04 hardening, refs #1130):
+        # directly into the run: script (OSPS-BR-01.04 hardening):
         # matches this file's own LANCACHE_IMAGE_TAG/env-var convention
         # elsewhere and avoids the documented GitHub Actions script-injection
         # anti-pattern, even though image_tag only ever holds a raw

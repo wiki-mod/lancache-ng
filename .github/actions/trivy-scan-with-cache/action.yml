@@ -36,21 +36,20 @@ inputs:
     required: false
     default: ""
   registry-username:
-    description: Registry username, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    description: Registry username, forwarded to trivy-scan-retry for GHCR authentication and retry re-login.
     required: true
   registry-password:
-    description: Registry password/token, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    description: Registry password/token, forwarded to trivy-scan-retry for GHCR authentication and retry re-login.
     required: true
   dockerhub-username:
     description: >-
       Docker Hub username, forwarded to trivy-scan-retry for its optional
-      third DB-source tier (issue #1535 follow-up). Optional, default "" --
-      matches trivy-scan-retry's own optionality, this action does not add
-      a hard dependency on top of it.
+      third DB-source tier. Optional, default "" -- matches trivy-scan-retry's
+      own optionality, this action does not add a hard dependency on top of it.
     required: false
     default: ""
   dockerhub-password:
-    description: Docker Hub password/token, forwarded to trivy-scan-retry (issue #1535 follow-up).
+    description: Docker Hub password/token, forwarded to trivy-scan-retry.
     required: false
     default: ""
 outputs:
@@ -72,11 +71,10 @@ runs:
         path: ${{ runner.temp }}/trivy-scan-clean
         key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
 
-    # What: Scans via trivy-scan-retry (not aquasecurity/trivy-action
-    # directly) for its retry, GHCR-first-mirror, and Docker Hub auth.
-    # Why: trivy's unauthenticated first-choice DB mirror caused two real
-    # CI failures (PR #1503, #1500) with zero retry anywhere.
-    # From: PR #1542, Issue #1535
+    # What: scans with trivy-scan-retry, not aquasecurity/trivy-action directly.
+    # Why: the unauthenticated first-choice vulnerability-DB mirror caused
+    #   real CI failures with zero retry anywhere.
+    # From: PR #1542 | Issue #1535
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
       uses: ./.github/actions/trivy-scan-retry

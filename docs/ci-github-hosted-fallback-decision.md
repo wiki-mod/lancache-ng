@@ -182,9 +182,9 @@ a maintainer explicitly dispatches it during a self-hosted outage.
 That new workflow covers `container-scan` (amd64) + `build` (amd64 leg) +
 manifest merge, producing the same `sha-<short>[-amd64]` / merged
 `sha-<short>` GHCR tags the self-hosted jobs would have produced. It does
-not cover `promote` or `release` -- see that workflow's own header comment
-for why those stay deferred (their channel-pointer/promote-lock machinery
-was judged too risky to re-derive from scratch in the same increment).
+not cover `promote` or `release` -- their channel-pointer/promote-lock
+machinery was judged too risky to re-derive from scratch in the same
+increment, so both stay deferred, self-hosted-only.
 
 The credential question (constraint 2 below) turned out to already be
 answered by existing, shipped code: `build-arm64` has been pushing to GHCR
@@ -229,7 +229,7 @@ issue #592). Three independent constraints apply:
 leg) + manifest merge now have an opt-in `workflow_dispatch` overflow path,
 `.github/workflows/build-push-hosted-fallback.yml`. `promote` and `release`
 remain self-hosted-only, deferred to a follow-up rather than reimplemented
-alongside this increment -- see that workflow's own header comment.
+alongside this increment.
 
 ## Summary
 

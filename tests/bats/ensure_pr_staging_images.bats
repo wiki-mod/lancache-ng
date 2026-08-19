@@ -295,12 +295,9 @@ STUB
     ! printf '%s\n' "$output" | grep -q "did NOT positively confirm absence"
 }
 
-# Issue #1581: the two tests above (and their staging_image_freshness.bats
-# counterparts) only prove the classifier itself recognizes the real
-# wording -- they don't prove wait_for_touched_image()'s own fail-fast
-# branch (added by PR #1538) now correctly takes the confirmed-absence path
-# instead of hard-failing at ~95s for THIS exact wording, end to end through
-# the real ensure-pr-staging-images.sh script. This closes that gap.
+# What: exercises wait_for_touched_image()'s fail-fast branch through the real script, not just the classifier tested above.
+# Why: proves the confirmed-absence path is taken instead of hard-failing at ~95s for this exact wording.
+# From: Issue #1581, PR #1538
 @test "image_exists real docker path: buildx's real GHCR \"not found\" wording is reported as confirmed absent, not a hard fail (Issue #1581)" {
     unset STAGING_IMAGE_EXISTS_CMD
     fake_docker_returning_stderr "ERROR: ghcr.io/wiki-mod/lancache-ng/proxy:pr-1532-sha-4c308b3: not found"

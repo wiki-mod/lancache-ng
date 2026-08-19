@@ -2,39 +2,10 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Opt-in GitHub-hosted OVERFLOW path for the amd64 build/scan/publish lane
-# build-push.yml normally runs on self-hosted `lancache-heavy` runners.
-# build-push.yml itself is completely unchanged by this file: self-hosted
-# stays the fast, default path, and this workflow only ever runs when a
-# maintainer explicitly dispatches it during a self-hosted outage. See
-# issue #686 and docs/ci-github-hosted-fallback-decision.md for the full
-# history and the credential-exposure analysis (same short-lived, repo-scoped
-# GITHUB_TOKEN build-arm64 already uses on GitHub-hosted runners, issue #592
-# -- not a new trust decision).
-#
-# Scope covered: build (amd64 leg) + scan + manifest merge, producing the
-# same `sha-<short>[-amd64]` / merged `sha-<short>` GHCR tags build-push.yml
-# would have produced for the same commit. The arm64 leg needs no fallback:
-# build-push.yml's own `build-arm64` job already runs unconditionally on
-# GitHub-hosted `ubuntu-24.04-arm` for every push/PR (issue #592), so its
-# `sha-<short>-arm64` tag is already available for this workflow's merge
-# step to combine with the amd64 tag produced here.
-#
-# Explicitly NOT covered: `promote` (channel-pointer moves) and `release`
-# (release-tag publish) -- both carry promote-lock/multi-channel rules not
-# safe to re-derive from scratch here (see docs/ci-github-hosted-fallback-decision.md).
-# Once this workflow publishes a service's merged `sha-<short>` tag,
-# promoting it to a channel still requires either self-hosted capacity to
-# return, or a manual `workflow_dispatch` of build-push.yml's own `channel`
-# input once a self-hosted runner is available to run `promote`.
-#
-# What: single build/push/scan job per service, no separate local-scan-only
-# pre-build.
-# Why: CI 1.1's single-artifact invariant (Refs #1522) removed the duplicate
-# scan-only candidate build this job used to depend on -- the digest scanned
-# below is the exact same one that gets pushed, attested, and merged into the
-# multi-platform manifest by exact digest (never a mutable tag).
-# From: Issue #1522 | PR #1523
+# What: opt-in, maintainer-dispatched GitHub-hosted overflow build/scan/merge path.
+# Why: self-hosted lancache-heavy stays the default; this only covers a
+#   self-hosted outage (workflow_dispatch only, never push/PR).
+# From: Issue #686
 name: Build & Push (GitHub-hosted overflow fallback)
 
 on:
@@ -73,13 +44,11 @@ defaults:
 
 jobs:
   preflight:
-    # Gate + fan-out. Fails closed unless the operator explicitly chose "yes"
-    # -- a plain workflow_dispatch click with the default "no" left in place
-    # must not silently build and push anything. Also resolves the same
-    # digest-pinned, smoke-tested build-tools image build-push.yml's own
-    # validate-compose job resolves (AG-VAL-026: never trust a mutable
-    # channel tag inside a gate), and turns the `services` input into a JSON
-    # matrix the downstream jobs can consume via fromJSON().
+    # What: gates the run, then builds the service matrix for later jobs.
+    # Why: a plain workflow_dispatch click with the default "no" must not
+    #   silently build/push; resolves the same digest-pinned build-tools
+    #   image build-push.yml's own validate-compose job resolves.
+    # From: Issue #686
     runs-on: ubuntu-latest
     timeout-minutes: 30
     outputs:
@@ -99,9 +68,10 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # What: sets up the builder select-build-tools-image.sh needs below.
+      # Why: its imagetools inspect call requires a configured builder.
+      # From: Issue #686
       - name: Set up Docker Buildx
-        # Required for the imagetools inspect call inside
-        # select-build-tools-image.sh below.
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
@@ -131,10 +101,10 @@ jobs:
         run: |
           set -euo pipefail
 
-          # Keep in sync by hand with build-push.yml's own build/build-arm64
-          # matrix.include service list -- there is no shared source both
-          # workflow files can read matrix rows from (GitHub Actions has no
-          # cross-workflow YAML include mechanism).
+          # What: service context/build-context/description tables below.
+          # Why: kept in sync by hand with build-push.yml's own matrix.include
+          #   list; GitHub Actions has no cross-workflow YAML include mechanism.
+          # From: Issue #686
           declare -A contexts=(
             [proxy]=services/proxy
             [dns]=services/dns
@@ -204,13 +174,12 @@ jobs:
           printf 'matrix=%s\n' "$(printf '%s' "$rows" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
 
   build-hosted-fallback:
+    # What: single build/push/scan job, no separate local-scan-only pre-build.
+    # Why: the digest scanned below is the exact same digest that gets
+    #   pushed, attested, and published.
+    # From: Issue #1522 | PR #1523
     needs: preflight
     runs-on: ubuntu-latest
-    # What: single build/push/scan job, no separate local-scan-only pre-build.
-    # Why: CI 1.1's single-artifact invariant (Refs #1522) removed the duplicate
-    # scan-only candidate build this job used to depend on; the digest scanned
-    # below is the exact same one that gets pushed and published.
-    # From: PR #1523
     timeout-minutes: 150
     permissions:
       contents: read
@@ -234,21 +203,18 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # What: assigns the short SHA to a local before printf, instead of
-          #   embedding the call in printf's argument list.
-          # Why: printf's own exit status stays 0 even if a command
-          #   substitution inside its argument fails, so `set -e` cannot
-          #   catch a failure embedded there.
+          # What: assigns the short SHA to a local before printf.
+          # Why: printf's own exit status stays 0 even when a command
+          #   substitution inside its argument fails, so `set -e` misses it.
           # From: Issue #1095 (G2) | PR #1503
           short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
 
+      # What: uses the retried builder-setup variant, not the plain action.
+      # Why: this fresh hosted VM has no local image cache, the same
+      #   Docker Hub rate-limit exposure build-arm64 hit.
+      # From: Issue #930
       - name: Set up Docker Buildx
-        # Retried variant (not the plain action): ubuntu-latest is also a
-        # fresh VM every run with no local image cache, the same underlying
-        # condition (issue #930) that made build-arm64's arm64 leg hit
-        # Docker Hub's anonymous-pull rate limit while bootstrapping
-        # moby/buildkit:buildx-stable-1.
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
@@ -305,6 +271,11 @@ jobs:
           fi
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
+      # What: builds and pushes a single-platform (amd64) candidate image.
+      # Why: forces oci-mediatypes so the later imagetools merge with
+      #   build-arm64's arm64 leg does not silently drop the description
+      #   annotation (build-push.yml's equivalent step has the full rationale).
+      # From: Issue #620 | Issue #1522 | PR #1523
       - name: Build and push candidate once
         id: build
         timeout-minutes: 90
@@ -339,17 +310,19 @@ jobs:
           platform: linux/amd64
           run-fixtures: "true"
 
+      # What: scans the just-pushed candidate digest with a 50-minute bound.
+      # Why: trivy-scan-retry can run up to 4 attempts; the timeout must
+      #   cover the worst case.
+      # From: Issue #1535
       - name: Scan the exact pushed candidate digest
-        # What: allows 50 minutes (was 20) for this scan step.
-        # Why: trivy-scan-retry can run up to 4 attempts; the bound must cover the worst case.
-        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
           registry-username: ${{ github.actor }}
           registry-password: ${{ secrets.GITHUB_TOKEN }}
-          # What: same unconditional Docker Hub secret as build-push.yml's own scan steps.
-          # Why: an unauthenticated first-choice DB mirror caused real CI failures.
+          # What: passes the same unconditional Docker Hub credential pair.
+          # Why: an unauthenticated first-choice vulnerability-DB mirror
+          #   caused real CI failures.
           # From: Issue #1535
           dockerhub-username: ${{ secrets.DOCKERHUB_USERNAME }}
           dockerhub-password: ${{ secrets.DOCKERHUB_TOKEN }}
@@ -365,6 +338,11 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+      # What: assembles the real multi-platform tag from this job's amd64 candidate and build-arm64's arm64 leg.
+      # Why: this hosted-fallback job only ever builds amd64; merging by
+      #   digest keeps the exact scanned/attested candidate from being
+      #   swapped for a newer push mid-assembly.
+      # From: Issue #1522 | PR #1523
       - name: Merge exact candidate with existing arm64 leg
         id: merge
         if: ${{ inputs.merge_manifest }}
@@ -418,9 +396,10 @@ jobs:
           arm64_ref="ghcr.io/${REPOSITORY}/${SERVICE}@${arm64_digest}"
           target_image="ghcr.io/${REPOSITORY}/${SERVICE}:sha-${SHORT_SHA}"
 
-          # Resolve the mutable arm64 staging tag exactly once above, then keep
-          # the complete merge on immutable references so the tested amd64
-          # candidate cannot be replaced between verification and assembly.
+          # What: resolves the arm64 staging tag once, then merges by digest.
+          # Why: keeps the tested amd64 candidate from being replaced between
+          #   verification and assembly.
+          # From: Issue #1095
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
             docker buildx imagetools create -t "$target_image" "$amd64_ref" "$arm64_ref" \
             --annotation "index:org.opencontainers.image.description=${DESCRIPTION}"

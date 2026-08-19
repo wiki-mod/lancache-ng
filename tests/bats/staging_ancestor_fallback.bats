@@ -1729,7 +1729,7 @@ STUB
 @test "saf_find_built_ancestor: a run-bearing candidate whose service was untouched by it is walked past instead of stopping (2026-08-02 finding)" {
     # Live-confirmed 2026-08-02 (PR #1355, commit c7d42fe): a candidate can
     # have a genuinely confirmed push-triggered run yet never get its own
-    # sha-<commit> tag for one specific service, because Step 4 (#1095)
+    # sha-<commit> tag for one specific service, because Step 4
     # reused that service's content from an even earlier commit instead of
     # rebuilding it. Without the service-scoped check, the JUDGMENT CALL
     # treats "run exists, image never resolves" as a broken build and stops
@@ -1874,7 +1874,7 @@ STUB
     # setup() stubs `sleep` as a no-op -- see that comment -- so a poll loop
     # here would spin as fast as possible, not literally sleep, but would
     # still call the stub far more than once before $SECONDS crosses the
-    # ceiling). Post-fix (issue #1095), the pre-check confirms "untouched"
+    # ceiling). Post-fix, the pre-check confirms "untouched"
     # before ever entering that loop and pays for exactly one non-polling
     # (0/0 budget) probe instead, so the stub must be invoked exactly once
     # for this candidate's own image regardless of the 5s budget passed in.

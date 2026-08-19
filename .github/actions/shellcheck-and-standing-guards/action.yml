@@ -13,15 +13,10 @@ inputs:
 runs:
   using: composite
   steps:
-    # What: nested in-container `timeout --kill-after` guards around
-    # ShellCheck+ActionLint -- inner 300s around actionlint, outer 600s
-    # around the whole step's docker run.
+    # What: nested in-container timeouts (300s actionlint, 600s docker run).
     # Why: actionlint's embedded shellcheck can hang indefinitely in a
-    # Go-runtime deadlock (real incident 2026-07-24/25, exhausted the
-    # lancache-light runner tier for hours); a composite-action step
-    # cannot declare `timeout-minutes` (GitHub's schema validator rejects
-    # it), and a deadlocked process ignores the job-level SIGTERM anyway,
-    # so an in-container SIGKILL is the only real protection.
+    #   Go-runtime deadlock; a composite-action step can't declare
+    #   timeout-minutes, so an in-container SIGKILL is the only protection.
     # From: PR #1383 | PR #1523
     - name: Run ShellCheck and ActionLint
       shell: bash
@@ -50,7 +45,7 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash tests/setup-migration-semantics.sh
 
-    - name: Check pinned GitHub Actions for deprecated Node runtimes (#801)
+    - name: Check pinned GitHub Actions for deprecated Node runtimes
       # What: runs check-action-node-versions.sh inside the build-tools container with GH_TOKEN.
       # Why: the script calls curl against api.github.com (must not rely on a host-local tool,
       # AG-VAL-016); GH_TOKEN only raises the rate limit and also works fine unauthenticated
@@ -77,7 +72,7 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 600 bash scripts/tracked/check-action-node-versions.sh
 
-    - name: Check validation-subnet wrapper coverage (#896)
+    - name: Check validation-subnet wrapper coverage
       # What: asserts every full-setup-validate.yml/full-setup-deep-validate.yml job that
       # starts its own compose stack is wired through the collision-safe subnet reservation.
       # Why: two jobs added after the original wiring pass were never connected to it and hit
@@ -93,7 +88,7 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-validation-subnet-wrapper-coverage.sh
 
-    - name: Check executable bits on bare-path script invocations (#1019)
+    - name: Check executable bits on bare-path script invocations
       # What: scans every workflow/composite-action file and .githooks/ hook for a bare-path
       # script invocation and asserts each such file is committed with mode 100755.
       # Why: a script committed 100644 but invoked by bare path fails in CI with exit 126, a
@@ -109,12 +104,12 @@ runs:
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-executable-bits.sh
 
-    - name: Check build-tools smoke-test coverage (#790/#791)
+    - name: Check build-tools smoke-test coverage
       # What: compares select-build-tools-image.sh's smoke_test_image() required-tools list
       # against tools/build-tools/Dockerfile's own verification list.
       # Why: a tool the Dockerfile installs and a consumer needs had repeatedly gone silently
       # unverified by the smoke test after drifting behind the Dockerfile's list.
-      # From: Issue #790 | PR #1022
+      # From: Issue #790, Issue #791 | PR #1022
       shell: bash
       run: |
         set -euo pipefail

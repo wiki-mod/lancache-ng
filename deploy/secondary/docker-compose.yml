@@ -19,40 +19,40 @@ services:
       - NATS_PASSWORD=${NATS_PASSWORD}
       - NATS_CONSUMER=${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
-      # Known-good pdns.conf/recursor.conf snapshot retention (#615), same
-      # variable/default as the primary's config/{dev,prod}/dns-standard.env.
+      # What: KEEP_KNOWN_GOOD_CONFIGS default, same variable as the
+      #   primary's config/prod/dns-standard.env.
+      # Why: retains known-good pdns.conf/recursor.conf snapshots for rollback.
+      # From: Issue #615
       - KEEP_KNOWN_GOOD_CONFIGS=${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
-      # Known-good pdns.conf/recursor.conf snapshots (#615): without this,
-      # a secondary node keeps its rollback baseline only in the container
-      # layer, and loses it on every image update/recreate.
+      # What: pdns-config-snapshots volume for known-good pdns.conf/
+      #   recursor.conf snapshots.
+      # Why: without it, a secondary node's rollback baseline lives only
+      #   in the container layer and is lost on every image update/recreate.
+      # From: Issue #615
       - pdns-config-snapshots:/var/lib/lancache-dns
     ports:
       - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
       - "${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
     healthcheck:
-      # Real query/response probe (AG-VAL-018), not bare `rec_control ping`
-      # (liveness only -- proves the control socket answers, not that DNS
-      # itself resolves, AG-VAL-019). Matches
-      # deploy/quickstart/docker-compose.yml's compliant check (#869):
-      # dnsutils/dig is already installed in this image
-      # (services/dns/Dockerfile). cdn-domains.txt is baked into the image
-      # itself (`COPY cdn-domains.txt /etc/pdns/cdn-domains.txt` in
-      # services/dns/Dockerfile, no bind mount needed here), and the RPZ
-      # zone is generated from that file during entrypoint.sh's startup
-      # sequence, before the NATS subscriber even starts -- verified live
-      # against ghcr.io/wiki-mod/lancache-ng/dns:latest. NATS here only
-      # syncs the dynamic `lan.` zone from the primary, not the CDN list,
-      # so this check does not depend on NATS reconciliation and has the
-      # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line (issue #1377)
+      # What: real dig query/response probe (AG-VAL-018), not bare
+      #   `rec_control ping` (liveness only, AG-VAL-019).
+      # Why: cdn-domains.txt and its RPZ zone are baked into the image and
+      #   generated before the NATS subscriber starts, so this check needs
+      #   no NATS reconciliation and matches every DNS container's timing.
+      # From: Issue #869, deploy/quickstart/docker-compose.yml
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
     restart: always
+    # What: caps json-file logs at 5MB per file, 2 rotated files (10MB max).
+    # Why: bounds log-driven disk growth on the secondary host; no other
+    #   log-rotation policy is configured at the Docker daemon level here.
+    # From: commit e58dab9d (no per-value rationale recorded beyond bounding growth)
     logging:
       driver: json-file
       options:

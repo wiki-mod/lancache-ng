@@ -2,34 +2,55 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 name: Trivy scan exact image digest
-description: >-
-  Runs the blocking vulnerability and secret scan against one immutable,
-  digest-qualified image reference. Candidate build jobs share this action so
-  every architecture and event path uses the same fail-closed scan policy.
+description: |
+  What: runs the blocking vulnerability/secret scan against one immutable, digest-qualified image reference.
+  Why: every candidate build job shares this action so all architectures and event paths enforce the same fail-closed scan policy.
+  From: PR #1523
 
 inputs:
   image-ref:
-    description: Immutable image reference in repository@sha256:digest form.
+    description: |
+      What: repository@sha256:<digest> reference for the exact image to scan.
+      Why: a mutable tag could resolve to a different artifact than the one that actually gets published.
+      From: PR #1523
     required: true
   cache-dir:
-    description: Trivy vulnerability database cache directory owned by the caller.
+    description: |
+      What: filesystem path for Trivy's vulnerability-database cache.
+      Why: caller-owned so concurrent matrix jobs never share one cache directory.
+      From: PR #1523
     required: true
   cleanup-cache:
-    description: Remove cache-dir after the scan when it is an ephemeral candidate cache.
+    description: |
+      What: deletes cache-dir after the scan when set to "true".
+      Why: an ephemeral per-run cache must not accumulate; a shared persistent cache must never be deleted this way.
+      From: PR #1523
     required: false
     default: "false"
   registry-username:
-    description: Registry username, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    description: |
+      What: registry username forwarded to trivy-scan-retry.
+      Why: needed for GHCR authentication and for re-login on a retried scan attempt.
+      From: PR #1543 | Issue #1535
     required: true
   registry-password:
-    description: Registry password/token, forwarded to trivy-scan-retry for GHCR authentication and retry re-login (issue #1535).
+    description: |
+      What: registry password/token forwarded to trivy-scan-retry.
+      Why: needed for GHCR authentication and for re-login on a retried scan attempt.
+      From: PR #1543 | Issue #1535
     required: true
   dockerhub-username:
-    description: Docker Hub username, forwarded to trivy-scan-retry for its optional third DB-source tier (issue #1535).
+    description: |
+      What: optional Docker Hub username forwarded to trivy-scan-retry.
+      Why: Docker Hub is trivy-scan-retry's optional third vulnerability-DB source tier.
+      From: PR #1543 | Issue #1535
     required: false
     default: ""
   dockerhub-password:
-    description: Docker Hub password/token, forwarded to trivy-scan-retry (issue #1535).
+    description: |
+      What: optional Docker Hub password/token forwarded to trivy-scan-retry.
+      Why: Docker Hub is trivy-scan-retry's optional third vulnerability-DB source tier.
+      From: PR #1543 | Issue #1535
     required: false
     default: ""
 
@@ -59,10 +80,11 @@ runs:
         : "${CACHE_DIR:?cache-dir is required}"
 
         cleanup_safe=false
+        # What: restricts safe-to-delete cache paths to two known roots.
+        # Why: a typo in the caller-controlled cache-dir input must never
+        #   turn a reusable action into an arbitrary recursive deletion.
+        # From: PR #1523
         if [[ "$CLEANUP_CACHE" == "true" ]]; then
-          # Cleanup is intentionally limited to the two cache roots this
-          # action's callers own. A typo must never turn a reusable action's
-          # caller-controlled input into an arbitrary recursive deletion.
           [[ "$CACHE_DIR" == /* ]] || {
             echo "::error::Refusing to clean non-absolute Trivy cache path '$CACHE_DIR'."
             exit 1
@@ -95,11 +117,10 @@ runs:
         fi
         printf 'cleanup-safe=%s\n' "$cleanup_safe" >> "$GITHUB_OUTPUT"
 
-    # What: scans via trivy-scan-retry (not aquasecurity/trivy-action directly) for its
-    # retry, GHCR-first-mirror, and Docker Hub auth.
-    # Why: trivy's unauthenticated first-choice DB mirror caused real CI failures with
-    # zero retry anywhere (PR #1503, #1500).
-    # From: PR #1542, Issue #1535
+    # What: scans with trivy-scan-retry, not aquasecurity/trivy-action directly.
+    # Why: the unauthenticated first-choice vulnerability-DB mirror caused
+    #   real CI failures with zero retry anywhere.
+    # From: PR #1542 | Issue #1535
     - name: Scan exact image digest with Trivy
       uses: ./.github/actions/trivy-scan-retry
       with:

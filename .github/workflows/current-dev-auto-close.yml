@@ -2,40 +2,9 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# GitHub's built-in "Closes #N"/"Fixes #N" issue auto-close only fires when a
-# pull request merges into the repository's DEFAULT branch (currently
-# master). This project's active development happens on `current_dev` (see
-# #825), so that native mechanism never fires for the PRs that actually
-# resolve issues day to day, leaving them open forever unless someone closes
-# them by hand. See #1137 for the full background and the manual pattern
-# this workflow mechanizes (already used by hand dozens of times).
-#
-# This workflow:
-#   1. Fires only when a PR merges into `current_dev` (never master/vX.Y.Z --
-#      GitHub's native mechanism already covers those; this must not
-#      duplicate or interfere with it).
-#   2. Reads only the PR body's exact `## Linked Issues` section (issue
-#      #1496) and parses `Closes #N` / `Fixes #N` (and the rest of GitHub's
-#      own accepted keyword set) within it, case-insensitive, same-repo only.
-#   3. For each referenced issue: posts a comment containing the PR's own
-#      body verbatim (mechanical relay, not an AI-generated summary), then
-#      closes the issue.
-#   4. Also exposes a `workflow_dispatch` test mode that runs the exact same
-#      parsing/comment-building logic in dry-run against a real, already-
-#      merged PR number, without posting or closing anything -- this is how
-#      the logic is validated without spamming a real issue with a
-#      duplicate comment (see the PR that introduced this workflow for the
-#      dry-run transcript proving the parsing path against real data).
-#
-# A bad or stale issue reference (issue doesn't exist, is already closed, or
-# the number actually belongs to a pull request) is logged as a warning and
-# skipped -- it must never fail the whole job just because one of several
-# referenced issues among many is no longer valid.
-#
-# What: Only the PR body's exact `## Linked Issues` section is scanned for
-# closing keywords; text elsewhere in the body has zero effect.
-# Why: Free-form prose elsewhere cannot be reliably told apart from a real
-# closing instruction (confirmed false-closes: PR #1443, PR #1491).
+# What: relays a merged current_dev PR's body onto, and closes, every issue its `## Linked Issues` section references.
+# Why: GitHub's native "Closes #N" auto-close only fires for merges into
+#   the default branch (master), never current_dev.
 # From: Issue #1496
 name: current_dev Auto-Close Linked Issues
 
@@ -57,6 +26,10 @@ on:
         type: number
 
 permissions:
+  # What: grants write to issues and read-only to pull requests.
+  # Why: this workflow only relays a merged PR's body and closes issues; it
+  #   never touches repo contents or code.
+  # From: Issue #1137 | PR #1157
   issues: write
   pull-requests: read
 
@@ -64,9 +37,9 @@ jobs:
   auto-close:
     name: Relay PR body and close linked issues
     runs-on: ubuntu-latest
-    # What: Guards on `merged == true` in addition to `types: [closed]`.
-    # Why: `types: [closed]` alone also fires for a PR closed without
-    # merging; workflow_dispatch always runs since it is dry-run only.
+    # What: Guards on `merged == true` in addition to the trigger's own filter.
+    # Why: a closed-without-merging PR still matches `types: [closed]`;
+    #   workflow_dispatch always runs since it is dry-run only.
     # From: Issue #1137 | PR #1157
     if: >-
       github.event_name == 'workflow_dispatch' ||
@@ -81,16 +54,13 @@ jobs:
             const repo = context.repo.repo;
             const isDryRun = context.eventName === 'workflow_dispatch';
 
-            // Step 1: Resolve the PR to process -- the real event payload
-            // already carries everything for the pull_request trigger, but
-            // workflow_dispatch only gives us a bare number and must fetch
-            // the rest for real.
+            // What: resolves the PR to process; workflow_dispatch fetches it, the real trigger already has it.
+            // Why: `context.payload.inputs` values arrive as strings even
+            //   when declared `type: number`, so the dry-run number needs
+            //   an explicit conversion before use below.
+            // From: Issue #1137 | PR #1157
             let pr;
             if (isDryRun) {
-              // What: Converts the dispatch input to a Number explicitly.
-              // Why: `context.payload.inputs` values arrive as strings even
-              // when declared `type: number` in the workflow file.
-              // From: Issue #1137 | PR #1157
               const prNumber = Number(context.payload.inputs?.pr_number);
               if (!prNumber || Number.isNaN(prNumber)) {
                 core.setFailed('workflow_dispatch requires a numeric pr_number input.');
@@ -117,8 +87,7 @@ jobs:
             const mergedAt = pr.merged_at || 'unknown time';
             const mergeSha = pr.merge_commit_sha || 'unknown commit';
 
-            // What: Locates every line matching the exact "## Linked
-            // Issues" heading, to isolate that section's text below.
+            // What: Locates every line matching the exact "## Linked Issues" heading.
             // Why: A near-miss heading (case, extra text) must be treated
             // as missing, never fuzzy-matched into an unintended section.
             // From: Issue #1496
@@ -137,17 +106,14 @@ jobs:
             });
 
             let linkedIssuesText = null;
+            // What: Fails closed to "close nothing" when the heading is missing or duplicated.
+            // Why: a missing or ambiguous "## Linked Issues" heading has no
+            //   safe way to guess the right section; failing open risks
+            //   closing an issue the PR never actually resolved.
+            // From: Issue #1496
             if (headingLineIndexes.length === 0) {
-              // What: Warns when no "## Linked Issues" heading is found.
-              // Why: The section is the sole authoritative input; a
-              // missing section must fail closed, not fall back to the body.
-              // From: Issue #1496
               core.warning(`PR #${prNumber}'s body has no exact "## Linked Issues" section. Failing closed to "close nothing" (issue #1496).`);
             } else if (headingLineIndexes.length > 1) {
-              // What: Warns when the heading appears more than once.
-              // Why: Which occurrence is authoritative is ambiguous;
-              // guessing would reopen the false-positive surface being closed.
-              // From: Issue #1496
               core.warning(`PR #${prNumber}'s body has ${headingLineIndexes.length} exact "## Linked Issues" headings (duplicated/ambiguous). Failing closed to "close nothing" (issue #1496).`);
             } else {
               const sectionStart = headingLineIndexes[0] + 1;
@@ -167,11 +133,9 @@ jobs:
             // From: Issue #1496
             const linkedIssuesSectionText = linkedIssuesText || '';
 
-            // Step 3: Parse the Linked Issues section text for closing keywords.
-            // What: Matches closing keywords, skipping a same-sentence
-            // negated mention (e.g. "does not close #N"); never matches `Refs`.
-            // Why: Without the lookbehind, that prose matched like a real
-            // close (PR #1443 incident).
+            // What: parses the Linked Issues section text, matching close/fix/resolve + #N while excluding a same-sentence negated mention and `Refs`.
+            // Why: without the negation guard, prose like "does not close
+            //   #N" matched as a real close.
             // From: PR #1491
             const keywordPattern = /(?<!\b(?:not|never|cannot)\b[^.!?\n]{0,20}|n't\b[^.!?\n]{0,20})\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\s*:?\s*#(\d+)/gi;
             const issueNumbers = new Set();
@@ -189,7 +153,7 @@ jobs:
             const commentBody = [
               '## Closed via merge to `current_dev` (not the default branch -- see #1137)',
               '',
-              `**Auto-close notice:** This comment and this issue's closure were generated automatically by the \`current-dev-auto-close\` GitHub Actions workflow, not by a human or an interactive session. GitHub's built-in "Closes #N"/"Fixes #N" auto-close only fires for merges into the default branch (\`master\`); this workflow mirrors that behavior for \`current_dev\`, the project's actual active development branch (see #1137). The content below is PR #${prNumber}'s own description, relayed verbatim -- it is not an AI-generated summary.`,
+              `**Auto-close notice:** This comment and this issue's closure were generated automatically by the \`current-dev-auto-close\` GitHub Actions workflow, not by a human or an interactive session. GitHub's built-in "Closes #N"/"Fixes #N" auto-close only fires for merges into the default branch (\`master\`); this workflow mirrors that behavior for \`current_dev\`, the project's actual active development branch. The content below is PR #${prNumber}'s own description, relayed verbatim -- it is not an AI-generated summary.`,
               '',
               `Resolved by PR #${prNumber}: ${prUrl} (merged ${mergedAt}, commit \`${mergeSha}\`). Full PR body below.`,
               '',
@@ -198,9 +162,11 @@ jobs:
               prBody,
             ].join('\n');
 
-            // Step 4: Resolve each referenced number and act on it
-            // independently -- one bad reference (missing issue, already
-            // closed, or actually a PR number) must not abort the others.
+            // What: processes each referenced issue independently; no single failure aborts the loop.
+            // Why: a missing/closed/PR-not-issue reference or a transient
+            //   per-issue API error (rate limit, permissions) must not
+            //   stop the rest.
+            // From: Issue #1137 | PR #1157
             for (const issueNumber of issueNumbers) {
               try {
                 let issue;
@@ -249,10 +215,6 @@ jobs:
                 });
                 core.info(`Closed #${issueNumber} with a relayed comment from PR #${prNumber}.`);
               } catch (err) {
-                // What: Warns and continues the loop on an unexpected error.
-                // Why: A single failure (rate limit, permissions, transient
-                // API error) for one issue must not abort the remaining ones.
-                // From: Issue #1137 | PR #1157
                 core.warning(`Failed to process #${issueNumber}: ${err.message}`);
               }
             }

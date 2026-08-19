@@ -1,14 +1,10 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# What: runs tests/bats + tests/shellspec against the already-published
-# build-tools image (pulled via scripts/untracked/select-build-tools-image.sh);
-# never builds or publishes anything itself.
-# Why: split from build-tools.yml (issue #1253/#1255) so a test/script-only
-# change gets full regression coverage without a wasteful full multi-arch
-# rebuild; scripts/tracked/check-bats-path-filter-coverage.sh (#879) now
-# targets THIS file's own path list, not build-tools.yml's.
-# From: Issue #1253 | Issue #1255 | PR #1501.
+# What: runs tests/bats + tests/shellspec against the already-published build-tools image only.
+# Why: split from build-tools.yml so a script/test-only change gets full
+#   regression coverage without a wasteful full multi-arch rebuild.
+# From: Issue #1253 | Issue #1255 | PR #1501
 name: Build Tools Smoke Tests
 
 on:
@@ -18,6 +14,11 @@ on:
     # listed as the frozen long-lived hotfix branch (issue #709).
     # From: PR #1501.
     branches: [master, current_dev, v0.2.0]
+    # What: every entry below mirrors scripts/tracked/check-bats-path-filter-coverage.sh's own bats/shellspec dependency scan.
+    # Why: that script is the authoritative source for exactly which files
+    #   are real test dependencies; treat it (not this list) as truth, and
+    #   re-run it after touching this list.
+    # From: Issue #1095 | PR #1501
     paths:
       - ".github/workflows/build-tools-smoke.yml"
       - "certs/generate-ca.sh"
@@ -62,21 +63,7 @@ on:
       - "scripts/untracked/generate-vex.sh"
       - "scripts/untracked/simulations/setup-cli-simulation.sh"
       - "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
-      # scripts/untracked/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
-      # reap/orphan-classification logic that used to live entirely inline in
-      # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
-      # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
-      # directly (`source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"`) --
-      # without this entry, a PR touching only this script would not already
-      # match any other path above (it is not under scripts/lib/, which is
-      # already covered) and so would never run that suite. Found by
-      # scripts/tracked/check-bats-path-filter-coverage.sh's own existence-filtered
-      # dependency scan against the real repo tree.
       - "scripts/untracked/gc-pr-staging-images.sh"
-      # What: lists scripts/untracked/gc-sha-retention-audit.sh.
-      # Why: tests/bats/sha_retention_audit.bats sources it directly and it
-      # is not under scripts/lib/, which is already covered above.
-      # From: Issue #1095 | PR #1501.
       - "scripts/untracked/gc-sha-retention-audit.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
       - ".github/workflows/gc-sha-retention-audit.yml"
@@ -88,14 +75,6 @@ on:
       - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
       - ".github/actions/wait-validation-stack-health/action.yml"
-      # What: lists services/ files individually (not "services/<name>/**"
-      # wildcards, #1198) plus several guard/workflow files (coverage
-      # guards, build-push.yml, full-setup-sims.yml, docker-daemon-config.sh).
-      # Why: each has its own bats dependency not covered by a wildcard
-      # match; scripts/tracked/check-bats-path-filter-coverage.sh (#879) is
-      # the source of truth for exactly which files are real bats
-      # dependencies -- re-run it after touching this list.
-      # From: Issue #873 | Issue #879 | Issue #1112 | Issue #1171 | Issue #1198 | Issue #1253 | Issue #1255 | PR #1501.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
@@ -109,48 +88,19 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
-      # What: lists conf.d/http.conf, conf.d/https.conf, proxy-params.conf.
-      # Why: tests/bats/proxy_healthz_acl_and_hidden_headers.bats reads
-      # these three files directly; entrypoint.sh's own path entry above
-      # does not cover them.
-      # From: PR #1501.
       - "services/proxy/conf.d/http.conf"
       - "services/proxy/conf.d/https.conf"
       - "services/proxy/proxy-params.conf"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
-      # What: lists services/watchdog/retention.sh.
-      # Why: its own bats coverage (tests/bats/retention_*.bats) sources it
-      # directly; without this entry, a change to only this script would
-      # never run that suite (issue #842).
-      # From: PR #1501.
       - "services/watchdog/retention.sh"
-      # What: lists services/proxy/public_suffix_list.dat.
-      # Why: tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this vendored file; a PSL update needs
-      # this entry to trigger that suite.
-      # From: PR #1501.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
-      # What: lists services/syslog/netdata-web_log.conf.
-      # Why: tests/bats/check_logging_matrix_weblog_parity.bats reads this
-      # file directly to assert byte-parity with
-      # deploy/quickstart/docker-compose.yml's inline copy (issue #879).
-      # From: PR #1501.
       - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
-      # What: lists deploy/secondary/docker-compose.yml.
-      # Why: tests/bats/setup_secondary_docker_compose.bats's
-      # cmd_secondary heredoc sync-guard uses this as its checked-in
-      # reference file (issue #946).
-      # From: PR #1501.
       - "deploy/secondary/docker-compose.yml"
-      # What: lists deploy/full-setup/docker-compose.yml.
-      # Why: tests/bats/watchdog_docker_socket_proxy_startup_dependency.bats
-      # reads this file directly.
-      # From: PR #1501.
       - "deploy/full-setup/docker-compose.yml"
   pull_request:
     # What: mirrors build-tools.yml's own branches list.
@@ -158,6 +108,10 @@ on:
     # listed as the frozen long-lived hotfix branch (issue #709).
     # From: PR #1501.
     branches: [master, current_dev, v0.2.0]
+    # What: identical to the push.paths list above.
+    # Why: pull_request and push must trigger on the same file set; kept as
+    #   two literal lists since GitHub Actions has no include mechanism.
+    # From: Issue #1095 | PR #1501
     paths:
       - ".github/workflows/build-tools-smoke.yml"
       - "certs/generate-ca.sh"
@@ -202,21 +156,7 @@ on:
       - "scripts/untracked/generate-vex.sh"
       - "scripts/untracked/simulations/setup-cli-simulation.sh"
       - "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
-      # scripts/untracked/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
-      # reap/orphan-classification logic that used to live entirely inline in
-      # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
-      # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
-      # directly (`source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"`) --
-      # without this entry, a PR touching only this script would not already
-      # match any other path above (it is not under scripts/lib/, which is
-      # already covered) and so would never run that suite. Found by
-      # scripts/tracked/check-bats-path-filter-coverage.sh's own existence-filtered
-      # dependency scan against the real repo tree.
       - "scripts/untracked/gc-pr-staging-images.sh"
-      # What: lists scripts/untracked/gc-sha-retention-audit.sh.
-      # Why: tests/bats/sha_retention_audit.bats sources it directly and it
-      # is not under scripts/lib/, which is already covered above.
-      # From: Issue #1095 | PR #1501.
       - "scripts/untracked/gc-sha-retention-audit.sh"
       - ".github/workflows/gc-pr-staging-images.yml"
       - ".github/workflows/gc-sha-retention-audit.yml"
@@ -228,11 +168,6 @@ on:
       - ".github/workflows/full-setup-sims.yml"
       - ".github/actions/derive-validation-network/action.yml"
       - ".github/actions/wait-validation-stack-health/action.yml"
-      # What: lists services/ files individually (not wildcards) plus several
-      # guard/workflow files (coverage guards, build-push.yml,
-      # full-setup-sims.yml, docker-daemon-config.sh).
-      # Why: each has its own bats dependency not covered by a wildcard match.
-      # From: PR #1501.
       - "tools/runner-host/lancache-ci-docker-daemon-config.sh"
       - "services/dns/cdn-domains.txt"
       - "services/dns/entrypoint.sh"
@@ -246,48 +181,19 @@ on:
       - "services/ntp/entrypoint.sh"
       - "services/ntp/chrony.conf"
       - "services/proxy/entrypoint.sh"
-      # What: lists conf.d/http.conf, conf.d/https.conf, proxy-params.conf.
-      # Why: tests/bats/proxy_healthz_acl_and_hidden_headers.bats reads
-      # these three files directly; entrypoint.sh's own path entry above
-      # does not cover them.
-      # From: PR #1501.
       - "services/proxy/conf.d/http.conf"
       - "services/proxy/conf.d/https.conf"
       - "services/proxy/proxy-params.conf"
       - "services/watchdog/watchdog.sh"
       - "services/watchdog/healthcheck.sh"
-      # What: lists services/watchdog/retention.sh.
-      # Why: its own bats coverage (tests/bats/retention_*.bats) sources it
-      # directly; without this entry, a change to only this script would
-      # never run that suite (issue #842).
-      # From: PR #1501.
       - "services/watchdog/retention.sh"
-      # What: lists services/proxy/public_suffix_list.dat.
-      # Why: tests/bats/proxy_registrable_domain.bats points
-      # PUBLIC_SUFFIX_LIST_FILE at this vendored file; a PSL update needs
-      # this entry to trigger that suite.
-      # From: PR #1501.
       - "services/proxy/public_suffix_list.dat"
       - "services/ui/docker-entrypoint.sh"
       - "services/netdata/Dockerfile"
-      # What: lists services/syslog/netdata-web_log.conf.
-      # Why: tests/bats/check_logging_matrix_weblog_parity.bats reads this
-      # file directly to assert byte-parity with
-      # deploy/quickstart/docker-compose.yml's inline copy (issue #879).
-      # From: PR #1501.
       - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
       - "deploy/quickstart/docker-compose.yml"
-      # What: lists deploy/secondary/docker-compose.yml.
-      # Why: tests/bats/setup_secondary_docker_compose.bats's
-      # cmd_secondary heredoc sync-guard uses this as its checked-in
-      # reference file (issue #946).
-      # From: PR #1501.
       - "deploy/secondary/docker-compose.yml"
-      # What: lists deploy/full-setup/docker-compose.yml.
-      # Why: tests/bats/watchdog_docker_socket_proxy_startup_dependency.bats
-      # reads this file directly.
-      # From: PR #1501.
       - "deploy/full-setup/docker-compose.yml"
 
 # What: grants only read access to repository contents.
@@ -335,15 +241,15 @@ jobs:
         id: buildx
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
+      # What: authenticates the published-image pull with GHCR_RETRY_USERNAME/PASSWORD.
+      # Why: avoids GHCR's much lower anonymous rate limit under concurrent
+      #   CI load, the same fix as validate-compose's identical env block
+      #   in build-push.yml.
+      # From: PR #1501
       - name: Select published build-tools image
         id: select-image
         env:
           GITHUB_EVENT_PULL_REQUEST_HEAD_REPO_FULL_NAME: ${{ github.event.pull_request.head.repo.full_name }}
-          # What: authenticates the pull.
-          # Why: avoids GHCR's much lower anonymous rate limit under
-          # concurrent CI load, the same fix as validate-compose's
-          # identical env block in build-push.yml.
-          # From: PR #1501.
           GHCR_RETRY_USERNAME: ${{ github.actor }}
           GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -365,10 +271,9 @@ jobs:
           esac
           printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
 
-      # What: mirrors build-tools.yml's identically-named step exactly,
-      # against the pulled published image instead of a freshly built
-      # local one.
-      # From: PR #1501.
+      # What: mirrors build-tools.yml's identically-named step against the pulled published image.
+      # Why: this light-tier job must stay pull-only and never build locally.
+      # From: PR #1501
       - name: Run Bats setup fixtures
         timeout-minutes: 20
         run: |
@@ -386,8 +291,10 @@ jobs:
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             bash -lc 'set -euo pipefail; bats tests/bats'
 
-      # What: mirrors build-tools.yml's identically-named step exactly.
-      # From: PR #1501.
+      # What: mirrors build-tools.yml's identically-named ShellSpec step.
+      # Why: keeps this light-tier job pull-only, consistent with the Bats
+      #   step above.
+      # From: PR #1501
       - name: Run ShellSpec setup fixtures
         timeout-minutes: 20
         run: |

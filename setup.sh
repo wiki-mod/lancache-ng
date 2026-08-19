@@ -492,13 +492,9 @@ run_kea_dhcp_activation_preflight() {
         return 0
     fi
 
-    # Anchors at the start of the line (after stripping nmap's leading |/_
-    # prefixes and whitespace) instead of a bare substring match, and takes
-    # the first match rather than assuming there is exactly one.
-    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit) -- both sed stages here already lack an explicit q/Q and read
-    # to EOF regardless, but converting keeps this consistent with the rest
-    # of the fix and needs no further reasoning about $output's size.
+    # What: sed anchors at line start (strips nmap's leading |/_ prefix) and takes the first match via a here-string.
+    # Why: consistency with this file's other SIGPIPE-safe conversions -- both sed stages already lack q/Q and read to EOF regardless.
+    # From: Issue #1377
     server_identifier="$(sed -n '1p' <<<"$(sed -n 's/^[|_[:space:]]*Server Identifier:[[:space:]]*//p' <<<"$output")")"
 
     if [[ -n "$server_identifier" ]]; then
@@ -2033,8 +2029,9 @@ assert_resolved_image_tag_platform_supported() {
     [[ -n "$discovered_platforms" ]] \
         || { die "${image} did not expose any usable platform metadata; cannot verify ${platform} support for tag '${tag}'."; return 1; }
 
-    # Here-string, not a live pipe into grep -q -- $discovered_platforms can
-    # list several platforms (issue #1377's repo-wide pipefail/SIGPIPE audit).
+    # What: feeds grep -q via a here-string, not a live pipe.
+    # Why: $discovered_platforms can list several platforms.
+    # From: Issue #1377
     grep -Eq "^${platform}(/.*)?$" <<<"$discovered_platforms" \
         || die "Image tag '${tag}' does not publish a ${platform} image for this ${arch} host (published: $(printf '%s' "$discovered_platforms" | tr '\n' ',' | sed 's/,$//')). Choose a tag/channel that publishes ${platform}, for example LANCACHE_IMAGE_CHANNEL=latest, then rerun setup.sh."
 }
@@ -3380,11 +3377,9 @@ compose_project_name() {
     name="${COMPOSE_PROJECT_NAME:-}"
     [[ -n "$name" ]] || name=$(get_env_var COMPOSE_PROJECT_NAME "$env_file")
     if [[ -z "$name" && -f "$compose_dir/docker-compose.yml" ]]; then
-        # sed's own matches captured into a variable first, then `head -1`
-        # reads them via a here-string instead of a live pipe from sed --
-        # avoids a SIGPIPE if the compose file ever has more than one
-        # unindented top-level `name:` key (issue #1377's repo-wide
-        # pipefail/SIGPIPE audit).
+        # What: captures sed's matches into a variable, then reads via a here-string, not a live pipe from sed.
+        # Why: avoids a SIGPIPE if the compose file ever has more than one unindented top-level `name:` key.
+        # From: Issue #1377
         local compose_name_lines
         compose_name_lines=$(sed -n 's/^name:[[:space:]]*//p' "$compose_dir/docker-compose.yml")
         name=$(head -1 <<<"$compose_name_lines")
@@ -3757,12 +3752,9 @@ cmd_restore() {
     }
     trap restore_cleanup EXIT
     tar -C "$tmp" -xzf "$archive"
-    # `-print -quit` makes find itself stop after the first match instead of
-    # relying on `head -1` to force an early pipe close, which could
-    # otherwise SIGPIPE find if a backup archive's layout ever nests more
-    # than one `rootfs` directory (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit -- this is a real, restore-path-critical script, so this is
-    # fixed rather than merely marked safe).
+    # What: `-print -quit` stops find at the first match, instead of relying on `head -1` to force an early pipe close.
+    # Why: an early pipe close could SIGPIPE find on a backup nesting more than one `rootfs` directory; this restore path is fixed outright, not just marked safe.
+    # From: Issue #1377
     root=$(find "$tmp" -mindepth 2 -maxdepth 2 -type d -name rootfs -print -quit)
     [[ -n "$root" && -d "$root" ]] || die "Backup archive has no rootfs payload."
     backup_dir=$(dirname "$root")
@@ -4995,8 +4987,9 @@ lancache_read_ui_settings_override() {
     docker volume inspect "$volume" >/dev/null 2>&1 || return 0
     raw=$(docker run --rm -v "${volume}:/volume:ro" alpine \
         sh -c 'cat /volume/lancache-ui-settings.env 2>/dev/null') 2>/dev/null || return 0
-    # Here-string, not a live pipe (issue #1377's repo-wide pipefail/SIGPIPE
-    # audit).
+    # What: feeds sed via a here-string, not a live pipe from $raw.
+    # Why: avoids a SIGPIPE if $raw ever has more than one matching line.
+    # From: Issue #1377
     sed -n "s/^${key}=//p" <<<"$raw" | tail -1
 }
 
@@ -5289,17 +5282,9 @@ logbundle_key_looks_like_secret() {
     [[ "$key" =~ (PASSWORD|SECRET|TOKEN|TSIG|CREDENTIAL|_KEY) ]]
 }
 
-# Prints one non-empty, non-placeholder secret VALUE per line, longest first,
-# gathered from every given env file for every key that is either in
-# logbundle_secret_env_keys or matches logbundle_key_looks_like_secret.
-# secret_value_is_placeholder (line ~890) is reused here so a still-default
-# CHANGE_ME_*/lancache-*-secret placeholder is never treated as a real
-# secret needing redaction (that would just clutter every log line
-# containing e.g. "CHANGE_ME" with a confusing [REDACTED]).
-# Longest-first ordering matters for logbundle_redact_stream's sequential
-# literal substitution: if one secret value happened to be a substring of
-# another, replacing the shorter one first would corrupt the longer one's
-# remaining, un-redacted tail instead of fully masking it.
+# What: prints one non-empty, non-placeholder secret VALUE per line, longest first.
+# Why: gathers every value for every key in logbundle_secret_env_keys or matching logbundle_key_looks_like_secret.
+# From: Issue #782
 logbundle_collect_secret_values() {
     local -a env_files=("$@")
     local -A key_set=()
@@ -5322,9 +5307,16 @@ logbundle_collect_secret_values() {
             [[ -f "$env_file" ]] || continue
             value=$(get_env_var_nonempty "$key" "$env_file")
             [[ -n "$value" ]] || continue
+            # What: skips a still-default CHANGE_ME_*/lancache-*-secret placeholder.
+            # Why: redacting it would clutter every log line containing it with a confusing [REDACTED].
+            # From: Issue #782
             secret_value_is_placeholder "$value" && continue
             printf '%s\n' "$value"
         done
+    # What: sorts output longest-value-first.
+    # Why: logbundle_redact_stream substitutes sequentially; a shorter value
+    #   replaced first would corrupt a longer value's un-redacted tail.
+    # From: Issue #782
     done | sort -u | awk '{ print length, $0 }' | sort -k1,1nr | cut -d' ' -f2-
 }
 
@@ -5743,11 +5735,9 @@ kea_ctrl_post() {
     if [[ ! "$http_status" =~ ^2 ]]; then
         die "Kea's Control Agent rejected the request with HTTP ${http_status}. Response: ${response}"
     fi
-    # Here-strings feed grep, and grep's own matches (Kea's JSON response can
-    # be a batched array with more than one "result"/"text" key) are
-    # captured into variables before `head -1` reads them -- avoids a live
-    # `grep | head -1` pipe that could SIGPIPE grep (issue #1377's
-    # repo-wide pipefail/SIGPIPE audit).
+    # What: here-strings feed grep, whose matches are captured before `head -1` reads them, not a live `grep | head -1` pipe.
+    # Why: Kea's JSON response can be a batched array with more than one "result"/"text" key, which could otherwise SIGPIPE grep.
+    # From: Issue #1377
     result_code_lines=$(grep -oP '"result"\s*:\s*\K-?[0-9]+' <<<"$response")
     result_code=$(head -1 <<<"$result_code_lines")
     result_text_lines=$(grep -oP '"text"\s*:\s*"\K[^"]*' <<<"$response")
@@ -5901,10 +5891,9 @@ list_dns_zones_with_snapshots() {
 dns_zone_snapshot_entries() {
     local body="$1" zone="$2" zone_escaped zone_array zone_array_matches
     zone_escaped="${zone//./\\.}"
-    # grep's own matches captured into a variable first, then `head -1`
-    # reads them via a here-string -- avoids a live `grep | head -1` pipe
-    # that could SIGPIPE grep if $body ever repeats the zone key (issue
-    # #1377's repo-wide pipefail/SIGPIPE audit).
+    # What: captures grep's matches into a variable, then reads via a here-string, not a live `grep | head -1` pipe.
+    # Why: avoids a SIGPIPE if $body ever repeats the zone key.
+    # From: Issue #1377
     zone_array_matches=$(printf '%s' "$body" | grep -oP "\"${zone_escaped}\"\s*:\s*\[[^]]*\]")
     zone_array=$(head -1 <<<"$zone_array_matches")
     [[ -n "$zone_array" ]] || return 0
@@ -6204,15 +6193,9 @@ cmd_update_ip() {
     sed -i "s|^IP_SSL=.*|IP_SSL=$new_ip_ssl|" "$deploy_env"
     print_ok "Updated: $deploy_env"
 
-    # Keep UI_BIND_IP in sync only while it still equals the pre-update
-    # Standard IP -- that is the install-time default (see cmd_setup), so an
-    # unmodified default install would otherwise stay bound to the address
-    # docker-compose.yml just removed. An explicit override such as
-    # 127.0.0.1 will not match current_ip_standard and is left alone. The
-    # `-n` guard also leaves a deliberately empty UI_BIND_IP= untouched: that
-    # empty state already tracks IP_STANDARD automatically via Compose's
-    # ${UI_BIND_IP:-${IP_STANDARD}} fallback (see line ~1114), so rewriting
-    # it here is unnecessary and would just turn it into a fixed value.
+    # What: rewrites UI_BIND_IP only while it still equals the pre-update Standard IP; a set-but-explicit override or an empty value are both left untouched.
+    # Why: an unmodified default install would otherwise stay bound to the address docker-compose.yml just removed; an empty value already tracks IP_STANDARD via Compose's own `${UI_BIND_IP:-${IP_STANDARD}}` fallback.
+    # From: PR #745
     if [[ -n "$current_ui_bind_ip" && "$current_ui_bind_ip" = "$current_ip_standard" ]]; then
         sed -i "s|^UI_BIND_IP=.*|UI_BIND_IP=$new_ip_standard|" "$deploy_env"
         print_ok "Updated: $deploy_env (UI_BIND_IP)"
@@ -6612,13 +6595,9 @@ EOF
         assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
     fi
 
-    # Known-good pdns.conf/recursor.conf snapshot retention (#615): same
-    # variable and default (3) as config/{dev,prod}/dns-standard.env. The
-    # primary's registration response has no opinion on this -- it is a
-    # purely local, per-secondary-node setting -- so resolve it the same way
-    # as the image registry/prefix/channel above: an explicit env var wins,
-    # then whatever the existing generated .env already had (so --rotate
-    # doesn't silently reset an operator's prior choice), then the default.
+    # What: resolves KEEP_KNOWN_GOOD_CONFIGS the same way as the image registry/prefix/channel above -- explicit env var wins, then the existing generated .env (so --rotate doesn't silently reset an operator's prior choice), then the default.
+    # Why: same variable and default (3) as config/{dev,prod}/dns-standard.env; the primary's registration response has no opinion on this purely local, per-secondary-node setting.
+    # From: Issue #615
     keep_known_good_configs="${KEEP_KNOWN_GOOD_CONFIGS:-}"
     if [[ -z "$keep_known_good_configs" && -n "$existing_env_file" ]]; then
         keep_known_good_configs=$(get_env_var KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file")
@@ -6641,40 +6620,40 @@ services:
       - NATS_PASSWORD=\${NATS_PASSWORD}
       - NATS_CONSUMER=\${NATS_CONSUMER}
       - DDNS_ALLOW_FROM=127.0.0.1
-      # Known-good pdns.conf/recursor.conf snapshot retention (#615), same
-      # variable/default as the primary's config/{dev,prod}/dns-standard.env.
+      # What: KEEP_KNOWN_GOOD_CONFIGS default, same variable as the
+      #   primary's config/prod/dns-standard.env.
+      # Why: retains known-good pdns.conf/recursor.conf snapshots for rollback.
+      # From: Issue #615
       - KEEP_KNOWN_GOOD_CONFIGS=\${KEEP_KNOWN_GOOD_CONFIGS:-3}
     volumes:
       - pdns-data:/var/lib/powerdns
       - pdns-filter-state:/var/lib/powerdns-state
-      # Known-good pdns.conf/recursor.conf snapshots (#615): without this,
-      # a secondary node keeps its rollback baseline only in the container
-      # layer, and loses it on every image update/recreate.
+      # What: pdns-config-snapshots volume for known-good pdns.conf/
+      #   recursor.conf snapshots.
+      # Why: without it, a secondary node's rollback baseline lives only
+      #   in the container layer and is lost on every image update/recreate.
+      # From: Issue #615
       - pdns-config-snapshots:/var/lib/lancache-dns
     ports:
       - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/udp"
       - "\${LISTEN_IP:?Set LISTEN_IP to the secondary host LAN IP}:53:53/tcp"
     healthcheck:
-      # Real query/response probe (AG-VAL-018), not bare \`rec_control ping\`
-      # (liveness only -- proves the control socket answers, not that DNS
-      # itself resolves, AG-VAL-019). Matches
-      # deploy/quickstart/docker-compose.yml's compliant check (#869):
-      # dnsutils/dig is already installed in this image
-      # (services/dns/Dockerfile). cdn-domains.txt is baked into the image
-      # itself (\`COPY cdn-domains.txt /etc/pdns/cdn-domains.txt\` in
-      # services/dns/Dockerfile, no bind mount needed here), and the RPZ
-      # zone is generated from that file during entrypoint.sh's startup
-      # sequence, before the NATS subscriber even starts -- verified live
-      # against ghcr.io/wiki-mod/lancache-ng/dns:latest. NATS here only
-      # syncs the dynamic \`lan.\` zone from the primary, not the CDN list,
-      # so this check does not depend on NATS reconciliation and has the
-      # same timing profile as every other profile's DNS containers.
-      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line (issue #1377)
+      # What: real dig query/response probe (AG-VAL-018), not bare
+      #   \`rec_control ping\` (liveness only, AG-VAL-019).
+      # Why: cdn-domains.txt and its RPZ zone are baked into the image and
+      #   generated before the NATS subscriber starts, so this check needs
+      #   no NATS reconciliation and matches every DNS container's timing.
+      # From: Issue #869, deploy/quickstart/docker-compose.yml
+      test: ["CMD-SHELL", "dig @127.0.0.1 content1.steampowered.com A +short +time=2 +tries=1 | grep -q ."] # pipefail-safe: this CMD-SHELL runs under the container's own /bin/sh -c on every healthcheck tick, a different execution context that never inherits setup.sh's own `pipefail`; dig +short for a single query also emits at most one short line
       interval: 30s
       timeout: 5s
       retries: 3
       start_period: 20s
     restart: always
+    # What: caps json-file logs at 5MB per file, 2 rotated files (10MB max).
+    # Why: bounds log-driven disk growth on the secondary host; no other
+    #   log-rotation policy is configured at the Docker daemon level here.
+    # From: commit e58dab9d (no per-value rationale recorded beyond bounding growth)
     logging:
       driver: json-file
       options:

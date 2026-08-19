@@ -1,11 +1,12 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# CI workflow for the multi-arch build-tools image. Manual and scheduled runs
-# build exactly one publishable candidate per architecture, then smoke-test,
-# scan, attest, and merge those exact immutable digests. Fork pull requests
-# build one local candidate per architecture; same-repository pull requests are
-# handled by build-push.yml so this workflow does not build the same candidate twice.
+#
+# What: builds, scans, and publishes the multi-arch build-tools image.
+# Why: fork PRs build one local candidate per architecture for the same
+#   smoke/vulnerability policy; same-repo PRs are built once by build-push.yml
+#   instead, so this workflow never duplicates that candidate.
+# From: PR #1523
 name: Build Tools Image
 
 on:
@@ -38,12 +39,11 @@ env:
   #   files, so both copies must be kept equal by hand.
   # From: Issue #1095 (G2) | PR #1503
   DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
-  # run_id-run_attempt suffixed, not a fixed name: build-tools and
-  # build-tools-arm64 each load a *local* scan image onto their own runner's
-  # Docker daemon, and the self-hosted amd64 runner in particular is reused
-  # across overlapping/retried runs -- a fixed local tag could let one run's
-  # cleanup ("Remove local scan image") delete or overwrite an image a
-  # concurrently-running job on the same host is still scanning.
+  # What: local scan-image tags are suffixed by run_id-run_attempt.
+  # Why: the self-hosted amd64 runner is reused across overlapping/retried
+  #   runs; a fixed tag could let one run's cleanup delete or overwrite an
+  #   image a concurrent run on the same host is still scanning.
+  # From: PR #1523
   BUILD_TOOLS_SCAN_IMAGE_AMD64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-amd64
   BUILD_TOOLS_SCAN_IMAGE_ARM64: lancache-ng-build-tools-scan:${{ github.run_id }}-${{ github.run_attempt }}-arm64
 
@@ -54,9 +54,10 @@ defaults:
 jobs:
   determine-publish-scope:
     name: admit standalone build-tools route
-    # Same-repository PRs are built by build-push.yml exactly once. This job is
-    # a shared admission gate for both architecture jobs so the fork-only PR
-    # exception is expressed once rather than copied into every downstream job.
+    # What: shared admission gate for both architecture jobs below.
+    # Why: same-repo PRs are built once by build-push.yml instead; expressing
+    #   the fork-only exception here avoids copying it into every job.
+    # From: PR #1523
     if: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.id != github.event.repository.id }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
@@ -104,13 +105,12 @@ jobs:
             exit 0
           fi
 
-          # Capture into a variable first, then test for non-empty output
-          # instead of piping git diff directly into `grep -q .` (AG-VAL-032):
-          # a live producer piped into an early-exiting grep -q can surface
-          # the producer's SIGPIPE (141) instead of grep's own successful
-          # match under pipefail (this workflow's default shell runs with
-          # -eo pipefail), which would silently skip a real build-tools
-          # rebuild here.
+          # What: captures the diff into a variable before testing it, instead
+          #   of piping git diff directly into `grep -q .`.
+          # Why: under this workflow's default -eo pipefail, a live producer
+          #   piped into an early-exiting grep -q can surface the producer's
+          #   own SIGPIPE (141) instead of grep's match.
+          # From: PR #1500
           changed_build_tools_files="$(git diff --name-only "$before_sha" "${{ github.sha }}" -- tools/build-tools .github/workflows/build-tools.yml)" || changed_build_tools_files=""
           if [ -n "$changed_build_tools_files" ]; then
             echo "should-publish=true" >> "$GITHUB_OUTPUT"
@@ -204,24 +204,19 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: this job's local Buildx cache (see "Prepare local Buildx
-      # cache" above) has no wall-clock expiry, only cache-key expiry -- once
-      # tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN
-      # step has been built once, every later run with identical Dockerfile
-      # text reuses that same cached layer forever, so a Debian security fix
-      # published after the layer was first cached (confirmed for real:
-      # bind9-libs/bind9-dnsutils/bind9-host stayed on the vulnerable
-      # 1:9.20.23-1~deb13u1 for weeks after 1:9.20.26-1~deb13u1 shipped to
-      # trixie-security) never gets picked up. A value that changes once per
-      # ISO week, passed as the Dockerfile's APT_CACHE_BUST build-arg, forces
-      # that one layer to actually re-run against the current Debian archive
-      # on a weekly cadence without busting it on every single run.
+      # What: derives APT_CACHE_BUST from the current ISO week.
+      # Why: this job's Buildx cache has no wall-clock expiry, only cache-key
+      #   expiry, so a Debian security fix landing after a layer was first
+      #   cached would otherwise never get picked up.
+      # From: Issue #1147 | PR #1070
       - name: Compute apt cache-bust value
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      # Fork PRs cannot publish repository packages, but still need one local
-      # candidate so the same build-tools smoke and vulnerability policy runs.
+      # What: builds one local amd64 candidate for fork PRs.
+      # Why: fork PRs cannot publish repository packages, but still need a
+      #   candidate to run the same smoke/vulnerability policy against.
+      # From: PR #1523
       - name: Build local amd64 scan image
         id: local-build-amd64
         if: github.event_name == 'pull_request'
@@ -246,9 +241,10 @@ jobs:
             --cache-to "type=local,dest=$BUILDX_CACHE_TO_DIR,mode=max" \
             tools/build-tools
 
-      # A publish-capable run has no throwaway local precursor. This is the one
-      # real amd64 build and its digest is consumed by smoke, Trivy, provenance,
-      # and the later manifest merge.
+      # What: the one real amd64 build on a publish-capable run.
+      # Why: its digest is consumed by smoke, Trivy, provenance, and the
+      #   later manifest merge; there is no throwaway local precursor here.
+      # From: PR #1523
       - name: Build and push amd64 build-tools image
         id: build
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
@@ -290,10 +286,10 @@ jobs:
           platform: linux/amd64
           run-fixtures: "true"
 
-      # What: keys the Trivy cache directory by sanitized ref, ephemeral (self-cleaned)
-      # for pull_request/workflow_dispatch/rerun events, persistent otherwise.
-      # Why: a fixed shared directory let concurrent runs race on Trivy's single-writer
-      # BoltDB backend; unscoped per-PR dirs would also accumulate without bound.
+      # What: keys the Trivy cache dir by sanitized ref, ephemeral for
+      #   pull_request/workflow_dispatch/rerun events, persistent otherwise.
+      # Why: a fixed shared directory let concurrent runs race on Trivy's
+      #   single-writer BoltDB backend.
       # From: Issue #912 | PR #927
       - name: Prepare candidate Trivy cache
         id: trivy-cache
@@ -311,22 +307,24 @@ jobs:
           mkdir -p "$cache_dir"
           echo "dir=$cache_dir" >> "$GITHUB_OUTPUT"
 
-      # What: Scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
-      # Why: this exact step is where PR #1503/#1500 hit a DB-download
-      # failure with zero retry anywhere.
+      # What: scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
+      # Why: this exact step previously hit a DB-download failure with no
+      #   retry anywhere.
       # From: PR #1542, Issue #1535
       - name: Scan local build-tools amd64 image with Trivy
         if: github.event_name == 'pull_request'
-        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        # What: allows 50 minutes for this scan step.
+        # Why: trivy-scan-retry can run up to 4 attempts.
+        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-retry
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          # What: Empty (not the real secret) on pull_request.
+          # What: empty (not the real secret) on pull_request.
           # Why: this step runs on every same-repo PR, which also executes
-          # its own trivy-scan-retry copy -- unlike GITHUB_TOKEN, the
-          # long-lived Docker Hub credential has no automatic per-run scope.
+          #   its own trivy-scan-retry copy -- the long-lived Docker Hub
+          #   credential has no automatic per-run scope.
           # From: PR #1543, Issue #1535
           dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
           dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
@@ -344,8 +342,9 @@ jobs:
 
       - name: Scan pushed amd64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: allows 50 minutes for this scan step.
+        # Why: the wrapped trivy-scan-retry can run up to 4 attempts.
+        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -463,20 +462,19 @@ jobs:
             printf 'golang=%s\n' "$(digest_for_image golang:latest)"
           } >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: same reasoning as build-tools's own identically-named
-      # step -- this job's `type=gha` cache (see the arm64 leg's own scope
-      # comment further down) also has no wall-clock expiry, so this arm64
-      # leg needs the same periodic bust as the amd64 leg above, computed
-      # independently here since the two jobs run on separate runners with
-      # no shared state. Both derive the same ISO-week string from wall-clock
-      # time alone, so amd64 and arm64 bust in lockstep without needing to
-      # pass a value between jobs.
+      # What: derives the same ISO-week APT_CACHE_BUST as the amd64 leg.
+      # Why: computed independently since the two jobs run on separate
+      #   runners with no shared state; both derive it from wall-clock time
+      #   alone, so amd64 and arm64 bust in lockstep.
+      # From: Issue #1147 | PR #1070
       - name: Compute apt cache-bust value
         id: apt-cache-bust
         run: echo "value=$(date -u +%G-W%V)" >> "$GITHUB_OUTPUT"
 
-      # Fork PRs use one local arm64 candidate; manual and scheduled runs take
-      # the pushed exact-digest path below instead of building a second image.
+      # What: builds one local arm64 candidate for fork PRs.
+      # Why: manual/scheduled runs take the pushed exact-digest path instead
+      #   of building a second image.
+      # From: PR #1523
       - name: Build local arm64 scan image
         id: local-build-arm64
         if: github.event_name == 'pull_request'
@@ -534,18 +532,23 @@ jobs:
           image-ref: ${{ env.BUILD_TOOLS_IMAGE }}@${{ steps.build.outputs.digest }}
           platform: linux/arm64
 
-      # Retry + GHCR-first-DB-mirror + authenticated-pull wrapper (issue
-      # #1535): see .github/actions/trivy-scan-retry's own header comment.
+      # What: scans via trivy-scan-retry for its retry/GHCR-mirror/auth.
+      # Why: same DB-download exposure as the amd64 leg's identical step.
+      # From: Issue #1535
       - name: Scan local build-tools arm64 image with Trivy
         if: github.event_name == 'pull_request'
-        # 50 min (was 20): the retry wrapper can run up to 4 scan attempts.
+        # What: allows 50 minutes for this scan step.
+        # Why: trivy-scan-retry can run up to 4 attempts.
+        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-retry
         with:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-          # Empty on pull_request -- same PR-branch credential-exfiltration
-          # gate as the amd64 leg above (see its comment).
+          # What: empty (not the real secret) on pull_request.
+          # Why: same PR-branch credential-exfiltration gate as the amd64
+          #   leg's identical dockerhub-username/password pair.
+          # From: Issue #1535
           dockerhub-username: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_USERNAME || '' }}
           dockerhub-password: ${{ github.event_name != 'pull_request' && secrets.DOCKERHUB_TOKEN || '' }}
           image-ref: ${{ env.BUILD_TOOLS_SCAN_IMAGE_ARM64 }}
@@ -561,8 +564,9 @@ jobs:
 
       - name: Scan pushed arm64 build-tools digest with Trivy
         if: github.event_name != 'pull_request' && needs['determine-publish-scope'].outputs.should-publish == 'true'
-        # 50 min (was 20): the wrapped trivy-scan-retry (issue #1535) can run up to 4 scan
-        # attempts, so the bound must cover the worst case.
+        # What: allows 50 minutes for this scan step.
+        # Why: the wrapped trivy-scan-retry can run up to 4 attempts.
+        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -592,13 +596,12 @@ jobs:
         run: docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
   merge-build-tools-manifests:
-    # Combines build-tools's linux/amd64 tag with build-tools-arm64's
-    # linux/arm64 tag into the real sha-<commit> multi-platform tag that
-    # scripts/untracked/select-build-tools-image.sh and setup.sh consume -- same
-    # imagetools create pattern as build-push.yml's merge-manifests, no image
-    # is rebuilt here, only a manifest list assembled from two already-pushed
-    # digests.
     name: merge build-tools multi-platform manifest
+    # What: merges the amd64 + arm64 tags into the real sha-<commit> tag.
+    # Why: no image is rebuilt here, only a manifest list assembled from
+    #   two already-pushed digests -- same pattern as build-push.yml's
+    #   merge-manifests job.
+    # From: PR #1523
     needs: [determine-publish-scope, build-tools, build-tools-arm64]
     if: >-
       ${{
@@ -642,11 +645,10 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
-          # CI 1.1: merges the exact candidate digests build-tools/build-tools-arm64
-          # already built, scanned, and attested (needs[...].outputs.candidate-digest)
-          # rather than re-resolving a mutable :sha-<short>-standalone-{amd64,arm64}
-          # tag -- the tag could in principle have moved between those jobs finishing
-          # and this merge step running.
+          # What: merges the exact child job digests, not a re-resolved tag.
+          # Why: a mutable :sha-<short>-standalone-{amd64,arm64} tag could
+          #   move between the child jobs finishing and this step running.
+          # From: Issue #1522 | PR #1523
           [[ "$AMD64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid amd64 digest '$AMD64_DIGEST'."; exit 1; }
           [[ "$ARM64_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]] || { echo "::error::Invalid arm64 digest '$ARM64_DIGEST'."; exit 1; }
 
@@ -655,17 +657,11 @@ jobs:
           amd64_ref="${BUILD_TOOLS_IMAGE}@${AMD64_DIGEST}"
           arm64_ref="${BUILD_TOOLS_IMAGE}@${ARM64_DIGEST}"
 
-          # Same description text as build-push.yml's own build-tools
-          # matrix.description entry -- kept in sync manually, not sourced
-          # from one shared place, same reasoning as that file's
-          # merge-manifests job. This is where the index-level
-          # org.opencontainers.image.description annotation actually gets
-          # attached (issue #620): the per-platform build-tools/
-          # build-tools-arm64 jobs above stay unannotated on purpose (see
-          # their "Build and push" step comments), and "Promote mutable
-          # tags" below carbon-copies this index annotation forward
-          # untouched rather than re-declaring it, same pattern as
-          # build-push.yml's promote job.
+          # What: sets the index-level image description at merge time.
+          # Why: kept in sync by hand with build-push.yml's own build-tools
+          #   matrix.description entry, not sourced from one shared place;
+          #   the per-platform build/arm64 jobs stay unannotated on purpose.
+          # From: Issue #620
           build_tools_description="Prebuilt lancache-ng CI and developer validation toolchain image."
 
           ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- \
@@ -673,11 +669,10 @@ jobs:
             --annotation "index:org.opencontainers.image.description=${build_tools_description}"
           printf 'source-tag=%s\n' "$source_tag" >> "$GITHUB_OUTPUT"
 
-      # Mirrors the guard build-push.yml's own merge-manifests job runs via
-      # scripts/untracked/require-image-platforms.sh: a manual `imagetools create` can
-      # still produce a tag missing a required platform if either staging tag
-      # silently resolved to the wrong architecture, and that would only
-      # surface later as a confusing per-runner-class failure downstream.
+      # What: verifies the merged manifest exposes both platforms.
+      # Why: a manual imagetools create can still produce a tag missing a
+      #   platform if a staging tag silently resolved to the wrong arch.
+      # From: PR #1523
       - name: Verify merged manifest exposes both platforms
         env:
           GHCR_RETRY_USERNAME: ${{ github.actor }}
