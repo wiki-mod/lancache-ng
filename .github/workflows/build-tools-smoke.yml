@@ -4,7 +4,7 @@
 # What: runs tests/bats + tests/shellspec against the already-published build-tools image only.
 # Why: split from build-tools.yml so a script/test-only change gets full
 #   regression coverage without a wasteful full multi-arch rebuild.
-# From: Issue #1253 | Issue #1255 | PR #1501 | Issue #1095
+# From: Issue #1253 | Issue #1255 | PR #1501 | Issue #1095 (synchronize re-test)
 name: Build Tools Smoke Tests
 
 on:
