@@ -109,14 +109,13 @@ check_workflow_image_defaults() {
 
 # What: flags raw github.repository expressions against a counted baseline.
 # Why: GHCR requires a lowercase owner/repo; github.repository is not
-#   guaranteed lowercase (a real repo rename broke this once already).
-#   Per-category breakdown and per-file counts: see the tracking issue.
+#   guaranteed lowercase.
 # From: Issue #1504
 check_repository_case_expressions() {
     # What: matches ${{ github.repository }} with braces fully escaped.
     # Why: GNU grep tolerates a bare, syntactically-invalid ERE interval as
-    #   a literal brace; a strict POSIX grep (this pattern's real
-    #   container's grep, not this dev host's) is not required to.
+    #   a literal brace, but a strict POSIX grep is not required to, and
+    #   this script's container is not guaranteed to run GNU grep.
     # From: Issue #1504
     local pattern='\$\{\{ *github\.repository *\}\}'
     # What: file -> expected TOTAL raw github.repository count (live baseline).
@@ -178,9 +177,8 @@ report() {
 }
 
 # What: --only NAME runs exactly one named check instead of the full sweep.
-# Why: only the repository-case check has ever been verified clean against
-#   this repo; wiring the other three into CI would silently gate on their
-#   unverified current pass/fail state.
+# Why: lets a caller wire a single check into CI without also gating on
+#   the other checks' own, independent state.
 # From: Issue #1504
 only_check=""
 case "${1:-}" in
