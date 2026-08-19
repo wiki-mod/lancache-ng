@@ -71,11 +71,10 @@ runs:
         path: ${{ runner.temp }}/trivy-scan-clean
         key: trivy-scan-clean-${{ inputs.cache-key-scope }}-${{ inputs.digest }}-${{ inputs.freshness-bucket }}
 
-    # What: Scans via trivy-scan-retry (not aquasecurity/trivy-action
-    # directly) for its retry, GHCR-first-mirror, and Docker Hub auth.
-    # Why: trivy's unauthenticated first-choice DB mirror caused two real
-    # CI failures (PR #1503, #1500) with zero retry anywhere.
-    # From: PR #1542, Issue #1535
+    # What: scans with trivy-scan-retry, not aquasecurity/trivy-action directly.
+    # Why: the unauthenticated first-choice vulnerability-DB mirror caused
+    #   real CI failures with zero retry anywhere.
+    # From: PR #1542 | Issue #1535
     - name: Scan image with Trivy
       if: steps.restore.outputs.cache-hit != 'true'
       uses: ./.github/actions/trivy-scan-retry

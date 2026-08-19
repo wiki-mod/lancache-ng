@@ -13,15 +13,10 @@ inputs:
 runs:
   using: composite
   steps:
-    # What: nested in-container `timeout --kill-after` guards around
-    # ShellCheck+ActionLint -- inner 300s around actionlint, outer 600s
-    # around the whole step's docker run.
+    # What: nested in-container timeouts (300s actionlint, 600s docker run).
     # Why: actionlint's embedded shellcheck can hang indefinitely in a
-    # Go-runtime deadlock (real incident 2026-07-24/25, exhausted the
-    # lancache-light runner tier for hours); a composite-action step
-    # cannot declare `timeout-minutes` (GitHub's schema validator rejects
-    # it), and a deadlocked process ignores the job-level SIGTERM anyway,
-    # so an in-container SIGKILL is the only real protection.
+    #   Go-runtime deadlock; a composite-action step can't declare
+    #   timeout-minutes, so an in-container SIGKILL is the only protection.
     # From: PR #1383 | PR #1523
     - name: Run ShellCheck and ActionLint
       shell: bash
