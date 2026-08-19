@@ -33,7 +33,16 @@ audit_concurrency="${SRA_CONCURRENCY:-2}"
 # Why: opt-in via an unset-by-default env var keeps this strictly additive:
 # no caller that does not set SRA_CACHE_DB is affected by this feature at
 # all, and any cache failure (missing sqlite3, unreadable/corrupt db, a
-# cache miss) falls back to full classification rather than erroring.
+# cache miss) falls back to full classification rather than erroring. KNOWN
+# LIMITATION: a cached ordinary-root git-history rank is only reused when
+# digest+tags are byte-identical to the cached row, but the rank NUMBER
+# itself was computed against whichever history_refs (current_dev/master/
+# release branches) were live on the run that cached it -- if the managed
+# ref set changes (a release branch is added/retired) between that run and
+# a later cache hit, the reused rank reflects the old ref set. Not yet
+# guarded against; a real multi-run CI verification (this PR's own open
+# item) should confirm whether this drift is observable in practice before
+# relying on it across a ref-set change.
 # From: Issue #1585.
 cache_db="${SRA_CACHE_DB:-}"
 per_page=100
