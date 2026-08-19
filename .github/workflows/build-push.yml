@@ -5636,7 +5636,7 @@ jobs:
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: deletes the just-pushed digest from GHCR when its own Trivy scan above fails.
-        # Why: the scan targets the digest already pushed by "Build and push" -- a scan failure otherwise leaves a never-vetted image reachable in GHCR indefinitely.
+        # Why: the scan targets the digest already pushed by "Build and push" -- a scan failure otherwise leaves a never-vetted image reachable in GHCR indefinitely (issue #1095 G8).
         # From: Issue #1095 | Issue #626 | PR #1443
         if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
         env:
@@ -6191,7 +6191,7 @@ jobs:
 
       - name: Delete GHCR package version pushed by a failed scan
         # What: same cleanup as build's own equivalent step, for this job's linux/arm64 leg.
-        # Why: scan targets an already-pushed digest -- a failure otherwise leaves it reachable in GHCR indefinitely.
+        # Why: scan targets an already-pushed digest -- a failure otherwise leaves it reachable in GHCR indefinitely (issue #1095 G8).
         # From: Issue #1095 | Issue #626 | PR #1443
         if: ${{ always() && steps.build.outcome == 'success' && steps.trivy-scan-pushed.outcome == 'failure' }}
         env:
