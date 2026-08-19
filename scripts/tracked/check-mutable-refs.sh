@@ -3,10 +3,13 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # CI image pinning helper: scans .github/workflows and Dockerfiles for mutable
 # image references (floating tags like :latest, @v4-style action references
-# without SHA pins, untagged base images) and reports them. Intended as a
-# transparency tool to make mixed mutable+immutable states visible; can be
+# without SHA pins, untagged base images, and raw un-lowercased
+# github.repository expressions in GHCR paths) and reports them. Intended as
+# a transparency tool to make mixed mutable+immutable states visible; can be
 # used as a CI gate to enforce pinning (exit 1 if violations found) or as an
 # informational report (exit 0, violations reported to stdout/stderr).
+# Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|
+#        workflow-image-defaults|repository-case]; omitted runs every check.
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -104,6 +107,49 @@ check_workflow_image_defaults() {
     return 0
 }
 
+# What: flags raw github.repository expressions against a counted baseline.
+# Why: GHCR requires a lowercase owner/repo; github.repository is not
+#   guaranteed lowercase.
+# From: Issue #1504
+check_repository_case_expressions() {
+    # What: matches ${{ github.repository }} with braces fully escaped.
+    # Why: GNU grep tolerates a bare, syntactically-invalid ERE interval as
+    #   a literal brace, but a strict POSIX grep is not required to, and
+    #   this script's container is not guaranteed to run GNU grep.
+    # From: Issue #1504
+    local pattern='\$\{\{ *github\.repository *\}\}'
+    # What: file -> expected TOTAL raw github.repository count (live baseline).
+    # Why: must be updated in the same commit that changes the real count,
+    #   or this guard silently stops meaning anything.
+    # From: Issue #1504
+    local -A expected_counts=(
+        [.github/workflows/build-push.yml]=29
+        [.github/workflows/build-tools.yml]=1
+        [.github/workflows/build-push-hosted-fallback.yml]=5
+    )
+    local file expected actual mismatch=0
+
+    for file in "${!expected_counts[@]}"; do
+        expected="${expected_counts[$file]}"
+        actual=$(grep -cE "$pattern" "$file" || true)
+        if [[ "$actual" -ne "$expected" ]]; then
+            printf "%b[REPOSITORY CASE]%b %s: expected %d raw github.repository expression(s), found %d.\n" "$RED" "$NC" "$file" "$expected" "$actual"
+            if [[ "$actual" -gt "$expected" ]]; then
+                printf '  A new raw ${{ github.repository }} expression was added. If it is bash-reachable, use dmeta_ghcr_repo() instead (see scripts/lib/docker-metadata.sh), per issue #1095 (G1). If it is a genuine new pure-YAML or non-GHCR site, raise the expected count above with a reason.\n'
+            else
+                printf '  Fewer raw expressions than expected -- likely a site was fixed. Lower the expected count above to match, so this baseline stays accurate.\n'
+            fi
+            mismatch=1
+        fi
+    done
+
+    if [[ "$mismatch" -eq 1 ]]; then
+        violations=$((violations + 1))
+        return 1
+    fi
+    return 0
+}
+
 # Summary report.
 report() {
     echo
@@ -130,14 +176,43 @@ report() {
     return 0
 }
 
-echo "Checking GitHub Actions references..."
-check_action_refs || true
+# What: --only NAME runs exactly one named check instead of the full sweep.
+# Why: lets a caller wire a single check into CI without also gating on
+#   the other checks' own, independent state.
+# From: Issue #1504
+only_check=""
+case "${1:-}" in
+    --only)
+        only_check="${2:?--only requires a check name}"
+        ;;
+    --only=*)
+        only_check="${1#--only=}"
+        ;;
+    "") ;;
+    *)
+        printf 'check-mutable-refs: unknown argument: %s\n' "$1" >&2
+        printf 'Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|workflow-image-defaults|repository-case]\n' >&2
+        exit 2
+        ;;
+esac
 
-echo "Checking Dockerfile base images..."
-check_dockerfile_base_images || true
+run_check() {
+    local name="$1" label="$2"
+    shift 2
+    [[ -z "$only_check" || "$only_check" == "$name" ]] || return 0
+    echo "$label"
+    "$@" || true
+}
 
-echo "Checking workflow image defaults..."
-check_workflow_image_defaults || true
+run_check action-refs "Checking GitHub Actions references..." check_action_refs
+run_check dockerfile-base-images "Checking Dockerfile base images..." check_dockerfile_base_images
+run_check workflow-image-defaults "Checking workflow image defaults..." check_workflow_image_defaults
+run_check repository-case "Checking github.repository case-safety (issue #1504/#1095 G1)..." check_repository_case_expressions
+
+if [[ -n "$only_check" && "$violations" -eq 0 && "$warnings" -eq 0 ]]; then
+    printf 'check-mutable-refs --only %s: OK\n' "$only_check"
+    exit 0
+fi
 
 report
 

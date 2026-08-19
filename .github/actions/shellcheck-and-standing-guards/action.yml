@@ -151,3 +151,18 @@ runs:
           -w /work \
           "${{ inputs.build-tools-image }}" \
           timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-pipefail-scope-coverage.sh
+
+    - name: Check github.repository case-safety in GHCR paths
+      # What: runs check-mutable-refs.sh's repository-case check only.
+      # Why: GHCR requires a lowercase owner/repo; github.repository is not
+      #   guaranteed lowercase.
+      # From: Issue #1095 (G1) | Issue #1504
+      shell: bash
+      run: |
+        set -euo pipefail
+        docker run --rm \
+          --user "$(id -u):$(id -g)" \
+          -v "$PWD:/work:ro" \
+          -w /work \
+          "${{ inputs.build-tools-image }}" \
+          timeout --kill-after=30 --signal=KILL 300 bash scripts/tracked/check-mutable-refs.sh --only repository-case
