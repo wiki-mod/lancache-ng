@@ -11,9 +11,10 @@
 # Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|
 #        workflow-image-defaults|repository-case] -- omitted runs every
 #        check; shellcheck-and-standing-guards/action.yml currently wires up
-#        only --only repository-case in CI (issue #1504; the other three
-#        checks have never been gated on in CI and their current pass/fail
-#        state is unverified -- see that issue for the scoping reason).
+#        only --only repository-case in CI (the other three checks have
+#        never been gated on in CI and their current pass/fail state is
+#        unverified -- see this file's own From: pointer below for the
+#        tracking issue and the scoping reason).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -119,7 +120,7 @@ check_workflow_image_defaults() {
 # shared dmeta_ghcr_repo() helper (scripts/lib/docker-metadata.sh) instead,
 # exactly like build-push.yml's own ~15 existing "What: reads the single
 # declared, lowercased GHCR owner/repo" call sites (issue #1095 G1 / PR
-# #1503, PR #1504).
+# #1503).
 #
 # Each file's expected count below is a MIX of three known categories, not
 # one uniform kind of site -- naming them here so a future reader classifies
@@ -128,14 +129,14 @@ check_workflow_image_defaults() {
 #     consumed by third-party actions such as docker/metadata-action).
 #     GitHub Actions' own ${{ }} expression syntax has no lowercase()
 #     function, so these can't call the bash helper at all; fixing them
-#     needs a precomputed job/step output instead, which PR #1504 documents
-#     as follow-up rather than implementing, given the line-count ceiling
-#     build-push.yml is already close to (AG-CI-021).
+#     needs a precomputed job/step output instead -- documented as
+#     follow-up rather than implemented here, given the line-count
+#     ceiling build-push.yml is already close to (AG-CI-021).
 #     build-push.yml: 27 | build-tools.yml: 0 | build-push-hosted-fallback.yml: 4
 #   - env: values in a GHCR image-path context that have NOT yet been
 #     confirmed bash-reachable-and-fixable the way build-push.yml:2847 (PR
-#     #1523's regression) was -- classification is open, tracked in #1504,
-#     not yet fixed here on purpose.
+#     #1523's regression) was -- classification is open, not yet fixed
+#     here on purpose.
 #     build-push.yml: 0 | build-tools.yml: 1 | build-push-hosted-fallback.yml: 1
 #   - non-GHCR uses (e.g. `REPO: ${{ github.repository }}` feeding `gh pr
 #     view --repo`) where GitHub's own API/CLI is case-insensitive on repo
@@ -158,8 +159,8 @@ check_repository_case_expressions() {
     # instead of catching a real one.
     local pattern='\$\{\{ *github\.repository *\}\}'
     # file -> expected TOTAL raw-expression count (all three categories
-    # above combined), established 2026-08-19 (issue #1504, after fixing
-    # build-push.yml's own line-2847 PR-#1523 regression). Update the number
+    # above combined), established 2026-08-19 after fixing build-push.yml's
+    # own line-2847 PR-#1523 regression. Update the number
     # here in the SAME commit that changes the real count, with a one-line
     # reason in that commit message (fixed N sites | classified N env: sites
     # as bash-reachable and fixed them | added a legitimate new non-GHCR
@@ -225,7 +226,7 @@ report() {
 # actually runs guard scripts in CI, AG-VAL-016) can only wire up the one
 # check this project has verified clean (repository-case) without also
 # gating CI on the other three checks' current, never-yet-evaluated state --
-# see issue #1504's own PR body for that scoping decision.
+# see the tracking issue's own PR body for that scoping decision.
 # From: Issue #1504
 only_check=""
 case "${1:-}" in

@@ -156,10 +156,11 @@ runs:
       # What: runs only check-mutable-refs.sh's repository-case check (--only), not its
       # other three checks -- those pre-date this wiring, were never run in CI before, and
       # their current-state pass/fail has not been verified; gating CI on them here would
-      # be an unrelated, unverified scope expansion (see issue #1504's own PR body).
+      # be an unrelated, unverified scope expansion (see the tracking issue's own PR body).
       # Why: catches a raw, un-lowercased ${{ github.repository }} regression (the exact
-      # shape build-push.yml:2847 had, PR #1523) the moment it lands, instead of only when
-      # a repo-name casing edge case next makes it observable at runtime.
+      # shape build-push.yml:2847 had, from an earlier fix's own reintroduced regression)
+      # the moment it lands, instead of only when a repo-name casing edge case next makes
+      # it observable at runtime.
       # From: Issue #1095 (G1) | Issue #1504
       shell: bash
       run: |
