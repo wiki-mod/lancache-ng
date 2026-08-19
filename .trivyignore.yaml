@@ -170,10 +170,9 @@ vulnerabilities:
       packages or their hard link-time dependents, so none can be purged;
       "not exploitable" is the only available disposition short of
       migrating the image off Debian. Neither image invokes Perl at all
-      (grep-confirmed across every project-controlled script; verified
-      2026-08-06, full-severity Trivy scan).
+      (grep-confirmed; re-verified 2026-08-19 against the current tree).
 
-      From: Issue #815, PR #1454
+      From: Issue #815, PR #1454, Issue #1598
     status: not_affected
     expired_at: 2026-08-27
   - id: CVE-2025-15649
@@ -547,11 +546,12 @@ vulnerabilities:
       `paths:` scoping for Debian os-pkgs, so the disposition reflects the
       more exploitable image: `tools/build-tools` unpacks pinned,
       checksum-verified release tarballs via `gzip`, never invoking
-      `gzexe` itself or on attacker-supplied input (verified 2026-08-06,
-      full-severity Trivy scan).
+      `gzexe` itself or on attacker-supplied input. No `trixie`/
+      `trixie-backports` fix exists yet (Debian security-tracker: only
+      `sid` has 1.14-1; re-verified 2026-08-19).
 
       From: Issue #815, PR #1454, Issue #1598
-    expired_at: 2026-08-27
+    expired_at: 2026-08-20
   - id: CVE-2026-41992
     statement: >-
       What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own
@@ -565,4 +565,4 @@ vulnerabilities:
       input explicitly identified as LZH-formatted.
 
       From: Issue #815, PR #1454, Issue #1598
-    expired_at: 2026-08-27
+    expired_at: 2026-08-20
