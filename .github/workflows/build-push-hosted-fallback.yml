@@ -68,10 +68,10 @@ jobs:
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
+      # What: sets up the builder select-build-tools-image.sh needs below.
+      # Why: its imagetools inspect call requires a configured builder.
+      # From: Issue #686
       - name: Set up Docker Buildx
-        # What: sets up the builder select-build-tools-image.sh needs below.
-        # Why: its imagetools inspect call requires a configured builder.
-        # From: Issue #686
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
@@ -174,12 +174,12 @@ jobs:
           printf 'matrix=%s\n' "$(printf '%s' "$rows" | jq -c '{include: .}')" >> "$GITHUB_OUTPUT"
 
   build-hosted-fallback:
-    needs: preflight
-    runs-on: ubuntu-latest
     # What: single build/push/scan job, no separate local-scan-only pre-build.
     # Why: the digest scanned below is the exact same digest that gets
     #   pushed, attested, and published.
     # From: Issue #1522 | PR #1523
+    needs: preflight
+    runs-on: ubuntu-latest
     timeout-minutes: 150
     permissions:
       contents: read
@@ -210,11 +210,11 @@ jobs:
           short_sha="$(dmeta_short_sha "$GITHUB_SHA")"
           printf 'value=%s\n' "$short_sha" >> "$GITHUB_OUTPUT"
 
+      # What: uses the retried builder-setup variant, not the plain action.
+      # Why: this fresh hosted VM has no local image cache, the same
+      #   Docker Hub rate-limit exposure build-arm64 hit.
+      # From: Issue #930
       - name: Set up Docker Buildx
-        # What: uses the retried builder-setup variant, not the plain action.
-        # Why: this fresh hosted VM has no local image cache, the same
-        #   Docker Hub rate-limit exposure build-arm64 hit.
-        # From: Issue #930
         id: buildx
         uses: ./.github/actions/buildx-setup-retry
 
@@ -271,6 +271,12 @@ jobs:
           fi
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
+      # What: builds and pushes a single-platform (amd64) candidate image.
+      # Why: forces oci-mediatypes with no provenance/annotations here so the
+      #   later imagetools merge with build-arm64's arm64 leg does not
+      #   silently drop the description annotation (see build-push.yml's
+      #   equivalent step for the full verified rationale).
+      # From: Issue #620 | Issue #1522 | PR #1523
       - name: Build and push candidate once
         id: build
         timeout-minutes: 90
@@ -305,11 +311,11 @@ jobs:
           platform: linux/amd64
           run-fixtures: "true"
 
+      # What: scans the just-pushed candidate digest with a 50-minute bound.
+      # Why: trivy-scan-retry can run up to 4 attempts; the timeout must
+      #   cover the worst case.
+      # From: Issue #1535
       - name: Scan the exact pushed candidate digest
-        # What: allows 50 minutes for this scan step.
-        # Why: trivy-scan-retry can run up to 4 attempts; the bound must
-        #   cover the worst case.
-        # From: Issue #1535
         timeout-minutes: 50
         uses: ./.github/actions/trivy-scan-exact-digest
         with:
@@ -333,6 +339,12 @@ jobs:
           subject-name: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           subject-digest: ${{ steps.build.outputs.digest }}
 
+      # What: assembles the real multi-platform tag from this job's amd64
+      #   candidate and build-arm64's already-published arm64 leg.
+      # Why: this hosted-fallback job only ever builds amd64; merging by
+      #   digest (not by tag) keeps the exact scanned/attested candidate
+      #   from being swapped for a newer push mid-assembly.
+      # From: Issue #1522 | PR #1523
       - name: Merge exact candidate with existing arm64 leg
         id: merge
         if: ${{ inputs.merge_manifest }}
