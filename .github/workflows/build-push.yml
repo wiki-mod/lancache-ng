@@ -2844,7 +2844,6 @@ jobs:
       - name: Pin full-setup service identities to immutable digests
         id: pin-full-setup-digests
         env:
-          REPOSITORY: ${{ github.repository }}
           IMAGE_TAG: ${{ steps.channel.outputs.tag }}
           PROXY_DIGEST: ${{ needs['merge-manifests'].outputs.proxy_digest }}
           DNS_DIGEST: ${{ needs['merge-manifests'].outputs.dns_digest }}
@@ -2857,6 +2856,13 @@ jobs:
           set -euo pipefail
           # shellcheck source=scripts/lib/ghcr-retry.sh
           source "$GITHUB_WORKSPACE/scripts/lib/ghcr-retry.sh"
+          # shellcheck source=scripts/lib/docker-metadata.sh
+          source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
+
+          # What: reads the single declared, lowercased GHCR owner/repo.
+          # Why: github.repository is not guaranteed lowercase; GHCR requires it.
+          # From: Issue #1095 (G1) | PR #1503
+          REPOSITORY="$(dmeta_ghcr_repo)"
 
           resolve_digest() {
             local service=$1 supplied=$2 image digest

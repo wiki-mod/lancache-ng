@@ -3,10 +3,17 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
 # CI image pinning helper: scans .github/workflows and Dockerfiles for mutable
 # image references (floating tags like :latest, @v4-style action references
-# without SHA pins, untagged base images) and reports them. Intended as a
-# transparency tool to make mixed mutable+immutable states visible; can be
+# without SHA pins, untagged base images, and raw un-lowercased
+# github.repository expressions in GHCR paths) and reports them. Intended as
+# a transparency tool to make mixed mutable+immutable states visible; can be
 # used as a CI gate to enforce pinning (exit 1 if violations found) or as an
 # informational report (exit 0, violations reported to stdout/stderr).
+# Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|
+#        workflow-image-defaults|repository-case] -- omitted runs every
+#        check; shellcheck-and-standing-guards/action.yml currently wires up
+#        only --only repository-case in CI (issue #1504; the other three
+#        checks have never been gated on in CI and their current pass/fail
+#        state is unverified -- see that issue for the scoping reason).
 set -euo pipefail
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
@@ -104,6 +111,87 @@ check_workflow_image_defaults() {
     return 0
 }
 
+# Check for raw (non-lowercased) github.repository expressions. GHCR requires
+# a lowercase owner/repo; github.repository mirrors the real GitHub-declared
+# casing and is not guaranteed lowercase (issue #1095, finding G1 -- this
+# broke during a real repo rename). Bash-reachable sites (an env: value
+# consumed inside that step's own run: block) must resolve this via the
+# shared dmeta_ghcr_repo() helper (scripts/lib/docker-metadata.sh) instead,
+# exactly like build-push.yml's own ~15 existing "What: reads the single
+# declared, lowercased GHCR owner/repo" call sites (issue #1095 G1 / PR
+# #1503, PR #1504).
+#
+# Each file's expected count below is a MIX of three known categories, not
+# one uniform kind of site -- naming them here so a future reader classifies
+# a NEW site correctly instead of assuming every raw match is the same kind:
+#   - pure-YAML `with:` step inputs (images:/image-ref:/subject-name:,
+#     consumed by third-party actions such as docker/metadata-action).
+#     GitHub Actions' own ${{ }} expression syntax has no lowercase()
+#     function, so these can't call the bash helper at all; fixing them
+#     needs a precomputed job/step output instead, which PR #1504 documents
+#     as follow-up rather than implementing, given the line-count ceiling
+#     build-push.yml is already close to (AG-CI-021).
+#     build-push.yml: 27 | build-tools.yml: 0 | build-push-hosted-fallback.yml: 4
+#   - env: values in a GHCR image-path context that have NOT yet been
+#     confirmed bash-reachable-and-fixable the way build-push.yml:2847 (PR
+#     #1523's regression) was -- classification is open, tracked in #1504,
+#     not yet fixed here on purpose.
+#     build-push.yml: 0 | build-tools.yml: 1 | build-push-hosted-fallback.yml: 1
+#   - non-GHCR uses (e.g. `REPO: ${{ github.repository }}` feeding `gh pr
+#     view --repo`) where GitHub's own API/CLI is case-insensitive on repo
+#     path, so casing is out of this check's concern and these are expected
+#     to stay exactly as-is.
+#     build-push.yml: 2 | build-tools.yml: 0 | build-push-hosted-fallback.yml: 0
+#
+# This check holds each file's TOTAL raw count as a known, counted baseline,
+# not an approved-forever exception list: it fails the moment the real count
+# drifts from the expected number below in EITHER direction, so a newly-
+# added raw site (regression) and a newly-fixed site (stale baseline) both
+# surface instead of going silent.
+check_repository_case_expressions() {
+    # Braces are explicitly escaped (\{ \}) rather than left bare: GNU grep
+    # treats a syntactically-invalid ERE interval as a literal brace, but a
+    # strict POSIX grep is not required to, and this pattern's real
+    # container (the build-tools image, not this dev host) is not
+    # guaranteed to be GNU grep -- an unescaped bare '{{'/'}}' silently
+    # under-matching would make this guard report a false "regression fixed"
+    # instead of catching a real one.
+    local pattern='\$\{\{ *github\.repository *\}\}'
+    # file -> expected TOTAL raw-expression count (all three categories
+    # above combined), established 2026-08-19 (issue #1504, after fixing
+    # build-push.yml's own line-2847 PR-#1523 regression). Update the number
+    # here in the SAME commit that changes the real count, with a one-line
+    # reason in that commit message (fixed N sites | classified N env: sites
+    # as bash-reachable and fixed them | added a legitimate new non-GHCR
+    # site).
+    local -A expected_counts=(
+        [.github/workflows/build-push.yml]=29
+        [.github/workflows/build-tools.yml]=1
+        [.github/workflows/build-push-hosted-fallback.yml]=5
+    )
+    local file expected actual mismatch=0
+
+    for file in "${!expected_counts[@]}"; do
+        expected="${expected_counts[$file]}"
+        actual=$(grep -cE "$pattern" "$file" || true)
+        if [[ "$actual" -ne "$expected" ]]; then
+            printf "%b[REPOSITORY CASE]%b %s: expected %d raw github.repository expression(s), found %d.\n" "$RED" "$NC" "$file" "$expected" "$actual"
+            if [[ "$actual" -gt "$expected" ]]; then
+                printf '  A new raw ${{ github.repository }} expression was added. If it is bash-reachable, use dmeta_ghcr_repo() instead (see scripts/lib/docker-metadata.sh), per issue #1095 (G1). If it is a genuine new pure-YAML or non-GHCR site, raise the expected count above with a reason.\n'
+            else
+                printf '  Fewer raw expressions than expected -- likely a site was fixed. Lower the expected count above to match, so this baseline stays accurate.\n'
+            fi
+            mismatch=1
+        fi
+    done
+
+    if [[ "$mismatch" -eq 1 ]]; then
+        violations=$((violations + 1))
+        return 1
+    fi
+    return 0
+}
+
 # Summary report.
 report() {
     echo
@@ -130,14 +218,48 @@ report() {
     return 0
 }
 
-echo "Checking GitHub Actions references..."
-check_action_refs || true
+# What: --only NAME runs exactly one named check instead of the full sweep;
+# omitted (the default) runs everything below, unchanged from this script's
+# original behavior.
+# Why: shellcheck-and-standing-guards/action.yml (the composite action that
+# actually runs guard scripts in CI, AG-VAL-016) can only wire up the one
+# check this project has verified clean (repository-case) without also
+# gating CI on the other three checks' current, never-yet-evaluated state --
+# see issue #1504's own PR body for that scoping decision.
+# From: Issue #1504
+only_check=""
+case "${1:-}" in
+    --only)
+        only_check="${2:?--only requires a check name}"
+        ;;
+    --only=*)
+        only_check="${1#--only=}"
+        ;;
+    "") ;;
+    *)
+        printf 'check-mutable-refs: unknown argument: %s\n' "$1" >&2
+        printf 'Usage: check-mutable-refs.sh [--only action-refs|dockerfile-base-images|workflow-image-defaults|repository-case]\n' >&2
+        exit 2
+        ;;
+esac
 
-echo "Checking Dockerfile base images..."
-check_dockerfile_base_images || true
+run_check() {
+    local name="$1" label="$2"
+    shift 2
+    [[ -z "$only_check" || "$only_check" == "$name" ]] || return 0
+    echo "$label"
+    "$@" || true
+}
 
-echo "Checking workflow image defaults..."
-check_workflow_image_defaults || true
+run_check action-refs "Checking GitHub Actions references..." check_action_refs
+run_check dockerfile-base-images "Checking Dockerfile base images..." check_dockerfile_base_images
+run_check workflow-image-defaults "Checking workflow image defaults..." check_workflow_image_defaults
+run_check repository-case "Checking github.repository case-safety (issue #1504/#1095 G1)..." check_repository_case_expressions
+
+if [[ -n "$only_check" && "$violations" -eq 0 && "$warnings" -eq 0 ]]; then
+    printf 'check-mutable-refs --only %s: OK\n' "$only_check"
+    exit 0
+fi
 
 report
 
