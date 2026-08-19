@@ -49,7 +49,7 @@ runs:
         bash scripts/tracked/check-dependabot-docker-base-consistency.sh
 
     # See scripts/untracked/check-trivy-action-direct-usage.sh's own header for why a
-    # direct call site regresses issue #1535's retry/auth/mirror fix
+    # direct call site regresses the retry/auth/mirror fix
     # (AG-VAL-029: a point fix alone is not sufficient).
     - name: Check no direct aquasecurity/trivy-action call sites outside the retry wrapper
       shell: bash
@@ -59,7 +59,7 @@ runs:
         bash scripts/untracked/check-trivy-action-direct-usage.sh
 
     # See scripts/untracked/check-short-sha-truncation.sh's own header comment for the
-    # full list of prior real instances (issue #1095 G2) this guard exists
+    # full list of prior real instances (G2) this guard exists
     # to prevent a recurrence of.
     - name: Check for hardcoded short-SHA truncation lengths (issue #1095 G2)
       shell: bash

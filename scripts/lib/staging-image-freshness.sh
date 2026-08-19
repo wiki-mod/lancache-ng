@@ -172,7 +172,7 @@ _sif_inspect_failure_is_confirmed_absence() {
   # render the same words space-separated -- match both rather than only the
   # shape this project has actually observed so far.
   # `^ERROR:.*: not found$`: buildx's own real wording for a missing GHCR
-  # tag/manifest (see Issue #1581 comment above) -- anchored to buildx's
+  # tag/manifest (see the comment above) -- anchored to buildx's
   # "ERROR: " line prefix, never matching a bare shell "command not found".
   grep -qi 'manifest unknown\|no such manifest\|name[ _]unknown\|^ERROR:.*: not found$' <<<"$stderr_text"
 }
@@ -207,8 +207,8 @@ _sif_inspect_attempt() {
     return "${GHCR_RETRY_PERMANENT_FAILURE_EXIT_CODE:-99}"
   fi
   # What: Echoes the real stderr instead of only returning 1 (discarding it).
-  # Why: previously undiagnosable from the job log alone -- Issue #1581's own
-  # root cause needed live reproduction against a real runner to find.
+  # Why: previously undiagnosable from the job log alone -- the root cause
+  #   needed live reproduction against a real runner to find.
   # From: Issue #1581
   if [[ -n "$err_text" ]]; then
     echo "docker buildx imagetools inspect failed with stderr not recognized as a confirmed absence: $err_text" >&2

@@ -4,9 +4,9 @@
 # What: runs tests/bats + tests/shellspec against the already-published
 # build-tools image (pulled via scripts/untracked/select-build-tools-image.sh);
 # never builds or publishes anything itself.
-# Why: split from build-tools.yml (issue #1253/#1255) so a test/script-only
+# Why: split from build-tools.yml so a test/script-only
 # change gets full regression coverage without a wasteful full multi-arch
-# rebuild; scripts/tracked/check-bats-path-filter-coverage.sh (#879) now
+# rebuild; scripts/tracked/check-bats-path-filter-coverage.sh now
 # targets THIS file's own path list, not build-tools.yml's.
 # From: Issue #1253 | Issue #1255 | PR #1501.
 name: Build Tools Smoke Tests
@@ -62,16 +62,9 @@ on:
       - "scripts/untracked/generate-vex.sh"
       - "scripts/untracked/simulations/setup-cli-simulation.sh"
       - "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
-      # scripts/untracked/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
-      # reap/orphan-classification logic that used to live entirely inline in
-      # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
-      # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
-      # directly (`source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"`) --
-      # without this entry, a PR touching only this script would not already
-      # match any other path above (it is not under scripts/lib/, which is
-      # already covered) and so would never run that suite. Found by
-      # scripts/tracked/check-bats-path-filter-coverage.sh's own existence-filtered
-      # dependency scan against the real repo tree.
+      # What: lists scripts/untracked/gc-pr-staging-images.sh (2026-08-06), the sourceable script the GHCR reap/orphan-classification logic was extracted into from gc-pr-staging-images.yml's inline `run:` block.
+      # Why: tests/bats/gc_pr_staging_images.bats sources it directly and it is not under scripts/lib/, which is already covered above; found by scripts/tracked/check-bats-path-filter-coverage.sh's own dependency scan against the real repo tree.
+      # From: Issue #1095 | PR #1501.
       - "scripts/untracked/gc-pr-staging-images.sh"
       # What: lists scripts/untracked/gc-sha-retention-audit.sh.
       # Why: tests/bats/sha_retention_audit.bats sources it directly and it
@@ -89,10 +82,10 @@ on:
       - ".github/actions/derive-validation-network/action.yml"
       - ".github/actions/wait-validation-stack-health/action.yml"
       # What: lists services/ files individually (not "services/<name>/**"
-      # wildcards, #1198) plus several guard/workflow files (coverage
+      # wildcards) plus several guard/workflow files (coverage
       # guards, build-push.yml, full-setup-sims.yml, docker-daemon-config.sh).
       # Why: each has its own bats dependency not covered by a wildcard
-      # match; scripts/tracked/check-bats-path-filter-coverage.sh (#879) is
+      # match; scripts/tracked/check-bats-path-filter-coverage.sh is
       # the source of truth for exactly which files are real bats
       # dependencies -- re-run it after touching this list.
       # From: Issue #873 | Issue #879 | Issue #1112 | Issue #1171 | Issue #1198 | Issue #1253 | Issue #1255 | PR #1501.
@@ -136,7 +129,7 @@ on:
       # What: lists services/syslog/netdata-web_log.conf.
       # Why: tests/bats/check_logging_matrix_weblog_parity.bats reads this
       # file directly to assert byte-parity with
-      # deploy/quickstart/docker-compose.yml's inline copy (issue #879).
+      # deploy/quickstart/docker-compose.yml's inline copy.
       # From: PR #1501.
       - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"
@@ -202,16 +195,9 @@ on:
       - "scripts/untracked/generate-vex.sh"
       - "scripts/untracked/simulations/setup-cli-simulation.sh"
       - "scripts/untracked/simulations/syslog-forwarding-simulation.sh"
-      # scripts/untracked/gc-pr-staging-images.sh (#1095, 2026-08-06): the GHCR
-      # reap/orphan-classification logic that used to live entirely inline in
-      # gc-pr-staging-images.yml's own `run:` block now lives here as a real,
-      # sourceable script. tests/bats/gc_pr_staging_images.bats sources it
-      # directly (`source "$repo_root/scripts/untracked/gc-pr-staging-images.sh"`) --
-      # without this entry, a PR touching only this script would not already
-      # match any other path above (it is not under scripts/lib/, which is
-      # already covered) and so would never run that suite. Found by
-      # scripts/tracked/check-bats-path-filter-coverage.sh's own existence-filtered
-      # dependency scan against the real repo tree.
+      # What: lists scripts/untracked/gc-pr-staging-images.sh (2026-08-06), the sourceable script the GHCR reap/orphan-classification logic was extracted into from gc-pr-staging-images.yml's inline `run:` block.
+      # Why: tests/bats/gc_pr_staging_images.bats sources it directly and it is not under scripts/lib/, which is already covered above; found by scripts/tracked/check-bats-path-filter-coverage.sh's own dependency scan against the real repo tree.
+      # From: Issue #1095 | PR #1501.
       - "scripts/untracked/gc-pr-staging-images.sh"
       # What: lists scripts/untracked/gc-sha-retention-audit.sh.
       # Why: tests/bats/sha_retention_audit.bats sources it directly and it
@@ -273,7 +259,7 @@ on:
       # What: lists services/syslog/netdata-web_log.conf.
       # Why: tests/bats/check_logging_matrix_weblog_parity.bats reads this
       # file directly to assert byte-parity with
-      # deploy/quickstart/docker-compose.yml's inline copy (issue #879).
+      # deploy/quickstart/docker-compose.yml's inline copy.
       # From: PR #1501.
       - "services/syslog/netdata-web_log.conf"
       - "deploy/prod/docker-compose.yml"

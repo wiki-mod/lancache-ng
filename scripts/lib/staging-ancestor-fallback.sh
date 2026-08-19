@@ -365,7 +365,7 @@ saf_base_commit_paths_are_ignorable() {
 # pay the full base_freshness wait for a tag that could never appear, then
 # hard-fail with "a push run exists, so this is a real build problem" --
 # the wrong verdict for a deliberately-skipped service build. Confirmed live
-# 2026-08-02: ui:sha-<commit> never gets created when Step 4 (#1095) reuses
+# 2026-08-02: ui:sha-<commit> never gets created when Step 4 reuses
 # ui for a push, for exactly this reason.
 #
 # Delegates to scripts/untracked/classify-image-impact.sh -- the same single-source-of-
@@ -374,7 +374,7 @@ saf_base_commit_paths_are_ignorable() {
 # saf_base_commit_diff_paths' own already-computed path list, rather than
 # re-deriving the diff a second time or hand-rolling a second copy of the
 # per-service path-prefix rules here (exactly the kind of drift-prone
-# duplication issue #1095 itself flags elsewhere in this pipeline).
+# duplication already flagged elsewhere in this pipeline).
 #
 # Returns 0 if classify-image-impact.sh confirms <classify_key> was NOT
 # touched by <sha> itself relative to its own first parent (safe to treat as
@@ -986,7 +986,7 @@ saf_base_commit_has_confirmed_run() {
 # <classify_key>'s own service is confirmed untouched by that candidate's own
 # diff (saf_base_commit_service_untouched), in which case the run existing
 # says nothing on its own about whether a fresh per-commit tag for <service>
-# is actually present (Step 4 / #1095 reuse, confirmed live 2026-08-02, does
+# is actually present (Step 4 reuse, confirmed live 2026-08-02, does
 # not by itself prove a fresh per-commit tag exists yet for a reused
 # service -- see the corrected note at the has_run==0 branch below for why
 # this is a probe-and-move-on decision, not "it structurally never exists"),
@@ -1001,7 +1001,7 @@ saf_base_commit_has_confirmed_run() {
 # service-affecting commit is a genuine CI problem worth surfacing on its
 # own, not a reason to keep hunting for an even older substitute.
 #
-# Issue #1095 (2026-08-07): the confirmed-untouched case described above used
+# 2026-08-07: the confirmed-untouched case described above used
 # to be reached ONLY here, after paying the full wait -- a candidate whose
 # own diff never touched <service> still burned the full wait, up to
 # <freshness_hard_ceiling_seconds> (and, if a confirmed-active retry
@@ -1221,7 +1221,7 @@ saf_find_built_ancestor() {
     # whether that run actually produced a confirmed-fresh image for
     # <service>.
     #
-    # Issue #1095 (2026-08-07, confirmed live against runs 31184925428/
+    # 2026-08-07, confirmed live against runs 31184925428/
     # 31187... for PR #1468): four untouched services each independently
     # paid the full 600s ancestor-candidate ceiling waiting on the exact same
     # candidate commit, ~40 minutes total, when a cheap, no-network,
@@ -1241,7 +1241,7 @@ saf_find_built_ancestor() {
     # directly against the registry. fb05ee33's tags were missing not
     # because the wait is structurally doomed, but because that specific
     # run's merge-manifests job aborted before ever reaching the untouched
-    # services (see issue #1095 for that separate, still-open finding). The
+    # services (a separate, still-open finding). The
     # real, narrower justification for skipping the full-budget wait below
     # is: if the run truly never completed (aborted, or genuinely never
     # produced this tag), waiting the full budget cannot help either, and
@@ -1338,7 +1338,7 @@ saf_find_built_ancestor() {
     # -- even after the activity-confirmed extended retry, if one applied.
     # Before applying the JUDGMENT CALL above (stop, do not walk further):
     # re-derive the same service-scoped untouched check the PRE-wait check
-    # above already ran (issue #1095). This is now normally redundant (a
+    # above already ran. This is now normally redundant (a
     # positive pre-check already `continue`d past this candidate before ever
     # reaching the wait), EXCEPT when the pre-check was inconclusive (status
     # 2 -- a transient git/fetch issue), in which case the wait still ran per
@@ -1350,7 +1350,7 @@ saf_find_built_ancestor() {
     # time this way, never safety. If <classify_key>'s own service was
     # untouched by THIS candidate's own diff, having reached this point means
     # even the full-budget wait above found no usable tag for it -- expected
-    # for Step 4 (#1095) reuse when the run never completed a retag for this
+    # for Step 4 reuse when the run never completed a retag for this
     # service (aborted, or the diff-implied reuse just never got confirmed
     # fresh in time), not proof of a broken build -- continue to the next
     # candidate instead of stopping. Only when the service WAS actually
@@ -1551,14 +1551,14 @@ saf_resolve_untouched_backfill_source() {
     # longer cannot help: no push run exists, and the paths are confirmed
     # ignorable, so there is no in-flight push build to wait out.
     #
-    # allow_reverse_ancestry=true (issue #1095, 2026-08-07): $base_image is
+    # allow_reverse_ancestry=true (2026-08-07): $base_image is
     # always an immutable per-commit sha-<base_sha> tag here, never a mutable
     # channel tag -- exactly the same safety condition
     # sif_wait_for_fresh_base_image's own allow_reverse_ancestry doc requires,
     # and exactly the same reasoning saf_find_built_ancestor's own candidate
     # checks already rely on (see that function's own comments). This
-    # specific call site is the one F-20 (#1095) named as exposed:
-    # push-reuse (Step 4, #1095) can retag $base_image FOR $base_sha's own
+    # specific call site is the one F-20 named as exposed:
+    # push-reuse (Step 4) can retag $base_image FOR $base_sha's own
     # commit while content-copying an older commit's build, which keeps that
     # older commit's org.opencontainers.image.revision label (imagetools
     # create copies labels byte-for-byte, never rewrites them) -- without
@@ -1595,7 +1595,7 @@ saf_resolve_untouched_backfill_source() {
   # header for why this specific wait, unlike the ancestor-candidate checks,
   # needs congestion-scale headroom.
   #
-  # allow_reverse_ancestry=true (issue #1095, 2026-08-07): same reasoning as
+  # allow_reverse_ancestry=true (2026-08-07): same reasoning as
   # Step 1's fast-path call above -- $base_image is always an immutable
   # per-commit tag, so a push-reuse retag that kept an older source commit's
   # revision label is exactly as safe to accept here as it already is for

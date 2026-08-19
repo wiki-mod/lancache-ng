@@ -133,7 +133,7 @@ EOF_ALLOWLIST
 #
 # What: matches a match-arm base literal (`=> "lancache-x"`), not a whole
 # `Ok("lancache-x")` return.
-# Why: issue #1592 made container_name_for_service append a runtime suffix
+# Why: container_name_for_service was changed to append a runtime suffix
 # (`Ok(format!("{base}{suffix}"))` once, outside the match), so no arm
 # returns a bare `Ok(...)` anymore -- only the base-name literal itself.
 # From: Issue #1592

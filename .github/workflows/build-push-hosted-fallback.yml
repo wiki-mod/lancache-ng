@@ -213,7 +213,7 @@ jobs:
       - name: Set up Docker Buildx
         # What: uses the retried builder-setup variant, not the plain action.
         # Why: this fresh hosted VM has no local image cache, the same
-        #   Docker Hub rate-limit exposure build-arm64 hit (Issue #930).
+        #   Docker Hub rate-limit exposure build-arm64 hit.
         # From: Issue #930
         id: buildx
         uses: ./.github/actions/buildx-setup-retry

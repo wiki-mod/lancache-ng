@@ -7,16 +7,16 @@
 # master). This project's active development happens on `current_dev` (see
 # #825), so that native mechanism never fires for the PRs that actually
 # resolve issues day to day, leaving them open forever unless someone closes
-# them by hand. See #1137 for the full background and the manual pattern
-# this workflow mechanizes (already used by hand dozens of times).
+# them by hand -- this workflow mechanizes the manual pattern already used
+# by hand dozens of times.
 #
 # This workflow:
 #   1. Fires only when a PR merges into `current_dev` (never master/vX.Y.Z --
 #      GitHub's native mechanism already covers those; this must not
 #      duplicate or interfere with it).
-#   2. Reads only the PR body's exact `## Linked Issues` section (issue
-#      #1496) and parses `Closes #N` / `Fixes #N` (and the rest of GitHub's
-#      own accepted keyword set) within it, case-insensitive, same-repo only.
+#   2. Reads only the PR body's exact `## Linked Issues` section and parses
+#      `Closes #N` / `Fixes #N` (and the rest of GitHub's own accepted
+#      keyword set) within it, case-insensitive, same-repo only.
 #   3. For each referenced issue: posts a comment containing the PR's own
 #      body verbatim (mechanical relay, not an AI-generated summary), then
 #      closes the issue.
@@ -35,7 +35,7 @@
 # What: Only the PR body's exact `## Linked Issues` section is scanned for
 # closing keywords; text elsewhere in the body has zero effect.
 # Why: Free-form prose elsewhere cannot be reliably told apart from a real
-# closing instruction (confirmed false-closes: PR #1443, PR #1491).
+# closing instruction (confirmed false-closes across multiple PRs, including PR #1443).
 # From: Issue #1496
 name: current_dev Auto-Close Linked Issues
 

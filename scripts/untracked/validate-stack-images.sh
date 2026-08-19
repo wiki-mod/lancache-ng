@@ -370,7 +370,7 @@ require_grep 'stack_pointer_image="ghcr\.io/\$\{REPOSITORY\}/stack@\$\{STACK_DIG
 # CI 1.1 deliberately keeps the existing immutable stack pointer/stack.env
 # contract rather than introducing a separate stack-bom.json artifact (that
 # BOM/Stack-Lock design is out of scope here, tracked under the broader V2
-# work in #1095) -- so this validator only asserts stack.env's own presence
+# work) -- so this validator only asserts stack.env's own presence
 # below, not a stack-bom.json file build-push.yml no longer builds.
 require_grep 'LANCACHE_IMAGE_TAG=%s\\n' \
   .github/workflows/build-push.yml \
@@ -461,7 +461,7 @@ require_grep 'is missing required platform' \
   'the shared platform coverage guard must fail closed when a release image misses a required platform'
 # What: checks only build/build-arm64's pushed-digest scan cache dir now,
 # not container-scan's former local-build cache dir.
-# Why: container-scan no longer builds/scans locally (issue #1095 G8), so
+# Why: container-scan no longer builds/scans locally (G8), so
 # only this surviving Trivy cache directory still enforces #904's invariant.
 # From: Issue #1095 | PR #1501.
 require_grep 'cache_dir="/var/tmp/lancache-ng-trivy-cache/\$\{MATRIX_SERVICE\}-pushed-\$\{sanitized_ref\}"' \

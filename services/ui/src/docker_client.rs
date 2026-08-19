@@ -171,7 +171,7 @@ mod tests {
     }
 
     // What: an empty suffix (every real install) must be byte-identical to
-    // pre-#1590 behavior.
+    // pre-suffix behavior.
     // Why: this is the only regression that matters for production installs.
     // From: Issue #1590
     #[test]

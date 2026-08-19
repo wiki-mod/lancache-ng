@@ -6595,13 +6595,9 @@ EOF
         assert_resolved_image_tag_platform_supported "$lancache_image_registry" "$lancache_image_prefix" "$lancache_image_tag"
     fi
 
-    # Known-good pdns.conf/recursor.conf snapshot retention (#615): same
-    # variable and default (3) as config/{dev,prod}/dns-standard.env. The
-    # primary's registration response has no opinion on this -- it is a
-    # purely local, per-secondary-node setting -- so resolve it the same way
-    # as the image registry/prefix/channel above: an explicit env var wins,
-    # then whatever the existing generated .env already had (so --rotate
-    # doesn't silently reset an operator's prior choice), then the default.
+    # What: resolves KEEP_KNOWN_GOOD_CONFIGS the same way as the image registry/prefix/channel above -- explicit env var wins, then the existing generated .env (so --rotate doesn't silently reset an operator's prior choice), then the default.
+    # Why: same variable and default (3) as config/{dev,prod}/dns-standard.env; the primary's registration response has no opinion on this purely local, per-secondary-node setting.
+    # From: Issue #615
     keep_known_good_configs="${KEEP_KNOWN_GOOD_CONFIGS:-}"
     if [[ -z "$keep_known_good_configs" && -n "$existing_env_file" ]]; then
         keep_known_good_configs=$(get_env_var KEEP_KNOWN_GOOD_CONFIGS "$existing_env_file")
