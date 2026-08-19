@@ -56,7 +56,10 @@ on:
       minimum_age_seconds:
         description: Minimum version age before any deletion.
         type: string
-        default: "86400"
+        # What: manual-dispatch default, mirrors GC_MIN_AGE_SECONDS's own default.
+        # Why: raised from 24h to 7 days (604800s) per issue #1585's v1.2 plan.
+        # From: Issue #1585
+        default: "604800"
 
 # What: no elevated `permissions:` block; deletion uses a separate PAT.
 # Why: GitHub's package-version-delete REST API requires a classic PAT with
@@ -175,7 +178,7 @@ jobs:
           GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '1' }}
           GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
           GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
-          GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '86400' }}
+          GC_MIN_AGE_SECONDS: ${{ github.event.inputs.minimum_age_seconds || vars.GC_MIN_AGE_SECONDS || '604800' }}
           GC_MAX_PR_LOOKUP_FAILURES: ${{ vars.GC_MAX_PR_LOOKUP_FAILURES || '10' }}
         run: bash scripts/untracked/gc-pr-staging-images.sh
 

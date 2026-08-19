@@ -55,6 +55,17 @@ sra_read_minimum_stable_releases() {
   _sra_read_manifest_positive_integer "$manifest" "minimum_stable_releases"
 }
 
+# What: reads retention.channel_buffer_versions from the manifest.
+# Why: v1.2 (issue #1585) inverts protection for a non-ordinary-version
+# fallback (unrecognized tag shape, no protected-channel match) -- this
+# count is the per-package safety buffer kept regardless of age instead of
+# a permanent protect.
+# From: Issue #1585.
+sra_read_channel_buffer_versions() {
+  local manifest="${1:?sra_read_channel_buffer_versions: manifest is required}"
+  _sra_read_manifest_positive_integer "$manifest" "channel_buffer_versions"
+}
+
 # What: reads a `<key>:` block-list from the manifest, one item per line.
 # Why: shared parsing rule for every retention list key (today only
 # rollback_anchors), so a future second list key reuses it (AG-CODE-011).
@@ -454,20 +465,124 @@ sra_protected_reference_reason() {
   printf '%s\n' "$joined"
 }
 
-# What: combines the two tag-protection helpers into one always-succeeding call.
-# Why: only the root_count==0 branch uses this; a version with a root tag
-# must call sra_protected_reference_reason directly instead.
-# From: Issue #1095 | PR #1586
-sra_extra_tag_protect_reason() {
-  local tags_csv="${1?sra_extra_tag_protect_reason: tags CSV argument is required}"
-  local supported_releases="${2?sra_extra_tag_protect_reason: supported releases argument is required}"
-  local fallback_reason="${3:?sra_extra_tag_protect_reason: fallback reason is required}"
-  local other_tags reason
-
-  other_tags="$(sra_other_tags_from_csv "$tags_csv")" || return 1
-  if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
-    printf '%s\n' "$reason"
+# What: classifies one already-ranked candidate's position against a budget.
+# Why: shared by both the ordinary-sha-root retention-budget loop and the
+# v1.2 (issue #1585) non-ordinary-version buffer loop in the orchestrator,
+# so the same within/beyond-budget arithmetic is not duplicated (AG-CODE-011).
+# From: Issue #1585.
+sra_budget_decision() {
+  local position="${1:?sra_budget_decision: position is required}"
+  local budget="${2:?sra_budget_decision: budget is required}"
+  [[ "$position" =~ ^[0-9]+$ ]] || return 1
+  [[ "$budget" =~ ^[0-9]+$ ]] || return 1
+  if (( position <= budget )); then
+    printf 'protect\twithin-%s\n' "$budget"
   else
-    printf '%s\n' "$fallback_reason"
+    printf 'would-delete\tbeyond-%s\n' "$budget"
   fi
 }
+
+# --- Incremental classification cache (Issue #1585 v1.2 point 4) ---------
+#
+# What: a small SQLite cache of the expensive-to-recompute per-version
+# resolution result (an ordinary sha-<commit> root's git-history rank, or a
+# rootless version's channel-match outcome), keyed by (package, version_id)
+# and fingerprinted by (digest, tags) so a changed version never reuses a
+# stale result.
+# Why: the final protect/would-delete decision always depends on a fresh,
+# in-memory sort of the current candidate pool (ranks/positions shift as
+# versions are added or removed), so nothing about the DELETE-relevant
+# decision itself is ever read from cache -- only the deterministic,
+# unchanged-if-digest/tags-unchanged *resolution* (git-history rank; or
+# "no protected channel matched") is, which is what made the original
+# 26,000-version run in issue #1585 slow (one `git rev-parse`/`merge-base`
+# subprocess pair per candidate root, every run, even for versions whose
+# tags have not changed since the previous run).
+# From: Issue #1585.
+
+# What: the cache's schema, as a plain printable string.
+# Why: keeps the schema itself directly unit-testable without a live
+# sqlite3 invocation (its shape can be grepped/asserted on by bats).
+# From: Issue #1585.
+sra_cache_schema_sql() {
+  cat <<'SQL'
+CREATE TABLE IF NOT EXISTS version_cache (
+  package TEXT NOT NULL,
+  version_id INTEGER NOT NULL,
+  digest TEXT NOT NULL,
+  tags TEXT NOT NULL,
+  resolution TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (package, version_id)
+);
+SQL
+}
+
+# What: creates the cache database (idempotent) at the given path.
+# Why: a cache-miss run (first run ever, or a rotated-key restore-keys
+# fallback with no prior save under this run's exact key) must produce a
+# valid, empty, queryable database, not fail -- that clean fallback is the
+# cache's own required self-verification per issue #1585's plan.
+# From: Issue #1585.
+sra_cache_init() {
+  local db_path="${1:?sra_cache_init: db path is required}"
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  sra_cache_schema_sql | sqlite3 "$db_path"
+}
+
+# What: escapes a value for safe inclusion inside a single-quoted SQL literal.
+# Why: sqlite3's CLI has no separate parameter-binding mode for an ad hoc
+# statement string built from a shell script; doubling an embedded single
+# quote is SQL's own standard escape for exactly this case.
+# From: Issue #1585.
+sra_sql_quote() {
+  local value="${1?sra_sql_quote: value argument is required}"
+  printf '%s' "${value//\'/\'\'}"
+}
+
+# What: bulk-reads every cached row for one package as TSV.
+# Why: one sqlite3 invocation per package, not per version -- a per-version
+# subprocess call would add cost of its own kind and defeat the point of
+# caching the per-version git/jq subprocess cost in the first place.
+# From: Issue #1585.
+sra_cache_read_package() {
+  local db_path="${1:?sra_cache_read_package: db path is required}"
+  local package="${2:?sra_cache_read_package: package is required}"
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  [[ -f "$db_path" ]] || return 1
+  sqlite3 -separator "$(printf '\t')" "$db_path" \
+    "SELECT version_id, digest, tags, resolution FROM version_cache WHERE package = '$(sra_sql_quote "$package")';"
+}
+
+# What: bulk-writes one package's updated cache rows in a single transaction.
+# Why: same one-call-per-package reasoning as the read side; rows_file is
+# pre-built TSV(version_id, digest, tags, resolution) fed on a real path,
+# not stdin, so the caller controls its own temp-file lifecycle.
+# From: Issue #1585.
+sra_cache_write_package() {
+  local db_path="${1:?sra_cache_write_package: db path is required}"
+  local package="${2:?sra_cache_write_package: package is required}"
+  local rows_file="${3:?sra_cache_write_package: rows file is required}"
+  local now version_id digest tags resolution sql_file
+  command -v sqlite3 >/dev/null 2>&1 || return 1
+  [[ -f "$rows_file" ]] || return 1
+
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  sql_file="$(mktemp)"
+  {
+    printf 'BEGIN TRANSACTION;\n'
+    while IFS=$'\t' read -r version_id digest tags resolution; do
+      [[ "$version_id" =~ ^[0-9]+$ ]] || continue
+      printf "INSERT OR REPLACE INTO version_cache (package, version_id, digest, tags, resolution, updated_at) VALUES ('%s', %s, '%s', '%s', '%s', '%s');\n" \
+        "$(sra_sql_quote "$package")" "$version_id" "$(sra_sql_quote "$digest")" "$(sra_sql_quote "$tags")" "$(sra_sql_quote "$resolution")" "$now"
+    done <"$rows_file"
+    printf 'COMMIT;\n'
+  } >"$sql_file"
+  if sqlite3 "$db_path" <"$sql_file"; then
+    rm -f -- "$sql_file"
+  else
+    rm -f -- "$sql_file"
+    return 1
+  fi
+}
+

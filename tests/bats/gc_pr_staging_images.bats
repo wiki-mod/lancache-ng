@@ -74,6 +74,51 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
+# gc_discover_org_container_packages (Issue #1585 v1.2 point 1)
+# ---------------------------------------------------------------------------
+
+# What: strips the repo-name prefix and returns only this org's own packages.
+# Why: an org can host packages for other repos too; only ${repo#*/}/* names
+# are this reaper's concern.
+# From: Issue #1585.
+@test "gc_discover_org_container_packages strips the repo prefix and ignores unrelated packages" {
+    gh() { printf '[{"name":"lancache-ng/proxy"},{"name":"lancache-ng/newsvc"},{"name":"some-other-repo/thing"}]\n'; }
+    export -f gh
+    run gc_discover_org_container_packages
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"proxy"* ]]
+    [[ "$output" == *"newsvc"* ]]
+    [[ "$output" != *"some-other-repo"* ]]
+    [[ "$output" != *"thing"* ]]
+}
+
+# What: a listing failure degrades to a warning and an empty result.
+# Why: this is an additive discovery layer -- a transient API/scope problem
+# must never fail the whole GC run, only skip the extra coverage this run.
+# From: Issue #1585.
+@test "gc_discover_org_container_packages degrades to empty output on a listing failure" {
+    gh() { echo "gh: HTTP 403: API rate limit exceeded" >&2; return 1; }
+    export -f gh
+    run --separate-stderr gc_discover_org_container_packages
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"::warning::"* ]]
+}
+
+# What: an empty/no-match listing also degrades to a warning, not an error.
+# Why: distinguishes "the API call itself failed" from "it succeeded but
+# found nothing relevant" -- both must be non-fatal for the same reason.
+# From: Issue #1585.
+@test "gc_discover_org_container_packages warns without failing when nothing matches the prefix" {
+    gh() { printf '[{"name":"some-other-repo/thing"}]\n'; }
+    export -f gh
+    run --separate-stderr gc_discover_org_container_packages
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+    [[ "$stderr" == *"::warning::"* ]]
+}
+
+# ---------------------------------------------------------------------------
 # gcps_manifest_looks_valid
 # ---------------------------------------------------------------------------
 

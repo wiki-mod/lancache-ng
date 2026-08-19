@@ -27,6 +27,15 @@ package_filter="${SRA_PACKAGE_FILTER:-}"
 version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
 audit_concurrency="${SRA_CONCURRENCY:-2}"
+# What: optional path to the v1.2 (issue #1585) incremental classification
+# cache; empty (the default) disables caching entirely -- every version is
+# always fully (re)classified, identical to pre-v1.2 behavior.
+# Why: opt-in via an unset-by-default env var keeps this strictly additive:
+# no caller that does not set SRA_CACHE_DB is affected by this feature at
+# all, and any cache failure (missing sqlite3, unreadable/corrupt db, a
+# cache miss) falls back to full classification rather than erroring.
+# From: Issue #1585.
+cache_db="${SRA_CACHE_DB:-}"
 per_page=100
 
 if [[ -n "$version_snapshot_file" && -z "$package_filter" ]]; then
@@ -78,6 +87,15 @@ if minimum_stable_releases="$(sra_read_minimum_stable_releases "$manifest")"; th
   :
 else
   echo "::error::Cannot read exactly one valid minimum_stable_releases value from $manifest." >&2
+  exit 1
+fi
+# What: reads the v1.2 (issue #1585) non-ordinary-version safety-buffer count.
+# Why: needed below for the inverted-protection buffer/would-delete ranking.
+# From: Issue #1585.
+if channel_buffer="$(sra_read_channel_buffer_versions "$manifest")"; then
+  :
+else
+  echo "::error::Cannot read exactly one valid channel_buffer_versions value from $manifest." >&2
   exit 1
 fi
 
@@ -218,10 +236,28 @@ audit_package() {
   local versions_file="$package_dir/versions.jsonl"
   local body_file="$package_dir/page.json"
   local page count url package_path
+  local cache_rows_out
 
   mkdir -p "$package_dir"
   : >"$versions_file"
   package_path="${repository_name}%2F${package}"
+
+  # What: loads this package's cached resolutions (issue #1585 v1.2 point 4).
+  # Why: a fresh row set every run means a cache miss (no cache_db, no
+  # sqlite3, first run, or a rotated-key restore-keys fallback with no
+  # matching data) degrades to a plain empty array -- every version below
+  # then simply takes the existing full-classification path unchanged.
+  # From: Issue #1585.
+  declare -A cache_hits=()
+  cache_rows_out="$package_dir/cache-rows-out.tsv"
+  : >"$cache_rows_out"
+  if [[ -n "$cache_db" ]]; then
+    local cache_line cache_version_id cache_digest cache_tags cache_resolution
+    while IFS=$'\t' read -r cache_version_id cache_digest cache_tags cache_resolution; do
+      [[ "$cache_version_id" =~ ^[0-9]+$ ]] || continue
+      cache_hits["$cache_version_id"]="${cache_digest}"$'\t'"${cache_tags}"$'\t'"${cache_resolution}"
+    done < <(sra_cache_read_package "$cache_db" "$package" 2>/dev/null || true)
+  fi
 
   for (( page=1; page<=max_pages_per_package; page++ )); do
     url="https://api.github.com/orgs/${owner}/packages/container/${package_path}/versions?per_page=${per_page}&page=${page}"
@@ -298,9 +334,19 @@ audit_package() {
 
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
+  # What: v1.2 (issue #1585) buffer pool for a rootless, non-channel-matched
+  # version -- ranked by build date instead of git history (it has none).
+  # Why: replaces the old unconditional "non-ordinary-version" permanent
+  # protect; only the newest channel_buffer_versions such versions per
+  # package stay protected, the rest become would-delete candidates.
+  # From: Issue #1585.
+  local other_tag_candidates="$package_dir/other-tag-candidates.tsv"
+  : >"$other_tag_candidates"
   local version_json id digest tags built facts root_count child_count other_count
   local encoded_tags encoded_tag tag kind prefix full_commit rank min_rank
   local root_resolution_failed reason other_tags managed_root_count unmanaged_root_count
+  local channel_matched sort_key
+  local cache_resolution cache_digest cache_tags
   local missing_build_date_count=0
   local direct_would_delete_count=0
   declare -A seen_id_digest=()
@@ -375,20 +421,39 @@ audit_package() {
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
       continue
     fi
-    # What: classifies a rootless version by its specific channel/release.
-    # Why: no sha-<commit> alias means no history root to rank by, so it
-    # always stays protect; the other_count==0 skip avoids a no-op scan.
-    # From: Issue #1095 | PR #1586
+    # What: classifies a rootless version -- a matched protected channel/
+    # release stays permanently protected; everything else (including a
+    # truly untagged version) becomes a channel_buffer_versions-ranked
+    # candidate below instead of an unconditional permanent protect.
+    # Why: v1.2 (issue #1585) inverts the old default: "no recognized
+    # sha-<commit> root" alone no longer justifies protecting forever --
+    # only an explicit nightly/latest/stable-release match does. Everything
+    # else competes for a small buffer, then becomes a real would-delete
+    # candidate once that buffer is exhausted, regardless of tag shape.
+    # From: Issue #1585.
     if (( root_count == 0 )); then
+      channel_matched=0
       if (( other_count > 0 )); then
-        reason="$(sra_extra_tag_protect_reason "$tags" "$supported_releases" "non-ordinary-version")" || {
+        other_tags="$(sra_other_tags_from_csv "$tags")" || {
           echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
           return 1
         }
-      else
-        reason="non-ordinary-version"
+        if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
+          channel_matched=1
+        fi
       fi
-      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
+      if (( channel_matched == 1 )); then
+        sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
+      else
+        # What: buffers this candidate for a build-date-ranked pass below.
+        # Why: an "unknown" build date sorts first (oldest) on purpose, so a
+        # missing date is treated conservatively as an early would-delete
+        # candidate rather than accidentally winning the newest-first buffer.
+        # From: Issue #1585.
+        sort_key="$built"
+        [[ "$sort_key" == "unknown" ]] && sort_key="0000-00-00T00:00:00Z"
+        printf '%s\t%s\t%s\t%s\t%s\n' "$sort_key" "$id" "$digest" "$tags" "$built" >>"$other_tag_candidates"
+      fi
       continue
     fi
     if (( child_count > 0 )); then
@@ -408,6 +473,55 @@ audit_package() {
         sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
         continue
       fi
+    fi
+
+    # What: reuses a cached git-history resolution instead of recomputing it.
+    # Why: issue #1585 v1.2 point 4 -- the loop below is the actual expensive
+    # part this cache exists for (one `git rev-parse`/`merge-base` subprocess
+    # pair per root tag, every run); a hit requires an EXACT digest+tags
+    # match, so any real change (retag, new digest) always falls through to
+    # full recomputation below rather than trusting a stale cached rank.
+    # From: Issue #1585.
+    cache_resolution=""
+    if [[ -n "${cache_hits[$id]:-}" ]]; then
+      IFS=$'\t' read -r cache_digest cache_tags cache_resolution <<<"${cache_hits[$id]}"
+      if [[ "$cache_digest" != "$digest" || "$cache_tags" != "$tags" ]]; then
+        cache_resolution=""
+      fi
+    fi
+
+    if [[ -n "$cache_resolution" ]]; then
+      case "$cache_resolution" in
+        resolution-unknown)
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-resolution-unknown"
+          continue
+          ;;
+        outside-managed-history)
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "outside-managed-history" "outside-managed-history" "would-delete" "sha-not-on-managed-history"
+          direct_would_delete_count=$((direct_would_delete_count + 1))
+          continue
+          ;;
+        mixed-managed-unmanaged)
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "mixed-managed-and-unmanaged-root-tags"
+          continue
+          ;;
+        rank-unknown)
+          sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-history-rank-unknown"
+          continue
+          ;;
+        rank:*)
+          min_rank="${cache_resolution#rank:}"
+          if [[ "$min_rank" =~ ^[0-9]+$ ]]; then
+            printf '%s\t%s\t%s\t%s\t%s\n' "$min_rank" "$id" "$digest" "$tags" "$built" >>"$root_candidates"
+            printf '%s\t%s\t%s\t%s\n' "$id" "$digest" "$tags" "$cache_resolution" >>"$cache_rows_out"
+            continue
+          fi
+          # What: falls through to full recomputation on a malformed cache value.
+          # Why: fail-safe -- a corrupt/unexpected cached string must never
+          # silently skip real classification (AG-INT-002).
+          # From: Issue #1585.
+          ;;
+      esac
     fi
 
     if encoded_tags="$(jq -r '.metadata.container.tags[] | @base64' <<<"$version_json")"; then
@@ -451,27 +565,46 @@ audit_package() {
 
     if [[ "$root_resolution_failed" == "true" ]]; then
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-resolution-unknown"
+      printf '%s\t%s\t%s\t%s\n' "$id" "$digest" "$tags" "resolution-unknown" >>"$cache_rows_out"
       continue
     fi
 
     if (( managed_root_count == 0 && unmanaged_root_count > 0 )); then
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "outside-managed-history" "outside-managed-history" "would-delete" "sha-not-on-managed-history"
       direct_would_delete_count=$((direct_would_delete_count + 1))
+      printf '%s\t%s\t%s\t%s\n' "$id" "$digest" "$tags" "outside-managed-history" >>"$cache_rows_out"
       continue
     fi
 
     if (( unmanaged_root_count > 0 )); then
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "mixed-managed-and-unmanaged-root-tags"
+      printf '%s\t%s\t%s\t%s\n' "$id" "$digest" "$tags" "mixed-managed-unmanaged" >>"$cache_rows_out"
       continue
     fi
 
     if (( min_rank == 0 )); then
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "unknown" "protected" "protect" "sha-history-rank-unknown"
+      printf '%s\t%s\t%s\t%s\n' "$id" "$digest" "$tags" "rank-unknown" >>"$cache_rows_out"
       continue
     fi
 
     printf '%s\t%s\t%s\t%s\t%s\n' "$min_rank" "$id" "$digest" "$tags" "$built" >>"$root_candidates"
+    printf '%s\t%s\t%s\trank:%s\n' "$id" "$digest" "$tags" "$min_rank" >>"$cache_rows_out"
   done <"$versions_file"
+
+  # What: persists this run's resolutions back to the cache database.
+  # Why: a no-op when cache_db is unset, sqlite3 is unavailable, or nothing
+  # was written this run (e.g. every version hit the cache already);
+  # sra_cache_write_package's own command -v/[[ -f ]] guards make this safe
+  # to call unconditionally in either case.
+  # From: Issue #1585.
+  if [[ -n "$cache_db" && -s "$cache_rows_out" ]]; then
+    if sra_cache_init "$cache_db" && sra_cache_write_package "$cache_db" "$package" "$cache_rows_out"; then
+      :
+    else
+      echo "::warning::Could not persist the v1.2 classification cache for ${repository_name}/${package}; the next run will fully reclassify it instead of using an incremental cache." >&2
+    fi
+  fi
 
   local sorted_candidates="$package_dir/root-candidates.sorted.tsv"
   if sort -n -k1,1 "$root_candidates" >"$sorted_candidates"; then
@@ -485,6 +618,7 @@ audit_package() {
   if [[ "$class" == "legacy" ]]; then
     package_retention_keep=0
   fi
+  local budget_decision_line
   while IFS=$'\t' read -r rank id digest tags built; do
     [[ -n "$id" ]] || continue
     (( legacy_position += 1 ))
@@ -492,23 +626,61 @@ audit_package() {
     # Why: the destructive GC consumes these exact identities after its
     # independent age, tag, PR-state, graph, and live-revalidation gates.
     # From: Issue #1095.
-    if (( legacy_position <= package_retention_keep )); then
-      budget="within-${package_retention_keep}"
-      decision="protect"
+    if budget_decision_line="$(sra_budget_decision "$legacy_position" "$package_retention_keep")"; then
+      :
+    else
+      echo "::error::Cannot classify retention-budget position for package version $id in ${repository_name}/${package}." >&2
+      return 1
+    fi
+    IFS=$'\t' read -r decision budget <<<"$budget_decision_line"
+    if [[ "$decision" == "protect" ]]; then
       reason="ordinary-root-within-retention-budget"
     else
-      budget="beyond-${package_retention_keep}"
-      decision="would-delete"
       reason="ordinary-root-beyond-retention-budget"
       (( would_delete_count += 1 ))
     fi
     sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_position" "$budget" "$decision" "$reason"
   done <"$sorted_candidates"
 
-  printf 'SUMMARY\tclass=%s\tpackage=%s\tlegacy_roots=%s\tretention_keep=%s\twould_delete_count=%s\tmissing_build_date_count=%s\tdecision=protect-only\n' \
-    "$class" "$package" "$legacy_position" "$package_retention_keep" "$would_delete_count" "$missing_build_date_count"
+  # What: ranks the v1.2 (issue #1585) rootless/non-channel-matched
+  # candidate pool by build date, newest first (no git-history root exists
+  # to rank these by, unlike the ordinary sha-* roots above).
+  # Why: replaces the old permanent "non-ordinary-version" protect with a
+  # real, bounded buffer -- mirrors root_candidates' own plain sort-to-file
+  # pattern immediately above (a direct redirect, not a pipe, so AG-VAL-032
+  # does not apply here).
+  # From: Issue #1585.
+  local other_tag_sorted="$package_dir/other-tag-candidates.sorted.tsv"
+  if sort -t $'\t' -k1,1r "$other_tag_candidates" >"$other_tag_sorted"; then
+    :
+  else
+    echo "::error::Cannot sort non-ordinary-version candidates for ${repository_name}/${package}." >&2
+    return 1
+  fi
+  local other_tag_position=0 other_tag_decision other_tag_budget other_tag_reason
+  while IFS=$'\t' read -r rank id digest tags built; do
+    [[ -n "$id" ]] || continue
+    (( other_tag_position += 1 ))
+    if budget_decision_line="$(sra_budget_decision "$other_tag_position" "$channel_buffer")"; then
+      :
+    else
+      echo "::error::Cannot classify non-ordinary-version buffer position for package version $id in ${repository_name}/${package}." >&2
+      return 1
+    fi
+    IFS=$'\t' read -r other_tag_decision other_tag_budget <<<"$budget_decision_line"
+    if [[ "$other_tag_decision" == "protect" ]]; then
+      other_tag_reason="non-ordinary-version-within-buffer"
+    else
+      other_tag_reason="non-ordinary-version-beyond-buffer"
+      (( would_delete_count += 1 ))
+    fi
+    sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$other_tag_position" "$other_tag_budget" "$other_tag_decision" "$other_tag_reason"
+  done <"$other_tag_sorted"
+
+  printf 'SUMMARY\tclass=%s\tpackage=%s\tlegacy_roots=%s\tretention_keep=%s\tchannel_buffer=%s\tnon_ordinary_versions=%s\twould_delete_count=%s\tmissing_build_date_count=%s\tdecision=protect-only\n' \
+    "$class" "$package" "$legacy_position" "$package_retention_keep" "$channel_buffer" "$other_tag_position" "$would_delete_count" "$missing_build_date_count"
   if (( would_delete_count > 0 )); then
-    echo "::notice::${repository_name}/${package}: $would_delete_count ordinary root(s) past the storage-retention budget of $package_retention_keep; this read-only audit performed no deletion." >&2
+    echo "::notice::${repository_name}/${package}: $would_delete_count version(s) past their storage-retention budget (ordinary sha-* roots beyond $package_retention_keep, and/or non-ordinary-version candidates beyond the $channel_buffer-version buffer); this read-only audit performed no deletion." >&2
   fi
 }
 

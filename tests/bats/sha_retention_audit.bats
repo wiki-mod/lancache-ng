@@ -59,6 +59,16 @@ EOF
   [ "$output" = "3" ]
 }
 
+# What: reads the manifest's single channel_buffer_versions value.
+# Why: the v1.2 (issue #1585) per-package buffer for a non-ordinary-version
+# candidate that matches no protected channel.
+# From: Issue #1585.
+@test "retention manifest defines exactly five channel buffer versions" {
+  run sra_read_channel_buffer_versions "$repo_root/release/stack-images.yml"
+  [ "$status" -eq 0 ]
+  [ "$output" = "5" ]
+}
+
 # What: retention keep and minimum stable releases parse independently.
 # Why: both share _sra_read_manifest_positive_integer -- the two keys'
 # values must never bleed into each other.
@@ -657,24 +667,122 @@ EOF
   [ "$status" -ne 0 ]
 }
 
-# What: extra tag protect reason returns the specific channel when one matches.
-# Why: the caller's protect reason must name the real matching channel, not
-# a generic fallback, whenever one genuinely applies.
-# From: Issue #1585 | PR #1586
-@test "extra tag protect reason returns the specific channel when one matches" {
-  run sra_extra_tag_protect_reason "sha-abcdef1,nightly" "" "non-ordinary-version"
+# What: budget decision protects a position at or within the budget.
+# Why: shared arithmetic used by both the ordinary-root and the v1.2
+# non-ordinary-version buffer loops; wrong-direction off-by-one here would
+# silently over- or under-protect every package audited.
+# From: Issue #1585.
+@test "budget decision protects within budget" {
+  run sra_budget_decision 5 5
   [ "$status" -eq 0 ]
-  [ "$output" = "nightly-channel-protected" ]
+  [ "$output" = $'protect\twithin-5' ]
 }
 
-# What: extra tag protect reason falls back to the caller's generic reason.
-# Why: this is only correct for the root_count==0 branch, which has no root
-# tag to rank by regardless of whether its extra tag is recognized.
-# From: Issue #1585 | PR #1586
-@test "extra tag protect reason falls back to the caller's generic reason" {
-  run sra_extra_tag_protect_reason "pr-1501-staging" "" "non-ordinary-version"
+# What: budget decision marks a position beyond the budget would-delete.
+# Why: confirms the off-by-one boundary the "within" case above establishes.
+# From: Issue #1585.
+@test "budget decision marks beyond-budget positions would-delete" {
+  run sra_budget_decision 6 5
   [ "$status" -eq 0 ]
-  [ "$output" = "non-ordinary-version" ]
+  [ "$output" = $'would-delete\tbeyond-5' ]
+}
+
+# What: budget decision fails closed on a non-numeric position or budget.
+# Why: a caller passing a malformed rank must not silently default to a
+# spuriously-protective or spuriously-deletable decision.
+# From: Issue #1585.
+@test "budget decision fails closed on non-numeric input" {
+  run sra_budget_decision "abc" 5
+  [ "$status" -ne 0 ]
+  run sra_budget_decision 5 "abc"
+  [ "$status" -ne 0 ]
+}
+
+# ---------------------------------------------------------------------------
+# Incremental classification cache (Issue #1585 v1.2 point 4)
+# ---------------------------------------------------------------------------
+
+# What: the schema declares the cache's primary key and required columns.
+# Why: a pure string check -- catches an accidental column rename/drop
+# without needing a live sqlite3 invocation.
+# From: Issue #1585.
+@test "cache schema declares the version_cache table with its primary key" {
+  run sra_cache_schema_sql
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"CREATE TABLE IF NOT EXISTS version_cache"* ]]
+  [[ "$output" == *"PRIMARY KEY (package, version_id)"* ]]
+}
+
+# What: doubles an embedded single quote, SQL's own escape for that literal.
+# Why: every cache write builds its statement string this way -- a wrong
+# escape here is a SQL-injection-shaped correctness bug, not just cosmetic.
+# From: Issue #1585.
+@test "sql quote doubles an embedded single quote" {
+  run sra_sql_quote "pr-1's-sha-abc"
+  [ "$status" -eq 0 ]
+  [ "$output" = "pr-1''s-sha-abc" ]
+}
+
+# What: init/write/read round-trips a real row through a real sqlite3 db.
+# Why: the pure-string/escaping tests above cannot catch a real SQL syntax
+# error; only an actual sqlite3 invocation can. Skips (not fails) when
+# sqlite3 is unavailable -- expected on a host outside the pinned
+# build-tools container (AG-VAL-016), where this dependency was added.
+# From: Issue #1585.
+@test "cache init/write/read round-trips a real row through sqlite3" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  digest="sha256:$(printf 'a%.0s' {1..64})"
+  printf '42\t%s\tsha-abc1234\trank:7\n' "$digest" >"$rows_file"
+
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  [ "$status" -eq 0 ]
+  run sra_cache_read_package "$db_path" "proxy"
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"42"* ]]
+  [[ "$output" == *"$digest"* ]]
+  [[ "$output" == *"sha-abc1234"* ]]
+  [[ "$output" == *"rank:7"* ]]
+}
+
+# What: a fresh, never-initialized database path is a clean read miss.
+# Why: this is the exact "cache miss falls back to a full scan" case issue
+# #1585's plan calls its own required self-verification -- must degrade,
+# never error the caller.
+# From: Issue #1585.
+@test "cache read on a nonexistent database fails closed without erroring the caller" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  run sra_cache_read_package "$tmp_dir/does-not-exist.db" "proxy"
+  [ "$status" -ne 0 ]
+}
+
+# What: re-writing the same (package, version_id) replaces, not duplicates.
+# Why: INSERT OR REPLACE is load-bearing -- a version reclassified after a
+# retag must overwrite its stale row, never accumulate a second one.
+# From: Issue #1585.
+@test "cache write replaces an existing row for the same package and version id" {
+  command -v sqlite3 >/dev/null 2>&1 || skip "sqlite3 not available on this host"
+  db_path="$tmp_dir/cache.db"
+  rows_file="$tmp_dir/rows.tsv"
+  run sra_cache_init "$db_path"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\told-tag\trank:9\n' "$(printf 'a%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  [ "$status" -eq 0 ]
+
+  printf '42\tsha256:%s\tnew-tag\trank:3\n' "$(printf 'b%.0s' {1..64})" >"$rows_file"
+  run sra_cache_write_package "$db_path" "proxy" "$rows_file"
+  [ "$status" -eq 0 ]
+
+  run sra_cache_read_package "$db_path" "proxy"
+  [ "$status" -eq 0 ]
+  [ "$(wc -l <<<"$output")" -eq 1 ]
+  [[ "$output" == *"new-tag"* ]]
+  [[ "$output" != *"old-tag"* ]]
 }
 
 # What: rollback anchors must precede tag/history classification for every class.

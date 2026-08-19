@@ -59,12 +59,14 @@ gc_concurrency="${GC_CONCURRENCY:-1}"
 # From: Issue #1095.
 gc_dry_run="${GC_DRY_RUN:-false}"
 
-# What: 24-hour safety margin, applied to every deletion category alike.
+# What: 7-day safety margin, applied to every deletion category alike.
 # Why: a version deletable by tag/reference state alone can still be a
 # build/promotion/backfill still in flight; age is simpler than tracking
-# every concurrent producer.
-# From: Issue #1095 | PR #1443
-min_age_seconds="${GC_MIN_AGE_SECONDS:-86400}"
+# every concurrent producer. Raised from the original 24h default to 7 days
+# (604800s) per issue #1585's v1.2 plan -- 24h was judged too tight once
+# active deletion (not just dry-run classification) is really running.
+# From: Issue #1095 | PR #1443 | Issue #1585
+min_age_seconds="${GC_MIN_AGE_SECONDS:-604800}"
 
 now_epoch="$(date -u +%s)"
 
@@ -189,6 +191,39 @@ gc_resolve_retention_history_refs() {
   done
   [[ -n "$normalized" ]] || return 1
   printf '%s\n' "$normalized"
+}
+
+# What: lists every real container package under this org via the live
+# GHCR API, as a best-effort addition to the static services array/manifest.
+# Why: v1.2 (issue #1585) -- a package this repo actually publishes but
+# that nobody added to the static services array or to the manifest's
+# metadata/legacy sections was previously invisible to this reaper with no
+# error or warning at all. A failure here (missing packages-listing scope,
+# transient API error, a test double with no matching mock) degrades to a
+# warning and an empty result rather than failing the whole run -- the
+# static services array plus the manifest's metadata/legacy sections
+# remain the always-present baseline this is additive to, never the sole
+# source of truth, so a discovery outage cannot regress today's coverage.
+# From: Issue #1585.
+gc_discover_org_container_packages() {
+  local package_prefix="${repo#*/}/" listing_json name
+  local -a discovered=()
+
+  if ! listing_json="$(gh api --paginate "orgs/${org}/packages?package_type=container&per_page=100" 2>&1)"; then
+    echo "::warning::Dynamic org package discovery could not list container packages for org ${org} (falling back to the configured services array/manifest only): $listing_json"
+    return 0
+  fi
+  while IFS= read -r name; do
+    [[ -n "$name" ]] || continue
+    [[ "$name" == "${package_prefix}"* ]] || continue
+    discovered+=("${name#"$package_prefix"}")
+  done < <(printf '%s' "$listing_json" | jq -r '.[]?.name // empty' 2>/dev/null)
+
+  if (( ${#discovered[@]} == 0 )); then
+    echo "::warning::Dynamic org package discovery for ${org} found no ${package_prefix}* container packages (falling back to the configured services array/manifest only) -- this may be a real empty org listing or a read:packages scope/API problem; the configured baseline still runs either way."
+    return 0
+  fi
+  printf '%s\n' "${discovered[@]}"
 }
 
 # What: builds one package's exact would-delete map with the existing audit.
@@ -983,6 +1018,25 @@ main() {
     [[ -n "$target_class" && -n "$target_name" ]] || continue
     package_targets+=("$target_name")
   done <<<"$target_inventory"
+
+  # What: adds any live GHCR package not already covered by the static
+  # services array or the manifest's metadata/legacy sections.
+  # Why: v1.2 (issue #1585) point 1 -- dynamic discovery must never remove
+  # or replace the existing baseline, only extend it, so a discovery outage
+  # (see gc_discover_org_container_packages's own fallback) cannot regress
+  # today's coverage.
+  # From: Issue #1585.
+  declare -A package_targets_seen=()
+  for target_name in "${package_targets[@]}"; do
+    package_targets_seen["$target_name"]=1
+  done
+  local discovered_name
+  while IFS= read -r discovered_name; do
+    [[ -n "$discovered_name" ]] || continue
+    [[ -z "${package_targets_seen[$discovered_name]:-}" ]] || continue
+    package_targets_seen["$discovered_name"]=1
+    package_targets+=("$discovered_name")
+  done < <(gc_discover_org_container_packages)
 
   local package_count quota_base quota_remainder quota index
   local -a package_quotas=()

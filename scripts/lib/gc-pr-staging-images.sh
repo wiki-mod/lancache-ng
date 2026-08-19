@@ -73,8 +73,8 @@ gcps_manifest_looks_valid() {
 #
 # What: converts a GHCR `.created_at` timestamp to Unix epoch seconds.
 # Why: a parse failure must be treated as "too young to delete" (fail
-# closed), never as satisfying the 24h safety margin every deletion
-# category requires.
+# closed), never as satisfying the configurable safety margin every
+# deletion category requires.
 # From: Issue #1095 | PR #1586
 gcps_created_at_to_epoch() {
   local created_at="$1"
