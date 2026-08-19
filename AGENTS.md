@@ -657,10 +657,30 @@ by configuring which DNS server IP they point to:
   SSH against Linux self-hosted runners rather than a local Docker Desktop install (Rust
   builds and full-stack `docker compose up` runs are not exercised on the Windows
   authoring host — see AG-IPV6-001 for one concrete Docker-Desktop-on-Windows limitation).
-- **[AG-KD-009]** See the Rule Enforcement Matrix entry above for the current binding
-  requirement. Original Debian-only rationale and blocker-tool list (`distcc`/`distcc-pump`,
-  `isc-dhcp-client`, `tcpdump`, `bind9-dnsutils`, etc.): issue #815. Active re-evaluation against
-  Alpine 3.24, verifying or refuting that tool list: issue #1095.
+- **[AG-KD-009]** **`build-tools` currently stays Debian, with `trixie-backports` pinned in for
+  currency; its base OS is under active re-evaluation (issue #1095)**: #815's own research
+  explicitly excluded `tools/build-tools` from the project's Alpine-migration push (unlike
+  `dhcp`, `dhcp-proxy`, `dns`, `proxy`, `ntp`, and `ui`'s runtime stage, all evaluated or migrated
+  separately), on the grounds that rebasing `build-tools` itself onto Alpine/musl would hit its
+  own full CI/dev toolchain (`distcc`/`distcc-pump` as a Debian `.deb`, `isc-dhcp-client`,
+  `tcpdump`, `bind9-dnsutils`, `cmake`/`clang`/`lld`, `python3` for `distcc-pump`'s include-server)
+  — largely glibc/`apt`-idiomatic tooling with no clean musl equivalent, and no attack-surface
+  argument in this image's favor the way there is for a network-facing runtime service. Issue
+  #1095's evaluation must verify or refute this specific tool list against Alpine's own package
+  availability, not just assume it still holds. `trixie-backports` (the same project-wide pin
+  already applied in every Debian-based service's Dockerfile) is pinned into this image too, so
+  its tools stay reasonably current without needing a base-OS change in the meantime. If Debian's
+  package currency ever becomes a real blocker for this image specifically, Ubuntu (or another
+  actively-current Debian derivative) is a fallback to evaluate — #815's `services/proxy` research
+  already piloted Ubuntu 26.04 ("resolute") for a different service and found its
+  `resolute-backports` channel has no `Suite`/`Codename` mismatch (unlike Debian's own
+  `trixie-backports` gotcha, see AG-KD-007's sibling Dockerfile comments), a real,
+  already-verified mechanism this image could reuse if the maintainer decides to pursue it. This
+  is separate from the musl cross-compilation *target* already added to this image for
+  `services/ui`/`services/dns`'s Rust builder stages (#815, landed via PR #1374) — that does not
+  change this image's own base OS. See the Rule Enforcement Matrix entry above for the current
+  binding requirement (any base-OS/image-tag change needs full verification and maintainer
+  approval, regardless of which distribution issue #1095 concludes with).
 
 ## CDN Domains, First-time Setup, IPv6
 
