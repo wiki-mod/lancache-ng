@@ -303,7 +303,7 @@ teardown() {
 
 # What: a 4th-arg result variable never leaks state to stdout, even on a repeat call.
 # Why: production always uses the result variable; a raw OPEN/CLOSED stdout
-# line was an unintended duplicate output channel (Issue #1557).
+# line was an unintended duplicate output channel.
 # From: Issue #1585 | PR #1586
 @test "gcps_pr_lookup_state populates a 4th-arg result variable without leaking state to stdout" {
     gh() { printf '{"state":"open"}\n'; }
@@ -1122,7 +1122,7 @@ VERSIONS_JSON
 
 
 # ---------------------------------------------------------------------------
-# Issue #1585 / PR #1586 live-GC regressions
+# Live-GC regression tests
 # ---------------------------------------------------------------------------
 
 # What: two concurrent lookups for the same PR share one live API call.
