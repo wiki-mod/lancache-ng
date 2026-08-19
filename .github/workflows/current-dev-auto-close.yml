@@ -35,7 +35,7 @@
 # What: Only the PR body's exact `## Linked Issues` section is scanned for
 # closing keywords; text elsewhere in the body has zero effect.
 # Why: Free-form prose elsewhere cannot be reliably told apart from a real
-# closing instruction (confirmed false-closes across multiple PRs, including PR #1443).
+# closing instruction (confirmed false-close: PR #1443).
 # From: Issue #1496
 name: current_dev Auto-Close Linked Issues
 
