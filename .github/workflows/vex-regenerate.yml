@@ -1,0 +1,428 @@
+
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Regenerates the OpenVEX document (vex.openvex.json, OSPS-VM-04.02) on the
+# dedicated `CI-Automation/vex` orphan branch whenever the source of truth
+# (.trivyignore.yaml) or the generator itself changes on current_dev.
+#
+# WHY THIS EXISTS (Issue #1095 F-22): vex.openvex.json used to be committed
+# directly to current_dev alongside .trivyignore.yaml, kept in sync only by a
+# human/agent remembering to re-run scripts/untracked/generate-vex.sh in the
+# same commit, and enforced after the fact by a drift guard
+# (scripts/tracked/check-vex-drift.sh). That model produced two real drift
+# incidents on the same branch within one PR (commit 9b31ee5c did the
+# companion regen correctly, commit d92d5077 a few commits later did not --
+# see AGENTS.md's AG-WF-025 and PR #1620's fix). Removing the committed copy
+# from current_dev removes the failure class itself: there is no second
+# copy left to drift. This workflow is what keeps a fresh copy available
+# afterward, on its own branch, entirely mechanically.
+#
+# WHY A SEPARATE WORKFLOW FILE, NOT A JOB IN build-push.yml: build-push.yml
+# is already within a few hundred lines of AG-CI-021's hard line-count
+# ceiling and is independently flagged in issue #1095 as structurally
+# overloaded. This is a new, independent responsibility (push-triggered,
+# not PR-gated; writes to an unrelated branch; no shared job dependencies
+# with anything in build-push.yml) -- exactly the case for a new file per
+# AG-CODE-013's decision tree, not an addition to an existing one.
+#
+# WHY NON-BLOCKING ON FAILURE (maintainer decision, 2026-08-20, Issue #1095):
+# vex.openvex.json is a best-effort supply-chain artifact with no real-time
+# consumer in this repo (verified: neither `vexctl` nor `trivy --vex` is
+# actually invoked anywhere in this repo outside generate-vex.sh's own
+# explanatory header comment). This workflow is not a required branch-
+# protection check and nobody is actively reviewing a `push` event the way a
+# PR author reviews a PR check, so a hard-failed run here would just sit red
+# with no one looking at it. A failure here is real and must stay visible --
+# but that visibility is intentionally provided by an `::error::` workflow
+# annotation (shown prominently on the run's summary page regardless of the
+# job's own exit code) plus a durable, self-labeled GitHub issue, not by the
+# job's own pass/fail status. See "Regenerate and publish to CI-Automation/vex"
+# below for the documented-exception details (AGENTS.md AG-DOC-011 format,
+# also referenced in this change's own PR body).
+#
+# AG-CI-012 note: this workflow's actual `push`-triggered execution cannot be
+# proven from within the PR that introduces it -- a `push`-triggered workflow
+# only ever runs from the copy of the file already on the branch the push
+# landed on, so the very first real trigger can only happen after this file
+# merges to current_dev. The `workflow_dispatch` input below lets the
+# generate/diff/commit/push logic itself be exercised for real ahead of that,
+# but it does not prove the automatic path-filtered `push` trigger itself
+# fires correctly -- see this change's PR body Validation section.
+name: VEX Document Regeneration
+
+on:
+  push:
+    branches:
+      - current_dev
+    paths:
+      - ".trivyignore.yaml"
+      - "scripts/untracked/generate-vex.sh"
+      - ".github/workflows/vex-regenerate.yml"
+  # Manual escape hatch, same rationale as nightly-refresh.yml's own
+  # workflow_dispatch: lets an operator force a regeneration (e.g. to prove
+  # the generate/commit/push logic works ahead of the first real `push`
+  # trigger, or to recover after a fix without waiting for the next
+  # .trivyignore.yaml edit) without it counting as proof of the `push` path
+  # itself (AG-CI-012, see the header comment above).
+  workflow_dispatch: {}
+
+# Scoped to exactly what this job writes: the CI-Automation/vex branch
+# (contents) and the vex-generator-broken tracking issue (issues). No
+# package/registry/actions permissions needed.
+permissions:
+  contents: write
+  issues: write
+
+concurrency:
+  # Serializes regeneration runs against each other (two overlapping
+  # .trivyignore.yaml pushes should not race two commits onto
+  # CI-Automation/vex); does not need to be per-ref since this workflow only
+  # ever triggers off current_dev.
+  group: vex-regenerate
+  cancel-in-progress: false
+
+jobs:
+  regenerate-vex:
+    name: regenerate vex.openvex.json on CI-Automation/vex
+    runs-on: [self-hosted, linux, lancache, lancache-light]
+    # Real expected runtime: a single script run plus a small git push, low
+    # tens of seconds. Generous headroom over that, same reasoning as
+    # nightly-refresh.yml's own timeout (AG-CI-016).
+    timeout-minutes: 15
+    env:
+      TRACKING_LABEL: vex-generator-broken
+    steps:
+      - name: Checkout current_dev
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      # Mirrors build-tools-smoke.yml's identically-named step: resolves the
+      # published build-tools image without a local-build fallback (this
+      # light-tier job must stay pull-only, AG-CI-002/AG-VAL-016).
+      - name: Set up Docker Buildx for manifest inspection
+        id: buildx
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
+
+      - name: Select published build-tools image
+        id: select-image
+        env:
+          GHCR_RETRY_USERNAME: ${{ github.actor }}
+          GHCR_RETRY_PASSWORD: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          image="$(BUILD_TOOLS_REQUIRE_PUBLISHED=true bash scripts/untracked/select-build-tools-image.sh)"
+          case "$image" in
+            *@sha256:*)
+              ;;
+            *)
+              echo "::error::Expected a digest-qualified build-tools image from the published build-tools selector, got '$image'."
+              exit 1
+              ;;
+          esac
+          printf 'BUILD_TOOLS_IMAGE=%s\n' "$image" >> "$GITHUB_ENV"
+
+      # Documented Exception (AGENTS.md AG-DOC-011 format):
+      # - Scope: only this job's generate/commit/push logic below. Does not
+      #   apply to the PR-time generator smoke test
+      #   (scripts/tracked/check-vex-drift.sh, wired into validate-compose in
+      #   build-push.yml), which stays a normal blocking PR check -- a PR
+      #   author is actively editing the affected files there and an
+      #   immediate red X is actionable and scoped to that one PR.
+      # - Reason: maintainer decision (Issue #1095, 2026-08-20): this is a
+      #   best-effort, no-real-time-consumer artifact regenerated on an
+      #   unreviewed `push` to current_dev, not a PR; a hard-failed workflow
+      #   run here has no one actively watching it and blocks nothing (this
+      #   workflow is not a branch-protection required check), so treating it
+      #   as a hard CI failure is disproportionate to its actual role.
+      # - Tracking: a real failure still produces an `::error::` annotation
+      #   (visible on the run summary regardless of exit code) and opens/
+      #   reuses a `vex-generator-broken`-labeled issue naming the failing
+      #   step and commit -- never silently discarded (AG-INT-002). The next
+      #   successful run auto-closes that issue.
+      # - Validation: this step's own exit code is intentionally not what
+      #   signals failure to a human -- see AG-INT-002 note above; the issue
+      #   and the annotation are the durable signal instead.
+      # - Non-Expansion: this exception is specific to this one job; it does
+      #   not generalize to any other workflow or check in this repository.
+      - name: Regenerate and publish to CI-Automation/vex
+        id: regen
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VEX_BRANCH: CI-Automation/vex
+          REPO: ${{ github.repository }}
+          TRIGGER_SHA: ${{ github.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -uo pipefail
+          # This step intentionally does not run under `set -e`: a real
+          # failure anywhere below is handled explicitly (issue opened,
+          # ::error:: emitted, status output recorded) rather than aborting
+          # the script -- see the Documented Exception comment above this
+          # step for why the step itself must still end 0.
+          status="success"
+          fail_detail=""
+
+          fail() {
+            status="failure"
+            fail_detail="$1"
+            echo "::error::$1"
+          }
+
+          # --- Step 1: regenerate against the checked-out current_dev tip ---
+          fresh_json="$(docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/untracked/generate-vex.sh)"
+          if [ -z "$fresh_json" ] || ! jq empty <<<"$fresh_json" 2>/dev/null; then
+            fail "scripts/untracked/generate-vex.sh produced invalid or empty output for the current_dev tip ${TRIGGER_SHA}."
+          fi
+
+          if [ "$status" = "success" ]; then
+            # --- Step 2: fetch (or self-bootstrap) CI-Automation/vex ---
+            tmp_dir="$(mktemp -d)"
+            cp "$GITHUB_WORKSPACE/scripts/untracked/generate-vex.sh" "$tmp_dir/generate-vex.sh.snapshot" 2>/dev/null || true
+            printf '%s' "$fresh_json" > "$tmp_dir/vex.openvex.json.fresh"
+
+            git fetch origin "$VEX_BRANCH:refs/remotes/origin/$VEX_BRANCH" 2>/tmp/vex-fetch.err || true
+            branch_exists=0
+            if git show-ref --verify --quiet "refs/remotes/origin/$VEX_BRANCH"; then
+              branch_exists=1
+            fi
+
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+            if [ "$branch_exists" -eq 1 ]; then
+              git switch -C "vex-work" "origin/$VEX_BRANCH" 2>/tmp/vex-switch.err || fail "Could not switch to existing origin/$VEX_BRANCH: $(cat /tmp/vex-switch.err)"
+            else
+              echo "::notice::origin/$VEX_BRANCH does not exist yet -- bootstrapping it as a fresh orphan branch."
+              git switch --orphan "vex-work" || fail "Could not create orphan branch for $VEX_BRANCH."
+              git rm -rf . >/dev/null 2>&1 || true
+            fi
+          fi
+
+          if [ "$status" = "success" ]; then
+            # --- Step 3: decide whether there is a real content change ---
+            # Reuses check-vex-drift.sh's own determinism trick, but for
+            # real change-detection this time: compare the fresh regen
+            # against the existing file with the SAME timestamp substituted,
+            # so a wall-clock-only difference (e.g. this workflow re-running
+            # with no real .trivyignore.yaml/generator change) never produces
+            # a spurious commit.
+            if [ -s vex.openvex.json ]; then
+              existing_ts="$(jq -r '.timestamp // empty' vex.openvex.json)"
+            else
+              existing_ts=""
+            fi
+
+            if [ -n "$existing_ts" ]; then
+              rebased_json="$(docker run --rm \
+                --user "$(id -u):$(id -g)" \
+                -v "$GITHUB_WORKSPACE:/src:ro" \
+                -e VEX_TIMESTAMP="$existing_ts" \
+                -w /src \
+                "${BUILD_TOOLS_IMAGE:?}" \
+                timeout --kill-after=30 --signal=KILL 300 \
+                bash /src/scripts/untracked/generate-vex.sh 2>/dev/null || true)"
+            else
+              rebased_json=""
+            fi
+
+            if [ -n "$rebased_json" ] && diff -q <(jq -S . vex.openvex.json) <(jq -S . <<<"$rebased_json") >/dev/null 2>&1; then
+              echo "::notice::vex.openvex.json on $VEX_BRANCH is already semantically in sync with current_dev's .trivyignore.yaml/generate-vex.sh; nothing to commit."
+              changed=0
+            else
+              changed=1
+            fi
+          fi
+
+          if [ "$status" = "success" ] && [ "${changed:-1}" -eq 1 ]; then
+            # --- Step 4: write the fresh (real-timestamped) document + README, commit, push with retry ---
+            # write_and_commit is re-run from a freshly re-fetched origin tip on every
+            # retry attempt below (not a `git rebase` of one existing commit): every
+            # attempt writes the exact same two files with the exact same desired final
+            # content ($fresh_json, computed once above, does not change between
+            # attempts), so there is no real merge to reconcile -- rebasing one fixed
+            # commit onto a moved tip would just risk a content conflict CI cannot
+            # resolve unattended, for no benefit over simply re-writing and
+            # re-committing on top of whatever origin's tip now is.
+            write_and_commit() {
+              printf '%s\n' "$fresh_json" | jq -S . > vex.openvex.json
+
+              cat > README.md <<'VEXREADME'
+# CI-Automation/vex
+
+This branch carries exactly one generated artifact: `vex.openvex.json`, an
+[OpenVEX](https://openvex.dev) document listing this project's accepted/
+deferred CVE dispositions (OSPS-VM-04.02).
+
+**Do not hand-edit `vex.openvex.json` on this branch.** It is entirely and
+deterministically regenerated from
+[`.trivyignore.yaml`](https://github.com/wiki-mod/lancache-ng/blob/current_dev/.trivyignore.yaml)
+on `current_dev` by
+[`scripts/untracked/generate-vex.sh`](https://github.com/wiki-mod/lancache-ng/blob/current_dev/scripts/untracked/generate-vex.sh),
+run automatically by
+[`.github/workflows/vex-regenerate.yml`](https://github.com/wiki-mod/lancache-ng/blob/current_dev/.github/workflows/vex-regenerate.yml)
+whenever `.trivyignore.yaml` or the generator itself changes on
+`current_dev`. Any manual edit here is silently overwritten by the next
+real regeneration.
+
+To change the VEX content, edit `.trivyignore.yaml` on `current_dev`
+instead -- this branch will catch up automatically.
+
+Fetch the current document directly at:
+`https://raw.githubusercontent.com/wiki-mod/lancache-ng/CI-Automation/vex/vex.openvex.json`
+
+A release tag's own `vex.openvex.json` release asset is regenerated fresh
+from that tag's own `.trivyignore.yaml` state at release time (see
+`.github/workflows/build-push.yml`'s "Attach OpenVEX document to the
+release" step) -- it is never copied from this branch's tip, since that
+could race a release cut against this branch's own refresh.
+
+Background: Issue #1095 (F-22).
+VEXREADME
+
+              git add vex.openvex.json README.md
+              if git diff --cached --quiet; then
+                echo "::notice::No staged changes after all; treating as no-op."
+                return 2
+              fi
+              git commit -m "chore(vex): regenerate vex.openvex.json from current_dev@${TRIGGER_SHA:0:12}
+
+Regenerated by .github/workflows/vex-regenerate.yml from current_dev's
+.trivyignore.yaml / scripts/untracked/generate-vex.sh at commit ${TRIGGER_SHA}.
+Refs #1095 (F-22)."
+            }
+
+            max_attempts=5
+            attempt=1
+            pushed=0
+            while [ "$attempt" -le "$max_attempts" ]; do
+              if ! write_and_commit; then
+                commit_rc=$?
+                if [ "$commit_rc" -eq 2 ]; then
+                  # No real diff against the tip we just switched to -- another run
+                  # already published the same content between our earlier compare
+                  # step and now.
+                  pushed=1
+                  break
+                fi
+                fail "git commit failed unexpectedly on attempt ${attempt}."
+                break
+              fi
+              if git push origin "vex-work:$VEX_BRANCH"; then
+                pushed=1
+                break
+              fi
+              if [ "$attempt" -ge "$max_attempts" ]; then
+                break
+              fi
+              echo "::notice::Push to $VEX_BRANCH rejected (attempt $attempt/$max_attempts); refetching and retrying from the current tip."
+              git fetch origin "$VEX_BRANCH:refs/remotes/origin/$VEX_BRANCH" || true
+              if git show-ref --verify --quiet "refs/remotes/origin/$VEX_BRANCH"; then
+                git switch -C "vex-work" "origin/$VEX_BRANCH" || { fail "Could not switch to origin/$VEX_BRANCH on retry attempt ${attempt}."; break; }
+              fi
+              attempt=$((attempt + 1))
+            done
+            if [ "$pushed" -ne 1 ] && [ "$status" = "success" ]; then
+              fail "Failed to push CI-Automation/vex after $max_attempts attempts (non-fast-forward every time)."
+            fi
+          fi
+
+          {
+            echo "status=$status"
+            echo "detail<<VEXDETAIL"
+            echo "$fail_detail"
+            echo "VEXDETAIL"
+          } >> "$GITHUB_OUTPUT"
+
+      # Runs regardless of the step above's own (intentionally-always-0) exit
+      # code -- it reads the real outcome from steps.regen.outputs.status,
+      # per the Documented Exception on the step above.
+      - name: Track failures as a durable issue (open/reuse) or close on recovery
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          TRACKING_LABEL: vex-generator-broken
+          REGEN_STATUS: ${{ steps.regen.outputs.status }}
+          REGEN_DETAIL: ${{ steps.regen.outputs.detail }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          TRIGGER_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          docker run --rm \
+            -e GITHUB_TOKEN -e REPO -e TRACKING_LABEL -e REGEN_STATUS -e REGEN_DETAIL -e RUN_URL -e TRIGGER_SHA \
+            "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash -s <<'TRACK_VEX'
+          set -euo pipefail
+
+          api="https://api.github.com/repos/${REPO}"
+          auth="Authorization: Bearer ${GITHUB_TOKEN}"
+          accept="Accept: application/vnd.github+json"
+          version="X-GitHub-Api-Version: 2022-11-28"
+
+          # Ensure the tracking label exists (auto-create on first real
+          # failure, idempotent afterward).
+          label_status="$(curl -s -o /dev/null -w '%{http_code}' -H "$auth" -H "$accept" -H "$version" "$api/labels/${TRACKING_LABEL}")"
+          if [ "$label_status" = "404" ]; then
+            curl -fsS -X POST -H "$auth" -H "$accept" -H "$version" \
+              -d "{\"name\":\"${TRACKING_LABEL}\",\"color\":\"b60205\",\"description\":\"vex-regenerate.yml failed to regenerate vex.openvex.json\"}" \
+              "$api/labels" >/dev/null
+          fi
+
+          open_issue="$(curl -fsS -H "$auth" -H "$accept" -H "$version" \
+            "$api/issues?state=open&labels=${TRACKING_LABEL}&per_page=1" | jq -r '.[0].number // empty')"
+
+          # Every request body below is built with `jq -n` rather than hand-interpolated
+          # JSON strings -- REGEN_DETAIL comes from a real ::error:: message and can
+          # legitimately contain quotes/backslashes (e.g. a shell error naming a quoted
+          # path), which a hand-built "...\"$var\"..." string would either corrupt into
+          # invalid JSON or, worse, allow to inject extra JSON fields.
+          if [ "$REGEN_STATUS" = "success" ]; then
+            if [ -n "$open_issue" ]; then
+              curl -fsS -X POST -H "$auth" -H "$accept" -H "$version" \
+                -d "$(jq -n --arg url "$RUN_URL" --arg sha "$TRIGGER_SHA" '{body: ("Resolved by run " + $url + " (commit " + $sha + ").")}')" \
+                "$api/issues/${open_issue}/comments" >/dev/null
+              curl -fsS -X PATCH -H "$auth" -H "$accept" -H "$version" \
+                -d '{"state":"closed","state_reason":"completed"}' \
+                "$api/issues/${open_issue}" >/dev/null
+              echo "Closed #${open_issue} (resolved by ${RUN_URL})."
+            else
+              echo "No open ${TRACKING_LABEL} issue to close; nothing to do."
+            fi
+            exit 0
+          fi
+
+          # Failure path: open a new issue only if one isn't already open,
+          # to avoid duplicates across repeated failing runs (maintainer
+          # instruction, Issue #1095).
+          if [ -n "$open_issue" ]; then
+            curl -fsS -X POST -H "$auth" -H "$accept" -H "$version" \
+              -d "$(jq -n --arg url "$RUN_URL" --arg sha "$TRIGGER_SHA" --arg detail "$REGEN_DETAIL" \
+                    '{body: ("Another run also failed: " + $url + " (commit " + $sha + ").\n\n```\n" + $detail + "\n```")}')" \
+              "$api/issues/${open_issue}/comments" >/dev/null
+            echo "Left detail comment on already-open #${open_issue}."
+            exit 0
+          fi
+
+          create_response="$(curl -fsS -X POST -H "$auth" -H "$accept" -H "$version" \
+            -d "$(jq -n \
+                  --arg title "vex-regenerate.yml is failing to regenerate vex.openvex.json" \
+                  --arg url "$RUN_URL" \
+                  --arg sha "$TRIGGER_SHA" \
+                  --arg detail "$REGEN_DETAIL" \
+                  --arg label "$TRACKING_LABEL" \
+                  '{
+                    title: $title,
+                    body: ("`.github/workflows/vex-regenerate.yml` failed to regenerate `vex.openvex.json` on `CI-Automation/vex`.\n\n**Run:** " + $url + "\n**Triggering commit:** " + $sha + "\n\n```\n" + $detail + "\n```\n\nThis is a best-effort artifact (Issue #1095 F-22); it does not block current_dev, but the regenerated document is stale until this is fixed.\n\nRefs #1095"),
+                    labels: [$label]
+                  }')" \
+            "$api/issues")"
+          echo "Opened $(jq -r '.html_url' <<<"$create_response")."
+          TRACK_VEX
