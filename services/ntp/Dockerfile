@@ -31,6 +31,13 @@
 # package, matching the same finding already made for the other three
 # already-migrated/being-migrated services in this project.
 
+# What: source stage for tools copied into the final image below.
+# Why: pinned by digest (not a mutable tag) for a reproducible build -- see
+#   services/proxy/Dockerfile's identical stage comment for the full
+#   digest-resolution rationale.
+# From: Issue #1556
+FROM ghcr.io/wiki-mod/lancache-ng/utilities@sha256:5c02fc536c53c2b2d42010b88508b0ea50adb27b0ef487f98a38457bfde18d85 AS utilities-tools
+
 FROM mirror.gcr.io/library/alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
 
 LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP server, disciplined against public NTP servers, serving LAN clients on UDP/123."
@@ -41,12 +48,29 @@ LABEL org.opencontainers.image.description="LanCache-NG-NTP: chrony-based NTP se
 # install, it does not touch already-installed packages. See
 # services/dhcp-proxy/Dockerfile's matching comment for the fuller
 # rationale and live verification of this behavior.
+
+# What: curl/gettext-envsubst(envsubst) come from the shared utilities
+#   image (COPY below) instead of apk-installed here.
+# Why: same alpine:3.24 base digest as the utilities image, so this is a
+#   safe binary-compatible swap -- see services/proxy/Dockerfile's
+#   identical comment for the full rationale.
+# From: Issue #1556
+COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
+COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst
+COPY --from=utilities-tools /usr/lib/libintl.so.8 /usr/lib/libintl.so.8
+
+# What: verifies the copied binaries actually run.
+# Why: a missing shared-library dependency fails at exec time, not at
+#   COPY time -- see services/proxy/Dockerfile's identical comment.
+# From: Issue #1556
+RUN set -euo pipefail; \
+    printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
+    curl --version >/dev/null
+
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
-    chrony-nts \
-    gettext-envsubst \
-    curl
+    chrony-nts
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
 COPY entrypoint.sh /entrypoint.sh
