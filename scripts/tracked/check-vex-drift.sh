@@ -6,11 +6,11 @@
 # What: Runs scripts/untracked/generate-vex.sh against .trivyignore.yaml and
 # asserts the output is valid JSON (`jq empty`). Nothing more.
 #
-# Why: vex.openvex.json is no longer committed to current_dev (Issue #1095
-# F-22) -- it used to be a second, independently-editable copy kept in sync
-# with .trivyignore.yaml only by a human/agent remembering to re-run the
+# Why: vex.openvex.json is no longer committed to current_dev -- it used to
+# be a second, independently-editable copy kept in sync with
+# .trivyignore.yaml only by a human/agent remembering to re-run the
 # generator in the same commit, which produced two real drift incidents on
-# the same branch (see this repo's AGENTS.md AG-WF-025 note and PR #1620).
+# the same branch (see this repo's AGENTS.md AG-WF-025 note).
 # Removing the committed copy removes the drift failure class itself -- there
 # is no second copy left to compare against. What can still break is the
 # generator: a syntax error in .trivyignore.yaml, or a bug introduced into

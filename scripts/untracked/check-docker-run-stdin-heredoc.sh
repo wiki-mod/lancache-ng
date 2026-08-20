@@ -90,11 +90,9 @@ while IFS= read -r -d '' file; do
     # expected case, handled explicitly by the -z check below) exits 1, and
     # that failure would otherwise propagate through the pipeline into this
     # assignment -- which `set -e` treats as a fatal error on the assignment
-    # itself, aborting the whole script with no message at all. Confirmed
-    # empirically (a first version of this script without `|| true` did
-    # exactly that, exit 1, zero output, real bug in the guard itself before
-    # this fix -- exactly the class AGENTS.md's AG-VAL-029 Known Gaps notes
-    # already document for this project).
+    # itself, aborting the whole script with no message at all -- exactly the
+    # class AGENTS.md's AG-VAL-029 Known Gaps notes already document for this
+    # project.
     last_offset="$(printf '%s\n' "$window" | grep -n "docker run" | tail -1 | cut -d: -f1 || true)"
     if [ -z "$last_offset" ]; then
       # No "docker run" found in the lookback window at all -- not this

@@ -2359,7 +2359,7 @@ jobs:
 
       - name: Check VEX generator produces valid OpenVEX JSON (.trivyignore.yaml -> generate-vex.sh)
         # What: Runs scripts/untracked/generate-vex.sh against .trivyignore.yaml and asserts valid, non-empty OpenVEX JSON output; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
-        # Why: vex.openvex.json is no longer committed to current_dev (Issue #1095 F-22 -- it is regenerated post-merge onto the CI-Automation/vex branch by .github/workflows/vex-regenerate.yml, and freshly again at release time), so there is no second committed copy left to drift-compare. What can still break here is the generator itself: a malformed .trivyignore.yaml or a generator bug should fail in the PR that introduced it, not first surface post-merge or during a release. Runs unconditionally as part of this job (validate-compose is an unconditional gate for every PR), which already covers "runs when .trivyignore.yaml or generate-vex.sh changes."
+        # Why: vex.openvex.json is no longer committed to current_dev -- it is regenerated post-merge onto the CI-Automation/vex branch by .github/workflows/vex-regenerate.yml, and freshly again at release time, so there is no second committed copy left to drift-compare. What can still break here is the generator itself: a malformed .trivyignore.yaml or a generator bug should fail in the PR that introduced it, not first surface post-merge or during a release. Runs unconditionally as part of this job (validate-compose is an unconditional gate for every PR), which already covers "runs when .trivyignore.yaml or generate-vex.sh changes."
         # From: Issue #1095 (F-22) | PR #1620 (superseded drift-comparison version)
         run: |
           set -euo pipefail
@@ -4571,8 +4571,8 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # What: syslog/utilities added to the allowlist (issue #1095, this PR): both services were onboarded
-      # after this job's original 8-service allowlist snapshot (PR #1378, 2026-08-03) and were never added
+      # What: syslog/utilities added to the allowlist: both services were onboarded
+      # after this job's original 8-service allowlist snapshot (2026-08-03) and were never added
       # here, so every push rebuilt them unconditionally regardless of whether they actually changed.
       # Why: Same three-part verification (revision label + ancestry + content diff) as the other 8 services;
       # no new logic needed, only these two additional outputs and allowlist entries.
@@ -4664,7 +4664,7 @@ jobs:
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
           # What: All 10 first-party product/tooling services (including build-tools, syslog, utilities) go through the identical decide_one() call below, with no per-service branching.
-          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy. syslog (#1428) and utilities (#1556) were onboarded after this allowlist's original 8-service snapshot (PR #1378) and were never added here, so every push rebuilt them unconditionally even when unchanged -- classify-image-impact.sh already carries `syslog`/`utilities` classify keys (added when those services were onboarded), so this is a pure allowlist extension, not new verification logic.
+          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy. syslog and utilities were onboarded after this allowlist's original 8-service snapshot and were never added here, so every push rebuilt them unconditionally even when unchanged -- classify-image-impact.sh already carries `syslog`/`utilities` classify keys (added when those services were onboarded), so this is a pure allowlist extension, not new verification logic.
           # From: Issue #1095
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
 
@@ -5005,7 +5005,7 @@ jobs:
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies to all 10 currently allowlisted services (build-tools, syslog, utilities included); a service outside the allowlist would be a plain pass-through to `*) reuse="false"`.
-            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag. syslog/utilities added (issue #1095): both were onboarded after this case's original 8-service snapshot and previously fell through to the `*) reuse="false"` default unconditionally.
+            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag. syslog/utilities were onboarded after this case's original 8-service snapshot and previously fell through to the `*) reuse="false"` default unconditionally.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
@@ -7470,8 +7470,8 @@ jobs:
         # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json) as a
         # release asset. Regenerated fresh here from THIS TAG's own checked-out
         # .trivyignore.yaml via scripts/untracked/generate-vex.sh, rather than read from
-        # the checkout (vex.openvex.json is no longer committed to current_dev at all,
-        # Issue #1095 F-22) or copied from the CI-Automation/vex branch's current tip
+        # the checkout (vex.openvex.json is no longer committed to current_dev at all)
+        # or copied from the CI-Automation/vex branch's current tip
         # (that branch is refreshed asynchronously by .github/workflows/vex-regenerate.yml
         # on a plain `push` to current_dev and could legitimately still be catching up
         # when a release tag is cut moments later -- reading it here would risk shipping a
@@ -7703,11 +7703,9 @@ jobs:
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
           # -i required: same stdin-heredoc shape and gap as the release job's
           # "Create or update GitHub release for built images" / "Attach OpenVEX
-          # document to the release" steps -- found and fixed as one failure class
-          # across this file while touching the adjacent VEX release step (Issue
-          # #1095, F-22 PR). Without -i, docker run never attaches container stdin,
-          # so this bash -s heredoc would read immediate EOF and silently upload
-          # nothing while still exiting 0.
+          # document to the release" steps. Without -i, docker run never attaches
+          # container stdin, so this bash -s heredoc would read immediate EOF and
+          # silently upload nothing while still exiting 0.
           docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
