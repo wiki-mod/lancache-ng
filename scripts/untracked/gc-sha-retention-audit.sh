@@ -354,7 +354,7 @@ audit_package() {
   local version_json id digest tags built facts root_count child_count other_count
   local encoded_tags encoded_tag tag kind prefix full_commit rank min_rank
   local root_resolution_failed reason other_tags managed_root_count unmanaged_root_count
-  local channel_matched sort_key
+  local sort_key
   local cache_resolution cache_digest cache_tags
   local missing_build_date_count=0
   local direct_would_delete_count=0
@@ -430,28 +430,31 @@ audit_package() {
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "closure" "protect" "artifact-child-closure-unresolved"
       continue
     fi
-    # What: classifies a rootless version -- a matched protected channel/
-    # release stays permanently protected; everything else (including a
-    # truly untagged version) becomes a channel_buffer_versions-ranked
-    # candidate below instead of an unconditional permanent protect.
-    # Why: v1.2 (issue #1585) inverts the old default: "no recognized
-    # sha-<commit> root" alone no longer justifies protecting forever --
-    # only an explicit nightly/latest/stable-release match does. Everything
-    # else competes for a small buffer, then becomes a real would-delete
-    # candidate once that buffer is exhausted, regardless of tag shape.
+    # What: classifies a rootless version -- a truly untagged version
+    # (other_count==0) stays permanently protected exactly as before; a
+    # matched protected channel/release also stays protected; only a
+    # rootless version that HAS tags but matches no protected channel
+    # becomes a channel_buffer_versions-ranked candidate below.
+    # Why: v1.2 (issue #1585) targets "any historical or otherwise-
+    # unanticipated tag FORMAT" -- a genuinely untagged version has no tag
+    # format to be unanticipated, and is almost always a manifest-list's
+    # own untagged amd64/arm64 platform child (this reaper's own separate
+    # orphan-closure pass, not this classifier, is the correct place to
+    # decide whether such a child is truly orphaned -- it already checks
+    # forward-reference edges from a still-retained parent manifest, which
+    # this classifier cannot see). Only "has tags, none recognized" is the
+    # actual gap this rule inverts; an absence of tags is not that gap.
     # From: Issue #1585.
+    if (( root_count == 0 && other_count == 0 )); then
+      sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "non-ordinary-version"
+      continue
+    fi
     if (( root_count == 0 )); then
-      channel_matched=0
-      if (( other_count > 0 )); then
-        other_tags="$(sra_other_tags_from_csv "$tags")" || {
-          echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
-          return 1
-        }
-        if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
-          channel_matched=1
-        fi
-      fi
-      if (( channel_matched == 1 )); then
+      other_tags="$(sra_other_tags_from_csv "$tags")" || {
+        echo "::error::Cannot classify non-root tags for package version $id in ${repository_name}/${package}." >&2
+        return 1
+      }
+      if reason="$(sra_protected_reference_reason "$other_tags" "$supported_releases")"; then
         sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "$reason"
       else
         # What: buffers this candidate for a build-date-ranked pass below.

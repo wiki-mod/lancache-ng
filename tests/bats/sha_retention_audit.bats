@@ -799,6 +799,29 @@ EOF
   [ "$status" -eq 1 ]
 }
 
+# What: a truly untagged rootless version (other_count==0) must still emit an
+# unconditional protect BEFORE the v1.2 buffer-candidate line is reachable.
+# Why: regression guard for a real defect caught in review -- an early draft
+# of the v1.2 change routed a completely untagged version (the common case
+# for a manifest list's own untagged amd64/arm64 platform children) into the
+# same channel_buffer_versions buffer as a version with an unrecognized tag
+# FORMAT, making a live-manifest platform child a would-delete candidate
+# past a 5-slot buffer. The plan's own wording targets "any historical or
+# otherwise-unanticipated tag format" -- an absent tag has no format, so it
+# must stay on the unconditional-protect path, never reach
+# other_tag_candidates at all. This is a structural/ordering check (the
+# orchestrator's own live GHCR pagination is not mocked here); it can only
+# assert source-code shape, not runtime behavior -- see the plan's own
+# request for real CI verification.
+# From: Issue #1585.
+@test "gc-sha-retention-audit.sh protects a truly untagged rootless version before any buffer routing" {
+  untagged_protect_line="$(grep -n 'root_count == 0 && other_count == 0' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | cut -d: -f1)"
+  buffer_write_line="$(grep -n '>>"\$other_tag_candidates"' "$repo_root/scripts/untracked/gc-sha-retention-audit.sh" | head -1 | cut -d: -f1)"
+  [ -n "$untagged_protect_line" ]
+  [ -n "$buffer_write_line" ]
+  [ "$untagged_protect_line" -lt "$buffer_write_line" ]
+}
+
 # What: filtered mode is the package-parallel planner entry point used by GC.
 # Why: it must exist without adding DELETE capability to the audit itself.
 # From: Issue #1095 | PR #1586

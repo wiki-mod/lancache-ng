@@ -1029,8 +1029,12 @@ below, per that same rule's "genuinely unautomatable case" carve-out):
   `sra_is_stable_release_tag`, `sra_release_sort_key`,
   `sra_select_supported_release_tags`, `sra_classify_channel_tag`,
   `sra_other_tags_from_csv`, `sra_protected_reference_reason`,
-  `sra_extra_tag_protect_reason`), including the combined-reason case, the
-  unsupported-old-release case, and the unrecognized-tag fallthrough case —
+  `sra_extra_tag_protect_reason` -- this last helper was removed in issue
+  #1585's v1.2 pass once its one caller needed to distinguish a real channel
+  match from its always-protect fallback; its coverage was replaced by
+  tests for the new shared `sra_budget_decision` helper), including the
+  combined-reason case, the unsupported-old-release case, and the
+  unrecognized-tag fallthrough case —
   this file's own standing coverage for this subsystem, satisfying AG-VAL-029
   for this change rather than leaving it as a point fix with no durable
   regression net. **Not implemented, recorded as an open gap below rather
