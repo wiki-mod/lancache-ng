@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "label": "rust coverage",
+  "message": "ui 49.96% / dns 25.61%",
+  "color": "yellow"
+}
