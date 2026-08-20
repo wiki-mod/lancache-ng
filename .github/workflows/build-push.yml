@@ -5122,8 +5122,9 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-amd64"
 
@@ -5174,8 +5175,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
@@ -5926,8 +5928,9 @@ jobs:
           fi
           pinned_ref="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}@${pinned_digest}"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-arm64"
 
@@ -5975,8 +5978,9 @@ jobs:
           # shellcheck source=scripts/lib/docker-metadata.sh
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
@@ -6272,8 +6276,9 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           declare -A merged_digests=()
@@ -6439,8 +6444,9 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}"
 
@@ -6787,8 +6793,9 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack@${STACK_DIGEST}"
@@ -7226,8 +7233,9 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: reads the single declared short-SHA derivation.
-          # Why: keeps every truncation length in sync with one declared source.
+          # What: uses the full commit SHA directly, no local truncation.
+          # Why: short-SHA tags are banned outright -- a blind local slice risked
+          #   an unbounded collision as this project's commit volume grew.
           # From: Issue #1095 (G2) | PR #1503
           source_tag="sha-${COMMIT_SHA}"
           expected_prerelease=false

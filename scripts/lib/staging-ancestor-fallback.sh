@@ -892,28 +892,63 @@ saf_base_commit_has_confirmed_run() {
   return 0
 }
 
+# saf_legacy_sha_image_ref <repository> <service> <commit> <git_dir>
+#
+# Probes <commit>'s legacy 7-char short-SHA GHCR tag for <service> (one of
+# the ~37k already-published tags pre-dating this project's full-SHA
+# cutover) and echoes that tag's own reference on a hit; returns non-zero,
+# no output, on a miss. Never derives the short form locally: uses
+# `git rev-parse --short=7` (a real git object-database lookup, never a
+# `${VAR:0:7}` bash slice) to get the exact bytes GHCR already has -- this
+# is deliberately NOT the same operation scripts/untracked/check-deny-short-sha.sh's
+# guard forbids, since the guard targets locally re-deriving a truncation,
+# not asking git for the name of an object that already exists. If
+# `git rev-parse --short=7` ever returns MORE than 7 hex characters (a real
+# local ambiguity), the resulting guess deliberately will not match
+# whatever blindly-truncated tag GHCR actually has -- refusing to reuse an
+# ambiguous prefix is the correct, safe outcome here, not a bug (this exact
+# blind-truncation collision risk is the reason dmeta_short_sha() was
+# removed).
+#
+# Split out of saf_resolve_sha_image_ref so a caller that has already paid
+# for its own full-SHA probe(s) (e.g. saf_find_built_ancestor's own
+# short/extended freshness waits) can try the legacy form directly, once,
+# at its own give-up point, without saf_resolve_sha_image_ref's own
+# leading full-SHA probe repeating a check that caller already ran.
+# From: Issue #1095 (G2)
+saf_legacy_sha_image_ref() {
+  local repository="${1:?saf_legacy_sha_image_ref: repository is required}"
+  local service="${2:?saf_legacy_sha_image_ref: service is required}"
+  local commit="${3:?saf_legacy_sha_image_ref: commit is required}"
+  local git_dir="${4:?saf_legacy_sha_image_ref: git_dir is required}"
+
+  local legacy_short legacy_image
+  legacy_short="$(git -C "$git_dir" rev-parse --short=7 "$commit" 2>/dev/null)" || return 1
+  [[ "$legacy_short" =~ ^[0-9a-f]{7}$ ]] || return 1
+  legacy_image="ghcr.io/${repository}/${service}:sha-${legacy_short}"
+  sif_image_revision "$legacy_image" >/dev/null 2>&1 || return 1
+  printf '%s\n' "$legacy_image"
+  return 0
+}
+
 # saf_resolve_sha_image_ref <repository> <service> <commit> [git_dir]
 #
 # Resolves <commit>'s own per-commit GHCR tag reference for <service>,
-# tolerating the ~37k already-published legacy 7-char short-SHA tags
-# (pre-dating this project's full-SHA cutover) without ever deriving a
-# short SHA locally: a single cheap
-# sif_image_revision probe against the canonical full-SHA tag
-# (`sha-<commit>`) is tried first; only on a miss does this probe the
-# legacy form, using `git rev-parse --short=7` (a real git object-database
-# lookup, never a `${VAR:0:7}` bash slice) to get the exact bytes GHCR
-# already has -- this is deliberately NOT the same operation
-# scripts/untracked/check-deny-short-sha.sh's guard forbids, since the guard
-# targets locally re-deriving a truncation, not asking git for the name of
-# an object that already exists. If `git rev-parse --short=7` ever returns
-# MORE than 7 hex characters (a real local ambiguity), the resulting guess
-# deliberately will not match whatever blindly-truncated tag GHCR actually
-# has -- refusing to reuse an ambiguous prefix is the correct, safe
-# outcome here, not a bug (this exact blind-truncation collision risk is
-# the reason dmeta_short_sha() was removed). Neither probe succeeding
-# echoes the canonical full-SHA reference anyway, so every caller's own
-# freshness wait always targets the format any future build actually
-# produces.
+# tolerating the same legacy short-SHA tags saf_legacy_sha_image_ref
+# documents: a single cheap sif_image_revision probe against the canonical
+# full-SHA tag (`sha-<commit>`) is tried first; only on a miss does this
+# fall back to saf_legacy_sha_image_ref. Neither probe succeeding echoes
+# the canonical full-SHA reference anyway, so every caller's own freshness
+# wait always targets the format any future build actually produces.
+#
+# Only appropriate for a caller with no freshness wait of its own already
+# planned right after this call (e.g. this file's own final
+# ancestor-substitution points, after an ancestor is already fully
+# confirmed) -- a caller that is about to run its own
+# sif_wait_for_fresh_base_image poll should construct the plain full-SHA
+# reference directly instead and reach for saf_legacy_sha_image_ref only at
+# its own give-up point, so the two probes are never stacked redundantly
+# (see saf_find_built_ancestor's own candidate-walk for the pattern).
 # From: Issue #1095 (G2)
 saf_resolve_sha_image_ref() {
   local repository="${1:?saf_resolve_sha_image_ref: repository is required}"
@@ -927,14 +962,10 @@ saf_resolve_sha_image_ref() {
     return 0
   fi
 
-  local legacy_short legacy_image
-  if legacy_short="$(git -C "$git_dir" rev-parse --short=7 "$commit" 2>/dev/null)" \
-    && [[ "$legacy_short" =~ ^[0-9a-f]{7}$ ]]; then
-    legacy_image="ghcr.io/${repository}/${service}:sha-${legacy_short}"
-    if sif_image_revision "$legacy_image" >/dev/null 2>&1; then
-      printf '%s\n' "$legacy_image"
-      return 0
-    fi
+  local legacy_image
+  if legacy_image="$(saf_legacy_sha_image_ref "$repository" "$service" "$commit" "$git_dir")"; then
+    printf '%s\n' "$legacy_image"
+    return 0
   fi
 
   printf '%s\n' "$full_image"
@@ -1207,7 +1238,20 @@ saf_find_built_ancestor() {
           # exactly as safe to use as the has_run==0 case already is. Only
           # when the image ALSO does not exist does this remain a genuine,
           # unbuilt real change that must still fail closed.
-          ancestor_image="$(saf_resolve_sha_image_ref "$repository" "$service" "$candidate" "$git_dir")"
+          #
+          # Plain full-SHA string construction, not saf_resolve_sha_image_ref:
+          # the wait immediately below is this candidate's own real freshness
+          # probe already, so pre-probing here would just duplicate it for
+          # the common (new-format) case that is this project's own future
+          # default. A legacy-tag attempt is still made below, but only at
+          # this branch's own give-up point (after the full-SHA wait has
+          # already failed) -- exactly the "zero recorded runs, run
+          # retention expired" scenario this branch's own header comment
+          # documents is likeliest to land on an OLD, legacy-tag-only
+          # commit, so skipping the legacy check here would defeat the
+          # transition support this file exists to provide for precisely
+          # this case.
+          ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate}"
           # allow_reverse_ancestry=true: $ancestor_image is always an
           # immutable per-commit sha-tag here (never a mutable channel tag),
           # so a label that predates $candidate is exactly build-push.yml's
@@ -1219,7 +1263,12 @@ saf_find_built_ancestor() {
             printf '%s\n' "$candidate"
             return 0
           fi
-          echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but neither $classify_key's own service-scoped diff nor its changed paths overall could be positively confirmed as untouched/ignorable (service status $candidate_service_untouched_status, paths status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either), and its own per-commit image could not be confirmed to exist either (checked directly, independent of run history, precisely because run retention can expire while the image itself does not). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
+          local legacy_image
+          if legacy_image="$(saf_legacy_sha_image_ref "$repository" "$service" "$candidate" "$git_dir")"; then
+            printf '%s\n' "$candidate"
+            return 0
+          fi
+          echo "::error::Ancestor candidate $candidate (between $base_sha and its own ancestor history) has zero recorded build-push.yml runs, but neither $classify_key's own service-scoped diff nor its changed paths overall could be positively confirmed as untouched/ignorable (service status $candidate_service_untouched_status, paths status $candidate_paths_status -- see this file's own header for why an inconclusive result must not be treated as safe either), and its own per-commit image could not be confirmed to exist either under the full-SHA or legacy short-SHA tag (checked directly, independent of run history, precisely because run retention can expire while the image itself does not). Refusing to silently walk past it to an older substitute -- that could back-fill content omitting a real, unbuilt change at $candidate. This needs a maintainer look at $candidate's own build-push.yml history." >&2
           return 1
         fi
       fi
@@ -1308,7 +1357,15 @@ saf_find_built_ancestor() {
     # single-purpose.
     local candidate_pre_service_untouched_status=0
     saf_base_commit_service_untouched "$candidate" "$classify_key" "$git_dir" || candidate_pre_service_untouched_status=$?
-    ancestor_image="$(saf_resolve_sha_image_ref "$repository" "$service" "$candidate" "$git_dir")"
+    # Plain full-SHA string construction, not saf_resolve_sha_image_ref: the
+    # untouched-candidate fast path immediately below is itself a single
+    # real probe against this exact reference (no pre-probing needed to
+    # avoid duplicating it), and the run-bearing short/extended waits
+    # further down are this candidate's own real freshness checks too --
+    # legacy-tag support for a run-bearing candidate is handled once, at
+    # this candidate's own give-up point (after both waits below have
+    # failed), not pre-probed here.
+    ancestor_image="ghcr.io/${repository}/${service}:sha-${candidate}"
     if (( candidate_pre_service_untouched_status == 0 )); then
       if sif_wait_for_fresh_base_image "$ancestor_image" "$candidate" "$service" 0 0 "$freshness_poll_interval_seconds" true >/dev/null; then
         printf '%s\n' "$candidate"
@@ -1352,9 +1409,24 @@ saf_find_built_ancestor() {
       fi
     fi
 
+    # Both the short attempt above and (if this candidate's own build was
+    # confirmed still active) the extended retry have now failed against
+    # the canonical full-SHA tag. Before falling through to the JUDGMENT
+    # CALL below, try this candidate's own legacy 7-char tag exactly once
+    # (a single non-polling probe, not a second full wait) -- this
+    # candidate is, by construction, further back in history than
+    # <base_sha>, so it is exactly the kind of pre-cutover commit whose
+    # only real tag may still be the legacy short-SHA form.
+    local legacy_image
+    if legacy_image="$(saf_legacy_sha_image_ref "$repository" "$service" "$candidate" "$git_dir")"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+
     # Found a run-bearing candidate whose image never became confirmed-fresh
-    # -- even after the activity-confirmed extended retry, if one applied.
-    # Before applying the JUDGMENT CALL above (stop, do not walk further):
+    # under either tag format -- even after the activity-confirmed extended
+    # retry, if one applied. Before applying the JUDGMENT CALL above (stop,
+    # do not walk further):
     # re-derive the same service-scoped untouched check the PRE-wait check
     # above already ran. This is now normally redundant (a
     # positive pre-check already `continue`d past this candidate before ever
@@ -1516,8 +1588,17 @@ saf_resolve_untouched_backfill_source() {
   # environment, not a parameter.
   local -x STAGING_FRESHNESS_GIT_DIR="$git_dir"
 
+  # Plain full-SHA string construction, not saf_resolve_sha_image_ref: Step 1
+  # and Step 2 below are $base_sha's own real freshness probes already, so
+  # pre-probing here would just duplicate one of them for the common
+  # (new-format) case. No legacy-tag fallback needed for $base_sha itself
+  # either -- it is this PR's own current base commit (recent, not a
+  # historical walk-back target), and if its image genuinely does not exist
+  # under either tag format, both Step 1 and Step 2 already fall through to
+  # saf_find_built_ancestor, whose own candidate walk carries its own
+  # legacy-tag support for exactly the older commits that need it.
   local base_image
-  base_image="$(saf_resolve_sha_image_ref "$repository" "$service" "$base_sha" "$git_dir")"
+  base_image="ghcr.io/${repository}/${service}:sha-${base_sha}"
   local ancestor_sha
 
   # Step 1: fast-path pre-check (see this function's own header). Either
