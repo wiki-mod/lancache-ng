@@ -375,8 +375,8 @@ EOF
     fi
     return 0
   }
-  GITHUB_API_RETRY_ATTEMPTS=2
-  GITHUB_API_RETRY_DELAY_SECONDS=0
+  export GITHUB_API_RETRY_ATTEMPTS=2
+  export GITHUB_API_RETRY_DELAY_SECONDS=0
   run github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/body.json"
   [ "$status" -eq 0 ]
   [[ "$output" == *"::notice::"* ]]
@@ -489,6 +489,7 @@ EOF
   calls=0
   _github_api_get_once() {
     calls=$(( calls + 1 ))
+    # shellcheck disable=SC2034 # read by github_api_get_with_retry() after this stub returns
     GITHUB_API_HTTP_STATUS="200"
     printf '[]\n' >"$2"
     return 0
@@ -507,12 +508,13 @@ EOF
   calls=0
   _github_api_get_once() {
     calls=$(( calls + 1 ))
+    # shellcheck disable=SC2034 # read by github_api_get_with_retry() after this stub returns
     GITHUB_API_HTTP_STATUS="200"
     printf '[]\n' >"$2"
     return 0
   }
   GITHUB_API_CACHE_DIR="$tmp_dir/api-cache"
-  GITHUB_API_CACHE_TTL_SECONDS=600
+  export GITHUB_API_CACHE_TTL_SECONDS=600
   mkdir -p "$GITHUB_API_CACHE_DIR"
 
   github_api_get_with_retry "https://api.github.invalid/example" "$tmp_dir/first.json" >/dev/null

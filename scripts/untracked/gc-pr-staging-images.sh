@@ -22,6 +22,7 @@ source "$script_dir/../lib/sha-retention-audit.sh"
 # What: disables GET caching inside the destructive collector process.
 # Why: immediate pre-delete revalidation must always read current API state.
 # From: Issue #1095.
+# shellcheck disable=SC2034 # read by github_api_get_with_retry() in the sourced library
 GITHUB_API_CACHE_DIR=""
 
 # --- Reaper entry point (org/config/process_service/main) ---------------

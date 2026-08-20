@@ -974,7 +974,9 @@ VERSIONS_JSON
 # preserve the remaining job budget for other diagnostic work.
 # From: Issue #1095.
 @test "package-version DELETE does not retry a permanent HTTP 403" {
+    # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
     GHCR_RETRY_BACKOFF_SECONDS=0
+    # shellcheck disable=SC2034 # read by ghcr_retry() in the sourced script
     GHCR_RETRY_MAX_ATTEMPTS=4
     attempt_log="$BATS_TEST_TMPDIR/delete-403-attempts"
     printf '0\n' >"$attempt_log"
