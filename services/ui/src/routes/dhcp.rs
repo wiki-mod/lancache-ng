@@ -659,13 +659,20 @@ fn start_service_error(err: anyhow::Error, service_name: &str, profile: &str) ->
     }
 }
 
-async fn reconcile_dhcp_mode(
+// What: stops whatever container(s) must not remain running under `mode`,
+// including a same-container dnsmasq sub-mode's own container when the
+// sub-mode is actually changing.
+// Why: split from reconcile_dhcp_mode_start and called BEFORE
+// persist_ui_settings writes the new DHCP_MODE -- a same-container
+// ProxyDHCP<->Relay switch must stop dhcp-proxy here and only restart it in
+// the start half (after persist), or the freshly-started container would
+// reread its OLD sub-mode from the still-unwritten settings file.
+// From: Issue #1486
+async fn reconcile_dhcp_mode_stop(
     state: &AppState,
     mode: crate::config::DhcpMode,
+    previous_mode: crate::config::DhcpMode,
 ) -> Result<(), DhcpError> {
-    // Only predeclared Compose services are controlled here. Missing profile
-    // containers stay a visible operator error instead of silently diverging
-    // from the UI's persisted DHCP mode.
     match mode {
         crate::config::DhcpMode::Disabled => {
             docker_client::stop_service_if_present(
@@ -691,16 +698,7 @@ async fn reconcile_dhcp_mode(
             )
             .await
             .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
-            docker_client::start_service(&state.docker, "dhcp", &state.config.container_suffix)
-                .await
-                .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
         }
-        // Both dnsmasq sub-modes (ProxyDHCP and relay, issue #844) run in the
-        // same `dhcp-proxy` container -- it renders one config or the other
-        // from the DHCP_MODE it reads out of the persisted UI settings -- so
-        // reconciliation is identical: ensure Kea is stopped and the
-        // dhcp-proxy container is running. The container itself, on (re)start,
-        // reads the new mode and renders the matching config.
         crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
             docker_client::stop_service_if_present(
                 &state.docker,
@@ -709,6 +707,47 @@ async fn reconcile_dhcp_mode(
             )
             .await
             .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
+            // Only force a stop here for a genuine same-container sub-mode
+            // change (ProxyDHCP <-> Relay) -- dhcp-proxy is already running
+            // under the OTHER dnsmasq sub-mode in that case. A first switch
+            // into the dnsmasq family (previous_mode not dnsmasq) or a
+            // same-mode resubmit both leave this as a no-op, matching the
+            // Kea branch's existing idempotent-start-only behavior (no
+            // restart on an unrelated resubmit).
+            if previous_mode.is_dnsmasq() && previous_mode != mode {
+                docker_client::stop_service_if_present(
+                    &state.docker,
+                    "dhcp-proxy",
+                    &state.config.container_suffix,
+                )
+                .await
+                .map_err(|err| DhcpError::config_error(format!("{err:#}")))?;
+            }
+        }
+    }
+    Ok(())
+}
+
+// What: starts whatever container `mode` requires, called AFTER
+// persist_ui_settings has succeeded.
+// Why: only predeclared Compose services are controlled here (a missing
+// profile container is a visible operator error, never a silent divergence
+// from the persisted mode); running this after persist means a same-container
+// dnsmasq sub-mode switch reads the newly-written DHCP_MODE on this fresh
+// start, not a value still pending write.
+// From: Issue #1486
+async fn reconcile_dhcp_mode_start(
+    state: &AppState,
+    mode: crate::config::DhcpMode,
+) -> Result<(), DhcpError> {
+    match mode {
+        crate::config::DhcpMode::Disabled => {}
+        crate::config::DhcpMode::Kea => {
+            docker_client::start_service(&state.docker, "dhcp", &state.config.container_suffix)
+                .await
+                .map_err(|err| start_service_error(err, "dhcp", "dhcp-kea"))?;
+        }
+        crate::config::DhcpMode::DnsmasqProxy | crate::config::DhcpMode::DnsmasqRelay => {
             docker_client::start_service(
                 &state.docker,
                 "dhcp-proxy",
@@ -797,8 +836,8 @@ async fn set_ntp_option_on_all_subnets(
 }
 
 // Best-effort pre-flight check that update_dhcp_mode runs BEFORE
-// reconcile_dhcp_mode (i.e. before any dhcp/dhcp-proxy container is actually
-// stopped/started). It exercises the exact same directory the later
+// reconcile_dhcp_mode_stop (i.e. before any dhcp/dhcp-proxy container is
+// actually stopped/started). It exercises the exact same directory the later
 // persist_ui_settings write will target -- create the parent dir, write a
 // throwaway probe file into it, remove the probe file -- without touching
 // the real settings file, so a full or read-only `ui-data` volume (the
@@ -1170,8 +1209,9 @@ pub(crate) fn persist_cache_settings(state: &AppState, cache_gb: u64) -> Result<
 // Pure filesystem half of persist_ui_settings, split out so unit tests can
 // exercise the real write/rename behavior against a temp path without
 // needing a full AppState (which otherwise requires a live Docker
-// connection to construct -- see the docker_client-backed reconcile_dhcp_mode
-// this file also defines).
+// connection to construct -- see the docker_client-backed
+// reconcile_dhcp_mode_stop/reconcile_dhcp_mode_start this file also
+// defines).
 fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<(), DhcpError> {
     let mut map = BTreeMap::new();
     for (key, value) in values {
@@ -1264,25 +1304,30 @@ fn write_ui_settings_file(target: &Path, values: &[(&str, String)]) -> Result<()
     })
 }
 
-// Switches the whole stack between disabled/Kea/dnsmasq-proxy DHCP: starts
-// and stops the matching Docker services (reconcile_dhcp_mode), then
-// persists the new mode plus every other current DHCP setting so a later
-// container restart comes back up in the same mode instead of reverting to
-// whatever DHCP_MODE was in the original env file.
+// Switches the whole stack between disabled/Kea/dnsmasq-proxy DHCP: stops
+// whatever must not remain running (reconcile_dhcp_mode_stop), persists the
+// new mode plus every other current DHCP setting, then starts whatever the
+// new mode requires (reconcile_dhcp_mode_start).
 //
-// Ordering here is deliberate and has two guards against the two ways this
-// can go wrong (#671):
-//   1. Before reconcile_dhcp_mode runs at all, check_settings_dir_writable
-//      catches the common failure mode (full/read-only ui-data volume, bad
-//      permissions) up front, so no Docker container is touched for a save
-//      that can't possibly complete.
-//   2. If persist_ui_settings still fails afterward (e.g. the volume filled
-//      up in the window between the check and the real write), the DHCP
-//      containers have already switched to the new mode but
-//      effective_dhcp_mode() would keep reporting the previous one. Rather
-//      than leave that divergence for an operator to notice, this
-//      best-effort rolls the Docker mutation back to the previous mode and
-//      surfaces both errors if the rollback attempt itself also fails.
+// Ordering here is deliberate and has three guards against the ways this can
+// go wrong (#671, #1486):
+//   1. Before any Docker call at all, check_settings_dir_writable catches
+//      the common failure mode (full/read-only ui-data volume, bad
+//      permissions) up front, so no container is touched for a save that
+//      can't possibly complete.
+//   2. Stop happens before persist and start happens after: a same-container
+//      dnsmasq sub-mode switch (ProxyDHCP <-> Relay) must not restart
+//      dhcp-proxy before the new DHCP_MODE is actually on disk, or the
+//      freshly-started container rereads its OLD sub-mode from the
+//      still-unwritten settings file (issue #1486) -- see
+//      reconcile_dhcp_mode_stop/reconcile_dhcp_mode_start's own comments.
+//   3. If persist_ui_settings fails, the stop phase has already run but
+//      nothing has started under the new mode yet, and the settings file is
+//      untouched (write_ui_settings_file's temp-file-then-rename never
+//      completes on a failed write) -- so this best-effort restarts whatever
+//      the STILL-persisted previous mode needs, which is guaranteed to read
+//      the correct (unchanged) settings, and surfaces both errors if that
+//      rollback attempt itself also fails.
 pub async fn update_dhcp_mode(
     State(state): State<Arc<AppState>>,
     headers: HeaderMap,
@@ -1298,7 +1343,7 @@ pub async fn update_dhcp_mode(
 
     check_settings_dir_writable(Path::new(&state.config.ui_settings_file))?;
 
-    reconcile_dhcp_mode(&state, mode).await?;
+    reconcile_dhcp_mode_stop(&state, mode, previous_mode).await?;
     // Re-persists every DHCP setting, not just DHCP_MODE: persist_ui_settings
     // overwrites the whole settings file each call, so any field left out
     // here would be dropped from it (and fall back to its original env
@@ -1416,25 +1461,38 @@ pub async fn update_dhcp_mode(
 
     if let Err(persist_err) = persist_result {
         // mode == previous_mode only when the operator re-submits the mode
-        // they're already on; reconcile_dhcp_mode is then a no-op repeat of
-        // the current state, so there is nothing to roll back to and doing
-        // so would just repeat the exact same persist failure.
+        // they're already on; reconcile_dhcp_mode_stop is then a no-op
+        // repeat of the current state, so there is nothing to roll back to
+        // and doing so would just repeat the exact same persist failure.
+        // reconcile_dhcp_mode_start (not the removed single-call
+        // reconcile_dhcp_mode) is correct here: the stop phase above already
+        // ran for `mode`, and the settings file still holds previous_mode's
+        // values (the failed write never renamed over it), so starting
+        // previous_mode's container now is guaranteed to read them back.
         if mode != previous_mode
-            && let Err(rollback_err) = reconcile_dhcp_mode(&state, previous_mode).await
+            && let Err(rollback_err) = reconcile_dhcp_mode_start(&state, previous_mode).await
         {
             return Err(DhcpError::config_error(format!(
                 "Failed to persist DHCP mode ({persist_err}), and rolling the '{}' containers \
                  back to the previous '{}' mode also failed ({rollback_err}). DHCP containers \
-                 are now running in '{}' mode but the UI may still report '{}' until this is \
-                 resolved manually.",
+                 are now stopped but the UI may still report '{}' until this is resolved \
+                 manually.",
                 mode.as_str(),
                 previous_mode.as_str(),
-                mode.as_str(),
                 previous_mode.as_str()
             )));
         }
         return Err(persist_err);
     }
+
+    // Persist succeeded, so the settings file now holds `mode` -- start
+    // whatever it requires. A failure here leaves the settings file ahead of
+    // reality (UI reports `mode`, no container is actually serving it yet);
+    // this is reported directly rather than attempted to be rolled back,
+    // since a rollback would just discard the operator's just-saved change
+    // rather than fix the underlying start failure (e.g. see
+    // start_service_error's own "container never created" guidance).
+    reconcile_dhcp_mode_start(&state, mode).await?;
 
     Ok(Redirect::to("/dhcp"))
 }

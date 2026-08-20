@@ -43,14 +43,23 @@ frontend dockerfrontend
     acl safe_version path,url_dec -m reg -i ^(/v[0-9.]+)?/version$
     acl docker_container_path path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/
     # ui/netdata/syslog (issue #842/#849): added to the master
-    # allowlist and to safe_container_inspect only, NOT to
-    # safe_service_restart below -- watchdog's Rust rewrite monitors these
-    # three for dashboard visibility (alert-only, see
-    # services/watchdog/src/main.rs's resolve_alert_only_targets()) but
-    # never restarts them, so no restart grant belongs here for any of the
-    # three (mirrors how lancache-dhcp/lancache-dhcp-proxy already have
-    # inspect access without a restart grant -- see safe_dhcp_action below
-    # for why those two use start/stop instead).
+    # allowlist and to safe_container_inspect. watchdog's Rust rewrite
+    # monitors all three for dashboard visibility (alert-only, see
+    # services/watchdog/src/main.rs's resolve_alert_only_targets()) and never
+    # restarts any of them itself.
+    # UPDATED (issue #1486): ui now ALSO gets its own narrow restart-only
+    # grant (safe_ui_restart below) for the Admin UI's own self-restart
+    # control -- restart-only (never start/stop, see safe_ui_restart's own
+    # comment) so this path can never be used to leave the UI stopped.
+    # netdata and syslog still get no restart grant at all, and watchdog
+    # itself is not even in this allowlist (mirrors how
+    # lancache-dhcp/lancache-dhcp-proxy have inspect access without a
+    # restart grant -- see safe_dhcp_action below for why those two use
+    # start/stop instead). This distinction -- ui restartable,
+    # watchdog/syslog never restartable/stoppable/startable via the Admin UI
+    # under any circumstance -- is this issue's own explicit, load-bearing
+    # requirement: watchdog is the mechanism that notices and recovers other
+    # services, so no UI control may ever be able to disable it.
     # UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged
     # concurrently with #842/#849 which originally added BOTH
     # lancache-syslog and lancache-syslog-ng here as two separate entries):
@@ -70,6 +79,15 @@ frontend dockerfrontend
     # to change when this service's allowlist entry changes independently.
     acl safe_ntp_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-ntp/(start|stop)$
     acl safe_probe_action path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-dhcp-probe/(start|stop|wait)$
+    # Admin UI self-restart (issue #1486): restart-only, scoped to exactly
+    # this one container name -- deliberately its own acl (same rationale as
+    # safe_ntp_action above) rather than folded into safe_service_restart, so
+    # build-push.yml's exact-literal check on that acl's regex never has to
+    # change when this grant changes independently. restart-only (never
+    # start/stop) means this path can never be used to leave the UI stopped,
+    # unlike safe_dhcp_action/safe_ntp_action's start/stop shape, which is
+    # the correct shape for a service the operator may deliberately disable.
+    acl safe_ui_restart path,url_dec -m reg -i ^(/v[0-9.]+)?/containers/lancache-ui/restart$
     http-request allow if safe_get safe_ping
     http-request allow if safe_head safe_ping
     http-request allow if safe_get safe_version
@@ -79,6 +97,7 @@ frontend dockerfrontend
     http-request allow if safe_post safe_dhcp_action
     http-request allow if safe_post safe_ntp_action
     http-request allow if safe_post safe_probe_action
+    http-request allow if safe_post safe_ui_restart
     http-request deny if docker_container_path !lancache_container
     http-request deny
     default_backend dockerbackend

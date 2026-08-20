@@ -345,17 +345,25 @@ Docker restart action for it.
 - **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
   adding either to watchdog's blind restart-on-unhealthy loop would need the
   Docker socket proxy's allowlist (`scripts/untracked/docker-socket-proxy.sh`) widened
-  first -- `ui` has no allowlist entry at all today (a deliberate boundary
-  documented in `docs/naming-conventions.md`'s "Operator-visible
-  consistency" section: nothing currently calls the Docker API to manage it
-  by name), and `dhcp` is only allowlisted for `start`/`stop`
-  (`safe_dhcp_action`), never `restart` (`safe_service_restart` omits it).
-  Widening that allowlist for *restart* is a security-relevant architectural
-  change in its own right, not a side effect of extending a monitored-
-  container list, so #842 left both out of scope for a follow-up PR to
-  decide deliberately rather than as a byproduct of this change (the
-  narrower *inspect-only* allowlist widening needed for alert-only monitoring
-  is a different grant and does not touch `safe_service_restart`).
+  for *that specific caller*, which remains undecided. **Corrected 2026-08-19
+  (issue #1486): `ui` is no longer restart-grant-free.** It has its own
+  narrow `safe_ui_restart` acl (`POST .../containers/lancache-ui/restart`
+  only, never `start`/`stop`) for the Admin UI's own operator-initiated
+  self-restart control (`/setup/restart-ui`) -- deliberately restart-only so
+  this path can never leave `ui` stopped. This grant is unrelated to
+  watchdog: the live Bash watchdog and the prepared Rust rewrite still never
+  call `restart_container` for `ui`, so it remains outside
+  `check_and_maybe_restart`'s blind restart-on-unhealthy loop exactly as
+  before -- only an explicit operator request through the Admin UI can
+  trigger this restart. `dhcp` is unchanged by #1486 and is still only
+  allowlisted for `start`/`stop` (`safe_dhcp_action`), never `restart`
+  (`safe_service_restart` omits it). Widening either service's allowlist so
+  *watchdog* could restart it automatically remains a separate,
+  security-relevant architectural decision left open by #842, not a side
+  effect of #1486's operator-initiated grant (the narrower *inspect-only*
+  allowlist widening needed for alert-only monitoring is yet another,
+  already-existing, different grant and does not touch
+  `safe_service_restart`).
 - **`dhcp-proxy` (dnsmasq) and `netdata`**: both have real Docker healthchecks
   but are not currently polled by the live Bash watchdog. Adding either to
   the live monitored set remains a separate scoping decision rather than a
