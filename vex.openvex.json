@@ -1,15 +1,15 @@
 {
   "@context": "https://openvex.dev/ns/v0.2.0",
-  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-19T20:17:48Z",
+  "@id": "https://github.com/wiki-mod/lancache-ng/vex/lancache-ng-2026-08-20T17:10:42Z",
   "author": "lancache-ng release automation (https://github.com/wiki-mod/lancache-ng)",
-  "timestamp": "2026-08-19T20:17:48Z",
+  "timestamp": "2026-08-20T17:10:42Z",
   "version": 1,
   "statements": [
     {
       "vulnerability": {
         "name": "CVE-2026-34040"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -31,7 +31,7 @@
       "vulnerability": {
         "name": "CVE-2026-41567"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -53,7 +53,7 @@
       "vulnerability": {
         "name": "CVE-2026-42306"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -75,7 +75,7 @@
       "vulnerability": {
         "name": "CVE-2026-12064"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -89,7 +89,7 @@
       "vulnerability": {
         "name": "CVE-2026-8286"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -103,7 +103,7 @@
       "vulnerability": {
         "name": "CVE-2026-8927"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -117,7 +117,7 @@
       "vulnerability": {
         "name": "CVE-2026-8932"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -131,7 +131,7 @@
       "vulnerability": {
         "name": "CVE-2026-9079"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -145,7 +145,7 @@
       "vulnerability": {
         "name": "CVE-2026-9080"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -159,7 +159,7 @@
       "vulnerability": {
         "name": "CVE-2026-9545"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -173,7 +173,7 @@
       "vulnerability": {
         "name": "CVE-2011-4116"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -188,7 +188,7 @@
       "vulnerability": {
         "name": "CVE-2025-15649"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -203,7 +203,7 @@
       "vulnerability": {
         "name": "CVE-2026-12087"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -218,7 +218,7 @@
       "vulnerability": {
         "name": "CVE-2026-13221"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -233,7 +233,7 @@
       "vulnerability": {
         "name": "CVE-2026-42496"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -248,7 +248,7 @@
       "vulnerability": {
         "name": "CVE-2026-42497"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -263,7 +263,7 @@
       "vulnerability": {
         "name": "CVE-2026-48959"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -278,7 +278,7 @@
       "vulnerability": {
         "name": "CVE-2026-48961"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -293,7 +293,7 @@
       "vulnerability": {
         "name": "CVE-2026-48962"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -308,7 +308,7 @@
       "vulnerability": {
         "name": "CVE-2026-57432"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -323,7 +323,7 @@
       "vulnerability": {
         "name": "CVE-2026-57433"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -338,7 +338,7 @@
       "vulnerability": {
         "name": "CVE-2026-7010"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -353,7 +353,7 @@
       "vulnerability": {
         "name": "CVE-2026-7017"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -368,7 +368,7 @@
       "vulnerability": {
         "name": "CVE-2026-8376"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -383,7 +383,7 @@
       "vulnerability": {
         "name": "CVE-2026-9538"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -398,7 +398,7 @@
       "vulnerability": {
         "name": "CVE-2022-0563"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -413,7 +413,7 @@
       "vulnerability": {
         "name": "CVE-2025-14104"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -428,7 +428,7 @@
       "vulnerability": {
         "name": "CVE-2026-13595"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -443,7 +443,7 @@
       "vulnerability": {
         "name": "CVE-2026-27456"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -458,7 +458,7 @@
       "vulnerability": {
         "name": "CVE-2026-3184"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -473,7 +473,7 @@
       "vulnerability": {
         "name": "CVE-2026-53612"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -488,7 +488,7 @@
       "vulnerability": {
         "name": "CVE-2026-53613"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -503,7 +503,7 @@
       "vulnerability": {
         "name": "CVE-2026-53614"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -518,7 +518,7 @@
       "vulnerability": {
         "name": "CVE-2026-53615"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -533,7 +533,7 @@
       "vulnerability": {
         "name": "CVE-2025-6141"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -548,7 +548,7 @@
       "vulnerability": {
         "name": "CVE-2025-69720"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -563,7 +563,7 @@
       "vulnerability": {
         "name": "CVE-2026-54369"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -578,7 +578,7 @@
       "vulnerability": {
         "name": "CVE-2026-54370"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -593,7 +593,7 @@
       "vulnerability": {
         "name": "CVE-2026-41991"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -601,13 +601,13 @@
         }
       ],
       "status": "affected",
-      "action_statement": "What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via insecure temporary-file handling in the `gzexe` utility) as tracked risk for `tools/build-tools` only; `services/ui` is unaffected. Anchor entry for the 2-ID gzip group (this and CVE-2026-41992 below) -- the only ID in this file's 30-ID batch where the two images' exploitability genuinely differs. Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed). Trivy's finding applies per-CVE-ID repo-wide with no per-image `paths:` scoping for Debian os-pkgs, so the disposition reflects the more exploitable image: `tools/build-tools` unpacks pinned, checksum-verified release tarballs via `gzip`, never invoking `gzexe` itself or on attacker-supplied input. No `trixie`/ `trixie-backports` fix exists yet (Debian security-tracker: only `sid` has 1.14-1; re-verified 2026-08-19). From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-27 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-41991 (an arbitrary-file-overwrite via insecure temporary-file handling in the `gzexe` utility) as tracked risk for `tools/build-tools` only; `services/ui` is unaffected. Anchor entry for the 2-ID gzip group (this and CVE-2026-41992 below) -- the only ID in this file's 30-ID batch where the two images' exploitability genuinely differs. Why: `services/ui` never invokes `gzip`/`gzexe` (grep-confirmed). Trivy's finding applies per-CVE-ID repo-wide with no per-image `paths:` scoping for Debian os-pkgs, so the disposition reflects the more exploitable image: `tools/build-tools` unpacks pinned, checksum-verified release tarballs via `gzip`, never invoking `gzexe` itself or on attacker-supplied input. No `trixie`/ `trixie-backports` fix exists yet (Debian security-tracker: only `sid` has 1.14-1; re-verified 2026-08-19). From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-20 and must be re-reviewed on or before that date.)"
     },
     {
       "vulnerability": {
         "name": "CVE-2026-41992"
       },
-      "timestamp": "2026-08-19T20:17:48Z",
+      "timestamp": "2026-08-20T17:10:42Z",
       "products": [
         {
           "@id": "pkg:github/wiki-mod/lancache-ng",
@@ -615,7 +615,7 @@
         }
       ],
       "status": "affected",
-      "action_statement": "What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own LZH decompression path -- legacy `.lzh`/SCO-compress-format support) as tracked risk for `tools/build-tools` only; the HIGH-severity ID in this group. Why: Same gzip finding group as CVE-2026-41991 above. `tools/build-tools`'s `gzip` usage (unpacking plain `.tar.gz` tarballs) never exercises the LZH code path, which only triggers on input explicitly identified as LZH-formatted. From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-27 and must be re-reviewed on or before that date.)"
+      "action_statement": "What: Accepts CVE-2026-41992 (a global buffer overflow in gzip's own LZH decompression path -- legacy `.lzh`/SCO-compress-format support) as tracked risk for `tools/build-tools` only; the HIGH-severity ID in this group. Why: Same gzip finding group as CVE-2026-41991 above. `tools/build-tools`'s `gzip` usage (unpacking plain `.tar.gz` tarballs) never exercises the LZH code path, which only triggers on input explicitly identified as LZH-formatted. From: Issue #815, PR #1454, Issue #1598 (Accepted, tracked risk recorded in .trivyignore.yaml; this disposition expires 2026-08-20 and must be re-reviewed on or before that date.)"
     }
   ]
 }
