@@ -2342,7 +2342,7 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/tracked/check-naming-consistency.sh
 
-      - name: Check workflow service lists stay in sync (issue #822)
+      - name: Check workflow service lists stay in sync
         # What: Checks this file's own 4 hardcoded `services=(...)`/`full_setup_services=(...)` copies, plus gc-pr-staging-images.yml, backfill-stack-latest.yml, and scripts/untracked/ensure-pr-staging-images.sh; runs in the build-tools container because it needs GNU grep -P, same as the naming-consistency guard above.
         # Why: Guards against a service silently dropping out of manifest merge, channel promotion, release, PR-staging-tag garbage collection, or latest-channel backfill when a new one is added to the build matrix but one of these hardcoded copies is missed.
         # From: Issue #1095 | PR #1532
@@ -2639,13 +2639,12 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # Calls scripts/lib/validation-image-tag.sh's own functions instead of reimplementing
-          # the same channel/pr-staging-available/tag decisions inline a second time (issue #822
-          # pattern audit, 2026-07-17: that file's own header used to document this job as
-          # "deliberately left untouched... keep the two in sync by hand", exactly the
-          # no-guard-against-drift shape #822 exists to catch). This job already sources other
-          # scripts/lib/*.sh files below (ghcr-retry.sh, staging-image-freshness.sh), so this is
-          # not a new pattern for it.
+          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/
+          #   pr-staging-available/tag decisions, instead of reimplementing them inline.
+          # Why: Keeps exactly one implementation of this decision logic; this job already
+          #   sources other scripts/lib/*.sh files below (ghcr-retry.sh, staging-image-freshness.sh)
+          #   the same way.
+          # From: Issue #822
           # shellcheck source=scripts/lib/validation-image-tag.sh
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
 
@@ -2669,12 +2668,12 @@ jobs:
           fi
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            # #1254/#1255: any untouched service is backfilled from this PR's
-            # own base commit's per-commit sha-* image in the next step
-            # ("Ensure PR staging tags exist for full-setup services"), not
-            # from base_channel_tag -- that variable is computed above only
-            # for the pr_staging_available == false branch's whole-suite
-            # fallback below, and is otherwise unused by this step.
+            # What: Any untouched service is backfilled from this PR's own base-commit
+            #   per-commit image in the next step ("Ensure PR staging tags exist for
+            #   full-setup services"), not from base_channel_tag.
+            # Why: base_channel_tag is computed above only for the pr_staging_available ==
+            #   false branch's whole-suite fallback below, and is otherwise unused here.
+            # From: Issue #1254 | Issue #1255
             echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
           else
             if [[ "$EVENT_NAME" == "pull_request" ]]; then
@@ -2706,12 +2705,11 @@ jobs:
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          # #808/#1254/#1255: this PR's own base commit. Needed both to prove the back-fill
-          # source image was actually built from it (or later) before backfilling an untouched
-          # service, AND (since #1254/#1255) to derive that source image's own tag directly
-          # (sha-<short of this>) -- no separate BASE_CHANNEL_TAG input is used anymore. Always
-          # present here: this step only runs when pr-staging-available is true, which requires
-          # a pull_request event.
+          # What: This PR's own base commit; used both to verify the back-fill source was
+          #   actually built from it (or later), and to derive that source image's own tag.
+          # Why: Always present here -- this step only runs when pr-staging-available is
+          #   true, which requires a pull_request event.
+          # From: Issue #808 | Issue #1254 | Issue #1255
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_TOUCHED: ${{ needs['detect-changes'].outputs.proxy }}
@@ -2749,13 +2747,12 @@ jobs:
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # Calls vit_service_should_have_staging_tag directly instead of
-          # reimplementing the same "workflow/CI-contract change forces
-          # every service except build-tools to be treated as touched"
-          # override inline a second time (issue #822 pattern audit,
-          # 2026-07-17) -- see this step's earlier "Determine validation
-          # image channel"-sourced functions for the matching fix to the
-          # other two decisions this job used to duplicate.
+          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing
+          #   the same "workflow/CI-contract change forces every service except build-tools to
+          #   be treated as touched" override inline a second time.
+          # Why: Keeps this decision alongside this step's other "Determine validation image
+          #   channel"-sourced functions, one implementation instead of a second copy.
+          # From: Issue #822
           service_should_have_staging_tag() {
             vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
           }
@@ -2814,19 +2811,13 @@ jobs:
               exit 1
             fi
 
-            # #808: never back-fill without first proving the source image was actually built
-            # from base.sha or later -- see scripts/lib/staging-image-freshness.sh for the
-            # mechanism, and scripts/lib/staging-ancestor-fallback.sh for the full resolution
-            # sequence (exact-BASE_SHA wait, then the ancestor fallback when that wait genuinely
-            # cannot succeed) this step now shares with scripts/untracked/ensure-pr-staging-images.sh
-            # instead of carrying an independent copy of the same logic. 900/1200 (BASE_SHA's own
-            # wait), 300/600 (ancestor-candidate checks) and the "50" search depth intentionally
-            # match that script's own BASE_FRESHNESS_POLL_*/ANCESTOR_FRESHNESS_POLL_*/
-            # STAGING_ANCESTOR_SEARCH_DEPTH defaults exactly (1200s: maintainer-directed
-            # reduction from the previous 5400s, 2026-08-02) -- see
-            # saf_resolve_untouched_backfill_source's own header for why these are separate
-            # budgets, not one shared pair, and keep them in sync by hand if those defaults ever
-            # change, same as the rest of this step's touched-vs-untouched logic already must be.
+            # What: Never back-fills without first proving the source image was actually
+            #   built from base.sha or later, via saf_resolve_untouched_backfill_source.
+            # Why: Shares scripts/lib/staging-image-freshness.sh's/staging-ancestor-fallback.sh's
+            #   resolution sequence with scripts/untracked/ensure-pr-staging-images.sh instead of
+            #   an independent copy; the poll/search-depth arguments below intentionally match
+            #   that script's own defaults -- keep them in sync by hand if those ever change.
+            # From: Issue #808
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
               300 600 \
@@ -2947,11 +2938,11 @@ jobs:
       - name: Wait for the stack to stabilize and check container health
         uses: ./.github/actions/wait-validation-stack-health
 
-      # Unlike the failure-only log dump above, this always runs -- #626's
-      # whole point is that a *green* run here must be verifiable as having
-      # actually tested this commit's own code (not stale base-branch
-      # content), and that's only checkable if the logs are visible
-      # regardless of outcome.
+      # What: Always dumps logs here, unlike the failure-only dump above.
+      # Why: A green run must be verifiable as having actually tested this commit's own
+      #   code (not stale base-branch content), only checkable if logs are visible
+      #   regardless of outcome.
+      # From: Issue #626
       - name: Show full-setup service logs
         if: always()
         working-directory: deploy/full-setup
@@ -3519,19 +3510,9 @@ jobs:
               echo "DNS coverage: ${dns_coverage}%"
               echo "UI coverage: ${ui_coverage}%"
 
-              # Per-crate thresholds, not a shared minimum: the two crates real coverage differs by
-              # an order of magnitude (measured on CI: ui about 38.6%, nats-subscriber about 0%).
-              # nats-subscriber unit tests cover its pure conversion logic
-              # (dns_record_to_zone_update); its async subscribe/forward loop needs a live
-              # NATS/PowerDNS harness and is exercised by the full-setup integration jobs, not unit
-              # coverage. A single shared minimum threshold would either block real ui coverage
-              # from ever mattering (if set low enough for nats-subscriber to pass) or permanently
-              # fail nats-subscriber (if set for ui level). Each crate threshold is raised
-              # independently as that crate gains real unit tests. STATUS (2026-07-23):
-              # dns_threshold stays 0 because the floor has not been raised since issue #504 (first
-              # flagged this) was closed -- its pure-logic unit tests landed via PR #515 -- not
-              # because an open gap is still tracked. Raise it once nats-subscriber gains
-              # unit-testable coverage beyond the model.
+              # What: Per-crate coverage thresholds (ui_threshold/dns_threshold), not a shared minimum.
+              # Why: The nats-subscriber async subscribe/forward loop needs a live NATS/PowerDNS harness and is covered by full-setup integration, not unit coverage, so a shared threshold would either block real ui coverage or permanently fail nats-subscriber; dns_threshold stays 0 until nats-subscriber gains unit-testable coverage beyond its current pure-logic tests.
+              # From: Issue #504 | PR #515
               ui_threshold=35
               dns_threshold=0
 
@@ -3552,9 +3533,10 @@ jobs:
                 exit 1
               fi
 
-              # Badge generation reuses this same containerized jq instead of
-              # assuming a host-installed jq, matching why the coverage
-              # extraction above already runs in here (issue #566).
+              # What: Badge generation reuses this same containerized jq instead of assuming
+              #   a host-installed jq.
+              # Why: Matches why the coverage extraction above already runs in here.
+              # From: Issue #566
               ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
               dns_coverage_display="$(printf "%.2f" "$dns_coverage")"
               badge_message="ui ${ui_coverage_display}% / dns ${dns_coverage_display}%"
@@ -3653,14 +3635,10 @@ jobs:
           : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
-          # Debounce/coalesce, same reasoning and mechanism as promote's own branch-tip check
-          # (#777, see that job's comment): the per-ref badge concurrency group above only
-          # serializes the ORDER two same-branch publishes execute in, it does not guarantee the
-          # newer commit's coverage wins. A slow, older run's rust_coverage can still finish and
-          # reach this step after a faster, newer run for the same branch already published --
-          # without this check it would silently fast-forward the badge file back to stale
-          # coverage. Re-resolve the branch's current tip directly from the remote and skip as a
-          # no-op if a newer commit has already landed.
+          # What: Debounce/coalesce -- re-resolves the branch's current tip directly from the
+          #   remote and skips as a no-op if a newer commit has already landed.
+          # Why: Same reasoning/mechanism as promote's own branch-tip check: the per-ref badge concurrency group only serializes execution ORDER, not which commit's coverage wins; a slow, older run could otherwise fast-forward the badge file back to stale coverage after a faster, newer run for the same branch already published.
+          # From: Issue #777
           current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
           if [[ -z "$current_tip" ]]; then
             echo "::error::Could not resolve the current tip of ${GITHUB_REF} via git ls-remote; refusing to publish the coverage badge blind."
@@ -5066,16 +5044,9 @@ jobs:
         uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Log in to GHCR
-        # Pull requests now also log in: this same-repo-only project (no fork PRs, confirmed
-        # in #626) pushes a PR-scoped staging tag below so "validate full-setup image" can
-        # test the PR's own commits instead of stale base-branch state. The fork check is a
-        # fail-safe in case that assumption ever stops holding -- a fork PR's GITHUB_TOKEN is
-        # read-only anyway, so login would fail loudly rather than silently. Dependabot PRs
-        # get the same read-only-token treatment as fork PRs (GitHub docs: Dependabot Actions
-        # runs never get a write-scoped GITHUB_TOKEN) -- excluded explicitly so this step
-        # (and the push below) is skipped cleanly instead of attempting a login/push GitHub
-        # would reject with a 403. Also widened for a Step 4 push-reuse-only path, same
-        # reasoning as "Set up Docker Buildx" immediately above.
+        # What: Pull requests now also log in, pushing a PR-scoped staging tag below so "validate full-setup image" can test the PR's own commits instead of stale base-branch state; also widened for a Step 4 push-reuse-only path, same reasoning as "Set up Docker Buildx" immediately above.
+        # Why: This is a same-repo-only project (no fork PRs); the fork/Dependabot actor checks are a fail-safe in case that assumption ever stops holding -- their GITHUB_TOKEN is read-only anyway, so login/push would otherwise fail loudly with a 403 rather than being skipped cleanly.
+        # From: Issue #626
         if: >-
           ${{
             (
@@ -5307,13 +5278,9 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN
-      # step is fed from this job's persistent local Buildx cache with no wall-clock
-      # expiry, so a Debian security fix published after that layer was first cached
-      # (confirmed for real: bind9-libs/bind9-dnsutils/bind9-host stayed vulnerable for
-      # weeks after the fix shipped to trixie-security) never gets picked up. A value that
-      # changes once per ISO week, passed as build-tools's APT_CACHE_BUST build-arg below,
-      # forces that one layer to re-run weekly without busting it on every push.
+      # What: Computes an ISO-week cache-bust value for build-tools's APT_CACHE_BUST build-arg below.
+      # Why: tools/build-tools/Dockerfile's apt-get-install/apt-get-upgrade RUN step is fed from this job's persistent local Buildx cache with no wall-clock expiry; a Debian security fix published after that layer was cached would otherwise never get picked up until the cache naturally evicts.
+      # From: Issue #1147
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
         id: apt-cache-bust
@@ -5463,14 +5430,9 @@ jobs:
           platform: linux/amd64
 
       - name: Build and push
-        # #822 ("Pattern D"): ghcr.io push-token issuance intermittently fails with "403
-        # Forbidden"/"denied: denied"/"401 Unauthorized" for the slowest (Rust) builds in
-        # this matrix; a manual `gh run rerun` (fresh login, some time elapsed) has fixed
-        # every occurrence so far. This composite action is the shared retry+re-login policy
-        # every GHCR-writing step in the project now uses (see
-        # .github/actions/ghcr-build-push-retry and scripts/lib/ghcr-retry.sh for why a
-        # `uses:` step needs its own wrapper instead of sourcing the shared shell function
-        # directly).
+        # What: Uses the shared retry+re-login composite action (.github/actions/ghcr-build-push-retry) for this build/push step.
+        # Why: ghcr.io push-token issuance intermittently fails (403/401/denied) for the slowest builds in this matrix; this is the shared retry+re-login policy every GHCR-writing `uses:` step in the project now uses, since a `uses:` step needs its own wrapper instead of sourcing the shared shell function (scripts/lib/ghcr-retry.sh) directly.
+        # From: Issue #822
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 60
@@ -5495,17 +5457,9 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # No `annotations:` input here (issue #620). A genuinely single-platform push with
-          # provenance disabled has no index for buildx to attach an index-level description
-          # annotation to -- `docker buildx build --annotation index:...` on a real
-          # single-platform push errors outright, confirmed live against this project's own
-          # images. Forcing OCI mediatypes here is still required groundwork:
-          # `docker buildx imagetools create` downstream (in merge-manifests) silently drops
-          # --annotation with no error at all when combining Docker-format sources, since
-          # Docker's manifest list schema has no annotations field -- also confirmed live.
-          # merge-manifests is the first point where a genuine multi-platform index exists, so
-          # that's where the description annotation is actually attached; channel/stack
-          # promotions downstream carbon-copy that annotation forward untouched.
+          # What: No `annotations:` input on this single-platform push; the description annotation is attached later, in merge-manifests, and channel/stack promotions copy it forward untouched from there.
+          # Why: A single-platform push has no index for `--annotation index:...` to attach to (errors outright), and `imagetools create` downstream silently drops `--annotation` when combining Docker-format sources (no annotations field in that manifest-list schema); `oci-mediatypes=true` here is required groundwork since merge-manifests is where a real multi-platform index first exists.
+          # From: Issue #620
           outputs: type=image,oci-mediatypes=true
           platforms: linux/amd64
           provenance: false
@@ -6085,12 +6039,9 @@ jobs:
 
           echo "jobs=$jobs" >> "$GITHUB_OUTPUT"
 
-      # Issue #1147: same reasoning as build's own identically-named step -- this job's
-      # `type=gha` cache also has no wall-clock expiry, so this arm64 leg needs the same
-      # periodic bust as the amd64 leg. Computed independently here since the two jobs run
-      # on separate runners with no shared state; both derive the same ISO-week string from
-      # wall-clock time alone, so amd64 and arm64 bust in lockstep without passing a value
-      # between jobs.
+      # What: Computes build-arm64's own independent ISO-week cache-bust value, mirroring build's identical step.
+      # Why: This job's `type=gha` cache also has no wall-clock expiry and runs on a separate runner with no shared state; deriving the same ISO-week string from wall-clock time alone keeps amd64/arm64 in lockstep without passing a value between jobs.
+      # From: Issue #1147
       - name: Compute apt cache-bust value
         if: steps.should-build.outputs.should-build == 'true'
         id: apt-cache-bust
@@ -6105,8 +6056,9 @@ jobs:
         # (type=gha) instead of the self-hosted local Buildx cache, since this runner is
         # ephemeral and has no persistent /var/tmp to reuse across runs.
         #
-        # #822: same shared GHCR retry+re-login policy as build's own equivalent step -- see
-        # .github/actions/ghcr-build-push-retry.
+        # What: Same shared retry+re-login composite action (.github/actions/ghcr-build-push-retry) as build's own equivalent step.
+        # Why: One shared GHCR retry+re-login policy, not a second copy for this arm64 leg.
+        # From: Issue #822
         id: build
         if: steps.should-build.outputs.should-build == 'true'
         timeout-minutes: 90
@@ -6128,9 +6080,9 @@ jobs:
             org.opencontainers.image.description=${{ matrix.description }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.rust.digest={0}', steps.build-tools-base-digests.outputs.rust) || '' }}
             ${{ matrix.service == 'build-tools' && format('org.opencontainers.image.base.golang.digest={0}', steps.build-tools-base-digests.outputs.golang) || '' }}
-          # See build's equivalent step for why there is no `annotations:`
-          # input here and why `outputs: type=image,oci-mediatypes=true` is
-          # still required groundwork for issue #620.
+          # What: Mirrors build's equivalent step -- no `annotations:` input, `oci-mediatypes=true` groundwork.
+          # Why: See build's own comment on this exact step for the full reasoning.
+          # From: Issue #620
           outputs: type=image,oci-mediatypes=true
           platforms: linux/arm64
           provenance: false
@@ -6307,8 +6259,8 @@ jobs:
           source "$GITHUB_WORKSPACE/scripts/lib/docker-metadata.sh"
 
           # What: Reads the shared CI_BUILD_SERVICES scalar rather than a hand-duplicated services=(...) literal.
-          # Why: scripts/tracked/check-workflow-service-lists.sh only guards copies it knows about; a scalar shared by every promotion/GC/release loop removes the duplication class entirely (#822).
-          # From: PR #1523
+          # Why: scripts/tracked/check-workflow-service-lists.sh only guards copies it knows about; a scalar shared by every promotion/GC/release loop removes the duplication class entirely.
+          # From: Issue #822 | PR #1523
           read -ra services <<< "$CI_BUILD_SERVICES"
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository is not guaranteed lowercase; GHCR requires it.
@@ -6341,10 +6293,9 @@ jobs:
           # of this same helper) is a local copy per job over introducing a new composite
           # action just for one function. Same quote-stripping as those.
           #
-          # Wrapped in ghcr_retry (#822): this reads the digest of a manifest this same step
-          # just created a few lines below, so a transient GHCR 401/read failure here is a real
-          # retry candidate, not an "expected absent" probe -- unlike the amd64/arm64 existence
-          # checks further down, which intentionally stay unwrapped (see their own comment).
+          # What: Wrapped in ghcr_retry -- reads the digest of a manifest this same step just created a few lines below.
+          # Why: A transient GHCR 401/read failure here is a real retry candidate, not an "expected absent" probe -- unlike the amd64/arm64 existence checks further down, which intentionally stay unwrapped (see their own comment).
+          # From: Issue #822
           digest_for_image() {
             local image=$1
             local digest
@@ -6562,7 +6513,7 @@ jobs:
         run: |
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
-      # What: One explicit attest step per service (actions/attest cannot run inside the bash loops above), gated only on its own digest output being non-empty, routed through ghcr-attest-with-cache rather than ghcr-attest-retry directly; includes syslog, which previously had no attest step here.
+      # What: One explicit attest step per service (actions/attest cannot run inside the bash loops above), gated only on its own digest output being non-empty, routed through ghcr-attest-with-cache rather than ghcr-attest-retry directly.
       # Why: The "Create ..." step above already skips (via `continue`, not a step failure) any service with no per-arch inputs for this event, leaving that service's *_digest output unset -- nothing else needs checking; "Create multi-platform manifests" runs unconditionally every push for every service with valid inputs, and `docker buildx imagetools create` is deterministic for identical inputs, so an unchanged service would otherwise get the exact same merged digest recreated and re-attested on every push, wasting attestation calls the same way an unchanged service's rebuild would waste compute.
       # From: Issue #1095 | PR #1532
       - name: Attest proxy merged manifest provenance
@@ -6853,12 +6804,9 @@ jobs:
           declare -A previous_refs=()
           promoted_targets=()
 
-          # Wrapped in ghcr_retry (#822): unlike merge-manifests' amd64/arm64 existence probes,
-          # absence is never the expected outcome for any caller of this helper in this job --
-          # the "previous digest before overwrite" callers below already tolerate absence via
-          # `|| true` regardless of whether that absence is real (first-ever promotion) or a
-          # transient read failure, and a retry only improves the odds of capturing the real
-          # previous digest that rollback_promotions needs.
+          # What: Wrapped in ghcr_retry -- unlike merge-manifests' amd64/arm64 existence probes, absence is never the expected outcome for any caller of this helper in this job.
+          # Why: The "previous digest before overwrite" callers below already tolerate absence via `|| true` regardless of whether it is real (first-ever promotion) or a transient read failure; a retry only improves the odds of capturing the real previous digest that rollback_promotions needs.
+          # From: Issue #822
           digest_for_image() {
             local image=$1
             local digest
@@ -6895,17 +6843,9 @@ jobs:
           }
           trap rollback_promotions EXIT
 
-          # Debounce/coalesce (#777): mutable channel tags (latest/nightly) are branch-driven,
-          # and giving promote its own concurrency group above only stops it competing for the
-          # SAME slot as the rest of this workflow -- it does not stop several of these runs
-          # from queuing up back-to-back across a burst of merges, each pointing at a
-          # moment-in-time commit a later one will immediately supersede. Before actually
-          # moving any tag, re-resolve the ref's current tip directly from the remote and bail
-          # out as a no-op if a newer commit already landed: that later commit's own promote
-          # run will move the tag correctly, so this run briefly setting dev/nightly to an
-          # already-stale commit would only add churn. This only applies to branch refs -- a
-          # release/rc tag push targets one fixed, immutable ref, so vX.Y.Z/latest promotion is
-          # never skipped by this check.
+          # What: Debounce/coalesce -- before moving any tag, re-resolves the ref's current tip directly from the remote and bails out as a no-op if a newer commit already landed; only applies to branch refs, since a release/rc tag push targets one fixed, immutable ref.
+          # Why: promote's own concurrency group above only stops it competing for the SAME slot as the rest of this workflow, not several runs queuing back-to-back across a burst of merges, each pointing at a moment-in-time commit a later one will immediately supersede; that later commit's own promote run will move the tag correctly, so this run briefly setting dev/nightly to an already-stale commit would only add churn.
+          # From: Issue #777
           if [[ "$GITHUB_REF" == refs/heads/* ]]; then
             current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
             if [[ -z "$current_tip" ]]; then
@@ -6986,15 +6926,9 @@ jobs:
           GHCR_RETRY_USERNAME="$GHCR_RETRY_USERNAME" GHCR_RETRY_PASSWORD="$GHCR_RETRY_PASSWORD" \
             bash scripts/untracked/require-image-platforms.sh "$stack_pointer_image" "$REQUIRED_PLATFORMS"
 
-          # Neither loop below passes --annotation. $source_image already carries the
-          # org.opencontainers.image.description index annotation from merge-manifests above
-          # (and $stack_pointer_image from its own build a few lines up), and a plain
-          # --prefer-index=false carbon copy of an already-annotated OCI index preserves that
-          # annotation AND produces a byte-identical digest to the source -- confirmed live
-          # while fixing issue #620. Adding --annotation again here would only risk
-          # re-serializing the manifest with a different digest, which would break the release
-          # job's invariant that a channel/release tag resolves to the exact same digest as its
-          # source sha-* tag.
+          # What: Neither loop below passes --annotation; $source_image/$stack_pointer_image already carry it from their own upstream builds.
+          # Why: A plain --prefer-index=false copy of an already-annotated OCI index preserves that annotation and produces a byte-identical digest; passing --annotation again would risk re-serializing the manifest with a different digest, breaking release's invariant that a channel/release tag resolves to the same digest as its source sha-* tag.
+          # From: Issue #620
           for service in "${services[@]}"; do
             source_image="ghcr.io/${REPOSITORY}/${service}@${candidate_digests[$service]}"
             for channel_tag in "${channel_tags[@]}"; do
@@ -7557,7 +7491,7 @@ jobs:
       fail-fast: false
       matrix:
         # What: The Trivy-scanned first-party image set (container-scan's matrix), including syslog and utilities so every released image gets a CycloneDX SBOM; `stack` is intentionally excluded since it is a busybox channel-pointer image, not vuln-scanned either.
-        # Why: This separate matrix copy previously lagged container-scan's own list on syslog/utilities.
+        # Why: A hand-kept copy of container-scan's own list risks drifting from it if not kept in sync by hand.
         # From: Issue #1428 | PR #1433, Issue #1556 | PR #1574
         service: [proxy, dns, watchdog, dhcp, dhcp-proxy, ntp, syslog, ui, build-tools, utilities]
     steps:
