@@ -7,7 +7,7 @@
 # the registry needs a bounded retention collector rather than PR-only GC.
 # From: Issue #1095.
 #
-# What: closed PRs reap promptly and a daily schedule bounds normal growth.
+# What: closed PRs reap promptly and an 8x/day schedule bounds normal growth.
 # Why: the delete-capable checkout is pinned below to a trusted merged ref,
 # never to feature-branch code, regardless of which event invoked the job.
 # From: Issue #1095.
@@ -18,15 +18,18 @@ on:
     types: [closed]
     # What: also matches current_dev, the active development branch.
     # Why: without it, a closed current_dev PR misses this prompt reap and
-    # falls back to the daily schedule sweep as its only cleanup path.
+    # falls back to the 8x/day schedule sweep as its only cleanup path.
     # From: PR #1110
     branches: [master, current_dev, "release/**", "v[0-9]*"]
   schedule:
-    # What: daily sweep at 04:17 UTC.
-    # Why: offset from build-tools.yml's 03:23 refresh so the two scheduled
-    # jobs don't contend for the same runner.
-    # From: PR #627
-    - cron: "17 4 * * *"
+    # What: sweep every 3 hours (8x/day) at :17 past the hour.
+    # Why: the capped max_deletions_per_service/_total limits mean one run
+    # cannot clear the existing backlog; running 8x/day instead of daily
+    # reaches the same total ceiling faster without raising per-run caps.
+    # Minute offset preserved from build-tools.yml's 03:23 refresh so the
+    # two scheduled jobs don't contend for the same runner.
+    # From: Issue #1585 | PR #1586
+    - cron: "17 */3 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
