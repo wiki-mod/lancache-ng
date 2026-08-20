@@ -197,6 +197,10 @@ jobs:
             # has neither .trivyignore.yaml nor generate-vex.sh -- Step 3 below needs
             # a still-reachable copy of both to redo the comparison regeneration.
             tmp_dir="$(mktemp -d)"
+            # Self-hosted runners reuse one workspace across unrelated jobs (AG-CI-016) --
+            # an unclaimed mktemp -d left over from an interrupted run is exactly the kind
+            # of ad-hoc runner-host litter that rule calls out. Clean up on any exit path.
+            trap 'rm -rf "$tmp_dir"' EXIT
             cp "$GITHUB_WORKSPACE/.trivyignore.yaml" "$tmp_dir/.trivyignore.yaml" || fail "Could not snapshot .trivyignore.yaml before switching branches."
             cp "$GITHUB_WORKSPACE/scripts/untracked/generate-vex.sh" "$tmp_dir/generate-vex.sh" || fail "Could not snapshot generate-vex.sh before switching branches."
 
@@ -375,7 +379,14 @@ jobs:
         run: |
           set -euo pipefail
 
-          docker run --rm \
+          # -i is required here, not optional: this script is fed to the container over
+          # stdin via the bash -s <<'TRACK_VEX' heredoc below. Without -i, `docker run`
+          # never attaches host stdin to the container at all, so the containerized
+          # `bash -s` reads immediate EOF and exits 0 having executed nothing -- a
+          # silent no-op, not a visible failure. (Found while reviewing this step: the
+          # pre-existing "Attach OpenVEX document to the release" step this pattern was
+          # copied from had the identical gap -- see that step's own fix in this same PR.)
+          docker run --rm -i \
             -e GITHUB_TOKEN -e REPO -e TRACKING_LABEL -e REGEN_STATUS -e REGEN_DETAIL -e RUN_URL -e TRIGGER_SHA \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \

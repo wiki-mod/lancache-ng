@@ -7352,7 +7352,17 @@ jobs:
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
-          docker run --rm \
+          # What: -i attaches host stdin to the container -- required because this script
+          # is fed to the container via the bash -s <<'UPDATE_RELEASE' heredoc below.
+          # Why: without -i, `docker run` never connects container stdin at all, so the
+          # containerized `bash -s` reads immediate EOF and exits 0 having executed
+          # nothing: a silent no-op (no release created/updated), not a visible failure.
+          # Pre-existing gap (this invocation predates this PR), found while this PR was
+          # already touching the adjacent "Attach OpenVEX document to the release" step
+          # a few lines below, which had the identical shape -- fixed here in the same
+          # pass rather than left as a walked-past defect (AG-WF-013/AG-WF-027).
+          # From: Issue #1095 (F-22)
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
@@ -7508,7 +7518,10 @@ jobs:
             exit 1
           fi
 
-          docker run --rm \
+          # -i required: see the identical note on "Create or update GitHub release for
+          # built images" above -- this is the same stdin-heredoc shape (bash -s
+          # <<'UPLOAD_VEX'), and without -i the upload would silently no-op.
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
@@ -7688,7 +7701,14 @@ jobs:
           fi
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
-          docker run --rm \
+          # -i required: same stdin-heredoc shape and gap as the release job's
+          # "Create or update GitHub release for built images" / "Attach OpenVEX
+          # document to the release" steps -- found and fixed as one failure class
+          # across this file while touching the adjacent VEX release step (Issue
+          # #1095, F-22 PR). Without -i, docker run never attaches container stdin,
+          # so this bash -s heredoc would read immediate EOF and silently upload
+          # nothing while still exiting 0.
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
