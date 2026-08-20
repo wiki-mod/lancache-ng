@@ -213,8 +213,9 @@ pub async fn update_ntp_settings(
         // service matches what is actually persisted, rather than leaving
         // NTP down after a save that did not take effect.
         if was_enabled {
-            let _ = docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
-                .await;
+            let _ =
+                docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
+                    .await;
         }
         return Err(NtpError::config_error(persist_err.to_string()));
     }
@@ -275,7 +276,10 @@ async fn reconcile_ntp_container_stop(
 // error rather than silently diverging from the persisted toggle state --
 // same tradeoff routes/dhcp.rs already accepts for `dhcp`/`dhcp-proxy`.
 // From: Issue #1486
-async fn reconcile_ntp_container_start(state: &AppState, ntp_enabled: bool) -> Result<(), NtpError> {
+async fn reconcile_ntp_container_start(
+    state: &AppState,
+    ntp_enabled: bool,
+) -> Result<(), NtpError> {
     if ntp_enabled {
         docker_client::start_service(&state.docker, "ntp", &state.config.container_suffix)
             .await
