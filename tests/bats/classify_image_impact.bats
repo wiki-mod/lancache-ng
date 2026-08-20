@@ -347,7 +347,7 @@ setup_git_repo() {
 # captures key=value stdout/status, the same way run_classify does above for
 # the CHANGED_FILES form.
 run_classify_git() {
-    cd "$git_dir"
+    cd "$git_dir" || return 1
     run bash "$script" "$1" "$2"
 }
 

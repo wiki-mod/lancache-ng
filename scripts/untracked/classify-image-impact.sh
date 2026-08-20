@@ -22,8 +22,8 @@
 # changed-file list is written to stderr so callers can append stdout directly
 # to GITHUB_OUTPUT or consume one verdict without filtering diagnostics.
 #
-# Content-aware "workflow" refinement (issue #1095, G14): in the
-# <base_ref> <head_ref> form only, a touched build-workflow path
+# Content-aware "workflow" refinement (finding G14, see workflow_diff_is_comment_only
+# below for the From: pointer): in the <base_ref> <head_ref> form only, a touched build-workflow path
 # (build-push.yml/build-tools.yml/.github/actions/**) is downgraded from
 # "workflow=true" to "workflow=false" when every one of its own changed lines
 # is provably a blank line or a '#'-prefixed comment (see
@@ -151,7 +151,7 @@ touches_build_workflow() {
     # no service source moved, so downstream build-sensitive gates must agree
     # that this is a workflow-wide impact -- unless workflow_diff_is_comment_only
     # (above) can prove the touched content is comment/blank-only, in which case
-    # there is nothing here that could alter build/push behavior (issue #1095, G14).
+    # there is nothing here that could alter build/push behavior (finding G14).
     local touched=false
     if touches_exact ".github/workflows/build-push.yml" \
         || touches_exact ".github/workflows/build-tools.yml" \
