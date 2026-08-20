@@ -4290,8 +4290,9 @@ jobs:
           - service: watchdog
             platform_tag: amd64
             # Moved to heavy alongside build/build-arm64's own watchdog
-            # entry (issue #842's Rust rewrite) -- this job's own comment
-            # above says its runner selector stays aligned with those two.
+            # entry (the Rust rewrite's real compile/link step) -- this
+            # job's own comment above says its runner selector stays
+            # aligned with those two.
             runner: '["self-hosted", "linux", "lancache", "lancache-heavy"]'
           - service: dhcp
             platform_tag: amd64
@@ -4853,7 +4854,7 @@ jobs:
       matrix:
         include: &normal-build-services
           # What: Runner tiers below (AG-CI-002 measured exception, maintainer decision 2026-08-06): proxy/dhcp-proxy/dhcp/syslog/ntp have no real compile/link step in their Dockerfiles and measured well below dns/ui/build-tools in a real full-rebuild run; dns/ui (Rust) and build-tools (Go+Rust) stay heavy.
-          # Why: this exception is scoped to a service's CURRENT Dockerfile content only, re-evaluated whenever that changes -- watchdog moved off this light-tier group (issue #842's Rust rewrite, see its own `rust: true`/`lancache-heavy` entry below) exactly as this exception's own text already anticipated, not a grandfathered stay on light. This is the single canonical definition; build-arm64's own matrix below reuses it via the &normal-build-services/*normal-build-services YAML anchor instead of a hand-kept duplicate that could drift.
+          # Why: this exception is scoped to a service's CURRENT Dockerfile content only, re-evaluated whenever that changes -- watchdog moved off this light-tier group (its Rust rewrite's real compile/link step, see its own `rust: true`/`lancache-heavy` entry below) exactly as this exception's own text already anticipated, not a grandfathered stay on light. This is the single canonical definition; build-arm64's own matrix below reuses it via the &normal-build-services/*normal-build-services YAML anchor instead of a hand-kept duplicate that could drift.
           # From: Issue #1095 | PR #1523
 
           - service: proxy
@@ -4872,7 +4873,7 @@ jobs:
             context: services/watchdog
             build_contexts: ""
             description: &ci-description-watchdog "lancache-ng watchdog helper for runtime health checks and recovery hooks."
-            # Re-evaluation triggered (issue #842's Rust rewrite is now
+            # Re-evaluation triggered (the Rust rewrite is now
             # wired into this Dockerfile's own builder stage): watchdog no
             # longer qualifies for the AG-CI-002 light-tier exception the
             # comment above documents -- it now has a real musl cargo

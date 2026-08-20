@@ -13,7 +13,9 @@ FROM ${BUILD_TOOLS_IMAGE} AS watchdog-builder
 # distcc-pump, musl cross target) is present before relying on any of it.
 # Why: fail closed rather than a confusing mid-build "command not found" if
 # the pinned build-tools image ever regresses this contract.
-# From: Issue #842
+# From: Issue #842 (this file's own sole pointer for that number -- every
+# other mention below refers to it by description, not by number, per
+# AG-CODE-012)
 #
 # musl cross-compilation (issue #815 pattern, mirrored from
 # services/dns/Dockerfile's identical nats-subscriber builder stage): the
@@ -71,8 +73,8 @@ COPY src/ ./src/
 # disable_distcc/resolve_distcc_wrapper_dir/extract_remote_toolchain_id/
 # configure_ccache/disable_ccache/resolve_cargo_jobs/run_cargo_build) are
 # byte-identical in structure and intent to services/dns/Dockerfile's own
-# nats-subscriber builder stage (Issue #887's ccache-over-distcc pattern,
-# AG-CI-022) -- see that file's own extensive inline documentation for the
+# nats-subscriber builder stage (the ccache-over-distcc pattern, AG-CI-022)
+# -- see that file's own extensive inline documentation for the
 # full reasoning behind each step (probe-then-commit accelerator selection,
 # three-tier fallback, remote-toolchain-identity verification). Only the
 # per-crate identifiers differ: SCCACHE_REDIS_KEY_PREFIX/CCACHE_DIR use
@@ -84,7 +86,7 @@ COPY src/ ./src/
 # Why: this crate pulls in `ring` (a real C-dependency compile) via
 # reqwest's rustls-tls-native-roots feature, so it needs the exact same
 # build-acceleration wiring dns/ui already have, per the 2026-08-07
-# maintainer decision on issue #842 (acceleration required from day one).
+# maintainer decision (acceleration required from day one).
 # From: Issue #842 | Issue #887 (pattern origin)
 # NOTE: comments cannot be embedded inside this block itself -- Docker's
 # line-continuation strips the backslash-newline entirely, so a "#" comment
@@ -350,7 +352,7 @@ COPY retention-entrypoint.sh /retention-entrypoint.sh
 RUN chmod +x /healthcheck.sh /retention.sh /retention-entrypoint.sh
 VOLUME ["/var/run/watchdog"]
 
-# `lancache` account (#842 Teil 2, 2026-08-01): fixed uid/gid 10001,
+# `lancache` account (Teil 2, 2026-08-01): fixed uid/gid 10001,
 # matching services/ui/Dockerfile's own existing account of the same name.
 # Only the `retention` compose service actually runs as this user (via
 # retention-entrypoint.sh's root-to-lancache privilege drop); the plain
@@ -362,17 +364,18 @@ RUN addgroup -g 10001 lancache && \
 
 # What: default ENTRYPOINT is now the compiled Rust binary, not the bash
 # `watchdog.sh` script.
-# Why: issue #842's 2026-08-07 maintainer decision authorized the
-# ENTRYPOINT swap once the existing full-setup-deep-validate suite passes
-# with this binary in place. `watchdog.sh` itself is removed from this
-# image (and from the repository) as of this change -- it has no remaining
-# caller: `deploy/*/docker-compose.yml`'s `watchdog` service `command:`
-# overrides for prod/quickstart now `exec` this binary instead (see those
-# files' own comments), and `deploy/full-setup` has no override at all, so
-# it picks up this new default directly. The `retention` compose service
-# continues to override this with `entrypoint: ["/retention-entrypoint.sh"]`
-# (see deploy/*/docker-compose.yml's own `retention:` service block) --
-# both executables still ship in this one image so a single build serves
-# either role, chosen entirely by which compose service invokes it.
+# Why: the 2026-08-07 maintainer decision authorized the ENTRYPOINT swap
+# once the existing full-setup-deep-validate suite passes with this binary
+# in place. `watchdog.sh` itself is removed from this image (no longer
+# `COPY`'d in) but deliberately kept in the repository, unused, as a
+# rollback-safety reference -- it has no remaining image caller:
+# `deploy/*/docker-compose.yml`'s `watchdog` service `command:` overrides
+# for prod/quickstart now `exec` this binary instead (see those files' own
+# comments), and `deploy/full-setup` has no override at all, so it picks up
+# this new default directly. The `retention` compose service continues to
+# override this with `entrypoint: ["/retention-entrypoint.sh"]` (see
+# deploy/*/docker-compose.yml's own `retention:` service block) -- both
+# executables still ship in this one image so a single build serves either
+# role, chosen entirely by which compose service invokes it.
 # From: Issue #842
 ENTRYPOINT ["/usr/local/bin/lancache-watchdog"]
