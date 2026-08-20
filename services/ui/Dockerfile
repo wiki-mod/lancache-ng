@@ -185,7 +185,7 @@ COPY Cargo.toml Cargo.lock ./
 #     writes generated C headers into its own build directory during the build, so pump
 #     can't see them yet. The wrapper detects those translation units and falls back to
 #     non-pump distcc / the local compiler for just those compiles; it also understands
-#     ccache's CCACHE_PREFIX dispatch shape now (issue #1533), used by configure_ccache below.
+#     ccache's CCACHE_PREFIX dispatch shape now, used by configure_ccache below.
 #   disable_distcc         - rollback path used by configure_distcc/run_cargo_build on failure;
 #                            shuts down distcc-pump and restores the pre-distcc PATH/env.
 #   resolve_distcc_wrapper_dir - locates the cc/gcc/c++/g++ -> distcc wrapper symlinks.

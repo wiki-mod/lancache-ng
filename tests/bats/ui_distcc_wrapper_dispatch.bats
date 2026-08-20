@@ -7,9 +7,9 @@
 # hand-duplicated -- a second copy would drift from the real generated script
 # exactly the way AG-CODE-011 warns against), against real compiler/distcc
 # stubs. Proves both dispatch conventions the wrapper must understand: the
-# original $0-basename masquerade shape, and issue #1533's new $1-as-path
-# CCACHE_PREFIX shape -- including the exact corrupted-argv regression the
-# issue reported (a duplicated compiler path) no longer occurring.
+# original $0-basename masquerade shape, and ccache's newer $1-as-path
+# CCACHE_PREFIX shape -- including the exact corrupted-argv regression this
+# reported (a duplicated compiler path) no longer occurring.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -89,13 +89,13 @@ EOF
 }
 
 @test "CCACHE_PREFIX dispatch: real compiler path from \$1 is passed through once, not duplicated" {
-    # Regression test for issue #1533's reported corruption: before the fix,
-    # $0=="distcc" fell through to a hardcoded "cc" default and re-passed $1
-    # as a stray positional argument (e.g. "cc /usr/bin/cc -O2 ... file.c").
+    # Regression test for the reported corruption: before the fix, $0=="distcc"
+    # fell through to a hardcoded "cc" default and re-passed $1 as a stray
+    # positional argument (e.g. "cc /usr/bin/cc -O2 ... file.c").
     run "$bin_dir/distcc" "$sys_dir/cc" -c foo.c -o foo.o
     [ "$status" -eq 0 ]
     [ "$output" = "DISTCC_REAL_ARGV: [$sys_dir/cc] [-c] [foo.c] [-o] [foo.o]" ]
-    [[ "$output" != *"[cc] [$sys_dir/cc]"* ]] || fail "compiler path was duplicated -- the exact corruption issue #1533 reported"
+    [[ "$output" != *"[cc] [$sys_dir/cc]"* ]] || fail "compiler path was duplicated -- the exact reported corruption"
 }
 
 @test "unrecognized invocation with no usable \$1 falls back to the pre-existing cc default" {
