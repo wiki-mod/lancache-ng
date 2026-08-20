@@ -4571,8 +4571,8 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
-      # What: syslog/utilities added to the allowlist: both services were onboarded
-      # after this job's original 8-service allowlist snapshot (2026-08-03) and were never added
+      # What: syslog/utilities added to the allowlist (issue #1095, this PR): both services were onboarded
+      # after this job's original 8-service allowlist snapshot (PR #1378, 2026-08-03) and were never added
       # here, so every push rebuilt them unconditionally regardless of whether they actually changed.
       # Why: Same three-part verification (revision label + ancestry + content diff) as the other 8 services;
       # no new logic needed, only these two additional outputs and allowlist entries.
@@ -4664,7 +4664,7 @@ jobs:
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
           # What: All 10 first-party product/tooling services (including build-tools, syslog, utilities) go through the identical decide_one() call below, with no per-service branching.
-          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy. syslog and utilities were onboarded after this allowlist's original 8-service snapshot and were never added here, so every push rebuilt them unconditionally even when unchanged -- classify-image-impact.sh already carries `syslog`/`utilities` classify keys (added when those services were onboarded), so this is a pure allowlist extension, not new verification logic.
+          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy. syslog (#1428) and utilities (#1556) were onboarded after this allowlist's original 8-service snapshot (PR #1378) and were never added here, so every push rebuilt them unconditionally even when unchanged -- classify-image-impact.sh already carries `syslog`/`utilities` classify keys (added when those services were onboarded), so this is a pure allowlist extension, not new verification logic.
           # From: Issue #1095
           allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
 
@@ -5005,7 +5005,7 @@ jobs:
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
             # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies to all 10 currently allowlisted services (build-tools, syslog, utilities included); a service outside the allowlist would be a plain pass-through to `*) reuse="false"`.
-            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag. syslog/utilities were onboarded after this case's original 8-service snapshot and previously fell through to the `*) reuse="false"` default unconditionally.
+            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag. syslog/utilities added (issue #1095): both were onboarded after this case's original 8-service snapshot and previously fell through to the `*) reuse="false"` default unconditionally.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
