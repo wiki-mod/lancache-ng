@@ -32,8 +32,8 @@ on:
       dry_run:
         description: Classify and revalidate candidates without deleting them.
         type: choice
-        options: ["false", "true"]
-        default: "false"
+        options: ["true", "false"]
+        default: "true"
       concurrency:
         description: Packages processed in parallel.
         type: string
@@ -168,7 +168,7 @@ jobs:
         if: steps.creds.outputs.have-pat == 'true' && steps.script-check.outputs.scripts-present == 'true'
         env:
           GH_TOKEN: ${{ secrets.GHCR_PACKAGE_DELETE_PAT }}
-          GC_DRY_RUN: ${{ github.event.inputs.dry_run || 'false' }}
+          GC_DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.dry_run || 'true' }}
           GC_CONCURRENCY: ${{ github.event.inputs.concurrency || vars.GC_CONCURRENCY || '1' }}
           GC_MAX_DELETIONS_PER_SERVICE: ${{ github.event.inputs.max_deletions_per_service || vars.GC_MAX_DELETIONS_PER_SERVICE || '40' }}
           GC_MAX_DELETIONS_TOTAL: ${{ github.event.inputs.max_deletions_total || vars.GC_MAX_DELETIONS_TOTAL || '1500' }}
