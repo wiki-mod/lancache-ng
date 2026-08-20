@@ -451,3 +451,26 @@ run_classify_git() {
     [ "$status" -eq 0 ]
     [ "$(val workflow)" = "false" ]
 }
+
+# touches_codeql_rust() ORs in touches_build_workflow() (a build-affecting
+# workflow file is also a CodeQL-relevant input), so this content-aware
+# refinement changes codeql_rust too, not only workflow -- a real, deliberate
+# side effect (a comment-only build-push.yml diff cannot affect what CodeQL
+# extracts either), not an accidental one, but it needs its own coverage in
+# the git-diff form since the existing CHANGED_FILES-mode codeql_rust cases
+# above are untouched by this change and would not have caught a regression.
+@test "G14: a comment-only build-push.yml diff also sets codeql_rust=false (no other CodeQL-relevant path touched)" {
+    setup_git_repo
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    printf 'jobs:\n  build:\n    steps:\n      # explains why the step below exists\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m comment_only
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+    [ "$(val codeql_rust)" = "false" ]
+}

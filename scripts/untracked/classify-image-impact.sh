@@ -114,6 +114,11 @@ touches_docs() {
 workflow_diff_is_comment_only() {
     [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 1
 
+    # `${#paths[@]}` on a still-empty array is safe under `set -u` on bash
+    # >= 4.4 (this repo's build-tools image is Debian-based rust:latest, per
+    # AG-KD-009, always well past that); every other array in this codebase
+    # (e.g. scripts/lib/known-good-snapshots.sh, scripts/untracked/check-
+    # short-sha-truncation.sh) already relies on the identical baseline.
     local paths=() path
     while IFS= read -r path; do
         case "$path" in
