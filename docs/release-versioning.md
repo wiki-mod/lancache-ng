@@ -590,12 +590,11 @@ written; this section now reflects the actually-shipped design.
 
 Automated cleanup must be explicitly approved and must consume the manifest
 retention contract plus canonical accepted/protected identity evidence. The
-`GHCR Retention GC` workflow remains read-only unless a maintainer deliberately
-selects `dry_run=false` for a supervised manual dispatch:
+repository's configured `GHCR Retention GC` schedule is that approved automation:
 
-- scheduled and pull-request-close sweeps classify candidates without deleting;
-- `workflow_dispatch` defaults to dry-run and exposes destructive mode as an
-  explicit selection;
+- it currently performs one bounded destructive sweep per day;
+- `workflow_dispatch` permits either the same destructive mode or a
+  supervised dry-run;
 - during a large historical backlog the schedule may be run more often only
   after measured API behavior shows the smaller repeated sweeps remain
   below GitHub rate/service-pressure limits;
