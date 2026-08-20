@@ -6161,7 +6161,7 @@ jobs:
     # already uses to move channel tags -- so no image is rebuilt here, only a manifest
     # list assembled from two already-pushed digests.
     #
-    # Also runs on pull_request events now (see #626): a same-repo PR pushes its own
+    # Also runs on pull_request events now: a same-repo PR pushes its own
     # pr-<N>-sha-<short>-{amd64,arm64} legs in build/build-arm64, and this job merges
     # those into the real pr-<N>-sha-<short> tag that full-setup-validate consumes to
     # test the PR's own commits. The existing sha-<short> merge below stays gated to
