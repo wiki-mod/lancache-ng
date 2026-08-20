@@ -408,7 +408,7 @@ jobs:
           # pre-existing "Attach OpenVEX document to the release" step this pattern was
           # copied from had the identical gap -- see that step's own fix in this same PR.)
           docker run --rm -i \
-            -e GITHUB_TOKEN -e REPO -e TRACKING_LABEL -e REGEN_STATUS -e REGEN_DETAIL -e RUN_URL -e TRIGGER_SHA \
+            -e GITHUB_TOKEN -e REPO -e TRACKING_LABEL -e REGEN_STATUS -e REGEN_DETAIL -e RUN_URL -e TRIGGER_SHA -e TRACKING_ISSUE \
             "${BUILD_TOOLS_IMAGE:?BUILD_TOOLS_IMAGE is required}" \
             timeout --kill-after=30 --signal=KILL 300 \
             bash -s <<'TRACK_VEX'
