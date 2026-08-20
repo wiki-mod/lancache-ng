@@ -2639,11 +2639,8 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/
-          #   pr-staging-available/tag decisions, instead of reimplementing them inline.
-          # Why: Keeps exactly one implementation of this decision logic; this job already
-          #   sources other scripts/lib/*.sh files below (ghcr-retry.sh, staging-image-freshness.sh)
-          #   the same way.
+          # What: Calls scripts/lib/validation-image-tag.sh's own functions for the channel/pr-staging-available/tag decisions, instead of reimplementing them inline.
+          # Why: Keeps exactly one implementation of this decision logic; this job already sources other scripts/lib/*.sh files below (ghcr-retry.sh, staging-image-freshness.sh) the same way.
           # From: Issue #822
           # shellcheck source=scripts/lib/validation-image-tag.sh
           source "$GITHUB_WORKSPACE/scripts/lib/validation-image-tag.sh"
@@ -2668,11 +2665,8 @@ jobs:
           fi
 
           if [[ "$pr_staging_available" == "true" ]]; then
-            # What: Any untouched service is backfilled from this PR's own base-commit
-            #   per-commit image in the next step ("Ensure PR staging tags exist for
-            #   full-setup services"), not from base_channel_tag.
-            # Why: base_channel_tag is computed above only for the pr_staging_available ==
-            #   false branch's whole-suite fallback below, and is otherwise unused here.
+            # What: Any untouched service is backfilled from this PR's own base-commit per-commit image in the next step ("Ensure PR staging tags exist for full-setup services"), not from base_channel_tag.
+            # Why: base_channel_tag is computed above only for the pr_staging_available == false branch's whole-suite fallback below, and is otherwise unused here.
             # From: Issue #1254 | Issue #1255
             echo "Validating against this PR's own staging tag '$tag' (built commit $BUILD_SHA, PR head $PR_HEAD_SHA; untouched services are backfilled from this PR's own base commit's per-commit image, see the next step)."
           else
@@ -2705,10 +2699,8 @@ jobs:
         if: steps.channel.outputs.pr-staging-available == 'true'
         env:
           PR_TAG: ${{ steps.channel.outputs.tag }}
-          # What: This PR's own base commit; used both to verify the back-fill source was
-          #   actually built from it (or later), and to derive that source image's own tag.
-          # Why: Always present here -- this step only runs when pr-staging-available is
-          #   true, which requires a pull_request event.
+          # What: This PR's own base commit; used both to verify the back-fill source was actually built from it (or later), and to derive that source image's own tag.
+          # Why: Always present here -- this step only runs when pr-staging-available is true, which requires a pull_request event.
           # From: Issue #808 | Issue #1254 | Issue #1255
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
@@ -2747,11 +2739,8 @@ jobs:
 
           : "${BASE_SHA:?BASE_SHA (github.event.pull_request.base.sha) is required}"
 
-          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing
-          #   the same "workflow/CI-contract change forces every service except build-tools to
-          #   be treated as touched" override inline a second time.
-          # Why: Keeps this decision alongside this step's other "Determine validation image
-          #   channel"-sourced functions, one implementation instead of a second copy.
+          # What: Calls vit_service_should_have_staging_tag directly instead of reimplementing the same "workflow/CI-contract change forces every service except build-tools to be treated as touched" override inline a second time.
+          # Why: Keeps this decision alongside this step's other "Determine validation image channel"-sourced functions, one implementation instead of a second copy.
           # From: Issue #822
           service_should_have_staging_tag() {
             vit_service_should_have_staging_tag "$1" "$2" "$WORKFLOW_CHANGED"
@@ -2811,12 +2800,8 @@ jobs:
               exit 1
             fi
 
-            # What: Never back-fills without first proving the source image was actually
-            #   built from base.sha or later, via saf_resolve_untouched_backfill_source.
-            # Why: Shares scripts/lib/staging-image-freshness.sh's/staging-ancestor-fallback.sh's
-            #   resolution sequence with scripts/untracked/ensure-pr-staging-images.sh instead of
-            #   an independent copy; the poll/search-depth arguments below intentionally match
-            #   that script's own defaults -- keep them in sync by hand if those ever change.
+            # What: Never back-fills without first proving the source image was actually built from base.sha or later, via saf_resolve_untouched_backfill_source.
+            # Why: Shares scripts/lib/staging-image-freshness.sh's/staging-ancestor-fallback.sh's resolution sequence with scripts/untracked/ensure-pr-staging-images.sh instead of an independent copy; the poll/search-depth arguments below intentionally match that script's own defaults -- keep them in sync by hand if those ever change.
             # From: Issue #808
             if ! resolved_source="$(saf_resolve_untouched_backfill_source "$REPOSITORY" "$service" "${classify_key_map[$service]}" "$BASE_SHA" \
               900 1200 \
@@ -3533,8 +3518,7 @@ jobs:
                 exit 1
               fi
 
-              # What: Badge generation reuses this same containerized jq instead of assuming
-              #   a host-installed jq.
+              # What: Badge generation reuses this same containerized jq instead of assuming a host-installed jq.
               # Why: Matches why the coverage extraction above already runs in here.
               # From: Issue #566
               ui_coverage_display="$(printf "%.2f" "$ui_coverage")"
@@ -3635,8 +3619,7 @@ jobs:
           : "${BADGE_BRANCH:?BADGE_BRANCH is required}"
           : "${BADGE_FILE:?BADGE_FILE is required}"
 
-          # What: Debounce/coalesce -- re-resolves the branch's current tip directly from the
-          #   remote and skips as a no-op if a newer commit has already landed.
+          # What: Debounce/coalesce -- re-resolves the branch's current tip directly from the remote and skips as a no-op if a newer commit has already landed.
           # Why: Same reasoning/mechanism as promote's own branch-tip check: the per-ref badge concurrency group only serializes execution ORDER, not which commit's coverage wins; a slow, older run could otherwise fast-forward the badge file back to stale coverage after a faster, newer run for the same branch already published.
           # From: Issue #777
           current_tip="$(git ls-remote origin "$GITHUB_REF" | cut -f1)"
