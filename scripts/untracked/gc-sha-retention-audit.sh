@@ -26,6 +26,7 @@ history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
 package_filter="${SRA_PACKAGE_FILTER:-}"
 version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
+audit_concurrency="${SRA_CONCURRENCY:-2}"
 per_page=100
 
 if [[ -n "$version_snapshot_file" && -z "$package_filter" ]]; then
@@ -45,6 +46,10 @@ repository_name="${GITHUB_REPOSITORY#*/}"
 }
 [[ "$max_pages_per_package" =~ ^[1-9][0-9]*$ ]] || {
   echo "::error::SRA_MAX_PAGES_PER_PACKAGE must be a positive integer." >&2
+  exit 1
+}
+[[ "$audit_concurrency" =~ ^[1-9][0-9]*$ ]] || {
+  echo "::error::SRA_CONCURRENCY must be a positive integer." >&2
   exit 1
 }
 
@@ -208,6 +213,7 @@ done
 audit_package() {
   local class="${1:?audit_package: class is required}"
   local package="${2:?audit_package: package is required}"
+  local anchor_result_file="${3:?audit_package: anchor result file is required}"
   local package_dir="$work_dir/${class}-${package}"
   local versions_file="$package_dir/versions.jsonl"
   local body_file="$package_dir/page.json"
@@ -348,7 +354,7 @@ audit_package() {
     # a match also marks this anchor "observed" for the post-loop check below.
     # From: Issue #1095 | PR #1586
     if sra_digest_is_rollback_anchor "$digest" "${!retention_rollback_anchor_digests[@]}"; then
-      retention_rollback_anchor_found["$digest"]=1
+      printf '%s\n' "$digest" >>"$anchor_result_file"
       sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "n/a" "protected" "protect" "explicit-rollback-anchor"
       continue
     fi
@@ -506,20 +512,56 @@ audit_package() {
   fi
 }
 
+# What: audits packages in bounded batches and merges each worker deterministically.
+# Why: package listings are independent and dominate the live runtime, while
+# per-worker files preserve output, failures, and rollback-anchor evidence
+# across the background-shell boundary under set -euo pipefail.
+# From: Issue #1585
 overall_status=0
-while IFS=$'\t' read -r package_class package_name; do
-  [[ -n "$package_class" && -n "$package_name" ]] || {
-    echo "::error::Malformed first-party package inventory entry." >&2
-    overall_status=1
-    continue
-  }
-  echo "::notice::Auditing read-only GHCR retention state for $package_class package ${repository_name}/${package_name}." >&2
-  if audit_package "$package_class" "$package_name"; then
-    :
-  else
-    overall_status=1
-  fi
-done <"$packages_file"
+mapfile -t package_targets <"$packages_file"
+package_count="${#package_targets[@]}"
+(( audit_concurrency <= package_count )) || audit_concurrency="$package_count"
+for (( offset=0; offset<package_count; offset+=audit_concurrency )); do
+  batch_end=$((offset + audit_concurrency))
+  (( batch_end <= package_count )) || batch_end="$package_count"
+  worker_pids=()
+  worker_outputs=()
+  worker_errors=()
+  worker_anchors=()
+
+  for (( index=offset; index<batch_end; index++ )); do
+    IFS=$'\t' read -r package_class package_name <<<"${package_targets[$index]}"
+    if [[ -z "$package_class" || -z "$package_name" ]]; then
+      echo "::error::Malformed first-party package inventory entry." >&2
+      overall_status=1
+      continue
+    fi
+    worker_output="$work_dir/worker-${index}.out"
+    worker_error="$work_dir/worker-${index}.err"
+    worker_anchor="$work_dir/worker-${index}.anchors"
+    : >"$worker_anchor"
+    echo "::notice::Auditing read-only GHCR retention state for $package_class package ${repository_name}/${package_name}." >&2
+    audit_package "$package_class" "$package_name" "$worker_anchor" >"$worker_output" 2>"$worker_error" &
+    worker_pids+=("$!")
+    worker_outputs+=("$worker_output")
+    worker_errors+=("$worker_error")
+    worker_anchors+=("$worker_anchor")
+  done
+
+  for worker_index in "${!worker_pids[@]}"; do
+    if wait "${worker_pids[$worker_index]}"; then
+      :
+    else
+      overall_status=1
+    fi
+    cat "${worker_outputs[$worker_index]}"
+    cat "${worker_errors[$worker_index]}" >&2
+    while IFS= read -r retention_rollback_anchor_entry; do
+      [[ -n "$retention_rollback_anchor_entry" ]] || continue
+      retention_rollback_anchor_found["$retention_rollback_anchor_entry"]=1
+    done <"${worker_anchors[$worker_index]}"
+  done
+done
 
 # What: fails closed on any declared rollback anchor never observed live.
 # Why: an unobserved anchor is a typo, an already-deleted digest, or one

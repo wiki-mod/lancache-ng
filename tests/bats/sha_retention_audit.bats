@@ -703,6 +703,31 @@ EOF
   [ "$status" -eq 0 ]
 }
 
+# What: audit concurrency rejects zero before any registry request can run.
+# Why: an invalid worker bound must fail closed instead of disabling the audit
+# loop or creating an unbounded package fan-out.
+# From: Issue #1585
+@test "gc-sha-retention-audit.sh rejects invalid package concurrency" {
+  run env GITHUB_REPOSITORY=wiki-mod/lancache-ng GH_TOKEN=test SRA_CONCURRENCY=0 \
+    bash "$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  [ "$status" -ne 0 ]
+  [[ "$output" == *"SRA_CONCURRENCY must be a positive integer"* ]]
+}
+
+# What: package workers use bounded batches and file-backed result handoff.
+# Why: background shells cannot return audit output, failure state, or observed
+# rollback anchors through parent variables; all three channels must survive.
+# From: Issue #1585
+@test "gc-sha-retention-audit.sh preserves concurrent worker results" {
+  script="$repo_root/scripts/untracked/gc-sha-retention-audit.sh"
+  run grep -F 'offset+=audit_concurrency' "$script"
+  [ "$status" -eq 0 ]
+  run grep -F 'wait "${worker_pids[$worker_index]}"' "$script"
+  [ "$status" -eq 0 ]
+  run grep -F 'done <"${worker_anchors[$worker_index]}"' "$script"
+  [ "$status" -eq 0 ]
+}
+
 # What: retention audit code and workflow contain no destructive package path.
 # Why: the read-only audit surface must remain structurally incapable of
 # package deletion, verified by grepping for any DELETE-capable pattern.
