@@ -114,8 +114,11 @@ RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     rg --version >/dev/null; \
-    ec=0; lsof -v >/dev/null 2>&1 || ec=$?; \
-    [ "$ec" -ne 126 ] && [ "$ec" -ne 127 ]
+    lsof_out="$(lsof -v 2>&1)" || true; \
+    case "$lsof_out" in \
+      *"error while loading shared"*|*"not found"*|*"cannot execute"*) \
+        printf '%s\n' "ERROR: lsof failed to load: $lsof_out" >&2; exit 1 ;; \
+    esac
 
 RUN apk upgrade --no-cache && \
     apk add --no-cache ca-certificates openssl && \

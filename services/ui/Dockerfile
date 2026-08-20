@@ -616,8 +616,11 @@ COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
-    ec=0; lsof -v >/dev/null 2>&1 || ec=$?; \
-    [ "$ec" -ne 126 ] && [ "$ec" -ne 127 ]
+    lsof_out="$(lsof -v 2>&1)" || true; \
+    case "$lsof_out" in \
+      *"error while loading shared"*|*"not found"*|*"cannot execute"*) \
+        printf '%s\n' "ERROR: lsof failed to load: $lsof_out" >&2; exit 1 ;; \
+    esac
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's
 # identical comment for the full rationale; lsof/ripgrep are COPY'd above
