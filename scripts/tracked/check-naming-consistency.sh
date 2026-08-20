@@ -173,32 +173,35 @@ $watchdog_names
 EOF_WATCHDOG
 
 # --- watchdog/syslog must never gain a lifecycle-action grant (#1486) -----
-# Deliberate, load-bearing design decision (issue #1486): watchdog must stay
-# completely absent from this allowlist (not even inspect-only, since it is
-# the mechanism that recovers other services), and syslog may keep its
-# existing inspect-only access but must never gain a start/stop/restart/wait
-# grant. This checks every currently-known lifecycle-action acl by name
-# rather than a generic pattern -- a future verb-granting acl added under a
-# new name still needs a matching addition to this list, which is a known,
-# accepted limitation of this specific check (see AG-VAL-028).
-# Scoped to `acl`/`http-request` lines specifically (not the whole file) so
-# a future maintainer comment that merely explains this exclusion (e.g.
-# "lancache-watchdog is deliberately absent") never trips this check itself.
-# Captured into a variable first, then grep -q'd via a here-string (not a
-# live pipe), per AG-VAL-032/issue #1377.
+# What: watchdog stays fully absent from the allowlist; syslog keeps
+#   inspect-only access; the verb-acl set below is derived from the file
+#   itself (any acl regex ending in a start/stop/restart/wait segment).
+# Why: a hardcoded name list would silently miss a differently-named future
+#   verb-granting acl, letting a watchdog/syslog regression pass unnoticed.
+# From: Issue #1486
 watchdog_acl_lines=$(grep -Ei '^[[:space:]]*(acl|http-request)[[:space:]].*lancache-watchdog' "$SOCKET_PROXY_SCRIPT" || true)
 if grep -q . <<<"$watchdog_acl_lines"; then
   fail "$SOCKET_PROXY_SCRIPT references lancache-watchdog in an acl/http-request line -- issue #1486 requires watchdog to stay completely absent from this allowlist."
 fi
 
-for verb_acl in safe_service_restart safe_dhcp_action safe_ntp_action safe_probe_action safe_ui_restart; do
+verb_acls=$(grep -oE '^[[:space:]]*acl[[:space:]]+[a-z_]+[[:space:]]+path,url_dec.*/\(?(start|stop|restart|wait)(\|(start|stop|restart|wait))*\)?\$' "$SOCKET_PROXY_SCRIPT" \
+  | grep -oE 'acl [a-z_]+' | awk '{print $2}')
+
+if [ -z "$verb_acls" ]; then
+  fail "Could not find any lifecycle-action (start/stop/restart/wait) acl in $SOCKET_PROXY_SCRIPT."
+fi
+
+while IFS= read -r verb_acl; do
+  [ -n "$verb_acl" ] || continue
   # Captured into a variable, then grep -q'd via a here-string (not a live
   # pipe), per AG-VAL-032/issue #1377.
   verb_acl_line=$(grep -F "acl $verb_acl " "$SOCKET_PROXY_SCRIPT" || true)
   if grep -qi 'lancache-\(watchdog\|syslog\)' <<<"$verb_acl_line"; then
     fail "$SOCKET_PROXY_SCRIPT's '$verb_acl' acl grants a lifecycle action to watchdog or syslog -- issue #1486 requires both to stay un-disableable via the Admin UI."
   fi
-done
+done <<EOF_VERB_ACLS
+$verb_acls
+EOF_VERB_ACLS
 
 # --- UI's *_SERVICE defaults match a real Compose *service* name ----------
 # This is the other namespace (see docs/naming-conventions.md): these

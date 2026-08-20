@@ -537,18 +537,18 @@ services:
   watchdog:
     container_name: lancache-watchdog${LANCACHE_CONTAINER_SUFFIX:-}
     image: ${LANCACHE_IMAGE_REGISTRY:-ghcr.io}/${LANCACHE_IMAGE_PREFIX:-wiki-mod/lancache-ng}/watchdog:${LANCACHE_IMAGE_TAG:-latest}
-    # What: entrypoint tees watchdog.sh's stdout into a file in addition to the container's normal stdout via process substitution (bash-only; `exec` still replaces this shell so /watchdog.sh stays PID 1).
-    # Why: watchdog.sh's log() function only writes stdout and is never itself changed; fluent-bit needs a file to tail, `docker logs` must keep working unchanged.
-    # From: Issue #633
+    # What: entrypoint tees the compiled watchdog binary's stdout into a file in addition to the container's normal stdout via process substitution (bash-only; `exec` still replaces this shell so the binary stays PID 1).
+    # Why: the binary's log()/log_err() only write stdout/stderr and are never themselves changed here; fluent-bit needs a file to tail, `docker logs` must keep working unchanged.
+    # From: Issue #633 | Issue #842 (ENTRYPOINT swap: bash watchdog.sh -> compiled lancache-watchdog binary)
     #
-    # What: calls /watchdog.sh directly; no longer also launches retention.sh as a backgrounded process inside this container.
+    # What: calls the compiled binary directly; no longer also launches retention.sh as a backgrounded process inside this container.
     # Why: retention.sh now runs as its own `retention` service below -- see deploy/prod/docker-compose.yml's identical watchdog comment.
     # From: Issue #842 | PR #1360
     entrypoint: ["/bin/bash", "-c"]
     command:
       - |
         mkdir -p /var/log/lancache-watchdog
-        exec /watchdog.sh > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
+        exec /usr/local/bin/lancache-watchdog > >(tee -a /var/log/lancache-watchdog/watchdog.log) 2>&1
     environment:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       - CHECK_INTERVAL=30
@@ -556,8 +556,8 @@ services:
       - DISK_WARN_PCT=85
       - DISK_ALARM_PCT=95
       - CACHE_DIR=/var/cache/lancache
-      # What: CONTAINER_PROXY/CONTAINER_DNS_STANDARD/CONTAINER_DNS_SSL/CONTAINER_NATS/LANCACHE_CONTAINER_SUFFIX, passed to watchdog's own FATAL guard (watchdog.sh's C_PROXY/C_DNS_STD/C_DNS_SSL/C_NATS checks).
-      # Why: recomputes the container names it expects using the same suffix this project started its containers with; left unset, byte-identical to watchdog.sh's own literal default, a no-op for a real install.
+      # What: CONTAINER_PROXY/CONTAINER_DNS_STANDARD/CONTAINER_DNS_SSL/CONTAINER_NATS/LANCACHE_CONTAINER_SUFFIX, passed to the watchdog binary's own fail-closed guard (config::resolve_container_names).
+      # Why: recomputes the container names it expects using the same suffix this project started its containers with; left unset, byte-identical to the binary's own literal default, a no-op for a real install.
       # From: Issue #1415 | PR #1456
       - CONTAINER_PROXY=lancache-proxy${LANCACHE_CONTAINER_SUFFIX:-}
       - CONTAINER_DNS_STANDARD=lancache-dns-standard${LANCACHE_CONTAINER_SUFFIX:-}
@@ -573,7 +573,7 @@ services:
       - LOGGING_ENABLED=${LOGGING_ENABLED:-0}
       - NTP_ENABLED=${NTP_ENABLED:-0}
     volumes:
-      # What: read-only mount; watchdog.sh only reads this tree (disk_info()'s `df -P` for the dashboard's disk-usage card).
+      # What: read-only mount; the watchdog binary only reads this tree (status::disk_info() for the dashboard's disk-usage card).
       # Why: the destructive purge that needed read-write access here moved to the `retention` service below -- see deploy/prod/docker-compose.yml.
       # From: Issue #842 | PR #1360
       - ${CACHE_DIR:?CACHE_DIR is required}:/var/cache/lancache:ro
@@ -872,7 +872,7 @@ services:
       - DOCKER_PROXY_URL=http://docker-socket-proxy:2375
       # What: LANCACHE_CONTAINER_SUFFIX, passed through to the ui container.
       # Why: docker_client.rs's restart/start/stop calls need it to resolve the
-      #   same suffixed container names docker-socket-proxy.sh/watchdog.sh accept.
+      #   same suffixed container names docker-socket-proxy.sh/the watchdog binary accept.
       # From: Issue #1592
       - LANCACHE_CONTAINER_SUFFIX=${LANCACHE_CONTAINER_SUFFIX:-}
       - DNS_STANDARD_SERVICE=dns-standard

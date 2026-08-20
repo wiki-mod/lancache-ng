@@ -294,10 +294,10 @@ demand, and `syslog-logs-permissions`, the one-shot `logs` volume ownership
 migration init container documented in the syslog-ng section below -- both
 `restart: "no"` and run to completion rather than staying up as a
 long-running daemon, so a liveness
-healthcheck has no meaningful state to probe. `watchdog.sh` itself only *acts* on a subset of
-the services below -- see the "Auto-restart" scope note directly below this
-list before assuming every entry here is watched and restarted by the
-watchdog daemon.
+healthcheck has no meaningful state to probe. The watchdog binary itself only
+*acts* on a subset of the services below -- see the "Auto-restart" scope note
+directly below this list before assuming every entry here is watched and
+restarted by the watchdog daemon.
 - nginx: HTTP request on `/health`
 - PowerDNS: DNS query test via `rec_control`
 - Kea: REST API ping
@@ -310,72 +310,79 @@ watchdog daemon.
 - docker-socket-proxy: HTTP probe against the Docker API's own `/_ping` endpoint (#1169), explicitly allowlisted by `scripts/untracked/docker-socket-proxy.sh`'s own `safe_ping` ACL -- proves the HAProxy frontend is actually forwarding to the real Docker socket backend, not just that port 2375 is open
 
 **Auto-restart:** X failed checks → `docker restart <container>`. Scope,
-verified against `services/watchdog/watchdog.sh`: the daemon's own
-`check_and_maybe_restart` loop polls and auto-restarts `proxy`,
-`dns-standard`, `nats` (always monitored, not flag-gated), and (when
-`SSL_ENABLED=1`) `dns-ssl` -- the container names it takes via
+verified against the compiled `services/watchdog` Rust binary (the production
+`ENTRYPOINT` since issue #842's ENTRYPOINT swap -- see this file's own
+`services/watchdog/Dockerfile` and `deploy/*/docker-compose.yml`): `main()`'s
+own `monitored` list covers `proxy`, `dns-standard`, `nats` (always
+monitored, not flag-gated), `netdata` (always monitored, added by #842's
+2026-08-07 restart-capability decision), and (when `SSL_ENABLED=1`)
+`dns-ssl` -- the container names it takes via
 `CONTAINER_PROXY`/`CONTAINER_DNS_STANDARD`/`CONTAINER_NATS`/
-`CONTAINER_DNS_SSL`. `watchdog.sh` writes this state to a `status.json` file
-every 30 seconds; see "Status" below for how the Admin UI renders it (this
-sentence previously claimed the Admin UI had no route reading that file at
-all -- stale since issue #870 added one, corrected here while updating the
-adjacent docker-socket-proxy bullet below for issue #1170).
+`CONTAINER_DNS_SSL`/`CONTAINER_NETDATA`. The binary writes this state to a
+`status.json` file every `CHECK_INTERVAL` seconds (default 30); see "Status"
+below for how the Admin UI renders it. The legacy `services/watchdog/watchdog.sh`
+bash implementation this replaced remains in the repository (with its own
+bats coverage still passing) as a historical reference and manual-rollback
+source, but is no longer copied into the production image or executed --
+see #842's own PR for why full removal is a deliberate follow-up, not part
+of the ENTRYPOINT swap itself.
 
-These four `CONTAINER_*` variables exist only as a fail-loud consistency
-check, not a real renaming mechanism: `watchdog.sh` rejects any value that
+These five `CONTAINER_*` variables exist only as a fail-loud consistency
+check, not a real renaming mechanism: the binary rejects any value that
 does not match the fixed default and exits at startup (issue #849 bug-hunt
-finding #5). Running more than one lancache-ng stack on the same host is a
-deliberate non-goal, not an unfinished feature -- see the fail-loud
-messages' own comments in `watchdog.sh` for the full reasoning and the
-pointer to open a feature request for a genuine multi-stack-per-host need.
+finding #5, carried forward from the bash implementation into
+`config::resolve_container_names`). Running more than one lancache-ng stack
+on the same host is a deliberate non-goal, not an unfinished feature -- see
+the fail-loud messages' own comments in `services/watchdog/src/config.rs`
+for the full reasoning and the pointer to open a feature request for a
+genuine multi-stack-per-host need.
 
-Beyond the four restart-capable services above, the live Bash watchdog has
-three alert-only paths that never call `restart_container()`: it probes
-`docker-socket-proxy` every cycle through `/_ping`, monitors the combined
-`syslog` container with `check_alert_only()` when `LOGGING_ENABLED` is
-truthy, and monitors `ntp` with `check_alert_only()` when `NTP_ENABLED` is
-truthy. `ui`, `dhcp` (Kea), `dhcp-proxy`, and `netdata` have real Docker
-healthchecks but remain outside the live Bash watchdog's polled set. The
-prepared Rust rewrite has broader alert-only target resolution for those
-optional services, but that binary is not the production watchdog entrypoint
-yet. Alert-only coverage is deliberately distinct from restart permission:
-observing a service through the inspect allowlist does not grant or imply a
-Docker restart action for it.
+Beyond the five restart-capable services above, the watchdog binary has
+alert-only paths that never call `restart()`: it probes `docker-socket-proxy`
+every cycle through `/_ping`, monitors `ui` (always), the correct `dhcp`/
+`dhcp-proxy` container (per `DHCP_MODE`), `syslog` when `LOGGING_ENABLED` is
+truthy, and `ntp` when `NTP_ENABLED` is truthy. Alert-only coverage is
+deliberately distinct from restart permission: observing a service through
+the inspect allowlist does not grant or imply a Docker restart action for it.
 
-- **`ui` and `dhcp` (Kea)**: both already have a real Docker healthcheck, but
-  adding either to watchdog's blind restart-on-unhealthy loop would need the
-  Docker socket proxy's allowlist (`scripts/untracked/docker-socket-proxy.sh`) widened
-  for *that specific caller*, which remains undecided. **Corrected 2026-08-19
-  (issue #1486): `ui` is no longer restart-grant-free.** It has its own
-  narrow `safe_ui_restart` acl (`POST .../containers/lancache-ui/restart`
-  only, never `start`/`stop`) for the Admin UI's own operator-initiated
-  self-restart control (`/setup/restart-ui`) -- deliberately restart-only so
-  this path can never leave `ui` stopped. This grant is unrelated to
-  watchdog: the live Bash watchdog and the prepared Rust rewrite still never
-  call `restart_container` for `ui`, so it remains outside
-  `check_and_maybe_restart`'s blind restart-on-unhealthy loop exactly as
-  before -- only an explicit operator request through the Admin UI can
-  trigger this restart. `dhcp` is unchanged by #1486 and is still only
-  allowlisted for `start`/`stop` (`safe_dhcp_action`), never `restart`
-  (`safe_service_restart` omits it). Widening either service's allowlist so
-  *watchdog* could restart it automatically remains a separate,
-  security-relevant architectural decision left open by #842, not a side
-  effect of #1486's operator-initiated grant (the narrower *inspect-only*
-  allowlist widening needed for alert-only monitoring is yet another,
-  already-existing, different grant and does not touch
-  `safe_service_restart`).
-- **`dhcp-proxy` (dnsmasq) and `netdata`**: both have real Docker healthchecks
-  but are not currently polled by the live Bash watchdog. Adding either to
-  the live monitored set remains a separate scoping decision rather than a
-  side effect of having a healthcheck.
-- **`ntp` (chrony)**: alert-only monitored by the live Bash watchdog when
-  `NTP_ENABLED` is truthy. It is intentionally not restart-capable through
-  `check_and_maybe_restart()`.
-- **`syslog` (combined fluent-bit + syslog-ng)**: alert-only monitored by the
-  live Bash watchdog when `LOGGING_ENABLED` is truthy. Its dual-process
-  healthcheck (`services/syslog/healthcheck.sh`) feeds the Docker health state
-  consumed by `check_alert_only()`, while restart permission remains outside
-  this PR's scope.
+- **`ui`**: has a real Docker healthcheck and is alert-only monitored
+  unconditionally. **Corrected 2026-08-19 (issue #1486): `ui` is no longer
+  restart-grant-free.** It has its own narrow `safe_ui_restart` acl (`POST
+  .../containers/lancache-ui/restart` only, never `start`/`stop`) for the
+  Admin UI's own operator-initiated self-restart control
+  (`/setup/restart-ui`) -- deliberately restart-only so this path can never
+  leave `ui` stopped. This grant is not caller-specific: the socket proxy
+  authorizes only the HTTP method/path, not which client sent the request,
+  so any client able to reach the proxy (UI, watchdog, or otherwise) could
+  invoke this endpoint once it exists -- watchdog's Rust rewrite simply has
+  no code that does so, and still never calls `restart_container` for `ui`,
+  so `ui` remains outside `check_and_maybe_restart`'s blind
+  restart-on-unhealthy loop exactly as before; only an explicit operator
+  request through the Admin UI can trigger this restart.
+- **`dhcp` (Kea) and `dhcp-proxy` (dnsmasq)**: both have real Docker
+  healthchecks and are alert-only monitored (the container matching the
+  active `DHCP_MODE`). Deliberately kept start/stop-only in
+  `scripts/untracked/docker-socket-proxy.sh` (`safe_dhcp_action`), never given a
+  `restart` grant: Kea/dnsmasq's own known-good-config rollback semantics
+  and the Admin UI's start/stop-driven lifecycle control are the intended
+  recovery path, and a watchdog-triggered blind restart mid-rollback could
+  actively conflict with that -- a concern raised explicitly in #842's own
+  history and not yet reversed by any later maintainer decision.
+- **`netdata`**: promoted to real restart-capability (#842, 2026-08-07
+  decision) -- see the `Auto-restart` paragraph above. Its own dedicated
+  `safe_netdata_restart` allowlist grant follows the same
+  one-acl-per-service pattern `safe_ntp_action`/`safe_dhcp_action` already
+  use, rather than widening the shared `safe_service_restart` acl.
+- **`ntp` (chrony)**: alert-only monitored when `NTP_ENABLED` is truthy. Its
+  own start/stop-only Admin-UI toggle (`safe_ntp_action`) mirrors `dhcp`'s
+  shape; no restart grant exists for it either.
+- **`syslog` (combined fluent-bit + syslog-ng)**: alert-only monitored when
+  `LOGGING_ENABLED` is truthy. Its dual-process healthcheck
+  (`services/syslog/healthcheck.sh`) feeds the Docker health state consumed
+  here. `syslog` (and `watchdog` itself) must never gain a restart grant or
+  become user-disableable via the Admin UI -- an explicit, deliberate
+  maintainer decision (#1486's cross-reference on #842), not an
+  oversight.
 
 **Alert-only monitoring's own allowlist precondition (issue #842/#849,
 2026-08-05):** alert-only health reads require inspect-only Docker API access
@@ -385,8 +392,7 @@ not call `restart_container()`, so observing a target never makes it
 restart-capable. **Watchdog's alert-only monitoring of `syslog` is gated by
 `LOGGING_ENABLED`** (`resolve_bool`, default `false`), matching the Compose
 `logging` profile that determines whether the combined syslog+fluent-bit
-container exists. Both the live Bash watchdog and the prepared Rust rewrite
-use this same gate, so a normal logging-enabled installation includes the
+container exists. The watchdog binary uses this same gate, so a normal logging-enabled installation includes the
 container in alert-only monitoring and in `status.json` without requiring the
 separate retention opt-in. `SYSLOG_ENABLED` remains an independent, narrower
 double opt-in for the storage-budget retention/pruning engine only; it does not
@@ -408,13 +414,13 @@ watchdog's deployment-state input inconsistent.
   a *hung-but-not-crashed* docker-socket-proxy (process alive, HAProxy not
   answering) used to be completely invisible -- Docker's own `restart:
   always` only reacts to the process exiting, and nothing else in the stack
-  polled it at all. `watchdog.sh`'s `probe_docker_socket_proxy` function now
+  polled it at all. The watchdog binary's `main()` loop now
   hits `docker-socket-proxy`'s own `GET /_ping` endpoint every cycle (already
   permitted by `scripts/untracked/docker-socket-proxy.sh`'s `safe_ping` ACL -- zero new
   privilege) and writes the result into `status.json`'s `services` map like
   any other monitored container, so it renders on the Admin UI dashboard.
-  This is deliberately alert-only: `probe_docker_socket_proxy` is never
-  passed to `check_and_maybe_restart` and never calls `restart_container` --
+  This is deliberately alert-only, driven through `AlertCounter` rather
+  than `FailureCounter` --
   the circular-dependency reasoning above still fully applies to *restarting*
   it. Actually self-healing docker-socket-proxy from inside its own
   container (a supervisor that kills its own PID 1 so `restart: always`
