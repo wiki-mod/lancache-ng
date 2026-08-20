@@ -7,9 +7,9 @@
 #   for ANY length N (literal or variable) -- not merely an inconsistent
 #   literal length.
 # Why: short-SHA truncation is banned outright, not just required to stay
-#   consistent (maintainer decision, issue #1095: "Kurzformat ist verboten.
-#   Das war noch nie von mir genehmigt."); a blind local slice re-introduces
-#   the exact collision-unsafe truncation dmeta_short_sha() used to perform.
+#   consistent (maintainer decision: "Kurzformat ist verboten. Das war noch
+#   nie von mir genehmigt."); a blind local slice re-introduces the exact
+#   collision-unsafe truncation dmeta_short_sha() used to perform.
 # From: Issue #1095 (G2)
 set -euo pipefail
 

@@ -86,8 +86,8 @@ setup() {
 
 @test "resolve tag: eligible PR resolves to its own pr-<N>-sha-<full> tag" {
     # What: proves the tag carries the full commit SHA, not a truncation.
-    # Why: short SHAs are banned outright (issue #1095 G2); vit_resolve_tag
-    #   used to derive an abbreviated form via dmeta_short_sha, now removed.
+    # Why: short SHAs are banned outright; vit_resolve_tag used to derive an
+    #   abbreviated form via dmeta_short_sha, now removed.
     # From: Issue #1095 (G2)
     run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789abcdef0123456789abcdef01" \
         "someuser" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""

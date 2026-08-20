@@ -79,9 +79,9 @@ EOF
     # What: proves a variable-length slice (the shape dmeta_short_sha() used
     #   to have, e.g. \${full_sha:0:length}) is caught just like a literal
     #   length -- the guard's old carve-out for this exact shape is gone.
-    # Why: maintainer decision, issue #1095: "Kurzformat ist verboten. Das
-    #   war noch nie von mir genehmigt." -- no named exemption in the guard,
-    #   for any reason, including its own former single declared derivation.
+    # Why: maintainer decision: "Kurzformat ist verboten. Das war noch nie
+    #   von mir genehmigt." -- no named exemption in the guard, for any
+    #   reason, including its own former single declared derivation.
     # From: Issue #1095 (G2)
     cat > "$fixture_root/scripts/lib/example.sh" <<'EOF'
 #!/usr/bin/env bash

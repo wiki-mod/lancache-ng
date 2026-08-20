@@ -5,8 +5,8 @@
 # What: Docker-free unit coverage for scripts/lib/docker-metadata.sh.
 # Why: this is the single shared derivation every GHCR-repo call site across
 #   build-push.yml and build-tools.yml now reads from. dmeta_short_sha() and
-#   its own tests were removed here (issue #1095 G2): short SHAs are banned
-#   outright, not merely truncated by a single declared derivation.
+#   its own tests were removed here: short SHAs are banned outright, not
+#   merely truncated by a single declared derivation.
 # From: Issue #1095 (G1, G2)
 
 setup() {

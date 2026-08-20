@@ -896,8 +896,8 @@ saf_base_commit_has_confirmed_run() {
 #
 # Resolves <commit>'s own per-commit GHCR tag reference for <service>,
 # tolerating the ~37k already-published legacy 7-char short-SHA tags
-# (pre-dating this project's full-SHA cutover, issue #1095 G2 hardening)
-# without ever deriving a short SHA locally: a single cheap
+# (pre-dating this project's full-SHA cutover) without ever deriving a
+# short SHA locally: a single cheap
 # sif_image_revision probe against the canonical full-SHA tag
 # (`sha-<commit>`) is tried first; only on a miss does this probe the
 # legacy form, using `git rev-parse --short=7` (a real git object-database
