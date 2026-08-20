@@ -4394,6 +4394,8 @@ jobs:
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
+          REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -4410,6 +4412,8 @@ jobs:
             ntp) reuse="$REUSE_NTP" ;;
             ui) reuse="$REUSE_UI" ;;
             build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+            syslog) reuse="$REUSE_SYSLOG" ;;
+            utilities) reuse="$REUSE_UTILITIES" ;;
             *) reuse="false" ;;
           esac
 
@@ -4465,6 +4469,8 @@ jobs:
           DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
+          DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -4484,6 +4490,8 @@ jobs:
             ntp) digest="$DIGEST_NTP" ;;
             ui) digest="$DIGEST_UI" ;;
             build-tools) digest="$DIGEST_BUILD_TOOLS" ;;
+            syslog) digest="$DIGEST_SYSLOG" ;;
+            utilities) digest="$DIGEST_UTILITIES" ;;
             *) digest="" ;;
           esac
 
@@ -4563,6 +4571,14 @@ jobs:
       reuse_dhcp_proxy: ${{ steps.decide.outputs.reuse_dhcp_proxy }}
       reuse_ntp: ${{ steps.decide.outputs.reuse_ntp }}
       reuse_build_tools: ${{ steps.decide.outputs.reuse_build_tools }}
+      # What: syslog/utilities added to the allowlist (issue #1095, this PR): both services were onboarded
+      # after this job's original 8-service allowlist snapshot (PR #1378, 2026-08-03) and were never added
+      # here, so every push rebuilt them unconditionally regardless of whether they actually changed.
+      # Why: Same three-part verification (revision label + ancestry + content diff) as the other 8 services;
+      # no new logic needed, only these two additional outputs and allowlist entries.
+      # From: Issue #1095
+      reuse_syslog: ${{ steps.decide.outputs.reuse_syslog }}
+      reuse_utilities: ${{ steps.decide.outputs.reuse_utilities }}
       # What: The exact immutable manifest-list digest this job pinned and verified reuse safety against, for every service with reuse=true (empty when reuse=false); every downstream consumer (container-scan, build, build-arm64) reads this instead of re-resolving the mutable channel tag again.
       # Why: Independently re-resolving the tag a second/third/fourth time is a digest TOCTOU race -- a channel refresh between this job's verification and a later job's re-resolution could scan/retag a different image than the one proven safe; verifying against this exact pinned digest instead of the mutable tag makes the verified and exported bytes provably identical.
       # From: Issue #1095 | PR #1532, PR #1378
@@ -4574,6 +4590,8 @@ jobs:
       digest_dhcp_proxy: ${{ steps.decide.outputs.digest_dhcp_proxy }}
       digest_ntp: ${{ steps.decide.outputs.digest_ntp }}
       digest_build_tools: ${{ steps.decide.outputs.digest_build_tools }}
+      digest_syslog: ${{ steps.decide.outputs.digest_syslog }}
+      digest_utilities: ${{ steps.decide.outputs.digest_utilities }}
     steps:
       # fetch-depth: 0 (not the default shallow depth-1 clone) so
       # sif_is_ancestor_or_equal below can prove real git ancestry between a
@@ -4613,6 +4631,8 @@ jobs:
           DHCP_PROXY_CHANGED: ${{ needs['detect-changes'].outputs.dhcp_proxy }}
           NTP_CHANGED: ${{ needs['detect-changes'].outputs.ntp }}
           BUILD_TOOLS_CHANGED: ${{ needs['detect-changes'].outputs.build_tools }}
+          SYSLOG_CHANGED: ${{ needs['detect-changes'].outputs.syslog }}
+          UTILITIES_CHANGED: ${{ needs['detect-changes'].outputs.utilities }}
           # What: Needed both for push_reuse_decide's own sif_image_revision call and this step's own digest-pinning read below.
           # Why: sif_image_revision is now ghcr_retry-wrapped (see scripts/lib/staging-image-freshness.sh).
           # From: Issue #1095 | PR #1532
@@ -4643,10 +4663,10 @@ jobs:
           channel="$(resolve_build_tools_channel "$REF_NAME")"
           echo "::notice::Resolved channel '$channel' for ref '$REF_NAME'."
 
-          # What: All 8 first-party product/tooling services (including build-tools) go through the identical decide_one() call below, with no per-service branching.
-          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy.
-          # From: Issue #1095 | PR #1532
-          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools)
+          # What: All 10 first-party product/tooling services (including build-tools, syslog, utilities) go through the identical decide_one() call below, with no per-service branching.
+          # Why: Each service gets the same three-part verification scripts/lib/push-reuse.sh's header documents in full; sharing this allowlist keeps exactly one implementation of the check in the codebase instead of build-tools carrying its own separate, drifting copy. syslog (#1428) and utilities (#1556) were onboarded after this allowlist's original 8-service snapshot (PR #1378) and were never added here, so every push rebuilt them unconditionally even when unchanged -- classify-image-impact.sh already carries `syslog`/`utilities` classify keys (added when those services were onboarded), so this is a pure allowlist extension, not new verification logic.
+          # From: Issue #1095
+          allowlist=(proxy dns ui watchdog dhcp dhcp-proxy ntp build-tools syslog utilities)
 
           is_allowlisted() {
             case " ${allowlist[*]} " in
@@ -4715,6 +4735,8 @@ jobs:
             printf 'reuse_dhcp_proxy=%s\n' "$(decide_one dhcp_proxy dhcp-proxy "$DHCP_PROXY_CHANGED")"
             printf 'reuse_ntp=%s\n' "$(decide_one ntp ntp "$NTP_CHANGED")"
             printf 'reuse_build_tools=%s\n' "$(decide_one build_tools build-tools "$BUILD_TOOLS_CHANGED")"
+            printf 'reuse_syslog=%s\n' "$(decide_one syslog syslog "$SYSLOG_CHANGED")"
+            printf 'reuse_utilities=%s\n' "$(decide_one utilities utilities "$UTILITIES_CHANGED")"
           } >> "$GITHUB_OUTPUT"
 
   # What: computes build/build-arm64's shared should-build admission once,
@@ -4951,6 +4973,8 @@ jobs:
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
+          REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -4980,8 +5004,8 @@ jobs:
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
-            # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies only to the currently allowlisted services (build-tools included); every other service, syslog included, is a plain pass-through to `*) reuse="false"`.
-            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag.
+            # What: determine-push-reuse-scope's real verification (channel image revision label + git ancestry + content diff) applies to all 10 currently allowlisted services (build-tools, syslog, utilities included); a service outside the allowlist would be a plain pass-through to `*) reuse="false"`.
+            # Why: Widening this allowlist is a separate, maintainer-gated decision; a not-yet-allowlisted service always gets a real rebuild, never a silent retag. syslog/utilities added (issue #1095): both were onboarded after this case's original 8-service snapshot and previously fell through to the `*) reuse="false"` default unconditionally.
             # From: Issue #1095 | PR #1532
             case "$MATRIX_SERVICE" in
               proxy) reuse="$REUSE_PROXY" ;;
@@ -4992,6 +5016,8 @@ jobs:
               ntp) reuse="$REUSE_NTP" ;;
               ui) reuse="$REUSE_UI" ;;
               build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+              syslog) reuse="$REUSE_SYSLOG" ;;
+              utilities) reuse="$REUSE_UTILITIES" ;;
               *) reuse="false" ;;
             esac
             if [ "$reuse" = "true" ]; then
@@ -5088,6 +5114,8 @@ jobs:
           DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
+          DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -5115,6 +5143,8 @@ jobs:
             ntp) pinned_digest="$DIGEST_NTP" ;;
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
+            syslog) pinned_digest="$DIGEST_SYSLOG" ;;
+            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
@@ -5601,7 +5631,7 @@ jobs:
           touch -- "$stamp"
 
       - name: Scan pushed service digest with Trivy
-        # What: Step 3 -- scans the exact pushed digest before provenance/channel promotion, generalized from build-tools-only to all 8 services.
+        # What: Step 3 -- scans the exact pushed digest before provenance/channel promotion, generalized from build-tools-only to every service.
         # Why: This is now the ONLY vulnerability scan for a changed service on a trusted ref; container-scan's own throwaway rebuild-and-scan (a different, never-published image/digest) was removed, since it never verified the artifact actually published.
         # From: Issue #1095 | PR #1532
         if: >-
@@ -5761,6 +5791,8 @@ jobs:
           REUSE_NTP: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ntp }}
           REUSE_UI: ${{ needs['determine-push-reuse-scope'].outputs.reuse_ui }}
           REUSE_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.reuse_build_tools }}
+          REUSE_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.reuse_syslog }}
+          REUSE_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.reuse_utilities }}
         run: |
           set -euo pipefail
 
@@ -5802,6 +5834,8 @@ jobs:
               ntp) reuse="$REUSE_NTP" ;;
               ui) reuse="$REUSE_UI" ;;
               build-tools) reuse="$REUSE_BUILD_TOOLS" ;;
+              syslog) reuse="$REUSE_SYSLOG" ;;
+              utilities) reuse="$REUSE_UTILITIES" ;;
               *) reuse="false" ;;
             esac
             if [ "$reuse" = "true" ]; then
@@ -5894,6 +5928,8 @@ jobs:
           DIGEST_NTP: ${{ needs['determine-push-reuse-scope'].outputs.digest_ntp }}
           DIGEST_UI: ${{ needs['determine-push-reuse-scope'].outputs.digest_ui }}
           DIGEST_BUILD_TOOLS: ${{ needs['determine-push-reuse-scope'].outputs.digest_build_tools }}
+          DIGEST_SYSLOG: ${{ needs['determine-push-reuse-scope'].outputs.digest_syslog }}
+          DIGEST_UTILITIES: ${{ needs['determine-push-reuse-scope'].outputs.digest_utilities }}
         run: |
           set -euo pipefail
 
@@ -5921,6 +5957,8 @@ jobs:
             ntp) pinned_digest="$DIGEST_NTP" ;;
             ui) pinned_digest="$DIGEST_UI" ;;
             build-tools) pinned_digest="$DIGEST_BUILD_TOOLS" ;;
+            syslog) pinned_digest="$DIGEST_SYSLOG" ;;
+            utilities) pinned_digest="$DIGEST_UTILITIES" ;;
             *) pinned_digest="" ;;
           esac
           if [ -z "$pinned_digest" ]; then
