@@ -25,12 +25,10 @@ ARG DOCKER_BUILDX_VERSION=0.36.1
 ARG DOCKER_BUILDX_CONTAINERD_VERSION=2.3.4
 # What: pins buildx/compose/cli's vendored google.golang.org/grpc dependency
 # at or above their own go.mod/vendor.mod floor.
-# Why: this override exists because these tools' releases have repeatedly
-# lagged a fixed grpc-go CVE before catching up on their own (AGENTS.md
-# AG-KD-003); all three now floor at v1.82.1 themselves, so 1.83.0 -- the
-# current upstream release -- keeps this override current.
-# From: Issue #1570 | PR #1571
-ARG GRPC_GO_VERSION=1.83.0
+# Why: these tools' releases repeatedly lag a fixed grpc-go CVE before
+# catching up (AG-KD-003); all three floor at v1.82.1, so 1.83.1 keeps this current.
+# From: Issue #1570 | PR #1571 | Issue #1598
+ARG GRPC_GO_VERSION=1.83.1
 # What: pins buildx/compose/cli's vendored golang.org/x/text dependency at
 # or above their own go.mod/vendor.mod floor (actionlint has no x/text
 # dependency, so it needs no override).
@@ -39,11 +37,18 @@ ARG GRPC_GO_VERSION=1.83.0
 # 0.41.0 -- the current upstream release -- keeps this override current.
 # From: Issue #1570 | PR #1571
 ARG GOLANG_X_TEXT_VERSION=0.41.0
+# What: pins buildx's vendored github.com/moby/go-archive dependency (Docker
+# CLI/compose already floor at v0.3.3, no override needed there).
+# Why: same lagged-CVE pattern as the overrides above (AG-KD-003); buildx
+# v0.36.1 floors at the CVE-2026-17106-affected v0.2.1.
+# From: Issue #1598
+ARG MOBY_GO_ARCHIVE_VERSION=0.3.3
 
 SHELL ["/bin/bash", "-o", "pipefail", "-c"]
 
 # What: builds actionlint/Docker CLI/docker-compose/buildx from source, with
-# grpc-go/containerd/x-text vendor bumps applied via go.mod/vendor.mod swaps.
+# grpc-go/containerd/x-text/go-archive vendor bumps applied via
+# go.mod/vendor.mod swaps.
 # Why: gets a current Go stdlib without waiting on upstream; each tool's own
 # module quirks (vendor.mod-only, exclude directives) rule out `go install`.
 # From: Issue #1570 | PR #1571
@@ -56,6 +61,7 @@ RUN set -euo pipefail; \
       && go get "github.com/containerd/containerd/v2@v${DOCKER_BUILDX_CONTAINERD_VERSION}" \
       && go get "google.golang.org/grpc@v${GRPC_GO_VERSION}" \
       && go get "golang.org/x/text@v${GOLANG_X_TEXT_VERSION}" \
+      && go get "github.com/moby/go-archive@v${MOBY_GO_ARCHIVE_VERSION}" \
       && go mod vendor \
       && go build -ldflags "-X github.com/docker/buildx/version.Version=v${DOCKER_BUILDX_VERSION}" -o /out/docker-buildx ./cmd/buildx ); \
     rm -rf "$buildx_src"; \
