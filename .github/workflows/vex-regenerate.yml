@@ -45,10 +45,18 @@
 # proven from within the PR that introduces it -- a `push`-triggered workflow
 # only ever runs from the copy of the file already on the branch the push
 # landed on, so the very first real trigger can only happen after this file
-# merges to current_dev. The `workflow_dispatch` input below lets the
-# generate/diff/commit/push logic itself be exercised for real ahead of that,
-# but it does not prove the automatic path-filtered `push` trigger itself
-# fires correctly -- see this change's PR body Validation section.
+# merges to current_dev. The `workflow_dispatch` input below is intended as a
+# manual escape hatch to exercise the generate/diff/commit/push logic ahead of
+# that -- but this repo's default branch is `master`, not `current_dev`
+# (AG-CI-019), and `workflow_dispatch` runs are resolved against the workflow
+# list GitHub Actions knows about, which is populated from the DEFAULT
+# branch's copy of each workflow file, the same trap AG-CI-018 documents for
+# `schedule:`. Whether `gh workflow run vex-regenerate.yml --ref current_dev`
+# actually works before this file also exists on `master` is NOT verified as
+# part of this PR (this session's maintainer instruction ruled out real
+# execution/SSH verification) -- see this change's PR body Validation section
+# for the honest state of this gap, which may be wider than "just dispatch it
+# manually" if that assumption turns out to be wrong.
 name: VEX Document Regeneration
 
 on:
@@ -183,9 +191,14 @@ jobs:
 
           if [ "$status" = "success" ]; then
             # --- Step 2: fetch (or self-bootstrap) CI-Automation/vex ---
+            # Snapshot the two current_dev inputs into a tmp dir BEFORE switching
+            # branches below: the switch (or --orphan + `git rm -rf .`) replaces
+            # $GITHUB_WORKSPACE's contents with CI-Automation/vex's own tree, which
+            # has neither .trivyignore.yaml nor generate-vex.sh -- Step 3 below needs
+            # a still-reachable copy of both to redo the comparison regeneration.
             tmp_dir="$(mktemp -d)"
-            cp "$GITHUB_WORKSPACE/scripts/untracked/generate-vex.sh" "$tmp_dir/generate-vex.sh.snapshot" 2>/dev/null || true
-            printf '%s' "$fresh_json" > "$tmp_dir/vex.openvex.json.fresh"
+            cp "$GITHUB_WORKSPACE/.trivyignore.yaml" "$tmp_dir/.trivyignore.yaml" || fail "Could not snapshot .trivyignore.yaml before switching branches."
+            cp "$GITHUB_WORKSPACE/scripts/untracked/generate-vex.sh" "$tmp_dir/generate-vex.sh" || fail "Could not snapshot generate-vex.sh before switching branches."
 
             git fetch origin "$VEX_BRANCH:refs/remotes/origin/$VEX_BRANCH" 2>/tmp/vex-fetch.err || true
             branch_exists=0
@@ -220,14 +233,17 @@ jobs:
             fi
 
             if [ -n "$existing_ts" ]; then
+              # Runs against the tmp_dir snapshot taken in Step 2, not
+              # $GITHUB_WORKSPACE -- the working tree here is CI-Automation/vex's
+              # own (post-switch), which has neither input file.
               rebased_json="$(docker run --rm \
                 --user "$(id -u):$(id -g)" \
-                -v "$GITHUB_WORKSPACE:/src:ro" \
+                -v "$tmp_dir:/src:ro" \
                 -e VEX_TIMESTAMP="$existing_ts" \
                 -w /src \
                 "${BUILD_TOOLS_IMAGE:?}" \
                 timeout --kill-after=30 --signal=KILL 300 \
-                bash /src/scripts/untracked/generate-vex.sh 2>/dev/null || true)"
+                bash /src/generate-vex.sh /src/.trivyignore.yaml 2>/dev/null || true)"
             else
               rebased_json=""
             fi
@@ -302,15 +318,19 @@ jobs:
             attempt=1
             pushed=0
             while [ "$attempt" -le "$max_attempts" ]; do
-              if ! write_and_commit; then
-                commit_rc=$?
-                if [ "$commit_rc" -eq 2 ]; then
-                  # No real diff against the tip we just switched to -- another run
-                  # already published the same content between our earlier compare
-                  # step and now.
-                  pushed=1
-                  break
-                fi
+              # Deliberately not `if ! write_and_commit; then ... $?`: `!` negates
+              # the whole pipeline's exit status, so `$?` inside that `then` would
+              # always read 0, never write_and_commit's real return code (2 for
+              # "nothing to commit"). Capture the status directly instead.
+              write_and_commit
+              commit_rc=$?
+              if [ "$commit_rc" -eq 2 ]; then
+                # No real diff against the tip we just switched to -- another run
+                # already published the same content between our earlier compare
+                # step and now.
+                pushed=1
+                break
+              elif [ "$commit_rc" -ne 0 ]; then
                 fail "git commit failed unexpectedly on attempt ${attempt}."
                 break
               fi
