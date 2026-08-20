@@ -2,13 +2,21 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/classify-image-impact.sh
-# (#819). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
-# per-path booleans this script inherited verbatim from build-push.yml's
-# detect-changes job, plus the additive IMAGE_IMPACT verdict the promote job's
-# version-bump logic consumes. The per-path booleans are covered so the
-# extraction stays byte-for-byte equivalent to the inline job it replaced; the
-# IMAGE_IMPACT cases pin the "does this diff warrant a patch (Z) bump?" boundary.
+# Docker-free unit coverage for scripts/untracked/classify-image-impact.sh
+# (#819). Most cases feed canned changed-file lists (via CHANGED_FILES, no git
+# repo needed) and assert the per-path booleans this script inherited verbatim
+# from build-push.yml's detect-changes job, plus the additive IMAGE_IMPACT
+# verdict the promote job's version-bump logic consumes. The per-path booleans
+# are covered so the extraction stays byte-for-byte equivalent to the inline
+# job it replaced; the IMAGE_IMPACT cases pin the "does this diff warrant a
+# patch (Z) bump?" boundary.
+#
+# The "content-aware workflow diff" section near the end (issue #1095, G14) is
+# the one part of this file that is NOT git-free: workflow_diff_is_comment_only
+# only activates in the script's <base_ref> <head_ref> git-diff invocation
+# form, which has no CHANGED_FILES equivalent to fake -- those cases build a
+# real disposable git repo (mirroring tests/bats/push_reuse.bats's own
+# git-repo-per-test convention) and run the script against real commits.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -314,4 +322,132 @@ val() {
     run bash "$script" --all-changed
     [ "$status" -eq 0 ]
     [ "$(val codeql_rust)" = "true" ]
+}
+
+# --- Content-aware workflow diff (issue #1095, G14) ---
+#
+# workflow_diff_is_comment_only only has real diff content to read in the
+# script's <base_ref> <head_ref> form (see this file's own header comment for
+# why), so these cases build a real disposable git repo per test -- mirroring
+# tests/bats/push_reuse.bats's own git-repo-per-test convention -- instead of
+# feeding a canned CHANGED_FILES list like every case above.
+
+# Creates an empty git repo under a fresh temp dir and points $git_dir at it.
+# Called explicitly only by the cases below, not automatically by setup(),
+# since every other case in this file has no need to pay for a real git repo.
+setup_git_repo() {
+    git_dir="$BATS_TEST_TMPDIR/repo"
+    mkdir -p "$git_dir/.github/workflows"
+    git -C "$git_dir" init -q
+    git -C "$git_dir" config user.email test@example.com
+    git -C "$git_dir" config user.name test
+}
+
+# Runs the classifier in <base_ref> <head_ref> form from inside $git_dir and
+# captures key=value stdout/status, the same way run_classify does above for
+# the CHANGED_FILES form.
+run_classify_git() {
+    cd "$git_dir"
+    run bash "$script" "$1" "$2"
+}
+
+@test "G14: comment-only build-push.yml diff sets workflow=false" {
+    setup_git_repo
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    printf 'jobs:\n  build:\n    steps:\n      # explains why the step below exists\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m comment_only
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+}
+
+@test "G14: a real build-push.yml logic-line change still sets workflow=true" {
+    setup_git_repo
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi there\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m real_change
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+# A trailing comment edited on an otherwise-unchanged code line is NOT
+# recognized as comment-only (the whole line differs, and it does not itself
+# start with '#') -- deliberately conservative/fail-closed, not exhaustive:
+# this script's own header comment documents that only whole blank/'#' lines
+# are proven safe, not every possible shape of a comment-only edit.
+@test "G14: an edited trailing same-line comment still sets workflow=true (conservative, not exhaustive)" {
+    setup_git_repo
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi # now with a trailing note\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m trailing_comment_edit
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: comment-only workflow diff alongside a real unrelated service change still reports the service change; workflow stays false" {
+    setup_git_repo
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    mkdir -p "$git_dir/services/ntp"
+    printf 'ntp code\n' > "$git_dir/services/ntp/entrypoint.sh"
+    printf 'jobs:\n  build:\n    steps:\n      # a second, also-safe comment\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m mixed
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val ntp)" = "true" ]
+    [ "$(val workflow)" = "false" ]
+    [ "$(val IMAGE_IMPACT)" = "true" ]
+}
+
+@test "G14: a new composite action file with real content still sets workflow=true" {
+    setup_git_repo
+    printf 'jobs:\n  build:\n    steps:\n      - run: echo hi\n' > "$git_dir/.github/workflows/build-push.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    mkdir -p "$git_dir/.github/actions/new-action"
+    printf "name: 'new-action'\nruns:\n  using: composite\n  steps:\n    - run: echo built\n      shell: bash\n" > "$git_dir/.github/actions/new-action/action.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m new_action
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+}
+
+@test "G14: a comment-only .github/actions/ diff also sets workflow=false" {
+    setup_git_repo
+    mkdir -p "$git_dir/.github/actions/new-action"
+    printf "name: 'new-action'\nruns:\n  using: composite\n  steps:\n    - run: echo built\n      shell: bash\n" > "$git_dir/.github/actions/new-action/action.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m base
+    base="$(git -C "$git_dir" rev-parse HEAD)"
+
+    printf "name: 'new-action'\n# why this step exists\nruns:\n  using: composite\n  steps:\n    - run: echo built\n      shell: bash\n" > "$git_dir/.github/actions/new-action/action.yml"
+    git -C "$git_dir" add -A && git -C "$git_dir" commit -q -m comment_only
+    head_rev="$(git -C "$git_dir" rev-parse HEAD)"
+
+    run_classify_git "$base" "$head_rev"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
 }

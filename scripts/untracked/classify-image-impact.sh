@@ -21,6 +21,16 @@
 # Output is machine-readable key=value lines on stdout. The human-readable
 # changed-file list is written to stderr so callers can append stdout directly
 # to GITHUB_OUTPUT or consume one verdict without filtering diagnostics.
+#
+# Content-aware "workflow" refinement (issue #1095, G14): in the
+# <base_ref> <head_ref> form only, a touched build-workflow path
+# (build-push.yml/build-tools.yml/.github/actions/**) is downgraded from
+# "workflow=true" to "workflow=false" when every one of its own changed lines
+# is provably a blank line or a '#'-prefixed comment (see
+# workflow_diff_is_comment_only below for why that is a real safety proof, not
+# a heuristic). --all-changed and CHANGED_FILES carry no diff content to
+# check, so they keep the original, fully conservative "any touch is
+# build-affecting" behavior unchanged.
 set -euo pipefail
 
 force_all=false
@@ -92,13 +102,60 @@ touches_docs() {
     return 1
 }
 
+# What: True only when merge_base/head_ref are set (the git-diff invocation
+#   form) AND every changed line across the touched build-workflow paths is a
+#   blank line or a '#'-prefixed comment.
+# Why: A '#' has zero runtime effect in either YAML or the shell embedded in a
+#   `run:` block, so a comment/blank-only diff is a real, provable proof the
+#   touched content cannot have changed build/push behavior -- not a guess at
+#   intent. Fails closed (returns 1) whenever no diff is available to check
+#   (--all-changed/CHANGED_FILES) or any touched path has a real content line.
+# From: Issue #1095 (G14)
+workflow_diff_is_comment_only() {
+    [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 1
+
+    local paths=() path
+    while IFS= read -r path; do
+        case "$path" in
+            .github/workflows/build-push.yml | .github/workflows/build-tools.yml | .github/actions/*)
+                paths+=("$path")
+                ;;
+        esac
+    done < "$changed_files"
+    [[ ${#paths[@]} -gt 0 ]] || return 1
+
+    local line content
+    while IFS= read -r line; do
+        case "$line" in
+            '+++ '* | '--- '*) continue ;;
+            '+'* | '-'*)
+                content="${line:1}"
+                content="${content#"${content%%[![:space:]]*}"}"
+                if [[ -n "$content" && "${content:0:1}" != "#" ]]; then
+                    return 1
+                fi
+                ;;
+        esac
+    done < <(git --no-pager diff --no-color "$merge_base" "$head_ref" -- "${paths[@]}")
+
+    return 0
+}
+
 touches_build_workflow() {
     # Changes here can alter how every service candidate is produced even when
     # no service source moved, so downstream build-sensitive gates must agree
-    # that this is a workflow-wide impact.
-    touches_exact ".github/workflows/build-push.yml" \
+    # that this is a workflow-wide impact -- unless workflow_diff_is_comment_only
+    # (above) can prove the touched content is comment/blank-only, in which case
+    # there is nothing here that could alter build/push behavior (issue #1095, G14).
+    local touched=false
+    if touches_exact ".github/workflows/build-push.yml" \
         || touches_exact ".github/workflows/build-tools.yml" \
-        || touches_prefix ".github/actions/"
+        || touches_prefix ".github/actions/"; then
+        touched=true
+    fi
+    [[ "$touched" == "true" ]] || return 1
+    workflow_diff_is_comment_only && return 1
+    return 0
 }
 
 touches_codeql_rust() {
