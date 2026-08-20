@@ -181,8 +181,14 @@ EOF_WATCHDOG
 # rather than a generic pattern -- a future verb-granting acl added under a
 # new name still needs a matching addition to this list, which is a known,
 # accepted limitation of this specific check (see AG-VAL-028).
-if grep -qi 'lancache-watchdog' "$SOCKET_PROXY_SCRIPT"; then
-  fail "$SOCKET_PROXY_SCRIPT references lancache-watchdog at all -- issue #1486 requires watchdog to stay completely absent from this allowlist."
+# Scoped to `acl`/`http-request` lines specifically (not the whole file) so
+# a future maintainer comment that merely explains this exclusion (e.g.
+# "lancache-watchdog is deliberately absent") never trips this check itself.
+# Captured into a variable first, then grep -q'd via a here-string (not a
+# live pipe), per AG-VAL-032/issue #1377.
+watchdog_acl_lines=$(grep -Ei '^[[:space:]]*(acl|http-request)[[:space:]].*lancache-watchdog' "$SOCKET_PROXY_SCRIPT" || true)
+if grep -q . <<<"$watchdog_acl_lines"; then
+  fail "$SOCKET_PROXY_SCRIPT references lancache-watchdog in an acl/http-request line -- issue #1486 requires watchdog to stay completely absent from this allowlist."
 fi
 
 for verb_acl in safe_service_restart safe_dhcp_action safe_ntp_action safe_probe_action safe_ui_restart; do

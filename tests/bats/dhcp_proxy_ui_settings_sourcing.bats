@@ -64,6 +64,23 @@ setup() {
     [ "$status" -eq 0 ]
 }
 
+# What: the settings file's value unconditionally overwrites an
+# already-set env var of the same name, not just fills in an unset one.
+# Why: issue #1486's same-container ProxyDHCP<->Relay restart fix depends
+# on this -- deploy/prod/docker-compose.yml passes a real DHCP_MODE env
+# var into this container (`DHCP_MODE=${DHCP_MODE:-disabled}`), so if the
+# settings-file assignment below were conditional on "unset", a freshly
+# persisted DHCP_MODE would never actually take effect on restart.
+# From: Issue #1486
+@test "the settings file's DHCP_MODE overwrites an already-set environment value" {
+    printf 'DHCP_MODE=dnsmasq-relay\n' > "$settings_file"
+    DHCP_MODE="dnsmasq-proxy"
+
+    _dhcp_proxy_source_ui_settings "$settings_file"
+
+    [ "$DHCP_MODE" = "dnsmasq-relay" ]
+}
+
 @test "a value containing a command substitution is stored as a literal string, never executed" {
     # Security regression test: this function used to `. <file>`
     # (dot-source) the settings file, which is full shell evaluation --
