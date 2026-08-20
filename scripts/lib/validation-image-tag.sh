@@ -24,18 +24,9 @@
 # absorption work in progress at the time, not a permanent ban on ever
 # deduplicating this specific helper logic -- see #822 for the narrower
 # follow-up that made this the single implementation. The whole point of
-# #715 is to REUSE that exact pr-<N>-sha-<short> mechanism, never invent a
+# #715 is to REUSE that exact pr-<N>-sha-<full> mechanism, never invent a
 # second, divergent one.
 #
-# What: self-sources docker-metadata.sh inline, with no intermediate
-#   `script_dir`-style variable.
-# Why: this file is itself sourced by callers that already have their own
-#   `script_dir` in scope (e.g. plan-deep-validation.sh); a bare top-level
-#   assignment here would silently overwrite it.
-# From: Issue #1095 (G2) | PR #1503
-# shellcheck source=scripts/lib/docker-metadata.sh
-source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/docker-metadata.sh"
-
 # Map a base ref (the PR's target branch, or a push's own ref) to the release
 # channel it publishes to. Mirrors build-push.yml's promote/validate mapping
 # (#825/#1141, decided 2026-07-23: master = stable, current_dev = nightly,
@@ -92,7 +83,7 @@ vit_pr_staging_available() {
 # against for this event. workflow_dispatch honours the operator's chosen
 # channel/tag input (the existing ad-hoc, published-channel use case that
 # #715 explicitly preserves). A same-repo PR resolves to its OWN
-# pr-<N>-sha-<short> staging tag so the sims test the PR's real commits, not
+# pr-<N>-sha-<full> staging tag so the sims test the PR's real commits, not
 # whatever the base branch last published -- the inconsistency #715 calls out
 # where the deep sims previously always tested "nightly" regardless of intent. A
 # Dependabot/fork PR falls back to the base channel. Echoes the tag.
@@ -113,15 +104,7 @@ vit_resolve_tag() {
     fi
 
     if [[ "$(vit_pr_staging_available "$event_name" "$actor" "$head_repo" "$repository")" == "true" ]]; then
-        # What: assigns the short SHA to a local before printf, instead of
-        #   embedding the call in printf's argument list.
-        # Why: printf's own exit status stays 0 even if a command
-        #   substitution inside its argument fails, so `set -e` cannot catch
-        #   a failure embedded there (Rule-Ref: AG-VAL-030).
-        # From: Issue #1095 (G2) | PR #1503
-        local pr_short_sha
-        pr_short_sha="$(dmeta_short_sha "$build_sha")" || return 1
-        printf 'pr-%s-sha-%s\n' "$pr_number" "$pr_short_sha"
+        printf 'pr-%s-sha-%s\n' "$pr_number" "$build_sha"
         return 0
     fi
 

@@ -180,8 +180,8 @@ and `.github/workflows/build-push-hosted-fallback.yml` is only ever run when
 a maintainer explicitly dispatches it during a self-hosted outage.
 
 That new workflow covers `container-scan` (amd64) + `build` (amd64 leg) +
-manifest merge, producing the same `sha-<short>[-amd64]` / merged
-`sha-<short>` GHCR tags the self-hosted jobs would have produced. It does
+manifest merge, producing the same `sha-<commit>[-amd64]` / merged
+`sha-<commit>` GHCR tags the self-hosted jobs would have produced. It does
 not cover `promote` or `release` -- their channel-pointer/promote-lock
 machinery was judged too risky to re-derive from scratch in the same
 increment, so both stay deferred, self-hosted-only.

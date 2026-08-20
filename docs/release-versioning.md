@@ -188,7 +188,7 @@ image was actually built at or after this PR's base commit" ancestry check,
 since a channel tag can lag). Now that `nightly` is no longer continuously
 fresh, that channel tag is no longer a reliable "at or after PR base"
 source, so the back-fill instead sources directly from the PR base commit's
-own durable `sha-<base_sha_short>` per-commit image -- exactly the right
+own durable `sha-<base_sha>` per-commit image -- exactly the right
 commit by construction, made possible because every non-PR push already
 publishes a fresh per-commit tag for every service (see `build-push.yml`'s
 "Ensure PR staging tags exist for full-setup services" step and

@@ -67,7 +67,6 @@ env:
   # Why: scripts/check-workflow-service-lists.sh fails CI if this drifts from the build matrix.
   # From: PR #1523
   CI_BUILD_SERVICES: "proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools utilities"
-  DOCKER_METADATA_SHORT_SHA_LENGTH: "7"
   RELEASE_PLATFORMS: linux/amd64,linux/arm64
   RUST_ACCELERATION_NETWORK: bridge
 
@@ -2664,7 +2663,7 @@ jobs:
           # before public promotion. PRs keep their unique staging tag and
           # immediately pin every service behind it to a digest below.
           if [[ "$EVENT_NAME" != "pull_request" ]]; then
-            tag="sha-$(dmeta_short_sha "$BUILD_SHA")"
+            tag="sha-${BUILD_SHA}"
             echo "Validating pre-promotion candidate set '$tag'."
           fi
 
@@ -5126,8 +5125,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
-          target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-amd64"
+          target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-amd64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
           amd64_digest="$(printf '%s' "$manifest_json" | jq -r '[.manifests[]? | select(.platform.architecture == "amd64" and .platform.os == "linux")][0].digest // empty')"
@@ -5153,7 +5151,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-,format=short,suffix=-amd64
+            type=sha,prefix=sha-,format=long,suffix=-amd64
 
       # Key PR staging tags by github.sha, the actual synthetic merge commit that was built.
       # This prevents two events for the same PR head but different base states from overwriting one staging tag.
@@ -5179,8 +5177,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
-          tag="pr-${PR_NUMBER}-sha-${short_sha}-amd64"
+          tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-amd64"
           echo "::notice::This PR's linux/amd64 staging tag for $MATRIX_SERVICE is $tag."
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository is not guaranteed lowercase; GHCR requires it.
@@ -5932,8 +5929,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
-          target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${short_sha}-arm64"
+          target="ghcr.io/${REPOSITORY}/${MATRIX_SERVICE}:sha-${COMMIT_SHA}-arm64"
 
           manifest_json="$(ghcr_retry ghcr.io "$GHCR_RETRY_USERNAME" "$GHCR_RETRY_PASSWORD" -- docker buildx imagetools inspect "$pinned_ref" --raw)"
           arm64_digest="$(printf '%s' "$manifest_json" | jq -r '[.manifests[]? | select(.platform.architecture == "arm64" and .platform.os == "linux")][0].digest // empty')"
@@ -5956,7 +5952,7 @@ jobs:
         with:
           images: ghcr.io/${{ github.repository }}/${{ matrix.service }}
           tags: |
-            type=sha,prefix=sha-,format=short,suffix=-arm64
+            type=sha,prefix=sha-,format=long,suffix=-arm64
 
       # Mirrors build's own "Compute PR staging tag" step, just for the
       # arm64 leg -- see that step's comment for the full rationale.
@@ -5982,8 +5978,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
-          tag="pr-${PR_NUMBER}-sha-${short_sha}-arm64"
+          tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}-arm64"
           echo "::notice::This PR's linux/arm64 staging tag for $MATRIX_SERVICE is $tag."
           # What: reads the single declared, lowercased GHCR owner/repo.
           # Why: github.repository is not guaranteed lowercase; GHCR requires it.
@@ -6189,9 +6184,9 @@ jobs:
     # list assembled from two already-pushed digests.
     #
     # Also runs on pull_request events now (see #626): a same-repo PR pushes its own
-    # pr-<N>-sha-<short>-{amd64,arm64} legs in build/build-arm64, and this job merges
-    # those into the real pr-<N>-sha-<short> tag that full-setup-validate consumes to
-    # test the PR's own commits. The existing sha-<short> merge below stays gated to
+    # pr-<N>-sha-<full>-{amd64,arm64} legs in build/build-arm64, and this job merges
+    # those into the real pr-<N>-sha-<full> tag that full-setup-validate consumes to
+    # test the PR's own commits. The existing sha-<commit> merge below stays gated to
     # non-PR events only -- that tag's inputs are never pushed on a PR, so running it on a
     # PR would just loop through seven harmless "no linux/amd64 image" skips for no
     # reason.
@@ -6280,8 +6275,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
-          source_tag="sha-${short_sha}"
+          source_tag="sha-${COMMIT_SHA}"
           declare -A merged_digests=()
 
           declare -A service_descriptions=(
@@ -6412,7 +6406,7 @@ jobs:
           cleanup_pointer_context
           trap - EXIT
 
-      # Same merge, for the PR-scoped staging tag instead of the trusted-ref sha-<short>
+      # Same merge, for the PR-scoped staging tag instead of the trusted-ref sha-<commit>
       # tag. Only same-repo PRs ever push the two per-arch inputs (build/build-arm64's own
       # fork check), so this naturally no-ops for a fork PR: neither leg exists, every
       # service is skipped, nothing is published. A service this PR did not touch also has
@@ -6448,8 +6442,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$BUILD_SHA")"
-          source_tag="pr-${PR_NUMBER}-sha-${short_sha}"
+          source_tag="pr-${PR_NUMBER}-sha-${BUILD_SHA}"
 
           # Same helper as the trusted-ref step above (and promote's own
           # copy) -- kept duplicated per step/job rather than shared, which
@@ -6797,8 +6790,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
-          source_tag="sha-${short_sha}"
+          source_tag="sha-${COMMIT_SHA}"
           stack_pointer_image="ghcr.io/${REPOSITORY}/stack@${STACK_DIGEST}"
           channel_tags=()
           declare -A candidate_digests=(
@@ -7237,8 +7229,7 @@ jobs:
           # What: reads the single declared short-SHA derivation.
           # Why: keeps every truncation length in sync with one declared source.
           # From: Issue #1095 (G2) | PR #1503
-          short_sha="$(dmeta_short_sha "$COMMIT_SHA")"
-          source_tag="sha-${short_sha}"
+          source_tag="sha-${COMMIT_SHA}"
           expected_prerelease=false
           if [[ "$TAG_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-rc\.[0-9]+$ ]]; then
             expected_prerelease=true

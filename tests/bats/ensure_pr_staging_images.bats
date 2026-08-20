@@ -4,7 +4,7 @@
 #
 # Docker-free coverage for scripts/untracked/ensure-pr-staging-images.sh (#715) -- the
 # fail-closed staging guard + untouched-service back-fill that reuses the
-# #626/#627 pr-<N>-sha-<short> mechanism. The registry probe and the
+# #626/#627 pr-<N>-sha-<full> mechanism. The registry probe and the
 # imagetools back-fill are stubbed via STAGING_IMAGE_EXISTS_CMD /
 # STAGING_BACKFILL_CMD so the touched-vs-untouched decision and the
 # fail-closed behaviour are exercised without a real daemon or registry. This
@@ -43,7 +43,7 @@
 #
 # #1254/#1255 (2026-07-25): the back-fill source itself is no longer the
 # mutable nightly/latest channel tag -- it is this PR's own base commit's
-# durable per-commit sha-<short> image, derived from BASE_SHA by
+# durable per-commit sha-<commit> image, derived from BASE_SHA by
 # scripts/lib/staging-ancestor-fallback.sh's own resolver. setup() below no
 # longer sets BASE_CHANNEL_TAG (the script no longer reads it at all);
 # base_sha_short is computed here purely for the tests' own assertions about
@@ -142,9 +142,12 @@ STUB
     git -C "$git_dir" commit -q -m base
     base_sha="$(git -C "$git_dir" rev-parse HEAD)"
     # #1254/#1255: the back-fill source image is now tagged sha-<this>, not a
-    # channel tag -- matches scripts/lib/staging-ancestor-fallback.sh's own
-    # internal base_sha_short computation.
-    base_sha_short="${base_sha:0:7}"
+    # channel tag. base_sha_short is a same-value alias kept for every
+    # existing assertion below that already reads it (issue #1095 G2: the
+    # real resolver's primary probe now targets the full commit SHA, never a
+    # locally-derived short form -- see
+    # scripts/lib/staging-ancestor-fallback.sh's saf_resolve_sha_image_ref).
+    base_sha_short="${base_sha}"
     revision_stub="$BATS_TEST_TMPDIR/revision.sh"
     cat > "$revision_stub" <<STUB
 #!/usr/bin/env bash
@@ -726,7 +729,7 @@ STUB
     # substituted for an ancestor's, and never refused as stale.
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
     grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${base_sha_short}" "$backfill_log"
-    run ! grep -qF "sha-${older_sha:0:7}" "$backfill_log"
+    run ! grep -qF "sha-${older_sha}" "$backfill_log"
     [[ "$script_output" != *"Substituting nearest built ancestor"* ]]
     [[ "$script_output" != *"No usable ancestor"* ]]
 }
@@ -771,7 +774,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${older_sha:0:7}") echo "$ancestor2_sha" ;;
+    "${older_sha}") echo "$ancestor2_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -786,7 +789,7 @@ STUB
     [ "$status" -eq 0 ]
     script_output="$output"
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
-    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${older_sha:0:7}" "$backfill_log"
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${older_sha}" "$backfill_log"
     printf '%s\n' "$script_output" | grep -q "PREDATES base commit"
     printf '%s\n' "$script_output" | grep -q "Schritt 4 retag-unchanged-image path"
 }
@@ -795,11 +798,11 @@ STUB
 # (scripts/lib/staging-ancestor-fallback.sh), exercised through the full
 # script rather than the library's own direct unit tests (see
 # tests/bats/staging_ancestor_fallback.bats for those). A docs/governance-
-# only BASE_SHA can never get a push-triggered sha-<short> image built,
+# only BASE_SHA can never get a push-triggered sha-<commit> image built,
 # because build-push.yml's own push trigger paths-ignore deliberately skips
 # it. These tests stub saf_base_commit_has_confirmed_run (via
 # STAGING_BASE_BUILD_RUN_EXISTS_CMD) and drive the freshness-revision stub
-# per-image (keyed off the image ref's own sha-<short> suffix) so the
+# per-image (keyed off the image ref's own sha-<commit> suffix) so the
 # ancestor walk's real logic -- not a mocked shortcut -- is exercised
 # end-to-end against setup()'s three-commit disposable repo
 # (ancestor2 -> older -> base), each commit touching a real docs/*.md file
@@ -834,7 +837,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${ancestor2_sha:0:7}") echo "$ancestor2_sha" ;;
+    "${ancestor2_sha}") echo "$ancestor2_sha" ;;
     *) exit 1 ;;
 esac
 STUB
@@ -853,7 +856,7 @@ STUB
     # All nine services back-filled, every one from ancestor2's tag, never
     # from base_sha's or older_sha's.
     [ "$(wc -l < "$backfill_log")" -eq 9 ]
-    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${ancestor2_sha:0:7}" "$backfill_log"
+    grep -qF "ghcr.io/wiki-mod/lancache-ng/proxy:pr-715-sha-abcdef0	ghcr.io/wiki-mod/lancache-ng/proxy:sha-${ancestor2_sha}" "$backfill_log"
     # SC2314: a bare `!` never triggers Bats' own failure detection unless it
     # happens to be the test's last statement -- `run !` (Bats >= 1.5.0, this
     # project pins 1.11.1) is position-independent and correct regardless of
@@ -862,7 +865,7 @@ STUB
     # $output/$status as a side effect regardless, which is exactly why
     # script_output was captured above first.
     run ! grep -qF "sha-${base_sha_short}" "$backfill_log"
-    run ! grep -qF "sha-${older_sha:0:7}" "$backfill_log"
+    run ! grep -qF "sha-${older_sha}" "$backfill_log"
     printf '%s\n' "$script_output" | grep -q "Substituting nearest built ancestor"
     printf '%s\n' "$script_output" | grep -qF "$ancestor2_sha"
     # base_sha is docs-only, so saf_base_commit_service_untouched confirms
@@ -900,7 +903,7 @@ STUB
 image="\$1"
 suffix="\${image##*:sha-}"
 case "\$suffix" in
-    "${ancestor2_sha:0:7}") echo "$ancestor2_sha" ;;
+    "${ancestor2_sha}") echo "$ancestor2_sha" ;;
     *) exit 1 ;;
 esac
 STUB
