@@ -125,10 +125,10 @@
 # which is itself a (trivial but real) workflow-wiring change the
 # maintainer's decision did not ask for.
 #
-# THIRD, INDEPENDENT CHECK (added 2026-08-21, Issue #1095 F-23, maintainer
-# decision: fold this new pattern into this existing guard rather than add a
-# new script -- same "extend this script, no new file" call already made
-# once for the second check above): a `docker run` invocation that feeds its
+# THIRD, INDEPENDENT CHECK (added 2026-08-21, maintainer decision: fold this
+# new pattern into this existing guard rather than add a new script -- same
+# "extend this script, no new file" call already made once for the second
+# check above): a `docker run` invocation that feeds its
 # command to the container via a `bash -s <<'X'` / `sh -s <<'X'` stdin
 # heredoc but omits `-i` never attaches the container's stdin at all, so the
 # containerized shell reads immediate EOF and exits 0 having run none of the
@@ -143,8 +143,8 @@
 # changelog with none of the "Resolved build-tools base image digests" /
 # "Provenance and SBOM status" text the release-notes step's heredoc was
 # supposed to append, and the release carries zero assets -- no
-# vex.openvex.json, no <service>.cdx.json. Fixed in Issue #1095 (F-23)'s PR
-# by adding `-i` to all three invocations.
+# vex.openvex.json, no <service>.cdx.json. Fixed by adding `-i` to all three
+# invocations.
 #
 # SCOPE: unlike the first two checks above, this one deliberately does NOT
 # reuse their scan_files -- its actual domain (workflow/composite-action
@@ -438,7 +438,7 @@ for file in "${yaml_scan_files[@]}"; do
 done
 
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-pipefail-early-exit-grep: %d finding(s) across all three checks (early-exiting-consumer-into-pipefail, if-without-else-then-$?, and docker-run-stdin-heredoc-missing--i). See AGENTS.md AG-VAL-029/AG-VAL-032 for the early-exit/if-without-else writeup, issue #1449 for the if-without-else-then-$? class specifically, and issue #1095 (F-23) for the docker-run-stdin-heredoc class.\n' "$failures" >&2
+  printf '::error::check-pipefail-early-exit-grep: %d finding(s) across all three checks (early-exiting-consumer-into-pipefail, if-without-else-then-$?, and docker-run-stdin-heredoc-missing--i). See AGENTS.md AG-VAL-029/AG-VAL-032 for the early-exit/if-without-else writeup, issue #1449 for the if-without-else-then-$? class specifically, and this file'"'"'s own header (THIRD, INDEPENDENT CHECK) for the docker-run-stdin-heredoc class.\n' "$failures" >&2
   exit 1
 fi
 
