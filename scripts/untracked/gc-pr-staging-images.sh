@@ -210,7 +210,7 @@ gc_discover_org_container_packages() {
   local -a discovered=()
 
   if ! listing_json="$(gh api --paginate "orgs/${org}/packages?package_type=container&per_page=100" 2>&1)"; then
-    echo "::warning::Dynamic org package discovery could not list container packages for org ${org} (falling back to the configured services array/manifest only): $listing_json"
+    echo "::warning::Dynamic org package discovery could not list container packages for org ${org} (falling back to the configured services array/manifest only): $listing_json" >&2
     return 0
   fi
   while IFS= read -r name; do
@@ -220,7 +220,7 @@ gc_discover_org_container_packages() {
   done < <(printf '%s' "$listing_json" | jq -r '.[]?.name // empty' 2>/dev/null)
 
   if (( ${#discovered[@]} == 0 )); then
-    echo "::warning::Dynamic org package discovery for ${org} found no ${package_prefix}* container packages (falling back to the configured services array/manifest only) -- this may be a real empty org listing or a read:packages scope/API problem; the configured baseline still runs either way."
+    echo "::warning::Dynamic org package discovery for ${org} found no ${package_prefix}* container packages (falling back to the configured services array/manifest only) -- this may be a real empty org listing or a read:packages scope/API problem; the configured baseline still runs either way." >&2
     return 0
   fi
   printf '%s\n' "${discovered[@]}"
