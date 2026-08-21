@@ -14,6 +14,29 @@ live in the repo, PR-reviewable and consistent across all hosts).
   runs in the first place, and (unlike the cleanup script) requires a full
   `dockerd` restart to take effect, which is why it is never wired into a
   timer and is only ever run by hand, one host at a time.
+- `lancache-ci-runner-clone-init.sh` — one-time bootstrap for a newly
+  provisioned or disk-cloned runner host, up to (but never including) actual
+  GitHub registration (issue #1622). See its own header for the full
+  background and its `--help` for the `check`/`clean`/`host-prep`/
+  `runner-fetch` modes. In short: a host in this fleet added by cloning an
+  existing host's disk carries that source host's own `.runner`/
+  `.credentials`/`.credentials_rsaparams` (private key material for an
+  identity already registered elsewhere) and multi-GB leftover imaging
+  archives under `/opt` — confirmed real on `.81` during that issue's
+  investigation. `check` detects this (and baseline sudoers/docker-group/
+  hooks/timer state) read-only; `clean` removes only what `check` already
+  flagged as foreign, gated on `CONFIRM_CLEAN=yes`; `host-prep` installs the
+  sudoers NOPASSWD drop-in, docker group membership, the
+  `/opt/lancache-ci-hooks/{pre,post}-job-cleanup.sh` pair (host-local, not
+  repo-tracked, same as they already are on every existing runner host), and
+  this directory's own cleanup timer; `runner-fetch` downloads, verifies
+  (against the GitHub Releases API asset digest), and extracts a specific
+  actions-runner release directly into a target instance directory. Actual
+  `config.sh` registration, `svc.sh install`, and starting the resulting
+  systemd service remain deliberate, separate, human-run steps — this script
+  never performs any of them, and never touches `/etc/docker/daemon.json`
+  (see the `lancache-ci-docker-daemon-config.sh` rollout above for that,
+  including this fleet's LAN-proxy block).
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
