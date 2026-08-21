@@ -546,9 +546,10 @@ cmd_check() {
     else
         echo "  /etc/sudoers.d/${RUNNER_USER}-nopasswd: MISSING"
     fi
-    # Same exact-field match as cmd_host_prep's own docker-group check --
-    # `grep -w docker` also matches an unrelated group like `docker-build`
-    # since a hyphen satisfies its word-boundary requirement on both sides.
+    # Same exact-field match as cmd_host_prep's own docker-group check
+    # (Codex review, PR #1624) -- `grep -w docker` also matches an
+    # unrelated group like `docker-build` since a hyphen satisfies its
+    # word-boundary requirement on both sides.
     local check_runner_groups
     check_runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
     if [[ "$check_runner_groups" == *" docker "* ]]; then
@@ -1383,8 +1384,8 @@ cmd_purge_pve() {
     echo "Remaining pve-related processes (should be none):"
     # Listing full command lines for a human to read is the point here, not
     # just matching PIDs (pgrep -l truncates).
-    # shellcheck disable=SC2009
     local remaining_procs
+    # shellcheck disable=SC2009
     remaining_procs="$(ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep || true)"
     echo "${remaining_procs:-  (none)}"
 
