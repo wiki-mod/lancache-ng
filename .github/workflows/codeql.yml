@@ -368,7 +368,7 @@ jobs:
           dist-scheduler-url: ${{ vars.SCCACHE_DIST_SCHEDULER_URL }}
           dist-auth-token: ${{ secrets.SCCACHE_DIST_AUTH_TOKEN }}
       - name: Initialize CodeQL
-        # What: caps CodeQL at 1000 MB RAM / 3 threads; also applies to "Perform CodeQL Analysis" below.
+        # What: caps CodeQL at 512 MB RAM / 4 threads; also applies to "Perform CodeQL Analysis" below.
         # Why: unset, CodeQL defaults to most of the host's memory; the
         #   smallest lancache-heavy host has ~3.6 GiB, no swap, and its Java
         #   extractor was confirmed OOM-killed under that default (dmesg).
@@ -382,8 +382,8 @@ jobs:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
           config-file: ./.github/codeql/codeql-config.yml
-          ram: "1000"
-          threads: "3"
+          ram: "512"
+          threads: "4"
 
       - name: Build DNS Rust crate for CodeQL
         if: steps.admission.outputs.superseded != 'true' && matrix.language == 'rust' && (needs.detect-changes.result != 'success' || needs.detect-changes.outputs.rust_relevant == 'true')
