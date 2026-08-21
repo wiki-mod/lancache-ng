@@ -21,7 +21,7 @@
 # the two originals are kept untouched rather than merged in place).
 #
 # On a pull_request event this validates the PR's OWN commits by reusing the
-# #626/#627 pr-<N>-sha-<short> staging-tag mechanism (see
+# pr-<N>-sha-<full> staging-tag mechanism (see
 # scripts/untracked/ensure-pr-staging-images.sh) -- it does NOT reinvent a second
 # tagging scheme. workflow_dispatch is preserved as a manual trigger for
 # ad-hoc runs against a specific published channel tag.
@@ -61,7 +61,7 @@ on:
   # Branch-filtered to match build-push.yml's own pull_request trigger
   # EXACTLY (see build-push.yml's `on.pull_request.branches`). This suite's
   # whole pr_staging_available/ensure-pr-staging-images mechanism assumes
-  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<short>
+  # build-push.yml ran for the same PR and pushed its pr-<N>-sha-<full>
   # staging tags -- vit_pr_staging_available() (scripts/lib/
   # validation-image-tag.sh) has no base-branch check of its own, so without
   # this filter a PR opened against a base branch build-push.yml ignores
@@ -250,10 +250,10 @@ jobs:
           # the back-fill source image was actually built from it (or later)
           # before backfilling an untouched service, AND (since #1254/#1255)
           # to derive that source image's own tag directly (this PR's base
-          # commit's durable sha-<short> image, not a mutable channel tag --
+          # commit's durable sha-<commit> image, not a mutable channel tag --
           # no separate BASE_CHANNEL_TAG input is passed anymore, see
-          # scripts/untracked/ensure-pr-staging-images.sh's own base_sha_short
-          # computation). Always present here: this job only runs on a
+          # scripts/lib/staging-ancestor-fallback.sh's own
+          # saf_resolve_sha_image_ref). Always present here: this job only runs on a
           # pull_request event (see this job's own `if:` above, gated on
           # pr_staging_available).
           BASE_SHA: ${{ github.event.pull_request.base.sha }}

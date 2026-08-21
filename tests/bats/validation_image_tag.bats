@@ -5,7 +5,7 @@
 # Docker-free unit coverage for scripts/lib/validation-image-tag.sh (#715) --
 # the pure tag-resolution helpers that decide which image the deep full-setup
 # validation suite tests. These mirror build-push.yml's inline staging-tag
-# logic, so a drift between the two (e.g. the pr-<N>-sha-<short> format, or
+# logic, so a drift between the two (e.g. the pr-<N>-sha-<full> format, or
 # the base-channel mapping) is exactly the kind of regression that would
 # silently make the deep gate test the wrong image; this keeps it honest in
 # fast CI without needing a runner with a registry.
@@ -84,23 +84,14 @@ setup() {
     [ "$output" = "false" ]
 }
 
-@test "resolve tag: eligible PR resolves to its own pr-<N>-sha-<short7> tag" {
-    run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
+@test "resolve tag: eligible PR resolves to its own pr-<N>-sha-<full> tag" {
+    # What: proves the tag carries the full commit SHA, not a truncation.
+    # Why: short SHAs are banned outright; vit_resolve_tag used to derive an
+    #   abbreviated form via dmeta_short_sha, now removed.
+    # From: Issue #1095 (G2)
+    run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789abcdef0123456789abcdef01" \
         "someuser" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""
-    [ "$output" = "pr-715-sha-abcdef0" ]
-}
-
-@test "resolve tag: a malformed DOCKER_METADATA_SHORT_SHA_LENGTH fails closed instead of returning pr-<N>-sha- (AG-VAL-030)" {
-    # What: proves vit_resolve_tag itself fails closed, not just dmeta_short_sha.
-    # Why: printf's own exit status stays 0 even if a command substitution
-    #   inside its argument fails, so the caller must check dmeta_short_sha's
-    #   own exit status separately.
-    # From: Issue #1095 (G2) | PR #1503
-    export DOCKER_METADATA_SHORT_SHA_LENGTH="seven"
-    run vit_resolve_tag "pull_request" "master" "715" "abcdef0123456789" \
-        "someuser" "wiki-mod/lancache-ng" "wiki-mod/lancache-ng" ""
-    [ "$status" -ne 0 ]
-    [[ "$output" != "pr-715-sha-"* ]]
+    [ "$output" = "pr-715-sha-abcdef0123456789abcdef0123456789abcdef01" ]
 }
 
 @test "resolve tag: Dependabot PR falls back to the base channel" {

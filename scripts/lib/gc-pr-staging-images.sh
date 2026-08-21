@@ -12,7 +12,7 @@
 #
 #   1. CLASSIFICATION GAP: the pre-extraction logic only ever considered a
 #      package version deletable when EVERY tag on it was a closed-PR
-#      `pr-<N>-sha-<short>` tag. A version with NO tags at all -- the
+#      `pr-<N>-sha-<full>` tag. A version with NO tags at all -- the
 #      per-platform manifests and buildx attestation/SBOM sub-manifests
 #      Buildx automatically creates on every multi-arch push -- never entered
 #      that check (the tag-classification loop it depends on never executes

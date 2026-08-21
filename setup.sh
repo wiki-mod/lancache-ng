@@ -2166,7 +2166,7 @@ validate_lancache_image_tag() {
             return 0
             ;;
         pr-*)
-            # CI-only immutable staging-tag format pr-<N>-sha-<short>, pushed by
+            # CI-only immutable staging-tag format pr-<N>-sha-<full>, pushed by
             # build-push.yml (and back-filled by scripts/untracked/ensure-pr-staging-images.sh)
             # for a same-repo PR's merge commit. It is keyed on that commit's sha
             # and never re-pointed, so it is a legitimate PINNED target that lets
