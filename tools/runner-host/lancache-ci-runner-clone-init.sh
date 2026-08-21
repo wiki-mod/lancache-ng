@@ -882,6 +882,58 @@ HOOKEOF
     echo "Installed $RUNNER_HOOKS_DIR/{pre,post}-job-cleanup.sh"
 }
 
+# Enables Debian trixie-backports project-wide, matching the exact pattern
+# already established and verified in tools/build-tools/Dockerfile
+# (maintainer decision, 2026-07-30, see that file's own long comment for
+# the full history): `Package: *` at Pin-Priority 500 (tied with the
+# regular trixie archive), so ordinary version-comparison rules pick
+# whichever archive has the newer version for ANY package, not a
+# hand-picked subset. THE PIN SELECTOR MUST BE `a=stable-backports`, NOT
+# `a=trixie-backports` -- trixie-backports' own Release file declares
+# `Suite: stable-backports`; a first version of this exact pin in
+# services/proxy/Dockerfile used the codename instead and silently matched
+# nothing (confirmed real regression, caught only by building and checking
+# an installed package version, not by trusting the file's presence). This
+# was previously container-image-only; confirmed real on lancache-240
+# (2026-08-21, an existing working reference host) that no host in this
+# fleet actually has it at the OS level yet -- this is a new host-level
+# hardening rollout, not a replication of existing host state.
+#
+# Idempotent: skips writing the source/pin files if already present (so a
+# second host-prep run doesn't re-fetch/re-upgrade every time), but still
+# runs `apt-get update` unconditionally so a freshly-added pin takes effect
+# even on a re-run.
+enable_backports() {
+    local list_file="/etc/apt/sources.list.d/backports.list"
+    local pref_file="/etc/apt/preferences.d/backports"
+    if sudo -n test -f "$list_file" 2>/dev/null && sudo -n test -f "$pref_file" 2>/dev/null; then
+        echo "$list_file / $pref_file already present, leaving as-is."
+    else
+        echo "deb http://deb.debian.org/debian trixie-backports main" | sudo -n tee "$list_file" >/dev/null
+        printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' | sudo -n tee "$pref_file" >/dev/null
+        echo "Installed $list_file and $pref_file (Pin-Priority 500, a=stable-backports)."
+    fi
+    sudo -n apt-get update 2>&1 | tail -10
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1 | tail -15
+    sudo -n env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y 2>&1 | tail -10
+}
+
+# apt-listchanges prompts interactively (or mails a changelog diff) on
+# every apt upgrade by default -- exactly the kind of thing that can hang
+# an unattended `apt-get upgrade`/`dist-upgrade` waiting for input on a CI
+# runner host. Confirmed real on every host in this fleet including the
+# existing reference host lancache-240 (2026-08-21): none had it purged
+# yet, so -- like enable_backports above -- this is a new rollout, not a
+# replication of existing host state.
+purge_apt_listchanges() {
+    if dpkg -l apt-listchanges 2>/dev/null | grep -q '^ii'; then
+        sudo -n env DEBIAN_FRONTEND=noninteractive apt-get purge -y apt-listchanges 2>&1 | tail -10
+        echo "Purged apt-listchanges."
+    else
+        echo "apt-listchanges not installed, nothing to do."
+    fi
+}
+
 cmd_host_prep() {
     local sudoers_file="/etc/sudoers.d/${RUNNER_USER}-nopasswd"
     if sudo -n test -f "$sudoers_file" 2>/dev/null; then
@@ -901,6 +953,8 @@ cmd_host_prep() {
     fi
 
     install_ci_hooks
+    enable_backports
+    purge_apt_listchanges
 
     if [[ -f "$SCRIPT_DIR/lancache-ci-cleanup.sh" ]]; then
         sudo install -m 0755 "$SCRIPT_DIR/lancache-ci-cleanup.sh" /usr/local/sbin/lancache-ci-cleanup.sh
