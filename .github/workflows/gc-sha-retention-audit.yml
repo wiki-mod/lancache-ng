@@ -180,7 +180,7 @@ jobs:
             sha-retention-api-cache-
 
       # What: exports the runner.temp classification-cache dir via GITHUB_ENV.
-      # Why: v1.2 (issue #1585) point 4 -- same reasoning as the API response
+      # Why: v1.2 point 4 -- same reasoning as the API response
       # cache dir above (runner.temp is step-scoped only).
       # From: Issue #1585.
       - name: Prepare incremental classification cache directory
@@ -248,7 +248,7 @@ jobs:
 
       # What: saves the classification cache with if: always(), matching the
       # API cache save's own reasoning above.
-      # Why: v1.2 (issue #1585) point 4 -- a partial run still resolved a
+      # Why: v1.2 point 4 -- a partial run still resolved a
       # real prefix of this package's versions, worth keeping for next time.
       # From: Issue #1585.
       - name: Save SHA retention classification cache

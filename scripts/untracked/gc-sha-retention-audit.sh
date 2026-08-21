@@ -26,8 +26,15 @@ history_refs_raw="${SRA_HISTORY_REFS:-${SRA_HISTORY_REF:-origin/current_dev}}"
 package_filter="${SRA_PACKAGE_FILTER:-}"
 version_snapshot_file="${SRA_VERSION_SNAPSHOT_FILE:-}"
 max_pages_per_package="${SRA_MAX_PAGES_PER_PACKAGE:-500}"
+# What: bounds how many packages are audited concurrently in one batch.
+# Why: package listings/classifications are independent and dominate live
+# runtime; a background-worker batch (see the main loop below) is what
+# makes a full ~26,000-version registry audit finish inside CI's job
+# timeout instead of the single-package-at-a-time run that originally
+# timed out at this issue's opening.
+# From: Issue #1585.
 audit_concurrency="${SRA_CONCURRENCY:-2}"
-# What: optional path to the v1.2 (issue #1585) incremental classification
+# What: optional path to the v1.2 incremental classification
 # cache; empty (the default) disables caching entirely -- every version is
 # always fully (re)classified, identical to pre-v1.2 behavior.
 # Why: opt-in via an unset-by-default env var keeps this strictly additive:
@@ -42,7 +49,14 @@ audit_concurrency="${SRA_CONCURRENCY:-2}"
 # a later cache hit, the reused rank reflects the old ref set. Not yet
 # guarded against; a real multi-run CI verification (this PR's own open
 # item) should confirm whether this drift is observable in practice before
-# relying on it across a ref-set change.
+# relying on it across a ref-set change. A second, separate concurrency
+# caveat: sra_cache_write_package's plain `sqlite3 "$db_path"` connection
+# sets no PRAGMA busy_timeout, so two workers from the same batch writing
+# to the same cache_db at the same moment can hit SQLITE_BUSY; that failure
+# is already handled as a soft ::warning:: (falls back to full
+# classification next run for that package), never a hard error or a
+# corrupted decision -- but it does mean cache effectiveness can degrade
+# under concurrency. Not yet fixed; flagged for follow-up.
 # From: Issue #1585.
 cache_db="${SRA_CACHE_DB:-}"
 per_page=100
@@ -98,7 +112,7 @@ else
   echo "::error::Cannot read exactly one valid minimum_stable_releases value from $manifest." >&2
   exit 1
 fi
-# What: reads the v1.2 (issue #1585) non-ordinary-version safety-buffer count.
+# What: reads the v1.2 non-ordinary-version safety-buffer count.
 # Why: needed below for the inverted-protection buffer/would-delete ranking.
 # From: Issue #1585.
 if channel_buffer="$(sra_read_channel_buffer_versions "$manifest")"; then
@@ -251,7 +265,7 @@ audit_package() {
   : >"$versions_file"
   package_path="${repository_name}%2F${package}"
 
-  # What: loads this package's cached resolutions (issue #1585 v1.2 point 4).
+  # What: loads this package's cached resolutions (v1.2 point 4).
   # Why: a fresh row set every run means a cache miss (no cache_db, no
   # sqlite3, first run, or a rotated-key restore-keys fallback with no
   # matching data) degrades to a plain empty array -- every version below
@@ -261,7 +275,7 @@ audit_package() {
   cache_rows_out="$package_dir/cache-rows-out.tsv"
   : >"$cache_rows_out"
   if [[ -n "$cache_db" ]]; then
-    local cache_line cache_version_id cache_digest cache_tags cache_resolution
+    local cache_version_id cache_digest cache_tags cache_resolution
     while IFS=$'\t' read -r cache_version_id cache_digest cache_tags cache_resolution; do
       [[ "$cache_version_id" =~ ^[0-9]+$ ]] || continue
       cache_hits["$cache_version_id"]="${cache_digest}"$'\t'"${cache_tags}"$'\t'"${cache_resolution}"
@@ -343,7 +357,7 @@ audit_package() {
 
   local root_candidates="$package_dir/root-candidates.tsv"
   : >"$root_candidates"
-  # What: v1.2 (issue #1585) buffer pool for a rootless, non-channel-matched
+  # What: v1.2 buffer pool for a rootless, non-channel-matched
   # version -- ranked by build date instead of git history (it has none).
   # Why: replaces the old unconditional "non-ordinary-version" permanent
   # protect; only the newest channel_buffer_versions such versions per
@@ -435,7 +449,7 @@ audit_package() {
     # matched protected channel/release also stays protected; only a
     # rootless version that HAS tags but matches no protected channel
     # becomes a channel_buffer_versions-ranked candidate below.
-    # Why: v1.2 (issue #1585) targets "any historical or otherwise-
+    # Why: v1.2 targets "any historical or otherwise-
     # unanticipated tag FORMAT" -- a genuinely untagged version has no tag
     # format to be unanticipated, and is almost always a manifest-list's
     # own untagged amd64/arm64 platform child (this reaper's own separate
@@ -488,7 +502,7 @@ audit_package() {
     fi
 
     # What: reuses a cached git-history resolution instead of recomputing it.
-    # Why: issue #1585 v1.2 point 4 -- the loop below is the actual expensive
+    # Why: v1.2 point 4 -- the loop below is the actual expensive
     # part this cache exists for (one `git rev-parse`/`merge-base` subprocess
     # pair per root tag, every run); a hit requires an EXACT digest+tags
     # match, so any real change (retag, new digest) always falls through to
@@ -654,7 +668,7 @@ audit_package() {
     sra_emit_record "$class" "$package" "$id" "$digest" "$tags" "$built" "$legacy_position" "$budget" "$decision" "$reason"
   done <"$sorted_candidates"
 
-  # What: ranks the v1.2 (issue #1585) rootless/non-channel-matched
+  # What: ranks the v1.2 rootless/non-channel-matched
   # candidate pool by build date, newest first (no git-history root exists
   # to rank these by, unlike the ordinary sha-* roots above).
   # Why: replaces the old permanent "non-ordinary-version" protect with a

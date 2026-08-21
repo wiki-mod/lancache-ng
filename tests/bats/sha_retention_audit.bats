@@ -60,7 +60,7 @@ EOF
 }
 
 # What: reads the manifest's single channel_buffer_versions value.
-# Why: the v1.2 (issue #1585) per-package buffer for a non-ordinary-version
+# Why: the v1.2 per-package buffer for a non-ordinary-version
 # candidate that matches no protected channel.
 # From: Issue #1585.
 @test "retention manifest defines exactly five channel buffer versions" {
@@ -699,7 +699,7 @@ EOF
 }
 
 # ---------------------------------------------------------------------------
-# Incremental classification cache (Issue #1585 v1.2 point 4)
+# Incremental classification cache (v1.2 point 4)
 # ---------------------------------------------------------------------------
 
 # What: the schema declares the cache's primary key and required columns.
@@ -749,8 +749,8 @@ EOF
 }
 
 # What: a fresh, never-initialized database path is a clean read miss.
-# Why: this is the exact "cache miss falls back to a full scan" case issue
-# #1585's plan calls its own required self-verification -- must degrade,
+# Why: this is the exact "cache miss falls back to a full scan" case the
+# v1.2 plan calls its own required self-verification -- must degrade,
 # never error the caller.
 # From: Issue #1585.
 @test "cache read on a nonexistent database fails closed without erroring the caller" {
@@ -801,13 +801,13 @@ EOF
 
 # What: a truly untagged rootless version (other_count==0) must still emit an
 # unconditional protect BEFORE the v1.2 buffer-candidate line is reachable.
-# Why: regression guard for a real defect caught in review -- an early draft
-# of the v1.2 change routed a completely untagged version (the common case
-# for a manifest list's own untagged amd64/arm64 platform children) into the
-# same channel_buffer_versions buffer as a version with an unrecognized tag
-# FORMAT, making a live-manifest platform child a would-delete candidate
-# past a 5-slot buffer. The plan's own wording targets "any historical or
-# otherwise-unanticipated tag format" -- an absent tag has no format, so it
+# Why: a completely untagged version (the common case for a manifest list's
+# own untagged amd64/arm64 platform children) must never share the
+# channel_buffer_versions buffer with a version that has an unrecognized tag
+# FORMAT -- doing so would make a live-manifest platform child a
+# would-delete candidate past a 5-slot buffer. The plan's own wording
+# targets "any historical or otherwise-unanticipated tag format" -- an
+# absent tag has no format, so it
 # must stay on the unconditional-protect path, never reach
 # other_tag_candidates at all. This is a structural/ordering check (the
 # orchestrator's own live GHCR pagination is not mocked here); it can only

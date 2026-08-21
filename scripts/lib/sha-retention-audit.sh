@@ -56,7 +56,7 @@ sra_read_minimum_stable_releases() {
 }
 
 # What: reads retention.channel_buffer_versions from the manifest.
-# Why: v1.2 (issue #1585) inverts protection for a non-ordinary-version
+# Why: v1.2 inverts protection for a non-ordinary-version
 # fallback (unrecognized tag shape, no protected-channel match) -- this
 # count is the per-package safety buffer kept regardless of age instead of
 # a permanent protect.
@@ -467,7 +467,7 @@ sra_protected_reference_reason() {
 
 # What: classifies one already-ranked candidate's position against a budget.
 # Why: shared by both the ordinary-sha-root retention-budget loop and the
-# v1.2 (issue #1585) non-ordinary-version buffer loop in the orchestrator,
+# v1.2 non-ordinary-version buffer loop in the orchestrator,
 # so the same within/beyond-budget arithmetic is not duplicated (AG-CODE-011).
 # From: Issue #1585.
 sra_budget_decision() {
@@ -482,7 +482,7 @@ sra_budget_decision() {
   fi
 }
 
-# --- Incremental classification cache (Issue #1585 v1.2 point 4) ---------
+# --- Incremental classification cache (v1.2 point 4) ---------
 #
 # What: a small SQLite cache of the expensive-to-recompute per-version
 # resolution result (an ordinary sha-<commit> root's git-history rank, or a
@@ -495,7 +495,7 @@ sra_budget_decision() {
 # decision itself is ever read from cache -- only the deterministic,
 # unchanged-if-digest/tags-unchanged *resolution* (git-history rank; or
 # "no protected channel matched") is, which is what made the original
-# 26,000-version run in issue #1585 slow (one `git rev-parse`/`merge-base`
+# 26,000-version run slow (one `git rev-parse`/`merge-base`
 # subprocess pair per candidate root, every run, even for versions whose
 # tags have not changed since the previous run).
 # From: Issue #1585.
@@ -522,7 +522,7 @@ SQL
 # Why: a cache-miss run (first run ever, or a rotated-key restore-keys
 # fallback with no prior save under this run's exact key) must produce a
 # valid, empty, queryable database, not fail -- that clean fallback is the
-# cache's own required self-verification per issue #1585's plan.
+# cache's own required self-verification per the v1.2 plan.
 # From: Issue #1585.
 sra_cache_init() {
   local db_path="${1:?sra_cache_init: db path is required}"

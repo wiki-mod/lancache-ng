@@ -74,7 +74,7 @@ teardown() {
 }
 
 # ---------------------------------------------------------------------------
-# gc_discover_org_container_packages (Issue #1585 v1.2 point 1)
+# gc_discover_org_container_packages (v1.2 point 1)
 # ---------------------------------------------------------------------------
 
 # What: strips the repo-name prefix and returns only this org's own packages.

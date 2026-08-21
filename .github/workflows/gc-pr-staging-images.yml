@@ -57,7 +57,7 @@ on:
         description: Minimum version age before any deletion.
         type: string
         # What: manual-dispatch default, mirrors GC_MIN_AGE_SECONDS's own default.
-        # Why: raised from 24h to 7 days (604800s) per issue #1585's v1.2 plan.
+        # Why: raised from 24h to 7 days (604800s) per the v1.2 plan.
         # From: Issue #1585
         default: "604800"
 

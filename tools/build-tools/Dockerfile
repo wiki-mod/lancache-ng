@@ -169,7 +169,7 @@ RUN echo "deb http://deb.debian.org/debian trixie-backports main" > /etc/apt/sou
 # From: Issue #1570 | PR #1571
 #
 # What: this same block also adds `sqlite3` (the CLI, not a library).
-# Why: v1.2 (issue #1585)'s GHCR retention-audit incremental cache reads
+# Why: v1.2's GHCR retention-audit incremental cache reads
 # and writes a small SQLite database from `scripts/lib/sha-retention-audit.sh`
 # via the `sqlite3` command; `rusqlite`'s statically-linked SQLite inside the
 # Admin UI Rust binary is a separate, unrelated build and provides no CLI.

@@ -63,7 +63,7 @@ gc_dry_run="${GC_DRY_RUN:-false}"
 # Why: a version deletable by tag/reference state alone can still be a
 # build/promotion/backfill still in flight; age is simpler than tracking
 # every concurrent producer. Raised from the original 24h default to 7 days
-# (604800s) per issue #1585's v1.2 plan -- 24h was judged too tight once
+# (604800s) per the v1.2 plan -- 24h was judged too tight once
 # active deletion (not just dry-run classification) is really running.
 # From: Issue #1095 | PR #1443 | Issue #1585
 min_age_seconds="${GC_MIN_AGE_SECONDS:-604800}"
@@ -195,7 +195,7 @@ gc_resolve_retention_history_refs() {
 
 # What: lists every real container package under this org via the live
 # GHCR API, as a best-effort addition to the static services array/manifest.
-# Why: v1.2 (issue #1585) -- a package this repo actually publishes but
+# Why: v1.2 -- a package this repo actually publishes but
 # that nobody added to the static services array or to the manifest's
 # metadata/legacy sections was previously invisible to this reaper with no
 # error or warning at all. A failure here (missing packages-listing scope,
@@ -1021,7 +1021,7 @@ main() {
 
   # What: adds any live GHCR package not already covered by the static
   # services array or the manifest's metadata/legacy sections.
-  # Why: v1.2 (issue #1585) point 1 -- dynamic discovery must never remove
+  # Why: v1.2 point 1 -- dynamic discovery must never remove
   # or replace the existing baseline, only extend it, so a discovery outage
   # (see gc_discover_org_container_packages's own fallback) cannot regress
   # today's coverage.

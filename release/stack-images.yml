@@ -26,7 +26,7 @@ retention:
   accepted_ordinary_roots_per_package: 30
   # What: per-package safety-buffer count for a version whose tags are
   # neither a recognized sha-<commit> root nor a protected channel/release.
-  # Why: v1.2's inverted protection model (issue #1585) stops treating an
+  # Why: v1.2's inverted protection model stops treating an
   # unrecognized tag shape as a permanent protect; this buffer still keeps
   # the newest few such versions regardless of age, in case they are a
   # recent/in-flight or historical-format publish rather than truly stale.
