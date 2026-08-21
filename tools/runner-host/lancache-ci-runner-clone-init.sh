@@ -83,7 +83,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # one's trailing numeric segment is exactly the host's own last IP octet or
 # equivalent host number, never shared between two different hosts.
 own_host_token() {
-    hostname | grep -oE '[0-9]+' | tail -n1
+    # `|| true`: if `hostname` ever contains no digits at all, `grep -oE`
+    # finds nothing and exits non-zero; under `set -o pipefail` that would
+    # propagate through a caller's `my_token="$(own_host_token)"`
+    # assignment and trip `set -e`, same failure class fixed in
+    # own_primary_ipv4 above (confirmed real there on host .80 -- applied
+    # here too as a preventive fix, not yet observed to fail in practice
+    # since every real hostname in this fleet does contain digits).
+    hostname | grep -oE '[0-9]+' | tail -n1 || true
 }
 
 # Returns this host's primary IPv4 address (the one carrying its default
@@ -98,11 +105,42 @@ own_host_token() {
 # hostname_mismatch_report below raised a false "MISMATCH" (comparing the
 # hostname's trailing digit token against docker0's own fixed last octet,
 # 1, instead of this host's actual last IP octet). Fixed to instead read
-# the source address of the default route (`ip route show default`'s own
-# `src` field) -- the interface actually used for outbound traffic, which
-# is unambiguous regardless of how many other interfaces/bridges exist.
+# the source address of the default route.
+#
+# Second bug fixed 2026-08-21, same day (confirmed real on host .80): that
+# first fix used `ip route show default`'s own `src` field -- but a `src`
+# field is only PRINTED there when the kernel's route table entry carries
+# an explicit one; a plain `onlink` default route (confirmed real: "default
+# via 192.168.1.2 dev vmbr0 proto kernel onlink", no `src` at all) omits it
+# entirely, and every host in this fleet uses exactly that route shape. The
+# `grep -oE 'src ...'` pipeline then matched nothing, exited non-zero, and
+# -- because it fed a variable assignment (`my_ip="$(own_primary_ipv4)"` in
+# hostname_mismatch_report/ensure_hosts_self_reference) -- `set -e` treated
+# that as a fatal error and killed the ENTIRE full-reset-clean run silently
+# partway through, with no error message and no indication anything had
+# stopped early. (This is why the .85-.88 batch's full-reset-clean output
+# each appeared to end abruptly right after this check's own section
+# header -- it wasn't a display artifact, those runs genuinely stopped
+# there without applying host-prep or the hostid/machine-id dedup added
+# later that same session; see README.md's own note on re-running
+# full-reset-clean on those hosts if this fix landed after they were
+# processed.) Fixed to use `ip route get <probe>` instead, which always
+# computes and prints a real `src` address for a reachable route regardless
+# of whether the route table's own display would show one, and wrapped so
+# a route lookup failure (e.g. no default route at all) returns empty
+# rather than propagating a non-zero exit through the command substitution.
 own_primary_ipv4() {
-    ip -4 route show default 2>/dev/null | grep -oE 'src [0-9.]+' | head -n1 | awk '{print $2}'
+    # `|| true` at the very end matters just as much as the one on `ip
+    # route get` itself: under `set -o pipefail`, if `grep` finds no match
+    # (a legitimate, expected outcome this function's callers already
+    # handle via an empty-string check) it exits non-zero, and pipefail
+    # would propagate that as the whole pipeline's exit status -- which,
+    # fed into a caller's `my_ip="$(own_primary_ipv4)"` assignment, is
+    # exactly the failure mode `set -e` killed this script over on host
+    # .80 (see the long comment above). This function must always exit 0;
+    # "could not determine the IP" is communicated via an empty stdout, not
+    # a non-zero exit code.
+    { ip -4 route get 1.1.1.1 2>/dev/null || true; } | grep -oE 'src [0-9.]+' | head -n1 | awk '{print $2}' || true
 }
 
 # Checks whether /etc/hosts lets this host resolve its OWN current hostname
