@@ -163,6 +163,42 @@ own_primary_ipv4() {
     { ip -4 route get 1.1.1.1 2>/dev/null || true; } | grep -oE 'src [0-9.]+' | head -n1 | awk '{print $2}' || true
 }
 
+# What: Return the last octet of own_primary_ipv4 as a second, independent
+#   fleet host-number token.
+# Why: own_host_token is derived from the OS `hostname`, which a real disk
+#   clone can carry over verbatim from its source host (confirmed real on
+#   host .80 via hostname_mismatch_report); the primary IPv4 address is live
+#   network configuration a clone cannot copy, so it is authoritative where
+#   the hostname is not. is_foreign_runner_dir cross-checks both instead of
+#   trusting the hostname-derived token alone. Empty-safe under `set -e`
+#   the same way own_host_token/own_primary_ipv4 are: no IP determined means
+#   empty output, never a non-zero exit.
+# From: #1624 (PRRT_kwDOS--bIM6bDjcN)
+own_ip_token() {
+    local ip
+    ip="$(own_primary_ipv4)"
+    [[ -n "$ip" ]] || return 0
+    echo "${ip##*.}"
+}
+
+# What: Extract the fleet host-number segment from a runner agentName or an
+#   authorized_keys comment, using this project's two known naming schemes.
+# Why: A generic "does the token appear as some hyphen-delimited segment"
+#   match (the shape is_foreign_runner_dir used to use) can match the WRONG
+#   segment -- confirmed real: on host 1, "a-lancache-runner-240-1" matched
+#   host token "1" against the trailing runner-INSTANCE suffix instead of
+#   the host-number segment "240", misclassifying host 240's directory as
+#   this host's own. Anchoring to the two actual naming schemes (shared with
+#   is_foreign_authorized_keys_line, which already used this structured
+#   match) makes both call sites extract the same, correct segment.
+# From: #1624 (PRRT_kwDOS--bIM6bCrpC)
+extract_fleet_host_number() {
+    local name="$1"
+    if [[ "$name" =~ (gh-lancache-[a-z]+-[A-Za-z0-9]+-([0-9]+)|[a-z]-lancache-runner-([0-9]+)) ]]; then
+        echo "${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
+    fi
+}
+
 # Checks whether /etc/hosts lets this host resolve its OWN current hostname
 # (issue #1622 follow-up, 2026-08-21). Confirmed real on hosts .80 and .84:
 # each had a self-reference line whose TEXT was stale clone residue -- .80's
@@ -295,28 +331,78 @@ hostname_mismatch_report() {
     fi
 }
 
-# True (exit 0) if a runner instance directory's recorded .runner identity
-# belongs to a DIFFERENT host than this one -- i.e. is a clone leftover, not
-# this host's own (possibly already-registered) identity. A directory with
-# no .runner file at all is not "foreign" (it's simply unregistered yet) and
-# is intentionally never flagged by this function.
+# Exit-status meaning for is_foreign_runner_dir (three states, not two --
+# callers must capture $? explicitly rather than relying on a plain
+# if/else, since bash's `if function; then` collapses any non-zero status
+# to the same "false" branch):
+#   0 = confirmed foreign clone leftover -- safe to remove.
+#   1 = confirmed this host's own identity, OR genuinely unregistered (no
+#       .runner file, no credential files either) -- never remove.
+#   2 = identity could not be safely confirmed either way -- never remove,
+#       but must NOT be reported as "own/registered" either (that would
+#       hide a real, still-unresolved risk from the operator).
+#
+# What: Detect a foreign (cloned-from-another-host) runner instance
+#   directory, failing closed (status 0 or 2, never silently 1) whenever
+#   this host cannot actually prove the directory is its own.
+# Why: Each of the following was a real fail-open gap found by review:
+#   - a directory with .credentials/.credentials_rsaparams but no .runner
+#     file (an incomplete clone) used to return 1 ("not foreign") purely
+#     because the .runner check came first, leaving private key material
+#     unflagged by `check` and unremoved by `clean`;
+#   - a missing/failing `jq`, or malformed/incomplete .runner JSON, was
+#     swallowed by `|| true` and treated as "not foreign" instead of "we
+#     don't know";
+#   - the hostname-derived token alone is not trustworthy: a real disk
+#     clone can carry the SOURCE host's own OS hostname verbatim (confirmed
+#     real on host .80 -- see hostname_mismatch_report), so an agentName
+#     that matches the hostname token could actually belong to the clone's
+#     source, not this host. The IP-derived token (own_ip_token) is live
+#     network configuration a clone cannot copy, so when the two tokens
+#     disagree, this host's OWN identity is itself ambiguous and neither
+#     token may be used to conclude "own" -- only status 2.
+# From: #1624 (PRRT_kwDOS--bIM6bDjcQ, Cro5, FGd7, DjcN)
 is_foreign_runner_dir() {
     local dir="$1"
     local runner_json="$dir/.runner"
-    [[ -f "$runner_json" ]] || return 1
-    local agent_name
-    agent_name="$(jq -r '.agentName // empty' "$runner_json" 2>/dev/null || true)"
-    [[ -n "$agent_name" ]] || return 1
-    local my_token
-    my_token="$(own_host_token)"
-    if [[ -z "$my_token" ]]; then
-        echo "WARNING: could not derive a host token from 'hostname' output -- cannot safely classify $dir, treating as NOT foreign (fail closed, never auto-remove when unsure)." >&2
-        return 1
+    if [[ ! -f "$runner_json" ]]; then
+        if [[ -f "$dir/.credentials" || -f "$dir/.credentials_rsaparams" ]]; then
+            echo "WARNING: $dir carries credential material (.credentials/.credentials_rsaparams) but no .runner file -- an incomplete clone artifact whose identity cannot be confirmed. Treating as foreign (fail closed) so 'clean' does not leave private key material behind." >&2
+            return 0
+        fi
+        return 1 # genuinely unregistered, not a clone leftover
     fi
-    # agentName segments are hyphen-delimited (a-lancache-runner-240-1) --
-    # match the host token as its own segment, not a substring, so host 1
-    # can never accidentally match host 41's directory.
-    if grep -qE "(^|-)${my_token}(-|$)" <<<"$agent_name"; then
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "WARNING: 'jq' is not available on this host -- cannot parse $runner_json to confirm $dir's identity. Treating as foreign (fail closed) rather than assuming it belongs to this host." >&2
+        return 0
+    fi
+    local agent_name
+    if ! agent_name="$(jq -r '.agentName // empty' "$runner_json" 2>/dev/null)" || [[ -z "$agent_name" ]]; then
+        echo "WARNING: could not read a valid agentName from $runner_json (missing, unreadable, or malformed JSON) -- cannot confirm $dir's identity. Treating as foreign (fail closed)." >&2
+        return 0
+    fi
+    local found
+    found="$(extract_fleet_host_number "$agent_name")"
+    if [[ -z "$found" ]]; then
+        echo "WARNING: agentName '$agent_name' in $runner_json does not match a known fleet naming scheme -- cannot confirm $dir's identity. Treating as foreign (fail closed)." >&2
+        return 0
+    fi
+    local hostname_token ip_token
+    hostname_token="$(own_host_token)"
+    ip_token="$(own_ip_token)"
+    if [[ -z "$hostname_token" && -z "$ip_token" ]]; then
+        echo "WARNING: could not derive this host's own identity from either 'hostname' or its primary IPv4 address -- cannot confirm whether $dir belongs to this host. Treating as foreign (fail closed)." >&2
+        return 0
+    fi
+    if [[ -n "$hostname_token" && -n "$ip_token" && "$hostname_token" != "$ip_token" ]]; then
+        if [[ "$found" == "$hostname_token" || "$found" == "$ip_token" ]]; then
+            echo "WARNING: this host's own identity is ambiguous (hostname token '$hostname_token' vs. primary-IPv4 token '$ip_token' disagree -- see hostname_mismatch_report) and $dir's agentName token '$found' matches one of them. Cannot safely confirm whether $dir belongs to this host or to the host it was cloned from; NOT auto-classified either way. Resolve the hostname-vs-IP mismatch (see 'set-hostname') before trusting this directory's status." >&2
+            return 2 # unresolved -- never auto-remove, never report as own
+        fi
+        return 0 # matches neither of this host's own (disagreeing) tokens -- foreign
+    fi
+    local my_token="${ip_token:-$hostname_token}"
+    if [[ "$found" == "$my_token" ]]; then
         return 1 # belongs to this host
     fi
     return 0 # foreign
@@ -324,6 +410,52 @@ is_foreign_runner_dir() {
 
 find_runner_dirs() {
     find "$RUNNER_OPT_ROOT" -maxdepth 1 -type d -name 'actions-runner*' 2>/dev/null | sort
+}
+
+# What: List installed systemd unit names under /etc/systemd/system whose
+#   WorkingDirectory or ExecStart references the given runner instance
+#   directory.
+# Why: A real disk clone of an ALREADY-provisioned host also copies that
+#   host's own installed, possibly-enabled `actions.runner.*.service` unit
+#   (the actions-runner's `svc.sh install` writes one per instance dir).
+#   Removing the directory without first stopping/disabling that unit
+#   leaves an already-running process holding the copied credentials open
+#   (able to keep accepting jobs under the source identity), or, if
+#   inactive but still enabled, a unit that starts again on the next boot
+#   pointing at a directory this script just deleted. A repo-wide search
+#   found no other place in this script (or the runner-host tooling
+#   generally) that inspects or manages these units.
+# From: #1624 (PRRT_kwDOS--bIM6bC3vo, PRRT_kwDOS--bIM6bGRmi)
+find_runner_services_for_dir() {
+    local dir="$1"
+    [[ -d /etc/systemd/system ]] || return 0
+    local unit_file
+    for unit_file in /etc/systemd/system/actions.runner.*.service; do
+        [[ -e "$unit_file" ]] || continue # no nullglob: literal pattern when no match
+        if grep -qE "^(WorkingDirectory|ExecStart)=${dir}(/|\$)" "$unit_file" 2>/dev/null; then
+            basename "$unit_file"
+        fi
+    done
+    return 0
+}
+
+# What: Stop and disable a systemd unit inherited from a disk-cloned source
+#   host before its runner instance directory is removed; refuse to
+#   proceed if it is still active afterward.
+# Why: See find_runner_services_for_dir's own comment for the full clone
+#   scenario this protects against -- a live process must never be left
+#   running against a directory this script is about to delete.
+# From: #1624 (PRRT_kwDOS--bIM6bC3vo, PRRT_kwDOS--bIM6bGRmi)
+stop_inherited_runner_service() {
+    local unit="$1"
+    echo "  Stopping and disabling inherited runner service: $unit"
+    sudo systemctl stop "$unit" 2>&1 || true
+    sudo systemctl disable "$unit" 2>&1 || true
+    if systemctl is-active --quiet "$unit" 2>/dev/null; then
+        echo "  WARNING: $unit is still active after 'systemctl stop' -- refusing to remove its directory until it is confirmed stopped." >&2
+        return 1
+    fi
+    return 0
 }
 
 find_stray_archives() {
@@ -338,11 +470,28 @@ cmd_check() {
     while IFS= read -r dir; do
         [[ -n "$dir" ]] || continue
         found=1
-        if is_foreign_runner_dir "$dir"; then
+        # What: Capture is_foreign_runner_dir's real exit status (0/1/2).
+        # Why: `if function; then` collapses status 1 and 2 into the same
+        #   "false" branch, which would silently report an unresolved
+        #   identity (status 2) as "own/registered" -- exactly the fail-open
+        #   this tri-state return exists to prevent.
+        # From: #1624 (PRRT_kwDOS--bIM6bDjcN)
+        local status=0
+        is_foreign_runner_dir "$dir" || status=$?
+        if [[ "$status" -eq 0 ]]; then
             local agent_name
             agent_name="$(jq -r '.agentName // "?"' "$dir/.runner" 2>/dev/null || echo '?')"
             echo "  FOREIGN CLONE ARTIFACT: $dir  (belongs to: $agent_name)"
-            [[ -f "$dir/.credentials" ]] && echo "    -> carries .credentials (private key material for that identity)"
+            [[ -f "$dir/.credentials" || -f "$dir/.credentials_rsaparams" ]] && echo "    -> carries credential material (private key for that identity)"
+            local svc
+            while IFS= read -r svc; do
+                [[ -n "$svc" ]] || continue
+                echo "    -> inherited systemd unit still installed: $svc (will be stopped/disabled by 'clean' before the directory is removed)"
+            done < <(find_runner_services_for_dir "$dir")
+        elif [[ "$status" -eq 2 ]]; then
+            local agent_name
+            agent_name="$(jq -r '.agentName // "?"' "$dir/.runner" 2>/dev/null || echo '?')"
+            echo "  UNRESOLVED IDENTITY: $dir  (agentName: $agent_name) -- this host's own hostname/IP identity is ambiguous; see hostname_mismatch_report above and 'set-hostname'. NOT auto-classified; 'clean' will not touch this directory."
         elif [[ -f "$dir/.runner" ]]; then
             local agent_name
             agent_name="$(jq -r '.agentName // "?"' "$dir/.runner" 2>/dev/null || echo '?')"
@@ -414,24 +563,86 @@ cmd_clean() {
         # Re-verify immediately before removal (not just trusting an earlier
         # check's output) -- defense in depth against this dir's contents
         # having changed between an operator's 'check' run and this 'clean'
-        # run.
-        if is_foreign_runner_dir "$dir"; then
+        # run. Capture the real 0/1/2 status explicitly (see
+        # is_foreign_runner_dir's own header) -- only status 0 (confirmed
+        # foreign) is ever removed; status 2 (unresolved identity) must
+        # never be silently treated as removable.
+        local status=0
+        is_foreign_runner_dir "$dir" || status=$?
+        if [[ "$status" -eq 0 ]]; then
+            local svc all_stopped=1
+            while IFS= read -r svc; do
+                [[ -n "$svc" ]] || continue
+                stop_inherited_runner_service "$svc" || all_stopped=0
+            done < <(find_runner_services_for_dir "$dir")
+            if [[ "$all_stopped" -eq 0 ]]; then
+                echo "SKIPPING $dir: an inherited runner service could not be confirmed stopped -- not safe to remove its directory while a process may still be using it." >&2
+                continue
+            fi
             echo "Removing foreign clone artifact: $dir"
             sudo rm -rf -- "$dir"
             removed_any=1
+        elif [[ "$status" -eq 2 ]]; then
+            echo "SKIPPING $dir: identity unresolved (hostname-vs-IP mismatch on this host itself) -- not safe to auto-classify. Resolve via 'set-hostname' first, then re-run 'check'." >&2
         fi
     done < <(find_runner_dirs)
-    local archive
+    # What: Report stray archives instead of auto-deleting them.
+    # Why: find_stray_archives selects purely by extension+size, which
+    #   cannot distinguish a real leftover clone-imaging archive from a
+    #   legitimate large backup an operator intentionally placed under
+    #   RUNNER_OPT_ROOT -- confirmed as a real irreversible-deletion risk by
+    #   review. This mirrors the script's own established pattern for a
+    #   judgment call it cannot safely automate (see 'set-hostname'):
+    #   report only here, act solely via the separate 'clean-archive' mode
+    #   that takes the exact target path(s) as an explicit argument.
+    # From: #1624 (PRRT_kwDOS--bIM6bETkU, PRRT_kwDOS--bIM6bCrpE, PRRT_kwDOS--bIM6bITvt)
+    local archive found_archive=0
     while IFS= read -r archive; do
         [[ -n "$archive" ]] || continue
-        echo "Removing stray archive: $archive"
-        sudo rm -f -- "$archive"
-        removed_any=1
+        found_archive=1
+        echo "NOT removed (judgment call -- see 'clean-archive' below): $archive  ($(du -h "$archive" 2>/dev/null | cut -f1))"
     done < <(find_stray_archives)
+    if [[ "$found_archive" -eq 1 ]]; then
+        echo "Stray archives are not auto-removed by 'clean': extension+size alone cannot prove clone origin (a legitimate large backup would match too)."
+        echo "Review the path(s) above, then run: sudo bash $0 clean-archive <exact-path> [<exact-path> ...]"
+    fi
     if [[ "$removed_any" -eq 0 ]]; then
-        echo "Nothing to remove -- no foreign runner directories or stray archives found."
+        echo "Nothing removed by 'clean' -- see above for any archives requiring 'clean-archive' confirmation."
     else
         echo "Clean complete. Re-run 'check' to confirm."
+    fi
+}
+
+# What: Remove one or more operator-confirmed stray archive paths.
+# Why: find_stray_archives can only select by extension+size (see cmd_clean's
+#   own comment on that limitation); this mode requires the operator to name
+#   the exact path(s) to remove, and re-verifies each one against
+#   find_stray_archives immediately before deleting it -- the same
+#   re-verify-before-removal discipline cmd_clean already applies to runner
+#   directories -- rather than trusting a stale earlier listing.
+# From: #1624 (PRRT_kwDOS--bIM6bETkU, PRRT_kwDOS--bIM6bCrpE, PRRT_kwDOS--bIM6bITvt)
+cmd_clean_archive() {
+    if [[ "$#" -eq 0 ]]; then
+        echo "Usage: clean-archive <exact-path> [<exact-path> ...]" >&2
+        echo "Run 'check' or 'clean' first to see candidate archive paths." >&2
+        return 1
+    fi
+    local candidates
+    candidates="$(find_stray_archives)"
+    local path removed_any=0
+    for path in "$@"; do
+        if grep -qxF "$path" <<<"$candidates"; then
+            echo "Removing confirmed stray archive: $path"
+            sudo rm -f -- "$path"
+            removed_any=1
+        else
+            echo "SKIPPING $path: does not currently match find_stray_archives (wrong path, already removed, or below the size/extension threshold) -- refusing to remove an unconfirmed path." >&2
+        fi
+    done
+    if [[ "$removed_any" -eq 1 ]]; then
+        echo "clean-archive complete."
+    else
+        echo "Nothing removed."
     fi
 }
 
@@ -492,19 +703,22 @@ is_foreign_authorized_keys_line() {
     # Look for this fleet's own "gh-lancache-<tier>-<group>-<hostnum>" or
     # "<letter>-lancache-runner-<hostnum>" host-identity naming scheme in the
     # comment field, and flag it only if the TRAILING digit run differs from
-    # this host's own token. The middle "group" segment is deliberately
-    # matched loosely ([A-Za-z0-9]+, not [0-9]+) -- confirmed real on host
-    # .81 (2026-08-21): the template's own leftover root authorized_keys
-    # comment was "root@gh-lancache-light-A-80", where "A" is a letter, not
-    # a number, so an earlier digits-only version of this pattern silently
-    # failed to match it. Deliberately anchored to these specific fleet
-    # naming prefixes (not "any trailing digits in any comment") so an
-    # unrelated key comment containing a date or other number (e.g.
-    # "discord-bridge-teamspeak-2026-04-01") is never misflagged.
-    if [[ "$line" =~ (gh-lancache-[a-z]+-[A-Za-z0-9]+-([0-9]+)|[a-z]-lancache-runner-([0-9]+)) ]]; then
-        local found="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
-        [[ -n "$found" && "$found" != "$my_token" ]] && return 0
-    fi
+    # this host's own token. Uses the same structured extraction as
+    # is_foreign_runner_dir (extract_fleet_host_number) rather than a
+    # separate copy of the regex, so both call sites always agree on which
+    # segment is the actual host number. The middle "group" segment is
+    # deliberately matched loosely ([A-Za-z0-9]+, not [0-9]+) -- confirmed
+    # real on host .81 (2026-08-21): the template's own leftover root
+    # authorized_keys comment was "root@gh-lancache-light-A-80", where "A"
+    # is a letter, not a number, so an earlier digits-only version of this
+    # pattern silently failed to match it. Deliberately anchored to these
+    # specific fleet naming prefixes (not "any trailing digits in any
+    # comment") so an unrelated key comment containing a date or other
+    # number (e.g. "discord-bridge-teamspeak-2026-04-01") is never
+    # misflagged.
+    local found
+    found="$(extract_fleet_host_number "$line")"
+    [[ -n "$found" && "$found" != "$my_token" ]] && return 0
     return 1
 }
 
@@ -1474,7 +1688,17 @@ Usage: bash lancache-ci-runner-clone-init.sh <mode> [args...]
 Modes:
   check                        (default) Read-only report. Writes nothing.
   clean                        Removes clone artifacts 'check' flagged as
-                                foreign. Requires CONFIRM_CLEAN=yes.
+                                foreign. Requires CONFIRM_CLEAN=yes. Stray
+                                archives are report-only here -- see
+                                'clean-archive'.
+  clean-archive <path...>      Removes the exact stray-archive path(s)
+                                named, after re-verifying each still matches
+                                find_stray_archives. Extension+size alone
+                                cannot prove clone origin, so 'clean' no
+                                longer auto-deletes archives -- this mode
+                                requires an explicit, individually-confirmed
+                                target, same judgment-call pattern as
+                                'set-hostname'.
   host-prep                    Idempotent sudoers/docker-group/ci-hooks/
                                 cleanup-timer setup. Never touches
                                 daemon.json or runner registration.
@@ -1551,6 +1775,7 @@ main() {
     case "$mode" in
         check) cmd_check ;;
         clean) cmd_clean ;;
+        clean-archive) cmd_clean_archive "$@" ;;
         host-prep) cmd_host_prep ;;
         runner-fetch) cmd_runner_fetch "$@" ;;
         runner-hook-env) cmd_runner_hook_env "$@" ;;
