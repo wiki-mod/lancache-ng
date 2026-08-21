@@ -436,7 +436,23 @@ cmd_set_hostname() {
         sudo sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${new_hostname}/" /etc/hosts
         echo "Updated /etc/hosts' 127.0.1.1 entry."
     else
-        echo "WARNING: no 127.0.1.1 line found in /etc/hosts -- left it untouched, review manually." >&2
+        # No Debian-standard 127.0.1.1 self-reference exists yet. Confirmed
+        # real on host .80 (2026-08-21): instead of one, /etc/hosts carried
+        # a stale, wrong-IP self-reference pointing at the TEMPLATE's own
+        # identity ("192.168.1.85 gh-lancache-heavy-A-85 ..." on a host whose
+        # real IP is 192.168.1.80) -- more clone residue this mode hadn't
+        # covered yet. Replace any such self-reference line (old hostname,
+        # or old hostname's own "-A-<num>" template form, on any IP) with a
+        # correct 127.0.1.1 entry; if no matching line exists at all, append
+        # one. Without this, sudo (and anything else resolving its own
+        # hostname) fails with "unable to resolve host" on every invocation.
+        if sudo grep -qE "^[0-9.]+[[:space:]].*\\b${old_hostname}\\b" /etc/hosts 2>/dev/null; then
+            sudo sed -i "s/^[0-9.]\\+[[:space:]].*\\b${old_hostname}\\b.*/127.0.1.1\\t${new_hostname}/" /etc/hosts
+            echo "Replaced stale self-reference line (was pointing at old hostname '${old_hostname}') with a 127.0.1.1 entry."
+        else
+            printf '127.0.1.1\t%s\n' "$new_hostname" | sudo tee -a /etc/hosts >/dev/null
+            echo "No existing self-reference line found -- appended a new 127.0.1.1 entry."
+        fi
     fi
     echo
     echo "Done. Current hostname: $(hostname)"
