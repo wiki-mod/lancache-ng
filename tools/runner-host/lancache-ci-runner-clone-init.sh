@@ -368,11 +368,11 @@ cmd_check() {
     else
         echo "  /etc/sudoers.d/${RUNNER_USER}-nopasswd: MISSING"
     fi
-    # Same exact-field match as cmd_host_prep's own docker-group check
-    # (Codex review, PR #1624) -- `grep -w docker` also matches an
-    # unrelated group like `docker-build` since a hyphen satisfies its
-    # word-boundary requirement on both sides.
-    local check_runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
+    # Same exact-field match as cmd_host_prep's own docker-group check --
+    # `grep -w docker` also matches an unrelated group like `docker-build`
+    # since a hyphen satisfies its word-boundary requirement on both sides.
+    local check_runner_groups
+    check_runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
     if [[ "$check_runner_groups" == *" docker "* ]]; then
         echo "  $RUNNER_USER in docker group: yes"
     else
@@ -1119,7 +1119,8 @@ cmd_host_prep() {
     # `grep -qw docker` also matches a DIFFERENT group like `docker-build`
     # (word-boundary-satisfying substring), which would report false
     # membership and skip the real `usermod -aG docker` this runner needs.
-    local runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
+    local runner_groups
+    runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
     if [[ "$runner_groups" == *" docker "* ]]; then
         echo "$RUNNER_USER already in docker group, leaving as-is."
     else
@@ -1441,8 +1442,15 @@ cmd_sccache_fetch() {
     # running as RUNNER_USER cannot overwrite this persistent PATH binary
     # and inject code into every later job on this host, the way owning it
     # as RUNNER_USER itself would have allowed.
-    sudo install -o root -g "$(runner_group)" -m 0755 "$src_dir/sccache" /usr/local/bin/sccache
-    sudo install -o root -g "$(runner_group)" -m 0755 "$src_dir/sccache-dist" /usr/local/bin/sccache-dist
+    # What: Stage each binary in the target directory, then atomically rename it into place.
+    # Why: `install` writing the destination path directly is not atomic;
+    # a concurrent CI job could exec a partially-written binary mid-replace.
+    # From: #1624
+    local group; group="$(runner_group)"
+    sudo install -o root -g "$group" -m 0755 "$src_dir/sccache" /usr/local/bin/.sccache.new
+    sudo mv -f /usr/local/bin/.sccache.new /usr/local/bin/sccache
+    sudo install -o root -g "$group" -m 0755 "$src_dir/sccache-dist" /usr/local/bin/.sccache-dist.new
+    sudo mv -f /usr/local/bin/.sccache-dist.new /usr/local/bin/sccache-dist
     sudo mkdir -p /opt/sccache/dist-client
     sudo chown "$RUNNER_USER:$(runner_group)" /opt/sccache /opt/sccache/dist-client
     sudo chmod 2775 /opt/sccache /opt/sccache/dist-client
