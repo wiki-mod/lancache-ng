@@ -66,9 +66,11 @@ live in the repo, PR-reviewable and consistent across all hosts).
   kernel/firmware package would ever be touched. Before running against a
   host whose runner service is live, check GitHub's busy status and stop
   that service first; a real reboot test afterward is strongly
-  recommended (verified end-to-end across the full `.80`-`.88` fleet,
-  issue #1622: every host came back on the identical `uname -r`, with
-  docker/networking/the runner service all working).
+  recommended (verified end-to-end on host `.81` only, issue #1622: it came
+  back on the identical `uname -r`, with docker/networking/the runner
+  service all working -- this is not yet confirmed across the rest of the
+  `.80`-and-up fleet, run `purge-pve` and its own reboot test per host
+  before treating any other host as proven).
 
   **`sccache-check`/`sccache-fetch` (issue #1619/#1622, 2026-08-21):**
   `.github/actions/configure-rust-sccache` — used by every trusted Rust CI
@@ -100,6 +102,74 @@ live in the repo, PR-reviewable and consistent across all hosts).
   scheduler/auth configuration is no longer host-copied either (see above);
   standing up a new dist-server remains a separate, additional capacity
   decision.
+
+### Full per-host rollout procedure (new or disk-cloned host)
+
+The exact ordered sequence `lancache-ci-runner-clone-init.sh`'s own header
+promises "the full per-host rollout procedure" for. Run each step from the
+host itself (`bash lancache-ci-runner-clone-init.sh <mode> ...`), not via
+`./lancache-ci-runner-clone-init.sh` (see the script's own usage comment).
+
+```sh
+# 1. Read-only survey: clone-artifact findings, docker/sudoers/group state.
+bash lancache-ci-runner-clone-init.sh check
+
+# 2. If check found foreign runner identities/archives, remove ONLY those
+#    (re-verified immediately before each removal):
+CONFIRM_CLEAN=yes bash lancache-ci-runner-clone-init.sh clean
+
+# 3. Broader de-clone sweep: shell history, known_hosts, foreign
+#    authorized_keys, stale journal/machine-id dirs, orphaned /home dirs,
+#    template-authoring scripts, apt/dpkg history mentions. Read-only first:
+bash lancache-ci-runner-clone-init.sh full-reset-check
+CONFIRM_FULL_RESET=yes bash lancache-ci-runner-clone-init.sh full-reset-clean
+
+# 4. If full-reset-check flagged a mismatched/leftover clone hostname,
+#    apply the maintainer-confirmed correct one (see "Runner naming" above
+#    for this fleet's naming convention):
+sudo bash lancache-ci-runner-clone-init.sh set-hostname <correct-hostname>
+
+# 5. If this is a Proxmox-templated VM (the `.80`-and-up fleet), remove the
+#    accidentally-included nested PVE management stack -- read-only survey
+#    first, see the dedicated section above for the destructive step and
+#    its kernel/firmware exclusions:
+bash lancache-ci-runner-clone-init.sh purge-pve-check
+CONFIRM_PURGE_PVE=yes bash lancache-ci-runner-clone-init.sh purge-pve
+
+# 6. Idempotent host setup: sudoers NOPASSWD drop-in, docker group, /opt
+#    ownership convergence, the pre/post-job cleanup hooks, and this
+#    directory's own cleanup timer. NOT non-disruptive -- runs a full
+#    apt-get dist-upgrade/full-upgrade; only run during a maintenance
+#    window (see the mode's own --help description):
+bash lancache-ci-runner-clone-init.sh host-prep
+
+# 7. Heavy-tier hosts only: verify/install the sccache client tooling (see
+#    the dedicated sccache-check/sccache-fetch section above):
+bash lancache-ci-runner-clone-init.sh sccache-check
+
+# 8. If this host needs the LAN proxy other hosts use (host-prep never
+#    touches /etc/docker/daemon.json), add a "proxies" block by hand and
+#    restart dockerd -- e.g.:
+#      { "proxies": { "http-proxy": "http://<lan-proxy-host>:3128",
+#                      "https-proxy": "http://<lan-proxy-host>:3128",
+#                      "no-proxy": "localhost,127.0.0.1" } }
+#    Confirm which hosts actually need this with the maintainer; most of
+#    this fleet does not.
+
+# 9. Download, checksum-verify, and extract the actions-runner release,
+#    writing its pre/post-job hook wiring (does not register or start it):
+bash lancache-ci-runner-clone-init.sh runner-fetch /opt/actions-runner-1
+
+# 10. Register with GitHub -- a short-lived registration token, human-run,
+#     never done by this script (see the script's own header):
+cd /opt/actions-runner-1
+./config.sh --url <repo-url> --token <registration-token> --name <exact-hostname> --labels <labels>
+sudo ./svc.sh install
+# hold off on 'sudo ./svc.sh start' until the go-ahead to accept real jobs
+```
+
+Steps 2-5 and 7-8 are conditional (skip a step whose survey found nothing to
+do); steps 1, 6, 9, and 10 apply to every new or disk-cloned host.
 
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 

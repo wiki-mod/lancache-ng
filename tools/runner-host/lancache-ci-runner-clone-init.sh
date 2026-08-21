@@ -6,20 +6,19 @@
 # self-hosted runner host for GitHub Actions registration, WITHOUT ever
 # performing the registration itself.
 #
-# Background (issue #1622): new runner host VMs in this fleet (e.g. the
-# .81/.82/.84 light/heavy hosts added 2026-08) are provisioned as disk
-# clones of an existing, already-registered runner host (lancache-240).
-# Confirmed by direct SSH inspection, 2026-08-21: a freshly cloned host's
-# /opt/actions-runner-N directories are NOT empty -- they carry the SOURCE
-# host's own .runner/.credentials/.credentials_rsaparams files (private key
-# material a runner uses to authenticate to GitHub as one specific,
-# already-registered identity), plus multi-GB leftover backup archives
-# (runner*.tgz) from whatever imaging process produced the clone. A runner
-# identity belonging to one host must never be left sitting on a different
-# host (maintainer decision, issue #1622: not treated as an active
-# credential-compromise incident since nothing on the clone side ever
-# started the runner service or communicated with GitHub using it, but it
-# must be detected and removed before the CLONE is put into service).
+# Background: new runner host VMs in this fleet are provisioned as disk
+# clones of an existing, already-registered runner host. Confirmed by direct
+# SSH inspection: a freshly cloned host's /opt/actions-runner-N directories
+# are NOT empty -- they carry the SOURCE host's own
+# .runner/.credentials/.credentials_rsaparams files (private key material a
+# runner uses to authenticate to GitHub as one specific, already-registered
+# identity), plus multi-GB leftover backup archives (runner*.tgz) from
+# whatever imaging process produced the clone. A runner identity belonging
+# to one host must never be left sitting on a different host (maintainer
+# decision: not treated as an active credential-compromise incident since
+# nothing on the clone side ever started the runner service or communicated
+# with GitHub using it, but it must be detected and removed before the
+# CLONE is put into service). See issue #1622 for the full incident history.
 #
 # This script only prepares a host up to the point of running the real
 # actions-runner `config.sh` -- registration itself needs a short-lived
@@ -39,13 +38,18 @@
 #                 anything not independently re-confirmed as foreign, so it
 #                 can never wipe a host's own real, already-registered runner
 #                 state even if run there by mistake.
-#   host-prep     Idempotent, non-disruptive: sudoers NOPASSWD drop-in for
-#                 the runner user, adds that user to the docker group,
-#                 installs the /opt/lancache-ci-hooks/{pre,post}-job-
+#   host-prep     Idempotent, but NOT non-disruptive: sudoers NOPASSWD
+#                 drop-in for the runner user, adds that user to the docker
+#                 group, installs the /opt/lancache-ci-hooks/{pre,post}-job-
 #                 cleanup.sh pair (host-local, not repo-tracked -- same as
 #                 they already are on every existing runner host) and this
 #                 repo's own lancache-ci-cleanup timer/service (installed
-#                 from the sibling files in this same directory).
+#                 from the sibling files in this same directory). ALSO runs
+#                 a full `apt-get dist-upgrade`/`full-upgrade` on every
+#                 invocation (see enable_backports below) -- this can remove
+#                 or replace packages and restart running services via their
+#                 maintainer scripts; run only during a maintenance window,
+#                 not as a routine no-op re-check.
 #   runner-fetch  Downloads, checksum-verifies (against the GitHub Releases
 #                 API asset digest), and extracts a specific actions-runner
 #                 release directly into a target instance directory --
@@ -61,8 +65,8 @@
 # lancache-ci-runner-clone-init.sh ...`), not
 # `./lancache-ci-runner-clone-init.sh` -- like this directory's other two
 # scripts, this repo's executable bit is unverifiable from a Windows
-# authoring host with `core.filemode=false` (AG-VAL-024), so this script
-# must not depend on it being set.
+# authoring host with `core.filemode=false` (Rule-Ref: AG-VAL-024), so this
+# script must not depend on it being set.
 set -euo pipefail
 
 RUNNER_OPT_ROOT="${RUNNER_OPT_ROOT:-/opt}"
@@ -163,7 +167,14 @@ ensure_hosts_self_reference() {
     local my_hostname my_ip
     my_hostname="$(hostname)"
     my_ip="$(own_primary_ipv4)"
-    if sudo -n grep -qE "\\b${my_hostname}\\b" /etc/hosts 2>/dev/null; then
+    # What: Only count an active (non-commented) /etc/hosts line as a real match.
+    # Why: A commented-out stale line must not be read as "already resolves";
+    # capture-then-here-string avoids piping into an early-exiting grep -q
+    # under this script's pipefail (Rule-Ref: AG-VAL-032).
+    # From: #1624
+    local active_hosts_lines
+    active_hosts_lines="$(sudo -n grep -vE '^[[:space:]]*#' /etc/hosts 2>/dev/null || true)"
+    if grep -qE "\\b${my_hostname}\\b" <<<"$active_hosts_lines"; then
         echo "  OK: /etc/hosts already resolves current hostname '${my_hostname}'."
         return 0
     fi
@@ -210,8 +221,18 @@ ensure_hosts_self_reference() {
 # key off that UUID) that this script cannot fix from inside the guest.
 dedupe_host_identity() {
     echo "  hostid: $(hostid) -> "
+    # What: Regenerate /etc/hostid and verify the write actually happened.
+    # Why: The previous `|| true` swallowed a missing/failing zgenhostid,
+    # leaving /etc/hostid deleted with no replacement while still reporting
+    # success -- a real hostid regression, not just a masked error.
+    # From: #1624
+    if ! command -v /usr/sbin/zgenhostid >/dev/null 2>&1; then
+        echo "ERROR: /usr/sbin/zgenhostid not found -- cannot regenerate /etc/hostid." >&2
+        return 1
+    fi
     sudo -n rm -f /etc/hostid
-    sudo -n /usr/sbin/zgenhostid -f >/dev/null 2>&1 || true
+    sudo -n /usr/sbin/zgenhostid -f >/dev/null
+    sudo -n test -s /etc/hostid || { echo "ERROR: zgenhostid ran but /etc/hostid is still missing or empty." >&2; return 1; }
     echo "    $(hostid)"
     local old_machine_id new_machine_id
     old_machine_id="$(cat /etc/machine-id 2>/dev/null || echo '?')"
@@ -910,6 +931,15 @@ HOOKEOF
 # runs `apt-get update` unconditionally so a freshly-added pin takes effect
 # even on a re-run.
 enable_backports() {
+    # What: Refuse to write a trixie-specific backports pin on a non-Trixie host.
+    # Why: A wrong suite silently mixes archives across distributions on cross-grade.
+    # From: #1624
+    local codename
+    codename="$(. /etc/os-release && echo "${VERSION_CODENAME:-}")"
+    if [[ "$codename" != "trixie" ]]; then
+        echo "ERROR: enable_backports only supports Debian trixie (detected VERSION_CODENAME='${codename:-unknown}') -- refusing to write a trixie-backports pin on a different suite." >&2
+        return 1
+    fi
     local list_file="/etc/apt/sources.list.d/backports.list"
     local pref_file="/etc/apt/preferences.d/backports"
     local expected_list="deb http://deb.debian.org/debian trixie-backports main"
@@ -968,6 +998,24 @@ cmd_host_prep() {
     else
         sudo usermod -aG docker "$RUNNER_USER"
         echo "Added $RUNNER_USER to docker group (takes effect on next login/SSH session)."
+    fi
+
+    # What: Converge /opt (recursively) to runner-user-owned with setgid set.
+    # Why: Maintainer decision (issue #1622, 2026-08-21): the base state for
+    # everything under /opt is <RUNNER_USER>:<runner-group> so ownership
+    # stays consistent as hosts get cloned; setgid makes future files/dirs
+    # inherit the group automatically. Known root-owned exceptions (e.g.
+    # /usr/local/bin/sccache-dist, installed by sccache-fetch) live outside
+    # /opt entirely and are unaffected by this recursive step.
+    # From: #1624
+    local runner_group
+    runner_group="$(id -gn "$RUNNER_USER" 2>/dev/null || true)"
+    if [[ -z "$runner_group" ]]; then
+        echo "WARNING: could not resolve a primary group for '$RUNNER_USER' -- skipping /opt ownership convergence." >&2
+    else
+        sudo chown -R "$RUNNER_USER:$runner_group" /opt
+        sudo chmod g+s /opt
+        echo "Converged /opt (recursively) to ${RUNNER_USER}:${runner_group} with setgid set on /opt itself."
     fi
 
     install_ci_hooks
