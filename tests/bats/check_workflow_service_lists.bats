@@ -22,8 +22,8 @@
 # invoke the script with a matrix-source fixture PLUS additional fixture
 # files, mirroring the script's own `[primary] [extra]...` argument shape.
 #
-# gc_fixture is named gc-pr-staging-images.sh, not .yml (#1095, 2026-08-06):
-# it used to model the array as it looked embedded in
+# gc_fixture is named gc-pr-staging-images.sh, not .yml: it used to model
+# the array as it looked embedded in
 # .github/workflows/gc-pr-staging-images.yml's own `run:` block, before that
 # logic moved into scripts/untracked/gc-pr-staging-images.sh as a real, standalone
 # script. check_services_arrays() in the script under test keys
@@ -199,9 +199,8 @@ EOF
 # on the real files: scripts/untracked/gc-pr-staging-images.sh equals the canonical
 # set, declared at column 0 like ensure-pr-staging-images.sh below (it is a
 # plain shell script, not indented inside a YAML `run:` block -- unlike
-# before #1095, 2026-08-06, when this array still lived embedded in
-# .github/workflows/gc-pr-staging-images.yml's own `run:` block and this
-# fixture was indented to match); backfill-stack-latest.yml deliberately
+# before this array moved out of .github/workflows/gc-pr-staging-images.yml's
+# own `run:` block, when this fixture was indented to match); backfill-stack-latest.yml deliberately
 # excludes build-tools (a documented subset, matching its own "intentionally
 # excludes build-tools" comment) and stays YAML-embedded/indented, since that
 # real file's array genuinely is still inline in a `run:` block;
@@ -508,4 +507,78 @@ EOF
     run bash -c "cd '$repo_root' && bash '$script'"
     [ "$status" -eq 0 ]
     [[ "$output" == *"consistent"* ]]
+}
+
+# Emits a minimal 5-job skeleton (the exact set check_push_supersession_wiring
+# requires) with a real `- service:` matrix so check_services_arrays's own
+# earlier, unrelated matrix-extraction requirement is satisfied too --
+# without it, that check's own "could not extract any matrix entries" hard
+# exit would fire before check_push_supersession_wiring ever runs. Pass a
+# job name in $1 to omit push-supersession-check from that one job's needs:;
+# an empty $1 wires all five correctly.
+write_supersession_fixture() {
+    local break_job="${1:-}"
+    local -a other_jobs=(build-arm64 container-scan merge-manifests full-setup-validate)
+    local job needs
+
+    write_canonical_matrix
+    # What: extends the just-written build: stanza with its own needs: key.
+    # Why: write_canonical_matrix already opens `  build:`; a second
+    #   `  build:` header here would be a duplicate YAML mapping key.
+    if [[ "$break_job" == "build" ]]; then
+        printf '    needs: [build-arm64]\n'
+    else
+        printf '    needs: [push-supersession-check]\n'
+    fi
+    printf '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)\n'
+    for job in "${other_jobs[@]}"; do
+        if [[ "$job" == "$break_job" ]]; then
+            needs="[build, build-arm64]"
+        else
+            needs="[push-supersession-check]"
+        fi
+        printf '  %s:\n    needs: %s\n' "$job" "$needs"
+    done
+}
+
+# What: proves the check applies once a file defines all five required jobs.
+# Why: a required job's needs: list silently missing push-supersession-check
+#   must be caught, even though the same check must stay a no-op against the
+#   narrower fixtures every other test above uses.
+# From: Issue #1095 | PR #1628
+@test "supersession wiring: fails when merge-manifests is missing push-supersession-check from needs" {
+    write_supersession_fixture merge-manifests > "$fixture"
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"job 'merge-manifests'"*"missing push-supersession-check"* ]]
+}
+
+# What: proves the check passes when all five jobs correctly depend on
+#   push-supersession-check.
+# From: Issue #1095 | PR #1628
+@test "supersession wiring: passes when all five required jobs depend on push-supersession-check" {
+    write_supersession_fixture > "$fixture"
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"consistent"* ]]
+}
+
+# What: proves the check is a no-op against a fixture that only defines
+#   `build:` (every other test in this file uses exactly this shape).
+# Why: without this content-gated design, this check would have broken the
+#   entire rest of this test suite -- confirmed live while building it: an
+#   earlier version required all five jobs unconditionally and failed every
+#   single-file test above before this gate was added.
+# From: Issue #1095 | PR #1628
+@test "supersession wiring: stays a no-op against a fixture defining only build:" {
+    {
+        write_canonical_matrix
+        echo '          services=(proxy dns watchdog dhcp dhcp-proxy ntp syslog ui build-tools)'
+    } > "$fixture"
+
+    run bash "$script" "$fixture"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"push-supersession-check"* ]]
 }

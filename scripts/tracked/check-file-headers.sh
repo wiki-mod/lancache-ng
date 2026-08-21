@@ -44,13 +44,11 @@ is_excluded() {
         # JSON despite the .conf extension -- see AGENTS.md for why these
         # three specifically are excluded.
         services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
-        # Machine-generated OpenVEX document (JSON has no comment syntax, so it
-        # cannot carry the repo header); produced by scripts/untracked/generate-vex.sh
-        # from .trivyignore.yaml and kept in sync by scripts/tracked/check-vex-drift.sh.
-        vex.openvex.json | */vex.openvex.json) return 0 ;;
         # Validation-state tracking record (JSON, no comment syntax) referenced
-        # by docs/release-validation-plan.md -- same exclusion rationale as
-        # vex.openvex.json above.
+        # by docs/release-validation-plan.md -- no comment syntax to carry a
+        # header in, same exclusion rationale the removed vex.openvex.json
+        # entry used to state before that file stopped being committed to
+        # current_dev at all (Issue #1095 F-22).
         docs/validation-state.json | */docs/validation-state.json) return 0 ;;
         # Vendored third-party file and generated/compiled build output.
         services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;

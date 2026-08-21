@@ -429,6 +429,55 @@ check_hosted_fallback_matrix() {
     done
 }
 
+# What: fails if any of a maintained allowlist of push-triggered
+#   image-publishing jobs in $1 is missing push-supersession-check from its
+#   own needs: list.
+# Why: referencing needs['push-supersession-check'] without declaring it in
+#   needs: is not a syntax error, just a silent empty string that no prior
+#   check caught.
+# From: Issue #1095 | PR #1628
+check_push_supersession_wiring() {
+    local file="$1" job block needs_section
+    local -a required_jobs=(build build-arm64 container-scan merge-manifests full-setup-validate)
+
+    # What: skips this whole check unless $file defines ALL five required
+    #   jobs; only then does a missing job trip a "renamed?" failure.
+    # Why: the narrow, single-purpose fixtures the other checks in this
+    #   script use only ever model a `build:` matrix, never the other four
+    #   real jobs -- requiring all five present before checking any of them
+    #   makes this check a no-op against those fixtures without weakening it
+    #   against a real (or realistically complete) build-push.yml, where all
+    #   five always exist together.
+    # From: Issue #1095 | PR #1628
+    for job in "${required_jobs[@]}"; do
+        grep -qE "^  ${job}:[[:space:]]*\$" "$file" || return 0
+    done
+
+    for job in "${required_jobs[@]}"; do
+        block="$(awk -v job="  ${job}:" '
+            $0 == job { found=1 }
+            found && /^  [a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ && $0 != job { exit }
+            found { print }
+        ' "$file")"
+        # What: extracts only the needs: declaration itself (flow-style
+        #   `needs: [...]` on one line, or block-style `needs:` plus its
+        #   immediately-following 6-space-indented `- x` list items).
+        # Why: a bare `grep -q` against the whole job block also matches this
+        #   very check's own reference comments mentioning the string --
+        #   confirmed live: mutating merge-manifests' needs: alone did not
+        #   trip this check until scoped to needs: specifically.
+        # From: Issue #1095 | PR #1628
+        needs_section="$(awk '
+            /^    needs:/ { grab=1; print; next }
+            grab && /^      - / { print; next }
+            grab { exit }
+        ' <<<"$block")"
+        if ! grep -q "push-supersession-check" <<<"$needs_section"; then
+            fail "job '$job' in $file is missing push-supersession-check from its own needs: list (see merge-manifests' create-trusted-manifests step, PR #1628, for the reference pattern)."
+        fi
+    done
+}
+
 # Per-extra-file expectation of which array kind each file must declare at
 # least one of (basename-keyed, same reasoning as SUBSET_SERVICES_FILES
 # above). This is what lets check_services_arrays/check_full_setup_arrays
@@ -448,6 +497,7 @@ declare -A REQUIRES_FULL_SETUP_ARRAY=(
 # still use services=(...). full_setup_services=(...) remains optional here.
 check_services_arrays "$workflow" "$workflow_services_requirement"
 check_full_setup_arrays "$workflow" "optional"
+check_push_supersession_wiring "$workflow"
 [[ -z "$hosted_fallback" ]] || check_hosted_fallback_matrix "$hosted_fallback"
 
 for file in "${extra_files[@]}"; do
