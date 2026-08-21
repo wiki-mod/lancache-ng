@@ -165,13 +165,10 @@ RUN set -eu; \
       > /usr/local/bin/lancache-rustc-wrapper; \
     chmod +x /usr/local/bin/lancache-rustc-wrapper
 
-# What: writes the sccache/distcc/ccache acceleration helper functions
-#   both build RUN blocks below call, once, to a file both source. Docker
-#   RUN instructions each run in a fresh shell, so a function defined in
-#   one RUN cannot be called from another without persisting it first.
-# Why: the pre-cache and real-source build RUN blocks need byte-for-byte
-#   identical acceleration behavior; duplicating this shell between them
-#   let the two copies silently drift out of sync.
+# What: writes shared cargo-accel helper functions once, to a file both
+#   build RUN blocks below source (each RUN starts a fresh shell).
+# Why: keeps the pre-cache and real-source builds byte-for-byte identical
+#   instead of two copies that could silently drift.
 # From: Issue #1533 | Refs #887
 RUN <<'LANCACHE_UI_BUILD_ACCEL_EOF'
 set -eu
