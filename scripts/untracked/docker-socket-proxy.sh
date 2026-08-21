@@ -48,7 +48,7 @@ frontend dockerfrontend
     #   to ever be disabled via the UI, since it recovers other services.
     # From: Issue #842 | Issue #849 | Issue #1486
     # UPDATED (syslog+fluent-bit consolidation PR, 2026-08, merged
-    # concurrently with #842/#849 which originally added BOTH
+    # concurrently with the changes above which originally added BOTH
     # lancache-syslog and lancache-syslog-ng here as two separate entries):
     # syslog (fluent-bit) and syslog-ng are now one combined container under
     # the single name lancache-syslog -- lancache-syslog-ng removed from both

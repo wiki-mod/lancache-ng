@@ -172,7 +172,7 @@ done <<EOF_WATCHDOG
 $watchdog_names
 EOF_WATCHDOG
 
-# --- watchdog/syslog must never gain a lifecycle-action grant (#1486) -----
+# --- watchdog/syslog must never gain a lifecycle-action grant -----
 # What: watchdog stays fully absent from the allowlist; syslog keeps
 #   inspect-only access; the verb-acl set below is derived from the file
 #   itself (any acl regex ending in a start/stop/restart/wait segment).
