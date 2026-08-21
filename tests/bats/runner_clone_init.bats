@@ -1,17 +1,23 @@
 #!/usr/bin/env bats
-# lancache-ng (https://github.com/wiki-mod/lancache-ng)
+# LanCache-NG (https://github.com/wiki-mod/lancache-ng)
+# SPDX-License-Identifier: AGPL-3.0-or-later
 #
 # Fast, Docker-free unit coverage for tools/runner-host/lancache-ci-runner-
-# clone-init.sh's own_host_token() and is_foreign_runner_dir() -- the two
-# functions that decide whether a runner instance directory's .runner
-# credential file belongs to THIS host or is leftover clone residue from a
-# different, already-registered host (issue #1622: confirmed real on this
-# fleet's disk-cloned VMs). `cmd_clean` gates every deletion on
-# is_foreign_runner_dir()'s classification, so a wrong answer here is
-# directly a deletion-safety bug -- this file exists because PR #1624's own
-# review found that the destructive fix it added had no executable
-# regression coverage, only a "conceptually verified" note in the test
-# plan (Codex review, PR #1624).
+# clone-init.sh's own_host_token(), is_foreign_runner_dir(), and
+# own_primary_ipv4() -- the functions that decide whether a runner instance
+# directory's .runner credential file belongs to THIS host or is leftover
+# clone residue from a different, already-registered host (issue #1622:
+# confirmed real on this fleet's disk-cloned VMs), and that derive this
+# host's own identity for that decision in the first place.
+# `cmd_clean` gates every deletion on is_foreign_runner_dir()'s
+# classification, so a wrong answer here is directly a deletion-safety bug
+# -- this file exists because PR #1624's own review found that the
+# destructive fix it added had no executable regression coverage, only a
+# "conceptually verified" note in the test plan (Codex review, PR #1624).
+# own_primary_ipv4()'s own coverage was added the same way, for the same
+# reason, after a separate review round found its own confirmed real bug
+# history (a wrong-interface pick on host .88, a silent `set -e` abort on
+# host .80) had no regression test either.
 #
 # The script under test also `set -euo pipefail`s at its own top level
 # (it doubles as a directly-runnable script, guarded at the bottom so
@@ -34,6 +40,15 @@ setup() {
 
     fixture_dir="$BATS_TEST_TMPDIR/runner-instance"
     mkdir -p "$fixture_dir"
+}
+
+# Stubs `ip` (the only external command own_primary_ipv4() calls) to return
+# a controlled `ip -4 route get 1.1.1.1` line, so tests never depend on the
+# real host's routing table.
+stub_ip() {
+    # shellcheck disable=SC2317 # invoked indirectly as the `ip` command
+    ip() { printf '%s\n' "$STUB_IP_ROUTE_GET_OUTPUT"; }
+    export -f ip
 }
 
 # Stubs `hostname` (the only external command own_host_token() calls) to
@@ -165,4 +180,45 @@ write_runner_json() {
     write_runner_json '{"agentName": "gh-lancache-heavy-30-85"}'
     run is_foreign_runner_dir "$fixture_dir"
     [ "$status" -eq 0 ]
+}
+
+# --- own_primary_ipv4() -----------------------------------------------------
+#
+# Regression coverage for the two confirmed real bugs this function's own
+# header comment documents (host .88: docker0's "scope global" address
+# picked over the real LAN interface; host .80: an `onlink` default route
+# has no `src` field at all, and the pre-fix pipeline's non-zero grep exit
+# silently killed the whole script under `set -e`). This function was
+# fixed to use `ip route get <probe>` specifically because that form always
+# computes and prints a `src` field for a reachable route; these tests
+# cover the function's own remaining edge cases (route lookup fails
+# entirely, or unexpectedly returns a line with no `src` field) to prove it
+# still exits 0 with empty output rather than propagating a pipeline
+# failure through a caller's `my_ip="$(own_primary_ipv4)"` assignment.
+
+@test "own_primary_ipv4 extracts the src address from a real 'ip route get' line" {
+    STUB_IP_ROUTE_GET_OUTPUT="1.1.1.1 via 192.168.1.2 dev vmbr0 src 192.168.1.84 uid 1000"
+    stub_ip
+    run own_primary_ipv4
+    [ "$status" -eq 0 ]
+    [ "$output" = "192.168.1.84" ]
+}
+
+@test "own_primary_ipv4 returns empty (not a failure) when the route line has no src field" {
+    # Regression: the pre-fix implementation fed a `src`-less line into a
+    # pipeline whose grep then exited non-zero, tripping `set -e` in every
+    # caller under pipefail (host .80 incident).
+    STUB_IP_ROUTE_GET_OUTPUT="1.1.1.1 via 192.168.1.2 dev vmbr0 proto kernel onlink"
+    stub_ip
+    run own_primary_ipv4
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
+}
+
+@test "own_primary_ipv4 returns empty (not a failure) when there is no route at all" {
+    STUB_IP_ROUTE_GET_OUTPUT=""
+    stub_ip
+    run own_primary_ipv4
+    [ "$status" -eq 0 ]
+    [ -z "$output" ]
 }
