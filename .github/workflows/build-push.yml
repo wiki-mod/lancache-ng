@@ -103,13 +103,6 @@ jobs:
       proxy: ${{ steps.filter.outputs.proxy }}
       build_tools: ${{ steps.filter.outputs.build_tools }}
       workflow: ${{ steps.filter.outputs.workflow }}
-      # What: narrower "does this change published image bytes" signal;
-      #   see classify-image-impact.sh's touches_build_content() for scope.
-      # Why: consumed only by determine-push-reuse-scope's decide_one() and
-      #   build/build-arm64's should-build override -- every other consumer
-      #   of `workflow` above stays on the broader signal unchanged.
-      # From: Issue #1095 | PR #1628
-      workflow_build_relevant: ${{ steps.filter.outputs.workflow_build_relevant }}
       docs: ${{ steps.filter.outputs.docs }}
       docs_only: ${{ steps.filter.outputs.docs_only }}
       governance: ${{ steps.filter.outputs.governance }}
@@ -4592,15 +4585,7 @@ jobs:
         env:
           REF_NAME: ${{ github.ref_name }}
           COMMIT_SHA: ${{ github.sha }}
-          # What: uses the narrower workflow_build_relevant, not the broad
-          #   `workflow` output every other WORKFLOW_CHANGED reader in this
-          #   file still reads -- see that output's own comment for scope.
-          # Why: an orchestration-only build-push.yml change (e.g. a
-          #   merge-manifests/promote fix) cannot alter published image
-          #   bytes, so it should not block reuse the way a real
-          #   build/build-arm64 change must.
-          # From: Issue #1095 | PR #1628
-          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow_build_relevant }}
+          WORKFLOW_CHANGED: ${{ needs['detect-changes'].outputs.workflow }}
           PROXY_CHANGED: ${{ needs['detect-changes'].outputs.proxy }}
           DNS_CHANGED: ${{ needs['detect-changes'].outputs.dns_image }}
           UI_CHANGED: ${{ needs['detect-changes'].outputs.ui }}
@@ -4980,14 +4965,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            # What: uses the narrower workflow_build_relevant, not the broad
-            #   `workflow` output -- see that output's own comment (in
-            #   detect-changes' outputs: block) for scope.
-            # Why: an orchestration-only build-push.yml change cannot alter
-            #   published image bytes, so it should not force a rebuild of
-            #   every service the way a real build/build-arm64 change must.
-            # From: Issue #1095 | PR #1628
-            if [ "${{ needs['detect-changes'].outputs.workflow_build_relevant }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then
@@ -5782,14 +5760,7 @@ jobs:
                 exit 1
                 ;;
             esac
-            # What: uses the narrower workflow_build_relevant, not the broad
-            #   `workflow` output -- see that output's own comment (in
-            #   detect-changes' outputs: block) for scope.
-            # Why: an orchestration-only build-push.yml change cannot alter
-            #   published image bytes, so it should not force a rebuild of
-            #   every service the way a real build/build-arm64 change must.
-            # From: Issue #1095 | PR #1628
-            if [ "${{ needs['detect-changes'].outputs.workflow_build_relevant }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
+            if [ "${{ needs['detect-changes'].outputs.workflow }}" = "true" ] && [ "$MATRIX_SERVICE" != "build-tools" ]; then
               should_build=true
             fi
           elif [ "$REUSE_JOB_RESULT" = "success" ]; then

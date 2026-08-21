@@ -101,70 +101,6 @@ touches_build_workflow() {
         || touches_prefix ".github/actions/"
 }
 
-# What: extracts one top-level job's YAML block (its header line up to, but
-#   not including, the next top-level job header) from stdin.
-# Why: shared by touches_build_content()'s base-vs-head block comparison
-#   below; matches check-workflow-service-lists.sh's own job-block extractor
-#   so both scripts agree on where one job's block ends.
-# From: Issue #1095 | PR #1628
-_cii_job_block() {
-    local job="  ${1}:"
-    awk -v job="$job" '
-        $0 == job { found=1 }
-        found && /^  [a-zA-Z][a-zA-Z0-9_-]*:[[:space:]]*$/ && $0 != job { exit }
-        found { print }
-    '
-}
-
-# What: narrower, additive "did this change alter published image bytes"
-#   signal, for exactly the two should-build/reuse gates that otherwise force
-#   a full rebuild+rescan of every service on ANY touch to build-push.yml --
-#   even a change confined to an unrelated job (merge-manifests, promote, a
-#   lint job) that cannot alter what `docker buildx build --push` produces,
-#   since only the build/build-arm64 jobs invoke that command. Does NOT
-#   replace touches_build_workflow()/the `workflow` output above, which ~20
-#   other, unaudited consumers (rust-quality/test/coverage/staging-tag gates)
-#   keep reading unchanged.
-# Why: build-push.yml is touched by nearly every CI-focused PR in this repo,
-#   and each such PR was rebuilding and rescanning every one of the 9
-#   first-party images regardless of which job it edited -- real compute
-#   spent on images that could not possibly have changed.
-# From: Issue #1095 | PR #1628
-touches_build_content() {
-    [[ "$force_all" == "true" ]] && return 0
-    touches_exact ".github/workflows/build-tools.yml" && return 0
-    touches_prefix ".github/actions/" && return 0
-    touches_exact ".github/workflows/build-push.yml" || return 1
-
-    # CHANGED_FILES-only callers (codeql.yml today) have no base/head refs to
-    # diff the two sides of build-push.yml with -- fail safe rather than guess.
-    [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 0
-
-    local job base_block head_block combined_head=""
-    for job in build build-arm64; do
-        base_block="$(git show "${merge_base}:.github/workflows/build-push.yml" 2>/dev/null | _cii_job_block "$job")"
-        head_block="$(git show "${head_ref}:.github/workflows/build-push.yml" 2>/dev/null | _cii_job_block "$job")"
-        [[ -n "$base_block" && -n "$head_block" ]] || return 0
-        [[ "$base_block" == "$head_block" ]] || return 0
-        combined_head+="$head_block"$'\n'
-    done
-
-    # What: fails safe if build/build-arm64 reference a YAML anchor (*name)
-    #   defined outside their own two (unchanged) blocks.
-    # Why: unchanged block text only proves unchanged effective behavior when
-    #   every alias the blocks use resolves inside those same blocks; an
-    #   anchor defined elsewhere (e.g. in a later job) could still change
-    #   without either block's own text changing.
-    # From: Issue #1095 | PR #1628
-    local alias
-    while IFS= read -r alias; do
-        [[ -z "$alias" ]] && continue
-        grep -q "&${alias}\b" <<< "$combined_head" || return 0
-    done < <(grep -oE '\*[a-zA-Z0-9_-]+' <<< "$combined_head" | sed 's/^\*//' | sort -u)
-
-    return 1
-}
-
 touches_codeql_rust() {
     # CodeQL's Rust database contains these three Rust crates. It also depends
     # on the shared build workflow/actions and on its own workflow/config, so a
@@ -260,7 +196,6 @@ fi
 
 output_bool "build_tools" touches_prefix "tools/build-tools/"
 output_bool "workflow" touches_build_workflow
-output_bool "workflow_build_relevant" touches_build_content
 output_bool "codeql_rust" touches_codeql_rust
 output_bool "docs" touches_docs
 printf 'docs_only=%s\n' "$docs_only"
