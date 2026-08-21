@@ -221,6 +221,188 @@ cmd_clean() {
     fi
 }
 
+# --- full-reset: broader de-clone sweep (maintainer request, issue #1622) --
+#
+# `check`/`clean` above only cover the ONE clone-artifact class that
+# motivated this script (runner identities + their backup archives).
+# `full-reset-check`/`full-reset-clean` cover everything else a real,
+# freshly-and-manually-installed Debian host would never have, so a cloned
+# host becomes indistinguishable from one after this runs. Deliberately
+# split into its own check/clean pair, same safety shape as `check`/`clean`:
+# read-only survey first, explicit CONFIRM_FULL_RESET=yes gate to act, and
+# only auto-removes items with NO plausible legitimate reason to exist on
+# this host -- anything requiring a judgment call about intent is reported,
+# never auto-removed. Concretely, `full-reset-clean` will:
+#   - truncate root's and RUNNER_USER's shell history (.bash_history) and
+#     .lesshst -- pure local usage history, no access-control meaning;
+#   - clear root's and RUNNER_USER's SSH known_hosts -- a cache of who this
+#     host has connected to before, not an access grant; safe to empty;
+#   - vacuum any /var/log/journal/<machine-id>/ directory that does NOT
+#     match this host's current /etc/machine-id (a real fresh install only
+#     ever has journal data under its own current machine-id; a leftover
+#     directory under the template's pre-reset machine-id is pure clone
+#     residue, confirmed real on host .81, 2026-08-21);
+#   - remove any /home/<user> directory with no corresponding entry in
+#     /etc/passwd (an orphaned home directory cannot belong to this host --
+#     confirmed real on host .81: /home/tom with no "tom" account at all);
+#   - remove known one-off template-authoring scripts such as
+#     prepare-proxmox-template.sh from /root -- tooling for turning a VM
+#     INTO a template, actively dangerous if ever run again against an
+#     already-provisioned clone, so it does not belong on the clone itself.
+# What this deliberately does NOT auto-remove, and only reports instead:
+#   - authorized_keys entries -- removing the wrong one can lock out real
+#     access. Only entries whose trailing comment names a DIFFERENT fleet
+#     host by this project's own "<name>-<number>" convention (see
+#     own_host_token) are even flagged, and even those require a human to
+#     confirm and remove by hand;
+#   - apt/dpkg history log content mentioning other hosts -- this is a
+#     genuine historical system audit trail (when packages were actually
+#     installed on the source disk); rewriting or deleting it to make the
+#     host merely LOOK freshly installed would falsify that record rather
+#     than fix anything, so this script only reports it exists.
+is_foreign_authorized_keys_line() {
+    local line="$1"
+    local my_token
+    my_token="$(own_host_token)"
+    [[ -n "$my_token" ]] || return 1
+    # Look for a "gh-lancache-<word>-<digits>" or "lancache-runner-<digits>"
+    # style host-identity token in the comment field, and flag it only if
+    # the digits segment differs from this host's own.
+    if [[ "$line" =~ (gh-lancache-[a-z]+-[0-9]+-([0-9]+)|lancache-runner-([0-9]+)) ]]; then
+        local found="${BASH_REMATCH[2]:-${BASH_REMATCH[3]}}"
+        [[ -n "$found" && "$found" != "$my_token" ]] && return 0
+    fi
+    return 1
+}
+
+cmd_full_reset_check() {
+    local my_token
+    my_token="$(own_host_token)"
+    echo "Host: $(hostname)   own_host_token=$my_token"
+    echo
+    echo "--- Shell history (informational size only; content not printed) ---"
+    for f in /root/.bash_history "/home/${RUNNER_USER}/.bash_history" "/opt/${RUNNER_USER}/.bash_history" /root/.lesshst; do
+        if sudo -n test -s "$f" 2>/dev/null; then
+            echo "  $f: $(sudo -n wc -l "$f" 2>/dev/null | awk '{print $1}' || echo '?') lines -- will be truncated by full-reset-clean"
+        fi
+    done
+    echo
+    echo "--- SSH known_hosts ---"
+    for f in /root/.ssh/known_hosts "/home/${RUNNER_USER}/.ssh/known_hosts" "/opt/${RUNNER_USER}/.ssh/known_hosts"; do
+        if sudo -n test -s "$f" 2>/dev/null; then
+            echo "  $f: $(sudo -n wc -l "$f" 2>/dev/null | awk '{print $1}' || echo '?') entries -- will be cleared by full-reset-clean"
+        fi
+    done
+    echo
+    echo "--- root authorized_keys: entries naming a DIFFERENT fleet host (report only, never auto-removed) ---"
+    local ak_found=0
+    if sudo -n test -f /root/.ssh/authorized_keys 2>/dev/null; then
+        while IFS= read -r line; do
+            [[ -n "$line" ]] || continue
+            if is_foreign_authorized_keys_line "$line"; then
+                ak_found=1
+                echo "  FOREIGN: $line"
+            fi
+        done < <(sudo -n cat /root/.ssh/authorized_keys 2>/dev/null)
+    fi
+    [[ "$ak_found" -eq 1 ]] || echo "  (none found)"
+    echo
+    echo "--- Stale journal machine-id directories (current: $(cat /etc/machine-id 2>/dev/null)) ---"
+    local jd found_jd=0
+    while IFS= read -r jd; do
+        [[ -n "$jd" ]] || continue
+        found_jd=1
+        echo "  STALE: $jd -- will be removed by full-reset-clean"
+    done < <(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$(cat /etc/machine-id 2>/dev/null)" 2>/dev/null)
+    [[ "$found_jd" -eq 1 ]] || echo "  (none found)"
+    echo
+    echo "--- Orphaned /home directories (no matching /etc/passwd entry) ---"
+    local hd found_hd=0
+    while IFS= read -r hd; do
+        [[ -n "$hd" ]] || continue
+        local uname
+        uname="$(basename "$hd")"
+        if ! getent passwd "$uname" >/dev/null 2>&1; then
+            found_hd=1
+            echo "  ORPHANED: $hd (no /etc/passwd entry for '$uname') -- will be removed by full-reset-clean"
+        fi
+    done < <(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+    [[ "$found_hd" -eq 1 ]] || echo "  (none found)"
+    echo
+    echo "--- Template-authoring scripts under /root ---"
+    local ts found_ts=0
+    while IFS= read -r ts; do
+        [[ -n "$ts" ]] || continue
+        found_ts=1
+        echo "  $ts -- will be removed by full-reset-clean"
+    done < <(sudo -n find /root -maxdepth 1 -type f -iname '*prepare*template*' 2>/dev/null)
+    [[ "$found_ts" -eq 1 ]] || echo "  (none found)"
+    echo
+    echo "--- apt/dpkg history mentioning other fleet hosts (report only -- a real audit trail, never rewritten) ---"
+    local al found_al=0
+    while IFS= read -r al; do
+        [[ -n "$al" ]] || continue
+        found_al=1
+        echo "  $al"
+    done < <(sudo -n grep -lE '(lancache-(240|241|229|243)|192\.168\.1\.(240|241|229|243))' /var/log/apt/history.log* /var/log/dpkg.log* 2>/dev/null)
+    [[ "$found_al" -eq 1 ]] || echo "  (none found)"
+    echo
+    echo "No files were changed (full-reset-check mode)."
+}
+
+cmd_full_reset_clean() {
+    if [[ "${CONFIRM_FULL_RESET:-}" != "yes" ]]; then
+        echo "ERROR: refusing to act without CONFIRM_FULL_RESET=yes." >&2
+        echo "Run 'full-reset-check' first and review its findings." >&2
+        return 1
+    fi
+
+    for f in /root/.bash_history "/home/${RUNNER_USER}/.bash_history" "/opt/${RUNNER_USER}/.bash_history" /root/.lesshst; do
+        if sudo -n test -f "$f" 2>/dev/null; then
+            sudo -n truncate -s0 "$f"
+            echo "Truncated $f"
+        fi
+    done
+
+    for f in /root/.ssh/known_hosts "/home/${RUNNER_USER}/.ssh/known_hosts" "/opt/${RUNNER_USER}/.ssh/known_hosts"; do
+        if sudo -n test -f "$f" 2>/dev/null; then
+            sudo -n truncate -s0 "$f"
+            echo "Cleared $f"
+        fi
+    done
+
+    local jd
+    while IFS= read -r jd; do
+        [[ -n "$jd" ]] || continue
+        echo "Removing stale journal dir: $jd"
+        sudo -n rm -rf -- "$jd"
+    done < <(sudo -n find /var/log/journal -mindepth 1 -maxdepth 1 -type d ! -name "$(cat /etc/machine-id 2>/dev/null)" 2>/dev/null)
+
+    local hd
+    while IFS= read -r hd; do
+        [[ -n "$hd" ]] || continue
+        local uname
+        uname="$(basename "$hd")"
+        if ! getent passwd "$uname" >/dev/null 2>&1; then
+            echo "Removing orphaned home directory: $hd"
+            sudo -n rm -rf -- "$hd"
+        fi
+    done < <(sudo -n find /home -mindepth 1 -maxdepth 1 -type d 2>/dev/null)
+
+    local ts
+    while IFS= read -r ts; do
+        [[ -n "$ts" ]] || continue
+        echo "Removing template-authoring script: $ts"
+        sudo -n rm -f -- "$ts"
+    done < <(sudo -n find /root -maxdepth 1 -type f -iname '*prepare*template*' 2>/dev/null)
+
+    echo
+    echo "full-reset-clean complete. NOT touched (report-only, see full-reset-check):"
+    echo "  - /root/.ssh/authorized_keys (review any FOREIGN entries by hand)"
+    echo "  - apt/dpkg history log content (a real audit trail, never rewritten)"
+    echo "Re-run 'full-reset-check' to confirm."
+}
+
 # Content copied verbatim from the live /opt/lancache-ci-hooks/pre-job-
 # cleanup.sh and post-job-cleanup.sh on lancache-240 (2026-08-21) -- these
 # hooks are host-local by design, same as they already are on every
@@ -417,6 +599,17 @@ Modes:
                                 directly into <dir> (default version 2.336.0)
                                 and write its .env hook wiring. Does not
                                 register or start anything.
+  full-reset-check             Read-only broader de-clone survey (shell
+                                history, known_hosts, foreign authorized_keys
+                                entries, stale journal machine-id dirs,
+                                orphaned /home dirs, template-authoring
+                                scripts, apt/dpkg history mentions). Writes
+                                nothing.
+  full-reset-clean             Acts on what 'full-reset-check' flagged as
+                                safe to auto-remove. Requires
+                                CONFIRM_FULL_RESET=yes. Never touches
+                                authorized_keys or apt/dpkg history -- those
+                                stay report-only, see the script's own header.
 
 Env overrides: RUNNER_OPT_ROOT (default /opt), RUNNER_HOOKS_DIR
 (default /opt/lancache-ci-hooks), RUNNER_USER (default codex),
@@ -432,6 +625,8 @@ main() {
         clean) cmd_clean ;;
         host-prep) cmd_host_prep ;;
         runner-fetch) cmd_runner_fetch "$@" ;;
+        full-reset-check) cmd_full_reset_check ;;
+        full-reset-clean) cmd_full_reset_clean ;;
         -h|--help) print_usage ;;
         *)
             echo "ERROR: unknown mode '$mode'" >&2
