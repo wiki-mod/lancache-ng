@@ -837,8 +837,13 @@ ENVEOF
     echo "Extracted actions-runner v${version} into $instance_dir and wrote its .env"
     echo "hook wiring. NOT registered yet -- run config.sh there by hand with a fresh"
     echo "registration token (never pass it as a literal argv string over ssh; pipe"
-    echo "it over stdin instead), then 'sudo ./svc.sh install' and hold off on"
-    echo "'sudo ./svc.sh start' until the go-ahead to accept real jobs is confirmed."
+    echo "it over stdin instead). Maintainer decision (issue #1622, 2026-08-21):"
+    echo "for this fleet (.80-.91 and on), pass --name \$(hostname) EXACTLY -- e.g."
+    echo "'$(hostname)' on this host -- NOT the old fleet's letter-prefix scheme"
+    echo "(a-lancache-runner-240-1 etc., which only applies to the pre-existing"
+    echo "229/240/241/243 hosts and must never be copied onto a new host)."
+    echo "Then 'sudo ./svc.sh install' and hold off on 'sudo ./svc.sh start' until"
+    echo "the go-ahead to accept real jobs is confirmed."
 }
 
 print_usage() {

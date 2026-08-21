@@ -38,6 +38,15 @@ live in the repo, PR-reviewable and consistent across all hosts).
   (see the `lancache-ci-docker-daemon-config.sh` rollout above for that,
   including this fleet's LAN-proxy block).
 
+  **Runner naming (maintainer decision, issue #1622, 2026-08-21):** for
+  hosts in the `.80`-and-up fleet, `config.sh --name` must be the host's
+  exact hostname (e.g. `gh-lancache-heavy-30-84` on that host) — never the
+  pre-existing `229`/`240`/`241`/`243` fleet's letter-prefix scheme
+  (`a-lancache-runner-240-1` etc.), which is specific to those older hosts
+  and must not be copied onto a new one. `runner-fetch`'s own final output
+  states this explicitly, including the exact value for the host it just
+  ran on.
+
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
 > A prior host-local-only copy ran on just a subset of hosts, which is why one
