@@ -304,6 +304,17 @@ is_foreign_runner_dir() {
     local dir="$1"
     local runner_json="$dir/.runner"
     [[ -f "$runner_json" ]] || return 1
+    # What: Explicitly detect a missing jq before relying on it.
+    # Why: jq's own errors were already swallowed by `2>/dev/null || true`
+    # below; without this check, a missing jq silently produces the same
+    # empty agent_name as an unregistered directory, with no visible signal
+    # that classification -- not just this one directory's actual state --
+    # is unreliable on this host.
+    # From: #1624
+    if ! command -v jq >/dev/null 2>&1; then
+        echo "WARNING: 'jq' not found -- cannot parse $runner_json, cannot safely classify $dir, treating as NOT foreign (fail closed, never auto-remove when unsure). Install jq before trusting this host's check/clean output." >&2
+        return 1
+    fi
     local agent_name
     agent_name="$(jq -r '.agentName // empty' "$runner_json" 2>/dev/null || true)"
     [[ -n "$agent_name" ]] || return 1
@@ -534,17 +545,24 @@ cmd_full_reset_check() {
         fi
     done
     echo
-    echo "--- root authorized_keys: entries naming a DIFFERENT fleet host (report only, never auto-removed) ---"
+    echo "--- authorized_keys (root + runner user): entries naming a DIFFERENT fleet host (report only, never auto-removed) ---"
+    # What: Also survey the runner account's own authorized_keys, not only root's.
+    # Why: A foreign key here grants direct RUNNER_USER login, then that
+    # account's host-prep-installed NOPASSWD sudo rule escalates it to root
+    # -- checking only /root/.ssh missed this exact privilege-escalation path.
+    # From: #1624
     local ak_found=0
-    if sudo -n test -f /root/.ssh/authorized_keys 2>/dev/null; then
-        while IFS= read -r line; do
-            [[ -n "$line" ]] || continue
-            if is_foreign_authorized_keys_line "$line"; then
-                ak_found=1
-                echo "  FOREIGN: $line"
-            fi
-        done < <(sudo -n cat /root/.ssh/authorized_keys 2>/dev/null)
-    fi
+    for ak_file in /root/.ssh/authorized_keys "/home/${RUNNER_USER}/.ssh/authorized_keys" "/opt/${RUNNER_USER}/.ssh/authorized_keys"; do
+        if sudo -n test -f "$ak_file" 2>/dev/null; then
+            while IFS= read -r line; do
+                [[ -n "$line" ]] || continue
+                if is_foreign_authorized_keys_line "$line"; then
+                    ak_found=1
+                    echo "  FOREIGN ($ak_file): $line"
+                fi
+            done < <(sudo -n cat "$ak_file" 2>/dev/null)
+        fi
+    done
     [[ "$ak_found" -eq 1 ]] || echo "  (none found)"
     echo
     echo "--- Stale journal machine-id directories (current: $(cat /etc/machine-id 2>/dev/null)) ---"
@@ -727,7 +745,7 @@ cmd_full_reset_clean() {
 
     echo
     echo "full-reset-clean complete. NOT touched (report-only, see full-reset-check):"
-    echo "  - /root/.ssh/authorized_keys (review any FOREIGN entries by hand)"
+    echo "  - authorized_keys for root and ${RUNNER_USER} (review any FOREIGN entries by hand)"
     echo "  - apt/dpkg history log content (a real audit trail, never rewritten)"
     echo "Re-run 'full-reset-check' to confirm."
 }
@@ -1379,12 +1397,20 @@ cmd_runner_hook_env() {
 # whoever administers the scheduler at the dist-scheduler-url, not a file
 # copy. Out of scope here.
 cmd_sccache_check() {
+    # What: Track every missing prerequisite and exit non-zero if any is found.
+    # Why: A caller (script, operator) using this mode's exit status as a
+    # readiness signal must not see 0 for a heavy host that is still
+    # missing sccache/sccache-dist/dist-client -- the first real Rust CI
+    # job on that host is not an acceptable way to discover this instead.
+    # From: #1624
+    local missing=0
     echo "--- sccache client binaries ---"
     for f in /usr/local/bin/sccache /usr/local/bin/sccache-dist; do
         if [[ -x "$f" ]]; then
             echo "  $f: present ($(sha256sum "$f" | awk '{print $1}'))"
         else
             echo "  $f: MISSING"
+            missing=1
         fi
     done
     echo
@@ -1403,15 +1429,20 @@ cmd_sccache_check() {
         echo "  /opt/sccache/dist-client: present"
     else
         echo "  /opt/sccache/dist-client: MISSING"
+        missing=1
     fi
     echo
     echo "--- Live check (requires the config above; reaches the real scheduler) ---"
     if [[ -x /usr/local/bin/sccache ]]; then
-        sudo -u "$RUNNER_USER" HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --version 2>&1
+        sudo -u "$RUNNER_USER" HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --version 2>&1 || missing=1
     else
         echo "  (skipped -- sccache binary missing)"
     fi
     echo
+    if [[ "$missing" -eq 1 ]]; then
+        echo "sccache-check: one or more prerequisites are MISSING (see above). No files were changed."
+        return 1
+    fi
     echo "No files were changed (sccache-check mode)."
 }
 

@@ -10,14 +10,11 @@
 # confirmed real on this fleet's disk-cloned VMs), and that derive this
 # host's own identity for that decision in the first place.
 # `cmd_clean` gates every deletion on is_foreign_runner_dir()'s
-# classification, so a wrong answer here is directly a deletion-safety bug
-# -- this file exists because PR #1624's own review found that the
-# destructive fix it added had no executable regression coverage, only a
-# "conceptually verified" note in the test plan (Codex review, PR #1624).
-# own_primary_ipv4()'s own coverage was added the same way, for the same
-# reason, after a separate review round found its own confirmed real bug
-# history (a wrong-interface pick on host .88, a silent `set -e` abort on
-# host .80) had no regression test either.
+# classification, so a wrong answer here is directly a deletion-safety bug,
+# and own_primary_ipv4() has its own confirmed real bug history (a wrong-
+# interface pick on host .88, a silent `set -e` abort on host .80) --
+# both get real executable regression coverage here rather than only a
+# prose "conceptually verified" note in the release validation plan.
 #
 # The script under test also `set -euo pipefail`s at its own top level
 # (it doubles as a directly-runnable script, guarded at the bottom so
@@ -105,6 +102,18 @@ write_runner_json() {
     write_runner_json 'this is not json'
     run is_foreign_runner_dir "$fixture_dir"
     [ "$status" -eq 1 ]
+}
+
+@test "is_foreign_runner_dir fails closed AND warns loudly when jq is missing, even for a genuinely foreign agentName" {
+    STUB_HOSTNAME="gh-lancache-heavy-30-84"
+    stub_hostname
+    # shellcheck disable=SC2317 # invoked indirectly via `command -v jq`
+    command() { [[ "$1" == "-v" && "$2" == "jq" ]] && return 1; builtin command "$@"; }
+    export -f command
+    write_runner_json '{"agentName": "gh-lancache-heavy-30-85"}'
+    run is_foreign_runner_dir "$fixture_dir"
+    [ "$status" -eq 1 ]
+    [[ "$output" == *"'jq' not found"* ]]
 }
 
 @test "is_foreign_runner_dir fails closed (NOT foreign) when own_host_token cannot be derived" {
