@@ -79,6 +79,21 @@ STRAY_ARCHIVE_MIN_BYTES="${STRAY_ARCHIVE_MIN_BYTES:-1073741824}" # 1 GiB
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
+# Resolves RUNNER_USER's actual primary group, never assuming a group of the
+# same name exists purely by convention (a `RUNNER_USER` override such as
+# `github-runner` with primary group `ci-runners` would otherwise make every
+# `chown "$RUNNER_USER:$RUNNER_USER"` call below fail after this script has
+# already written files as that user). Confirmed on the real fleet
+# (2026-08-21, host .81, `id codex` -> `uid=1000(codex) gid=1000(codex)`)
+# that the default RUNNER_USER's primary group is in fact named the same as
+# the user, so this resolves to the literal string "codex" in the common
+# case while staying correct for any override. Falls back to "$RUNNER_USER"
+# itself only if the lookup fails outright (should not happen for any caller
+# reached after `cmd_host_prep`'s own upfront `getent passwd` check).
+runner_group() {
+    id -gn "$RUNNER_USER" 2>/dev/null || echo "$RUNNER_USER"
+}
+
 # Derives a short "this host" token from `hostname` to compare against the
 # host-number segment embedded in this fleet's actual runner-name convention
 # (a-lancache-runner-240-1, b-lancache-runner-229-2, d-lancache-runner-241-1,
@@ -904,7 +919,7 @@ if [ -n "${GITHUB_WORKSPACE:-}" ] && [ -d "$GITHUB_WORKSPACE" ]; then
     fi
 fi
 HOOKEOF
-    sudo chown "$RUNNER_USER:$RUNNER_USER" "$RUNNER_HOOKS_DIR/pre-job-cleanup.sh" "$RUNNER_HOOKS_DIR/post-job-cleanup.sh"
+    sudo chown "$RUNNER_USER:$(runner_group)" "$RUNNER_HOOKS_DIR/pre-job-cleanup.sh" "$RUNNER_HOOKS_DIR/post-job-cleanup.sh"
     sudo chmod 0755 "$RUNNER_HOOKS_DIR/pre-job-cleanup.sh" "$RUNNER_HOOKS_DIR/post-job-cleanup.sh"
     echo "Installed $RUNNER_HOOKS_DIR/{pre,post}-job-cleanup.sh"
 }
@@ -983,9 +998,19 @@ cmd_host_prep() {
     for asset in lancache-ci-cleanup.sh lancache-ci-cleanup.service lancache-ci-cleanup.timer; do
         [[ -f "$SCRIPT_DIR/$asset" ]] || { echo "ERROR: required cleanup asset missing: $SCRIPT_DIR/$asset" >&2; return 1; }
     done
+    # What: Re-validate an already-present sudoers drop-in's exact content, not just its existence.
+    # Why: A stale/foreign rule under the same filename must not be mistaken for the one this
+    #      script installs -- the pre/post-job hooks depend on this exact NOPASSWD grant.
+    # From: #1624
     local sudoers_file="/etc/sudoers.d/${RUNNER_USER}-nopasswd"
+    local expected_sudoers_rule="${RUNNER_USER} ALL=(ALL) NOPASSWD:ALL"
     if sudo -n test -f "$sudoers_file" 2>/dev/null; then
-        echo "$sudoers_file already present, leaving as-is."
+        if [[ "$(sudo -n cat "$sudoers_file" 2>/dev/null)" == "$expected_sudoers_rule" ]] && sudo -n visudo -cf "$sudoers_file" >/dev/null 2>&1; then
+            echo "$sudoers_file already present with the expected rule, leaving as-is."
+        else
+            echo "ERROR: $sudoers_file exists but does not contain exactly the expected rule ('$expected_sudoers_rule') or fails visudo validation -- refusing to report success. Review/remove it by hand before re-running host-prep." >&2
+            return 1
+        fi
     else
         echo "${RUNNER_USER} ALL=(ALL) NOPASSWD:ALL" | sudo tee "$sudoers_file" >/dev/null
         sudo chmod 0440 "$sudoers_file"
@@ -993,7 +1018,12 @@ cmd_host_prep() {
         echo "Installed $sudoers_file"
     fi
 
-    if id -nG "$RUNNER_USER" 2>/dev/null | grep -qw docker; then
+    # Exact-field match, not `grep -w`: a hyphen is a non-word character, so
+    # `grep -qw docker` also matches a DIFFERENT group like `docker-build`
+    # (word-boundary-satisfying substring), which would report false
+    # membership and skip the real `usermod -aG docker` this runner needs.
+    local runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
+    if [[ "$runner_groups" == *" docker "* ]]; then
         echo "$RUNNER_USER already in docker group, leaving as-is."
     else
         sudo usermod -aG docker "$RUNNER_USER"
@@ -1022,16 +1052,16 @@ cmd_host_prep() {
     purge_apt_listchanges
     enable_backports
 
-    if [[ -f "$SCRIPT_DIR/lancache-ci-cleanup.sh" ]]; then
-        sudo install -m 0755 "$SCRIPT_DIR/lancache-ci-cleanup.sh" /usr/local/sbin/lancache-ci-cleanup.sh
-        sudo install -m 0644 "$SCRIPT_DIR/lancache-ci-cleanup.service" /etc/systemd/system/lancache-ci-cleanup.service
-        sudo install -m 0644 "$SCRIPT_DIR/lancache-ci-cleanup.timer" /etc/systemd/system/lancache-ci-cleanup.timer
-        sudo systemctl daemon-reload
-        sudo systemctl enable --now lancache-ci-cleanup.timer
-        echo "Installed and enabled lancache-ci-cleanup.timer (see README.md in this directory)."
-    else
-        echo "WARNING: lancache-ci-cleanup.sh/.service/.timer not found next to this script ($SCRIPT_DIR) -- skipping. Copy the whole tools/runner-host/ directory to the host, not just this one file." >&2
-    fi
+    # No `-f`/else guard here: the upfront asset-existence loop at the top
+    # of this function already returned 1 if any of these three files were
+    # missing, so by this point they are guaranteed present -- a redundant
+    # check here would be dead code that can never take its "missing" branch.
+    sudo install -m 0755 "$SCRIPT_DIR/lancache-ci-cleanup.sh" /usr/local/sbin/lancache-ci-cleanup.sh
+    sudo install -m 0644 "$SCRIPT_DIR/lancache-ci-cleanup.service" /etc/systemd/system/lancache-ci-cleanup.service
+    sudo install -m 0644 "$SCRIPT_DIR/lancache-ci-cleanup.timer" /etc/systemd/system/lancache-ci-cleanup.timer
+    sudo systemctl daemon-reload
+    sudo systemctl enable --now lancache-ci-cleanup.timer
+    echo "Installed and enabled lancache-ci-cleanup.timer (see README.md in this directory)."
 
     echo
     echo "host-prep complete. This does NOT touch /etc/docker/daemon.json (storage"
