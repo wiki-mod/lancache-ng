@@ -660,6 +660,139 @@ cmd_full_reset_clean() {
     echo "Re-run 'full-reset-check' to confirm."
 }
 
+# --- purge-pve: remove an accidentally-included nested Proxmox VE stack ----
+#
+# Confirmed real, issue #1622 follow-up (2026-08-21): every host in this
+# fleet's template carries a COMPLETE, running Proxmox VE 9.2 management
+# stack inside the guest itself (pveproxy, pvedaemon, pve-cluster/pmxcfs,
+# pve-ha-crm/lrm + its watchdog-mux, pvestatd, pvescheduler, pve-firewall,
+# proxmox-firewall, corosync, spiceproxy, qmeventd, pve-lxc-syscalld,
+# pve-qemu-kvm, ...) -- almost certainly because the template disk was
+# cloned from an actual Proxmox host rather than a lean Debian image. This
+# is pure, unwanted overhead for a CI runner guest: measured on host .81,
+# these processes alone held ~1.8-1.9 GB RSS permanently resident, a
+# significant fraction of a light host's 3.8 GB nominal RAM, and a
+# concrete contributor to that host's own OOM-kill of a real CI job the
+# same day (see PR #1624 history / issue #1622 for the incident details).
+#
+# CRITICAL: `proxmox-kernel-*`/`proxmox-default-kernel`/`pve-firmware`/
+# `pve-edk2-firmware*` are DELIBERATELY EXCLUDED and must stay excluded --
+# confirmed real on host .81: these VMs have NO regular Debian
+# `linux-image-*` kernel installed at all, only the Proxmox-branded kernel
+# packages. Purging those would leave the host with zero bootable kernel.
+# purge_pve_package_list() is the single source of truth both modes below
+# use, so `check`'s simulation and `clean`'s real run can never drift apart.
+purge_pve_package_list() {
+    echo "corosync libcorosync-common4 libproxmox-acme-perl libproxmox-acme-plugins libproxmox-backup-qemu0 libproxmox-rs-perl libpve-access-control libpve-apiclient-perl libpve-cluster-api-perl libpve-cluster-perl libpve-common-perl libpve-guest-common-perl libpve-http-server-perl libpve-network-api-perl libpve-network-perl libpve-notify-perl libpve-rs-perl libpve-storage-perl proxmox-backup-client proxmox-backup-file-restore proxmox-backup-restore-image proxmox-firewall proxmox-mail-forward proxmox-mini-journalreader proxmox-offline-mirror-docs proxmox-offline-mirror-helper proxmox-termproxy proxmox-ve proxmox-websocket-tunnel proxmox-widget-toolkit pve-cluster pve-container pve-docs pve-esxi-import-tools pve-firewall pve-ha-manager pve-i18n pve-lxc-syscalld pve-manager pve-nvidia-vgpu-helper pve-qemu-kvm pve-xtermjs pve-yew-mobile-gui pve-yew-mobile-i18n proxmox-enterprise-support-keyring"
+}
+
+# Names of the actively-running services this package set owns, stopped
+# before the purge so dpkg's own prerm scripts aren't racing an
+# auto-restarted daemon (confirmed real on .81: pve-cluster and
+# proxmox-firewall came back "active" on their own between two individual
+# `systemctl stop` calls -- apt's removal itself is what reliably wins).
+purge_pve_service_list() {
+    echo "pveproxy pvedaemon pvestatd pvescheduler spiceproxy pve-ha-crm pve-ha-lrm pve-firewall proxmox-firewall pve-lxc-syscalld qmeventd pve-cluster corosync pvefw-logger proxmox-firewall.timer watchdog-mux"
+}
+
+cmd_purge_pve_check() {
+    echo "--- Installed pve-*/proxmox-*/corosync/pmxcfs packages ---"
+    dpkg -l 2>/dev/null | grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || echo "  (none found -- already clean)"
+    echo
+    echo "--- KEPT regardless (kernel/firmware -- never purged, see header) ---"
+    dpkg -l 2>/dev/null | grep -iE '^ii.*(proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware)' || echo "  (none installed)"
+    echo
+    echo "--- Active pve/proxmox/corosync services right now ---"
+    systemctl list-units --all --type=service,timer --no-pager 2>/dev/null | grep -iE 'pve|corosync|proxmox|pmxcfs' | grep -i active || echo "  (none active)"
+    echo
+    echo "--- /etc/pve (pmxcfs FUSE mount) dependents ---"
+    mount 2>/dev/null | grep -i pve || echo "  not currently mounted"
+    local dep_found=0
+    if sudo -n grep -qi pve /etc/fstab 2>/dev/null; then
+        echo "  FOUND: /etc/fstab references pve -- review before purging"
+        dep_found=1
+    fi
+    if sudo -n lsof +D /etc/pve >/dev/null 2>&1; then
+        echo "  FOUND: open file handles under /etc/pve -- review before purging"
+        dep_found=1
+    fi
+    if sudo -n grep -rli pve /etc/cron.d /etc/cron.daily /etc/cron.hourly 2>/dev/null | grep -q .; then
+        echo "  FOUND: a cron.d/daily/hourly entry references pve -- review before purging"
+        dep_found=1
+    fi
+    [[ "$dep_found" -eq 1 ]] || echo "  (no fstab/lsof/cron dependents found)"
+    echo
+    echo "--- Current RSS held by pve-related processes ---"
+    local rss_mb
+    # `ps aux` (not pgrep) is needed here for its RSS column ($6); pgrep
+    # alone cannot report memory usage.
+    # shellcheck disable=SC2009
+    rss_mb="$(ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep | awk '{sum+=$6} END {if (sum) print sum/1024; else print 0}')"
+    echo "  ${rss_mb:-0} MB"
+    echo
+    echo "--- Simulated purge (no kernel/firmware package must appear below) ---"
+    # shellcheck disable=SC2046
+    sudo -n apt-get purge --simulate $(purge_pve_package_list) 2>&1 | tail -20
+    echo
+    echo "No files were changed (purge-pve-check mode)."
+}
+
+cmd_purge_pve() {
+    if [[ "${CONFIRM_PURGE_PVE:-}" != "yes" ]]; then
+        echo "ERROR: refusing to act without CONFIRM_PURGE_PVE=yes." >&2
+        echo "Run 'purge-pve-check' first and review its findings -- this removes a" >&2
+        echo "real, currently-running management stack (pveproxy/pve-cluster/" >&2
+        echo "pve-ha-manager/corosync/...). Test on one host before fleet-wide rollout" >&2
+        echo "(issue #1622: verified end-to-end, including a real reboot, on host .81" >&2
+        echo "before this mode existed)." >&2
+        return 1
+    fi
+    # Fail-closed pre-flight: re-simulate right before acting and refuse if a
+    # kernel/firmware package would be touched -- never trust that the
+    # package list stayed accurate as this fleet's images change over time.
+    local sim
+    # shellcheck disable=SC2046
+    sim="$(sudo -n apt-get purge --simulate $(purge_pve_package_list) 2>&1)"
+    if grep -qiE 'proxmox-kernel|proxmox-default-kernel|proxmox-kernel-helper|pve-firmware|pve-edk2-firmware' <<<"$sim"; then
+        echo "ERROR: the simulated purge would touch a kernel/firmware package -- refusing." >&2
+        echo "This host's package set has likely changed since this script was written." >&2
+        echo "$sim" >&2
+        return 1
+    fi
+
+    echo "Stopping pve/proxmox/corosync services..."
+    # shellcheck disable=SC2046
+    sudo -n systemctl stop $(purge_pve_service_list) 2>&1 || true
+
+    echo "Overriding pve-apt-hook's proxmox-ve removal guard (deliberate, confirmed"
+    echo "real on .81 -- apt otherwise refuses to remove the proxmox-ve meta-package)."
+    sudo -n touch /please-remove-proxmox-ve
+
+    echo "Purging..."
+    # shellcheck disable=SC2046
+    sudo -n DEBIAN_FRONTEND=noninteractive apt-get purge -y $(purge_pve_package_list) 2>&1
+
+    echo "Running apt autoremove (kernel/firmware packages are still manually"
+    echo "installed / depended-on and will not be swept by this)..."
+    sudo -n DEBIAN_FRONTEND=noninteractive apt-get autoremove -y 2>&1
+
+    echo
+    echo "--- Verification ---"
+    echo "Remaining pve-*/proxmox-*/corosync/pmxcfs packages (should be kernel/firmware only):"
+    dpkg -l 2>/dev/null | grep -iE '^ii.*(pve-|proxmox-|pmxcfs|corosync)' || echo "  (none)"
+    echo "Remaining pve-related processes (should be none):"
+    # Listing full command lines for a human to read is the point here, not
+    # just matching PIDs (pgrep -l truncates).
+    # shellcheck disable=SC2009
+    ps aux 2>/dev/null | grep -E 'pve|pmxcfs|corosync|spiceproxy|qmeventd' | grep -v grep || echo "  (none)"
+    echo
+    echo "purge-pve complete. Recommended next steps, not automated by this mode:"
+    echo "  - verify docker/network/the runner service still work"
+    echo "  - a real reboot test (issue #1622: done manually on .81, kernel"
+    echo "    packages were untouched and it came back up cleanly with the same"
+    echo "    'uname -r' as before) before trusting this on a fleet-wide rollout"
+}
+
 # Content copied verbatim from the live /opt/lancache-ci-hooks/pre-job-
 # cleanup.sh and post-job-cleanup.sh on lancache-240 (2026-08-21) -- these
 # hooks are host-local by design, same as they already are on every
@@ -880,6 +1013,24 @@ Modes:
                                 this host's own primary IPv4) but never
                                 guesses a replacement -- use this mode once
                                 you know the correct name.
+  purge-pve-check              Read-only inventory of the accidentally-
+                                included nested Proxmox VE stack (see the
+                                script's own header): installed packages,
+                                active services, /etc/pve dependents,
+                                current RSS held, and a simulated purge
+                                preview. Writes nothing.
+  purge-pve                    Stops the pve/proxmox/corosync services and
+                                purges the management-stack packages.
+                                Requires CONFIRM_PURGE_PVE=yes. NEVER
+                                touches proxmox-kernel-*/pve-firmware/
+                                pve-edk2-firmware* (this fleet has no
+                                regular Debian kernel -- purging those would
+                                leave the host unbootable). Before running
+                                on a host with the runner service live,
+                                check GitHub's busy status first and stop
+                                the runner service; a real reboot test
+                                afterward is strongly recommended (verified
+                                end-to-end on host .81, issue #1622).
 
 Env overrides: RUNNER_OPT_ROOT (default /opt), RUNNER_HOOKS_DIR
 (default /opt/lancache-ci-hooks), RUNNER_USER (default codex),
@@ -898,6 +1049,8 @@ main() {
         full-reset-check) cmd_full_reset_check ;;
         full-reset-clean) cmd_full_reset_clean ;;
         set-hostname) cmd_set_hostname "$@" ;;
+        purge-pve-check) cmd_purge_pve_check ;;
+        purge-pve) cmd_purge_pve ;;
         -h|--help) print_usage ;;
         *)
             echo "ERROR: unknown mode '$mode'" >&2
