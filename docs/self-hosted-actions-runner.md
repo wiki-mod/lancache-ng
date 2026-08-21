@@ -222,8 +222,15 @@ be reachable. Use `optional` or `off` when moving jobs to runners that do not
 have access to the Redis cache.
 
 When `SCCACHE_REDIS_MODE=required`, the runner must have `sccache` available in
-`PATH`. Install it from source and keep the installed binary on the runner
-service account's `PATH`.
+`PATH`. Provision heavy runner hosts with the repository's
+`tools/runner-host/lancache-ci-runner-clone-init.sh` workflow: stage the
+known-working `sccache` and `sccache-dist` binaries plus their client
+configuration from an existing heavy host, run `sccache-fetch <staging-dir>`,
+and confirm the installation with `sccache-check`. Do not use Debian's
+`sccache` package or compile a separate copy on each host; the CI client needs
+the project's `redis,dist-client` feature set, and the versioned runner-host
+procedure keeps that tooling consistent across the fleet. Keep the installed
+binaries on the runner service account's `PATH`.
 
 ## CodeQL
 
