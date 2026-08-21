@@ -628,6 +628,26 @@ explicit pass:**
   state.json`) is brand new as of this PR — it starts with every field `null` and has
   not yet been exercised by a real validation pass. The first real run against it is
   itself a gap until it happens.
+- **`tools/runner-host/lancache-ci-runner-clone-init.sh`'s `sccache-fetch` mode has
+  no mechanical guard against reintroducing host-copied scheduler credentials**
+  (confirmed real, PR #1624/#1626, 2026-08-21): the pre-fix `sccache-fetch` installed
+  `/opt/<RUNNER_USER>/.config/sccache/config` at mode `0644` (world-readable),
+  live-verified on 5 heavy hosts to contain a commented-out but still-plaintext
+  dist-auth token and JWT `secret_key`; the pre-existing source hosts this fleet was
+  cloned from (`lancache-240`/`lancache-241`) were found to carry the *active*,
+  non-commented token in `client.conf` at world-readable modes (`2775`/`644`
+  respectively) — a worse instance of the same class. #1626's fix removes the
+  host-copy code path entirely (binaries only; runtime config comes from a
+  per-job, secret-backed `SCCACHE_CONF`), which is the real fix, but nothing in CI
+  would catch a *future* regression reintroducing a similar `install -m 0644 ...`
+  line under a runner-user config path in this script family. Maintainer decision
+  (2026-08-21, threat model: LAN-only hosts, no external attacker, `codex` is both
+  the SSH-login and CI-job user so the file-mode bit does not change the real
+  access vector): no urgent remediation sprint for the already-provisioned hosts
+  and no credential rotation — cleanup happens as part of the normal host-prep
+  rollout, not a special pass. A cheap future guard, not built in this pass: reject
+  `install -m 06[4-7][4-7]`/`chmod 644` targeting a path under a runner-user
+  `.config/`/credential directory anywhere in `tools/runner-host/*.sh`.
 - **Watchdog Rust-crate findings** (PR #1355, **open, not merged, as of 2026-08-01**
   — do not treat as covered): the new `services/watchdog` Rust crate's
   `config::resolve_cache_dir()` (mirrors `watchdog.sh`'s `CACHE_DIR` vs. legacy
