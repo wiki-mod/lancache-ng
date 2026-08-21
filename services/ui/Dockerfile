@@ -597,16 +597,13 @@ RUN apk add --no-cache \
     util-linux \
     nano
 
-# What: curl/lsof/ripgrep come from the shared utilities image (COPY below)
-#   instead of apk-installed here.
-# Why: same alpine:3.24 base digest as the utilities image, so this is a
-#   safe binary-compatible swap -- see services/proxy/Dockerfile's
+# What: curl/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
 #   identical comment for the full rationale.
 # From: Issue #1556
 
-# What: removes the BusyBox symlink at this path before copying the real
-#   binary over it -- see services/proxy/Dockerfile's identical comment for
-#   why this must run before the COPY lines below.
+# What: removes the BusyBox symlink at this path before the real binary lands.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
 # From: Issue #1556
 RUN rm -f /usr/bin/lsof
 
@@ -617,16 +614,15 @@ COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 
 # What: verifies the copied binaries actually run.
-# Why: a missing shared-library dependency fails at exec time, not at
-#   COPY time -- see services/proxy/Dockerfile's identical comment.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
 # From: Issue #1556
 RUN set -euo pipefail; \
     rg --version >/dev/null; \
     curl --version >/dev/null; \
     lsof_out="$(lsof -v 2>&1)" || true; \
     case "$lsof_out" in \
-      *"error while loading shared"*|*"not found"*|*"cannot execute"*) \
-        printf '%s\n' "ERROR: lsof failed to load: $lsof_out" >&2; exit 1 ;; \
+      *"lsof version information"*) : ;; \
+      *) printf '%s\n' "ERROR: lsof did not report its expected version banner: $lsof_out" >&2; exit 1 ;; \
     esac
 
 # nano: in-container troubleshooting tool -- see services/proxy/Dockerfile's

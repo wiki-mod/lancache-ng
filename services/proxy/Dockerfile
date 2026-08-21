@@ -86,21 +86,14 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 #     (`local -n`), and `${var,,}` lowercasing all require real bash --
 #     Alpine's base image has no bash by default, unlike Debian's.
 #
-# What: curl/findutils/gettext-envsubst(envsubst)/lsof/ripgrep are copied
-#   from the shared utilities image instead of apk-installed here; the
-#   WHY-explanations above for needing each tool at all are unchanged.
-# Why: avoids rebuilding/reinstalling the same tools this project already
-#   builds once for every first-party image to consume; safe because this
-#   stage pins the identical alpine:3.24 base digest the utilities image
-#   itself uses (same musl libc, no cross-libc concern).
+# What: curl/findutils/envsubst/lsof/ripgrep come from the shared utilities image.
+# Why: avoids rebuilding the same tools per-image; safe since this stage
+#   pins the identical alpine:3.24 digest the utilities image itself uses.
 # From: Issue #1556
 
-# What: removes the BusyBox symlinks at these paths before copying real
-#   binaries over them.
-# Why: COPY writes through an existing symlink to its target rather than
-#   replacing it -- these paths symlink to /bin/busybox (same target as
-#   /bin/sh), so copying directly onto them corrupts busybox itself and
-#   breaks /bin/sh for every later RUN in this stage.
+# What: removes the BusyBox symlinks at these paths before real binaries land.
+# Why: COPY writes through an existing symlink to /bin/busybox (also
+#   /bin/sh's target), corrupting busybox and breaking /bin/sh in later RUNs.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
@@ -114,11 +107,9 @@ COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
 COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 
-# What: verifies the copied binaries actually run and that `find` is the
-#   real GNU findutils build, not BusyBox's applet still resolving first.
-# Why: a missing shared-library dependency fails at exec time, not at
-#   COPY time -- `--version` alone would not catch BusyBox's `find` silently
-#   winning, since BusyBox's `find` also exits 0 on unrelated invocations.
+# What: verifies the copied binaries actually run, not just that they exist.
+# Why: a missing shared-library dependency fails at exec time, not at COPY
+#   time, and BusyBox's own `find`/`lsof` applets would also exit 0 silently.
 # From: Issue #1556
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
@@ -126,8 +117,8 @@ RUN set -euo pipefail; \
     rg --version >/dev/null; \
     lsof_out="$(lsof -v 2>&1)" || true; \
     case "$lsof_out" in \
-      *"error while loading shared"*|*"not found"*|*"cannot execute"*) \
-        printf '%s\n' "ERROR: lsof failed to load: $lsof_out" >&2; exit 1 ;; \
+      *"lsof version information"*) : ;; \
+      *) printf '%s\n' "ERROR: lsof did not report its expected version banner: $lsof_out" >&2; exit 1 ;; \
     esac
 
 RUN apk upgrade --no-cache && \

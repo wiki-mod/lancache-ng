@@ -564,17 +564,13 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 # advisory affects a version still shipping in v3.24 stable at that time --
 # do not treat this resolution as a promise that `pdns`/`pdns-backend-sqlite3`
 # will never need pinning again.
-# What: curl/findutils/gettext-envsubst(envsubst)/lsof/ripgrep come from the
-#   shared utilities image (COPY below) instead of apk-installed here -- see
-#   services/proxy/Dockerfile's identical comment for the full rationale.
-# Why: same alpine:3.24 base digest as the utilities image, so this is a
-#   safe binary-compatible swap; the WHY for needing each tool at all
-#   (documented above) is unchanged.
+# What: curl/findutils/envsubst/lsof/ripgrep come from the shared utilities image.
+# Why: same alpine:3.24 digest as utilities -- see services/proxy/Dockerfile's
+#   identical comment for the full rationale.
 # From: Issue #1556
 
-# What: removes the BusyBox symlinks at these paths before copying real
-#   binaries over them -- see services/proxy/Dockerfile's identical comment
-#   for why this must run before the COPY lines below.
+# What: removes the BusyBox symlinks at these paths before real binaries land.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
 # From: Issue #1556
 RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
 
@@ -588,10 +584,8 @@ COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg
 COPY --from=utilities-tools /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
 COPY --from=utilities-tools /usr/lib/libpcre2-8.so.0* /usr/lib/
 
-# What: verifies the copied binaries actually run and that `find` is the
-#   real GNU findutils build, not BusyBox's applet still resolving first.
-# Why: a missing shared-library dependency fails at exec time, not at
-#   COPY time -- see services/proxy/Dockerfile's identical comment.
+# What: verifies the copied binaries actually run, not just that they exist.
+# Why: see services/proxy/Dockerfile's identical comment for the reason.
 # From: Issue #1556
 RUN set -euo pipefail; \
     find . -maxdepth 0 -printf '%f\n' >/dev/null; \
@@ -600,8 +594,8 @@ RUN set -euo pipefail; \
     curl --version >/dev/null; \
     lsof_out="$(lsof -v 2>&1)" || true; \
     case "$lsof_out" in \
-      *"error while loading shared"*|*"not found"*|*"cannot execute"*) \
-        printf '%s\n' "ERROR: lsof failed to load: $lsof_out" >&2; exit 1 ;; \
+      *"lsof version information"*) : ;; \
+      *) printf '%s\n' "ERROR: lsof did not report its expected version banner: $lsof_out" >&2; exit 1 ;; \
     esac
 
 RUN apk add --no-cache \

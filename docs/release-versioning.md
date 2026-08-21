@@ -23,9 +23,9 @@ The first-party runtime package set is:
 The first-party tooling package is:
 
 - `build-tools`
-- `utilities` (issue #1556; shared non-compiler CLI-tools image, not yet
-  consumed by any other first-party image -- see `release/stack-images.yml`'s
-  own entry for the current, deliberately empty `consumers:` list)
+- `utilities` (issue #1556; shared non-compiler CLI-tools image, consumed via
+  `COPY --from=` by six first-party images -- see `release/stack-images.yml`'s
+  own entry for the current `consumers:` list)
 
 The first-party metadata package is:
 

@@ -67,9 +67,17 @@ RUN set -euo pipefail; \
     printf '%s' '$FOO' | FOO=bar envsubst >/dev/null; \
     curl --version >/dev/null
 
+# What: ca-certificates is installed even though nothing here calls curl
+#   over HTTPS today.
+# Why: the copied curl is compiled with a fixed CA bundle path
+#   (services/utilities/Dockerfile), which only exists once this package
+#   generates it -- without it, any HTTPS use of this troubleshooting tool
+#   fails cert verification.
+# From: Issue #1556
 RUN apk upgrade --no-cache && \
     apk add --no-cache \
     bash \
+    ca-certificates \
     chrony-nts
 
 COPY chrony.conf /etc/chrony/chrony.conf.template
