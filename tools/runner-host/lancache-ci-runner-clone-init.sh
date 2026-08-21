@@ -86,6 +86,48 @@ own_host_token() {
     hostname | grep -oE '[0-9]+' | tail -n1
 }
 
+# Returns this host's primary IPv4 address (the one carrying its default
+# route), or empty if it cannot be determined.
+own_primary_ipv4() {
+    ip -4 -o addr show scope global 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -n1
+}
+
+# Detects a leftover CLONE hostname (issue #1622 follow-up, 2026-08-21):
+# confirmed real on host .80, which reports itself as "gh-lancache-heavy-
+# 30-85" via `hostname` while its actual IP is 192.168.1.80 -- the OS
+# hostname is itself clone residue from the template/a different host,
+# never updated after imaging. Detected by comparing the host's own primary
+# IPv4 address's last octet against `own_host_token` (the trailing digit run
+# in `hostname`) -- for every real host in this fleet seen so far, those two
+# are supposed to be identical. Deliberately report-only, same reasoning as
+# authorized_keys: this script has no way to independently know the
+# CORRECT hostname (that mapping only exists in the maintainer's own
+# inventory, not derivable from the host itself), so guessing a "fix" here
+# risks replacing one wrong hostname with a different wrong one. Use the
+# separate `set-hostname` mode to apply an explicit, maintainer-provided
+# correction.
+hostname_mismatch_report() {
+    local ip last_octet my_token
+    ip="$(own_primary_ipv4)"
+    my_token="$(own_host_token)"
+    if [[ -z "$ip" ]]; then
+        echo "  (could not determine primary IPv4 address -- skipping hostname-vs-IP check)"
+        return 0
+    fi
+    last_octet="${ip##*.}"
+    if [[ -z "$my_token" ]]; then
+        echo "  (could not derive a numeric token from 'hostname' -- skipping hostname-vs-IP check)"
+        return 0
+    fi
+    if [[ "$last_octet" != "$my_token" ]]; then
+        echo "  MISMATCH: hostname is '$(hostname)' (trailing token: $my_token) but primary IPv4 is $ip (last octet: $last_octet)"
+        echo "    -> likely leftover clone hostname; NOT auto-fixed. Confirm the correct hostname with the maintainer, then run:"
+        echo "       sudo bash $0 set-hostname <correct-hostname>"
+    else
+        echo "  OK: hostname '$(hostname)' trailing token ($my_token) matches primary IPv4 $ip's last octet."
+    fi
+}
+
 # True (exit 0) if a runner instance directory's recorded .runner identity
 # belongs to a DIFFERENT host than this one -- i.e. is a clone leftover, not
 # this host's own (possibly already-registered) identity. A directory with
@@ -259,7 +301,17 @@ cmd_clean() {
 #     genuine historical system audit trail (when packages were actually
 #     installed on the source disk); rewriting or deleting it to make the
 #     host merely LOOK freshly installed would falsify that record rather
-#     than fix anything, so this script only reports it exists.
+#     than fix anything, so this script only reports it exists;
+#   - the OS hostname itself -- confirmed real on host .80 (2026-08-21): it
+#     reported itself as "gh-lancache-heavy-30-85" via `hostname` while its
+#     actual IP is 192.168.1.80, i.e. the hostname is clone residue never
+#     updated after imaging. Flagged by comparing the trailing digit run in
+#     `hostname` against this host's own primary IPv4 address's last octet
+#     (see hostname_mismatch_report), but never auto-corrected -- this
+#     script has no independent way to know the CORRECT name (that mapping
+#     lives only in the maintainer's own inventory), so guessing could swap
+#     one wrong hostname for a different wrong one. Use the separate
+#     `set-hostname <name>` mode once the correct value is known.
 is_foreign_authorized_keys_line() {
     local line="$1"
     local my_token
@@ -356,7 +408,41 @@ cmd_full_reset_check() {
     done < <(sudo -n grep -lE '(lancache-(240|241|229|243)|192\.168\.1\.(240|241|229|243))' /var/log/apt/history.log* /var/log/dpkg.log* 2>/dev/null)
     [[ "$found_al" -eq 1 ]] || echo "  (none found)"
     echo
+    echo "--- Hostname vs. primary IPv4 (report only -- see 'set-hostname' mode to fix) ---"
+    hostname_mismatch_report
+    echo
     echo "No files were changed (full-reset-check mode)."
+}
+
+# Applies an explicit, maintainer-provided hostname correction (issue #1622
+# follow-up: confirmed real leftover-clone-hostname case on host .80).
+# Deliberately takes the target hostname as a required argument rather than
+# guessing one -- see hostname_mismatch_report's own comment for why this
+# script cannot safely derive the "correct" value itself. Updates
+# /etc/hostname, live `hostname`, and /etc/hosts' 127.0.1.1 entry (the
+# Debian convention this fleet's hosts already follow), then reports what
+# changed so the operator can confirm it against their own inventory.
+cmd_set_hostname() {
+    local new_hostname="${1:?Usage: set-hostname <new-hostname>}"
+    local old_hostname
+    old_hostname="$(hostname)"
+    if [[ "$new_hostname" == "$old_hostname" ]]; then
+        echo "Hostname is already '$old_hostname' -- nothing to do."
+        return 0
+    fi
+    echo "Renaming host: '$old_hostname' -> '$new_hostname'"
+    sudo hostnamectl set-hostname "$new_hostname"
+    if sudo test -f /etc/hosts && sudo grep -q "127.0.1.1" /etc/hosts 2>/dev/null; then
+        sudo sed -i "s/^127\.0\.1\.1[[:space:]].*/127.0.1.1\t${new_hostname}/" /etc/hosts
+        echo "Updated /etc/hosts' 127.0.1.1 entry."
+    else
+        echo "WARNING: no 127.0.1.1 line found in /etc/hosts -- left it untouched, review manually." >&2
+    fi
+    echo
+    echo "Done. Current hostname: $(hostname)"
+    echo "This does NOT reboot or restart any service -- some already-running"
+    echo "processes (this shell's own prompt, an already-connected runner"
+    echo "service) may keep showing the old name until they restart."
 }
 
 cmd_full_reset_clean() {
@@ -617,8 +703,16 @@ Modes:
   full-reset-clean             Acts on what 'full-reset-check' flagged as
                                 safe to auto-remove. Requires
                                 CONFIRM_FULL_RESET=yes. Never touches
-                                authorized_keys or apt/dpkg history -- those
-                                stay report-only, see the script's own header.
+                                authorized_keys, apt/dpkg history, or the
+                                hostname -- those stay report-only/manual,
+                                see the script's own header.
+  set-hostname <name>          Applies an explicit, maintainer-provided
+                                hostname correction (hostnamectl + /etc/hosts
+                                127.0.1.1). full-reset-check flags a likely
+                                leftover clone hostname (mismatched against
+                                this host's own primary IPv4) but never
+                                guesses a replacement -- use this mode once
+                                you know the correct name.
 
 Env overrides: RUNNER_OPT_ROOT (default /opt), RUNNER_HOOKS_DIR
 (default /opt/lancache-ci-hooks), RUNNER_USER (default codex),
@@ -636,6 +730,7 @@ main() {
         runner-fetch) cmd_runner_fetch "$@" ;;
         full-reset-check) cmd_full_reset_check ;;
         full-reset-clean) cmd_full_reset_clean ;;
+        set-hostname) cmd_set_hostname "$@" ;;
         -h|--help) print_usage ;;
         *)
             echo "ERROR: unknown mode '$mode'" >&2
