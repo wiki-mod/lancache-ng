@@ -2357,10 +2357,10 @@ jobs:
             timeout --kill-after=30 --signal=KILL 300 \
             bash scripts/tracked/check-workflow-service-lists.sh
 
-      - name: Check VEX document stays in sync (.trivyignore.yaml -> vex.openvex.json)
-        # What: Fails closed if the committed OpenVEX document (vex.openvex.json) drifts from .trivyignore.yaml; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
-        # Why: OSPS-VM-04.02 requires vex.openvex.json to be regenerated from .trivyignore.yaml whenever the accepted-vulnerability list changes, so a PR editing .trivyignore.yaml without regenerating it cannot ship a stale supply-chain artifact.
-        # From: Issue #1095 | PR #1532
+      - name: Check VEX generator produces valid OpenVEX JSON (.trivyignore.yaml -> generate-vex.sh)
+        # What: Runs scripts/untracked/generate-vex.sh against .trivyignore.yaml and asserts valid, non-empty OpenVEX JSON output; runs in the build-tools container because scripts/tracked/check-vex-drift.sh needs jq, same as the naming/service-list guards above.
+        # Why: vex.openvex.json is no longer committed to current_dev -- it is regenerated post-merge onto the CI-Automation/vex branch by .github/workflows/vex-regenerate.yml, and freshly again at release time, so there is no second committed copy left to drift-compare. What can still break here is the generator itself: a malformed .trivyignore.yaml or a generator bug should fail in the PR that introduced it, not first surface post-merge or during a release. Runs unconditionally as part of this job (validate-compose is an unconditional gate for every PR), which already covers "runs when .trivyignore.yaml or generate-vex.sh changes."
+        # From: Issue #1095 (F-22) | PR #1620 (superseded drift-comparison version)
         run: |
           set -euo pipefail
 
@@ -7269,7 +7269,17 @@ jobs:
             printf '%s\n' "$image_notes_end"
           } > "$notes_file"
 
-          docker run --rm \
+          # What: -i attaches host stdin to the container -- required because this script
+          # is fed to the container via the bash -s <<'UPDATE_RELEASE' heredoc below.
+          # Why: without -i, `docker run` never connects container stdin at all, so the
+          # containerized `bash -s` reads immediate EOF and exits 0 having executed
+          # nothing: a silent no-op (no release created/updated), not a visible failure.
+          # Pre-existing gap (this invocation predates this PR), found while this PR was
+          # already touching the adjacent "Attach OpenVEX document to the release" step
+          # a few lines below, which had the identical shape -- fixed here in the same
+          # pass rather than left as a walked-past defect (AG-WF-013/AG-WF-027).
+          # From: Issue #1095 (F-22)
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
@@ -7374,11 +7384,18 @@ jobs:
           docker buildx rm "${{ steps.buildx.outputs.name }}" || true
 
       - name: Attach OpenVEX document to the release
-        # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json, kept in
-        # sync with .trivyignore.yaml by the validate-compose drift guard) as a release
-        # asset, so downstream consumers get this project's accepted-vulnerability
-        # dispositions in a standard, tool-parseable format alongside the release. Idempotent:
-        # an existing same-named asset is deleted before re-upload. curl/jq run in the
+        # OSPS-VM-04.02: publish the portable OpenVEX document (vex.openvex.json) as a
+        # release asset. Regenerated fresh here from THIS TAG's own checked-out
+        # .trivyignore.yaml via scripts/untracked/generate-vex.sh, rather than read from
+        # the checkout (vex.openvex.json is no longer committed to current_dev at all)
+        # or copied from the CI-Automation/vex branch's current tip
+        # (that branch is refreshed asynchronously by .github/workflows/vex-regenerate.yml
+        # on a plain `push` to current_dev and could legitimately still be catching up
+        # when a release tag is cut moments later -- reading it here would risk shipping a
+        # stale VEX for a real, if narrow, race). Regenerating directly from the tag's
+        # own .trivyignore.yaml is race-free by construction: whatever that file says at
+        # this exact tag is what ships, unconditionally. Idempotent: an existing
+        # same-named asset is deleted before re-upload. bash/jq/curl run in the
         # tag-scoped build-tools image (guaranteed built for a release tag per AG-CI-010),
         # same as the release-notes step above, rather than assuming host tooling
         # (AG-CI-001).
@@ -7396,17 +7413,36 @@ jobs:
           # From: Issue #1095 (G1) | PR #1503
           REPOSITORY="$(dmeta_ghcr_repo)"
 
-          if [ ! -s vex.openvex.json ]; then
-            echo "::error::vex.openvex.json is missing from the checkout." >&2
+          if [ ! -s .trivyignore.yaml ]; then
+            echo "::error::.trivyignore.yaml is missing from the ${TAG_NAME} checkout; cannot generate the release VEX document." >&2
             exit 1
           fi
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
+
+          # Generate against this tag's own .trivyignore.yaml first, outside the upload
+          # container, so a generator failure is reported clearly before any release-asset
+          # API calls happen.
           docker run --rm \
+            --user "$(id -u):$(id -g)" \
+            -v "$PWD:/work:ro" \
+            -w /work \
+            "$build_tools_image" \
+            timeout --kill-after=30 --signal=KILL 300 \
+            bash scripts/untracked/generate-vex.sh > vex.openvex.json.release
+          if [ ! -s vex.openvex.json.release ]; then
+            echo "::error::scripts/untracked/generate-vex.sh produced empty output for ${TAG_NAME}'s .trivyignore.yaml." >&2
+            exit 1
+          fi
+
+          # -i required: see the identical note on "Create or update GitHub release for
+          # built images" above -- this is the same stdin-heredoc shape (bash -s
+          # <<'UPLOAD_VEX'), and without -i the upload would silently no-op.
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \
-            -v "$PWD/vex.openvex.json:/tmp/vex.openvex.json:ro" \
+            -v "$PWD/vex.openvex.json.release:/tmp/vex.openvex.json:ro" \
             "$build_tools_image" \
             timeout --kill-after=30 --signal=KILL 600 \
             bash -s <<'UPLOAD_VEX'
@@ -7582,7 +7618,12 @@ jobs:
           fi
 
           build_tools_image="ghcr.io/${REPOSITORY}/build-tools:${TAG_NAME}"
-          docker run --rm \
+          # -i required: same stdin-heredoc shape and gap as the release job's
+          # "Create or update GitHub release for built images" / "Attach OpenVEX
+          # document to the release" steps. Without -i, docker run never attaches
+          # container stdin, so this bash -s heredoc would read immediate EOF and
+          # silently upload nothing while still exiting 0.
+          docker run --rm -i \
             -e GITHUB_TOKEN \
             -e REPOSITORY \
             -e TAG_NAME \

@@ -37,7 +37,6 @@ is_excluded() {
         VERSION) return 0 ;;
         LICENSE | COPYING) return 0 ;;
         services/dhcp/kea-dhcp4.conf | services/dhcp/kea-ctrl-agent.conf | services/dhcp/kea-dhcp-ddns.conf) return 0 ;;
-        vex.openvex.json | */vex.openvex.json) return 0 ;;
         docs/validation-state.json | */docs/validation-state.json) return 0 ;;
         services/ui/src/static/chart.umd.min.js | services/ui/src/static/admin.css) return 0 ;;
         services/proxy/public_suffix_list.dat) return 0 ;;
