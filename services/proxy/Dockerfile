@@ -94,6 +94,16 @@ LABEL org.opencontainers.image.description="nginx-based lancache-ng caching prox
 #   stage pins the identical alpine:3.24 base digest the utilities image
 #   itself uses (same musl libc, no cross-libc concern).
 # From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before copying real
+#   binaries over them.
+# Why: COPY writes through an existing symlink to its target rather than
+#   replacing it -- these paths symlink to /bin/busybox (same target as
+#   /bin/sh), so copying directly onto them corrupts busybox itself and
+#   breaks /bin/sh for every later RUN in this stage.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs

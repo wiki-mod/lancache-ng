@@ -571,6 +571,13 @@ LABEL org.opencontainers.image.description="PowerDNS recursor, authoritative DNS
 #   safe binary-compatible swap; the WHY for needing each tool at all
 #   (documented above) is unchanged.
 # From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before copying real
+#   binaries over them -- see services/proxy/Dockerfile's identical comment
+#   for why this must run before the COPY lines below.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs

@@ -603,6 +603,13 @@ RUN apk add --no-cache \
 #   safe binary-compatible swap -- see services/proxy/Dockerfile's
 #   identical comment for the full rationale.
 # From: Issue #1556
+
+# What: removes the BusyBox symlink at this path before copying the real
+#   binary over it -- see services/proxy/Dockerfile's identical comment for
+#   why this must run before the COPY lines below.
+# From: Issue #1556
+RUN rm -f /usr/bin/lsof
+
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/lsof /usr/bin/lsof
 COPY --from=utilities-tools /usr/bin/rg /usr/bin/rg

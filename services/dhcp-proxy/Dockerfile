@@ -90,6 +90,13 @@ LABEL org.opencontainers.image.description="dnsmasq-based DHCP proxy and relay h
 #   safe binary-compatible swap; coreutils stays apk-installed unchanged
 #   (excluded from migration, see services/proxy/Dockerfile's comment).
 # From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before copying real
+#   binaries over them -- see services/proxy/Dockerfile's identical comment
+#   for why this must run before the COPY lines below.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
 COPY --from=utilities-tools /usr/bin/envsubst /usr/bin/envsubst

@@ -88,6 +88,13 @@ LABEL org.opencontainers.image.description="Kea DHCP, control-agent, and DHCP-DD
 #   only consumer among the seven migrated services -- not worth the added
 #   closure fragility for one caller.
 # From: Issue #1556
+
+# What: removes the BusyBox symlinks at these paths before copying real
+#   binaries over them -- see services/proxy/Dockerfile's identical comment
+#   for why this must run before the COPY lines below.
+# From: Issue #1556
+RUN rm -f /usr/bin/find /usr/bin/xargs /usr/bin/lsof
+
 COPY --from=utilities-tools /usr/local/bin/curl /usr/local/bin/curl
 COPY --from=utilities-tools /usr/bin/find /usr/bin/find
 COPY --from=utilities-tools /usr/bin/xargs /usr/bin/xargs
