@@ -142,6 +142,50 @@ ensure_hosts_self_reference() {
     fi
 }
 
+# Regenerates /etc/hostid and /etc/machine-id unconditionally (issue #1622
+# follow-up, 2026-08-21). Unlike the checks above, this script CANNOT
+# reliably detect "is my current hostid/machine-id a duplicate of some
+# other host's" from inside a single host -- that requires cross-host
+# knowledge this script doesn't have. Confirmed real duplicates found this
+# way across the fleet: hostid `dba8962a` shared by every unreset clone
+# (the template's own baked-in value); machine-id `50007d2d59f14fc3bce7d23c0b542c13`
+# shared by two DIFFERENT hosts (.87 and .88) at the same time, each
+# unaware of the other. Regenerating both is cheap and safe to run on every
+# full-reset-clean invocation, including on a host that already has a
+# unique value -- the new value is still unique, nothing depends on the
+# old one persisting across this operation this early in a host's setup
+# (before any runner registration or service that might reference it).
+#
+# IMPORTANT (confirmed real on host .85, 2026-08-21): `systemd-machine-id-
+# setup`'s own fallback chain includes deriving the ID from the SMBIOS/DMI
+# UUID when no D-Bus machine-id is present -- but .85 (a Proxmox clone of
+# .80) was NOT given a fresh SMBIOS UUID by the clone operation, so that
+# fallback deterministically reproduced .80's OWN machine-id verbatim
+# (confirmed: `sudo rm -f /etc/machine-id; sudo systemd-machine-id-setup`
+# yielded the byte-for-byte identical value on .85 as on .80). This
+# function therefore does NOT rely on systemd-machine-id-setup's own
+# fallback logic at all -- it writes a value read directly from
+# /dev/urandom, which cannot collide with another host's SMBIOS UUID
+# regardless of whether Proxmox gave the clone a fresh one. This masks the
+# symptom at the OS level; a duplicated SMBIOS/DMI UUID is itself a
+# hypervisor-level clone configuration issue (worth flagging to whoever
+# manages the Proxmox clone process, since it can affect other things that
+# key off that UUID) that this script cannot fix from inside the guest.
+dedupe_host_identity() {
+    echo "  hostid: $(hostid) -> "
+    sudo -n rm -f /etc/hostid
+    sudo -n /usr/sbin/zgenhostid -f >/dev/null 2>&1 || true
+    echo "    $(hostid)"
+    local old_machine_id new_machine_id
+    old_machine_id="$(cat /etc/machine-id 2>/dev/null || echo '?')"
+    new_machine_id="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+    printf '%s\n' "$new_machine_id" | sudo -n tee /etc/machine-id >/dev/null
+    sudo -n rm -f /var/lib/dbus/machine-id
+    sudo -n ln -s /etc/machine-id /var/lib/dbus/machine-id
+    sudo -n systemctl restart systemd-journald 2>/dev/null || true
+    echo "  machine-id: ${old_machine_id} -> ${new_machine_id}"
+}
+
 # Detects a leftover CLONE hostname (issue #1622 follow-up, 2026-08-21):
 # confirmed real on host .80, which reports itself as "gh-lancache-heavy-
 # 30-85" via `hostname` while its actual IP is 192.168.1.80 -- the OS
@@ -464,6 +508,11 @@ cmd_full_reset_check() {
     echo "--- /etc/hosts self-reference for current hostname ---"
     ensure_hosts_self_reference check
     echo
+    echo "--- hostid / machine-id (cannot detect duplicates locally -- see script header) ---"
+    echo "  hostid: $(hostid)"
+    echo "  machine-id: $(cat /etc/machine-id 2>/dev/null || echo '?')"
+    echo "  -> full-reset-clean unconditionally regenerates both (cheap, safe, always unique)."
+    echo
     echo "No files were changed (full-reset-check mode)."
 }
 
@@ -562,6 +611,9 @@ cmd_full_reset_clean() {
 
     echo "--- /etc/hosts self-reference for current hostname ---"
     ensure_hosts_self_reference fix
+
+    echo "--- hostid / machine-id ---"
+    dedupe_host_identity
 
     echo
     echo "full-reset-clean complete. NOT touched (report-only, see full-reset-check):"
