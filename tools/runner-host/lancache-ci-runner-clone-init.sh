@@ -546,10 +546,9 @@ cmd_check() {
     else
         echo "  /etc/sudoers.d/${RUNNER_USER}-nopasswd: MISSING"
     fi
-    # Same exact-field match as cmd_host_prep's own docker-group check
-    # (Codex review, PR #1624) -- `grep -w docker` also matches an
-    # unrelated group like `docker-build` since a hyphen satisfies its
-    # word-boundary requirement on both sides.
+    # Same exact-field match as cmd_host_prep's own docker-group check --
+    # `grep -w docker` also matches an unrelated group like `docker-build`
+    # since a hyphen satisfies its word-boundary requirement on both sides.
     local check_runner_groups
     check_runner_groups=" $(id -nG "$RUNNER_USER" 2>/dev/null) "
     if [[ "$check_runner_groups" == *" docker "* ]]; then
