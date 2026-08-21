@@ -2,13 +2,18 @@
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Docker-free, git-free unit coverage for scripts/untracked/classify-image-impact.sh
+# Docker-free unit coverage for scripts/untracked/classify-image-impact.sh
 # (#819). Feeds canned changed-file lists (via CHANGED_FILES) and asserts the
 # per-path booleans this script inherited verbatim from build-push.yml's
 # detect-changes job, plus the additive IMAGE_IMPACT verdict the promote job's
 # version-bump logic consumes. The per-path booleans are covered so the
 # extraction stays byte-for-byte equivalent to the inline job it replaced; the
 # IMAGE_IMPACT cases pin the "does this diff warrant a patch (Z) bump?" boundary.
+#
+# Mostly still git-free: only the workflow_build_relevant section near the end
+# (#1095, PR #1628) needs real git refs, since touches_build_content() diffs
+# build-push.yml's own build:/build-arm64: job blocks base vs head -- a real
+# disposable repo, not a CHANGED_FILES list, is the only way to exercise that.
 
 setup() {
     repo_root="$(cd "$BATS_TEST_DIRNAME/../.." && pwd)"
@@ -100,12 +105,18 @@ val() {
 @test "build-push.yml change sets workflow true; an unrelated workflow does not" {
     run_classify ".github/workflows/build-push.yml"
     [ "$(val workflow)" = "true" ]
+    # CHANGED_FILES mode has no base/head refs to diff build-push.yml's own
+    # job blocks with, so workflow_build_relevant fails safe to true here --
+    # the real narrowing is only exercised by the git-fixture section below.
+    [ "$(val workflow_build_relevant)" = "true" ]
 
     run_classify ".github/workflows/codeql.yml"
     [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_build_relevant)" = "false" ]
 
     run_classify ".github/actions/derive-validation-network/action.yml"
     [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_build_relevant)" = "true" ]
 }
 
 @test "docs flags: docs true, docs_only true for a pure docs diff" {
@@ -226,6 +237,7 @@ val() {
     [ "$(val syslog)" = "true" ]
     [ "$(val utilities)" = "true" ]
     [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_build_relevant)" = "true" ]
     [ "$(val IMAGE_IMPACT)" = "true" ]
 }
 
@@ -314,4 +326,116 @@ val() {
     run bash "$script" --all-changed
     [ "$status" -eq 0 ]
     [ "$(val codeql_rust)" = "true" ]
+}
+
+# --- workflow_build_relevant: content-vs-orchestration narrowing (#1095, PR #1628) ---
+#
+# touches_build_content() distinguishes a change to build:/build-arm64: (the
+# only two jobs that invoke `docker buildx build --push` and can alter
+# published image bytes) from a change confined to another job in the same
+# file (merge-manifests here). Needs real base/head refs to diff the two job
+# blocks with, so each case builds a tiny disposable repo instead of using
+# run_classify's CHANGED_FILES path.
+
+# $1 = repo dir, $2 = marker text inside build:'s own body.
+write_synthetic_workflow_build_change() {
+    cat > "$1/.github/workflows/build-push.yml" <<YAML
+jobs:
+  build:
+    name: build
+    steps:
+      - run: echo building
+        # marker: $2
+  build-arm64:
+    name: build arm64
+    steps:
+      - run: echo building arm64
+  merge-manifests:
+    name: merge manifests
+    steps:
+      - run: echo merging
+YAML
+}
+
+# $1 = repo dir, $2 = marker text inside merge-manifests:'s own body.
+write_synthetic_workflow_merge_change() {
+    cat > "$1/.github/workflows/build-push.yml" <<YAML
+jobs:
+  build:
+    name: build
+    steps:
+      - run: echo building
+  build-arm64:
+    name: build arm64
+    steps:
+      - run: echo building arm64
+  merge-manifests:
+    name: merge manifests
+    steps:
+      - run: echo merging
+        # marker: $2
+YAML
+}
+
+setup_synthetic_repo() {
+    repo_dir="$BATS_TEST_TMPDIR/synthetic-repo"
+    mkdir -p "$repo_dir/.github/workflows"
+    git init -q "$repo_dir"
+    git -C "$repo_dir" config user.email test@example.com
+    git -C "$repo_dir" config user.name test
+}
+
+commit_synthetic_workflow() {
+    # $1 = write_synthetic_workflow_* function name, $2 = marker, $3 = message
+    "$1" "$repo_dir" "$2"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m "$3"
+    git -C "$repo_dir" rev-parse HEAD
+}
+
+@test "workflow_build_relevant: a build: job body change is content-relevant" {
+    setup_synthetic_repo
+    base_sha="$(commit_synthetic_workflow write_synthetic_workflow_build_change v1 base)"
+    head_sha="$(commit_synthetic_workflow write_synthetic_workflow_build_change v2 head)"
+    run bash -c "cd '$repo_dir' && bash '$script' '$base_sha' '$head_sha'"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_build_relevant)" = "true" ]
+}
+
+@test "workflow_build_relevant: a merge-manifests-only change is NOT content-relevant" {
+    setup_synthetic_repo
+    base_sha="$(commit_synthetic_workflow write_synthetic_workflow_merge_change v1 base)"
+    head_sha="$(commit_synthetic_workflow write_synthetic_workflow_merge_change v2 head)"
+    run bash -c "cd '$repo_dir' && bash '$script' '$base_sha' '$head_sha'"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_build_relevant)" = "false" ]
+}
+
+@test "workflow_build_relevant: identical build-push.yml across base and head is NOT content-relevant" {
+    setup_synthetic_repo
+    base_sha="$(commit_synthetic_workflow write_synthetic_workflow_build_change same base)"
+    git -C "$repo_dir" commit -q --allow-empty -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash -c "cd '$repo_dir' && bash '$script' '$base_sha' '$head_sha'"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "false" ]
+    [ "$(val workflow_build_relevant)" = "false" ]
+}
+
+@test "workflow_build_relevant: a build-tools.yml change stays fail-safe true regardless of build-push.yml" {
+    setup_synthetic_repo
+    write_synthetic_workflow_build_change "$repo_dir" v1
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m base
+    base_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    printf 'jobs:\n  build:\n    name: build\n' > "$repo_dir/.github/workflows/build-tools.yml"
+    git -C "$repo_dir" add -A
+    git -C "$repo_dir" commit -q -m head
+    head_sha="$(git -C "$repo_dir" rev-parse HEAD)"
+    run bash -c "cd '$repo_dir' && bash '$script' '$base_sha' '$head_sha'"
+    [ "$status" -eq 0 ]
+    [ "$(val workflow)" = "true" ]
+    [ "$(val workflow_build_relevant)" = "true" ]
 }
