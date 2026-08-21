@@ -1,9 +1,9 @@
 
 # LanCache-NG (https://github.com/wiki-mod/lancache-ng)
 # SPDX-License-Identifier: AGPL-3.0-or-later
-name: File header / workflow size / review-chronology / dependabot-docker-base / trivy-action-direct-usage / short-sha-truncation / docker-run-stdin-heredoc checks
+name: File header / workflow size / review-chronology / dependabot-docker-base / trivy-action-direct-usage / short-sha-truncation checks
 description: >-
-  The seven repository-hygiene checks shared by the self-hosted and
+  The six repository-hygiene checks shared by the self-hosted and
   GitHub-hosted file-header jobs. Keeping the steps in one composite action
   prevents the fallback path from silently enforcing a smaller policy set.
 inputs:
@@ -68,14 +68,3 @@ runs:
         docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
         "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
         bash scripts/untracked/check-short-sha-truncation.sh
-
-    # See scripts/untracked/check-docker-run-stdin-heredoc.sh's own header for the
-    # confirmed real incident (AG-VAL-029) this guards against: a `docker run`
-    # feeding a `bash -s`/`sh -s` stdin heredoc without `-i` silently executes
-    # nothing while the step still reports success.
-    - name: Check docker run invocations feeding a stdin heredoc all pass -i
-      shell: bash
-      run: >-
-        docker run --rm -u "$(id -u):$(id -g)" -v "$PWD:/work:ro" -w /work
-        "${{ inputs.build-tools-image }}" timeout --kill-after=30s 5m
-        bash scripts/untracked/check-docker-run-stdin-heredoc.sh

@@ -124,6 +124,62 @@
 # .github/actions/shellcheck-and-standing-guards/action.yml's own reference,
 # which is itself a (trivial but real) workflow-wiring change the
 # maintainer's decision did not ask for.
+#
+# THIRD, INDEPENDENT CHECK (added 2026-08-21, Issue #1095 F-23, maintainer
+# decision: fold this new pattern into this existing guard rather than add a
+# new script -- same "extend this script, no new file" call already made
+# once for the second check above): a `docker run` invocation that feeds its
+# command to the container via a `bash -s <<'X'` / `sh -s <<'X'` stdin
+# heredoc but omits `-i` never attaches the container's stdin at all, so the
+# containerized shell reads immediate EOF and exits 0 having run none of the
+# heredoc's commands -- a green step, not a visible failure.
+#
+# CONFIRMED REAL INSTANCE (not just reasoned about): build-push.yml's
+# `release` job ("Create or update GitHub release for built images" and
+# "Attach OpenVEX document to the release" steps) and `release-sbom` job
+# (SBOM-asset-upload step) all had this shape. Checked against the real
+# v0.3.0 release (published 2026-08-03, run 30788959407, both steps reported
+# `success`): the release body is exactly release-drafter's own generated
+# changelog with none of the "Resolved build-tools base image digests" /
+# "Provenance and SBOM status" text the release-notes step's heredoc was
+# supposed to append, and the release carries zero assets -- no
+# vex.openvex.json, no <service>.cdx.json. Fixed in Issue #1095 (F-23)'s PR
+# by adding `-i` to all three invocations.
+#
+# SCOPE: unlike the first two checks above, this one deliberately does NOT
+# reuse their scan_files -- its actual domain (workflow/composite-action
+# YAML) is exactly the class of file the SCOPE NOTE above documents those two
+# checks as not covering. Discovers its own file list via `git ls-files`
+# (matching this file's own established preference over `find`, so a new
+# workflow or action file is automatically covered without a hand-maintained
+# list): .github/workflows/**/*.yml(.yaml) and .github/actions/**/*.yml(.yaml)
+# -- both extensions genuinely occur in this tree
+# (.github/workflows/update-changelog.yaml, .github/actionlint.yaml). A
+# `docker run` command is matched heuristically: this repo's own established
+# convention (confirmed by inspecting every current instance before writing
+# this check, per AG-VAL-036) is always `docker run --rm [-i] \` immediately
+# followed by zero or more `-e`/`-v` flag lines, then the image reference,
+# then the command to run -- when that command ends in `bash -s <<'MARKER'`
+# or `sh -s <<'MARKER'`, `-i` is required somewhere in the flags. This
+# intentionally does not try to parse arbitrary `docker run`
+# argument-ordering/syntax in general -- it targets the one call-site shape
+# this repo actually uses, the same scoping principle the first check above
+# already documents for its own heuristic.
+#
+# WHAT THIS THIRD CHECK DOES NOT DO: it looks back only up to 20 lines from a
+# matched heredoc marker for the nearest preceding `docker run` line, and
+# anchors on the LAST such line in that window (not the first), since two
+# docker-run invocations can legitimately fall inside the same 20-line window
+# (this repo's real "Attach OpenVEX document to the release" step has exactly
+# that shape: a plain generate call, then the heredoc-fed upload call ~10
+# lines later) -- anchoring on the first match would silently pass a genuine
+# violation whenever an earlier, unrelated invocation in the window happens
+# to carry -i. A comment line (including this file's own explanatory prose
+# above, which quotes the exact pattern verbatim) is skipped, not treated as
+# a real invocation -- confirmed empirically: without this check, an earlier
+# version of this logic flagged its own explanatory comment in
+# vex-regenerate.yml as a missing-`-i` violation, a real false positive found
+# by actually running it (AG-VAL-030).
 set -euo pipefail
 
 repo_root="${1:-$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)}"
@@ -314,8 +370,75 @@ for file in "${scan_files[@]}"; do
   done < <(check_if_without_else_status "$file")
 done
 
+# check_docker_run_stdin_heredoc_missing_i <file>
+# Emits one "<lineno>:<invocation>" record per heredoc-fed docker-run
+# invocation missing -i. See this file's own header comment above ("THIRD,
+# INDEPENDENT CHECK") for the full rationale, the confirmed real incident
+# this exists to catch, and this heuristic's documented limits.
+check_docker_run_stdin_heredoc_missing_i() {
+  local file="$1"
+  while IFS=: read -r lineno _rest; do
+    [ -n "$lineno" ] || continue
+
+    # A comment line is prose (e.g. this file's own header, or another
+    # step's explanatory comment quoting the pattern verbatim), not a real
+    # invocation -- skip it, confirmed empirically necessary above.
+    local matched_line trimmed_line
+    matched_line="$(sed -n "${lineno}p" "$file")"
+    trimmed_line="$(printf '%s' "$matched_line" | sed 's/^[[:space:]]*//')"
+    case "$trimmed_line" in
+      '#'*) continue ;;
+    esac
+
+    local start window last_offset invocation
+    start=$(( lineno > 20 ? lineno - 20 : 1 ))
+    window="$(sed -n "${start},${lineno}p" "$file")"
+    last_offset="$(printf '%s\n' "$window" | grep -n "docker run" | tail -1 | cut -d: -f1 || true)"
+    if [ -z "$last_offset" ]; then
+      # No "docker run" found in the lookback window at all -- not this
+      # check's concern (e.g. a heredoc feeding something other than a
+      # docker container, or one further away than the window covers).
+      continue
+    fi
+    invocation="$(printf '%s\n' "$window" | tail -n +"$last_offset")"
+
+    if ! grep -qE '(^|[[:space:]])-i([[:space:]]|$)' <<<"$invocation"; then
+      printf '%d:%s\n' "$lineno" "docker run invocation feeding a stdin heredoc (bash -s / sh -s) is missing -i -- container stdin is never attached, so the heredoc silently executes nothing while the step still reports success"
+    fi
+  done < <(grep -noE '(bash|sh)[[:space:]]+-s[[:space:]]*<<' "$file" 2>/dev/null || true)
+}
+
+# What: file discovery specific to the third check, independent of
+#   scan_files above -- see this file's own header ("THIRD, INDEPENDENT
+#   CHECK" / SCOPE) for why this domain is deliberately separate.
+# Why: `git ls-files` (not `find`) so a new workflow/action file is
+#   automatically covered without a hand-maintained list, and so this only
+#   ever scans tracked, committed files -- mirroring scan_files's own
+#   rationale above, and its own fail-closed discovery-failure check.
+# From: Issue #1095 (F-23)
+if ! yaml_scan_files_raw="$(git ls-files -- \
+  '.github/workflows/*.yml' '.github/workflows/*.yaml' \
+  '.github/actions/**/*.yml' '.github/actions/**/*.yaml')"; then
+  printf '::error::check-pipefail-early-exit-grep (docker-run-stdin-heredoc check): `git ls-files` itself failed -- is %s a real git work tree? Not treating this as a clean pass.\n' "$repo_root" >&2
+  exit 1
+fi
+
+yaml_scan_files=()
+if [ -n "$yaml_scan_files_raw" ]; then
+  mapfile -t yaml_scan_files < <(sort <<<"$yaml_scan_files_raw")
+fi
+
+for file in "${yaml_scan_files[@]}"; do
+  [ -f "$file" ] || continue
+
+  while IFS=: read -r lineno finding; do
+    [ -n "$lineno" ] || continue
+    fail "$file:$lineno: $finding. See scripts/untracked/check-pipefail-early-exit-grep.sh's own header (THIRD, INDEPENDENT CHECK) for the confirmed real incident this guards against."
+  done < <(check_docker_run_stdin_heredoc_missing_i "$file")
+done
+
 if [ "$failures" -gt 0 ]; then
-  printf '::error::check-pipefail-early-exit-grep: %d finding(s) across both checks (early-exiting-consumer-into-pipefail and if-without-else-then-$?). See AGENTS.md AG-VAL-029/AG-VAL-032 for the full failure-class writeup, and see issue #1449 for the if-without-else-then-$? class specifically.\n' "$failures" >&2
+  printf '::error::check-pipefail-early-exit-grep: %d finding(s) across all three checks (early-exiting-consumer-into-pipefail, if-without-else-then-$?, and docker-run-stdin-heredoc-missing--i). See AGENTS.md AG-VAL-029/AG-VAL-032 for the early-exit/if-without-else writeup, issue #1449 for the if-without-else-then-$? class specifically, and issue #1095 (F-23) for the docker-run-stdin-heredoc class.\n' "$failures" >&2
   exit 1
 fi
 
@@ -323,4 +446,4 @@ fi
 # this file's own second check, not a real $? expansion reading the
 # preceding `if`'s status -- self-flagged by check_if_without_else_status()
 # above without this marker, confirmed a false positive by inspection.
-printf 'check-pipefail-early-exit-grep: OK (no early-exiting consumer piped from a live producer, and no if-without-else block immediately followed by a masked $? read, found across %d scanned scripts/Dockerfiles).\n' "${#scan_files[@]}" # if-status-safe: literal "$?" is prose in the message text, not a real status read of the preceding if
+printf 'check-pipefail-early-exit-grep: OK (no early-exiting consumer piped from a live producer, no if-without-else block immediately followed by a masked $? read, across %d scanned scripts/Dockerfiles; no docker-run-stdin-heredoc missing -i, across %d scanned workflow/action YAML files).\n' "${#scan_files[@]}" "${#yaml_scan_files[@]}" # if-status-safe: literal "$?" is prose in the message text, not a real status read of the preceding if
