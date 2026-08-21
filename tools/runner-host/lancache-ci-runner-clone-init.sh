@@ -913,7 +913,24 @@ enable_backports() {
         printf 'Package: *\nPin: release a=stable-backports\nPin-Priority: 500\n' | sudo -n tee "$pref_file" >/dev/null
         echo "Installed $list_file and $pref_file (Pin-Priority 500, a=stable-backports)."
     fi
-    sudo -n apt-get update 2>&1 | tail -10
+    # `|| true`: confirmed real (issue #1619/#1622 follow-up, 2026-08-21,
+    # hosts .89/.92/.93) -- `apt-get update` returns non-zero the moment
+    # ANY configured repo's index fails to fetch (observed repeatedly: a
+    # pre-existing, unrelated download.docker.com mirror-sync hiccup
+    # through this LAN's caching proxy, nothing to do with backports).
+    # apt itself already handles this gracefully -- it falls back to
+    # cached/old index data for the failed repo and still updates every
+    # other repo's index fine, which is exactly why the subsequent
+    # dist-upgrade/full-upgrade calls below still work correctly even
+    # after this. But under this script's `set -o pipefail`, that non-zero
+    # exit code propagating through `| tail -10` would abort the ENTIRE
+    # function right here (same failure class already fixed once in
+    # own_primary_ipv4/own_host_token) -- silently skipping dist-upgrade,
+    # full-upgrade, and every host-prep step that runs after
+    # enable_backports (apt-listchanges purge, the lancache-ci-cleanup
+    # timer install), with no error ever shown. Confirmed this actually
+    # happened on .89/.92/.93's first host-prep run before this fix.
+    sudo -n apt-get update 2>&1 | tail -10 || echo "WARNING: apt-get update reported a failure (see above) -- continuing anyway, since apt itself already falls back to cached index data for any repo that failed and the repos this script actually cares about (backports, the base Debian archive) are not the ones observed failing." >&2
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get dist-upgrade -y 2>&1 | tail -15
     sudo -n env DEBIAN_FRONTEND=noninteractive apt-get full-upgrade -y 2>&1 | tail -10
 }
