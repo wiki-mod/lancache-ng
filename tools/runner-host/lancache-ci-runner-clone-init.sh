@@ -919,6 +919,21 @@ cmd_host_prep() {
     echo "add a 'proxies' block manually per README.md if this host needs the LAN"
     echo "proxy other hosts use, and it does NOT run config.sh, install a runner"
     echo "systemd unit, or start any runner service."
+
+    # Heavy-tier reminder (issue #1619/#1622, 2026-08-21): trusted Rust CI
+    # jobs on lancache-heavy fail outright without the sccache client
+    # tooling -- host-prep cannot install this itself (see sccache-fetch's
+    # own header for why: it's a host-to-host file copy, not a build or
+    # download this script can do unattended), so it only reminds here
+    # rather than silently leaving a heavy host half-prepped with no signal.
+    if [[ "$(hostname)" == *heavy* ]]; then
+        echo
+        echo "This looks like a HEAVY-tier host. Run 'sccache-check' next -- if it"
+        echo "reports missing tooling, stage sccache/sccache-dist/config/client.conf"
+        echo "from a known-working heavy host (e.g. lancache-240) via scp, then run"
+        echo "'sccache-fetch <staged-dir>'. See README.md and this script's own"
+        echo "sccache-check/-fetch header comments for the full background."
+    fi
 }
 
 cmd_runner_fetch() {
@@ -979,6 +994,105 @@ ENVEOF
     echo "the go-ahead to accept real jobs is confirmed."
 }
 
+# --- sccache-check: verify the sccache client tooling heavy hosts need ----
+#
+# Confirmed real (issue #1619/#1622 follow-up, 2026-08-21): `configure-rust-
+# sccache` (`.github/actions/configure-rust-sccache/action.yml`), used by
+# every trusted Rust CI job routed to `lancache-heavy` (build-push.yml,
+# codeql.yml -- never lancache-light, confirmed by grepping every
+# `runs-on:` line preceding a `configure-rust-sccache` use in both files),
+# fails a real job outright with "sccache is required on the runner when
+# Redis-backed sccache or sccache-dist is configured" the moment `command -v
+# sccache` doesn't resolve. New heavy hosts (.80/.84/.85/.86 confirmed
+# missing it) never got this installed as part of their host-prep.
+#
+# MAINTAINER DECISION, NOT `apt install sccache` and NOT rebuilt from source
+# on each new host: this project's sccache needs `--features redis,dist-
+# client` (see `tools/build-tools/Dockerfile`'s own `cargo install sccache
+# --no-default-features --features redis,dist-client` for the container-
+# image copy) -- Debian's packaged sccache lacks Redis support entirely, and
+# rebuilding via `cargo install` requires a full rustup+cargo toolchain this
+# fleet's runner hosts don't otherwise need. Confirmed on lancache-240 (an
+# existing working heavy host, 2026-08-21): its whole client-side sccache
+# tooling was itself originally copied host-to-host at identical paths for
+# exactly this reason -- rebuilding from source was never how any of these
+# hosts actually got their sccache binary. This mode therefore only
+# VERIFIES what `sccache-fetch` (below) installs; it does not build or
+# download anything itself.
+#
+# Deliberately CLIENT-role only. `sccache-dist-server.service` (accepting
+# distributed builds FROM other clients) is a separate, additional
+# capacity-expansion decision -- its config (`server.conf`) embeds a
+# per-host `public_addr` and a JWT token whose payload names that exact
+# server_id, so it is NOT safely copyable between hosts the way the client
+# config is; standing up a new dist-server needs a fresh token issued by
+# whoever administers the scheduler at the dist-scheduler-url, not a file
+# copy. Out of scope here.
+cmd_sccache_check() {
+    echo "--- sccache client binaries ---"
+    for f in /usr/local/bin/sccache /usr/local/bin/sccache-dist; do
+        if [[ -x "$f" ]]; then
+            echo "  $f: present ($(sha256sum "$f" | awk '{print $1}'))"
+        else
+            echo "  $f: MISSING"
+        fi
+    done
+    echo
+    echo "--- sccache client config ---"
+    for f in /opt/codex/.config/sccache/config /opt/codex/sccache-dist/client.conf; do
+        if sudo -n test -f "$f" 2>/dev/null; then
+            echo "  $f: present"
+        else
+            echo "  $f: MISSING"
+        fi
+    done
+    if sudo -n test -d /opt/sccache/dist-client 2>/dev/null; then
+        echo "  /opt/sccache/dist-client: present"
+    else
+        echo "  /opt/sccache/dist-client: MISSING"
+    fi
+    echo
+    echo "--- Live check (requires the config above; reaches the real scheduler) ---"
+    if [[ -x /usr/local/bin/sccache ]]; then
+        HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --version 2>&1
+        HOME="/opt/${RUNNER_USER}" /usr/local/bin/sccache --dist-status 2>&1
+    else
+        echo "  (skipped -- sccache binary missing)"
+    fi
+    echo
+    echo "No files were changed (sccache-check mode)."
+}
+
+# Installs the sccache client tooling from files already staged on THIS
+# host at the given source directory (see the script header above for why
+# this is a copy, not a build). The orchestrating machine is expected to
+# have already `scp`'d sccache, sccache-dist, config, and client.conf from
+# a known-working heavy host (e.g. lancache-240) into that directory --
+# this mode only does the LOCAL install step (permissions, ownership,
+# directory layout), matching the exact paths confirmed on lancache-240.
+cmd_sccache_fetch() {
+    local src_dir="${1:?Usage: sccache-fetch <source-dir-with-staged-files>}"
+    for f in sccache sccache-dist config client.conf; do
+        if [[ ! -f "$src_dir/$f" ]]; then
+            echo "ERROR: $src_dir/$f not found -- stage it first (scp from a known-working heavy host)." >&2
+            return 1
+        fi
+    done
+    sudo install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0755 "$src_dir/sccache" /usr/local/bin/sccache
+    sudo install -o root -g root -m 0755 "$src_dir/sccache-dist" /usr/local/bin/sccache-dist
+    mkdir -p "/opt/${RUNNER_USER}/.config/sccache"
+    install -m 0644 "$src_dir/config" "/opt/${RUNNER_USER}/.config/sccache/config"
+    sudo mkdir -p "/opt/${RUNNER_USER}/sccache-dist"
+    sudo install -o "$RUNNER_USER" -g "$RUNNER_USER" -m 0640 "$src_dir/client.conf" "/opt/${RUNNER_USER}/sccache-dist/client.conf"
+    sudo mkdir -p /opt/sccache/dist-client
+    sudo chown "$RUNNER_USER:$RUNNER_USER" /opt/sccache /opt/sccache/dist-client
+    sudo chmod 2775 /opt/sccache /opt/sccache/dist-client
+    echo "Installed sccache client tooling. Verifying:"
+    HOME="/opt/${RUNNER_USER}" sudo -u "$RUNNER_USER" /usr/local/bin/sccache --version
+    HOME="/opt/${RUNNER_USER}" sudo -u "$RUNNER_USER" /usr/local/bin/sccache --dist-status
+    echo "Run 'sccache-check' to confirm the full picture."
+}
+
 print_usage() {
     cat <<'EOF'
 Usage: bash lancache-ci-runner-clone-init.sh <mode> [args...]
@@ -1031,6 +1145,20 @@ Modes:
                                 the runner service; a real reboot test
                                 afterward is strongly recommended (verified
                                 end-to-end on host .81, issue #1622).
+  sccache-check                 Read-only: reports whether the sccache
+                                 client tooling (heavy hosts only -- see
+                                 script header) is installed, and if so
+                                 live-verifies it against the real
+                                 scheduler via --dist-status. Writes
+                                 nothing.
+  sccache-fetch <dir>            Installs sccache/sccache-dist and their
+                                 client configs from files already staged
+                                 at <dir> on this host (scp them from a
+                                 known-working heavy host such as
+                                 lancache-240 first -- this mode does not
+                                 build or download anything itself, see
+                                 the script header for why). Heavy hosts
+                                 only; light hosts never need this.
 
 Env overrides: RUNNER_OPT_ROOT (default /opt), RUNNER_HOOKS_DIR
 (default /opt/lancache-ci-hooks), RUNNER_USER (default codex),
@@ -1051,6 +1179,8 @@ main() {
         set-hostname) cmd_set_hostname "$@" ;;
         purge-pve-check) cmd_purge_pve_check ;;
         purge-pve) cmd_purge_pve ;;
+        sccache-check) cmd_sccache_check ;;
+        sccache-fetch) cmd_sccache_fetch "$@" ;;
         -h|--help) print_usage ;;
         *)
             echo "ERROR: unknown mode '$mode'" >&2

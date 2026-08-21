@@ -70,6 +70,34 @@ live in the repo, PR-reviewable and consistent across all hosts).
   issue #1622: every host came back on the identical `uname -r`, with
   docker/networking/the runner service all working).
 
+  **`sccache-check`/`sccache-fetch` (issue #1619/#1622, 2026-08-21):**
+  `.github/actions/configure-rust-sccache` — used by every trusted Rust CI
+  job routed to `lancache-heavy` (confirmed nowhere on `lancache-light`) —
+  fails a real job outright with "sccache is required on the runner when
+  Redis-backed sccache or sccache-dist is configured" if the `sccache`
+  binary isn't on the runner's PATH. New heavy hosts never got this
+  installed as part of host-prep. **Not `apt install sccache`** (Debian's
+  packaged version has no Redis support) **and not rebuilt from source on
+  each new host** — this project's sccache needs
+  `--features redis,dist-client` (see `tools/build-tools/Dockerfile`'s own
+  `cargo install sccache --no-default-features --features redis,dist-
+  client`), and every existing heavy host's client-side sccache tooling
+  was itself originally installed by copying the built binaries + client
+  configs host-to-host at identical paths, not by rebuilding — confirmed
+  directly on `lancache-240`. `sccache-check` (read-only) reports whether
+  the tooling is present and, if so, live-verifies it against the real
+  scheduler via `--dist-status`; `sccache-fetch <dir>` installs from files
+  already staged at `<dir>` on the host (`scp` `sccache`, `sccache-dist`,
+  `config`, and `client.conf` from a known-working heavy host such as
+  `lancache-240` first — this mode does not build or download anything
+  itself). `host-prep` reminds about this on any host whose hostname
+  contains "heavy", since it cannot do the host-to-host copy unattended.
+  Deliberately client-role only — `sccache-dist-server.service` (accepting
+  distributed builds from other clients) needs a fresh, server-specific
+  auth token issued by whoever administers the scheduler, so its config is
+  never safely copyable between hosts the way the client config is; that
+  remains a separate, additional capacity decision.
+
 ## Deploy (to **every** runner host — 229, 240, 241, 243, …)
 
 > A prior host-local-only copy ran on just a subset of hosts, which is why one
