@@ -92,13 +92,100 @@ touches_docs() {
     return 1
 }
 
+# What: prints $1 with every blank line and '#'-prefixed comment line
+#   removed, except inside a YAML block-scalar body (a `key: |`/`key: >`
+#   line and its more-indented or blank continuation lines), which is
+#   printed byte-for-byte unchanged.
+# Why: a leading '#' inside a block-scalar body is literal scalar data (e.g.
+#   a heredoc body byte), not a parsed YAML/shell comment, so it must never
+#   be stripped the way a real comment is.
+# From: Issue #1095 (G14) | PR #1609 review
+_cii_normalize_workflow_comments() {
+    awk '
+        BEGIN { in_block = 0; block_indent = -1 }
+        {
+            line = $0
+            match(line, /^[ ]*/)
+            indent = RLENGTH
+            is_blank = (line ~ /^[ ]*$/)
+            if (in_block) {
+                if (is_blank || indent > block_indent) { print line; next }
+                in_block = 0
+            }
+            if (!is_blank && match(line, /:[ ]*[|>][+-]?[0-9]?[ ]*(#.*)?$/)) {
+                block_indent = indent
+                in_block = 1
+                print line
+                next
+            }
+            stripped = line
+            sub(/^[ ]*/, "", stripped)
+            if (stripped == "" || substr(stripped, 1, 1) == "#") next
+            print line
+        }
+    ' "$1"
+}
+
+# What: true only in the <base_ref> <head_ref> form, when every touched
+#   build-workflow path is a plain text modification whose comment/blank
+#   lines are the only difference between its base and head content.
+# Why: comparing the two normalized (block-scalar-safe comment/blank-stripped)
+#   versions for exact equality proves nothing else changed, without having
+#   to map individual diff hunk lines back to base/head line numbers.
+# From: Issue #1095 (G14) | PR #1609 review
+workflow_diff_is_comment_only() {
+    [[ -n "${merge_base:-}" && -n "${head_ref:-}" ]] || return 1
+
+    local paths=() path
+    while IFS= read -r path; do
+        case "$path" in
+            .github/workflows/build-push.yml | .github/workflows/build-tools.yml | .github/actions/*)
+                paths+=("$path")
+                ;;
+        esac
+    done < "$changed_files"
+    [[ ${#paths[@]} -gt 0 ]] || return 1
+
+    local p status added deleted base_hash head_hash
+    for p in "${paths[@]}"; do
+        status="$(git diff --no-color --name-status "$merge_base" "$head_ref" -- "$p" | cut -f1)"
+        [[ "$status" == "M" ]] || return 1
+
+        read -r added deleted _ < <(git diff --no-color --numstat "$merge_base" "$head_ref" -- "$p")
+        # What: binary shows numstat "-\t-" (fails the numeric check below); a
+        #   mode-only change shows numeric "0\t0" (passes it, but its bytes
+        #   are unchanged so the hash comparison below would too) -- both
+        #   must fail closed rather than default to "no violation found".
+        # Why: a status=M path with no real +/- content delta is not provably
+        #   comment-only, it is simply unexamined by this function.
+        # From: Issue #1095 (G14) | PR #1609 review
+        [[ "$added" =~ ^[0-9]+$ && "$deleted" =~ ^[0-9]+$ ]] || return 1
+        (( added > 0 || deleted > 0 )) || return 1
+
+        base_hash="$(git show "${merge_base}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
+        head_hash="$(git show "${head_ref}:${p}" 2>/dev/null | _cii_normalize_workflow_comments /dev/stdin | sha256sum)"
+        [[ "$base_hash" == "$head_hash" ]] || return 1
+    done
+
+    return 0
+}
+
 touches_build_workflow() {
-    # Changes here can alter how every service candidate is produced even when
-    # no service source moved, so downstream build-sensitive gates must agree
-    # that this is a workflow-wide impact.
-    touches_exact ".github/workflows/build-push.yml" \
+    # What: workflow-wide impact for a build-workflow-path touch, unless
+    #   workflow_diff_is_comment_only proves the touched content is
+    #   comment/blank-only outside any block scalar.
+    # Why: those paths can alter how every service candidate is produced
+    #   even when no service source moved.
+    # From: Issue #1095 (G14) | PR #1609 review
+    local touched=false
+    if touches_exact ".github/workflows/build-push.yml" \
         || touches_exact ".github/workflows/build-tools.yml" \
-        || touches_prefix ".github/actions/"
+        || touches_prefix ".github/actions/"; then
+        touched=true
+    fi
+    [[ "$touched" == "true" ]] || return 1
+    workflow_diff_is_comment_only && return 1
+    return 0
 }
 
 touches_codeql_rust() {
